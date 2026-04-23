@@ -44,21 +44,24 @@ def test_sync_hook_register_tools():
 
 
 async def test_multiple_plugins_receive_hook():
+    from sherman.channel import Channel
+
     received = []
 
     class PluginA:
         @hookimpl
-        async def on_message(self, channel_id, sender, text):
+        async def on_message(self, channel, sender, text):
             received.append("A")
 
     class PluginB:
         @hookimpl
-        async def on_message(self, channel_id, sender, text):
+        async def on_message(self, channel, sender, text):
             received.append("B")
 
     pm = create_plugin_manager()
     pm.register(PluginA())
     pm.register(PluginB())
-    await pm.ahook.on_message(channel_id="test", sender="user", text="hi")
+    ch = Channel(transport="test", scope="scope")
+    await pm.ahook.on_message(channel=ch, sender="user", text="hi")
 
     assert sorted(received) == ["A", "B"]

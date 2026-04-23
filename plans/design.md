@@ -78,10 +78,17 @@ via `pm.ahook`). Plugins implement whichever hooks they need.
 
 ```python
 # hooks.py
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 import apluggy as pluggy
 
-hookspec = pluggy.HookspecMarker("agent")
-hookimpl = pluggy.HookimplMarker("agent")
+if TYPE_CHECKING:
+    from sherman.channel import Channel
+
+hookspec = pluggy.HookspecMarker("sherman")
+hookimpl = pluggy.HookimplMarker("sherman")
 
 class AgentSpec:
     """Hook specifications for the agent daemon."""
@@ -95,21 +102,21 @@ class AgentSpec:
         """Called on shutdown. Clean up resources."""
 
     @hookspec
-    async def on_message(self, channel_id: str, sender: str, text: str) -> None:
+    async def on_message(self, channel: Channel, sender: str, text: str) -> None:
         """A message arrived from a transport.
 
-        channel_id format: "{transport}:{scope}"
-            e.g. "irc:#lex", "signal:+15551234567"
+        channel: Channel object identifying transport and scope
+            (e.g. transport="irc", scope="#lex")
         sender: nick, phone number, or other identifier
         text: message content
         """
 
     @hookspec
-    async def send_message(self, channel_id: str, text: str) -> None:
+    async def send_message(self, channel: Channel, text: str) -> None:
         """Send a message to a specific channel.
 
-        Each transport plugin checks if channel_id matches its prefix
-        and sends if so. Non-matching transports ignore the call.
+        Each transport plugin checks channel.transport and sends if it
+        matches. Non-matching transports ignore the call.
         """
 
     @hookspec
@@ -123,7 +130,7 @@ class AgentSpec:
 
     @hookspec
     async def on_agent_response(
-        self, channel_id: str, request_text: str, response_text: str
+        self, channel: Channel, request_text: str, response_text: str
     ) -> None:
         """Called after the agent produces a response, before it is sent.
 
@@ -133,7 +140,7 @@ class AgentSpec:
 
     @hookspec
     async def on_task_complete(
-        self, channel_id: str, task_id: str, result: str
+        self, channel: Channel, task_id: str, result: str
     ) -> None:
         """A background task finished. The result should be posted
         to the originating channel."""
@@ -147,7 +154,7 @@ import apluggy as pluggy
 from hooks import AgentSpec
 
 def create_plugin_manager() -> pluggy.PluginManager:
-    pm = pluggy.PluginManager("agent")
+    pm = pluggy.PluginManager("sherman")
     pm.add_hookspecs(AgentSpec)
     return pm
 ```
@@ -520,8 +527,8 @@ class AgentLoopPlugin:
         )
 
     @hookimpl
-    async def on_message(self, channel_id, sender, text):
-        conv = await self._get_conversation(channel_id)
+    async def on_message(self, channel, sender, text):
+        conv = await self._get_conversation(channel.id)
         await conv.append({"role": "user", "content": text})
         await conv.compact_if_needed(self.client, self.max_context_tokens)
 
@@ -541,12 +548,12 @@ class AgentLoopPlugin:
         display_response = strip_thinking(raw_response)
 
         await self.pm.ahook.on_agent_response(
-            channel_id=channel_id,
+            channel=channel,
             request_text=text,
             response_text=display_response,
         )
         await self.pm.ahook.send_message(
-            channel_id=channel_id,
+            channel=channel,
             text=display_response,
         )
 
@@ -592,9 +599,9 @@ client lifecycle and translates between IRC events and agent hooks.
 ### Message Flow
 
 1. pydle receives a PRIVMSG in a joined channel
-2. IRC plugin calls `pm.ahook.on_message(channel_id="irc:#lex", ...)`
+2. IRC plugin calls `pm.ahook.on_message(channel=<Channel irc:#lex>, ...)`
 3. Agent loop plugin handles it, calls `pm.ahook.send_message(...)`
-4. IRC plugin's `send_message` hook checks the prefix, sends PRIVMSG
+4. IRC plugin's `send_message` hook checks `channel.matches_transport("irc")`, sends PRIVMSG
 
 ### IRC Message Splitting
 
@@ -618,9 +625,9 @@ class IRCClient(pydle.Client):
 
     async def on_message(self, target, source, message):
         if target in self.plugin.channels and source != self.nickname:
-            channel_id = f"irc:{target}"
+            channel = self.plugin.pm.registry.get_or_create("irc", target)
             await self.plugin.pm.ahook.on_message(
-                channel_id=channel_id,
+                channel=channel,
                 sender=source,
                 text=message,
             )
@@ -650,12 +657,11 @@ class IRCPlugin:
         asyncio.create_task(self.client.connect(server, port))
 
     @hookimpl
-    async def send_message(self, channel_id, text):
-        if not channel_id.startswith("irc:"):
+    async def send_message(self, channel, text):
+        if not channel.matches_transport("irc"):
             return
-        target = channel_id.removeprefix("irc:")
         for chunk in self._split_message(text):
-            await self.client.message(target, chunk)
+            await self.client.message(channel.scope, chunk)
 
     @hookimpl
     async def on_stop(self):
@@ -737,7 +743,7 @@ Message arrives
 @dataclass
 class BackgroundTask:
     task_id: str
-    channel_id: str
+    channel: Channel
     description: str
     instructions: str
     created_at: float
@@ -795,7 +801,7 @@ async def background_task(
             background worker to follow.
     """
     # The actual enqueue happens in the agent loop plugin,
-    # which wraps this tool and injects the channel_id.
+    # which wraps this tool and injects the channel.
     ...
 ```
 
@@ -826,12 +832,12 @@ class AgentLoopPlugin:
             self._execute_background_task
         ):
             await self.pm.ahook.on_task_complete(
-                channel_id=task.channel_id,
+                channel=task.channel,
                 task_id=task.task_id,
                 result=result,
             )
             await self.pm.ahook.send_message(
-                channel_id=task.channel_id,
+                channel=task.channel,
                 text=f"[Task {task.task_id[:8]}] {result}",
             )
 
@@ -1151,6 +1157,7 @@ agent-daemon/
 ├── main.py                 # Entry point
 ├── hooks.py                # AgentSpec hookspecs
 ├── plugin_manager.py       # create_plugin_manager()
+├── channel.py              # Channel, ChannelConfig, ChannelRegistry, load_channel_config
 ├── llm.py                  # LLMClient (aiohttp wrapper)
 ├── agent_loop.py           # run_agent_loop(), tool schema generation
 ├── conversation.py         # ConversationLog (append-only + compaction)
@@ -1203,14 +1210,45 @@ Completed. 39 tests pass. All deliverables implemented:
   SIGINT/SIGTERM, shuts down cleanly
 - Tests for hooks, agent loop (mocked HTTP), conversation log
 
+### Phase 1.5: Channel Abstraction ✓
+
+Completed. 68 tests pass (39 existing + 29 new). All deliverables implemented:
+
+- `channel.py` — `ChannelConfig` (per-channel config with agent-level fallback),
+  `Channel` (transport + scope + config + conversation reference),
+  `ChannelRegistry` (lifecycle management, get_or_create, by_transport),
+  `load_channel_config` (pre-registers channels from YAML before `on_start`)
+- Hook signature migration — four hookspecs changed from `channel_id: str` to
+  `channel: Channel`: `on_message`, `send_message`, `on_agent_response`,
+  `on_task_complete`
+- Registry injection — `pm.registry` set as a plain attribute on the plugin
+  manager in `main.py`; plugins access it via `self.pm.registry`
+- YAML channel config loading — `channels:` top-level key, keys in
+  `"transport:scope"` format, per-channel overrides for `system_prompt`,
+  `max_context_tokens`, `keep_thinking_in_history`
+
 ### Phase 2: Agent Loop Plugin
+
+Channel objects are now available via `pm.registry`. The agent loop plugin
+should use `pm.registry.get_or_create(channel.transport, channel.scope)` (or
+the channel passed via `on_message`) and attach a `ConversationLog` to
+`channel.conversation` on first use:
+
+```python
+if channel.conversation is None:
+    channel.conversation = ConversationLog(self.db, channel.id)
+    resolved = self.pm.registry.resolve_config(channel)
+    channel.conversation.system_prompt = resolved["system_prompt"]
+    await channel.conversation.load()
+```
 
 1. Agent loop plugin (`agent_loop.py` plugin class)
 2. LLM configuration from YAML
 3. Thinking token handling — three-layer strategy (strip for display,
    preserve in log, configurable for active history)
-4. ConversationLog integration — append-only persistence, stop-the-world
-   compaction when approaching context limit
+4. ConversationLog integration via `channel.conversation` — append-only
+   persistence, stop-the-world compaction when approaching context limit;
+   per-channel config resolved via `pm.registry.resolve_config(channel)`
 5. Wire up `register_tools` hook
 6. Tests with mocked LLM responses (mock aiohttp)
 

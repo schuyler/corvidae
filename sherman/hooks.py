@@ -1,4 +1,11 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 import apluggy as pluggy
+
+if TYPE_CHECKING:
+    from sherman.channel import Channel
 
 # NOTE: marker name is "sherman", not "agent" as in design.md
 hookspec = pluggy.HookspecMarker("sherman")
@@ -26,24 +33,24 @@ class AgentSpec:
         """Called once when the daemon receives SIGINT or SIGTERM."""
 
     @hookspec
-    async def on_message(self, channel_id: str, sender: str, text: str) -> None:
+    async def on_message(self, channel: Channel, sender: str, text: str) -> None:
         """Called when an inbound message arrives on a channel.
 
         Args:
-            channel_id: Identifies the channel (e.g. IRC channel name).
+            channel: The Channel object for this conversation scope.
             sender: The user or entity that sent the message.
             text: The message content.
         """
 
     @hookspec
-    async def send_message(self, channel_id: str, text: str) -> None:
+    async def send_message(self, channel: Channel, text: str) -> None:
         """Called to deliver an outbound message to a channel.
 
         Transport plugins implement this to forward the message over
         their protocol.
 
         Args:
-            channel_id: Identifies the target channel.
+            channel: The Channel object identifying the target.
             text: The message content to send.
         """
 
@@ -59,24 +66,24 @@ class AgentSpec:
 
     @hookspec
     async def on_agent_response(
-        self, channel_id: str, request_text: str, response_text: str
+        self, channel: Channel, request_text: str, response_text: str
     ) -> None:
         """Called after the agent loop produces a response to a message.
 
         Args:
-            channel_id: The channel where the conversation occurred.
+            channel: The Channel where the conversation occurred.
             request_text: The original user message that triggered the loop.
             response_text: The final text produced by the agent loop.
         """
 
     @hookspec
     async def on_task_complete(
-        self, channel_id: str, task_id: str, result: str
+        self, channel: Channel, task_id: str, result: str
     ) -> None:
         """Called when a background task finishes.
 
         Args:
-            channel_id: The channel associated with the task.
+            channel: The Channel associated with the task.
             task_id: Unique identifier for the completed task.
             result: The output produced by the task.
         """

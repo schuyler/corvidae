@@ -9,9 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import yaml
 
-import apluggy
-from apluggy import HookimplMarker
-
+from sherman.channel import ChannelRegistry
 from sherman.main import main
 
 
@@ -102,6 +100,65 @@ class TestMainCallsOnStartAndOnStop:
             on_stop_mock.assert_called_once()
         finally:
             os.unlink(config_path)
+
+
+class TestRegistryPopulatedBeforeOnStart:
+    async def test_registry_populated_before_on_start(self):
+        """pm.registry must be a ChannelRegistry with pre-configured channels
+        by the time on_start fires."""
+        from sherman.hooks import hookimpl
+        from sherman.plugin_manager import create_plugin_manager
+
+        registry_snapshot: list = []
+
+        class InspectorPlugin:
+            @hookimpl
+            async def on_start(self, config):
+                # Capture the registry state at on_start time via closure over pm
+                registry_snapshot.append(pm.registry)
+
+        inspector = InspectorPlugin()
+
+        def patched_create_plugin_manager():
+            nonlocal pm
+            pm = create_plugin_manager()
+            pm.register(inspector)
+            return pm
+
+        pm = None
+
+        config_data = {
+            "model": "test-model",
+            "base_url": "http://localhost:8080",
+            "channels": {
+                "irc:#lex": {
+                    "system_prompt": "You are a helpful assistant for #lex.",
+                },
+            },
+        }
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".yaml", delete=False
+        ) as f:
+            yaml.dump(config_data, f)
+            config_path = f.name
+
+        try:
+            with patch(
+                "sherman.main.create_plugin_manager",
+                side_effect=patched_create_plugin_manager,
+            ):
+                _schedule_sigint()
+                await main(config_path)
+        finally:
+            os.unlink(config_path)
+
+        assert len(registry_snapshot) == 1, "on_start was not called exactly once"
+        registry = registry_snapshot[0]
+        assert isinstance(registry, ChannelRegistry)
+        channel = registry.get("irc:#lex")
+        assert channel is not None, "irc:#lex not found in registry at on_start time"
+        assert channel.config.system_prompt == "You are a helpful assistant for #lex."
 
 
 class TestMainMissingConfig:

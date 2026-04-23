@@ -5,6 +5,7 @@ import signal
 
 import yaml
 
+from sherman.channel import ChannelRegistry, load_channel_config
 from sherman.plugin_manager import create_plugin_manager
 
 
@@ -21,6 +22,17 @@ async def main(config_path: str = "agent.yaml") -> None:
         config = yaml.safe_load(f)
 
     pm = create_plugin_manager()
+
+    # Extract agent-level defaults for channel config resolution
+    agent_defaults = config.get("agent", {})
+    registry = ChannelRegistry(agent_defaults)
+
+    # Option B injection: attach registry to PM so plugins access it
+    # via self.pm.registry
+    pm.registry = registry
+
+    # Pre-register channels from YAML config (must happen before on_start)
+    load_channel_config(config, registry)
 
     await pm.ahook.on_start(config=config)
 
