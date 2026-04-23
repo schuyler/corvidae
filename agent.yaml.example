@@ -1,0 +1,26 @@
+# LLM backend — OpenAI-compatible Chat Completions API (required)
+llm:
+  base_url: http://localhost:8080   # llama-server, vLLM, OpenAI, etc.
+  model: llama3                     # model name as the backend expects it
+  # api_key: sk-...                 # omit for local servers
+
+# Daemon settings (optional)
+daemon:
+  session_db: sessions.db           # SQLite path for conversation history
+
+# Agent-level defaults — apply to all channels unless overridden (optional)
+agent:
+  system_prompt: "You are a helpful assistant."
+  max_context_tokens: 24000
+  keep_thinking_in_history: false
+
+# Per-channel config (optional)
+# Keys must be "transport:scope". Overrides agent defaults where set.
+channels:
+  cli:local:
+    system_prompt: "You are a helpful assistant running in CLI mode."
+  # irc:#lex:
+  #   system_prompt: "You are Sherman, an IRC bot in #lex."
+  #   max_context_tokens: 8000
+  # signal:+15551234567:
+  #   keep_thinking_in_history: true

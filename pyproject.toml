@@ -19,5 +19,8 @@ dev = [
 [project.scripts]
 sherman = "sherman.main:cli"
 
+[tool.setuptools.packages.find]
+include = ["sherman*"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

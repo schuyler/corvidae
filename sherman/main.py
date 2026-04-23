@@ -8,6 +8,7 @@ import yaml
 
 from sherman.agent_loop_plugin import AgentLoopPlugin
 from sherman.channel import ChannelRegistry, load_channel_config
+from sherman.cli_plugin import CLIPlugin
 from sherman.plugin_manager import create_plugin_manager
 
 
@@ -37,6 +38,10 @@ async def main(config_path: str = "agent.yaml") -> None:
 
     # Pre-register channels from YAML config (must happen before on_start)
     load_channel_config(config, registry)
+
+    # Register CLIPlugin before AgentLoopPlugin (transport plugins first)
+    cli_plugin = CLIPlugin(pm)
+    pm.register(cli_plugin, name="cli")
 
     # Register AgentLoopPlugin after any tool-providing plugins (none yet in Phase 2)
     agent_loop = AgentLoopPlugin(pm)
