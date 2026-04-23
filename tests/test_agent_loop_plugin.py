@@ -1,10 +1,7 @@
-"""Tests for sherman.agent_loop_plugin.AgentLoopPlugin.
-
-All tests in this file are expected to FAIL until the implementation is
-written in sherman/agent_loop_plugin.py.
-"""
+"""Tests for sherman.agent_loop_plugin.AgentLoopPlugin."""
 
 import json
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiosqlite
@@ -14,7 +11,6 @@ from sherman.channel import Channel, ChannelConfig, ChannelRegistry
 from sherman.conversation import ConversationLog, init_db
 from sherman.plugin_manager import create_plugin_manager
 
-# The import under test — will raise ImportError until the file exists.
 from sherman.agent_loop_plugin import AgentLoopPlugin
 
 
@@ -179,6 +175,51 @@ class TestOnStart:
         assert plugin.tools["my_test_tool"] is my_test_tool
         assert len(plugin.tool_schemas) == 1
         assert plugin.tool_schemas[0]["function"]["name"] == "my_test_tool"
+
+    async def test_on_start_stores_base_dir_from_config(self):
+        """on_start reads config["_base_dir"] and stores it as plugin.base_dir."""
+        pm = create_plugin_manager()
+        pm.registry = ChannelRegistry(AGENT_DEFAULTS)
+        pm.ahook.send_message = AsyncMock()
+        pm.ahook.on_agent_response = AsyncMock()
+
+        plugin = AgentLoopPlugin(pm)
+        pm.register(plugin, name="agent_loop")
+
+        mock_client = MagicMock()
+        mock_client.start = AsyncMock()
+
+        config_with_base_dir = dict(BASE_CONFIG)
+        config_with_base_dir["_base_dir"] = Path("/some/dir")
+
+        with patch("sherman.agent_loop_plugin.LLMClient", return_value=mock_client), \
+             patch("sherman.agent_loop_plugin.aiosqlite.connect", new_callable=AsyncMock) as mock_connect, \
+             patch("sherman.agent_loop_plugin.init_db", new_callable=AsyncMock):
+            mock_connect.return_value = MagicMock()
+            await plugin.on_start(config=config_with_base_dir)
+
+        assert plugin.base_dir == Path("/some/dir")
+
+    async def test_on_start_defaults_base_dir_to_cwd(self):
+        """on_start sets plugin.base_dir to Path(".") when _base_dir is absent."""
+        pm = create_plugin_manager()
+        pm.registry = ChannelRegistry(AGENT_DEFAULTS)
+        pm.ahook.send_message = AsyncMock()
+        pm.ahook.on_agent_response = AsyncMock()
+
+        plugin = AgentLoopPlugin(pm)
+        pm.register(plugin, name="agent_loop")
+
+        mock_client = MagicMock()
+        mock_client.start = AsyncMock()
+
+        with patch("sherman.agent_loop_plugin.LLMClient", return_value=mock_client), \
+             patch("sherman.agent_loop_plugin.aiosqlite.connect", new_callable=AsyncMock) as mock_connect, \
+             patch("sherman.agent_loop_plugin.init_db", new_callable=AsyncMock):
+            mock_connect.return_value = MagicMock()
+            await plugin.on_start(config=BASE_CONFIG)
+
+        assert plugin.base_dir == Path(".")
 
     async def test_on_start_missing_llm_config_raises(self):
         """Config without llm.base_url or llm.model raises KeyError."""
@@ -624,7 +665,132 @@ class TestOnMessageToolCallRoundTrip:
 
 
 # ---------------------------------------------------------------------------
-# Section 8 — on_message: error handling
+# Section 8 — system prompt resolution via _ensure_conversation (Phase 2.5)
+# ---------------------------------------------------------------------------
+
+
+class TestEnsureConversationPromptResolution:
+    async def test_ensure_conversation_resolves_file_list(self, tmp_path):
+        """_ensure_conversation resolves a list of prompt file paths into a
+        concatenated string and assigns it to conv.system_prompt.
+
+        Setup: create temp files with known content, set plugin.base_dir to
+        tmp_path, then call on_message to trigger _ensure_conversation.
+        """
+        soul = tmp_path / "soul.md"
+        irc = tmp_path / "irc.md"
+        soul.write_text("You are Sherman.")
+        irc.write_text("This is IRC.")
+
+        agent_defaults = {
+            "system_prompt": ["soul.md", "irc.md"],
+            "max_context_tokens": 8000,
+            "keep_thinking_in_history": False,
+        }
+        plugin, channel, db = await _build_plugin_and_channel(
+            agent_defaults=agent_defaults
+        )
+        plugin.base_dir = tmp_path
+
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(return_value=_make_text_response("ok"))
+        plugin.client = mock_client
+
+        await plugin.on_message(channel=channel, sender="user", text="hello")
+
+        assert channel.conversation is not None
+        assert channel.conversation.system_prompt == "You are Sherman.\n\nThis is IRC."
+
+        await db.close()
+
+    async def test_ensure_conversation_string_prompt_unchanged(self):
+        """String system_prompt passes through _ensure_conversation unchanged.
+
+        This is a regression test — existing string-based config must
+        continue to work identically after Phase 2.5.
+        """
+        plugin, channel, db = await _build_plugin_and_channel()
+
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(return_value=_make_text_response("ok"))
+        plugin.client = mock_client
+
+        await plugin.on_message(channel=channel, sender="user", text="hello")
+
+        assert channel.conversation is not None
+        assert channel.conversation.system_prompt == "You are a test assistant."
+
+        await db.close()
+
+    async def test_mixed_config_agent_list_channel_string(self, tmp_path):
+        """Agent-level list + channel string override: channel string wins.
+
+        resolve_config() gives the channel string; _ensure_conversation should
+        pass it through as a string, not attempt file reads.
+        """
+        # Create a file that would be read if the agent list were used — it
+        # should NOT be read because the channel override wins.
+        soul = tmp_path / "soul.md"
+        soul.write_text("Agent level content.")
+
+        agent_defaults = {
+            "system_prompt": ["soul.md"],
+            "max_context_tokens": 8000,
+            "keep_thinking_in_history": False,
+        }
+        channel_cfg = ChannelConfig(system_prompt="Channel string wins.")
+        plugin, channel, db = await _build_plugin_and_channel(
+            agent_defaults=agent_defaults,
+            channel_config=channel_cfg,
+        )
+        plugin.base_dir = tmp_path
+
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(return_value=_make_text_response("ok"))
+        plugin.client = mock_client
+
+        await plugin.on_message(channel=channel, sender="user", text="hello")
+
+        assert channel.conversation is not None
+        assert channel.conversation.system_prompt == "Channel string wins."
+
+        await db.close()
+
+    async def test_mixed_config_agent_string_channel_list(self, tmp_path):
+        """Agent-level string + channel list override: channel list wins.
+
+        _ensure_conversation should read the channel's file list and set
+        conv.system_prompt to the concatenated content.
+        """
+        f = tmp_path / "channel.md"
+        f.write_text("Channel list content.")
+
+        agent_defaults = {
+            "system_prompt": "Agent string.",
+            "max_context_tokens": 8000,
+            "keep_thinking_in_history": False,
+        }
+        channel_cfg = ChannelConfig(system_prompt=["channel.md"])
+        plugin, channel, db = await _build_plugin_and_channel(
+            agent_defaults=agent_defaults,
+            channel_config=channel_cfg,
+        )
+        plugin.base_dir = tmp_path
+
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(return_value=_make_text_response("ok"))
+        plugin.client = mock_client
+
+        await plugin.on_message(channel=channel, sender="user", text="hello")
+
+        assert channel.conversation is not None
+        assert channel.conversation.system_prompt == "Channel list content."
+
+        await db.close()
+
+
+# ---------------------------------------------------------------------------
+# Section 9 — on_message: error handling
 # ---------------------------------------------------------------------------
 
 

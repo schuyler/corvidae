@@ -2,6 +2,7 @@
 
 import logging
 from collections.abc import Callable
+from pathlib import Path
 
 import aiosqlite
 
@@ -9,6 +10,7 @@ from sherman.agent_loop import run_agent_loop, strip_reasoning_content, strip_th
 from sherman.conversation import ConversationLog, init_db
 from sherman.hooks import hookimpl
 from sherman.llm import LLMClient
+from sherman.prompt import resolve_system_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +24,7 @@ class AgentLoopPlugin:
         self.db: aiosqlite.Connection | None = None
         self.tools: dict[str, Callable] = {}
         self.tool_schemas: list[dict] = []
+        self.base_dir: Path = Path(".")
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
@@ -30,6 +33,7 @@ class AgentLoopPlugin:
         # fields (base_url, model) — fail-fast on misconfiguration.
         self.tools = {}
         self.tool_schemas = []
+        self.base_dir = config.get("_base_dir", Path("."))
         llm_config = config.get("llm", {})
         self.client = LLMClient(
             base_url=llm_config["base_url"],
@@ -132,6 +136,6 @@ class AgentLoopPlugin:
             return
         conv = ConversationLog(self.db, channel.id)
         resolved = self.pm.registry.resolve_config(channel)
-        conv.system_prompt = resolved["system_prompt"]
+        conv.system_prompt = resolve_system_prompt(resolved["system_prompt"], self.base_dir)
         await conv.load()
         channel.conversation = conv

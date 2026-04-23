@@ -15,7 +15,7 @@ class ChannelConfig:
     """Per-channel configuration. Falls back to agent-level defaults
     for any field set to None."""
 
-    system_prompt: str | None = None
+    system_prompt: str | list[str] | None = None
     max_context_tokens: int | None = None
     keep_thinking_in_history: bool | None = None
     # Future: tool allowlist/denylist, response length, etc.

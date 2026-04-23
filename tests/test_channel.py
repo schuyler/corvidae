@@ -288,3 +288,35 @@ class TestLoadChannelConfig:
         ch = registry.get("irc:#lex")
         assert ch is not None
         assert ch.config.system_prompt is None
+
+
+# ---------------------------------------------------------------------------
+# Section 6.5 — system_prompt list passthrough (Phase 2.5)
+# ---------------------------------------------------------------------------
+
+
+class TestChannelConfigListSystemPrompt:
+    def test_resolve_list_system_prompt_passthrough(self):
+        """ChannelConfig with a list system_prompt preserves the list through resolve().
+
+        The list is NOT resolved to a string at this layer — that happens later
+        in _ensure_conversation via resolve_system_prompt().
+        """
+        cfg = ChannelConfig(system_prompt=["a.md", "b.md"])
+        result = cfg.resolve({})
+        assert result["system_prompt"] == ["a.md", "b.md"]
+
+    def test_resolve_list_agent_default_passthrough(self):
+        """Agent-level list system_prompt is passed through when the channel
+        has no override (system_prompt is None).
+
+        resolve() should not attempt to read files — the raw list is preserved.
+        """
+        agent_defaults = {
+            "system_prompt": ["soul.md", "irc.md"],
+            "max_context_tokens": 8000,
+            "keep_thinking_in_history": False,
+        }
+        cfg = ChannelConfig()  # no override
+        result = cfg.resolve(agent_defaults)
+        assert result["system_prompt"] == ["soul.md", "irc.md"]

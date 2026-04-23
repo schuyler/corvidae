@@ -2,6 +2,7 @@
 
 import asyncio
 import signal
+from pathlib import Path
 
 import yaml
 
@@ -21,6 +22,8 @@ async def main(config_path: str = "agent.yaml") -> None:
     """
     with open(config_path) as f:
         config = yaml.safe_load(f)
+
+    config["_base_dir"] = Path(config_path).parent
 
     pm = create_plugin_manager()
 

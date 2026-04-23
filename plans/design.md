@@ -1251,7 +1251,24 @@ Completed. 87 tests pass (69 existing + 18 new). All deliverables implemented:
 See `plans/phase2-design.md` for full design spec including discrepancies resolved
 during implementation.
 
-### Phase 2.5: Composable System Prompts
+### Phase 2.5: Composable System Prompts ✓
+
+Completed. 108 tests pass (87 existing + 21 new). All deliverables implemented:
+
+- `sherman/prompt.py` — `resolve_system_prompt(value, base_dir)` function
+- `ChannelConfig.system_prompt` type updated to `str | list[str] | None`
+- `AgentLoopPlugin.base_dir` attribute; `on_start` reads `config["_base_dir"]`
+  (defaults to `Path(".")` when absent); `_ensure_conversation` calls
+  `resolve_system_prompt()` at conversation init time
+- `main.py` injects `config["_base_dir"] = Path(config_path).parent` — no
+  hookspec change required
+- Resolution in `_ensure_conversation`, not `ChannelConfig.resolve()` — the
+  raw list is preserved in config and only resolved to a string at the point
+  of use
+- Sample prompt files: `prompts/SOUL.md` and `prompts/IRC.md`
+- Tests: `tests/test_prompt.py` (string passthrough, file list, path
+  resolution, error cases) and new tests in `tests/test_agent_loop_plugin.py`
+  (Section 8.5 — prompt resolution through `_ensure_conversation`)
 
 System prompts are composed from ordered lists of markdown files rather
 than inline YAML strings. This separates concerns (identity, personality,
