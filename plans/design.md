@@ -1188,15 +1188,20 @@ full results. All steps passed:
 - Multi-turn tool calling works with and without reasoning in history
 - Recommendation: `keep_thinking_in_history: false`
 
-### Phase 1: Core Framework
+### Phase 1: Core Framework ✓
 
-1. Hook definitions (`hooks.py`)
-2. Plugin manager setup (`plugin_manager.py`)
-3. LLM client (`llm.py`)
-4. Agent loop (`agent_loop.py`) — tool dispatch, schema generation
-5. Conversation log (`conversation.py`) — append-only log, compaction
-6. Daemon entry point (`main.py`) — starts, waits for signal, stops
-7. Tests for hooks, agent loop (mocked HTTP), conversation log
+Completed. 39 tests pass. All deliverables implemented:
+
+- Hook definitions (`hooks.py`) — `AgentSpec` with 7 lifecycle hooks
+- Plugin manager setup (`plugin_manager.py`) — `create_plugin_manager()`
+- LLM client (`llm.py`) — async `LLMClient` wrapping OpenAI-compatible API
+- Agent loop (`agent_loop.py`) — tool dispatch, schema generation via pydantic,
+  `strip_thinking()` for `<think>` block removal
+- Conversation log (`conversation.py`) — append-only SQLite persistence,
+  LLM-based compaction when token estimate reaches 80% of context limit
+- Daemon entry point (`main.py`) — loads YAML config, fires hooks, waits for
+  SIGINT/SIGTERM, shuts down cleanly
+- Tests for hooks, agent loop (mocked HTTP), conversation log
 
 ### Phase 2: Agent Loop Plugin
 
