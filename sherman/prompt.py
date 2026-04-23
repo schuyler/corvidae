@@ -1,4 +1,13 @@
-"""System prompt resolution for composable prompts."""
+"""System prompt resolution for composable prompts.
+
+This module handles system_prompt config values which can be:
+- A literal string (returned as-is)
+- A list of file paths (concatenated with double newlines)
+
+Logging:
+    - DEBUG: system prompt resolved (string vs file list, length)
+    - WARNING: empty list resolved to empty string
+"""
 
 import logging
 from pathlib import Path
@@ -14,9 +23,20 @@ def resolve_system_prompt(value: str | list[str], base_dir: Path) -> str:
     with double newlines. Relative paths are resolved against
     base_dir. Absolute paths are used as-is.
 
+    Args:
+        value: Either a literal prompt string or a list of file paths
+        base_dir: Base directory for resolving relative paths
+
+    Returns:
+        The resolved system prompt as a single string
+
     Raises:
         FileNotFoundError: If any path in the list does not exist.
         TypeError: If value is neither str nor list.
+
+    Logs:
+        DEBUG: Resolution method (string/file list) and result length
+        WARNING: Empty list resolves to empty string
     """
     if isinstance(value, str):
         logger.debug(

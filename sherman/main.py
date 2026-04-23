@@ -1,4 +1,19 @@
-"""Daemon entry point for sherman."""
+"""Daemon entry point for sherman.
+
+This module configures logging from the YAML config file (or applies defaults)
+before any other initialization. All sherman modules use module-level loggers
+named `sherman.<module>` via `logging.getLogger(__name__)`. The `sherman` root
+logger controls the entire logging hierarchy.
+
+Logging Configuration:
+    The `logging` key in agent.yaml is passed to `logging.config.dictConfig()`.
+    If omitted, built-in defaults apply: INFO level to stderr, standard format.
+    See `_DEFAULT_LOGGING` for the default configuration schema.
+
+Shutdown:
+    SIGINT/SIGTERM trigger graceful shutdown via `stop_event`. The shutdown
+    signal is logged before plugins are stopped.
+"""
 
 import asyncio
 import logging
@@ -16,6 +31,16 @@ from sherman.tools import CoreToolsPlugin
 
 logger = logging.getLogger(__name__)
 
+# Default logging configuration applied when no `logging` section exists in
+# agent.yaml. Passed directly to logging.config.dictConfig(). Key choices:
+#   - Output to stderr (stdout reserved for structured output if needed)
+#   - Sherman loggers at INFO (production operational level)
+#   - Root logger at WARNING (suppresses noisy library debug output)
+#   - disable_existing_loggers: False preserves loggers created at import time
+#   - propagate: False on sherman logger prevents double-output through root
+#
+# Users can override by providing a `logging` section in agent.yaml that
+# follows the same schema (log levels, file handlers, JSON formatters, etc.).
 _DEFAULT_LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,

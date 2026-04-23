@@ -1,3 +1,19 @@
+"""LLM client for OpenAI-compatible Chat Completions API.
+
+This module provides an async HTTP client for LLM chat completions. It handles:
+- Session lifecycle (start/stop with aiohttp)
+- Request/response logging with timing and token usage
+- Error handling and propagation
+
+Logging:
+    - INFO: client started/stopped, chat completion returned with metadata
+    - DEBUG: chat completion request (message count, tool count)
+    - ERROR: HTTP errors from the API
+
+Token usage is extracted from the response's `usage` field. If the API doesn't
+provide usage data, the fields are logged as `None`.
+"""
+
 import logging
 import time
 
@@ -7,16 +23,36 @@ logger = logging.getLogger(__name__)
 
 
 class LLMClient:
-    """Async client for OpenAI-compatible Chat Completions API."""
+    """Async client for OpenAI-compatible Chat Completions API.
+
+    The client maintains an aiohttp session with optional Bearer auth.
+    All requests include timing and token usage logging.
+
+    Attributes:
+        base_url: API base URL (e.g., "http://localhost:8080")
+        model: Model name for requests (e.g., "llama3.1")
+        api_key: Optional API key for Bearer auth
+        session: aiohttp session (created by start(), closed by stop())
+    """
 
     def __init__(self, base_url: str, model: str, api_key: str | None = None) -> None:
+        """Initialize the LLM client.
+
+        Args:
+            base_url: API base URL (trailing slash will be stripped)
+            model: Model identifier to use in requests
+            api_key: Optional Bearer token for authentication
+        """
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.api_key = api_key
         self.session: aiohttp.ClientSession | None = None
 
     async def start(self) -> None:
-        """Create the aiohttp session."""
+        """Create the aiohttp session with optional auth header.
+
+        Logs an INFO message with base_url and model.
+        """
         headers = {}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
@@ -28,7 +64,10 @@ class LLMClient:
         )
 
     async def stop(self) -> None:
-        """Close the aiohttp session."""
+        """Close the aiohttp session.
+
+        Logs an INFO message. Safe to call if session is None.
+        """
         if self.session:
             await self.session.close()
 
@@ -41,8 +80,21 @@ class LLMClient:
     ) -> dict:
         """Send a chat completion request.
 
-        Returns the full response dict from the API.
-        Raises aiohttp.ClientResponseError on non-2xx status.
+        Args:
+            messages: List of message dicts with 'role' and 'content' keys
+            tools: Optional list of tool schemas for function calling
+
+        Returns:
+            Full response dict from the API (includes choices, usage, etc.)
+
+        Raises:
+            RuntimeError: If start() was not called
+            aiohttp.ClientResponseError: On non-2xx HTTP status
+
+        Logs:
+            DEBUG: Request metadata (message count, tool count)
+            INFO: Response metadata (latency_ms, token counts, model)
+            ERROR: HTTP failure with status code
         """
         if self.session is None:
             raise RuntimeError("LLMClient.start() must be called before chat()")

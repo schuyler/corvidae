@@ -14,7 +14,6 @@ import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import aiosqlite
 import pytest
 import yaml
 
@@ -28,7 +27,7 @@ from sherman.prompt import resolve_system_prompt
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def _reset_logging():
     """Reset global logging state after each test so caplog is clean."""
     yield
@@ -128,7 +127,7 @@ class TestMainLogging:
         import sherman.main as mod
         assert mod._DEFAULT_LOGGING.get("disable_existing_loggers") is False
 
-    async def test_main_calls_dictconfig_with_defaults(self, _reset_logging):
+    async def test_main_calls_dictconfig_with_defaults(self):
         """When no 'logging' key in config, main() must call dictConfig with
         _DEFAULT_LOGGING."""
         with tempfile.NamedTemporaryFile(
@@ -151,10 +150,8 @@ class TestMainLogging:
                 mock_pm.ahook.on_stop = AsyncMock(return_value=[])
                 mock_pm_factory.return_value = mock_pm
 
-                loop = asyncio.get_event_loop()
-
                 async def run():
-                    loop.call_later(0.05, os.kill, os.getpid(), signal.SIGINT)
+                    asyncio.get_running_loop().call_later(0.05, os.kill, os.getpid(), signal.SIGINT)
                     from sherman.main import main
                     await main(config_path)
 
@@ -169,7 +166,7 @@ class TestMainLogging:
         finally:
             os.unlink(config_path)
 
-    async def test_main_calls_dictconfig_with_yaml_logging(self, _reset_logging):
+    async def test_main_calls_dictconfig_with_yaml_logging(self):
         """When 'logging' key is present in config, main() must call dictConfig
         with that config (not _DEFAULT_LOGGING)."""
         custom_logging = {
@@ -203,8 +200,7 @@ class TestMainLogging:
                 mock_pm_factory.return_value = mock_pm
 
                 async def run():
-                    loop = asyncio.get_event_loop()
-                    loop.call_later(0.05, os.kill, os.getpid(), signal.SIGINT)
+                    asyncio.get_running_loop().call_later(0.05, os.kill, os.getpid(), signal.SIGINT)
                     from sherman.main import main
                     await main(config_path)
 
@@ -218,7 +214,7 @@ class TestMainLogging:
         finally:
             os.unlink(config_path)
 
-    async def test_main_logs_startup_info(self, caplog, _reset_logging):
+    async def test_main_logs_startup_info(self, caplog):
         """main() must emit an INFO log for 'logging configured' and 'daemon starting'
         (or similar startup message)."""
         with tempfile.NamedTemporaryFile(
@@ -243,8 +239,7 @@ class TestMainLogging:
                 mock_pm_factory.return_value = mock_pm
 
                 async def run():
-                    loop = asyncio.get_event_loop()
-                    loop.call_later(0.05, os.kill, os.getpid(), signal.SIGINT)
+                    asyncio.get_running_loop().call_later(0.05, os.kill, os.getpid(), signal.SIGINT)
                     from sherman.main import main
                     await main(config_path)
 
@@ -258,7 +253,7 @@ class TestMainLogging:
         finally:
             os.unlink(config_path)
 
-    async def test_main_logs_shutdown_info(self, caplog, _reset_logging):
+    async def test_main_logs_shutdown_info(self, caplog):
         """main() must emit an INFO log after stop_event.wait() returns when
         shutdown signal is received (e.g., 'shutdown signal received, stopping')."""
         with tempfile.NamedTemporaryFile(
@@ -283,8 +278,7 @@ class TestMainLogging:
                 mock_pm_factory.return_value = mock_pm
 
                 async def run():
-                    loop = asyncio.get_event_loop()
-                    loop.call_later(0.05, os.kill, os.getpid(), signal.SIGINT)
+                    asyncio.get_running_loop().call_later(0.05, os.kill, os.getpid(), signal.SIGINT)
                     from sherman.main import main
                     await main(config_path)
 
@@ -585,22 +579,20 @@ class TestAgentLoopLogging:
 class TestConversationLogging:
     """ConversationLog must log WARNING before compaction and INFO after."""
 
-    async def test_compaction_triggered_logs_warning(self, caplog):
+    async def test_compaction_triggered_logs_warning(self, db, caplog):
         """compact_if_needed must log WARNING when compaction is triggered."""
-        async with aiosqlite.connect(":memory:") as db:
-            await init_db(db)
-            conv = ConversationLog(db, channel_id="test:chan1")
-            conv.system_prompt = ""
-            # 25 messages × 100 chars = 2500 chars; token_estimate ~714; 80% of 100 = 80 → triggers
-            conv.messages = [{"role": "user", "content": "x" * 100} for _ in range(25)]
+        conv = ConversationLog(db, channel_id="test:chan1")
+        conv.system_prompt = ""
+        # 25 messages × 100 chars = 2500 chars; token_estimate ~714; 80% of 100 = 80 → triggers
+        conv.messages = [{"role": "user", "content": "x" * 100} for _ in range(25)]
 
-            mock_client = AsyncMock()
-            mock_client.chat = AsyncMock(
-                return_value={"choices": [{"message": {"content": "summary"}}]}
-            )
+        mock_client = AsyncMock()
+        mock_client.chat = AsyncMock(
+            return_value={"choices": [{"message": {"content": "summary"}}]}
+        )
 
-            with caplog.at_level(logging.WARNING, logger="sherman.conversation"):
-                await conv.compact_if_needed(mock_client, max_tokens=100)
+        with caplog.at_level(logging.WARNING, logger="sherman.conversation"):
+            await conv.compact_if_needed(mock_client, max_tokens=100)
 
         records = [r for r in caplog.records if r.name == "sherman.conversation"]
         warning_records = [r for r in records if r.levelno == logging.WARNING]
@@ -608,22 +600,20 @@ class TestConversationLogging:
             "compact_if_needed must emit WARNING when compaction is triggered"
         )
 
-    async def test_compaction_completed_logs_info(self, caplog):
+    async def test_compaction_completed_logs_info(self, db, caplog):
         """compact_if_needed must log INFO after compaction with messages_before
         and messages_after counts."""
-        async with aiosqlite.connect(":memory:") as db:
-            await init_db(db)
-            conv = ConversationLog(db, channel_id="test:chan1")
-            conv.system_prompt = ""
-            conv.messages = [{"role": "user", "content": "x" * 100} for _ in range(25)]
+        conv = ConversationLog(db, channel_id="test:chan1")
+        conv.system_prompt = ""
+        conv.messages = [{"role": "user", "content": "x" * 100} for _ in range(25)]
 
-            mock_client = AsyncMock()
-            mock_client.chat = AsyncMock(
-                return_value={"choices": [{"message": {"content": "summary"}}]}
-            )
+        mock_client = AsyncMock()
+        mock_client.chat = AsyncMock(
+            return_value={"choices": [{"message": {"content": "summary"}}]}
+        )
 
-            with caplog.at_level(logging.INFO, logger="sherman.conversation"):
-                await conv.compact_if_needed(mock_client, max_tokens=100)
+        with caplog.at_level(logging.INFO, logger="sherman.conversation"):
+            await conv.compact_if_needed(mock_client, max_tokens=100)
 
         records = [r for r in caplog.records if r.name == "sherman.conversation"]
         info_records = [r for r in records if r.levelno == logging.INFO]
@@ -631,15 +621,13 @@ class TestConversationLogging:
             "compact_if_needed must emit INFO when compaction completes"
         )
 
-    async def test_load_debug_log(self, caplog):
+    async def test_load_debug_log(self, db, caplog):
         """ConversationLog.load() must emit a DEBUG log with the count of
         messages loaded."""
-        async with aiosqlite.connect(":memory:") as db:
-            await init_db(db)
-            conv = ConversationLog(db, channel_id="test:chan1")
+        conv = ConversationLog(db, channel_id="test:chan1")
 
-            with caplog.at_level(logging.DEBUG, logger="sherman.conversation"):
-                await conv.load()
+        with caplog.at_level(logging.DEBUG, logger="sherman.conversation"):
+            await conv.load()
 
         records = [r for r in caplog.records if r.name == "sherman.conversation"]
         debug_records = [r for r in records if r.levelno == logging.DEBUG]
@@ -647,15 +635,13 @@ class TestConversationLogging:
             "ConversationLog.load() must emit a DEBUG log with message count"
         )
 
-    async def test_append_debug_log(self, caplog):
+    async def test_append_debug_log(self, db, caplog):
         """ConversationLog.append() must emit a DEBUG log with role and content
         length."""
-        async with aiosqlite.connect(":memory:") as db:
-            await init_db(db)
-            conv = ConversationLog(db, channel_id="test:chan1")
+        conv = ConversationLog(db, channel_id="test:chan1")
 
-            with caplog.at_level(logging.DEBUG, logger="sherman.conversation"):
-                await conv.append({"role": "user", "content": "hello"})
+        with caplog.at_level(logging.DEBUG, logger="sherman.conversation"):
+            await conv.append({"role": "user", "content": "hello"})
 
         records = [r for r in caplog.records if r.name == "sherman.conversation"]
         debug_records = [r for r in records if r.levelno == logging.DEBUG]
@@ -839,15 +825,10 @@ class TestAgentLoopPluginLogging:
             "on_start INFO log must include tool_count as structured field"
         )
 
-    async def test_on_message_logs_info_channel_and_sender(self, caplog):
-        """on_message must emit an INFO log with channel and sender."""
-        import aiosqlite as aio
+    async def _make_on_message_plugin(self, db):
+        """Shared setup for on_message tests: returns (plugin, channel)."""
         from sherman.agent_loop_plugin import AgentLoopPlugin
-        from sherman.channel import Channel
         from sherman.plugin_manager import create_plugin_manager
-
-        db = await aio.connect(":memory:")
-        await init_db(db)
 
         pm = create_plugin_manager()
         registry = ChannelRegistry({"system_prompt": "Test.", "max_context_tokens": 8000,
@@ -867,11 +848,14 @@ class TestAgentLoopPluginLogging:
         plugin.client = mock_client
 
         channel = registry.get_or_create("test", "scope1")
+        return plugin, channel
+
+    async def test_on_message_logs_info_channel_and_sender(self, db, caplog):
+        """on_message must emit an INFO log with channel and sender."""
+        plugin, channel = await self._make_on_message_plugin(db)
 
         with caplog.at_level(logging.INFO, logger="sherman.agent_loop_plugin"):
             await plugin.on_message(channel=channel, sender="alice", text="hello")
-
-        await db.close()
 
         records = [r for r in caplog.records if r.name == "sherman.agent_loop_plugin"]
         info_records = [r for r in records if r.levelno == logging.INFO]
@@ -879,38 +863,12 @@ class TestAgentLoopPluginLogging:
             "on_message must emit at least one INFO log (channel, sender)"
         )
 
-    async def test_on_message_logs_response_with_latency(self, caplog):
+    async def test_on_message_logs_response_with_latency(self, db, caplog):
         """on_message must emit an INFO log after response with latency_ms field."""
-        import aiosqlite as aio
-        from sherman.agent_loop_plugin import AgentLoopPlugin
-        from sherman.plugin_manager import create_plugin_manager
-
-        db = await aio.connect(":memory:")
-        await init_db(db)
-
-        pm = create_plugin_manager()
-        registry = ChannelRegistry({"system_prompt": "Test.", "max_context_tokens": 8000,
-                                     "keep_thinking_in_history": False})
-        pm.registry = registry
-        pm.ahook.send_message = AsyncMock()
-        pm.ahook.on_agent_response = AsyncMock()
-
-        plugin = AgentLoopPlugin(pm)
-        pm.register(plugin, name="agent_loop")
-        plugin.db = db
-
-        mock_client = MagicMock()
-        mock_client.chat = AsyncMock(
-            return_value={"choices": [{"message": {"role": "assistant", "content": "hi"}}]}
-        )
-        plugin.client = mock_client
-
-        channel = registry.get_or_create("test", "scope1")
+        plugin, channel = await self._make_on_message_plugin(db)
 
         with caplog.at_level(logging.INFO, logger="sherman.agent_loop_plugin"):
             await plugin.on_message(channel=channel, sender="alice", text="hello")
-
-        await db.close()
 
         records = [r for r in caplog.records if r.name == "sherman.agent_loop_plugin"]
         info_records = [r for r in records if r.levelno == logging.INFO]
@@ -919,15 +877,11 @@ class TestAgentLoopPluginLogging:
             "on_message must emit an INFO log with latency_ms structured field after response"
         )
 
-    async def test_ensure_conversation_logs_info(self, caplog):
+    async def test_ensure_conversation_logs_info(self, db, caplog):
         """_ensure_conversation must emit an INFO log when initializing a new
         conversation for a channel."""
-        import aiosqlite as aio
         from sherman.agent_loop_plugin import AgentLoopPlugin
         from sherman.plugin_manager import create_plugin_manager
-
-        db = await aio.connect(":memory:")
-        await init_db(db)
 
         pm = create_plugin_manager()
         registry = ChannelRegistry({"system_prompt": "Test.", "max_context_tokens": 8000,
@@ -945,8 +899,6 @@ class TestAgentLoopPluginLogging:
 
         with caplog.at_level(logging.INFO, logger="sherman.agent_loop_plugin"):
             await plugin._ensure_conversation(channel)
-
-        await db.close()
 
         records = [r for r in caplog.records if r.name == "sherman.agent_loop_plugin"]
         info_records = [r for r in records if r.levelno == logging.INFO]

@@ -1,4 +1,15 @@
-"""Channel abstraction for conversation scoping."""
+"""Channel abstraction for conversation scoping.
+
+This module provides the channel registry that maps transport:scope identifiers
+to Channel objects. Each channel has its own conversation history and config
+overrides. Channels are created on-demand when messages arrive, or pre-registered
+from the config file.
+
+Logging:
+    - INFO: channel registered from config
+    - WARNING: invalid channel key format
+    - DEBUG: channel config resolved
+"""
 
 from __future__ import annotations
 

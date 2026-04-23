@@ -1,4 +1,20 @@
-"""AgentLoopPlugin — wires the agent loop into the hook system."""
+"""AgentLoopPlugin — wires the agent loop into the hook system.
+
+This plugin implements the core agent message processing flow. On each message:
+1. Lazy-initialize conversation for the channel
+2. Append user message to conversation log
+3. Compact if approaching context limit
+4. Run agent loop (LLM + tool calls)
+5. Persist new messages
+6. Strip thinking tokens if configured
+7. Send response via transport
+
+Logging:
+    - INFO: on_start complete, on_message received, agent response sent,
+      conversation initialized
+    - ERROR: LLM client not initialized, agent loop failures
+    - Latency is tracked via time.monotonic() around run_agent_loop
+"""
 
 import asyncio
 import logging
@@ -19,7 +35,21 @@ logger = logging.getLogger(__name__)
 
 
 class AgentLoopPlugin:
-    """Plugin that wires the agent loop into the hook system."""
+    """Plugin that wires the agent loop into the hook system.
+
+    Attributes:
+        pm: Plugin manager instance (untyped due to pluggy limitations)
+        client: LLM client for chat completions
+        db: SQLite connection for conversation persistence
+        tools: Dict mapping tool names to async callable functions
+        tool_schemas: List of tool schemas for LLM function calling
+        base_dir: Base path for resolving relative system prompt files
+        task_queue: Background task queue for long-running operations
+        _worker_task: Background worker task that processes the queue
+
+    The plugin collects tools from all registered plugins via the register_tools
+    hook during on_start, then provides them to the agent loop during on_message.
+    """
 
     def __init__(self, pm) -> None:  # pm is untyped: pluggy.PluginManager has no typed interface for .registry
         self.pm = pm
