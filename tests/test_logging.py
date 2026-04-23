@@ -87,6 +87,12 @@ class TestLoggerNamingConvention:
         assert hasattr(mod, "logger")
         assert mod.logger.name == "sherman.agent_loop_plugin"
 
+    def test_plugin_manager_has_module_logger(self):
+        """sherman.plugin_manager must expose a module-level logger attribute."""
+        import sherman.plugin_manager as mod
+        assert hasattr(mod, "logger"), "plugin_manager.py must define module-level `logger`"
+        assert mod.logger.name == "sherman.plugin_manager"
+
 
 # ---------------------------------------------------------------------------
 # Section 2: main.py — _DEFAULT_LOGGING and dictConfig
@@ -330,9 +336,8 @@ class TestLLMLogging:
 
         # Check that the log record carries structured extra fields
         completion_record = info_records[-1]
-        assert hasattr(completion_record, "latency_ms") or "latency" in completion_record.getMessage().lower() or \
-               hasattr(completion_record, "model"), (
-            "chat completion INFO log must include latency_ms or model field"
+        assert hasattr(completion_record, "latency_ms"), (
+            "chat completion INFO log must include latency_ms as structured field"
         )
 
     async def test_llm_chat_logs_error_on_http_failure(self, caplog):
@@ -723,6 +728,28 @@ class TestPromptLogging:
         debug_records = [r for r in records if r.levelno == logging.DEBUG]
         assert debug_records, (
             "resolve_system_prompt must emit a DEBUG log for file list input"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Section 8: plugin_manager.py — DEBUG log on create_plugin_manager
+# ---------------------------------------------------------------------------
+
+
+class TestPluginManagerLogging:
+    """plugin_manager must log DEBUG when created."""
+
+    def test_create_plugin_manager_logs_debug(self, caplog):
+        """create_plugin_manager() must emit a DEBUG log."""
+        from sherman.plugin_manager import create_plugin_manager
+
+        with caplog.at_level(logging.DEBUG, logger="sherman.plugin_manager"):
+            create_plugin_manager()
+
+        records = [r for r in caplog.records if r.name == "sherman.plugin_manager"]
+        debug_records = [r for r in records if r.levelno == logging.DEBUG]
+        assert debug_records, (
+            "create_plugin_manager() must emit a DEBUG log"
         )
 
 
