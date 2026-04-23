@@ -19,7 +19,12 @@ from sherman.main import main
 
 def _write_config(path: str, data: dict | None = None) -> None:
     """Write a minimal YAML config file."""
-    config = data or {"model": "test-model", "base_url": "http://localhost:8080"}
+    config = data or {
+        "llm": {
+            "base_url": "http://localhost:8080",
+            "model": "test-model",
+        },
+    }
     with open(path, "w") as f:
         yaml.dump(config, f)
 
@@ -89,10 +94,25 @@ class TestMainCallsOnStartAndOnStop:
             config_path = f.name
 
         try:
+            mock_client = MagicMock()
+            mock_client.start = AsyncMock()
+            mock_client.stop = AsyncMock()
             with patch(
                 "sherman.main.create_plugin_manager",
                 side_effect=patched_create_plugin_manager,
+            ), patch(
+                "sherman.agent_loop_plugin.LLMClient",
+                return_value=mock_client,
+            ), patch(
+                "sherman.agent_loop_plugin.aiosqlite.connect",
+                new_callable=AsyncMock,
+            ) as mock_connect, patch(
+                "sherman.agent_loop_plugin.init_db",
+                new_callable=AsyncMock,
             ):
+                mock_db = MagicMock()
+                mock_db.close = AsyncMock()
+                mock_connect.return_value = mock_db
                 _schedule_sigint()
                 await main(config_path)
 
@@ -128,8 +148,10 @@ class TestRegistryPopulatedBeforeOnStart:
         pm = None
 
         config_data = {
-            "model": "test-model",
-            "base_url": "http://localhost:8080",
+            "llm": {
+                "base_url": "http://localhost:8080",
+                "model": "test-model",
+            },
             "channels": {
                 "irc:#lex": {
                     "system_prompt": "You are a helpful assistant for #lex.",
@@ -144,10 +166,25 @@ class TestRegistryPopulatedBeforeOnStart:
             config_path = f.name
 
         try:
+            mock_client = MagicMock()
+            mock_client.start = AsyncMock()
+            mock_client.stop = AsyncMock()
             with patch(
                 "sherman.main.create_plugin_manager",
                 side_effect=patched_create_plugin_manager,
+            ), patch(
+                "sherman.agent_loop_plugin.LLMClient",
+                return_value=mock_client,
+            ), patch(
+                "sherman.agent_loop_plugin.aiosqlite.connect",
+                new_callable=AsyncMock,
+            ) as mock_connect, patch(
+                "sherman.agent_loop_plugin.init_db",
+                new_callable=AsyncMock,
             ):
+                mock_db = MagicMock()
+                mock_db.close = AsyncMock()
+                mock_connect.return_value = mock_db
                 _schedule_sigint()
                 await main(config_path)
         finally:

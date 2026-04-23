@@ -1227,30 +1227,126 @@ Completed. 68 tests pass (39 existing + 29 new). All deliverables implemented:
   `"transport:scope"` format, per-channel overrides for `system_prompt`,
   `max_context_tokens`, `keep_thinking_in_history`
 
-### Phase 2: Agent Loop Plugin
+### Phase 2: Agent Loop Plugin ✓
 
-Channel objects are now available via `pm.registry`. The agent loop plugin
-should use `pm.registry.get_or_create(channel.transport, channel.scope)` (or
-the channel passed via `on_message`) and attach a `ConversationLog` to
-`channel.conversation` on first use:
+Completed. 87 tests pass (69 existing + 18 new). All deliverables implemented:
 
-```python
-if channel.conversation is None:
-    channel.conversation = ConversationLog(self.db, channel.id)
-    resolved = self.pm.registry.resolve_config(channel)
-    channel.conversation.system_prompt = resolved["system_prompt"]
-    await channel.conversation.load()
+- `agent_loop_plugin.py` — `AgentLoopPlugin` implementing `on_start`, `on_message`,
+  `on_stop` hooks; wires `LLMClient`, `run_agent_loop()`, and `ConversationLog` into
+  the hook system
+- `LLMClient` updated with optional `api_key` parameter (forward compatibility)
+- `agent_loop.py` updated with `strip_reasoning_content()` helper for in-memory
+  stripping of thinking tokens from active history
+- `channel.py` updated: `keep_thinking_in_history` hardcoded fallback changed from
+  `True` to `False`
+- Thinking token handling — three-layer strategy: `content` for display,
+  full message dict (including `reasoning_content`) in persistent log,
+  `reasoning_content` stripped from active history when `keep_thinking_in_history=false`
+- ConversationLog lazy-initialized on `channel.conversation` on first message;
+  no separate conversations dict on the plugin
+- `register_tools` collected synchronously during `on_start` via `pm.hook.register_tools()`
+- Per-channel config resolved via `pm.registry.resolve_config(channel)`
+- Test file: `tests/test_agent_loop_plugin.py`
+
+See `plans/phase2-design.md` for full design spec including discrepancies resolved
+during implementation.
+
+### Phase 2.5: Composable System Prompts
+
+System prompts are composed from ordered lists of markdown files rather
+than inline YAML strings. This separates concerns (identity, personality,
+channel-specific instructions) into independently editable files, and
+sets up hot-reloading of prompt components when Phase 5 lands.
+
+#### Config changes
+
+`system_prompt` accepts either a string (backward compatible) or a list
+of file paths:
+
+```yaml
+agent:
+  system_prompt:
+    - prompts/SOUL.md        # personality, tone, values
+    - prompts/AGENTS.md      # agent capabilities and tool usage guidance
+    - prompts/USER.md        # user preferences and context
+
+channels:
+  "irc:#lex":
+    system_prompt:
+      - prompts/SOUL.md
+      - prompts/AGENTS.md
+      - prompts/IRC.md       # channel-specific: "keep responses short"
 ```
 
-1. Agent loop plugin (`agent_loop.py` plugin class)
-2. LLM configuration from YAML
-3. Thinking token handling — three-layer strategy (strip for display,
-   preserve in log, configurable for active history)
-4. ConversationLog integration via `channel.conversation` — append-only
-   persistence, stop-the-world compaction when approaching context limit;
-   per-channel config resolved via `pm.registry.resolve_config(channel)`
-5. Wire up `register_tools` hook
-6. Tests with mocked LLM responses (mock aiohttp)
+When `system_prompt` is a list, the files are read and concatenated in
+order, separated by `\n\n`. When it's a string, it's used as-is (no
+file resolution). This keeps existing configs working without changes.
+
+#### Implementation
+
+```python
+# sherman/prompt.py
+
+from pathlib import Path
+
+
+def resolve_system_prompt(
+    value: str | list[str],
+    base_dir: Path,
+) -> str:
+    """Resolve a system_prompt config value to a string.
+
+    If value is a string, return it directly.
+    If value is a list of paths, read each file and concatenate
+    with double newlines. Relative paths are resolved against
+    base_dir, which should be the directory containing the config
+    file (e.g. Path(config_path).parent).
+    """
+    if isinstance(value, str):
+        return value
+
+    parts = []
+    for path_str in value:
+        path = base_dir / path_str
+        parts.append(path.read_text().strip())
+    return "\n\n".join(parts)
+```
+
+#### Integration points
+
+- `ChannelConfig.resolve()` and the agent-level defaults both pass
+  through `resolve_system_prompt()` before the result is used.
+- The raw config value (string or list) is preserved in `ChannelConfig`
+  and agent defaults — only resolved to a string at the point of use.
+- `base_dir` is `Path(config_path).parent` — relative prompt file paths
+  resolve against the directory containing `agent.yaml`, not the working
+  directory. This makes the config portable.
+- `resolve_system_prompt()` is called each time a conversation is
+  initialized (in `_ensure_conversation`), so editing a prompt file
+  takes effect on the next new conversation without a restart.
+
+#### Hot-reload preparation (Phase 5)
+
+When Phase 5 adds the watchdog file watcher, it can:
+
+1. Collect all prompt file paths from the config (agent-level + per-channel)
+2. Watch those paths alongside the `components/` directory
+3. On change, call `resolve_system_prompt()` again and update the
+   `system_prompt` on affected `ConversationLog` instances
+4. Existing conversations pick up the new prompt on their next turn
+   (the system prompt is the first message in `build_prompt()`)
+
+The file list is available from the config at any time, so no additional
+bookkeeping is needed in Phase 2.5.
+
+#### Deliverables
+
+1. `sherman/prompt.py` — `resolve_system_prompt()` function
+2. Integration into `ChannelConfig.resolve()` or the agent loop plugin's
+   `_ensure_conversation` (wherever the system_prompt is consumed)
+3. Sample prompt files in `prompts/` directory
+4. Tests: string passthrough, file list resolution, missing file error,
+   mixed configs (agent-level list + channel-level string override)
 
 ### Phase 3: Starter Tools and Background Tasks
 

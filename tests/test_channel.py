@@ -80,7 +80,7 @@ class TestChannelConfigResolve:
         result = cfg.resolve({})
         assert result["system_prompt"] == "You are a helpful assistant."
         assert result["max_context_tokens"] == 24000
-        assert result["keep_thinking_in_history"] is True
+        assert result["keep_thinking_in_history"] is False
 
 
 # ---------------------------------------------------------------------------

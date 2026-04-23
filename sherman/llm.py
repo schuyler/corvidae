@@ -4,14 +4,18 @@ import aiohttp
 class LLMClient:
     """Async client for OpenAI-compatible Chat Completions API."""
 
-    def __init__(self, base_url: str, model: str) -> None:
+    def __init__(self, base_url: str, model: str, api_key: str | None = None) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
+        self.api_key = api_key
         self.session: aiohttp.ClientSession | None = None
 
     async def start(self) -> None:
         """Create the aiohttp session."""
-        self.session = aiohttp.ClientSession()
+        headers = {}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        self.session = aiohttp.ClientSession(headers=headers)
 
     async def stop(self) -> None:
         """Close the aiohttp session."""

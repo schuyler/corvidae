@@ -39,7 +39,7 @@ class ChannelConfig:
             "keep_thinking_in_history": (
                 self.keep_thinking_in_history
                 if self.keep_thinking_in_history is not None
-                else agent_defaults.get("keep_thinking_in_history", True)
+                else agent_defaults.get("keep_thinking_in_history", False)
             ),
         }
 
