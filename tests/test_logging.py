@@ -258,6 +258,46 @@ class TestMainLogging:
         finally:
             os.unlink(config_path)
 
+    async def test_main_logs_shutdown_info(self, caplog, _reset_logging):
+        """main() must emit an INFO log after stop_event.wait() returns when
+        shutdown signal is received (e.g., 'shutdown signal received, stopping')."""
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".yaml", delete=False
+        ) as f:
+            yaml.dump(
+                {"llm": {"base_url": "http://localhost:8080", "model": "test"}},
+                f,
+            )
+            config_path = f.name
+
+        try:
+            import asyncio
+            import signal
+
+            with caplog.at_level(logging.INFO, logger="sherman.main"), \
+                 patch("logging.config.dictConfig"), \
+                 patch("sherman.main.create_plugin_manager") as mock_pm_factory:
+                mock_pm = MagicMock()
+                mock_pm.ahook.on_start = AsyncMock(return_value=[])
+                mock_pm.ahook.on_stop = AsyncMock(return_value=[])
+                mock_pm_factory.return_value = mock_pm
+
+                async def run():
+                    loop = asyncio.get_event_loop()
+                    loop.call_later(0.05, os.kill, os.getpid(), signal.SIGINT)
+                    from sherman.main import main
+                    await main(config_path)
+
+                await run()
+
+            log_messages = [r.message for r in caplog.records if r.name == "sherman.main"]
+            assert any("shutdown" in m.lower() or "stopping" in m.lower() or "signal" in m.lower()
+                       for m in log_messages), (
+                f"Expected shutdown INFO log in sherman.main, got: {log_messages}"
+            )
+        finally:
+            os.unlink(config_path)
+
 
 # ---------------------------------------------------------------------------
 # Section 3: llm.py — INFO logs on start, stop, chat completion
