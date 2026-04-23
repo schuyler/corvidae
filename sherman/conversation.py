@@ -1,9 +1,12 @@
 import json
+import logging
 import time
 
 import aiosqlite
 
 from sherman.llm import LLMClient
+
+logger = logging.getLogger(__name__)
 
 
 class ConversationLog:
@@ -37,10 +40,23 @@ class ConversationLog:
             rows = await cursor.fetchall()
         self.messages = [json.loads(row[0]) for row in rows]
 
+        logger.debug(
+            "messages loaded from DB",
+            extra={"count": len(self.messages)},
+        )
+
     async def append(self, message: dict) -> None:
         """Append to both self.messages and persistent log."""
         self.messages.append(message)
         await self._persist(message)
+
+        logger.debug(
+            "message appended",
+            extra={
+                "role": message.get("role"),
+                "content_length": len(message.get("content", "")),
+            },
+        )
 
     def token_estimate(self) -> int:
         """Rough token count: int(total_chars / 3.5)."""
@@ -57,6 +73,11 @@ class ConversationLog:
         if len(self.messages) <= 20:
             return
 
+        logger.warning(
+            "compaction triggered (approaching context limit)",
+            extra={"channel_id": self.channel_id},
+        )
+
         older = self.messages[:-20]
         last_20 = self.messages[-20:]
 
@@ -65,7 +86,17 @@ class ConversationLog:
             "role": "assistant",
             "content": f"[Summary of earlier conversation]\n{summary_text}",
         }
+        messages_before = len(self.messages)
         self.messages = [summary_msg] + last_20
+
+        logger.info(
+            "compaction completed",
+            extra={
+                "channel_id": self.channel_id,
+                "messages_before": messages_before,
+                "messages_after": len(self.messages),
+            },
+        )
 
     def build_prompt(self) -> list[dict]:
         """Return [system_message, *self.messages]."""

@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -92,10 +93,24 @@ class AgentLoopPlugin:
             )
         )
 
+        logger.info(
+            "on_start complete",
+            extra={
+                "tool_count": len(self.tools),
+                "channel_count": len(self.pm.registry.all()),
+            },
+        )
+
     @hookimpl
     async def on_message(self, channel, sender: str, text: str) -> None:
         if not self.client:
+            logger.error("on_message: LLM client not initialized")
             return
+
+        logger.info(
+            "on_message received",
+            extra={"channel": channel.id, "sender": sender},
+        )
 
         # 1. Lazy-initialize conversation on the channel
         await self._ensure_conversation(channel)
@@ -133,6 +148,7 @@ class AgentLoopPlugin:
         # cause an off-by-one and double-persist the last user message.
         messages_before = len(messages)
 
+        start = time.monotonic()
         try:
             raw_response = await run_agent_loop(
                 self.client, messages, local_tools, self.tool_schemas
@@ -144,6 +160,8 @@ class AgentLoopPlugin:
                 text="Sorry, I encountered an error and could not process your message.",
             )
             return
+
+        latency_ms = round((time.monotonic() - start) * 1000, 1)
 
         # 6. Persist new messages appended by run_agent_loop
         new_messages = messages[messages_before:]
@@ -161,6 +179,11 @@ class AgentLoopPlugin:
 
         # 8. Strip thinking for display and send response
         display_response = strip_thinking(raw_response)
+
+        logger.info(
+            "agent response sent",
+            extra={"channel": channel.id, "latency_ms": latency_ms},
+        )
 
         await self.pm.ahook.on_agent_response(
             channel=channel,
@@ -224,3 +247,8 @@ class AgentLoopPlugin:
         conv.system_prompt = resolve_system_prompt(resolved["system_prompt"], self.base_dir)
         await conv.load()
         channel.conversation = conv
+
+        logger.info(
+            "conversation initialized for channel",
+            extra={"channel": channel.id},
+        )

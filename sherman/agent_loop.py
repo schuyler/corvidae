@@ -1,11 +1,19 @@
 import inspect
 import json
+import logging
 import re
 from typing import Callable
 
 from pydantic import create_model
 
 from sherman.llm import LLMClient
+
+logger = logging.getLogger(__name__)
+
+
+def _truncate(s: str, maxlen: int = 200) -> str:
+    """Truncate a string to maxlen characters, appending '...' if truncated."""
+    return s[:maxlen] + "..." if len(s) > maxlen else s
 
 
 async def run_agent_loop(
@@ -23,6 +31,14 @@ async def run_agent_loop(
         messages.append(msg)
 
         tool_calls = msg.get("tool_calls")
+        logger.debug(
+            "LLM response received",
+            extra={
+                "role": msg.get("role"),
+                "tool_calls_count": len(tool_calls) if tool_calls else 0,
+            },
+        )
+
         if not tool_calls:
             return msg.get("content", "")
 
@@ -31,13 +47,27 @@ async def run_agent_loop(
             fn_name = call["function"]["name"]
             args = json.loads(call["function"]["arguments"])
 
+            logger.debug(
+                "tool call dispatched",
+                extra={"tool": fn_name, "arg_keys": list(args.keys())},
+            )
+
             if fn_name not in tools:
+                logger.warning("unknown tool called: %s", fn_name)
                 content = f"Error: unknown tool '{fn_name}'"
             else:
                 try:
                     content = await tools[fn_name](**args)
-                except Exception as exc:
-                    content = f"Error: {exc}"
+                except Exception:
+                    logger.warning(
+                        "tool %s raised exception", fn_name, exc_info=True
+                    )
+                    content = f"Error: unknown error"
+
+            logger.debug(
+                "tool call result",
+                extra={"tool": fn_name, "result_length": len(str(content))},
+            )
 
             messages.append({
                 "role": "tool",
@@ -45,6 +75,7 @@ async def run_agent_loop(
                 "content": str(content),
             })
 
+    logger.warning("max tool-calling rounds reached")
     return "(max tool-calling rounds reached)"
 
 

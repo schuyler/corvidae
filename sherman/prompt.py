@@ -1,6 +1,9 @@
 """System prompt resolution for composable prompts."""
 
+import logging
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 def resolve_system_prompt(value: str | list[str], base_dir: Path) -> str:
@@ -16,9 +19,14 @@ def resolve_system_prompt(value: str | list[str], base_dir: Path) -> str:
         TypeError: If value is neither str nor list.
     """
     if isinstance(value, str):
+        logger.debug(
+            "system prompt resolved from literal string",
+            extra={"length": len(value)},
+        )
         return value
     if isinstance(value, list):
         if not value:
+            logger.warning("empty system prompt list resolved to empty string")
             return ""
         parts = []
         for entry in value:
@@ -26,7 +34,12 @@ def resolve_system_prompt(value: str | list[str], base_dir: Path) -> str:
             if not path.is_absolute():
                 path = base_dir / path
             parts.append(path.read_text().strip())
-        return "\n\n".join(parts)
+        result = "\n\n".join(parts)
+        logger.debug(
+            "system prompt resolved from file list",
+            extra={"file_count": len(value), "length": len(result)},
+        )
+        return result
     raise TypeError(
         f"system_prompt must be str or list[str], got {type(value).__name__!r}"
     )

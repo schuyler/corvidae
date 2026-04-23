@@ -1,6 +1,8 @@
 """Daemon entry point for sherman."""
 
 import asyncio
+import logging
+import logging.config
 import signal
 from pathlib import Path
 
@@ -12,18 +14,58 @@ from sherman.cli_plugin import CLIPlugin
 from sherman.plugin_manager import create_plugin_manager
 from sherman.tools import CoreToolsPlugin
 
+logger = logging.getLogger(__name__)
+
+_DEFAULT_LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "standard": {
+            "format": "%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+            "datefmt": "%Y-%m-%d %H:%M:%S",
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "standard",
+            "stream": "ext://sys.stderr",
+        },
+    },
+    "loggers": {
+        "sherman": {
+            "level": "INFO",
+            "handlers": ["console"],
+            "propagate": False,
+        },
+    },
+    "root": {
+        "level": "WARNING",
+        "handlers": ["console"],
+    },
+}
+
 
 async def main(config_path: str = "agent.yaml") -> None:
     """Daemon entry point.
 
     1. Load YAML config from config_path. Raises FileNotFoundError if missing.
-    2. Create plugin manager via create_plugin_manager().
-    3. Call await pm.ahook.on_start(config=config).
-    4. Wait for SIGINT or SIGTERM.
-    5. Call await pm.ahook.on_stop().
+    2. Configure logging from config section or defaults.
+    3. Create plugin manager via create_plugin_manager().
+    4. Call await pm.ahook.on_start(config=config).
+    5. Wait for SIGINT or SIGTERM.
+    6. Call await pm.ahook.on_stop().
     """
     with open(config_path) as f:
         config = yaml.safe_load(f)
+
+    # Configure logging first — before any other work
+    log_config = config.get("logging", _DEFAULT_LOGGING)
+    logging.config.dictConfig(log_config)
+    logger.info(
+        "logging configured",
+        extra={"source": "yaml" if "logging" in config else "defaults"},
+    )
 
     config["_base_dir"] = Path(config_path).parent
 
@@ -60,6 +102,8 @@ async def main(config_path: str = "agent.yaml") -> None:
         loop.add_signal_handler(sig, stop_event.set)
 
     await stop_event.wait()
+
+    logger.info("shutdown signal received, stopping")
 
     await pm.ahook.on_stop()
 

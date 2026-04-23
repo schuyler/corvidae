@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from time import time
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from sherman.conversation import ConversationLog
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -27,7 +30,7 @@ class ChannelConfig:
         Uses `is not None` for all fields so that falsy values (empty
         string, 0) are treated as intentional overrides.
         """
-        return {
+        resolved = {
             "system_prompt": (
                 self.system_prompt if self.system_prompt is not None
                 else agent_defaults.get("system_prompt", "You are a helpful assistant.")
@@ -42,6 +45,13 @@ class ChannelConfig:
                 else agent_defaults.get("keep_thinking_in_history", False)
             ),
         }
+
+        logger.debug(
+            "channel config resolved",
+            extra={"channel_id": "(unknown)", "resolved": resolved},
+        )
+
+        return resolved
 
 
 @dataclass
@@ -137,6 +147,7 @@ def load_channel_config(config: dict, registry: ChannelRegistry) -> None:
     for channel_id, overrides in channels_config.items():
         parts = channel_id.split(":", 1)
         if len(parts) != 2:
+            logger.warning("invalid channel key format: %s", channel_id)
             raise ValueError(
                 f"Invalid channel key {channel_id!r} — expected 'transport:scope'"
             )
@@ -153,3 +164,8 @@ def load_channel_config(config: dict, registry: ChannelRegistry) -> None:
             keep_thinking_in_history=overrides.get("keep_thinking_in_history"),
         )
         registry.get_or_create(transport, scope, config=channel_config)
+
+        logger.info(
+            "channel registered from config",
+            extra={"channel_id": channel_id},
+        )
