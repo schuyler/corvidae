@@ -18,7 +18,9 @@ sherman/
 ├── agent_loop.py          # run_agent_loop(), tool_to_schema(), strip_thinking(), strip_reasoning_content()
 ├── conversation.py        # ConversationLog — SQLite-backed append-only log + compaction
 ├── prompt.py              # resolve_system_prompt() — string passthrough or file list concatenation
-├── agent_loop_plugin.py   # AgentLoopPlugin — wires LLMClient/run_agent_loop/ConversationLog into hooks
+├── agent_loop_plugin.py   # AgentLoopPlugin — foreground agent loop, background task system, task tool closures
+├── tools.py               # CoreToolsPlugin with shell, read_file, write_file, web_fetch tools
+├── background.py          # BackgroundTask dataclass, TaskQueue (FIFO worker queue)
 ├── main.py                # Daemon entry point — YAML config, plugin registration, SIGINT/SIGTERM
 tests/
 ├── conftest.py            # Shared fixtures (in-memory SQLite DB)
@@ -28,13 +30,16 @@ tests/
 ├── test_channel.py
 ├── test_main.py
 ├── test_agent_loop_plugin.py
-└── test_prompt.py
+├── test_prompt.py
+├── test_tools.py
+└── test_background.py
 prompts/
 ├── SOUL.md                # Sample identity/personality prompt
 └── IRC.md                 # Sample IRC channel-specific prompt
 plans/
 ├── design.md              # Primary design document — authoritative source
-└── phase2-design.md       # Phase 2 detailed spec (complete)
+├── phase2-design.md       # Phase 2 detailed spec (complete)
+└── phase3-design.md       # Phase 3 detailed spec (complete)
 ```
 
 ## Phase Status
@@ -50,6 +55,8 @@ plans/
 - **Phase 2.5** ✓ — Composable system prompts. 108 tests. `system_prompt` accepts list of file
   paths; resolved in `_ensure_conversation` via `resolve_system_prompt()` in `prompt.py`.
   `base_dir` injected via `config["_base_dir"]`; defaults to `Path(".")` when absent.
+- **Phase 3** ✓ — Starter Tools and Background Tasks. 148 tests. CoreToolsPlugin (shell,
+  read_file, write_file, web_fetch), BackgroundTask/TaskQueue, background worker in AgentLoopPlugin.
 
 ## Key Architectural Decisions
 
@@ -86,6 +93,24 @@ plans/
 - `plugin.base_dir` defaults to `Path(".")` (never `None`).
 - Re-reads files each time a conversation is initialized, so prompt edits take effect on next
   new conversation without a restart (sets up Phase 5 hot-reload).
+
+**Per-call closure for channel safety** (Phase 3):
+- `on_message` creates a local `background_task` closure capturing `channel` and builds
+  a `local_tools` dict per call.
+- Avoids shared `_current_channel` state, which is unsafe at asyncio await points.
+
+**Task tools owned by AgentLoopPlugin** (Phase 3):
+- `background_task` and `task_status` closures are created in `on_start` (not CoreToolsPlugin)
+  because they need `TaskQueue` access.
+- `CoreToolsPlugin` registers only stateless tools.
+
+**Background worker uses filtered tools** (Phase 3):
+- `_execute_background_task` excludes `background_task` from the tools dict to prevent
+  unbounded recursive task nesting. Background tasks can use all other tools.
+
+**Lambda wrappers for worker callbacks** (Phase 3):
+- The background worker uses `lambda` wrappers that dispatch via `self` at call time,
+  preserving test monkeypatching.
 
 **Channel ID format:** `transport:scope` — e.g., `irc:#lex`, `signal:+15551234567`.
 

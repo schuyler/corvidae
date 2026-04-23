@@ -1365,16 +1365,21 @@ bookkeeping is needed in Phase 2.5.
 4. Tests: string passthrough, file list resolution, missing file error,
    mixed configs (agent-level list + channel-level string override)
 
-### Phase 3: Starter Tools and Background Tasks
+### Phase 3: Starter Tools and Background Tasks ✓
 
-1. Core tools plugin (`tools.py`) — shell, read_file, write_file,
-   web_fetch
-2. Background task queue (`background.py`)
-3. `background_task` and `task_status` tools
-4. Background worker in agent loop plugin with its own system prompt
-5. Tests for tools (mock subprocess for shell, temp dirs for files,
-   mock aiohttp for web_fetch)
-6. Tests for background task queue
+Completed. 148 tests pass (108 existing + 40 new). All deliverables implemented:
+
+- `sherman/tools.py` — `CoreToolsPlugin` with `shell`, `read_file`, `write_file`,
+  and `web_fetch` tools registered via `register_tools` hook
+- `sherman/background.py` — `BackgroundTask` dataclass and `TaskQueue` (FIFO
+  asyncio worker queue)
+- `background_task` and `task_status` tool closures created in
+  `AgentLoopPlugin.on_start`, wired into the agent loop's tool dict per message
+- Background worker in `AgentLoopPlugin` that executes queued tasks with their
+  own agent loop call, excluding `background_task` to prevent recursive creation
+- Tests in `tests/test_tools.py` and `tests/test_background.py`
+
+See `plans/phase3-design.md` for detailed design.
 
 ### Phase 4: IRC Transport
 
