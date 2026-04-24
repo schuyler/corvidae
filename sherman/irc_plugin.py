@@ -138,6 +138,7 @@ class IRCPlugin:
         chunks = split_message(text)
         for chunk in chunks:
             for line in chunk.split('\n'):
+                line = line.rstrip('\r')
                 if not line.strip():
                     continue
                 await self.client.message(channel.scope, line)
