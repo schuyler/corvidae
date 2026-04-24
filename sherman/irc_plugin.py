@@ -1,10 +1,13 @@
 """IRC transport plugin using pydle library."""
 
 import asyncio
+import logging
 import re
 from typing import Optional
 
 import pydle
+
+logger = logging.getLogger(__name__)
 
 from sherman.channel import Channel
 from sherman.hooks import hookimpl
@@ -12,6 +15,12 @@ from sherman.hooks import hookimpl
 
 class IRCClient(pydle.Client):
     """Thin pydle subclass. Holds reference to IRCPlugin."""
+
+    # Connection management defaults (seconds)
+    _INITIAL_BACKOFF = 10
+    _BACKOFF_MULTIPLIER = 2
+    _BACKOFF_CAP = 300
+    _CONNECTION_POLL_INTERVAL = 60
 
     def __init__(self, plugin, nickname, server=None, port=None, tls=False, **kwargs):
         super().__init__(nickname, **kwargs)
@@ -36,21 +45,24 @@ class IRCClient(pydle.Client):
 
     async def connect_with_retry(self):
         """Connect with exponential backoff retry."""
-        delay = 10
+        delay = self._INITIAL_BACKOFF
         task = self.plugin._connect_task  # capture for shutdown check
         try:
             while task is not None:
                 try:
                     await self.connect(self._server, self._port, tls=self._tls)
-                    delay = 10  # reset on success
-                    # Hold connection open
-                    await asyncio.sleep(86400)
-                except Exception:
-                    pass
+                    delay = self._INITIAL_BACKOFF  # reset on success
+                    # Hold connection open, polling for shutdown/disconnect
+                    while self.plugin._connect_task is not None:
+                        await asyncio.sleep(self._CONNECTION_POLL_INTERVAL)
+                        if not self.connected:
+                            break
+                except (OSError, pydle.Error) as exc:
+                    logger.warning("IRC connection error, retrying: %s", exc)
                 if self.plugin._connect_task is None:
                     return
                 await asyncio.sleep(delay)
-                delay = min(delay * 2, 300)
+                delay = min(delay * self._BACKOFF_MULTIPLIER, self._BACKOFF_CAP)
         except asyncio.CancelledError:
             if self.plugin._connect_task is None:
                 return
