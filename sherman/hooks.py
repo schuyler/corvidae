@@ -43,7 +43,7 @@ class AgentSpec:
         """
 
     @hookspec
-    async def send_message(self, channel: Channel, text: str) -> None:
+    async def send_message(self, channel: Channel, text: str, latency_ms: float | None = None) -> None:
         """Called to deliver an outbound message to a channel.
 
         Transport plugins implement this to forward the message over
@@ -52,6 +52,8 @@ class AgentSpec:
         Args:
             channel: The Channel object identifying the target.
             text: The message content to send.
+            latency_ms: Optional agent loop latency in milliseconds.
+                        Transport plugins may use this to display timing to the user.
         """
 
     @hookspec

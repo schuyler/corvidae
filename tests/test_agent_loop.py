@@ -333,3 +333,120 @@ async def test_run_agent_loop_with_extra_body_empty():
     mock_client.chat.assert_called_once()
     call_args = mock_client.chat.call_args
     assert call_args.kwargs.get("extra_body") == {}
+
+
+# ---------------------------------------------------------------------------
+# Logging tests — INFO records with latency_ms
+# ---------------------------------------------------------------------------
+
+
+async def test_llm_response_logs_info_with_latency_ms(caplog):
+    """After a successful LLM call, an INFO record with message 'LLM response
+    received' and a numeric latency_ms attribute must be emitted."""
+    import logging
+
+    client = MagicMock()
+    client.chat = AsyncMock(return_value=_make_text_response("hello"))
+
+    messages = [{"role": "user", "content": "hi"}]
+    with caplog.at_level(logging.INFO, logger="sherman.agent_loop"):
+        await run_agent_loop(client, messages, tools={}, tool_schemas=[])
+
+    records = [r for r in caplog.records if r.name == "sherman.agent_loop"]
+    matching = [r for r in records if r.levelno == logging.INFO and r.getMessage() == "LLM response received"]
+    assert matching, "Expected INFO record with message 'LLM response received'"
+    assert hasattr(matching[0], "latency_ms"), "'LLM response received' log must have latency_ms attribute"
+    assert isinstance(matching[0].latency_ms, (int, float)), "latency_ms must be numeric"
+
+
+async def test_tool_call_result_logs_info_with_latency_ms(caplog):
+    """After a successful tool execution, an INFO record with message 'tool call
+    result' and a numeric latency_ms attribute must be emitted."""
+    import logging
+
+    tool_fn = AsyncMock(return_value="tool result")
+    client = MagicMock()
+    client.chat = AsyncMock(
+        side_effect=[
+            _make_tool_call_response([_make_tool_call("c1", "my_tool", {"x": "v"})]),
+            _make_text_response("done"),
+        ]
+    )
+
+    messages = [{"role": "user", "content": "go"}]
+    with caplog.at_level(logging.INFO, logger="sherman.agent_loop"):
+        await run_agent_loop(client, messages, tools={"my_tool": tool_fn}, tool_schemas=[])
+
+    records = [r for r in caplog.records if r.name == "sherman.agent_loop"]
+    matching = [r for r in records if r.levelno == logging.INFO and r.getMessage() == "tool call result"]
+    assert matching, "Expected INFO record with message 'tool call result'"
+    assert hasattr(matching[0], "latency_ms"), "'tool call result' log must have latency_ms attribute"
+    assert isinstance(matching[0].latency_ms, (int, float)), "latency_ms must be numeric"
+
+
+async def test_tool_call_dispatched_logs_info(caplog):
+    """After dispatching a tool call, an INFO record with message 'tool call
+    dispatched' must be emitted (latency_ms not required)."""
+    import logging
+
+    tool_fn = AsyncMock(return_value="result")
+    client = MagicMock()
+    client.chat = AsyncMock(
+        side_effect=[
+            _make_tool_call_response([_make_tool_call("c1", "my_tool", {})]),
+            _make_text_response("done"),
+        ]
+    )
+
+    messages = [{"role": "user", "content": "go"}]
+    with caplog.at_level(logging.INFO, logger="sherman.agent_loop"):
+        await run_agent_loop(client, messages, tools={"my_tool": tool_fn}, tool_schemas=[])
+
+    records = [r for r in caplog.records if r.name == "sherman.agent_loop"]
+    matching = [r for r in records if r.levelno == logging.INFO and r.getMessage() == "tool call dispatched"]
+    assert matching, "Expected INFO record with message 'tool call dispatched'"
+
+
+async def test_tool_call_result_not_logged_for_unknown_tool(caplog):
+    """When an unknown tool is called, 'tool call result' INFO must NOT be emitted."""
+    import logging
+
+    client = MagicMock()
+    client.chat = AsyncMock(
+        side_effect=[
+            _make_tool_call_response([_make_tool_call("c1", "ghost_tool", {})]),
+            _make_text_response("done"),
+        ]
+    )
+
+    messages = [{"role": "user", "content": "go"}]
+    with caplog.at_level(logging.INFO, logger="sherman.agent_loop"):
+        await run_agent_loop(client, messages, tools={}, tool_schemas=[])
+
+    records = [r for r in caplog.records if r.name == "sherman.agent_loop"]
+    result_records = [r for r in records if r.levelno == logging.INFO and r.getMessage() == "tool call result"]
+    assert not result_records, "'tool call result' INFO must NOT be emitted for unknown tool"
+
+
+async def test_tool_call_result_not_logged_on_exception(caplog):
+    """When a tool raises an exception, 'tool call result' INFO must NOT be emitted."""
+    import logging
+
+    async def bad_tool(**kwargs):
+        raise ValueError("boom")
+
+    client = MagicMock()
+    client.chat = AsyncMock(
+        side_effect=[
+            _make_tool_call_response([_make_tool_call("c1", "bad_tool", {})]),
+            _make_text_response("recovered"),
+        ]
+    )
+
+    messages = [{"role": "user", "content": "go"}]
+    with caplog.at_level(logging.INFO, logger="sherman.agent_loop"):
+        await run_agent_loop(client, messages, tools={"bad_tool": bad_tool}, tool_schemas=[])
+
+    records = [r for r in caplog.records if r.name == "sherman.agent_loop"]
+    result_records = [r for r in records if r.levelno == logging.INFO and r.getMessage() == "tool call result"]
+    assert not result_records, "'tool call result' INFO must NOT be emitted when tool raises"

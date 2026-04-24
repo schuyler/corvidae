@@ -50,14 +50,14 @@ No module creates child loggers or uses `logging.getLogger("custom_name")`. The 
 | `llm` | client stopped | |
 | `llm` | chat completion returned | `model`, `latency_ms`, `prompt_tokens`, `completion_tokens`, `total_tokens` |
 | `channel` | channel registered from config | `channel_id` |
+| `agent_loop` | LLM response received | `role`, `tool_calls_count`, `latency_ms` |
+| `agent_loop` | tool call dispatched | `tool`, `arg_keys` |
+| `agent_loop` | tool call result | `tool`, `result_length`, `latency_ms` |
 
 ### DEBUG — development tracing (never on in production)
 
 | Module | Event | Notes |
 |---|---|---|
-| `agent_loop` | each turn: LLM response received | Include message role, tool_calls count |
-| `agent_loop` | tool call dispatched | tool name, arguments |
-| `agent_loop` | tool call result | tool name, result length |
 | `agent_loop_plugin` | full message list sent to LLM | Message count, token estimate |
 | `conversation` | message appended | role, content length |
 | `conversation` | messages loaded from DB | count |
@@ -278,9 +278,9 @@ This is only needed when the argument computation is non-trivial. Simple attribu
 - Add WARNING log when max turns reached
 - Add WARNING log when unknown tool called
 - Add WARNING log when tool execution raises: `logger.warning("tool %s raised", fn_name, exc_info=True)`
-- Add DEBUG log per turn (response role, tool_calls count)
-- Add DEBUG log per tool call (tool name, arg keys — not values)
-- Add DEBUG log after tool call returns (tool name, result length — not result content)
+- Add INFO log per turn (response role, tool_calls count, latency_ms)
+- Add INFO log per tool call (tool name, arg keys — not values)
+- Add INFO log after tool call returns (tool name, result length — not result content)
 
 ### `conversation.py`
 - Add `import logging`

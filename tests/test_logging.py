@@ -442,7 +442,7 @@ class TestLLMLogging:
 
 
 class TestAgentLoopLogging:
-    """run_agent_loop must log WARNING for edge cases and DEBUG per turn."""
+    """run_agent_loop must log WARNING for edge cases and INFO per turn."""
 
     async def test_max_turns_logs_warning(self, caplog):
         """When max turns are exhausted, agent_loop must emit a WARNING log."""
@@ -544,9 +544,9 @@ class TestAgentLoopLogging:
             "run_agent_loop must emit a WARNING when a tool raises an exception"
         )
 
-    async def test_turn_debug_log(self, caplog):
-        """Each turn in run_agent_loop must emit a DEBUG log with role and
-        tool_calls count."""
+    async def test_turn_info_log(self, caplog):
+        """Each turn in run_agent_loop must emit at least one INFO log, and at
+        least one INFO record must carry a latency_ms attribute."""
         from sherman.agent_loop import run_agent_loop
 
         client = MagicMock()
@@ -556,7 +556,7 @@ class TestAgentLoopLogging:
             }
         )
 
-        with caplog.at_level(logging.DEBUG, logger="sherman.agent_loop"):
+        with caplog.at_level(logging.INFO, logger="sherman.agent_loop"):
             await run_agent_loop(
                 client,
                 [{"role": "user", "content": "hi"}],
@@ -565,9 +565,12 @@ class TestAgentLoopLogging:
             )
 
         records = [r for r in caplog.records if r.name == "sherman.agent_loop"]
-        debug_records = [r for r in records if r.levelno == logging.DEBUG]
-        assert debug_records, (
-            "run_agent_loop must emit at least one DEBUG log per turn"
+        info_records = [r for r in records if r.levelno == logging.INFO]
+        assert info_records, (
+            "run_agent_loop must emit at least one INFO log per turn"
+        )
+        assert any(hasattr(r, "latency_ms") for r in info_records), (
+            "at least one INFO record must carry a latency_ms attribute"
         )
 
 

@@ -58,11 +58,18 @@ class CLIPlugin:
             )
 
     @hookimpl
-    async def send_message(self, channel, text: str) -> None:
-        """Print agent response to stdout if this is a cli channel."""
+    async def send_message(self, channel, text: str, latency_ms: float | None = None) -> None:
+        """Print agent response to stdout if this is a cli channel.
+
+        If latency_ms is provided, appends a dim ANSI-formatted timing line
+        (e.g. `(32.5s)`).
+        """
         if not channel.matches_transport("cli"):
             return
-        print(f"\n{text}\n")
+        if latency_ms is not None:
+            print(f"\n{text}\n\033[2m({latency_ms/1000:.1f}s)\033[0m\n")
+        else:
+            print(f"\n{text}\n")
 
     @hookimpl
     async def on_stop(self) -> None:

@@ -2,7 +2,8 @@
 
 import json
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+import unittest.mock
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import aiosqlite
 import pytest
@@ -361,6 +362,7 @@ class TestOnMessagePersistenceAndLoop:
         plugin.pm.ahook.send_message.assert_awaited_once_with(
             channel=channel,
             text="my answer",
+            latency_ms=ANY,
         )
         plugin.pm.ahook.on_agent_response.assert_awaited_once_with(
             channel=channel,
@@ -522,6 +524,7 @@ class TestOnMessageThinkingTokens:
         plugin.pm.ahook.send_message.assert_awaited_once_with(
             channel=channel,
             text="clean answer",
+            latency_ms=ANY,
         )
 
         await db.close()
@@ -790,6 +793,7 @@ class TestOnMessageToolCallRoundTrip:
         plugin.pm.ahook.send_message.assert_awaited_once_with(
             channel=channel,
             text="final response after tool",
+            latency_ms=ANY,
         )
 
         await db.close()

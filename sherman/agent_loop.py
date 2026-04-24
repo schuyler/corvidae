@@ -5,18 +5,19 @@ and tool execution. The loop continues until the LLM responds without tool
 calls or max_turns is reached.
 
 Logging:
-    - DEBUG: LLM response (role, tool_calls count), tool call dispatched,
+    - INFO: LLM response (role, tool_calls count, latency_ms), tool call dispatched,
       tool call result
     - WARNING: max rounds reached, unknown tool called, tool exception
 
-Tool call results are truncated to 200 chars in debug logs to avoid logging
-sensitive user data. The `_truncate` helper is used for this purpose.
+Tool call result content is not logged; only result length is recorded. The
+`_truncate` helper is available for future use if result content logging is added.
 """
 
 import inspect
 import json
 import logging
 import re
+import time
 from typing import Callable
 
 from pydantic import create_model
@@ -29,7 +30,8 @@ logger = logging.getLogger(__name__)
 def _truncate(s: str, maxlen: int = 200) -> str:
     """Truncate a string to maxlen characters, appending '...' if truncated.
 
-    Used in debug logs to avoid logging sensitive user data in tool call results.
+    Available for use in log calls where result content needs to be included
+    without logging sensitive user data in full.
     """
     return s[:maxlen] + "..." if len(s) > maxlen else s
 
@@ -63,24 +65,27 @@ async def run_agent_loop(
         if max_turns was reached
 
     Logs:
-        DEBUG: Per-turn LLM response metadata, tool calls, results
+        INFO: Per-turn LLM response metadata, tool calls, results
         WARNING: Max turns reached, unknown tools, tool exceptions
     """
     for _ in range(max_turns):
+        start = time.monotonic()
         if extra_body is not None:
             response = await client.chat(messages, tools=tool_schemas or None, extra_body=extra_body)
         else:
             response = await client.chat(messages, tools=tool_schemas or None)
+        latency_ms = round((time.monotonic() - start) * 1000, 1)
         msg = response["choices"][0]["message"]
         msg.setdefault("role", "assistant")
         messages.append(msg)
 
         tool_calls = msg.get("tool_calls")
-        logger.debug(
+        logger.info(
             "LLM response received",
             extra={
                 "role": msg.get("role"),
                 "tool_calls_count": len(tool_calls) if tool_calls else 0,
+                "latency_ms": latency_ms,
             },
         )
 
@@ -92,7 +97,7 @@ async def run_agent_loop(
             fn_name = call["function"]["name"]
             args = json.loads(call["function"]["arguments"])
 
-            logger.debug(
+            logger.info(
                 "tool call dispatched",
                 extra={"tool": fn_name, "arg_keys": list(args.keys())},
             )
@@ -102,17 +107,18 @@ async def run_agent_loop(
                 content = f"Error: unknown tool '{fn_name}'"
             else:
                 try:
+                    tool_start = time.monotonic()
                     content = await tools[fn_name](**args)
+                    tool_latency_ms = round((time.monotonic() - tool_start) * 1000, 1)
+                    logger.info(
+                        "tool call result",
+                        extra={"tool": fn_name, "result_length": len(str(content)), "latency_ms": tool_latency_ms},
+                    )
                 except Exception:
                     logger.warning(
                         "tool %s raised exception", fn_name, exc_info=True
                     )
                     content = f"Error: unknown error"
-
-            logger.debug(
-                "tool call result",
-                extra={"tool": fn_name, "result_length": len(str(content))},
-            )
 
             messages.append({
                 "role": "tool",

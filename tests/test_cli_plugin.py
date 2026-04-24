@@ -186,6 +186,34 @@ class TestSendMessage:
         captured = capsys.readouterr()
         assert "should not appear" not in captured.out
 
+    async def test_send_message_with_latency_ms_shows_dim_duration(self, capsys):
+        """send_message with latency_ms=1500.0 outputs the duration as '(1.5s)'
+        wrapped in ANSI dim codes."""
+        pm, registry = _make_pm_with_registry(transport="cli")
+        plugin = CLIPlugin(pm)
+        pm.register(plugin, name="cli")
+
+        channel = registry.get_or_create("cli", "local")
+        await plugin.send_message(channel=channel, text="hello", latency_ms=1500.0)
+
+        captured = capsys.readouterr()
+        assert "(1.5s)" in captured.out
+        assert "\033[2m" in captured.out
+        assert "\033[0m" in captured.out
+
+    async def test_send_message_without_latency_ms_no_ansi(self, capsys):
+        """send_message with latency_ms=None produces no ANSI escape codes."""
+        pm, registry = _make_pm_with_registry(transport="cli")
+        plugin = CLIPlugin(pm)
+        pm.register(plugin, name="cli")
+
+        channel = registry.get_or_create("cli", "local")
+        await plugin.send_message(channel=channel, text="hello", latency_ms=None)
+
+        captured = capsys.readouterr()
+        assert "\033[2m" not in captured.out
+        assert "\033[0m" not in captured.out
+
 
 # ---------------------------------------------------------------------------
 # Section 4 — on_stop

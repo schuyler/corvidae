@@ -230,6 +230,7 @@ class AgentLoopPlugin:
         await self.pm.ahook.send_message(
             channel=channel,
             text=display_response,
+            latency_ms=latency_ms,
         )
 
     @hookimpl
@@ -277,7 +278,7 @@ class AgentLoopPlugin:
             channel=task.channel, task_id=task.task_id, result=display_result,
         )
         await self.pm.ahook.send_message(
-            channel=task.channel, text=f"[Task {task.task_id}] {display_result}",
+            channel=task.channel, text=f"[Task {task.task_id}] {display_result}", latency_ms=None,
         )
 
     async def _ensure_conversation(self, channel) -> None:
