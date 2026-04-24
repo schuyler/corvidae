@@ -19,7 +19,7 @@ import yaml
 
 from sherman.channel import ChannelConfig, ChannelRegistry, load_channel_config
 from sherman.conversation import ConversationLog, init_db
-from sherman.prompt import resolve_system_prompt
+from sherman.conversation import resolve_system_prompt
 
 
 # ---------------------------------------------------------------------------
@@ -68,10 +68,10 @@ class TestLoggerNamingConvention:
         assert mod.logger.name == "sherman.channel"
 
     def test_prompt_has_module_logger(self):
-        """sherman.prompt must expose a module-level `logger` attribute."""
-        import sherman.prompt as mod
-        assert hasattr(mod, "logger"), "prompt.py must define module-level `logger`"
-        assert mod.logger.name == "sherman.prompt"
+        """resolve_system_prompt logs under 'sherman.prompt' (canonical: sherman.conversation)."""
+        import sherman.conversation as mod
+        assert hasattr(mod, "_prompt_logger"), "conversation.py must define module-level `_prompt_logger`"
+        assert mod._prompt_logger.name == "sherman.prompt"
 
     def test_main_has_module_logger(self):
         """sherman.main must expose a module-level `logger` attribute."""
@@ -80,17 +80,16 @@ class TestLoggerNamingConvention:
         assert mod.logger.name == "sherman.main"
 
     def test_agent_loop_plugin_has_module_logger(self):
-        """sherman.agent_loop_plugin already defines `logger` (existing code).
-        Verify its name is correct."""
-        import sherman.agent_loop_plugin as mod
+        """AgentPlugin logs under 'sherman.agent' (canonical: sherman.agent)."""
+        import sherman.agent as mod
         assert hasattr(mod, "logger")
-        assert mod.logger.name == "sherman.agent_loop_plugin"
+        assert mod.logger.name == "sherman.agent"
 
     def test_plugin_manager_has_module_logger(self):
-        """sherman.plugin_manager must expose a module-level logger attribute."""
-        import sherman.plugin_manager as mod
-        assert hasattr(mod, "logger"), "plugin_manager.py must define module-level `logger`"
-        assert mod.logger.name == "sherman.plugin_manager"
+        """create_plugin_manager logs under 'sherman.plugin_manager' (canonical: sherman.hooks)."""
+        import sherman.hooks as mod
+        assert hasattr(mod, "_pm_logger"), "hooks.py must define module-level `_pm_logger`"
+        assert mod._pm_logger.name == "sherman.plugin_manager"
 
     def test_background_has_module_logger(self):
         """sherman.background must expose a module-level `logger` attribute
@@ -777,7 +776,7 @@ class TestPluginManagerLogging:
 
     def test_create_plugin_manager_logs_debug(self, caplog):
         """create_plugin_manager() must emit a DEBUG log."""
-        from sherman.plugin_manager import create_plugin_manager
+        from sherman.hooks import create_plugin_manager
 
         with caplog.at_level(logging.DEBUG, logger="sherman.plugin_manager"):
             create_plugin_manager()
@@ -794,14 +793,14 @@ class TestPluginManagerLogging:
 # ---------------------------------------------------------------------------
 
 
-class TestAgentLoopPluginLogging:
-    """AgentLoopPlugin must log INFO on_start (tool count, channel count) and
+class TestAgentPluginLogging:
+    """AgentPlugin must log INFO on_start (tool count, channel count) and
     on_message (channel, sender, latency)."""
 
     async def test_on_start_logs_info_tool_and_channel_count(self, caplog):
         """on_start must emit an INFO log with tool_count and channel_count."""
-        from sherman.agent_loop_plugin import AgentLoopPlugin
-        from sherman.plugin_manager import create_plugin_manager
+        from sherman.agent import AgentPlugin
+        from sherman.hooks import create_plugin_manager
 
         pm = create_plugin_manager()
         registry = ChannelRegistry({"system_prompt": "Test.", "max_context_tokens": 8000})
@@ -809,23 +808,23 @@ class TestAgentLoopPluginLogging:
         pm.ahook.send_message = AsyncMock()
         pm.ahook.on_agent_response = AsyncMock()
 
-        plugin = AgentLoopPlugin(pm)
+        plugin = AgentPlugin(pm)
         pm.register(plugin, name="agent_loop")
 
         mock_client = MagicMock()
         mock_client.start = AsyncMock()
 
-        with caplog.at_level(logging.INFO, logger="sherman.agent_loop_plugin"), \
-             patch("sherman.agent_loop_plugin.LLMClient", return_value=mock_client), \
-             patch("sherman.agent_loop_plugin.aiosqlite.connect", new_callable=AsyncMock) as mock_connect, \
-             patch("sherman.agent_loop_plugin.init_db", new_callable=AsyncMock):
+        with caplog.at_level(logging.INFO, logger="sherman.agent"), \
+             patch("sherman.agent.LLMClient", return_value=mock_client), \
+             patch("sherman.agent.aiosqlite.connect", new_callable=AsyncMock) as mock_connect, \
+             patch("sherman.agent.init_db", new_callable=AsyncMock):
             mock_connect.return_value = MagicMock()
             await plugin.on_start(config={
                 "llm": {"main": {"base_url": "http://localhost:8080", "model": "test"}},
                 "daemon": {"session_db": ":memory:"},
             })
 
-        records = [r for r in caplog.records if r.name == "sherman.agent_loop_plugin"]
+        records = [r for r in caplog.records if r.name == "sherman.agent"]
         info_records = [r for r in records if r.levelno == logging.INFO]
         assert info_records, (
             "on_start must emit at least one INFO log (tool_count, channel_count)"
@@ -837,8 +836,8 @@ class TestAgentLoopPluginLogging:
 
     async def _make_on_message_plugin(self, db):
         """Shared setup for on_message tests: returns (plugin, channel)."""
-        from sherman.agent_loop_plugin import AgentLoopPlugin
-        from sherman.plugin_manager import create_plugin_manager
+        from sherman.agent import AgentPlugin
+        from sherman.hooks import create_plugin_manager
 
         pm = create_plugin_manager()
         registry = ChannelRegistry({"system_prompt": "Test.", "max_context_tokens": 8000,
@@ -847,7 +846,7 @@ class TestAgentLoopPluginLogging:
         pm.ahook.send_message = AsyncMock()
         pm.ahook.on_agent_response = AsyncMock()
 
-        plugin = AgentLoopPlugin(pm)
+        plugin = AgentPlugin(pm)
         pm.register(plugin, name="agent_loop")
         plugin.db = db
 
@@ -864,10 +863,10 @@ class TestAgentLoopPluginLogging:
         """on_message must emit an INFO log with channel and sender."""
         plugin, channel = await self._make_on_message_plugin(db)
 
-        with caplog.at_level(logging.INFO, logger="sherman.agent_loop_plugin"):
+        with caplog.at_level(logging.INFO, logger="sherman.agent"):
             await plugin.on_message(channel=channel, sender="alice", text="hello")
 
-        records = [r for r in caplog.records if r.name == "sherman.agent_loop_plugin"]
+        records = [r for r in caplog.records if r.name == "sherman.agent"]
         info_records = [r for r in records if r.levelno == logging.INFO]
         assert info_records, (
             "on_message must emit at least one INFO log (channel, sender)"
@@ -877,14 +876,14 @@ class TestAgentLoopPluginLogging:
         """on_message must emit an INFO log after response with latency_ms field."""
         plugin, channel = await self._make_on_message_plugin(db)
 
-        with caplog.at_level(logging.INFO, logger="sherman.agent_loop_plugin"):
+        with caplog.at_level(logging.INFO, logger="sherman.agent"):
             await plugin.on_message(channel=channel, sender="alice", text="hello")
             # Drain the channel queue so the consumer (which emits latency log)
             # runs before we check caplog records.
             if channel.id in plugin._queues:
                 await plugin._queues[channel.id].drain()
 
-        records = [r for r in caplog.records if r.name == "sherman.agent_loop_plugin"]
+        records = [r for r in caplog.records if r.name == "sherman.agent"]
         info_records = [r for r in records if r.levelno == logging.INFO]
         # At least one must have latency_ms
         assert any(hasattr(r, "latency_ms") for r in info_records), (
@@ -894,8 +893,8 @@ class TestAgentLoopPluginLogging:
     async def test_ensure_conversation_logs_info(self, db, caplog):
         """_ensure_conversation must emit an INFO log when initializing a new
         conversation for a channel."""
-        from sherman.agent_loop_plugin import AgentLoopPlugin
-        from sherman.plugin_manager import create_plugin_manager
+        from sherman.agent import AgentPlugin
+        from sherman.hooks import create_plugin_manager
 
         pm = create_plugin_manager()
         registry = ChannelRegistry({"system_prompt": "Test.", "max_context_tokens": 8000,
@@ -904,17 +903,17 @@ class TestAgentLoopPluginLogging:
         pm.ahook.send_message = AsyncMock()
         pm.ahook.on_agent_response = AsyncMock()
 
-        plugin = AgentLoopPlugin(pm)
+        plugin = AgentPlugin(pm)
         pm.register(plugin, name="agent_loop")
         plugin.db = db
 
         channel = registry.get_or_create("test", "scope1")
         assert channel.conversation is None
 
-        with caplog.at_level(logging.INFO, logger="sherman.agent_loop_plugin"):
+        with caplog.at_level(logging.INFO, logger="sherman.agent"):
             await plugin._ensure_conversation(channel)
 
-        records = [r for r in caplog.records if r.name == "sherman.agent_loop_plugin"]
+        records = [r for r in caplog.records if r.name == "sherman.agent"]
         info_records = [r for r in records if r.levelno == logging.INFO]
         assert info_records, (
             "_ensure_conversation must emit INFO log when initializing a new conversation"

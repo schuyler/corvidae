@@ -35,17 +35,28 @@ class LLMClient:
         session: aiohttp session (created by start(), closed by stop())
     """
 
-    def __init__(self, base_url: str, model: str, api_key: str | None = None) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        model: str,
+        api_key: str | None = None,
+        extra_body: dict | None = None,
+    ) -> None:
         """Initialize the LLM client.
 
         Args:
             base_url: API base URL (trailing slash will be stripped)
             model: Model identifier to use in requests
             api_key: Optional Bearer token for authentication
+            extra_body: Optional dict of extra fields merged into every
+                        chat request payload (instance-level defaults).
+                        Call-level extra_body passed to chat() overrides
+                        these when keys conflict.
         """
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.api_key = api_key
+        self.extra_body = extra_body
         self.session: aiohttp.ClientSession | None = None
 
     async def start(self) -> None:
@@ -115,8 +126,10 @@ class LLMClient:
         }
         if tools:
             payload["tools"] = tools
+        if self.extra_body:
+            payload.update(self.extra_body)  # instance defaults
         if extra_body:
-            payload.update(extra_body)
+            payload.update(extra_body)  # call-level override wins
 
         start = time.monotonic()
         async with self.session.post(

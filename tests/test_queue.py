@@ -1,8 +1,4 @@
-"""Tests for sherman.channel_queue.ChannelQueue and QueueItem.
-
-These tests are written Red-first: the module does not exist yet.
-All tests are expected to fail with ImportError or AttributeError
-until the implementation is written.
+"""Tests for sherman.queue.SerialQueue and QueueItem.
 
 Design requirements covered:
 - C1: drain() must not deadlock when process_fn raises (task_done in finally)
@@ -14,9 +10,7 @@ import asyncio
 import pytest
 
 from sherman.channel import Channel, ChannelConfig
-
-# These imports will fail (ImportError) until the module is created.
-from sherman.channel_queue import ChannelQueue, QueueItem
+from sherman.queue import SerialQueue, QueueItem
 
 
 # ---------------------------------------------------------------------------
@@ -78,7 +72,7 @@ class TestSerialization:
             processed.append(item.content)
 
         ch = _make_channel()
-        q = ChannelQueue()
+        q = SerialQueue()
         q.start(collect)
 
         await q.enqueue(QueueItem(role="user", content="first", channel=ch))
@@ -97,7 +91,7 @@ class TestSerialization:
             processed.append(item.content)
 
         ch = _make_channel()
-        q = ChannelQueue()
+        q = SerialQueue()
         q.start(collect)
 
         for i in range(5):
@@ -125,7 +119,7 @@ class TestDrain:
             processed.append(item.content)
 
         ch = _make_channel()
-        q = ChannelQueue()
+        q = SerialQueue()
         q.start(slow_collect)
 
         await q.enqueue(QueueItem(role="user", content="blocked", channel=ch))
@@ -162,7 +156,7 @@ class TestDrainWithError:
             raise RuntimeError("deliberate failure")
 
         ch = _make_channel()
-        q = ChannelQueue()
+        q = SerialQueue()
         q.start(raising_fn)
 
         await q.enqueue(QueueItem(role="user", content="boom", channel=ch))
@@ -186,7 +180,7 @@ class TestDrainWithError:
             processed.append(item.content)
 
         ch = _make_channel()
-        q = ChannelQueue()
+        q = SerialQueue()
         q.start(sometimes_raise)
 
         await q.enqueue(QueueItem(role="user", content="fail", channel=ch))
@@ -212,7 +206,7 @@ class TestStop:
             processed.append(item.content)
 
         ch = _make_channel()
-        q = ChannelQueue()
+        q = SerialQueue()
         q.start(collect)
         await q.stop()
 
@@ -227,7 +221,7 @@ class TestStop:
             processed.append(item.content)
 
         ch = _make_channel()
-        q = ChannelQueue()
+        q = SerialQueue()
         q.start(collect)
         await q.stop()
 

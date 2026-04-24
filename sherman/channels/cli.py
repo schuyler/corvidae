@@ -1,4 +1,4 @@
-# sherman/cli_plugin.py
+# sherman/channels/cli.py
 
 import asyncio
 import logging

@@ -1,4 +1,4 @@
-"""Tests for sherman.irc_plugin.IRCPlugin."""
+"""Tests for sherman.channels.irc.IRCPlugin."""
 
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from sherman.channel import Channel, ChannelConfig, ChannelRegistry
-from sherman.plugin_manager import create_plugin_manager
+from sherman.hooks import create_plugin_manager
 
 # Mock pydle before importing irc_plugin since it may not be installed
 # Create a more sophisticated mock that allows real IRCClient instantiation
@@ -43,8 +43,8 @@ mock_pydle = MagicMock()
 mock_pydle.Client = MockClient
 
 with patch.dict('sys.modules', {'pydle': mock_pydle}):
-    import sherman.irc_plugin as _irc_module
-    from sherman.irc_plugin import IRCPlugin, IRCClient, split_message
+    from sherman.channels import irc as _irc_module
+    from sherman.channels.irc import IRCPlugin, IRCClient, split_message
 
 
 # ---------------------------------------------------------------------------
@@ -147,7 +147,7 @@ class TestIRCClientEvents:
         plugin = IRCPlugin(pm)
         pm.register(plugin, name="irc")
 
-        with patch('sherman.irc_plugin.IRCClient') as mock_client_class:
+        with patch('sherman.channels.irc.IRCClient') as mock_client_class:
             mock_client = MagicMock()
             mock_client_class.return_value = mock_client
             plugin.client = mock_client
@@ -173,7 +173,7 @@ class TestIRCClientEvents:
         plugin = IRCPlugin(pm)
         pm.register(plugin, name="irc")
 
-        with patch('sherman.irc_plugin.IRCClient') as mock_client_class:
+        with patch('sherman.channels.irc.IRCClient') as mock_client_class:
             mock_client = MagicMock()
             mock_client_class.return_value = mock_client
             plugin.client = mock_client
@@ -194,7 +194,7 @@ class TestIRCClientEvents:
         plugin = IRCPlugin(pm)
         pm.register(plugin, name="irc")
 
-        with patch('sherman.irc_plugin.IRCClient') as mock_client_class:
+        with patch('sherman.channels.irc.IRCClient') as mock_client_class:
             mock_client = MagicMock()
             mock_client_class.return_value = mock_client
             plugin.client = mock_client
@@ -226,7 +226,7 @@ class TestSendMessage:
         plugin = IRCPlugin(pm)
         pm.register(plugin, name="irc")
 
-        with patch('sherman.irc_plugin.IRCClient') as mock_client_class:
+        with patch('sherman.channels.irc.IRCClient') as mock_client_class:
             mock_client = MagicMock()
             mock_client_class.return_value = mock_client
             plugin.client = mock_client
@@ -244,7 +244,7 @@ class TestSendMessage:
         plugin = IRCPlugin(pm)
         pm.register(plugin, name="irc")
 
-        with patch('sherman.irc_plugin.IRCClient') as mock_client_class:
+        with patch('sherman.channels.irc.IRCClient') as mock_client_class:
             mock_client = MagicMock()
             mock_client_class.return_value = mock_client
             plugin.client = mock_client
@@ -261,7 +261,7 @@ class TestSendMessage:
         plugin = IRCPlugin(pm)
         pm.register(plugin, name="irc")
 
-        with patch('sherman.irc_plugin.IRCClient') as mock_client_class:
+        with patch('sherman.channels.irc.IRCClient') as mock_client_class:
             mock_client = MagicMock()
             mock_client_class.return_value = mock_client
             plugin.client = mock_client
@@ -281,7 +281,7 @@ class TestSendMessage:
         plugin = IRCPlugin(pm)
         pm.register(plugin, name="irc")
 
-        with patch('sherman.irc_plugin.IRCClient') as mock_client_class:
+        with patch('sherman.channels.irc.IRCClient') as mock_client_class:
             mock_client = MagicMock()
             mock_client_class.return_value = mock_client
             plugin.client = mock_client

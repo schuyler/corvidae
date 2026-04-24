@@ -199,8 +199,10 @@ class TestCoreToolsPlugin:
         assert len(registry) == 4
 
     def test_registered_tool_names(self):
+        from sherman.tool import Tool
         plugin = CoreToolsPlugin()
         registry = []
         plugin.register_tools(tool_registry=registry)
-        names = {fn.__name__ for fn in registry}
+        # Items are Tool instances after Step 4
+        names = {item.name if isinstance(item, Tool) else item.__name__ for item in registry}
         assert names == {"shell", "read_file", "write_file", "web_fetch"}

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 import apluggy as pluggy
@@ -10,6 +11,25 @@ if TYPE_CHECKING:
 # NOTE: marker name is "sherman", not "agent" as in design.md
 hookspec = pluggy.HookspecMarker("sherman")
 hookimpl = pluggy.HookimplMarker("sherman")
+
+_pm_logger = logging.getLogger("sherman.plugin_manager")
+
+
+def create_plugin_manager() -> pluggy.PluginManager:
+    """Create and configure the plugin manager with AgentSpec hooks.
+
+    Returns:
+        A pluggy.PluginManager instance with the Sherman AgentSpec loaded.
+
+    Logs a DEBUG message when the manager is created.
+    """
+    pm = pluggy.PluginManager("sherman")
+    pm.add_hookspecs(AgentSpec)
+
+    _pm_logger.debug("plugin manager created")
+
+    return pm
+
 
 class AgentSpec:
     """Hook specifications for the agent daemon.
@@ -102,7 +122,7 @@ class AgentSpec:
         """Called to inject a notification into a channel's processing queue.
 
         Plugins implementing this hook can inject messages into a channel so
-        the agent loop sees and reacts to them. The AgentLoopPlugin hookimpl
+        the agent loop sees and reacts to them. The AgentPlugin hookimpl
         enqueues a QueueItem(role="notification") on the channel's queue.
 
         Note: all parameters are required (no defaults) so pluggy forwards

@@ -1,10 +1,10 @@
-"""Tests for sherman.prompt.resolve_system_prompt."""
+"""Tests for sherman.conversation.resolve_system_prompt."""
 
 from pathlib import Path
 
 import pytest
 
-from sherman.prompt import resolve_system_prompt
+from sherman.conversation import resolve_system_prompt
 
 
 # ---------------------------------------------------------------------------

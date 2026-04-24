@@ -15,5 +15,5 @@ async def db():
 
 @pytest.fixture
 def plugin_manager():
-    from sherman.plugin_manager import create_plugin_manager
+    from sherman.hooks import create_plugin_manager
     return create_plugin_manager()
