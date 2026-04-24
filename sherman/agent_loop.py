@@ -17,10 +17,14 @@ import json
 import logging
 import re
 import time
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 from sherman.llm import LLMClient
-from sherman.tool import tool_to_schema  # noqa: F401 — re-exported for backward compat
+from sherman.tool import ToolContext, tool_to_schema  # noqa: F401 — re-exported for backward compat
+
+if TYPE_CHECKING:
+    from sherman.channel import Channel
+    from sherman.task import TaskQueue
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +44,9 @@ async def run_agent_loop(
     tools: dict[str, Callable],
     tool_schemas: list[dict],
     max_turns: int = 10,
+    *,
+    channel: "Channel | None" = None,
+    task_queue: "TaskQueue | None" = None,
 ) -> str:
     """Run the agent loop to completion. Mutates messages in place.
 
@@ -119,12 +126,22 @@ async def run_agent_loop(
                     tool_start = time.monotonic()
                     tool_fn = tools[fn_name]
                     # Inject _-prefixed parameters from context, not from
-                    # LLM-supplied args. Currently only _tool_call_id is
-                    # injected; future injected params follow the same pattern.
+                    # LLM-supplied args.
                     tool_sig = inspect.signature(tool_fn)
                     call_kwargs = dict(args)
+
+                    # Inject ToolContext for tools that declare _ctx
+                    if "_ctx" in tool_sig.parameters:
+                        call_kwargs["_ctx"] = ToolContext(
+                            channel=channel,
+                            tool_call_id=call_id,
+                            task_queue=task_queue,
+                        )
+
+                    # Backward compat: inject _tool_call_id (removed in Phase 5)
                     if "_tool_call_id" in tool_sig.parameters:
                         call_kwargs["_tool_call_id"] = call_id
+
                     content = await tool_fn(**call_kwargs)
                     tool_latency_ms = round((time.monotonic() - tool_start) * 1000, 1)
                     logger.info(

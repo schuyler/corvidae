@@ -233,10 +233,17 @@ class AgentPlugin:
         messages = conv.build_prompt()
         messages_before = len(messages)
 
+        # Resolve new task queue from TaskPlugin
+        task_queue_ref = getattr(
+            getattr(self.pm, "task_plugin", None), "task_queue", None
+        )
+
         start = time.monotonic()
         try:
             raw_response = await run_agent_loop(
-                self.client, messages, local_tools, self.tool_schemas
+                self.client, messages, local_tools, self.tool_schemas,
+                channel=channel,
+                task_queue=task_queue_ref,
             )
         except Exception:  # broad catch: aiohttp, KeyError, TimeoutError, etc.
             logger.exception("run_agent_loop failed for channel %s", channel.id)

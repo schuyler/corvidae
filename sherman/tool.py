@@ -7,13 +7,21 @@ Public API:
     - Tool: dataclass wrapping a callable with its name and schema
     - ToolRegistry: collection of Tool instances with dict/schema views
     - tool_to_schema(): generate a Chat Completions schema from a typed function
+    - ToolContext: context injected into tools that declare a ``_ctx`` parameter
 """
+
+from __future__ import annotations
 
 import inspect
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from pydantic import create_model
+
+if TYPE_CHECKING:
+    from sherman.channel import Channel
+    from sherman.task import TaskQueue
 
 
 def tool_to_schema(fn: Callable) -> dict:
@@ -145,3 +153,24 @@ class ToolRegistry:
 
     def __len__(self) -> int:
         return len(self._tools)
+
+
+@dataclass
+class ToolContext:
+    """Context injected into tools that declare a ``_ctx`` parameter.
+
+    Constructed per tool call by run_agent_loop. Tools without ``_ctx``
+    work exactly as before.
+
+    Attributes:
+        channel: The channel this tool call is executing on. None when
+            run_agent_loop is called without channel context (e.g.,
+            background task sub-agent loops in Phase 1).
+        tool_call_id: The LLM-assigned call ID for this invocation.
+        task_queue: The TaskQueue for enqueueing background work. None
+            when no TaskPlugin is registered.
+    """
+
+    channel: Channel | None
+    tool_call_id: str
+    task_queue: TaskQueue | None

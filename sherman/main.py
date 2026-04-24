@@ -92,6 +92,11 @@ async def main(config_path: str = "agent.yaml") -> None:
     bg_plugin = BackgroundPlugin(pm)
     pm.register(bg_plugin, name="background")
 
+    # Register TaskPlugin before AgentPlugin (provides new task queue)
+    from sherman.task import TaskPlugin
+    task_plugin = TaskPlugin(pm)
+    pm.register(task_plugin, name="task")
+
     # Register AgentPlugin after tool-providing and transport plugins
     agent_loop = AgentPlugin(pm)
     pm.register(agent_loop, name="agent_loop")
