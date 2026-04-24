@@ -1184,8 +1184,7 @@ agent-daemon/
 
 ### Phase 0: Smoke Test ✓
 
-Completed. See `scripts/smoke_test.py` and `plans/smoke-test.md` for
-full results. All steps passed:
+Completed. See `plans/smoke-test.md` for full results. All steps passed:
 
 - aiohttp ↔ llama-server connectivity works
 - Tool calling works (correct function name, valid JSON arguments,
