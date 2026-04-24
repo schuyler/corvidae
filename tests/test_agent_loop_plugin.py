@@ -370,6 +370,136 @@ class TestOnMessagePersistenceAndLoop:
 
         await db.close()
 
+    async def test_on_message_with_extra_body_from_config(self):
+        """Plugin should read extra_body from llm config and pass to run_agent_loop."""
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(return_value={
+            "choices": [{"message": {"content": "test response"}}]
+        })
+
+        config = {
+            "llm": {
+                "base_url": "http://localhost:8080",
+                "model": "test-model",
+                "extra_body": {"id_slot": 1, "cache_prompt": True}
+            },
+            "daemon": {"session_db": ":memory:"},
+            "_base_dir": Path(".")
+        }
+
+        plugin, channel, db = await _build_plugin_and_channel()
+        plugin.client = mock_client
+
+        with patch("sherman.agent_loop_plugin.run_agent_loop") as mock_loop:
+            mock_loop.return_value = "response"
+
+            await plugin.on_start(config)
+            await plugin.on_message(channel=channel, sender="user", text="hello")
+
+            # Verify extra_body was passed to run_agent_loop
+            call_kwargs = mock_loop.call_args.kwargs
+            assert "extra_body" in call_kwargs
+            assert call_kwargs["extra_body"] == {"id_slot": 1, "cache_prompt": True}
+
+        await db.close()
+
+    async def test_on_message_without_extra_body_config(self):
+        """Missing extra_body in config should not pass extra_body to run_agent_loop."""
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(return_value={
+            "choices": [{"message": {"content": "test response"}}]
+        })
+
+        config = {
+            "llm": {
+                "base_url": "http://localhost:8080",
+                "model": "test-model",
+                # Note: no extra_body key
+            },
+            "daemon": {"session_db": ":memory:"},
+            "_base_dir": Path(".")
+        }
+
+        plugin, channel, db = await _build_plugin_and_channel()
+        plugin.client = mock_client
+
+        with patch("sherman.agent_loop_plugin.run_agent_loop") as mock_loop:
+            mock_loop.return_value = "response"
+
+            await plugin.on_start(config)
+            await plugin.on_message(channel=channel, sender="user", text="hello")
+
+            # Verify extra_body was NOT passed to run_agent_loop
+            call_kwargs = mock_loop.call_args.kwargs
+            assert "extra_body" not in call_kwargs
+
+        await db.close()
+
+    async def test_on_message_with_extra_body_none(self):
+        """extra_body=None in config should not pass extra_body to run_agent_loop."""
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(return_value={
+            "choices": [{"message": {"content": "test response"}}]
+        })
+
+        config = {
+            "llm": {
+                "base_url": "http://localhost:8080",
+                "model": "test-model",
+                "extra_body": None
+            },
+            "daemon": {"session_db": ":memory:"},
+            "_base_dir": Path(".")
+        }
+
+        plugin, channel, db = await _build_plugin_and_channel()
+        plugin.client = mock_client
+
+        with patch("sherman.agent_loop_plugin.run_agent_loop") as mock_loop:
+            mock_loop.return_value = "response"
+
+            await plugin.on_start(config)
+            await plugin.on_message(channel=channel, sender="user", text="hello")
+
+            # Verify extra_body was NOT passed to run_agent_loop
+            call_kwargs = mock_loop.call_args.kwargs
+            assert "extra_body" not in call_kwargs
+
+        await db.close()
+
+    async def test_on_message_with_extra_body_empty(self):
+        """extra_body={} in config should pass empty dict to run_agent_loop."""
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(return_value={
+            "choices": [{"message": {"content": "test response"}}]
+        })
+
+        config = {
+            "llm": {
+                "base_url": "http://localhost:8080",
+                "model": "test-model",
+                "extra_body": {}
+            },
+            "daemon": {"session_db": ":memory:"},
+            "_base_dir": Path(".")
+        }
+
+        plugin, channel, db = await _build_plugin_and_channel()
+        plugin.client = mock_client
+
+        with patch("sherman.agent_loop_plugin.run_agent_loop") as mock_loop:
+            mock_loop.return_value = "response"
+
+            await plugin.on_start(config)
+            await plugin.on_message(channel=channel, sender="user", text="hello")
+
+            # Verify extra_body={} was passed to run_agent_loop
+            call_kwargs = mock_loop.call_args.kwargs
+            assert "extra_body" in call_kwargs
+            assert call_kwargs["extra_body"] == {}
+
+        await db.close()
+
 
 # ---------------------------------------------------------------------------
 # Section 4 — on_message: thinking token handling

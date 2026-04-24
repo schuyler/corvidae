@@ -40,6 +40,7 @@ async def run_agent_loop(
     tools: dict[str, Callable],
     tool_schemas: list[dict],
     max_turns: int = 10,
+    extra_body: dict | None = None,
 ) -> str:
     """Run the agent loop to completion. Mutates messages in place.
 
@@ -55,6 +56,7 @@ async def run_agent_loop(
         tools: Dict mapping tool names to async callable functions
         tool_schemas: List of tool schemas for LLM function calling
         max_turns: Maximum iterations before giving up
+        extra_body: Optional dict of extra fields to merge into LLM request payload
 
     Returns:
         Final text content from the last LLM response, or a placeholder
@@ -65,7 +67,10 @@ async def run_agent_loop(
         WARNING: Max turns reached, unknown tools, tool exceptions
     """
     for _ in range(max_turns):
-        response = await client.chat(messages, tools=tool_schemas or None)
+        if extra_body is not None:
+            response = await client.chat(messages, tools=tool_schemas or None, extra_body=extra_body)
+        else:
+            response = await client.chat(messages, tools=tool_schemas or None)
         msg = response["choices"][0]["message"]
         msg.setdefault("role", "assistant")
         messages.append(msg)

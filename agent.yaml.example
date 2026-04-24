@@ -3,6 +3,8 @@ llm:
   base_url: http://localhost:8080   # llama-server, vLLM, OpenAI, etc.
   model: llama3                     # model name as the backend expects it
   # api_key: sk-...                 # omit for local servers
+  # extra_body:                      # optional: provider-specific request payload extensions
+  #   id_slot: 1                      # example: llama.cpp KV cache slot for parallelism
 
 # Daemon settings (optional)
 daemon:

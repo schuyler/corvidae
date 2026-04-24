@@ -259,3 +259,77 @@ def test_strip_thinking_no_tags():
 def test_strip_thinking_multiline():
     text = "<think>\nline one\nline two\n</think>\nfinal answer"
     assert strip_thinking(text) == "final answer"
+
+
+async def test_run_agent_loop_with_extra_body():
+    """run_agent_loop should accept and pass extra_body to client.chat()."""
+    extra_body = {"id_slot": 1}
+
+    mock_client = MagicMock()
+    mock_client.chat = AsyncMock(return_value=_make_text_response("test response"))
+
+    messages = [{"role": "user", "content": "hello"}]
+    tools = {}
+    tool_schemas = []
+
+    result = await run_agent_loop(
+        client=mock_client,
+        messages=messages,
+        tools=tools,
+        tool_schemas=tool_schemas,
+        max_turns=1,
+        extra_body=extra_body
+    )
+
+    # Verify extra_body was passed to client.chat
+    mock_client.chat.assert_called_once()
+    call_args = mock_client.chat.call_args
+    assert call_args.kwargs["extra_body"] == extra_body
+
+
+async def test_run_agent_loop_with_extra_body_none():
+    """extra_body=None should not be passed to client.chat()."""
+    mock_client = MagicMock()
+    mock_client.chat = AsyncMock(return_value=_make_text_response("test response"))
+
+    messages = [{"role": "user", "content": "hello"}]
+    tools = {}
+    tool_schemas = []
+
+    result = await run_agent_loop(
+        client=mock_client,
+        messages=messages,
+        tools=tools,
+        tool_schemas=tool_schemas,
+        max_turns=1,
+        extra_body=None
+    )
+
+    # Verify extra_body=None was not passed to client.chat
+    mock_client.chat.assert_called_once()
+    call_args = mock_client.chat.call_args
+    assert "extra_body" not in call_args.kwargs
+
+
+async def test_run_agent_loop_with_extra_body_empty():
+    """extra_body={} should not add extra fields to client.chat() call."""
+    mock_client = MagicMock()
+    mock_client.chat = AsyncMock(return_value=_make_text_response("test response"))
+
+    messages = [{"role": "user", "content": "hello"}]
+    tools = {}
+    tool_schemas = []
+
+    result = await run_agent_loop(
+        client=mock_client,
+        messages=messages,
+        tools=tools,
+        tool_schemas=tool_schemas,
+        max_turns=1,
+        extra_body={}
+    )
+
+    # Verify extra_body was passed but empty
+    mock_client.chat.assert_called_once()
+    call_args = mock_client.chat.call_args
+    assert call_args.kwargs.get("extra_body") == {}

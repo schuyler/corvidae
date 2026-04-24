@@ -77,12 +77,14 @@ class LLMClient:
         self,
         messages: list[dict],
         tools: list[dict] | None = None,
+        extra_body: dict | None = None,
     ) -> dict:
         """Send a chat completion request.
 
         Args:
             messages: List of message dicts with 'role' and 'content' keys
             tools: Optional list of tool schemas for function calling
+            extra_body: Optional dict of extra fields to merge into request payload
 
         Returns:
             Full response dict from the API (includes choices, usage, etc.)
@@ -113,6 +115,8 @@ class LLMClient:
         }
         if tools:
             payload["tools"] = tools
+        if extra_body:
+            payload.update(extra_body)
 
         start = time.monotonic()
         async with self.session.post(

@@ -129,3 +129,56 @@ class TestLLMClientChat:
 
         with pytest.raises(ClientResponseError):
             await client.chat(MESSAGES)
+
+
+class TestLLMClientChatExtraBody:
+    async def test_chat_with_extra_body_none(self):
+        """extra_body=None should not add any extra fields to the payload."""
+        client = LLMClient(base_url=BASE_URL, model=MODEL)
+        response = _make_mock_response(json_body=MOCK_COMPLETION)
+        client.session = _make_mock_session(response)
+
+        await client.chat(MESSAGES, extra_body=None)
+
+        call_args = client.session.post.call_args
+        payload = call_args[1]["json"]
+        assert payload.keys() == {"model", "messages"}
+
+    async def test_chat_with_extra_body_empty_dict(self):
+        """extra_body={} should not add any extra fields to the payload."""
+        client = LLMClient(base_url=BASE_URL, model=MODEL)
+        response = _make_mock_response(json_body=MOCK_COMPLETION)
+        client.session = _make_mock_session(response)
+
+        await client.chat(MESSAGES, extra_body={})
+
+        call_args = client.session.post.call_args
+        payload = call_args[1]["json"]
+        assert payload.keys() == {"model", "messages"}
+
+    async def test_chat_with_extra_body_fields(self):
+        """extra_body with actual fields should merge them into the payload."""
+        client = LLMClient(base_url=BASE_URL, model=MODEL)
+        response = _make_mock_response(json_body=MOCK_COMPLETION)
+        client.session = _make_mock_session(response)
+
+        await client.chat(MESSAGES, extra_body={"id_slot": 1})
+
+        call_args = client.session.post.call_args
+        payload = call_args[1]["json"]
+        assert payload["id_slot"] == 1
+        assert payload["model"] == MODEL
+        assert payload["messages"] == MESSAGES
+
+    async def test_chat_with_extra_body_multiple_fields(self):
+        """extra_body with multiple fields should merge all into the payload."""
+        client = LLMClient(base_url=BASE_URL, model=MODEL)
+        response = _make_mock_response(json_body=MOCK_COMPLETION)
+        client.session = _make_mock_session(response)
+
+        await client.chat(MESSAGES, extra_body={"id_slot": 1, "cache_prompt": True})
+
+        call_args = client.session.post.call_args
+        payload = call_args[1]["json"]
+        assert payload["id_slot"] == 1
+        assert payload["cache_prompt"] == True

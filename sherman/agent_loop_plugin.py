@@ -60,6 +60,7 @@ class AgentLoopPlugin:
         self.base_dir: Path = Path(".")
         self.task_queue: TaskQueue | None = None
         self._worker_task: asyncio.Task | None = None
+        self.extra_body: dict | None = None
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
@@ -70,6 +71,7 @@ class AgentLoopPlugin:
         self.tool_schemas = []
         self.base_dir = config.get("_base_dir", Path("."))
         llm_config = config.get("llm", {})
+        self.extra_body = llm_config.get("extra_body")
         self.client = LLMClient(
             base_url=llm_config["base_url"],
             model=llm_config["model"],
@@ -180,9 +182,14 @@ class AgentLoopPlugin:
 
         start = time.monotonic()
         try:
-            raw_response = await run_agent_loop(
-                self.client, messages, local_tools, self.tool_schemas
-            )
+            if self.extra_body is not None:
+                raw_response = await run_agent_loop(
+                    self.client, messages, local_tools, self.tool_schemas, extra_body=self.extra_body
+                )
+            else:
+                raw_response = await run_agent_loop(
+                    self.client, messages, local_tools, self.tool_schemas
+                )
         except Exception:
             logger.exception("run_agent_loop failed for channel %s", channel.id)
             await self.pm.ahook.send_message(
@@ -254,9 +261,14 @@ class AgentLoopPlugin:
              "Work through the instructions step by step. Be thorough."},
             {"role": "user", "content": task.instructions},
         ]
-        return await run_agent_loop(
-            self.client, messages, bg_tools, bg_schemas
-        )
+        if self.extra_body is not None:
+            return await run_agent_loop(
+                self.client, messages, bg_tools, bg_schemas, extra_body=self.extra_body
+            )
+        else:
+            return await run_agent_loop(
+                self.client, messages, bg_tools, bg_schemas
+            )
 
     async def _on_task_complete(self, task: BackgroundTask, result: str) -> None:
         """Handle a completed background task."""
