@@ -1,4 +1,4 @@
-"""Tests for sherman.agent_loop_plugin.AgentLoopPlugin."""
+"""Tests for sherman.agent.AgentPlugin."""
 
 import json
 from pathlib import Path
@@ -10,9 +10,10 @@ import pytest
 
 from sherman.channel import Channel, ChannelConfig, ChannelRegistry
 from sherman.conversation import ConversationLog, init_db
-from sherman.plugin_manager import create_plugin_manager
+from sherman.hooks import create_plugin_manager
 
-from sherman.agent_loop_plugin import AgentLoopPlugin
+from sherman.agent import AgentPlugin
+from sherman.background import BackgroundPlugin
 
 
 # ---------------------------------------------------------------------------
@@ -91,9 +92,16 @@ async def _build_plugin_and_channel(agent_defaults=None, channel_config=None):
     # Async mocks for outbound hooks.
     pm.ahook.send_message = AsyncMock()
     pm.ahook.on_agent_response = AsyncMock()
+    pm.ahook.on_task_complete = AsyncMock()
 
-    plugin = AgentLoopPlugin(pm)
+    # Register BackgroundPlugin so AgentPlugin delegation stubs work.
+    bg_plugin = BackgroundPlugin(pm)
+    pm.register(bg_plugin, name="background")
+    pm.background = bg_plugin
+
+    plugin = AgentPlugin(pm)
     pm.register(plugin, name="agent_loop")
+    pm.agent_plugin = plugin
 
     # Inject a pre-opened DB so we don't open a second connection inside on_start.
     plugin.db = db
@@ -134,15 +142,15 @@ class TestOnStart:
         pm.ahook.send_message = AsyncMock()
         pm.ahook.on_agent_response = AsyncMock()
 
-        plugin = AgentLoopPlugin(pm)
+        plugin = AgentPlugin(pm)
         pm.register(plugin, name="agent_loop")
 
         mock_client = MagicMock()
         mock_client.start = AsyncMock()
 
-        with patch("sherman.agent_loop_plugin.LLMClient", return_value=mock_client) as mock_cls, \
-             patch("sherman.agent_loop_plugin.aiosqlite.connect", new_callable=AsyncMock) as mock_connect, \
-             patch("sherman.agent_loop_plugin.init_db", new_callable=AsyncMock):
+        with patch("sherman.agent.LLMClient", return_value=mock_client) as mock_cls, \
+             patch("sherman.agent.aiosqlite.connect", new_callable=AsyncMock) as mock_connect, \
+             patch("sherman.agent.init_db", new_callable=AsyncMock):
 
             mock_connect.return_value = MagicMock()
 
@@ -152,12 +160,13 @@ class TestOnStart:
             base_url="http://localhost:8080",
             model="test-model",
             api_key=None,
+            extra_body=None,
         )
         mock_client.start.assert_awaited_once()
 
     async def test_on_start_collects_tools(self):
         """Register a test plugin implementing register_tools. Verify tools
-        are collected in the AgentLoopPlugin and schemas generated."""
+        are collected in the AgentPlugin and schemas generated."""
         def my_test_tool(x: str) -> str:
             """A test tool."""
             return f"result: {x}"
@@ -177,15 +186,15 @@ class TestOnStart:
         tool_plugin = ToolPlugin()
         pm.register(tool_plugin, name="tool_plugin")
 
-        plugin = AgentLoopPlugin(pm)
+        plugin = AgentPlugin(pm)
         pm.register(plugin, name="agent_loop")
 
         mock_client = MagicMock()
         mock_client.start = AsyncMock()
 
-        with patch("sherman.agent_loop_plugin.LLMClient", return_value=mock_client), \
-             patch("sherman.agent_loop_plugin.aiosqlite.connect", new_callable=AsyncMock) as mock_connect, \
-             patch("sherman.agent_loop_plugin.init_db", new_callable=AsyncMock):
+        with patch("sherman.agent.LLMClient", return_value=mock_client), \
+             patch("sherman.agent.aiosqlite.connect", new_callable=AsyncMock) as mock_connect, \
+             patch("sherman.agent.init_db", new_callable=AsyncMock):
             mock_connect.return_value = MagicMock()
             await plugin.on_start(config=BASE_CONFIG)
 
@@ -202,7 +211,7 @@ class TestOnStart:
         pm.ahook.send_message = AsyncMock()
         pm.ahook.on_agent_response = AsyncMock()
 
-        plugin = AgentLoopPlugin(pm)
+        plugin = AgentPlugin(pm)
         pm.register(plugin, name="agent_loop")
 
         mock_client = MagicMock()
@@ -211,9 +220,9 @@ class TestOnStart:
         config_with_base_dir = dict(BASE_CONFIG)
         config_with_base_dir["_base_dir"] = Path("/some/dir")
 
-        with patch("sherman.agent_loop_plugin.LLMClient", return_value=mock_client), \
-             patch("sherman.agent_loop_plugin.aiosqlite.connect", new_callable=AsyncMock) as mock_connect, \
-             patch("sherman.agent_loop_plugin.init_db", new_callable=AsyncMock):
+        with patch("sherman.agent.LLMClient", return_value=mock_client), \
+             patch("sherman.agent.aiosqlite.connect", new_callable=AsyncMock) as mock_connect, \
+             patch("sherman.agent.init_db", new_callable=AsyncMock):
             mock_connect.return_value = MagicMock()
             await plugin.on_start(config=config_with_base_dir)
 
@@ -226,15 +235,15 @@ class TestOnStart:
         pm.ahook.send_message = AsyncMock()
         pm.ahook.on_agent_response = AsyncMock()
 
-        plugin = AgentLoopPlugin(pm)
+        plugin = AgentPlugin(pm)
         pm.register(plugin, name="agent_loop")
 
         mock_client = MagicMock()
         mock_client.start = AsyncMock()
 
-        with patch("sherman.agent_loop_plugin.LLMClient", return_value=mock_client), \
-             patch("sherman.agent_loop_plugin.aiosqlite.connect", new_callable=AsyncMock) as mock_connect, \
-             patch("sherman.agent_loop_plugin.init_db", new_callable=AsyncMock):
+        with patch("sherman.agent.LLMClient", return_value=mock_client), \
+             patch("sherman.agent.aiosqlite.connect", new_callable=AsyncMock) as mock_connect, \
+             patch("sherman.agent.init_db", new_callable=AsyncMock):
             mock_connect.return_value = MagicMock()
             await plugin.on_start(config=BASE_CONFIG)
 
@@ -244,7 +253,7 @@ class TestOnStart:
         """Config without llm.main raises a clear error (flat llm block is rejected)."""
         pm = create_plugin_manager()
         pm.registry = ChannelRegistry(AGENT_DEFAULTS)
-        plugin = AgentLoopPlugin(pm)
+        plugin = AgentPlugin(pm)
         pm.register(plugin, name="agent_loop")
 
         # Old flat config — must be rejected with a clear error
@@ -258,21 +267,19 @@ class TestOnStart:
         with pytest.raises((KeyError, ValueError)):
             await plugin.on_start(config=bad_config)
 
-    async def test_on_start_config_parses_llm_main_and_background(self):
-        """on_start with llm.main and llm.background creates both self.client
-        and self.bg_client from the respective blocks."""
+    async def test_on_start_config_parses_llm_main(self):
+        """on_start with llm.main creates self.client. Background LLM client
+        is now owned by BackgroundPlugin (tested in test_background.py)."""
         pm = create_plugin_manager()
         pm.registry = ChannelRegistry(AGENT_DEFAULTS)
         pm.ahook.send_message = AsyncMock()
         pm.ahook.on_agent_response = AsyncMock()
 
-        plugin = AgentLoopPlugin(pm)
+        plugin = AgentPlugin(pm)
         pm.register(plugin, name="agent_loop")
 
         mock_main_client = MagicMock()
         mock_main_client.start = AsyncMock()
-        mock_bg_client = MagicMock()
-        mock_bg_client.start = AsyncMock()
 
         config_with_bg = {
             "llm": {
@@ -288,47 +295,15 @@ class TestOnStart:
             "daemon": {"session_db": ":memory:"},
         }
 
-        clients_created = []
-
-        def make_client(base_url, model, api_key=None):
-            if "8081" in base_url or model == "bg-model":
-                clients_created.append("bg")
-                return mock_bg_client
-            clients_created.append("main")
-            return mock_main_client
-
-        with patch("sherman.agent_loop_plugin.LLMClient", side_effect=make_client), \
-             patch("sherman.agent_loop_plugin.aiosqlite.connect", new_callable=AsyncMock) as mock_connect, \
-             patch("sherman.agent_loop_plugin.init_db", new_callable=AsyncMock):
+        with patch("sherman.agent.LLMClient", return_value=mock_main_client), \
+             patch("sherman.agent.aiosqlite.connect", new_callable=AsyncMock) as mock_connect, \
+             patch("sherman.agent.init_db", new_callable=AsyncMock):
             mock_connect.return_value = MagicMock()
             await plugin.on_start(config=config_with_bg)
 
-        # Both clients must be created and started
+        # AgentPlugin only creates the main client
         assert plugin.client is mock_main_client
-        assert plugin.bg_client is mock_bg_client
         mock_main_client.start.assert_awaited()
-        mock_bg_client.start.assert_awaited()
-
-    async def test_on_start_llm_background_absent_leaves_bg_client_none(self):
-        """When llm.background is absent, bg_client is None after on_start."""
-        pm = create_plugin_manager()
-        pm.registry = ChannelRegistry(AGENT_DEFAULTS)
-        pm.ahook.send_message = AsyncMock()
-        pm.ahook.on_agent_response = AsyncMock()
-
-        plugin = AgentLoopPlugin(pm)
-        pm.register(plugin, name="agent_loop")
-
-        mock_client = MagicMock()
-        mock_client.start = AsyncMock()
-
-        with patch("sherman.agent_loop_plugin.LLMClient", return_value=mock_client), \
-             patch("sherman.agent_loop_plugin.aiosqlite.connect", new_callable=AsyncMock) as mock_connect, \
-             patch("sherman.agent_loop_plugin.init_db", new_callable=AsyncMock):
-            mock_connect.return_value = MagicMock()
-            await plugin.on_start(config=BASE_CONFIG)
-
-        assert plugin.bg_client is None
 
 
 # ---------------------------------------------------------------------------
@@ -411,7 +386,7 @@ class TestOnMessagePersistenceAndLoop:
         mock_client.chat = AsyncMock(return_value=_make_text_response("answer"))
         plugin.client = mock_client
 
-        with patch("sherman.agent_loop_plugin.run_agent_loop", new_callable=AsyncMock) as mock_loop:
+        with patch("sherman.agent.run_agent_loop", new_callable=AsyncMock) as mock_loop:
             mock_loop.return_value = "answer"
             await plugin.on_message(channel=channel, sender="user", text="query")
             await _drain(plugin, channel)
@@ -475,18 +450,14 @@ class TestOnMessagePersistenceAndLoop:
         await db.close()
 
     async def test_on_message_with_extra_body_from_config(self):
-        """Plugin should read extra_body from llm.main config and pass to run_agent_loop."""
-        mock_client = MagicMock()
-        mock_client.chat = AsyncMock(return_value={
-            "choices": [{"message": {"content": "test response"}}]
-        })
-
+        """Plugin should read extra_body from llm.main config and pass it to LLMClient."""
+        extra_body_value = {"id_slot": 1, "cache_prompt": True}
         config = {
             "llm": {
                 "main": {
                     "base_url": "http://localhost:8080",
                     "model": "test-model",
-                    "extra_body": {"id_slot": 1, "cache_prompt": True},
+                    "extra_body": extra_body_value,
                 },
             },
             "daemon": {"session_db": ":memory:"},
@@ -494,29 +465,28 @@ class TestOnMessagePersistenceAndLoop:
         }
 
         plugin, channel, db = await _build_plugin_and_channel()
-        plugin.client = mock_client
 
-        with patch("sherman.agent_loop_plugin.run_agent_loop") as mock_loop:
-            mock_loop.return_value = "response"
+        mock_client = MagicMock()
+        mock_client.start = AsyncMock()
 
+        with patch("sherman.agent.LLMClient", return_value=mock_client) as mock_cls, \
+             patch("sherman.agent.aiosqlite.connect", new_callable=AsyncMock) as mock_connect, \
+             patch("sherman.agent.init_db", new_callable=AsyncMock):
+            mock_connect.return_value = MagicMock()
             await plugin.on_start(config)
-            await plugin.on_message(channel=channel, sender="user", text="hello")
-            await _drain(plugin, channel)
 
-            # Verify extra_body was passed to run_agent_loop
-            call_kwargs = mock_loop.call_args.kwargs
-            assert "extra_body" in call_kwargs
-            assert call_kwargs["extra_body"] == {"id_slot": 1, "cache_prompt": True}
+        # Verify LLMClient was created with extra_body
+        mock_cls.assert_called_once_with(
+            base_url="http://localhost:8080",
+            model="test-model",
+            api_key=None,
+            extra_body=extra_body_value,
+        )
 
         await db.close()
 
     async def test_on_message_without_extra_body_config(self):
-        """Missing extra_body in config should not pass extra_body to run_agent_loop."""
-        mock_client = MagicMock()
-        mock_client.chat = AsyncMock(return_value={
-            "choices": [{"message": {"content": "test response"}}]
-        })
-
+        """Missing extra_body in config should create LLMClient with extra_body=None."""
         config = {
             "llm": {
                 "main": {
@@ -530,28 +500,28 @@ class TestOnMessagePersistenceAndLoop:
         }
 
         plugin, channel, db = await _build_plugin_and_channel()
-        plugin.client = mock_client
 
-        with patch("sherman.agent_loop_plugin.run_agent_loop") as mock_loop:
-            mock_loop.return_value = "response"
+        mock_client = MagicMock()
+        mock_client.start = AsyncMock()
 
+        with patch("sherman.agent.LLMClient", return_value=mock_client) as mock_cls, \
+             patch("sherman.agent.aiosqlite.connect", new_callable=AsyncMock) as mock_connect, \
+             patch("sherman.agent.init_db", new_callable=AsyncMock):
+            mock_connect.return_value = MagicMock()
             await plugin.on_start(config)
-            await plugin.on_message(channel=channel, sender="user", text="hello")
-            await _drain(plugin, channel)
 
-            # Verify extra_body was NOT passed to run_agent_loop
-            call_kwargs = mock_loop.call_args.kwargs
-            assert "extra_body" not in call_kwargs
+        # Verify LLMClient was created with extra_body=None
+        mock_cls.assert_called_once_with(
+            base_url="http://localhost:8080",
+            model="test-model",
+            api_key=None,
+            extra_body=None,
+        )
 
         await db.close()
 
     async def test_on_message_with_extra_body_none(self):
-        """extra_body=None in config should not pass extra_body to run_agent_loop."""
-        mock_client = MagicMock()
-        mock_client.chat = AsyncMock(return_value={
-            "choices": [{"message": {"content": "test response"}}]
-        })
-
+        """extra_body=None in config should create LLMClient with extra_body=None."""
         config = {
             "llm": {
                 "main": {
@@ -565,28 +535,28 @@ class TestOnMessagePersistenceAndLoop:
         }
 
         plugin, channel, db = await _build_plugin_and_channel()
-        plugin.client = mock_client
 
-        with patch("sherman.agent_loop_plugin.run_agent_loop") as mock_loop:
-            mock_loop.return_value = "response"
+        mock_client = MagicMock()
+        mock_client.start = AsyncMock()
 
+        with patch("sherman.agent.LLMClient", return_value=mock_client) as mock_cls, \
+             patch("sherman.agent.aiosqlite.connect", new_callable=AsyncMock) as mock_connect, \
+             patch("sherman.agent.init_db", new_callable=AsyncMock):
+            mock_connect.return_value = MagicMock()
             await plugin.on_start(config)
-            await plugin.on_message(channel=channel, sender="user", text="hello")
-            await _drain(plugin, channel)
 
-            # Verify extra_body was NOT passed to run_agent_loop
-            call_kwargs = mock_loop.call_args.kwargs
-            assert "extra_body" not in call_kwargs
+        # Verify LLMClient was created with extra_body=None
+        mock_cls.assert_called_once_with(
+            base_url="http://localhost:8080",
+            model="test-model",
+            api_key=None,
+            extra_body=None,
+        )
 
         await db.close()
 
     async def test_on_message_with_extra_body_empty(self):
-        """extra_body={} in config should pass empty dict to run_agent_loop."""
-        mock_client = MagicMock()
-        mock_client.chat = AsyncMock(return_value={
-            "choices": [{"message": {"content": "test response"}}]
-        })
-
+        """extra_body={} in config should create LLMClient with extra_body={}."""
         config = {
             "llm": {
                 "main": {
@@ -600,19 +570,23 @@ class TestOnMessagePersistenceAndLoop:
         }
 
         plugin, channel, db = await _build_plugin_and_channel()
-        plugin.client = mock_client
 
-        with patch("sherman.agent_loop_plugin.run_agent_loop") as mock_loop:
-            mock_loop.return_value = "response"
+        mock_client = MagicMock()
+        mock_client.start = AsyncMock()
 
+        with patch("sherman.agent.LLMClient", return_value=mock_client) as mock_cls, \
+             patch("sherman.agent.aiosqlite.connect", new_callable=AsyncMock) as mock_connect, \
+             patch("sherman.agent.init_db", new_callable=AsyncMock):
+            mock_connect.return_value = MagicMock()
             await plugin.on_start(config)
-            await plugin.on_message(channel=channel, sender="user", text="hello")
-            await _drain(plugin, channel)
 
-            # Verify extra_body={} was passed to run_agent_loop
-            call_kwargs = mock_loop.call_args.kwargs
-            assert "extra_body" in call_kwargs
-            assert call_kwargs["extra_body"] == {}
+        # Verify LLMClient was created with extra_body={}
+        mock_cls.assert_called_once_with(
+            base_url="http://localhost:8080",
+            model="test-model",
+            api_key=None,
+            extra_body={},
+        )
 
         await db.close()
 
@@ -788,7 +762,7 @@ class TestOnMessageCompactionAndConfig:
 
         conv.compact_if_needed = mock_compact
 
-        with patch("sherman.agent_loop_plugin.run_agent_loop", new_callable=AsyncMock) as mock_loop:
+        with patch("sherman.agent.run_agent_loop", new_callable=AsyncMock) as mock_loop:
             mock_loop.return_value = "answer"
 
             async def tracking_loop(*args, **kwargs):
@@ -823,7 +797,7 @@ class TestOnMessageCompactionAndConfig:
         pm.ahook.send_message = AsyncMock()
         pm.ahook.on_agent_response = AsyncMock()
 
-        plugin = AgentLoopPlugin(pm)
+        plugin = AgentPlugin(pm)
         pm.register(plugin, name="agent_loop")
         plugin.db = db
 
@@ -859,7 +833,7 @@ class TestOnStop:
         pm = create_plugin_manager()
         pm.registry = ChannelRegistry(AGENT_DEFAULTS)
 
-        plugin = AgentLoopPlugin(pm)
+        plugin = AgentPlugin(pm)
         pm.register(plugin, name="agent_loop")
 
         mock_client = MagicMock()
@@ -875,37 +849,33 @@ class TestOnStop:
         mock_client.stop.assert_awaited_once()
         mock_db.close.assert_awaited_once()
 
-    async def test_on_stop_cancels_all_queues_and_bg_client(self):
-        """on_stop cancels all channel queue consumers and calls bg_client.stop()."""
+    async def test_on_stop_cancels_all_queues(self):
+        """on_stop cancels all channel queue consumers."""
         pm = create_plugin_manager()
         pm.registry = ChannelRegistry(AGENT_DEFAULTS)
         pm.ahook.send_message = AsyncMock()
         pm.ahook.on_agent_response = AsyncMock()
 
-        plugin = AgentLoopPlugin(pm)
+        plugin = AgentPlugin(pm)
         pm.register(plugin, name="agent_loop")
 
         mock_client = MagicMock()
         mock_client.stop = AsyncMock()
         plugin.client = mock_client
 
-        mock_bg_client = MagicMock()
-        mock_bg_client.stop = AsyncMock()
-        plugin.bg_client = mock_bg_client
-
         mock_db = MagicMock()
         mock_db.close = AsyncMock()
         plugin.db = mock_db
 
         # Create a couple of channel queues on the plugin so we can verify they are stopped.
-        from sherman.channel_queue import ChannelQueue, QueueItem
+        from sherman.queue import SerialQueue, QueueItem
 
         async def noop(item):
             pass
 
-        q1 = ChannelQueue()
+        q1 = SerialQueue()
         q1.start(noop)
-        q2 = ChannelQueue()
+        q2 = SerialQueue()
         q2.start(noop)
 
         plugin._queues = {
@@ -914,9 +884,6 @@ class TestOnStop:
         }
 
         await plugin.on_stop()
-
-        # bg_client.stop() must be called
-        mock_bg_client.stop.assert_awaited_once()
 
         # All queue consumers must be stopped
         for q in [q1, q2]:
@@ -1273,71 +1240,8 @@ class TestOnTaskComplete:
 
 
 # ---------------------------------------------------------------------------
-# Section 12 — bg_client used for background tasks
+# Section 12 — bg_client tests moved to test_background.py (BackgroundPlugin)
 # ---------------------------------------------------------------------------
-
-
-class TestBgClient:
-    async def test_bg_client_used_when_llm_background_configured(self):
-        """When llm.background is configured, _execute_background_task uses
-        bg_client, not the main client."""
-        from sherman.background import BackgroundTask
-
-        plugin, channel, db = await _build_plugin_and_channel()
-
-        mock_main_client = MagicMock()
-        mock_main_client.chat = AsyncMock(return_value=_make_text_response("main"))
-        plugin.client = mock_main_client
-
-        mock_bg_client = MagicMock()
-        mock_bg_client.chat = AsyncMock(return_value=_make_text_response("bg result"))
-        plugin.bg_client = mock_bg_client
-
-        task = BackgroundTask(
-            channel=channel,
-            description="bg test",
-            instructions="run in background",
-        )
-
-        with patch("sherman.agent_loop_plugin.run_agent_loop", new_callable=AsyncMock) as mock_loop:
-            mock_loop.return_value = "bg result"
-            await plugin._execute_background_task(task)
-            call_args = mock_loop.call_args
-            # First positional arg should be bg_client, not main client
-            assert call_args[0][0] is mock_bg_client, \
-                "Expected bg_client to be used for background task execution"
-
-        await db.close()
-
-    async def test_main_client_used_when_llm_background_absent(self):
-        """When llm.background is absent (bg_client is None), _execute_background_task
-        falls back to the main client."""
-        from sherman.background import BackgroundTask
-
-        plugin, channel, db = await _build_plugin_and_channel()
-
-        mock_main_client = MagicMock()
-        mock_main_client.chat = AsyncMock(return_value=_make_text_response("main"))
-        plugin.client = mock_main_client
-
-        # bg_client is None (not configured)
-        plugin.bg_client = None
-
-        task = BackgroundTask(
-            channel=channel,
-            description="bg test",
-            instructions="run in background",
-        )
-
-        with patch("sherman.agent_loop_plugin.run_agent_loop", new_callable=AsyncMock) as mock_loop:
-            mock_loop.return_value = "main result"
-            await plugin._execute_background_task(task)
-            call_args = mock_loop.call_args
-            # First positional arg should be the main client
-            assert call_args[0][0] is mock_main_client, \
-                "Expected main client to be used when bg_client is None"
-
-        await db.close()
 
 
 # ---------------------------------------------------------------------------

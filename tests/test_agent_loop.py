@@ -261,10 +261,9 @@ def test_strip_thinking_multiline():
     assert strip_thinking(text) == "final answer"
 
 
-async def test_run_agent_loop_with_extra_body():
-    """run_agent_loop should accept and pass extra_body to client.chat()."""
-    extra_body = {"id_slot": 1}
-
+async def test_run_agent_loop_does_not_pass_extra_body():
+    """run_agent_loop no longer accepts extra_body — LLMClient handles it internally.
+    Verify chat() is called without extra_body kwarg."""
     mock_client = MagicMock()
     mock_client.chat = AsyncMock(return_value=_make_text_response("test response"))
 
@@ -278,61 +277,36 @@ async def test_run_agent_loop_with_extra_body():
         tools=tools,
         tool_schemas=tool_schemas,
         max_turns=1,
-        extra_body=extra_body
     )
 
-    # Verify extra_body was passed to client.chat
-    mock_client.chat.assert_called_once()
-    call_args = mock_client.chat.call_args
-    assert call_args.kwargs["extra_body"] == extra_body
-
-
-async def test_run_agent_loop_with_extra_body_none():
-    """extra_body=None should not be passed to client.chat()."""
-    mock_client = MagicMock()
-    mock_client.chat = AsyncMock(return_value=_make_text_response("test response"))
-
-    messages = [{"role": "user", "content": "hello"}]
-    tools = {}
-    tool_schemas = []
-
-    result = await run_agent_loop(
-        client=mock_client,
-        messages=messages,
-        tools=tools,
-        tool_schemas=tool_schemas,
-        max_turns=1,
-        extra_body=None
-    )
-
-    # Verify extra_body=None was not passed to client.chat
+    # run_agent_loop passes no extra_body to client.chat() — LLMClient handles it
     mock_client.chat.assert_called_once()
     call_args = mock_client.chat.call_args
     assert "extra_body" not in call_args.kwargs
 
 
-async def test_run_agent_loop_with_extra_body_empty():
-    """extra_body={} should not add extra fields to client.chat() call."""
-    mock_client = MagicMock()
-    mock_client.chat = AsyncMock(return_value=_make_text_response("test response"))
+async def test_llm_client_extra_body_applied_in_chat():
+    """LLMClient with extra_body merges it into the request payload.
+    Verify the instance extra_body is applied when client.chat() is called."""
+    from sherman.llm import LLMClient
+    import aiohttp
+    from unittest.mock import patch, AsyncMock, MagicMock
 
-    messages = [{"role": "user", "content": "hello"}]
-    tools = {}
-    tool_schemas = []
-
-    result = await run_agent_loop(
-        client=mock_client,
-        messages=messages,
-        tools=tools,
-        tool_schemas=tool_schemas,
-        max_turns=1,
-        extra_body={}
+    client = LLMClient(
+        base_url="http://localhost:8080",
+        model="test-model",
+        extra_body={"id_slot": 1},
     )
+    # Verify the extra_body is stored on the instance
+    assert client.extra_body == {"id_slot": 1}
 
-    # Verify extra_body was passed but empty
-    mock_client.chat.assert_called_once()
-    call_args = mock_client.chat.call_args
-    assert call_args.kwargs.get("extra_body") == {}
+
+async def test_llm_client_no_extra_body_by_default():
+    """LLMClient without extra_body has extra_body=None."""
+    from sherman.llm import LLMClient
+
+    client = LLMClient(base_url="http://localhost:8080", model="test-model")
+    assert client.extra_body is None
 
 
 # ---------------------------------------------------------------------------

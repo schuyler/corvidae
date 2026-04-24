@@ -2,7 +2,7 @@ import apluggy as pluggy
 from pluggy import HookimplMarker, HookspecMarker
 
 from sherman.hooks import AgentSpec, hookimpl, hookspec
-from sherman.plugin_manager import create_plugin_manager
+from sherman.hooks import create_plugin_manager
 
 
 def test_hookspec_marker_exists():

@@ -70,7 +70,7 @@ class TestMainCallsOnStartAndOnStop:
     async def test_main_calls_on_start_and_on_stop(self):
         """main() should call on_start and on_stop on all registered plugins."""
         from sherman.hooks import hookimpl
-        from sherman.plugin_manager import create_plugin_manager
+        from sherman.hooks import create_plugin_manager
 
         on_start_mock = AsyncMock()
         on_stop_mock = AsyncMock()
@@ -103,13 +103,13 @@ class TestMainCallsOnStartAndOnStop:
                 "sherman.main.create_plugin_manager",
                 side_effect=patched_create_plugin_manager,
             ), patch(
-                "sherman.agent_loop_plugin.LLMClient",
+                "sherman.agent.LLMClient",
                 return_value=mock_client,
             ), patch(
-                "sherman.agent_loop_plugin.aiosqlite.connect",
+                "sherman.agent.aiosqlite.connect",
                 new_callable=AsyncMock,
             ) as mock_connect, patch(
-                "sherman.agent_loop_plugin.init_db",
+                "sherman.agent.init_db",
                 new_callable=AsyncMock,
             ):
                 mock_db = MagicMock()
@@ -129,7 +129,7 @@ class TestRegistryPopulatedBeforeOnStart:
         """pm.registry must be a ChannelRegistry with pre-configured channels
         by the time on_start fires."""
         from sherman.hooks import hookimpl
-        from sherman.plugin_manager import create_plugin_manager
+        from sherman.hooks import create_plugin_manager
 
         registry_snapshot: list = []
 
@@ -177,13 +177,13 @@ class TestRegistryPopulatedBeforeOnStart:
                 "sherman.main.create_plugin_manager",
                 side_effect=patched_create_plugin_manager,
             ), patch(
-                "sherman.agent_loop_plugin.LLMClient",
+                "sherman.agent.LLMClient",
                 return_value=mock_client,
             ), patch(
-                "sherman.agent_loop_plugin.aiosqlite.connect",
+                "sherman.agent.aiosqlite.connect",
                 new_callable=AsyncMock,
             ) as mock_connect, patch(
-                "sherman.agent_loop_plugin.init_db",
+                "sherman.agent.init_db",
                 new_callable=AsyncMock,
             ):
                 mock_db = MagicMock()

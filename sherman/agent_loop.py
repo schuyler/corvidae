@@ -19,9 +19,8 @@ import re
 import time
 from typing import Callable
 
-from pydantic import create_model
-
 from sherman.llm import LLMClient
+from sherman.tool import tool_to_schema  # noqa: F401 — re-exported for backward compat
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +40,6 @@ async def run_agent_loop(
     tools: dict[str, Callable],
     tool_schemas: list[dict],
     max_turns: int = 10,
-    extra_body: dict | None = None,
 ) -> str:
     """Run the agent loop to completion. Mutates messages in place.
 
@@ -57,7 +55,6 @@ async def run_agent_loop(
         tools: Dict mapping tool names to async callable functions
         tool_schemas: List of tool schemas for LLM function calling
         max_turns: Maximum iterations before giving up
-        extra_body: Optional dict of extra fields to merge into LLM request payload
 
     Returns:
         Final text content from the last LLM response, or a placeholder
@@ -70,10 +67,7 @@ async def run_agent_loop(
     """
     for _ in range(max_turns):
         start = time.monotonic()
-        if extra_body is not None:
-            response = await client.chat(messages, tools=tool_schemas or None, extra_body=extra_body)
-        else:
-            response = await client.chat(messages, tools=tool_schemas or None)
+        response = await client.chat(messages, tools=tool_schemas or None)
         latency_ms = round((time.monotonic() - start) * 1000, 1)
         msg = response["choices"][0]["message"]
         msg.setdefault("role", "assistant")
@@ -158,56 +152,6 @@ async def run_agent_loop(
 
     logger.warning("max tool-calling rounds reached")
     return "(max tool-calling rounds reached)"
-
-
-def tool_to_schema(fn: Callable) -> dict:
-    """Generate a Chat Completions tool schema from a typed function.
-
-    Extracts parameter types from the function signature and generates
-    a JSON schema compatible with OpenAI's function calling format.
-    The first line of the docstring becomes the tool description.
-
-    Args:
-        fn: An async function with type-annotated parameters
-
-    Returns:
-        Dict with 'type: function' and 'function' key containing name,
-        description, and parameters schema
-    """
-    sig = inspect.signature(fn)
-    fields = {}
-    for param_name, param in sig.parameters.items():
-        # CR1: Explicitly skip _-prefixed parameters — they are injected at
-        # call time by run_agent_loop, not supplied by the LLM. Do not rely
-        # on pydantic's private-attribute convention as the implementation
-        # strategy; this check is the authoritative filter.
-        if param_name.startswith("_"):
-            continue
-        annotation = param.annotation if param.annotation is not inspect.Parameter.empty else str
-        fields[param_name] = (annotation, ...)
-
-    model = create_model(fn.__name__, **fields)
-    schema = model.model_json_schema()
-
-    # Strip top-level title
-    schema.pop("title", None)
-
-    # Strip title from each property
-    for prop in schema.get("properties", {}).values():
-        prop.pop("title", None)
-
-    description = ""
-    if fn.__doc__:
-        description = fn.__doc__.strip().splitlines()[0]
-
-    return {
-        "type": "function",
-        "function": {
-            "name": fn.__name__,
-            "description": description,
-            "parameters": schema,
-        },
-    }
 
 
 def strip_thinking(text: str) -> str:

@@ -7,7 +7,7 @@ from typing import Optional
 
 import pydle
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("sherman.irc_plugin")
 
 from sherman.channel import Channel
 from sherman.hooks import hookimpl

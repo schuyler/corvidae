@@ -1,4 +1,4 @@
-"""Tests for sherman.cli_plugin.CLIPlugin."""
+"""Tests for sherman.channels.cli.CLIPlugin."""
 
 import asyncio
 import sys
@@ -7,9 +7,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from sherman.channel import Channel, ChannelConfig, ChannelRegistry
-from sherman.plugin_manager import create_plugin_manager
+from sherman.hooks import create_plugin_manager
 
-from sherman.cli_plugin import CLIPlugin
+from sherman.channels.cli import CLIPlugin
 
 
 # ---------------------------------------------------------------------------
