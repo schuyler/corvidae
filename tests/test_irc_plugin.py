@@ -318,6 +318,34 @@ class TestSendMessage:
         calls = [c.args[1] for c in plugin.client.message.await_args_list]
         assert calls == ["line1", "line2"]
 
+        # CRLF line endings: trailing \r is stripped
+        plugin.client.message = AsyncMock()
+        with patch.object(_irc_module, 'split_message',
+                          return_value=["line1\r\nline2\r\n"]):
+            await plugin.send_message(channel=channel, text="ignored")
+        calls = [c.args[1] for c in plugin.client.message.await_args_list]
+        assert calls == ["line1", "line2"]
+
+    async def test_send_message_real_split_no_blank_lines(self):
+        """Integration: real split_message + send_message produces no blank PRIVMSGs."""
+        pm, registry = _make_pm_with_registry()
+        plugin = IRCPlugin(pm)
+        pm.register(plugin, name="irc")
+
+        plugin.client = MagicMock()
+        plugin.client.connected = True
+        plugin.client.message = AsyncMock()
+
+        channel = registry.get_or_create("irc", "#test")
+        # Text long enough that split_message preserves \n\n in chunks
+        para = "x" * 300
+        text = para + "\n\n" + para
+        await plugin.send_message(channel=channel, text=text)
+
+        sent = [c.args[1] for c in plugin.client.message.await_args_list]
+        assert len(sent) >= 2
+        assert all(line.strip() for line in sent)
+
 
 # ---------------------------------------------------------------------------
 # Section 4 — split_message (6 tests)
