@@ -25,6 +25,16 @@ agent:
   max_context_tokens: 24000
   keep_thinking_in_history: false
 
+# IRC transport connection settings (optional — omit to disable IRC)
+# irc:
+#   host: irc.libera.chat              # IRC server hostname
+#   port: 6667                         # IRC server port
+#   nick: sherman                      # bot nickname
+#   tls: false                         # use TLS (set port to 6697 with tls: true)
+#   channels:                          # channels to auto-join
+#     - "#general"
+#     - "#random"
+
 # Per-channel config (optional)
 # Keys must be "transport:scope". Overrides agent defaults where set.
 channels:
