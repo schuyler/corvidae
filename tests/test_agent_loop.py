@@ -450,3 +450,212 @@ async def test_tool_call_result_not_logged_on_exception(caplog):
     records = [r for r in caplog.records if r.name == "sherman.agent_loop"]
     result_records = [r for r in records if r.levelno == logging.INFO and r.getMessage() == "tool call result"]
     assert not result_records, "'tool call result' INFO must NOT be emitted when tool raises"
+
+
+# ---------------------------------------------------------------------------
+# Logging tests — DEBUG records for content visibility
+# ---------------------------------------------------------------------------
+
+
+async def test_llm_response_content_debug_log(caplog):
+    """After a successful LLM call, a DEBUG record with message 'LLM response
+    content' must be emitted with has_reasoning_content and
+    reasoning_content_length attributes."""
+    import logging
+
+    client = MagicMock()
+    client.chat = AsyncMock(return_value=_make_text_response("hello"))
+
+    messages = [{"role": "user", "content": "hi"}]
+    with caplog.at_level(logging.DEBUG, logger="sherman.agent_loop"):
+        await run_agent_loop(client, messages, tools={}, tool_schemas=[])
+
+    records = [r for r in caplog.records if r.name == "sherman.agent_loop"]
+    matching = [
+        r for r in records
+        if r.levelno == logging.DEBUG and r.getMessage() == "LLM response content"
+    ]
+    assert matching, "Expected DEBUG record with message 'LLM response content'"
+    rec = matching[0]
+    assert hasattr(rec, "has_reasoning_content"), (
+        "'LLM response content' DEBUG log must have has_reasoning_content attribute"
+    )
+    assert isinstance(rec.has_reasoning_content, bool), (
+        "has_reasoning_content must be a bool"
+    )
+    assert hasattr(rec, "reasoning_content_length"), (
+        "'LLM response content' DEBUG log must have reasoning_content_length attribute"
+    )
+    assert hasattr(rec, "content"), "'LLM response content' DEBUG log must have content attribute"
+
+
+async def test_llm_response_content_debug_log_with_reasoning(caplog):
+    """When response has reasoning_content, DEBUG log must have
+    has_reasoning_content=True and reasoning_content_length > 0."""
+    import logging
+
+    reasoning_text = "<reasoning>think step by step</reasoning>"
+    response = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "final answer",
+                    "reasoning_content": reasoning_text,
+                }
+            }
+        ]
+    }
+    client = MagicMock()
+    client.chat = AsyncMock(return_value=response)
+
+    messages = [{"role": "user", "content": "hi"}]
+    with caplog.at_level(logging.DEBUG, logger="sherman.agent_loop"):
+        await run_agent_loop(client, messages, tools={}, tool_schemas=[])
+
+    records = [r for r in caplog.records if r.name == "sherman.agent_loop"]
+    matching = [
+        r for r in records
+        if r.levelno == logging.DEBUG and r.getMessage() == "LLM response content"
+    ]
+    assert matching, "Expected DEBUG record with message 'LLM response content'"
+    rec = matching[0]
+    assert rec.has_reasoning_content is True, (
+        "has_reasoning_content must be True when reasoning_content is present"
+    )
+    assert isinstance(rec.reasoning_content_length, int), (
+        "reasoning_content_length must be an int when reasoning_content is present"
+    )
+    assert rec.reasoning_content_length > 0, (
+        "reasoning_content_length must be > 0 for non-empty reasoning_content"
+    )
+    assert hasattr(rec, "content"), "'LLM response content' DEBUG log must have content attribute"
+
+
+async def test_llm_response_content_truncated(caplog):
+    """Content longer than 200 chars must be truncated in the DEBUG log."""
+    import logging
+
+    long_content = "x" * 300
+    client = MagicMock()
+    client.chat = AsyncMock(return_value=_make_text_response(long_content))
+
+    messages = [{"role": "user", "content": "hi"}]
+    with caplog.at_level(logging.DEBUG, logger="sherman.agent_loop"):
+        await run_agent_loop(client, messages, tools={}, tool_schemas=[])
+
+    records = [r for r in caplog.records if r.name == "sherman.agent_loop"]
+    matching = [
+        r for r in records
+        if r.levelno == logging.DEBUG and r.getMessage() == "LLM response content"
+    ]
+    assert matching, "Expected DEBUG record with message 'LLM response content'"
+    rec = matching[0]
+    assert hasattr(rec, "content"), (
+        "'LLM response content' DEBUG log must have content attribute"
+    )
+    assert len(rec.content) <= 203, (
+        "Truncated content must be at most 203 chars (200 + '...')"
+    )
+    assert rec.content.endswith("..."), (
+        "Truncated content must end with '...'"
+    )
+
+
+async def test_tool_call_arguments_debug_log(caplog):
+    """After dispatching a tool call, a DEBUG record with message 'tool call
+    arguments' must be emitted with tool and arguments attributes."""
+    import logging
+
+    tool_fn = AsyncMock(return_value="result")
+    client = MagicMock()
+    client.chat = AsyncMock(
+        side_effect=[
+            _make_tool_call_response([_make_tool_call("c1", "my_tool", {"x": "v"})]),
+            _make_text_response("done"),
+        ]
+    )
+
+    messages = [{"role": "user", "content": "go"}]
+    with caplog.at_level(logging.DEBUG, logger="sherman.agent_loop"):
+        await run_agent_loop(client, messages, tools={"my_tool": tool_fn}, tool_schemas=[])
+
+    records = [r for r in caplog.records if r.name == "sherman.agent_loop"]
+    matching = [
+        r for r in records
+        if r.levelno == logging.DEBUG and r.getMessage() == "tool call arguments"
+    ]
+    assert matching, "Expected DEBUG record with message 'tool call arguments'"
+    rec = matching[0]
+    assert hasattr(rec, "tool"), (
+        "'tool call arguments' DEBUG log must have tool attribute"
+    )
+    assert rec.tool == "my_tool", "tool attribute must match the called tool name"
+    assert hasattr(rec, "arguments"), (
+        "'tool call arguments' DEBUG log must have arguments attribute"
+    )
+    assert isinstance(rec.arguments, str), "arguments must be a string (JSON)"
+
+
+async def test_tool_call_result_content_debug_log(caplog):
+    """After a successful tool execution, a DEBUG record with message 'tool call
+    result content' must be emitted with tool and content attributes."""
+    import logging
+
+    tool_fn = AsyncMock(return_value="tool result")
+    client = MagicMock()
+    client.chat = AsyncMock(
+        side_effect=[
+            _make_tool_call_response([_make_tool_call("c1", "my_tool", {"x": "v"})]),
+            _make_text_response("done"),
+        ]
+    )
+
+    messages = [{"role": "user", "content": "go"}]
+    with caplog.at_level(logging.DEBUG, logger="sherman.agent_loop"):
+        await run_agent_loop(client, messages, tools={"my_tool": tool_fn}, tool_schemas=[])
+
+    records = [r for r in caplog.records if r.name == "sherman.agent_loop"]
+    matching = [
+        r for r in records
+        if r.levelno == logging.DEBUG and r.getMessage() == "tool call result content"
+    ]
+    assert matching, "Expected DEBUG record with message 'tool call result content'"
+    rec = matching[0]
+    assert hasattr(rec, "tool"), (
+        "'tool call result content' DEBUG log must have tool attribute"
+    )
+    assert rec.tool == "my_tool", "tool attribute must match the called tool name"
+    assert hasattr(rec, "content"), (
+        "'tool call result content' DEBUG log must have content attribute"
+    )
+
+
+async def test_tool_call_result_content_not_logged_on_exception(caplog):
+    """When a tool raises an exception, 'tool call result content' DEBUG must NOT
+    be emitted."""
+    import logging
+
+    async def bad_tool(**kwargs):
+        raise ValueError("boom")
+
+    client = MagicMock()
+    client.chat = AsyncMock(
+        side_effect=[
+            _make_tool_call_response([_make_tool_call("c1", "bad_tool", {})]),
+            _make_text_response("recovered"),
+        ]
+    )
+
+    messages = [{"role": "user", "content": "go"}]
+    with caplog.at_level(logging.DEBUG, logger="sherman.agent_loop"):
+        await run_agent_loop(client, messages, tools={"bad_tool": bad_tool}, tool_schemas=[])
+
+    records = [r for r in caplog.records if r.name == "sherman.agent_loop"]
+    result_content_records = [
+        r for r in records
+        if r.levelno == logging.DEBUG and r.getMessage() == "tool call result content"
+    ]
+    assert not result_content_records, (
+        "'tool call result content' DEBUG must NOT be emitted when tool raises"
+    )

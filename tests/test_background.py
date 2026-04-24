@@ -5,6 +5,7 @@ and sherman/agent_loop_plugin.py is updated for Phase 3.
 """
 
 import asyncio
+import logging
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -651,3 +652,163 @@ class TestBackgroundWorkerIntegration:
         assert plugin._worker_task.done()
 
         await db.close()
+
+
+# ---------------------------------------------------------------------------
+# TestTaskQueueLogging
+# ---------------------------------------------------------------------------
+
+
+class TestTaskQueueLogging:
+    async def test_enqueue_logs_debug(self, caplog):
+        """enqueue() must emit a DEBUG record with message 'task enqueued' and
+        task_id, channel, and description attributes."""
+        queue = TaskQueue()
+        channel = _make_channel()
+        task = BackgroundTask(
+            channel=channel,
+            description="log test task",
+            instructions="do something",
+        )
+
+        with caplog.at_level(logging.DEBUG, logger="sherman.background"):
+            await queue.enqueue(task)
+
+        records = [r for r in caplog.records if r.name == "sherman.background"]
+        matching = [
+            r for r in records
+            if r.levelno == logging.DEBUG and r.getMessage() == "task enqueued"
+        ]
+        assert matching, "Expected DEBUG record with message 'task enqueued'"
+        rec = matching[0]
+        assert hasattr(rec, "task_id"), "'task enqueued' log must have task_id attribute"
+        assert rec.task_id == task.task_id
+        assert hasattr(rec, "channel"), "'task enqueued' log must have channel attribute"
+        assert rec.channel == channel.id
+        assert hasattr(rec, "description"), "'task enqueued' log must have description attribute"
+        assert rec.description == task.description
+
+    async def test_run_worker_logs_task_started(self, caplog):
+        """Worker must emit a DEBUG record with message 'task started' after
+        dequeuing a task, with task_id and description attributes."""
+        queue = TaskQueue()
+        channel = _make_channel()
+        task = BackgroundTask(
+            channel=channel,
+            description="started log task",
+            instructions="run me",
+        )
+        done = asyncio.Event()
+
+        async def execute_fn(t):
+            done.set()
+            return "result"
+
+        async def on_complete(t, result):
+            pass
+
+        with caplog.at_level(logging.DEBUG, logger="sherman.background"):
+            worker = asyncio.create_task(queue.run_worker(execute_fn, on_complete))
+            await queue.enqueue(task)
+            await asyncio.wait_for(done.wait(), timeout=2.0)
+            worker.cancel()
+            try:
+                await worker
+            except asyncio.CancelledError:
+                pass
+
+        records = [r for r in caplog.records if r.name == "sherman.background"]
+        matching = [
+            r for r in records
+            if r.levelno == logging.DEBUG and r.getMessage() == "task started"
+        ]
+        assert matching, "Expected DEBUG record with message 'task started'"
+        rec = matching[0]
+        assert hasattr(rec, "task_id"), "'task started' log must have task_id attribute"
+        assert rec.task_id == task.task_id
+        assert hasattr(rec, "description"), "'task started' log must have description attribute"
+        assert rec.description == task.description
+
+    async def test_run_worker_logs_task_completed(self, caplog):
+        """Worker must emit a DEBUG record with message 'task completed' after
+        successful execute_fn, with task_id and result_length attributes."""
+        queue = TaskQueue()
+        channel = _make_channel()
+        task = BackgroundTask(
+            channel=channel,
+            description="completed log task",
+            instructions="finish me",
+        )
+        done = asyncio.Event()
+
+        async def execute_fn(t):
+            return "completed output"
+
+        async def on_complete(t, result):
+            done.set()
+
+        with caplog.at_level(logging.DEBUG, logger="sherman.background"):
+            worker = asyncio.create_task(queue.run_worker(execute_fn, on_complete))
+            await queue.enqueue(task)
+            await asyncio.wait_for(done.wait(), timeout=2.0)
+            worker.cancel()
+            try:
+                await worker
+            except asyncio.CancelledError:
+                pass
+
+        records = [r for r in caplog.records if r.name == "sherman.background"]
+        matching = [
+            r for r in records
+            if r.levelno == logging.DEBUG and r.getMessage() == "task completed"
+        ]
+        assert matching, "Expected DEBUG record with message 'task completed'"
+        rec = matching[0]
+        assert hasattr(rec, "task_id"), "'task completed' log must have task_id attribute"
+        assert rec.task_id == task.task_id
+        assert hasattr(rec, "result_length"), (
+            "'task completed' log must have result_length attribute"
+        )
+        assert isinstance(rec.result_length, int), "result_length must be an int"
+
+    async def test_run_worker_logs_task_failed_warning(self, caplog):
+        """Worker must emit a WARNING record with message 'task failed' when
+        execute_fn raises, with task_id attribute and exc_info attached."""
+        queue = TaskQueue()
+        channel = _make_channel()
+        task_fail = BackgroundTask(
+            channel=channel,
+            description="fail task",
+            instructions="explode",
+        )
+        done = asyncio.Event()
+
+        async def execute_fn(t):
+            raise RuntimeError("boom")
+
+        async def on_complete(t, result):
+            done.set()
+
+        with caplog.at_level(logging.DEBUG, logger="sherman.background"):
+            worker = asyncio.create_task(queue.run_worker(execute_fn, on_complete))
+            await queue.enqueue(task_fail)
+            await asyncio.wait_for(done.wait(), timeout=2.0)
+            worker.cancel()
+            try:
+                await worker
+            except asyncio.CancelledError:
+                pass
+
+        records = [r for r in caplog.records if r.name == "sherman.background"]
+        matching = [
+            r for r in records
+            if r.levelno == logging.WARNING and r.getMessage() == "task failed"
+        ]
+        assert matching, "Expected WARNING record with message 'task failed'"
+        rec = matching[0]
+        assert hasattr(rec, "task_id"), "'task failed' log must have task_id attribute"
+        assert rec.task_id == task_fail.task_id
+        assert rec.exc_info is not None, "'task failed' log must have exc_info attached"
+        assert rec.exc_info != (None, None, None), (
+            "exc_info must contain actual exception information"
+        )
