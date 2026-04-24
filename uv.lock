@@ -470,6 +470,15 @@ wheels = [
 ]
 
 [[package]]
+name = "pydle"
+version = "1.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/71/b3/f52fac7b3e2492bfa064d41e1763a7692e4e37eb210b4293239c6e56a81c/pydle-1.1.0.tar.gz", hash = "sha256:019eabd94060c2e46f1a88f53571390bba4865f5b61ab2f3e98d637d649e40d1", size = 37792 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/08/8a/cd1a9b2f5e2e7e26c122ebdbc74f27b0b6767febc40032ead31b9a72a582/pydle-1.1.0-py3-none-any.whl", hash = "sha256:60b30d987b67da3453cf35d27048e59ef3d09704d26c5a3199f50175b9f22dbe", size = 47552 },
+]
+
+[[package]]
 name = "pygments"
 version = "2.20.0"
 source = { registry = "https://pypi.org/simple" }
@@ -551,6 +560,7 @@ dependencies = [
     { name = "aiosqlite" },
     { name = "apluggy" },
     { name = "pydantic" },
+    { name = "pydle" },
     { name = "pyyaml" },
 ]
 
@@ -566,6 +576,7 @@ requires-dist = [
     { name = "aiosqlite", specifier = ">=0.19" },
     { name = "apluggy", specifier = ">=1.1.2" },
     { name = "pydantic", specifier = ">=2.13.3" },
+    { name = "pydle", specifier = ">=0.9" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
     { name = "pyyaml", specifier = ">=6.0.3" },

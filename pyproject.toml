@@ -6,6 +6,7 @@ dependencies = [
     "aiohttp>=3.9",
     "aiosqlite>=0.19",
     "apluggy>=1.1.2",
+    "pydle>=0.9",
     "pydantic>=2.13.3",
     "pyyaml>=6.0.3",
 ]
