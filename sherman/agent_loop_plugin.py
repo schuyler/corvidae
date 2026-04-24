@@ -39,7 +39,7 @@ from pathlib import Path
 
 import aiosqlite
 
-from sherman.agent_loop import run_agent_loop, strip_reasoning_content, strip_thinking, tool_to_schema
+from sherman.agent_loop import _truncate, run_agent_loop, strip_reasoning_content, strip_thinking, tool_to_schema
 from sherman.background import BackgroundTask, TaskQueue
 from sherman.channel_queue import ChannelQueue, QueueItem
 from sherman.conversation import ConversationLog, init_db
@@ -208,6 +208,15 @@ class AgentLoopPlugin:
             tool_call_id=tool_call_id,
             meta=meta or {},
         )
+        logger.debug(
+            "on_notify received",
+            extra={
+                "channel": item.channel.id,
+                "source": item.source,
+                "tool_call_id": item.tool_call_id,
+                "content_length": len(item.content),
+            },
+        )
         queue = self._get_or_create_queue(channel)
         await queue.enqueue(item)
 
@@ -233,6 +242,15 @@ class AgentLoopPlugin:
           "notification" without tool_call_id
                          → {"role": "system", "content": "[source]\n\ncontent"}
         """
+        logger.debug(
+            "processing queue item",
+            extra={
+                "channel": item.channel.id,
+                "role": item.role,
+                "source": item.source,
+                "has_tool_call_id": item.tool_call_id is not None,
+            },
+        )
         channel = item.channel
 
         # Build the conversation message based on item role
@@ -283,6 +301,14 @@ class AgentLoopPlugin:
                 tool_call_id=_tool_call_id,
             )
             await self.task_queue.enqueue(task)
+            logger.debug(
+                "background_task enqueued",
+                extra={
+                    "task_id": task.task_id,
+                    "channel": channel.id,
+                    "description": _truncate(description),
+                },
+            )
             return f"Task {task.task_id} enqueued: {description}"
 
         local_tools = {**self.tools, "background_task": background_task}
@@ -378,6 +404,14 @@ class AgentLoopPlugin:
 
     async def _execute_background_task(self, task: BackgroundTask) -> str:
         """Run a background task with its own conversation context."""
+        logger.debug(
+            "executing background task",
+            extra={
+                "task_id": task.task_id,
+                "description": task.description,
+                "instructions": _truncate(task.instructions or ""),
+            },
+        )
         # Exclude background_task to prevent unbounded recursive task creation.
         bg_tools = {k: v for k, v in self.tools.items() if k != "background_task"}
         bg_schemas = [s for s in self.tool_schemas if s["function"]["name"] != "background_task"]
@@ -404,6 +438,14 @@ class AgentLoopPlugin:
         Routes through on_notify so the LLM sees the task result in the
         conversation and can react to it, rather than sending directly.
         """
+        logger.debug(
+            "task complete, dispatching notification",
+            extra={
+                "task_id": task.task_id,
+                "channel": task.channel.id,
+                "result_length": len(result),
+            },
+        )
         display_result = strip_thinking(result)
         await self.pm.ahook.on_task_complete(
             channel=task.channel, task_id=task.task_id, result=display_result,

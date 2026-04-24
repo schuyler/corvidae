@@ -5,12 +5,11 @@ and tool execution. The loop continues until the LLM responds without tool
 calls or max_turns is reached.
 
 Logging:
+    - DEBUG: LLM response content (truncated), tool call arguments (truncated JSON),
+      tool call result content (truncated)
     - INFO: LLM response (role, tool_calls count, latency_ms), tool call dispatched,
       tool call result
     - WARNING: max rounds reached, unknown tool called, tool exception
-
-Tool call result content is not logged; only result length is recorded. The
-`_truncate` helper is available for future use if result content logging is added.
 """
 
 import inspect
@@ -65,6 +64,7 @@ async def run_agent_loop(
         if max_turns was reached
 
     Logs:
+        DEBUG: LLM response content, tool call arguments, tool call result content
         INFO: Per-turn LLM response metadata, tool calls, results
         WARNING: Max turns reached, unknown tools, tool exceptions
     """
@@ -88,6 +88,14 @@ async def run_agent_loop(
                 "latency_ms": latency_ms,
             },
         )
+        logger.debug(
+            "LLM response content",
+            extra={
+                "content": _truncate(msg.get("content") or ""),
+                "has_reasoning_content": "reasoning_content" in msg,
+                "reasoning_content_length": len(msg["reasoning_content"]) if "reasoning_content" in msg else None,
+            },
+        )
 
         if not tool_calls:
             return msg.get("content", "")
@@ -100,6 +108,13 @@ async def run_agent_loop(
             logger.info(
                 "tool call dispatched",
                 extra={"tool": fn_name, "arg_keys": list(args.keys())},
+            )
+            logger.debug(
+                "tool call arguments",
+                extra={
+                    "tool": fn_name,
+                    "arguments": _truncate(json.dumps(args)),
+                },
             )
 
             if fn_name not in tools:
@@ -121,6 +136,13 @@ async def run_agent_loop(
                     logger.info(
                         "tool call result",
                         extra={"tool": fn_name, "result_length": len(str(content)), "latency_ms": tool_latency_ms},
+                    )
+                    logger.debug(
+                        "tool call result content",
+                        extra={
+                            "tool": fn_name,
+                            "content": _truncate(str(content)),
+                        },
                     )
                 except Exception:
                     logger.warning(

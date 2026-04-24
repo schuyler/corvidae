@@ -1,12 +1,15 @@
 """Background task system for the sherman agent daemon."""
 
 import asyncio
+import logging
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from time import time
 
 from sherman.channel import Channel
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -27,6 +30,14 @@ class TaskQueue:
 
     async def enqueue(self, task: BackgroundTask) -> None:
         """Add a task to the queue."""
+        logger.debug(
+            "task enqueued",
+            extra={
+                "task_id": task.task_id,
+                "channel": task.channel.id,
+                "description": task.description,
+            },
+        )
         await self.queue.put(task)
 
     async def run_worker(
@@ -42,13 +53,26 @@ class TaskQueue:
         while True:
             task = await self.queue.get()
             self.active_task = task
+            logger.debug(
+                "task started",
+                extra={"task_id": task.task_id, "description": task.description},
+            )
             result = f"Task {task.task_id} failed: (unknown error)"
             try:
                 result = await execute_fn(task)
+                logger.debug(
+                    "task completed",
+                    extra={"task_id": task.task_id, "result_length": len(result)},
+                )
             except asyncio.CancelledError:
                 self.active_task = None
                 raise
             except Exception as exc:
+                logger.warning(
+                    "task failed",
+                    extra={"task_id": task.task_id},
+                    exc_info=True,
+                )
                 result = f"Task {task.task_id} failed: {exc}"
             finally:
                 self.queue.task_done()
