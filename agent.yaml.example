@@ -9,8 +9,9 @@ llm:
     # extra_body:                      # optional: provider-specific request payload extensions
     #   id_slot: 0                      # example: llama.cpp KV cache slot for parallelism
   # background:                        # optional: separate LLM for background tasks
-  #   base_url: http://localhost:8080
+  #   base_url: http://localhost:8080   # all fields must be specified; no inheritance from llm.main
   #   model: llama3
+  #   # api_key: sk-...                 # omit for local servers
   #   # extra_body:
   #   #   id_slot: 1
 

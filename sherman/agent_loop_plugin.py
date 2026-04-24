@@ -271,7 +271,7 @@ class AgentLoopPlugin:
         # The closure guards self.task_queue so processing works even if
         # on_start hasn't initialized the background task system yet.
         async def background_task(
-            description: str, instructions: str, _tool_call_id: str = None
+            description: str, instructions: str, _tool_call_id: str | None = None
         ) -> str:
             """Launch a long-running task in the background."""
             if not self.task_queue:

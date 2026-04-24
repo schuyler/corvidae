@@ -305,3 +305,103 @@ Both critical findings are addressable as explicit implementer instructions — 
   - Critical pluggy/apluggy finding: Optional parameters with defaults in hookspecs are NOT forwarded to hookimpls by pluggy. This affected `on_notify(tool_call_id=..., meta=...)`. Fix: removed defaults from the `on_notify` hookspec and hookimpl signatures, making all params required. All callers updated to pass `tool_call_id=None, meta=None` explicitly when not applicable.
   - Background integration tests needed drain() calls added since `_on_task_complete` now routes through `on_notify` (async queue) instead of calling `send_message` directly.
   - A commit `4636477` (IRC constants fix) was made to main between Red TDD and Green TDD, so the starting HEAD for Green TDD was `4636477` not `73213f6`. No conflicts with channel-queue changes.
+
+---
+
+## Green TDD Review
+
+**Reviewer:** Chico (Code Reviewer)
+**Files reviewed:** `sherman/channel_queue.py`, `sherman/hooks.py`, `sherman/background.py`, `sherman/agent_loop.py`, `sherman/agent_loop_plugin.py`, `sherman/cli_plugin.py`, `agent.yaml.example`, `tests/test_agent_loop_plugin.py`, `tests/test_channel_queue.py`, `tests/test_background.py`, `tests/test_logging.py`, `tests/test_main.py`
+
+### Checklist Results
+
+All 16 design/review requirements verified PASS:
+- C1: `task_done()` in `finally` — `channel_queue.py:91-99`; outer loop catches `Exception` at line 93
+- C2: `QueueItem.channel: Channel` present — `channel_queue.py:38`; used via `item.channel` at `agent_loop_plugin.py:236`
+- C3: explicit `_`-prefix filter — `agent_loop.py:162-163` (`if param_name.startswith("_"): continue`)
+- C3: `_tool_call_id` injected from call context — `agent_loop.py:115-118`; not from LLM args
+- CR1: schema tests call `tool_to_schema` directly and exercise the explicit filter
+- CR2: `_drain` guards missing key — `test_agent_loop_plugin.py:119`
+- pluggy: all `on_notify` callers pass `tool_call_id` and `meta` explicitly (no defaults)
+- `_process_queue_item` three-case dispatch — `agent_loop_plugin.py:239-256`
+- `on_stop` stops all queues and `bg_client` — `agent_loop_plugin.py:361-373`
+- `_on_task_complete` uses `on_notify` — `agent_loop_plugin.py:411-417`
+- `_execute_background_task` uses `self.bg_client or self.client` — `agent_loop_plugin.py:390-391`
+- Config parsing: `llm.main` required, `llm.background` optional — `agent_loop_plugin.py:98, 108`
+- CLI `>` prompt moved to `send_message` — `cli_plugin.py:81`
+
+### CRITICAL
+
+None.
+
+### IMPORTANT
+
+**GI1. `asyncio.get_event_loop()` deprecated in Python 3.10+** (`channel_queue.py:79`). `start()` is always called from async context — `asyncio.create_task()` is correct. *Fixed inline: replaced with `asyncio.create_task(self._run(process_fn))`.*
+
+**GI2. `_tool_call_id: str = None` incorrect type annotation** (`agent_loop_plugin.py:274`). Default is `None` but annotation says `str`. *Fixed inline: changed to `str | None = None`.*
+
+### COSMETIC
+
+- GCo1: `on_stop` does not reset `self._worker_task = None` after cancel (unlike `ChannelQueue.stop()`). No functional impact.
+- GCo2: `test_on_task_complete_does_not_call_send_message_directly` has no post-drain assertion; positive case covered by companion test.
+- GCo3: `background_task` placeholder in `self.tools` raises `RuntimeError` if called directly — documented in comment, never reachable in practice.
+
+### Proceed to final test gate: YES
+
+Both important findings fixed inline (one-liners). No critical issues. All design requirements correctly implemented.
+
+---
+
+## Final Test Gate
+
+- Command: uv run pytest --tb=short -q
+- Total tests: 255
+- Baseline: 233
+- Result: PASS (255 ≥ 233; +22 new tests)
+- Notes: 1 pre-existing warning (coroutine never awaited in test_tools.py::TestShell::test_shell_no_output)
+
+---
+
+## Requirements Gate
+
+- Result: PASS
+- Failed requirements: none
+- Notes: All 19 requirements verified against implementation. GI1 (asyncio.create_task) and GI2 (str | None annotation) fixed inline during Green TDD review as documented above.
+
+---
+
+## Documentation Report
+
+- Files changed:
+  - `agent.yaml.example` — added comment on line 12 clarifying that all fields must be specified in `llm.background` (no inheritance from `llm.main`). The structured `llm.main`/`llm.background` format was already present from Green TDD.
+  - `.claude/MEMORY.md` — added `channel_queue.py` and `test_channel_queue.py` to File Map; added `channel-queue-design.md` to plans listing; replaced stale flat-`llm` note with structured-`llm` note; added six new architectural decision entries: per-channel serial queue, breaking config change, pluggy optional-parameter behavior, queue drain test pattern, tool role hypothesis, and `_`-prefixed parameter schema filtering.
+  - `plans/channel-queue-design.md` — appended this report.
+- Notes: The `agent.yaml.example` already reflected the new config structure from Green TDD; only the inheritance clarification comment was missing. MEMORY.md line count is approximately 185 after additions — consolidation is recommended before the next feature session.
+
+---
+
+## Documentation Review
+
+**Reviewer:** Chico (Code Reviewer)
+**Files reviewed:** `agent.yaml.example`, `.claude/MEMORY.md`, `sherman/agent_loop_plugin.py`, `sherman/channel_queue.py`, `sherman/hooks.py`, `sherman/agent_loop.py`
+
+**agent.yaml.example**: Structure is correct and matches `on_start` exactly. Comment "all fields must be specified; no inheritance from llm.main" is accurate.
+
+**MEMORY.md entries — all six verified accurate.** One gap in the `_`-prefixed parameters entry: it described the schema-side filter (general `startswith("_")`) but omitted that the injection side in `run_agent_loop` checks for `_tool_call_id` by exact name, not a general prefix scan. Future injected parameters require an explicit new branch in `run_agent_loop`.
+
+### CRITICAL
+
+None.
+
+### IMPORTANT
+
+**DI1. `_`-prefixed parameters MEMORY entry omitted injection-side behavior.** Fixed inline: clarified that `run_agent_loop` injection is by exact parameter name check, not general prefix scan. A developer adding a new injected parameter must add an explicit branch in `run_agent_loop`.
+
+### COSMETIC
+
+- DCo1: `agent.yaml.example` `background:` block omitted `# api_key: sk-...`, creating asymmetry with `main:`. Fixed inline.
+- DCo2: MEMORY.md at 176+ lines exceeds 150-line consolidation threshold. Consolidation needed before next feature session.
+
+### Proceed to acceptance check: YES
+
+Both findings fixed inline. No critical issues. All six MEMORY entries are factually grounded in the implementation.
