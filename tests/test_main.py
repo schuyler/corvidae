@@ -21,8 +21,10 @@ def _write_config(path: str, data: dict | None = None) -> None:
     """Write a minimal YAML config file."""
     config = data or {
         "llm": {
-            "base_url": "http://localhost:8080",
-            "model": "test-model",
+            "main": {
+                "base_url": "http://localhost:8080",
+                "model": "test-model",
+            },
         },
     }
     with open(path, "w") as f:
@@ -149,8 +151,10 @@ class TestRegistryPopulatedBeforeOnStart:
 
         config_data = {
             "llm": {
-                "base_url": "http://localhost:8080",
-                "model": "test-model",
+                "main": {
+                    "base_url": "http://localhost:8080",
+                    "model": "test-model",
+                },
             },
             "channels": {
                 "irc:#lex": {

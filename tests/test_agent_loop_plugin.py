@@ -19,10 +19,14 @@ from sherman.agent_loop_plugin import AgentLoopPlugin
 # Helpers
 # ---------------------------------------------------------------------------
 
+# BASE_CONFIG migrated from flat llm block to llm.main / llm.background
+# per the channel-queue design (breaking config change, design review Co3).
 BASE_CONFIG = {
     "llm": {
-        "base_url": "http://localhost:8080",
-        "model": "test-model",
+        "main": {
+            "base_url": "http://localhost:8080",
+            "model": "test-model",
+        },
     },
     "daemon": {
         "session_db": ":memory:",
@@ -101,6 +105,19 @@ async def _build_plugin_and_channel(agent_defaults=None, channel_config=None):
     )
 
     return plugin, channel, db
+
+
+async def _drain(plugin, channel):
+    """Drain the channel's queue after on_message returns.
+
+    With the channel queue design, on_message is fire-and-enqueue, so
+    callers must drain to wait for processing before asserting on results.
+
+    Guards against missing queue (CR2: avoids KeyError when queue was
+    never created, e.g. in test_on_task_complete_does_not_call_send_message_directly).
+    """
+    if channel.id in plugin._queues:
+        await plugin._queues[channel.id].drain()
 
 
 # ---------------------------------------------------------------------------
@@ -223,17 +240,95 @@ class TestOnStart:
 
         assert plugin.base_dir == Path(".")
 
-    async def test_on_start_missing_llm_config_raises(self):
-        """Config without llm.base_url or llm.model raises KeyError."""
+    async def test_on_start_missing_llm_main_raises(self):
+        """Config without llm.main raises a clear error (flat llm block is rejected)."""
         pm = create_plugin_manager()
         pm.registry = ChannelRegistry(AGENT_DEFAULTS)
         plugin = AgentLoopPlugin(pm)
         pm.register(plugin, name="agent_loop")
 
-        bad_config = {"llm": {}}  # missing base_url and model
+        # Old flat config — must be rejected with a clear error
+        bad_config = {
+            "llm": {
+                "base_url": "http://localhost:8080",
+                "model": "test-model",
+            }
+        }
 
-        with pytest.raises(KeyError):
+        with pytest.raises((KeyError, ValueError)):
             await plugin.on_start(config=bad_config)
+
+    async def test_on_start_config_parses_llm_main_and_background(self):
+        """on_start with llm.main and llm.background creates both self.client
+        and self.bg_client from the respective blocks."""
+        pm = create_plugin_manager()
+        pm.registry = ChannelRegistry(AGENT_DEFAULTS)
+        pm.ahook.send_message = AsyncMock()
+        pm.ahook.on_agent_response = AsyncMock()
+
+        plugin = AgentLoopPlugin(pm)
+        pm.register(plugin, name="agent_loop")
+
+        mock_main_client = MagicMock()
+        mock_main_client.start = AsyncMock()
+        mock_bg_client = MagicMock()
+        mock_bg_client.start = AsyncMock()
+
+        config_with_bg = {
+            "llm": {
+                "main": {
+                    "base_url": "http://localhost:8080",
+                    "model": "main-model",
+                },
+                "background": {
+                    "base_url": "http://localhost:8081",
+                    "model": "bg-model",
+                },
+            },
+            "daemon": {"session_db": ":memory:"},
+        }
+
+        clients_created = []
+
+        def make_client(base_url, model, api_key=None):
+            if "8081" in base_url or model == "bg-model":
+                clients_created.append("bg")
+                return mock_bg_client
+            clients_created.append("main")
+            return mock_main_client
+
+        with patch("sherman.agent_loop_plugin.LLMClient", side_effect=make_client), \
+             patch("sherman.agent_loop_plugin.aiosqlite.connect", new_callable=AsyncMock) as mock_connect, \
+             patch("sherman.agent_loop_plugin.init_db", new_callable=AsyncMock):
+            mock_connect.return_value = MagicMock()
+            await plugin.on_start(config=config_with_bg)
+
+        # Both clients must be created and started
+        assert plugin.client is mock_main_client
+        assert plugin.bg_client is mock_bg_client
+        mock_main_client.start.assert_awaited()
+        mock_bg_client.start.assert_awaited()
+
+    async def test_on_start_llm_background_absent_leaves_bg_client_none(self):
+        """When llm.background is absent, bg_client is None after on_start."""
+        pm = create_plugin_manager()
+        pm.registry = ChannelRegistry(AGENT_DEFAULTS)
+        pm.ahook.send_message = AsyncMock()
+        pm.ahook.on_agent_response = AsyncMock()
+
+        plugin = AgentLoopPlugin(pm)
+        pm.register(plugin, name="agent_loop")
+
+        mock_client = MagicMock()
+        mock_client.start = AsyncMock()
+
+        with patch("sherman.agent_loop_plugin.LLMClient", return_value=mock_client), \
+             patch("sherman.agent_loop_plugin.aiosqlite.connect", new_callable=AsyncMock) as mock_connect, \
+             patch("sherman.agent_loop_plugin.init_db", new_callable=AsyncMock):
+            mock_connect.return_value = MagicMock()
+            await plugin.on_start(config=BASE_CONFIG)
+
+        assert plugin.bg_client is None
 
 
 # ---------------------------------------------------------------------------
@@ -254,6 +349,7 @@ class TestOnMessageConversationInit:
         assert channel.conversation is None
 
         await plugin.on_message(channel=channel, sender="user", text="hi")
+        await _drain(plugin, channel)
 
         assert channel.conversation is not None
         assert isinstance(channel.conversation, ConversationLog)
@@ -270,9 +366,11 @@ class TestOnMessageConversationInit:
         plugin.client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="first")
+        await _drain(plugin, channel)
         conv_first = channel.conversation
 
         await plugin.on_message(channel=channel, sender="user", text="second")
+        await _drain(plugin, channel)
         conv_second = channel.conversation
 
         assert conv_first is conv_second
@@ -296,6 +394,7 @@ class TestOnMessagePersistenceAndLoop:
         plugin.client = mock_client
 
         await plugin.on_message(channel=channel, sender="alice", text="test message")
+        await _drain(plugin, channel)
 
         conv = channel.conversation
         user_messages = [m for m in conv.messages if m["role"] == "user"]
@@ -315,6 +414,7 @@ class TestOnMessagePersistenceAndLoop:
         with patch("sherman.agent_loop_plugin.run_agent_loop", new_callable=AsyncMock) as mock_loop:
             mock_loop.return_value = "answer"
             await plugin.on_message(channel=channel, sender="user", text="query")
+            await _drain(plugin, channel)
 
         mock_loop.assert_awaited_once()
         call_kwargs = mock_loop.call_args
@@ -340,6 +440,7 @@ class TestOnMessagePersistenceAndLoop:
         plugin.client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="hello")
+        await _drain(plugin, channel)
 
         conv = channel.conversation
         assistant_messages = [m for m in conv.messages if m["role"] == "assistant"]
@@ -358,6 +459,7 @@ class TestOnMessagePersistenceAndLoop:
         plugin.client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="question")
+        await _drain(plugin, channel)
 
         plugin.pm.ahook.send_message.assert_awaited_once_with(
             channel=channel,
@@ -373,7 +475,7 @@ class TestOnMessagePersistenceAndLoop:
         await db.close()
 
     async def test_on_message_with_extra_body_from_config(self):
-        """Plugin should read extra_body from llm config and pass to run_agent_loop."""
+        """Plugin should read extra_body from llm.main config and pass to run_agent_loop."""
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value={
             "choices": [{"message": {"content": "test response"}}]
@@ -381,9 +483,11 @@ class TestOnMessagePersistenceAndLoop:
 
         config = {
             "llm": {
-                "base_url": "http://localhost:8080",
-                "model": "test-model",
-                "extra_body": {"id_slot": 1, "cache_prompt": True}
+                "main": {
+                    "base_url": "http://localhost:8080",
+                    "model": "test-model",
+                    "extra_body": {"id_slot": 1, "cache_prompt": True},
+                },
             },
             "daemon": {"session_db": ":memory:"},
             "_base_dir": Path(".")
@@ -397,6 +501,7 @@ class TestOnMessagePersistenceAndLoop:
 
             await plugin.on_start(config)
             await plugin.on_message(channel=channel, sender="user", text="hello")
+            await _drain(plugin, channel)
 
             # Verify extra_body was passed to run_agent_loop
             call_kwargs = mock_loop.call_args.kwargs
@@ -414,9 +519,11 @@ class TestOnMessagePersistenceAndLoop:
 
         config = {
             "llm": {
-                "base_url": "http://localhost:8080",
-                "model": "test-model",
-                # Note: no extra_body key
+                "main": {
+                    "base_url": "http://localhost:8080",
+                    "model": "test-model",
+                    # Note: no extra_body key
+                },
             },
             "daemon": {"session_db": ":memory:"},
             "_base_dir": Path(".")
@@ -430,6 +537,7 @@ class TestOnMessagePersistenceAndLoop:
 
             await plugin.on_start(config)
             await plugin.on_message(channel=channel, sender="user", text="hello")
+            await _drain(plugin, channel)
 
             # Verify extra_body was NOT passed to run_agent_loop
             call_kwargs = mock_loop.call_args.kwargs
@@ -446,9 +554,11 @@ class TestOnMessagePersistenceAndLoop:
 
         config = {
             "llm": {
-                "base_url": "http://localhost:8080",
-                "model": "test-model",
-                "extra_body": None
+                "main": {
+                    "base_url": "http://localhost:8080",
+                    "model": "test-model",
+                    "extra_body": None,
+                },
             },
             "daemon": {"session_db": ":memory:"},
             "_base_dir": Path(".")
@@ -462,6 +572,7 @@ class TestOnMessagePersistenceAndLoop:
 
             await plugin.on_start(config)
             await plugin.on_message(channel=channel, sender="user", text="hello")
+            await _drain(plugin, channel)
 
             # Verify extra_body was NOT passed to run_agent_loop
             call_kwargs = mock_loop.call_args.kwargs
@@ -478,9 +589,11 @@ class TestOnMessagePersistenceAndLoop:
 
         config = {
             "llm": {
-                "base_url": "http://localhost:8080",
-                "model": "test-model",
-                "extra_body": {}
+                "main": {
+                    "base_url": "http://localhost:8080",
+                    "model": "test-model",
+                    "extra_body": {},
+                },
             },
             "daemon": {"session_db": ":memory:"},
             "_base_dir": Path(".")
@@ -494,6 +607,7 @@ class TestOnMessagePersistenceAndLoop:
 
             await plugin.on_start(config)
             await plugin.on_message(channel=channel, sender="user", text="hello")
+            await _drain(plugin, channel)
 
             # Verify extra_body={} was passed to run_agent_loop
             call_kwargs = mock_loop.call_args.kwargs
@@ -520,6 +634,7 @@ class TestOnMessageThinkingTokens:
         plugin.client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="hi")
+        await _drain(plugin, channel)
 
         plugin.pm.ahook.send_message.assert_awaited_once_with(
             channel=channel,
@@ -558,6 +673,7 @@ class TestOnMessageThinkingTokens:
         plugin.client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="query")
+        await _drain(plugin, channel)
 
         # Prior message still has reasoning_content (not touched)
         assert conv.messages[0].get("reasoning_content") == "prior thinking"
@@ -593,6 +709,7 @@ class TestOnMessageThinkingTokens:
         plugin.client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="query")
+        await _drain(plugin, channel)
 
         conv = channel.conversation
         assistant_messages = [m for m in conv.messages if m.get("role") == "assistant"]
@@ -622,6 +739,7 @@ class TestOnMessageThinkingTokens:
         plugin.client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="query")
+        await _drain(plugin, channel)
 
         # Query the DB directly for this channel's assistant messages
         async with db.execute(
@@ -654,6 +772,7 @@ class TestOnMessageCompactionAndConfig:
         plugin.client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="hi")
+        await _drain(plugin, channel)
 
         # Verify compact_if_needed was called by patching it on the conversation
         # object. We do this on a second message after the conversation exists.
@@ -679,6 +798,7 @@ class TestOnMessageCompactionAndConfig:
             mock_loop.side_effect = tracking_loop
 
             await plugin.on_message(channel=channel, sender="user", text="second message")
+            await _drain(plugin, channel)
 
         assert len(compact_calls) == 1
         assert compact_calls[0][0] is mock_client
@@ -719,6 +839,8 @@ class TestOnMessageCompactionAndConfig:
 
         await plugin.on_message(channel=channel_a, sender="user", text="hello")
         await plugin.on_message(channel=channel_b, sender="user", text="hello")
+        await _drain(plugin, channel_a)
+        await _drain(plugin, channel_b)
 
         assert channel_a.conversation.system_prompt == "Channel A prompt."
         assert channel_b.conversation.system_prompt == "Channel B prompt."
@@ -752,6 +874,54 @@ class TestOnStop:
 
         mock_client.stop.assert_awaited_once()
         mock_db.close.assert_awaited_once()
+
+    async def test_on_stop_cancels_all_queues_and_bg_client(self):
+        """on_stop cancels all channel queue consumers and calls bg_client.stop()."""
+        pm = create_plugin_manager()
+        pm.registry = ChannelRegistry(AGENT_DEFAULTS)
+        pm.ahook.send_message = AsyncMock()
+        pm.ahook.on_agent_response = AsyncMock()
+
+        plugin = AgentLoopPlugin(pm)
+        pm.register(plugin, name="agent_loop")
+
+        mock_client = MagicMock()
+        mock_client.stop = AsyncMock()
+        plugin.client = mock_client
+
+        mock_bg_client = MagicMock()
+        mock_bg_client.stop = AsyncMock()
+        plugin.bg_client = mock_bg_client
+
+        mock_db = MagicMock()
+        mock_db.close = AsyncMock()
+        plugin.db = mock_db
+
+        # Create a couple of channel queues on the plugin so we can verify they are stopped.
+        from sherman.channel_queue import ChannelQueue, QueueItem
+
+        async def noop(item):
+            pass
+
+        q1 = ChannelQueue()
+        q1.start(noop)
+        q2 = ChannelQueue()
+        q2.start(noop)
+
+        plugin._queues = {
+            "test:ch1": q1,
+            "test:ch2": q2,
+        }
+
+        await plugin.on_stop()
+
+        # bg_client.stop() must be called
+        mock_bg_client.stop.assert_awaited_once()
+
+        # All queue consumers must be stopped
+        for q in [q1, q2]:
+            assert q._consumer_task is None or q._consumer_task.done(), \
+                "Queue consumer was not stopped by on_stop()"
 
 
 # ---------------------------------------------------------------------------
@@ -788,6 +958,7 @@ class TestOnMessageToolCallRoundTrip:
         plugin.client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="use the tool")
+        await _drain(plugin, channel)
 
         assert tool_result_store.get("called_with") == "test query"
         plugin.pm.ahook.send_message.assert_awaited_once_with(
@@ -832,6 +1003,7 @@ class TestEnsureConversationPromptResolution:
         plugin.client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="hello")
+        await _drain(plugin, channel)
 
         assert channel.conversation is not None
         assert channel.conversation.system_prompt == "You are Sherman.\n\nThis is IRC."
@@ -851,6 +1023,7 @@ class TestEnsureConversationPromptResolution:
         plugin.client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="hello")
+        await _drain(plugin, channel)
 
         assert channel.conversation is not None
         assert channel.conversation.system_prompt == "You are a test assistant."
@@ -885,6 +1058,7 @@ class TestEnsureConversationPromptResolution:
         plugin.client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="hello")
+        await _drain(plugin, channel)
 
         assert channel.conversation is not None
         assert channel.conversation.system_prompt == "Channel string wins."
@@ -917,6 +1091,7 @@ class TestEnsureConversationPromptResolution:
         plugin.client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="hello")
+        await _drain(plugin, channel)
 
         assert channel.conversation is not None
         assert channel.conversation.system_prompt == "Channel list content."
@@ -946,6 +1121,7 @@ class TestOnMessageErrorHandling:
 
         # Should not raise
         await plugin.on_message(channel=channel, sender="user", text="trigger error")
+        await _drain(plugin, channel)
 
         # send_message should be called with the error text
         plugin.pm.ahook.send_message.assert_awaited_once()
@@ -964,3 +1140,291 @@ class TestOnMessageErrorHandling:
         assert user_messages[0]["content"] == "trigger error"
 
         await db.close()
+
+
+# ---------------------------------------------------------------------------
+# Section 10 — on_notify hook
+# ---------------------------------------------------------------------------
+
+
+class TestOnNotify:
+    async def test_on_notify_enqueues_and_triggers_agent_loop(self):
+        """on_notify enqueues a notification item; after draining, send_message
+        is called with the agent's response to the notification."""
+        plugin, channel, db = await _build_plugin_and_channel()
+
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(return_value=_make_text_response("notified response"))
+        plugin.client = mock_client
+
+        await plugin.pm.ahook.on_notify(
+            channel=channel, source="test", text="background event happened",
+            tool_call_id=None, meta=None,
+        )
+        await _drain(plugin, channel)
+
+        plugin.pm.ahook.send_message.assert_awaited_once_with(
+            channel=channel,
+            text="notified response",
+            latency_ms=ANY,
+        )
+
+        await db.close()
+
+    async def test_on_notify_with_tool_call_id(self):
+        """on_notify with tool_call_id passes it through so the conversation
+        message uses role=tool."""
+        plugin, channel, db = await _build_plugin_and_channel()
+
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(return_value=_make_text_response("tool result acknowledged"))
+        plugin.client = mock_client
+
+        await plugin.pm.ahook.on_notify(
+            channel=channel,
+            source="background_task",
+            text="task done: success",
+            tool_call_id="call_abc123",
+            meta=None,
+        )
+        await _drain(plugin, channel)
+
+        # After draining, agent responded — verify the conversation contained
+        # a tool-role message with the right call_id.
+        assert channel.conversation is not None
+        tool_messages = [
+            m for m in channel.conversation.messages
+            if m.get("role") == "tool"
+        ]
+        assert any(
+            m.get("tool_call_id") == "call_abc123" for m in tool_messages
+        ), f"Expected tool message with call_id=call_abc123 in {tool_messages}"
+
+        await db.close()
+
+
+# ---------------------------------------------------------------------------
+# Section 11 — _on_task_complete uses on_notify path
+# ---------------------------------------------------------------------------
+
+
+class TestOnTaskComplete:
+    async def test_on_task_complete_calls_on_notify(self):
+        """_on_task_complete routes through on_notify, which enqueues a
+        notification item. After draining, send_message is called with
+        the agent's acknowledgment of the task result."""
+        from sherman.background import BackgroundTask
+
+        plugin, channel, db = await _build_plugin_and_channel()
+
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(return_value=_make_text_response("task result acknowledged"))
+        plugin.client = mock_client
+
+        task = BackgroundTask(
+            channel=channel,
+            description="test task",
+            instructions="do something",
+        )
+        # Add tool_call_id so the notification uses the tool role path
+        task.tool_call_id = "call_task_001"
+
+        await plugin._on_task_complete(task, "task succeeded with output X")
+        await _drain(plugin, channel)
+
+        # send_message must be called (the LLM saw the task result and responded)
+        plugin.pm.ahook.send_message.assert_awaited()
+        calls = plugin.pm.ahook.send_message.call_args_list
+        # The message must acknowledge the task result in some way
+        all_texts = " ".join(c.kwargs.get("text", "") for c in calls)
+        assert len(all_texts) > 0, "send_message was called but with no text"
+
+        await db.close()
+
+    async def test_on_task_complete_does_not_call_send_message_directly(self):
+        """_on_task_complete must NOT call send_message directly —
+        it routes through on_notify so the LLM sees the result."""
+        from sherman.background import BackgroundTask
+
+        plugin, channel, db = await _build_plugin_and_channel()
+
+        # Track direct send_message calls before draining
+        plugin.pm.ahook.send_message = AsyncMock()
+
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(return_value=_make_text_response("ack"))
+        plugin.client = mock_client
+
+        task = BackgroundTask(
+            channel=channel,
+            description="test task",
+            instructions="do something",
+        )
+
+        await plugin._on_task_complete(task, "done")
+
+        # Immediately after _on_task_complete returns (before drain),
+        # send_message must NOT have been called directly.
+        plugin.pm.ahook.send_message.assert_not_awaited()
+
+        await _drain(plugin, channel)
+
+        await db.close()
+
+
+# ---------------------------------------------------------------------------
+# Section 12 — bg_client used for background tasks
+# ---------------------------------------------------------------------------
+
+
+class TestBgClient:
+    async def test_bg_client_used_when_llm_background_configured(self):
+        """When llm.background is configured, _execute_background_task uses
+        bg_client, not the main client."""
+        from sherman.background import BackgroundTask
+
+        plugin, channel, db = await _build_plugin_and_channel()
+
+        mock_main_client = MagicMock()
+        mock_main_client.chat = AsyncMock(return_value=_make_text_response("main"))
+        plugin.client = mock_main_client
+
+        mock_bg_client = MagicMock()
+        mock_bg_client.chat = AsyncMock(return_value=_make_text_response("bg result"))
+        plugin.bg_client = mock_bg_client
+
+        task = BackgroundTask(
+            channel=channel,
+            description="bg test",
+            instructions="run in background",
+        )
+
+        with patch("sherman.agent_loop_plugin.run_agent_loop", new_callable=AsyncMock) as mock_loop:
+            mock_loop.return_value = "bg result"
+            await plugin._execute_background_task(task)
+            call_args = mock_loop.call_args
+            # First positional arg should be bg_client, not main client
+            assert call_args[0][0] is mock_bg_client, \
+                "Expected bg_client to be used for background task execution"
+
+        await db.close()
+
+    async def test_main_client_used_when_llm_background_absent(self):
+        """When llm.background is absent (bg_client is None), _execute_background_task
+        falls back to the main client."""
+        from sherman.background import BackgroundTask
+
+        plugin, channel, db = await _build_plugin_and_channel()
+
+        mock_main_client = MagicMock()
+        mock_main_client.chat = AsyncMock(return_value=_make_text_response("main"))
+        plugin.client = mock_main_client
+
+        # bg_client is None (not configured)
+        plugin.bg_client = None
+
+        task = BackgroundTask(
+            channel=channel,
+            description="bg test",
+            instructions="run in background",
+        )
+
+        with patch("sherman.agent_loop_plugin.run_agent_loop", new_callable=AsyncMock) as mock_loop:
+            mock_loop.return_value = "main result"
+            await plugin._execute_background_task(task)
+            call_args = mock_loop.call_args
+            # First positional arg should be the main client
+            assert call_args[0][0] is mock_main_client, \
+                "Expected main client to be used when bg_client is None"
+
+        await db.close()
+
+
+# ---------------------------------------------------------------------------
+# Section 13 — tool schema: _tool_call_id exclusion (design review C3)
+# ---------------------------------------------------------------------------
+
+
+class TestToolSchema:
+    def test_tool_call_id_not_in_background_task_schema(self):
+        """When background_task has _tool_call_id in its signature, it must
+        NOT appear in the generated tool schema (design review C3).
+
+        _-prefixed parameters are injected at call time by run_agent_loop,
+        not supplied by the LLM.
+        """
+        from sherman.agent_loop import tool_to_schema
+
+        async def background_task(
+            description: str,
+            instructions: str,
+            _tool_call_id: str = None,
+        ) -> str:
+            """Launch a long-running task in the background."""
+            pass
+
+        schema = tool_to_schema(background_task)
+        properties = schema["function"]["parameters"].get("properties", {})
+        assert "_tool_call_id" not in properties, \
+            f"_tool_call_id must not appear in tool schema properties, got: {list(properties.keys())}"
+
+    def test_underscore_params_excluded_from_schema(self):
+        """Any parameter whose name starts with _ is excluded from the schema."""
+        from sherman.agent_loop import tool_to_schema
+
+        async def my_tool(x: str, _injected: str = None, y: int = 0) -> str:
+            """A tool with injected params."""
+            pass
+
+        schema = tool_to_schema(my_tool)
+        properties = schema["function"]["parameters"].get("properties", {})
+        assert "_injected" not in properties, \
+            "_injected must not appear in schema"
+        assert "x" in properties, "x must appear in schema"
+        # y may or may not appear depending on whether optional params are included,
+        # but the key assertion is that _injected is absent
+
+    async def test_tool_call_id_injected_at_call_time(self):
+        """When run_agent_loop calls a tool that has _tool_call_id in its
+        signature, the call_id is injected from the tool call, not from
+        LLM-supplied args."""
+        from sherman.agent_loop import run_agent_loop
+
+        injected_call_ids: list[str] = []
+
+        async def my_tool(description: str, _tool_call_id: str = None) -> str:
+            """A tool that captures its injected call id."""
+            injected_call_ids.append(_tool_call_id)
+            return "done"
+
+        # LLM returns a tool call — args do NOT contain _tool_call_id
+        messages = [{"role": "user", "content": "go"}]
+        tool_calls_response = {
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "call_inject_test",
+                        "function": {
+                            "name": "my_tool",
+                            "arguments": json.dumps({"description": "test task"}),
+                        },
+                    }],
+                }
+            }]
+        }
+        final_response = {"choices": [{"message": {"role": "assistant", "content": "all done"}}]}
+
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(side_effect=[tool_calls_response, final_response])
+
+        tools = {"my_tool": my_tool}
+        from sherman.agent_loop import tool_to_schema
+        schemas = [tool_to_schema(my_tool)]
+
+        await run_agent_loop(mock_client, messages, tools, schemas)
+
+        assert len(injected_call_ids) == 1, "Tool must have been called once"
+        assert injected_call_ids[0] == "call_inject_test", \
+            f"Expected call_id 'call_inject_test' injected, got: {injected_call_ids[0]}"

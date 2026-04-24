@@ -108,7 +108,15 @@ async def run_agent_loop(
             else:
                 try:
                     tool_start = time.monotonic()
-                    content = await tools[fn_name](**args)
+                    tool_fn = tools[fn_name]
+                    # Inject _-prefixed parameters from context, not from
+                    # LLM-supplied args. Currently only _tool_call_id is
+                    # injected; future injected params follow the same pattern.
+                    tool_sig = inspect.signature(tool_fn)
+                    call_kwargs = dict(args)
+                    if "_tool_call_id" in tool_sig.parameters:
+                        call_kwargs["_tool_call_id"] = call_id
+                    content = await tool_fn(**call_kwargs)
                     tool_latency_ms = round((time.monotonic() - tool_start) * 1000, 1)
                     logger.info(
                         "tool call result",
@@ -147,6 +155,12 @@ def tool_to_schema(fn: Callable) -> dict:
     sig = inspect.signature(fn)
     fields = {}
     for param_name, param in sig.parameters.items():
+        # CR1: Explicitly skip _-prefixed parameters — they are injected at
+        # call time by run_agent_loop, not supplied by the LLM. Do not rely
+        # on pydantic's private-attribute convention as the implementation
+        # strategy; this check is the authoritative filter.
+        if param_name.startswith("_"):
+            continue
         annotation = param.annotation if param.annotation is not inspect.Parameter.empty else str
         fields[param_name] = (annotation, ...)
 

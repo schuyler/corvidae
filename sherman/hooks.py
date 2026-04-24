@@ -89,3 +89,32 @@ class AgentSpec:
             task_id: Unique identifier for the completed task.
             result: The output produced by the task.
         """
+
+    @hookspec
+    async def on_notify(
+        self,
+        channel: Channel,
+        source: str,
+        text: str,
+        tool_call_id: str | None,
+        meta: dict | None,
+    ) -> None:
+        """Called to inject a notification into a channel's processing queue.
+
+        Plugins implementing this hook can inject messages into a channel so
+        the agent loop sees and reacts to them. The AgentLoopPlugin hookimpl
+        enqueues a QueueItem(role="notification") on the channel's queue.
+
+        Note: all parameters are required (no defaults) so pluggy forwards
+        them correctly to hookimpl implementations. Callers should pass
+        tool_call_id=None and meta=None when not applicable.
+
+        Args:
+            channel: The Channel to notify.
+            source: Origin of the notification (e.g. "background_task").
+            text: The notification content.
+            tool_call_id: If set, the notification is a deferred tool result
+                          and will be formatted as role="tool" in the conversation.
+                          Pass None when not a deferred tool result.
+            meta: Optional extensible metadata (task_id, etc.). Pass None if unused.
+        """

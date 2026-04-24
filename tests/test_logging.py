@@ -814,7 +814,7 @@ class TestAgentLoopPluginLogging:
              patch("sherman.agent_loop_plugin.init_db", new_callable=AsyncMock):
             mock_connect.return_value = MagicMock()
             await plugin.on_start(config={
-                "llm": {"base_url": "http://localhost:8080", "model": "test"},
+                "llm": {"main": {"base_url": "http://localhost:8080", "model": "test"}},
                 "daemon": {"session_db": ":memory:"},
             })
 
@@ -872,6 +872,10 @@ class TestAgentLoopPluginLogging:
 
         with caplog.at_level(logging.INFO, logger="sherman.agent_loop_plugin"):
             await plugin.on_message(channel=channel, sender="alice", text="hello")
+            # Drain the channel queue so the consumer (which emits latency log)
+            # runs before we check caplog records.
+            if channel.id in plugin._queues:
+                await plugin._queues[channel.id].drain()
 
         records = [r for r in caplog.records if r.name == "sherman.agent_loop_plugin"]
         info_records = [r for r in records if r.levelno == logging.INFO]

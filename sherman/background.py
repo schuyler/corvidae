@@ -16,6 +16,7 @@ class BackgroundTask:
     instructions: str
     task_id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     created_at: float = field(default_factory=time)
+    tool_call_id: str | None = None
 
 
 class TaskQueue:

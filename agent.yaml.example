@@ -1,10 +1,18 @@
 # LLM backend — OpenAI-compatible Chat Completions API (required)
+# llm.main is required. llm.background is optional; if absent, background
+# tasks use llm.main.
 llm:
-  base_url: http://localhost:8080   # llama-server, vLLM, OpenAI, etc.
-  model: llama3                     # model name as the backend expects it
-  # api_key: sk-...                 # omit for local servers
-  # extra_body:                      # optional: provider-specific request payload extensions
-  #   id_slot: 1                      # example: llama.cpp KV cache slot for parallelism
+  main:
+    base_url: http://localhost:8080   # llama-server, vLLM, OpenAI, etc.
+    model: llama3                     # model name as the backend expects it
+    # api_key: sk-...                 # omit for local servers
+    # extra_body:                      # optional: provider-specific request payload extensions
+    #   id_slot: 0                      # example: llama.cpp KV cache slot for parallelism
+  # background:                        # optional: separate LLM for background tasks
+  #   base_url: http://localhost:8080
+  #   model: llama3
+  #   # extra_body:
+  #   #   id_slot: 1
 
 # Daemon settings (optional)
 daemon:

@@ -33,8 +33,10 @@ AGENT_DEFAULTS = {
 
 BASE_CONFIG = {
     "llm": {
-        "base_url": "http://localhost:8080",
-        "model": "test-model",
+        "main": {
+            "base_url": "http://localhost:8080",
+            "model": "test-model",
+        },
     },
     "daemon": {
         "session_db": ":memory:",
@@ -447,6 +449,9 @@ class TestBackgroundTaskTool:
 
         with patch("sherman.agent_loop_plugin.run_agent_loop", side_effect=fake_run_agent_loop):
             await plugin.on_message(channel=channel, sender="user", text="launch task")
+            # Drain so the consumer runs fake_run_agent_loop (which calls background_task)
+            if channel.id in plugin._queues:
+                await plugin._queues[channel.id].drain()
 
         assert len(enqueued_tasks) == 1
         assert enqueued_tasks[0].description == "my bg task"
@@ -474,6 +479,9 @@ class TestBackgroundTaskTool:
 
         with patch("sherman.agent_loop_plugin.run_agent_loop", side_effect=fake_run_agent_loop):
             await plugin.on_message(channel=channel, sender="user", text="go")
+            # Drain so the consumer runs fake_run_agent_loop (which calls background_task)
+            if channel.id in plugin._queues:
+                await plugin._queues[channel.id].drain()
 
         assert len(captured_channels) == 1
         assert captured_channels[0] is channel
@@ -531,6 +539,11 @@ class TestBackgroundWorkerIntegration:
             await plugin.task_queue.enqueue(task)
             await asyncio.wait_for(loop_done.wait(), timeout=2.0)
             await asyncio.wait_for(complete_done.wait(), timeout=2.0)
+            # _on_task_complete calls on_notify which enqueues to the channel queue.
+            # Drain so the notification consumer runs (and calls send_message) while
+            # run_agent_loop is still patched.
+            if channel.id in plugin._queues:
+                await asyncio.wait_for(plugin._queues[channel.id].drain(), timeout=2.0)
 
         plugin.pm.ahook.send_message.assert_awaited()
 
@@ -573,7 +586,11 @@ class TestBackgroundWorkerIntegration:
             await plugin.task_queue.enqueue(task_b)
             await asyncio.wait_for(task_a_done.wait(), timeout=3.0)
             await asyncio.wait_for(task_b_done.wait(), timeout=3.0)
-            await asyncio.sleep(0.05)
+            # _on_task_complete calls on_notify which enqueues to each channel queue.
+            # Drain both so the notification consumers run while run_agent_loop is patched.
+            for ch in [channel_a, channel_b]:
+                if ch.id in plugin._queues:
+                    await asyncio.wait_for(plugin._queues[ch.id].drain(), timeout=2.0)
 
         # send_message should have been called at least once per task
         send_calls = plugin.pm.ahook.send_message.call_args_list
@@ -606,6 +623,10 @@ class TestBackgroundWorkerIntegration:
         with patch("sherman.agent_loop_plugin.run_agent_loop", side_effect=fake_run_agent_loop):
             await plugin.task_queue.enqueue(task)
             await asyncio.wait_for(done.wait(), timeout=2.0)
+            # _on_task_complete calls on_notify which enqueues to the channel queue.
+            # Drain so the notification consumer runs while run_agent_loop is patched.
+            if channel.id in plugin._queues:
+                await asyncio.wait_for(plugin._queues[channel.id].drain(), timeout=2.0)
 
         plugin.pm.ahook.on_task_complete.assert_awaited()
         call_kwargs = plugin.pm.ahook.on_task_complete.call_args.kwargs
