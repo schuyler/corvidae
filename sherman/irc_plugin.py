@@ -29,6 +29,20 @@ class IRCClient(pydle.Client):
         self._port = port
         self._tls = tls
 
+    async def on_isupport_modes(self, value):
+        """Handle MODES ISUPPORT token; pydle crashes when value is None."""
+        if value is not None:
+            self._mode_limit = int(value)
+
+    async def on_unknown(self, message):
+        """Demote pydle's WARNING for unhandled numerics to DEBUG."""
+        logger.debug(
+            "Unhandled IRC command: [%s] %s %s",
+            message.source,
+            message.command,
+            message.params,
+        )
+
     async def on_connect(self):
         """Join configured channels after connecting."""
         await super().on_connect()
@@ -123,7 +137,9 @@ class IRCPlugin:
             return
         chunks = split_message(text)
         for chunk in chunks:
-            self.client.message(channel.scope, chunk)
+            if not chunk.strip():
+                continue
+            await self.client.message(channel.scope, chunk)
 
     @hookimpl
     async def on_stop(self) -> None:
@@ -133,13 +149,15 @@ class IRCPlugin:
             task.cancel()
             try:
                 await task
-            except (asyncio.CancelledError, Exception):
+            except asyncio.CancelledError:
                 pass
+            except Exception:
+                logger.debug("Exception awaiting connect_task during shutdown", exc_info=True)
         if self.client is not None:
             try:
                 await self.client.quit("Shutting down")
             except Exception:
-                pass
+                logger.debug("Exception during client.quit", exc_info=True)
             self.client = None
 
 
