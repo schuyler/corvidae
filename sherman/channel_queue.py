@@ -76,9 +76,7 @@ class ChannelQueue:
             process_fn: Async callable invoked for each dequeued item.
                         Signature: async def process_fn(item: QueueItem) -> None
         """
-        self._consumer_task = asyncio.get_event_loop().create_task(
-            self._run(process_fn)
-        )
+        self._consumer_task = asyncio.create_task(self._run(process_fn))
 
     async def _run(self, process_fn: Callable[[QueueItem], Awaitable[None]]) -> None:
         """Consumer loop — runs until cancelled.
