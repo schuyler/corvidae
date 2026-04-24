@@ -32,7 +32,7 @@ class MockClient:
     async def join(self, channel):
         pass
 
-    def message(self, target, message):
+    async def message(self, target, message):
         pass
 
     async def quit(self, message=""):
@@ -43,6 +43,7 @@ mock_pydle = MagicMock()
 mock_pydle.Client = MockClient
 
 with patch.dict('sys.modules', {'pydle': mock_pydle}):
+    import sherman.irc_plugin as _irc_module
     from sherman.irc_plugin import IRCPlugin, IRCClient, split_message
 
 
@@ -230,10 +231,12 @@ class TestSendMessage:
             mock_client_class.return_value = mock_client
             plugin.client = mock_client
 
+            plugin.client.message = AsyncMock()
+
             channel = registry.get_or_create("irc", "#test")
             await plugin.send_message(channel=channel, text="hello")
 
-            plugin.client.message.assert_called_once_with("#test", "hello")
+            plugin.client.message.assert_awaited_once_with("#test", "hello")
 
     async def test_send_message_non_irc_channel_ignored(self):
         """Non-IRC channels produce no client.message() call."""
@@ -245,11 +248,12 @@ class TestSendMessage:
             mock_client = MagicMock()
             mock_client_class.return_value = mock_client
             plugin.client = mock_client
+            plugin.client.message = AsyncMock()
 
             cli_channel = registry.get_or_create("cli", "local")
             await plugin.send_message(channel=cli_channel, text="hello")
 
-            plugin.client.message.assert_not_called()
+            plugin.client.message.assert_not_awaited()
 
     async def test_send_message_long_text_is_split(self):
         """Text exceeding max_len gets split into multiple client.message() calls."""
@@ -261,6 +265,7 @@ class TestSendMessage:
             mock_client = MagicMock()
             mock_client_class.return_value = mock_client
             plugin.client = mock_client
+            plugin.client.message = AsyncMock()
 
             channel = registry.get_or_create("irc", "#test")
             # Create text longer than default max_len (400)
@@ -268,7 +273,42 @@ class TestSendMessage:
             await plugin.send_message(channel=channel, text=long_text)
 
             # Should be called twice due to splitting
-            assert plugin.client.message.call_count == 2
+            assert plugin.client.message.await_count == 2
+
+    async def test_send_message_skips_whitespace_only_chunks(self):
+        """Chunks that are only whitespace are not sent to IRC."""
+        pm, registry = _make_pm_with_registry()
+        plugin = IRCPlugin(pm)
+        pm.register(plugin, name="irc")
+
+        with patch('sherman.irc_plugin.IRCClient') as mock_client_class:
+            mock_client = MagicMock()
+            mock_client_class.return_value = mock_client
+            plugin.client = mock_client
+            plugin.client.message = AsyncMock()
+
+            channel = registry.get_or_create("irc", "#test")
+            # Text that splits into chunks including whitespace-only ones
+            await plugin.send_message(channel=channel, text="\n")
+            plugin.client.message.assert_not_awaited()
+
+            # Also test bare whitespace
+            await plugin.send_message(channel=channel, text="   ")
+            plugin.client.message.assert_not_awaited()
+
+            # But real content still sends
+            await plugin.send_message(channel=channel, text="hello")
+            plugin.client.message.assert_awaited_once_with("#test", "hello")
+
+        # Whitespace-only chunk in a multi-chunk list (defensive filter)
+        plugin.client = MagicMock()
+        plugin.client.message = AsyncMock()
+        channel = registry.get_or_create("irc", "#test")
+        with patch.object(_irc_module, 'split_message',
+                          return_value=["para1", "\n\n", "para2"]):
+            await plugin.send_message(channel=channel, text="ignored")
+        calls = [c.args[1] for c in plugin.client.message.await_args_list]
+        assert calls == ["para1", "para2"]
 
 
 # ---------------------------------------------------------------------------
