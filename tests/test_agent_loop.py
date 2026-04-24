@@ -1,9 +1,18 @@
 """Tests for sherman.agent_loop -- run_agent_loop, tool_to_schema, strip_thinking."""
 
 import json
+import logging
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 from sherman.agent_loop import run_agent_loop, strip_thinking, tool_to_schema
+
+try:
+    from sherman.agent_loop import AgentTurnResult, run_agent_turn
+except ImportError:
+    AgentTurnResult = None
+    run_agent_turn = None
 
 
 def _make_text_response(text: str) -> dict:
@@ -633,3 +642,218 @@ async def test_tool_call_result_content_not_logged_on_exception(caplog):
     assert not result_content_records, (
         "'tool call result content' DEBUG must NOT be emitted when tool raises"
     )
+
+
+# ---------------------------------------------------------------------------
+# run_agent_turn tests
+# ---------------------------------------------------------------------------
+
+
+def _make_mixed_response(text: str, calls: list[dict]) -> dict:
+    """Response with both text content and tool calls."""
+    return {
+        "choices": [
+            {
+                "message": {
+                    "content": text,
+                    "tool_calls": calls,
+                }
+            }
+        ]
+    }
+
+
+def _make_null_content_tool_call_response(calls: list[dict]) -> dict:
+    """Response with content=null and tool calls — as some LLMs emit."""
+    return {
+        "choices": [
+            {
+                "message": {
+                    "content": None,
+                    "tool_calls": calls,
+                }
+            }
+        ]
+    }
+
+
+_skip_no_agent_turn = pytest.mark.skipif(
+    run_agent_turn is None, reason="run_agent_turn not yet implemented"
+)
+
+
+# Cases 1, 7, 8: text-only response; message appended; latency positive float
+@_skip_no_agent_turn
+async def test_run_agent_turn_text_response():
+    """Text response: tool_calls is [], text is the content, message appended,
+    latency_ms is a positive float."""
+    client = MagicMock()
+    client.chat = AsyncMock(return_value=_make_text_response("Hello from turn"))
+
+    messages = [{"role": "user", "content": "Hi"}]
+    result = await run_agent_turn(client, messages, tool_schemas=[])
+
+    assert isinstance(result, AgentTurnResult)
+    assert result.text == "Hello from turn"
+    assert result.tool_calls == []
+    # result.message is the raw assistant dict
+    assert result.message is messages[-1]
+    assert result.message.get("role") == "assistant"
+    # message appended in place (case 7)
+    assert len(messages) == 2
+    assert messages[-1]["content"] == "Hello from turn"
+    # latency_ms is a positive float (case 8)
+    assert isinstance(result.latency_ms, float)
+    assert result.latency_ms >= 0.0
+
+
+# Cases 2, 6: tool-calls-only response with non-empty tool_schemas passes schemas to client
+@_skip_no_agent_turn
+async def test_run_agent_turn_tool_calls_only():
+    """Tool call response: tool_calls populated, text is '', non-empty tool_schemas
+    passed as-is to client.chat()."""
+    tool_schemas = [{"type": "function", "function": {"name": "do_thing"}}]
+    calls = [_make_tool_call("call_1", "do_thing", {"x": 1})]
+    client = MagicMock()
+    client.chat = AsyncMock(return_value=_make_tool_call_response(calls))
+
+    messages = [{"role": "user", "content": "do it"}]
+    expected_call_arg = list(messages)  # snapshot before mutation
+    result = await run_agent_turn(client, messages, tool_schemas=tool_schemas)
+
+    assert result.tool_calls == calls
+    assert result.text == ""
+    # non-empty tool_schemas must be passed through unchanged (case 6)
+    # client.chat is called before the append, so use the pre-mutation snapshot
+    client.chat.assert_awaited_once_with(expected_call_arg, tools=tool_schemas)
+
+
+# Case 3: response with both text and tool calls
+@_skip_no_agent_turn
+async def test_run_agent_turn_text_and_tool_calls():
+    """Response containing both text and tool calls: both are surfaced on result."""
+    calls = [_make_tool_call("call_2", "do_thing", {})]
+    client = MagicMock()
+    client.chat = AsyncMock(return_value=_make_mixed_response("thinking out loud", calls))
+
+    messages = [{"role": "user", "content": "go"}]
+    result = await run_agent_turn(client, messages, tool_schemas=[])
+
+    assert result.text == "thinking out loud"
+    assert result.tool_calls == calls
+
+
+# Case 4: content=null → text is "" not None
+@_skip_no_agent_turn
+async def test_run_agent_turn_null_content_text_is_empty_string():
+    """When the LLM returns content=null, result.text must be '' not None."""
+    calls = [_make_tool_call("call_3", "do_thing", {})]
+    client = MagicMock()
+    client.chat = AsyncMock(return_value=_make_null_content_tool_call_response(calls))
+
+    messages = [{"role": "user", "content": "go"}]
+    result = await run_agent_turn(client, messages, tool_schemas=[])
+
+    assert result.text == ""
+    assert result.text is not None
+
+
+# Case 5: empty tool_schemas → tools=None passed to client.chat()
+@_skip_no_agent_turn
+async def test_run_agent_turn_empty_tool_schemas_passes_none_to_client():
+    """Empty tool_schemas must result in tools=None being passed to client.chat()."""
+    client = MagicMock()
+    client.chat = AsyncMock(return_value=_make_text_response("ok"))
+
+    messages = [{"role": "user", "content": "hi"}]
+    await run_agent_turn(client, messages, tool_schemas=[])
+
+    client.chat.assert_awaited_once()
+    call_kwargs = client.chat.call_args.kwargs
+    assert call_kwargs.get("tools") is None
+
+
+# Case 9: INFO "LLM response received" with latency_ms; DEBUG "LLM response content"
+@_skip_no_agent_turn
+async def test_run_agent_turn_logging_info_and_debug(caplog):
+    """run_agent_turn must emit INFO 'LLM response received' (with latency_ms) and
+    DEBUG 'LLM response content' on a successful call."""
+    client = MagicMock()
+    client.chat = AsyncMock(return_value=_make_text_response("logged"))
+
+    messages = [{"role": "user", "content": "hi"}]
+    with caplog.at_level(logging.DEBUG, logger="sherman.agent_loop"):
+        await run_agent_turn(client, messages, tool_schemas=[])
+
+    records = [r for r in caplog.records if r.name == "sherman.agent_loop"]
+
+    info_records = [
+        r for r in records
+        if r.levelno == logging.INFO and r.getMessage() == "LLM response received"
+    ]
+    assert info_records, "Expected INFO record 'LLM response received'"
+    assert hasattr(info_records[0], "latency_ms"), "'LLM response received' must have latency_ms"
+    assert isinstance(info_records[0].latency_ms, (int, float)), "latency_ms must be numeric"
+
+    debug_records = [
+        r for r in records
+        if r.levelno == logging.DEBUG and r.getMessage() == "LLM response content"
+    ]
+    assert debug_records, "Expected DEBUG record 'LLM response content'"
+
+
+# Case 10: reasoning_content present → DEBUG log attributes
+@_skip_no_agent_turn
+async def test_run_agent_turn_reasoning_content_debug_log(caplog):
+    """When the response contains reasoning_content, the DEBUG 'LLM response content'
+    log must have has_reasoning_content=True and a positive reasoning_content_length."""
+    reasoning_text = "step by step reasoning here"
+    response = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "final answer",
+                    "reasoning_content": reasoning_text,
+                }
+            }
+        ]
+    }
+    client = MagicMock()
+    client.chat = AsyncMock(return_value=response)
+
+    messages = [{"role": "user", "content": "reason through it"}]
+    with caplog.at_level(logging.DEBUG, logger="sherman.agent_loop"):
+        await run_agent_turn(client, messages, tool_schemas=[])
+
+    records = [r for r in caplog.records if r.name == "sherman.agent_loop"]
+    debug_records = [
+        r for r in records
+        if r.levelno == logging.DEBUG and r.getMessage() == "LLM response content"
+    ]
+    assert debug_records, "Expected DEBUG record 'LLM response content'"
+    rec = debug_records[0]
+    assert hasattr(rec, "has_reasoning_content")
+    assert rec.has_reasoning_content is True
+    assert hasattr(rec, "reasoning_content_length")
+    assert isinstance(rec.reasoning_content_length, int)
+    assert rec.reasoning_content_length > 0
+
+
+# Case 11: exception from client.chat() → messages unchanged, exception propagates
+@_skip_no_agent_turn
+async def test_run_agent_turn_exception_leaves_messages_unchanged():
+    """When client.chat() raises, messages must be left unchanged and the exception
+    must propagate unmodified to the caller."""
+    client = MagicMock()
+    client.chat = AsyncMock(side_effect=RuntimeError("session not started"))
+
+    original_message = {"role": "user", "content": "hi"}
+    messages = [original_message]
+
+    with pytest.raises(RuntimeError, match="session not started"):
+        await run_agent_turn(client, messages, tool_schemas=[])
+
+    # messages must be exactly as passed — no assistant message appended
+    assert len(messages) == 1
+    assert messages[0] is original_message
