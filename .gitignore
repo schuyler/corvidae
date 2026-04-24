@@ -8,3 +8,4 @@ dist/
 build/
 *.db
 agent.yaml
+*.swp
