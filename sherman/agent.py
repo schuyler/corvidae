@@ -233,7 +233,10 @@ class AgentPlugin:
         await conv.append(conversation_message)
 
         # 5. Compact if approaching context limit
-        await conv.compact_if_needed(self.client, resolved["max_context_tokens"])
+        try:
+            await conv.compact_if_needed(self.client, resolved["max_context_tokens"])
+        except Exception:
+            logger.warning("compaction failed, skipping", exc_info=True)
 
         # 6. Build prompt and call run_agent_turn (single LLM invocation)
         messages = conv.build_prompt()

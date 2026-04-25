@@ -19,6 +19,8 @@ from typing import TYPE_CHECKING
 
 from pydantic import create_model
 
+MAX_TOOL_RESULT_CHARS = 100_000
+
 if TYPE_CHECKING:
     from sherman.channel import Channel
     from sherman.task import TaskQueue
@@ -194,7 +196,11 @@ async def execute_tool_call(
         )
 
     result = await tool_fn(**call_kwargs)
-    return str(result)
+    result_str = str(result)
+    if len(result_str) > MAX_TOOL_RESULT_CHARS:
+        original_len = len(result_str)
+        result_str = result_str[:MAX_TOOL_RESULT_CHARS] + f"\n[truncated — {original_len} chars total]"
+    return result_str
 
 
 @dataclass

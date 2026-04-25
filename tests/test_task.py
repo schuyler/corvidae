@@ -819,3 +819,205 @@ class TestCompletedDeque:
         assert "deque task output" in status or task.task_id in status, (
             f"status() must show completed task info, got: {status!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# RED PHASE: TaskQueue concurrency (architecture critique item B)
+# ---------------------------------------------------------------------------
+
+
+class TestTaskQueueConcurrency:
+    def test_default_max_workers_is_one(self):
+        """TaskQueue() defaults to max_workers=1."""
+        queue = TaskQueue()
+        assert queue.max_workers == 1, (
+            f"Expected max_workers=1 by default, got {queue.max_workers}"
+        )
+
+    def test_configurable_max_workers(self):
+        """TaskQueue(max_workers=3) stores max_workers=3."""
+        queue = TaskQueue(max_workers=3)
+        assert queue.max_workers == 3, (
+            f"Expected max_workers=3, got {queue.max_workers}"
+        )
+
+    async def test_concurrent_execution(self):
+        """With max_workers=3, three tasks should start concurrently.
+
+        Each task blocks on an asyncio.Event that we set externally.
+        If workers are truly concurrent all 3 start events will be set
+        before any blocking event is released, which is impossible with
+        serial execution.
+        """
+        queue = TaskQueue(max_workers=3)
+        channel = _make_channel()
+
+        # One Event per task that the task sets when it starts executing.
+        started = [asyncio.Event() for _ in range(3)]
+        # A single gate that keeps all tasks blocked until we release them.
+        gate = asyncio.Event()
+        completions = []
+        all_done = asyncio.Event()
+
+        def make_work(i):
+            async def work():
+                started[i].set()
+                await gate.wait()
+                return f"result-{i}"
+            return work
+
+        tasks = [
+            Task(work=make_work(i), channel=channel, description=f"concurrent-{i}")
+            for i in range(3)
+        ]
+
+        async def on_complete(t, result):
+            completions.append(result)
+            if len(completions) == 3:
+                all_done.set()
+
+        # Start workers via run_worker — with max_workers=3 all three should
+        # be spawned so that tasks can execute in parallel.
+        worker = asyncio.create_task(queue.run_worker(on_complete))
+        for t in tasks:
+            await queue.enqueue(t)
+
+        # All three tasks should start before we release the gate.
+        # Give them a short window; serial execution cannot satisfy this.
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*(e.wait() for e in started)),
+                timeout=2.0,
+            )
+        except asyncio.TimeoutError:
+            worker.cancel()
+            try:
+                await worker
+            except asyncio.CancelledError:
+                pass
+            started_count = sum(e.is_set() for e in started)
+            pytest.fail(
+                f"Only {started_count}/3 tasks started concurrently within the timeout. "
+                "This indicates workers are not running concurrently."
+            )
+
+        gate.set()
+        await asyncio.wait_for(all_done.wait(), timeout=2.0)
+        worker.cancel()
+        try:
+            await worker
+        except asyncio.CancelledError:
+            pass
+
+        assert len(completions) == 3
+
+    async def test_concurrency_bounded(self):
+        """With max_workers=2, only 2 of 3 tasks start; the 3rd waits.
+
+        We enqueue 3 tasks that all block on a gate. With max_workers=2
+        only 2 should be running at once. We track the peak number of
+        concurrently running tasks to verify the bound is enforced,
+        avoiding timing-dependent assertions.
+        """
+        queue = TaskQueue(max_workers=2)
+        channel = _make_channel()
+
+        started = [asyncio.Event() for _ in range(3)]
+        gate = asyncio.Event()
+        completions = []
+        all_done = asyncio.Event()
+        # Track peak concurrency without timing dependencies
+        running = 0
+        peak_running = 0
+
+        def make_work(i):
+            async def work():
+                nonlocal running, peak_running
+                running += 1
+                peak_running = max(peak_running, running)
+                started[i].set()
+                await gate.wait()
+                running -= 1
+                return f"result-{i}"
+            return work
+
+        tasks = [
+            Task(work=make_work(i), channel=channel, description=f"bounded-{i}")
+            for i in range(3)
+        ]
+
+        async def on_complete(t, result):
+            completions.append(result)
+            if len(completions) == 3:
+                all_done.set()
+
+        worker = asyncio.create_task(queue.run_worker(on_complete))
+        for t in tasks:
+            await queue.enqueue(t)
+
+        # Wait for at least 2 tasks to start (proves concurrency works at all).
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(started[0].wait(), started[1].wait()),
+                timeout=2.0,
+            )
+        except asyncio.TimeoutError:
+            worker.cancel()
+            try:
+                await worker
+            except asyncio.CancelledError:
+                pass
+            pytest.fail("First 2 tasks did not start within the timeout.")
+
+        # Release the gate so all tasks complete.
+        gate.set()
+        await asyncio.wait_for(all_done.wait(), timeout=2.0)
+
+        worker.cancel()
+        try:
+            await worker
+        except asyncio.CancelledError:
+            pass
+
+        assert len(completions) == 3
+        assert peak_running <= 2, (
+            f"Peak concurrency was {peak_running}, expected <= 2 (max_workers=2)"
+        )
+
+
+# ---------------------------------------------------------------------------
+# RED PHASE: TaskPlugin reads max_task_workers from config (item B)
+# ---------------------------------------------------------------------------
+
+
+class TestTaskPluginConfig:
+    async def test_on_start_reads_max_task_workers_from_config(self):
+        """When config has daemon.max_task_workers=3, TaskQueue gets max_workers=3."""
+        pm = create_plugin_manager()
+        pm.ahook.on_notify = AsyncMock()
+        plugin = TaskPlugin(pm)
+
+        config = {"daemon": {"max_task_workers": 3}}
+        await plugin.on_start(config=config)
+
+        assert plugin.task_queue is not None
+        assert plugin.task_queue.max_workers == 3, (
+            f"Expected max_workers=3 from config, got {plugin.task_queue.max_workers}"
+        )
+
+        await plugin.on_stop()
+
+    async def test_on_start_defaults_to_4_workers(self):
+        """With no config, TaskQueue should have max_workers=4 (not 1)."""
+        pm = create_plugin_manager()
+        pm.ahook.on_notify = AsyncMock()
+        plugin = TaskPlugin(pm)
+
+        await plugin.on_start(config={})
+
+        assert plugin.task_queue is not None
+        assert plugin.task_queue.max_workers == 4, (
+            f"Expected default max_workers=4, got {plugin.task_queue.max_workers}"
+        )
+
+        await plugin.on_stop()

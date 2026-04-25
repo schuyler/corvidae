@@ -52,12 +52,23 @@ class Task:
 
 
 class TaskQueue:
-    """Async worker queue that processes Tasks one at a time."""
+    """Async worker queue that processes Tasks with configurable concurrency."""
 
-    def __init__(self) -> None:
+    def __init__(self, max_workers: int = 1) -> None:
+        self.max_workers = max_workers
         self.queue: asyncio.Queue[Task] = asyncio.Queue()
-        self.active_task: Task | None = None
+        self._active_tasks: list[Task] = []
         self.completed: collections.deque[tuple[str, str]] = collections.deque(maxlen=100)
+
+    @property
+    def active_task(self) -> Task | None:
+        """Return one active task (or None).
+
+        Provided for backward compatibility with single-worker usage.
+        When max_workers > 1, multiple tasks may be active simultaneously;
+        this property returns an arbitrary one.
+        """
+        return next(iter(self._active_tasks), None)
 
     async def enqueue(self, task: Task) -> None:
         """Add a task to the queue."""
@@ -75,14 +86,34 @@ class TaskQueue:
         self,
         on_complete: Callable[[Task, str], Awaitable[None]],
     ) -> None:
-        """Pull tasks from the queue and execute them one at a time.
+        """Pull tasks from the queue and execute up to max_workers concurrently.
 
-        Runs forever (while True). Cancelled via asyncio.Task.cancel()
+        Spawns max_workers worker coroutines that all pull from the shared
+        queue. Runs forever until cancelled via asyncio.Task.cancel()
         during shutdown.
         """
+        workers: list[asyncio.Task] = []
+        try:
+            for _ in range(self.max_workers):
+                workers.append(asyncio.create_task(
+                    self._run_one_worker(on_complete)
+                ))
+            # Block until all workers end (they loop forever, so this
+            # only returns when cancelled).
+            await asyncio.gather(*workers)
+        finally:
+            for w in workers:
+                w.cancel()
+            await asyncio.gather(*workers, return_exceptions=True)
+
+    async def _run_one_worker(
+        self,
+        on_complete: Callable[[Task, str], Awaitable[None]],
+    ) -> None:
+        """Single worker loop — pulls and executes tasks from the shared queue."""
         while True:
             task = await self.queue.get()
-            self.active_task = task
+            self._active_tasks.append(task)
             logger.debug(
                 "task started",
                 extra={"task_id": task.task_id, "description": task.description},
@@ -95,7 +126,10 @@ class TaskQueue:
                     extra={"task_id": task.task_id, "result_length": len(result)},
                 )
             except asyncio.CancelledError:
-                self.active_task = None
+                try:
+                    self._active_tasks.remove(task)
+                except ValueError:
+                    pass
                 raise
             except Exception as exc:
                 logger.warning(
@@ -107,20 +141,22 @@ class TaskQueue:
             finally:
                 self.queue.task_done()
             self.completed.append((task.task_id, result))
-            self.active_task = None
+            try:
+                self._active_tasks.remove(task)
+            except ValueError:
+                pass
             await on_complete(task, result)
 
     def status(self) -> str:
         """Return a human-readable status summary.
 
-        Shows active task, pending count, and last 3 completed results.
+        Shows active task(s), pending count, and last 3 completed results.
         """
         parts = []
 
-        if self.active_task:
-            parts.append(
-                f"Active: [{self.active_task.task_id}] {self.active_task.description}"
-            )
+        if self._active_tasks:
+            for t in self._active_tasks:
+                parts.append(f"Active: [{t.task_id}] {t.description}")
 
         pending = self.queue.qsize()
         if pending:
@@ -161,7 +197,8 @@ class TaskPlugin:
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
-        self.task_queue = TaskQueue()
+        max_workers = config.get("daemon", {}).get("max_task_workers", 4)
+        self.task_queue = TaskQueue(max_workers=max_workers)
 
         async def _complete_wrapper(task: Task, result: str) -> None:
             return await self._on_task_complete(task, result)

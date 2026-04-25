@@ -206,3 +206,58 @@ class TestCoreToolsPlugin:
         # Items are Tool instances after Step 4
         names = {item.name if isinstance(item, Tool) else item.__name__ for item in registry}
         assert names == {"shell", "read_file", "write_file", "web_fetch"}
+
+
+# ---------------------------------------------------------------------------
+# TestWebFetchSessionReuse
+# ---------------------------------------------------------------------------
+
+
+class TestWebFetchSessionReuse:
+    def test_core_tools_plugin_has_on_start(self):
+        plugin = CoreToolsPlugin()
+        assert hasattr(plugin, "on_start"), "CoreToolsPlugin must have an on_start method"
+        assert callable(plugin.on_start)
+
+    def test_core_tools_plugin_has_on_stop(self):
+        plugin = CoreToolsPlugin()
+        assert hasattr(plugin, "on_stop"), "CoreToolsPlugin must have an on_stop method"
+        assert callable(plugin.on_stop)
+
+    async def test_session_created_on_start(self):
+        import aiohttp
+        plugin = CoreToolsPlugin()
+        await plugin.on_start()
+        try:
+            assert hasattr(plugin, "_session"), "CoreToolsPlugin must have a _session attribute after on_start"
+            assert isinstance(plugin._session, aiohttp.ClientSession)
+        finally:
+            if hasattr(plugin, "_session") and plugin._session is not None:
+                await plugin._session.close()
+
+    async def test_session_closed_on_stop(self):
+        plugin = CoreToolsPlugin()
+        await plugin.on_start()
+        session = plugin._session
+        await plugin.on_stop()
+        assert session.closed, "Session must be closed after on_stop"
+
+
+# ---------------------------------------------------------------------------
+# TestFileToolsAsyncIO
+# ---------------------------------------------------------------------------
+
+
+class TestFileToolsAsyncIO:
+    async def test_read_file_uses_thread(self, tmp_path):
+        f = tmp_path / "test.txt"
+        f.write_text("contents")
+        with patch("asyncio.to_thread", wraps=asyncio.to_thread) as mock_to_thread:
+            await read_file(str(f))
+        mock_to_thread.assert_called()
+
+    async def test_write_file_uses_thread(self, tmp_path):
+        target = tmp_path / "out.txt"
+        with patch("asyncio.to_thread", wraps=asyncio.to_thread) as mock_to_thread:
+            await write_file(str(target), "data")
+        mock_to_thread.assert_called()

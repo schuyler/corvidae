@@ -146,3 +146,73 @@ async def test_execute_tool_call_ctx_defaults_none():
     assert ctx.channel is None
     assert ctx.task_queue is None
     assert ctx.tool_call_id == "call_defaults"
+
+
+# ---------------------------------------------------------------------------
+# Tests for tool result truncation (item D — red phase, expected to FAIL)
+# ---------------------------------------------------------------------------
+
+
+class TestToolResultTruncation:
+    """Tests for MAX_TOOL_RESULT_CHARS truncation in execute_tool_call.
+
+    These tests MUST FAIL against current code because truncation is not
+    implemented yet.
+    """
+
+    async def test_result_within_limit_unchanged(self):
+        """A tool returning 100 chars returns that result unchanged."""
+        from sherman.tool import MAX_TOOL_RESULT_CHARS  # noqa: F401 — import confirms constant exists
+
+        output = "x" * 100
+
+        async def small_tool() -> str:
+            """Returns 100 chars."""
+            return output
+
+        result = await execute_tool_call(small_tool, {}, tool_call_id="call_small")
+        assert result == output
+        assert len(result) == 100
+
+    async def test_result_at_limit_unchanged(self):
+        """A tool returning exactly MAX_TOOL_RESULT_CHARS returns that result unchanged."""
+        from sherman.tool import MAX_TOOL_RESULT_CHARS
+
+        output = "y" * MAX_TOOL_RESULT_CHARS
+
+        async def exact_tool() -> str:
+            """Returns exactly MAX_TOOL_RESULT_CHARS chars."""
+            return output
+
+        result = await execute_tool_call(exact_tool, {}, tool_call_id="call_exact")
+        assert result == output
+        assert len(result) == MAX_TOOL_RESULT_CHARS
+
+    async def test_result_exceeds_limit_truncated(self):
+        """A tool returning 150_000 chars is truncated to MAX_TOOL_RESULT_CHARS."""
+        from sherman.tool import MAX_TOOL_RESULT_CHARS
+
+        output = "z" * 150_000
+
+        async def large_tool() -> str:
+            """Returns 150k chars."""
+            return output
+
+        result = await execute_tool_call(large_tool, {}, tool_call_id="call_large")
+        assert len(result) <= MAX_TOOL_RESULT_CHARS + 200  # allow for truncation notice
+        assert result[:MAX_TOOL_RESULT_CHARS] == output[:MAX_TOOL_RESULT_CHARS]
+        assert "truncated" in result.lower()
+
+    async def test_truncation_notice_format(self):
+        """Truncation notice includes the original length."""
+        from sherman.tool import MAX_TOOL_RESULT_CHARS
+
+        original_len = 150_000
+        output = "a" * original_len
+
+        async def big_tool() -> str:
+            """Returns 150k chars."""
+            return output
+
+        result = await execute_tool_call(big_tool, {}, tool_call_id="call_notice")
+        assert str(original_len) in result
