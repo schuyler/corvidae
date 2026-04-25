@@ -9,6 +9,7 @@ Contains:
 from __future__ import annotations
 
 import asyncio
+import collections
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
@@ -56,7 +57,7 @@ class TaskQueue:
     def __init__(self) -> None:
         self.queue: asyncio.Queue[Task] = asyncio.Queue()
         self.active_task: Task | None = None
-        self.completed: dict[str, str] = {}  # task_id -> result
+        self.completed: collections.deque[tuple[str, str]] = collections.deque(maxlen=100)
 
     async def enqueue(self, task: Task) -> None:
         """Add a task to the queue."""
@@ -105,7 +106,7 @@ class TaskQueue:
                 result = f"Task {task.task_id} failed: {exc}"
             finally:
                 self.queue.task_done()
-            self.completed[task.task_id] = result
+            self.completed.append((task.task_id, result))
             self.active_task = None
             await on_complete(task, result)
 
@@ -126,7 +127,7 @@ class TaskQueue:
             parts.append(f"Pending: {pending} task(s)")
 
         if self.completed:
-            recent = list(self.completed.items())[-3:]
+            recent = list(self.completed)[-3:]  # already (task_id, result) tuples
             completed_lines = []
             for tid, res in recent:
                 completed_lines.append(f"  [{tid}] {res}")

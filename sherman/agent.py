@@ -31,6 +31,7 @@ import json
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 
 import aiosqlite
@@ -47,12 +48,18 @@ from sherman.tool import Tool, ToolContext, ToolRegistry, execute_tool_call
 logger = logging.getLogger("sherman.agent")
 
 
+class QueueItemRole(Enum):
+    USER = "user"
+    NOTIFICATION = "notification"
+
+
 @dataclass
 class QueueItem:
     """A single item in the per-channel processing queue.
 
     Attributes:
-        role: "user" for inbound messages, "notification" for injected events.
+        role: QueueItemRole.USER for inbound messages, QueueItemRole.NOTIFICATION
+            for injected events.
         content: The text content to process.
         channel: The Channel this item belongs to.
         sender: For user messages, the sender identity; None for notifications.
@@ -61,7 +68,7 @@ class QueueItem:
         meta: Extensible metadata (task_id, etc.).
     """
 
-    role: str
+    role: QueueItemRole
     content: str
     channel: Channel
     sender: str | None = None
@@ -112,7 +119,7 @@ class AgentPlugin:
         )
 
         item = QueueItem(
-            role="user",
+            role=QueueItemRole.USER,
             content=text,
             channel=channel,
             sender=sender,
@@ -131,7 +138,7 @@ class AgentPlugin:
     ) -> None:
         """Enqueue a notification item on the channel's queue."""
         item = QueueItem(
-            role="notification",
+            role=QueueItemRole.NOTIFICATION,
             content=text,
             channel=channel,
             source=source,
@@ -190,10 +197,10 @@ class AgentPlugin:
         channel = item.channel
 
         # Build the conversation message based on item role
-        if item.role == "user":
+        if item.role == QueueItemRole.USER:
             conversation_message = {"role": "user", "content": item.content}
             request_text = item.content
-        elif item.role == "notification":
+        elif item.role == QueueItemRole.NOTIFICATION:
             if item.tool_call_id:
                 conversation_message = {
                     "role": "tool",
@@ -215,7 +222,7 @@ class AgentPlugin:
         conv = channel.conversation
 
         # 2. Reset turn_counter on user messages
-        if item.role == "user":
+        if item.role == QueueItemRole.USER:
             channel.turn_counter = 0
 
         # 3. Resolve config and read max_turns_limit

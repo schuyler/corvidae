@@ -196,7 +196,7 @@ async def run_agent_loop(
                     logger.warning(
                         "tool %s raised exception", fn_name, exc_info=True
                     )
-                    content = f"Error: unknown error"
+                    content = f"Error: tool '{fn_name}' raised an exception"
 
             messages.append({
                 "role": "tool",

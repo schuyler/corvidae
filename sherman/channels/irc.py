@@ -134,7 +134,7 @@ class IRCPlugin:
         )
 
     @hookimpl
-    async def send_message(self, channel: Channel, text: str) -> None:
+    async def send_message(self, channel: Channel, text: str, latency_ms: float | None = None) -> None:
         # Broadcast-filter: pluggy calls all transports; return early if this
         # channel does not belong to the IRC transport.
         if not channel.matches_transport("irc"):

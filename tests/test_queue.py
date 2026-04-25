@@ -230,3 +230,97 @@ class TestStop:
         await asyncio.sleep(0.05)  # give any lingering consumer a chance to run
 
         assert "after-stop" not in processed
+
+
+# ---------------------------------------------------------------------------
+# RED PHASE: QueueItemRole enum (architecture critique)
+# ---------------------------------------------------------------------------
+
+
+class TestQueueItemRole:
+    def test_queue_item_role_enum_exists(self):
+        """QueueItemRole enum must be importable from sherman.agent."""
+        from sherman.agent import QueueItemRole
+        assert QueueItemRole is not None
+
+    def test_queue_item_role_has_user_member(self):
+        """QueueItemRole must have a USER member."""
+        from sherman.agent import QueueItemRole
+        assert hasattr(QueueItemRole, "USER")
+
+    def test_queue_item_role_has_notification_member(self):
+        """QueueItemRole must have a NOTIFICATION member."""
+        from sherman.agent import QueueItemRole
+        assert hasattr(QueueItemRole, "NOTIFICATION")
+
+    def test_queue_item_role_is_enum(self):
+        """QueueItemRole must be an enum (not just a class with attributes)."""
+        import enum
+        from sherman.agent import QueueItemRole
+        assert issubclass(QueueItemRole, enum.Enum)
+
+    async def test_on_message_creates_item_with_user_role(self):
+        """QueueItem created via on_message must use QueueItemRole.USER."""
+        from sherman.agent import AgentPlugin, QueueItemRole
+        from sherman.hooks import create_plugin_manager
+        from sherman.channel import ChannelRegistry, Channel, ChannelConfig
+        from sherman.queue import SerialQueue
+
+        pm = create_plugin_manager()
+        registry = ChannelRegistry({"system_prompt": "", "max_context_tokens": 8000, "keep_thinking_in_history": False})
+        pm.register(registry, name="registry")
+        plugin = AgentPlugin.__new__(AgentPlugin)
+        plugin.pm = pm
+        plugin.client = object()  # non-None so on_message proceeds
+        plugin._queues = {}
+        plugin._registry = registry
+
+        captured_items = []
+
+        async def fake_process(item):
+            captured_items.append(item)
+
+        ch = Channel(transport="test", scope="s1", config=ChannelConfig())
+
+        q = SerialQueue()
+        q.start(fake_process)
+        plugin._queues[ch.id] = q
+
+        await plugin.on_message(channel=ch, sender="alice", text="hello")
+        await q.drain()
+
+        assert len(captured_items) == 1
+        assert captured_items[0].role == QueueItemRole.USER
+
+    async def test_on_notify_creates_item_with_notification_role(self):
+        """QueueItem created via on_notify must use QueueItemRole.NOTIFICATION."""
+        from sherman.agent import AgentPlugin, QueueItemRole
+        from sherman.hooks import create_plugin_manager
+        from sherman.channel import ChannelRegistry, Channel, ChannelConfig
+        from sherman.queue import SerialQueue
+
+        pm = create_plugin_manager()
+        registry = ChannelRegistry({"system_prompt": "", "max_context_tokens": 8000, "keep_thinking_in_history": False})
+        pm.register(registry, name="registry")
+        plugin = AgentPlugin.__new__(AgentPlugin)
+        plugin.pm = pm
+        plugin.client = object()
+        plugin._queues = {}
+        plugin._registry = registry
+
+        captured_items = []
+
+        async def fake_process(item):
+            captured_items.append(item)
+
+        ch = Channel(transport="test", scope="s2", config=ChannelConfig())
+
+        q = SerialQueue()
+        q.start(fake_process)
+        plugin._queues[ch.id] = q
+
+        await plugin.on_notify(channel=ch, source="task", text="done", tool_call_id=None, meta=None)
+        await q.drain()
+
+        assert len(captured_items) == 1
+        assert captured_items[0].role == QueueItemRole.NOTIFICATION
