@@ -45,27 +45,29 @@ class ConversationLog:
         self.system_prompt: str = ""
 
     async def load(self) -> None:
-        """Load messages from DB for this channel, ordered by timestamp.
+        """Load messages from DB for this channel, ordered by id.
 
         If a summary row exists, loads only that summary plus non-summary rows
-        after it. Otherwise loads all rows in order. Logs the message count at
-        DEBUG level.
+        with a higher id. Otherwise loads all rows ordered by timestamp then id.
+        Logs the message count at DEBUG level.
         """
         async with self.db.execute(
-            "SELECT timestamp, message FROM message_log "
+            "SELECT id, message FROM message_log "
             "WHERE channel_id = ? AND is_summary = 1 "
-            "ORDER BY timestamp DESC LIMIT 1",
+            "ORDER BY id DESC LIMIT 1",
             (self.channel_id,),
         ) as cursor:
             summary_row = await cursor.fetchone()
 
         if summary_row:
-            summary_ts, summary_message = summary_row
+            summary_id, summary_message = summary_row
+            # Load all non-summary rows — summarized messages are deleted
+            # during compaction, so only retained + new messages remain.
             async with self.db.execute(
                 "SELECT message FROM message_log "
-                "WHERE channel_id = ? AND timestamp > ? AND is_summary = 0 "
-                "ORDER BY timestamp, id",
-                (self.channel_id, summary_ts),
+                "WHERE channel_id = ? AND is_summary = 0 "
+                "ORDER BY id",
+                (self.channel_id,),
             ) as cursor:
                 rows = await cursor.fetchall()
             self.messages = [json.loads(summary_message)] + [json.loads(row[0]) for row in rows]
@@ -195,22 +197,46 @@ class ConversationLog:
     async def _persist_summary(self, summary_msg: dict) -> None:
         """Persist a compaction summary to the DB.
 
-        Inserts a summary row with is_summary=1 timestamped just before the
-        oldest retained message so that load() can use it as a cutoff.
+        Deletes summarized (non-retained) messages and old summary rows,
+        then inserts the new summary. After this, the DB contains only
+        retained messages and the summary row. load() finds the summary
+        and loads all remaining non-summary rows.
+
+        Invariant: self.messages must reflect the current DB state — i.e.,
+        len(self.messages) - 1 retained messages must correspond to the
+        most recent non-summary rows in the DB. This holds because append()
+        keeps in-memory and DB state in sync, and compact_if_needed is the
+        only caller.
         """
         num_retained = len(self.messages) - 1
+        # Find the id of the oldest retained message
         async with self.db.execute(
-            "SELECT timestamp FROM message_log "
+            "SELECT id FROM message_log "
             "WHERE channel_id = ? AND is_summary = 0 "
-            "ORDER BY timestamp DESC, id DESC LIMIT 1 OFFSET ?",
+            "ORDER BY id DESC LIMIT 1 OFFSET ?",
             (self.channel_id, num_retained - 1),
         ) as cursor:
             row = await cursor.fetchone()
-        summary_ts = row[0] - 0.001 if row else time.time()
+
+        if row:
+            oldest_retained_id = row[0]
+            # Delete summarized messages (non-summary rows before retained set)
+            await self.db.execute(
+                "DELETE FROM message_log "
+                "WHERE channel_id = ? AND is_summary = 0 AND id < ?",
+                (self.channel_id, oldest_retained_id),
+            )
+        # Delete old summary rows
+        await self.db.execute(
+            "DELETE FROM message_log "
+            "WHERE channel_id = ? AND is_summary = 1",
+            (self.channel_id,),
+        )
+        # Insert the new summary
         await self.db.execute(
             "INSERT INTO message_log (channel_id, message, timestamp, is_summary) "
             "VALUES (?, ?, ?, 1)",
-            (self.channel_id, json.dumps(summary_msg), summary_ts),
+            (self.channel_id, json.dumps(summary_msg), time.time()),
         )
         await self.db.commit()
 

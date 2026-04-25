@@ -62,7 +62,7 @@ class AgentSpec:
     async def on_stop(self) -> None
     async def on_message(self, channel: Channel, sender: str, text: str) -> None
     async def send_message(self, channel: Channel, text: str, latency_ms: float | None = None) -> None
-    def register_tools(self, tool_registry: list) -> None  # sync
+    def register_tools(self, tool_registry: ToolRegistry) -> None  # sync; use Tool.from_function(fn) to register
     async def on_agent_response(self, channel: Channel, request_text: str, response_text: str) -> None
     async def on_notify(self, channel: Channel, source: str, text: str, tool_call_id: str | None, meta: dict | None) -> None
 ```
@@ -214,9 +214,12 @@ Tools that don't declare `_ctx` work without modification.
 - `build_prompt()` — returns `[system_msg, *messages]`
 - `token_estimate()` — rough count via `chars / 3.5`
 - `compact_if_needed(client, max_tokens)` — when token estimate reaches
-  80% of limit, summarizes older messages via an LLM call, keeping the
-  last 20 messages intact. Compaction only affects the in-memory prompt;
-  the persistent log is append-only.
+  80% of limit, summarizes older messages via an LLM call. Retention
+  uses a token-budget backward walk: starting from the most recent
+  message, messages are kept until they would exceed 50% of
+  `max_tokens`; the rest are replaced by a summary. Compaction is
+  durable: summaries are persisted to the DB and summarized messages
+  are deleted, so the working set survives restarts.
 
 **Thinking token handling** — three layers:
 - Display: `strip_thinking()` removes `<think>` blocks from content
@@ -233,10 +236,15 @@ CREATE TABLE message_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     channel_id TEXT NOT NULL,
     message TEXT NOT NULL,      -- JSON
-    timestamp REAL NOT NULL
+    timestamp REAL NOT NULL,
+    is_summary INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX idx_log_channel ON message_log(channel_id, timestamp);
 ```
+
+`is_summary` marks rows written by compaction (the synthetic summary
+message). Added via `ALTER TABLE message_log ADD COLUMN is_summary
+INTEGER NOT NULL DEFAULT 0` on existing databases.
 
 ## AgentPlugin
 
@@ -300,9 +308,13 @@ channel queue.
 ### QueueItem
 
 ```python
+class QueueItemRole(Enum):
+    USER = "user"
+    NOTIFICATION = "notification"
+
 @dataclass
 class QueueItem:
-    role: str        # "user" or "notification"
+    role: QueueItemRole
     content: str
     channel: Channel
     sender: str | None = None
@@ -331,12 +343,14 @@ class Task:
 The queue doesn't know what `work` does — it calls `await task.work()`,
 catches exceptions, and delivers the result via `on_notify`.
 
-**TaskQueue** — FIFO async worker. One task at a time. Tracks active
-task and completed results.
+**TaskQueue** — FIFO async worker with configurable concurrency. Accepts
+`max_workers` (default 1) to run up to that many tasks simultaneously.
+Tracks active tasks and completed results (bounded deque, last 100).
 
-**TaskPlugin** — hookimpl that owns the TaskQueue. Starts/stops the
-worker on lifecycle hooks. Registers the `task_status` tool. On task
-completion, fires `on_notify`.
+**TaskPlugin** — hookimpl that owns the TaskQueue. Reads
+`daemon.max_task_workers` from config (default 4) to set concurrency.
+Starts/stops the worker on lifecycle hooks. Registers the `task_status`
+tool. On task completion, fires `on_notify`.
 
 ## Subagent Tool
 
@@ -446,7 +460,7 @@ channels:
     max_turns: 5
 
 irc:
-  server: irc.lan
+  host: irc.lan
   port: 6667
   nick: agent
   channels:
@@ -544,12 +558,25 @@ sherman/
 **Tool result ordering.** When the LLM requests multiple tool calls,
 each completes independently and triggers a separate agent turn. The
 LLM sees results one at a time, not batched. This may cause chattier
-behavior or premature responses. Batching can be added later if needed.
+behavior or premature responses. Batching is intentionally not
+implemented: it adds timeout and partial-failure complexity (what
+happens when one tool in a batch hangs or errors?) that is not worth
+the cost for a personal daemon where correctness and simplicity matter
+more than throughput. Can be revisited if chattiness becomes a real
+problem.
 
 **User message interleaving.** If a user sends a new message while tool
 results are still pending, the conversation may interleave user
 messages with tool results. The SerialQueue serializes processing (no
 races), but ordering depends on arrival time.
+
+**Shell sandboxing.** The `shell` tool runs commands without any
+sandbox or privilege restriction. This is intentional: Sherman is a
+personal agent daemon running on the user's own machine, not a
+multi-tenant service. Sandboxing would add complexity while providing
+no security benefit in the single-user deployment model. This would
+need to change before deploying Sherman in any shared or untrusted
+environment.
 
 ## Unimplemented
 
@@ -568,8 +595,8 @@ are registered statically in `main.py`.
 The original design described a retrieval system using embeddings
 (nomic-embed-text or similar) with sqlite-vec for vector similarity
 search. The system would inject `<memory>` blocks into the conversation
-stream between turns. Prerequisites exist (the append-only message log),
-but the retrieval pipeline is not built.
+stream between turns. Prerequisites exist (the message log with durable
+compaction), but the retrieval pipeline is not built.
 
 ### Double-buffer compaction
 

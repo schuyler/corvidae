@@ -751,3 +751,55 @@ class TestNoSendMessageWhenToolCallsDispatched:
         # send_message should NOT have been called yet.
         # Under old run_agent_loop: send_message IS called -> test fails.
         plugin.pm.ahook.send_message.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Test 14: compaction failure resilience
+# ---------------------------------------------------------------------------
+
+
+class TestCompactionFailureResilience:
+    async def test_compaction_failure_does_not_prevent_response(
+        self, plugin_and_channel, caplog
+    ):
+        """compact_if_needed raising does not prevent run_agent_turn or send_message.
+
+        The fix (not yet implemented) wraps compact_if_needed in try/except,
+        logs a warning, and continues. This test MUST FAIL against current code
+        because the exception propagates and send_message is never called.
+        """
+        import logging
+        from unittest.mock import patch
+
+        plugin, channel, db = plugin_and_channel
+
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(return_value=_make_text_response("response after failed compaction"))
+        plugin.client = mock_client
+
+        # Trigger lazy conversation init so channel.conversation is set
+        await plugin._ensure_conversation(channel)
+        conv = channel.conversation
+
+        # Patch compact_if_needed to raise RuntimeError
+        with caplog.at_level(logging.WARNING, logger="sherman.agent"):
+            with patch.object(conv, "compact_if_needed", side_effect=RuntimeError("compaction boom")):
+                await plugin.on_message(channel=channel, sender="user", text="hello")
+                await _drain(plugin, channel)
+
+        # Despite compaction failure, run_agent_turn must have been called
+        # (evidenced by mock_client.chat being called) and send_message must have fired.
+        mock_client.chat.assert_called_once()
+        plugin.pm.ahook.send_message.assert_called_once()
+        sent_text = plugin.pm.ahook.send_message.call_args.kwargs["text"]
+        assert "response after failed compaction" in sent_text
+
+        # The failure must be logged as a warning, not silently swallowed.
+        warning_records = [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING and "compaction" in r.getMessage().lower()
+        ]
+        assert warning_records, (
+            "Expected a WARNING log about compaction failure; "
+            "exceptions must not be silently swallowed"
+        )

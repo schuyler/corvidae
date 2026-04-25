@@ -21,3 +21,19 @@ async def web_fetch(url: str) -> str:
         return f"Error: request timed out after 15 seconds"
     except aiohttp.ClientError as exc:
         return f"Error: {exc}"
+
+
+async def web_fetch_with_session(session: aiohttp.ClientSession, url: str) -> str:
+    """Fetch a URL using a pre-existing aiohttp.ClientSession."""
+    try:
+        async with session.get(url) as response:
+            if response.status != 200:
+                return f"HTTP {response.status}"
+            text = await response.text()
+            if len(text) > 50000:
+                return text[:50000] + "[truncated]"
+            return text
+    except asyncio.TimeoutError:
+        return f"Error: request timed out after 15 seconds"
+    except aiohttp.ClientError as exc:
+        return f"Error: {exc}"
