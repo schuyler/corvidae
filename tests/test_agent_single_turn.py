@@ -96,7 +96,7 @@ async def _build_plugin_and_channel(
     pm.ahook.on_task_complete = AsyncMock()
     # NOTE: on_notify is NOT mocked — both AgentPlugin and TaskPlugin use it.
 
-    # Register TaskPlugin (replaces BackgroundPlugin in Phase 3)
+    # Register TaskPlugin
     task_plugin = TaskPlugin(pm)
     pm.register(task_plugin, name="task_plugin")
     await task_plugin.on_start(config={})

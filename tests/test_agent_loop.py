@@ -250,6 +250,21 @@ def test_tool_to_schema_no_annotations():
         assert prop.get("type") == "string"
 
 
+def test_tool_to_schema_zero_params():
+    """tool_to_schema on a zero-parameter async function should produce
+    a schema with empty properties and no 'required' key."""
+
+    async def noop() -> str:
+        """Do nothing."""
+        ...
+
+    schema = tool_to_schema(noop)
+    params = schema["function"]["parameters"]
+    assert params["type"] == "object"
+    assert params.get("properties") == {} or "properties" not in params or params["properties"] == {}
+    assert "required" not in params
+
+
 # ---------------------------------------------------------------------------
 # strip_thinking tests
 # ---------------------------------------------------------------------------

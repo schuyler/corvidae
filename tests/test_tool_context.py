@@ -1,8 +1,4 @@
-"""Tests for ToolContext injection in run_agent_loop.
-
-These tests validate Phase 1 ToolContext injection — they will fail
-until sherman.task and sherman.tool.ToolContext are implemented.
-"""
+"""Tests for ToolContext injection in run_agent_loop."""
 
 import json
 from unittest.mock import AsyncMock, MagicMock
@@ -252,34 +248,3 @@ async def test_ctx_excluded_from_schema():
     assert "name" in properties
 
 
-async def test_tool_call_id_still_injected():
-    """_tool_call_id backward-compat injection coexists with _ctx injection."""
-    received = {}
-
-    async def legacy_tool(_ctx: ToolContext, _tool_call_id: str) -> str:
-        """Tool that uses both context and legacy call ID."""
-        received["ctx"] = _ctx
-        received["tool_call_id"] = _tool_call_id
-        return "ok"
-
-    client = MagicMock()
-    client.chat = AsyncMock(
-        side_effect=[
-            _make_tool_call_response(
-                [_make_tool_call("call_legacy_99", "legacy_tool", {})]
-            ),
-            {"choices": [{"message": {"content": "done"}}]},
-        ]
-    )
-
-    messages = [{"role": "user", "content": "go"}]
-    await run_agent_loop(
-        client,
-        messages,
-        tools={"legacy_tool": legacy_tool},
-        tool_schemas=[],
-    )
-
-    assert isinstance(received["ctx"], ToolContext)
-    assert received["tool_call_id"] == "call_legacy_99"
-    assert received["ctx"].tool_call_id == "call_legacy_99"

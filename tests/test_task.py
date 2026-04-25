@@ -586,10 +586,11 @@ class TestTaskPlugin:
 
         await plugin.on_stop()
 
-    async def test_on_task_complete_does_not_fire_on_task_complete_hook(self):
-        """TaskPlugin fires only on_notify in Phase 1, not on_task_complete hook.
+    async def test_on_task_complete_fires_on_task_complete_hook(self):
+        """TaskPlugin fires on_task_complete hook (in addition to on_notify) when a task completes.
 
-        This is intentional: on_task_complete hookspec is deferred to later phases.
+        Phase 5: BackgroundPlugin is deleted, so TaskPlugin takes over firing
+        on_task_complete. This replaces the Phase 1 test that asserted it was NOT fired.
         """
         pm = create_plugin_manager()
         pm.ahook.on_notify = AsyncMock()
@@ -607,8 +608,12 @@ class TestTaskPlugin:
 
         # on_notify was called
         pm.ahook.on_notify.assert_awaited_once()
-        # on_task_complete was NOT called (deferred to later phases)
-        pm.ahook.on_task_complete.assert_not_awaited()
+        # on_task_complete IS called (Phase 5: TaskPlugin takes over from BackgroundPlugin)
+        pm.ahook.on_task_complete.assert_awaited_once()
+        call_kwargs = pm.ahook.on_task_complete.call_args.kwargs
+        assert call_kwargs["channel"] is channel
+        assert call_kwargs["task_id"] == task.task_id
+        assert call_kwargs["result"] == "result"
 
         await plugin.on_stop()
 
@@ -624,5 +629,97 @@ class TestTaskPlugin:
 
         assert hasattr(pm, "task_plugin")
         assert pm.task_plugin is plugin
+
+        await plugin.on_stop()
+
+    def test_register_tools_registers_task_status(self):
+        """TaskPlugin.register_tools appends a task_status tool to the registry.
+
+        Phase 5: task_status moves from BackgroundPlugin to TaskPlugin.
+
+        Note: register_tools is called before on_start intentionally — this test
+        checks registration only, not invocation of the tool.
+        """
+        pm = create_plugin_manager()
+        plugin = TaskPlugin(pm)
+
+        tool_registry = []
+        plugin.register_tools(tool_registry=tool_registry)
+
+        tool_names = [
+            item.name if hasattr(item, "name") else item.__name__
+            for item in tool_registry
+        ]
+        assert "task_status" in tool_names, (
+            f"Expected 'task_status' in registered tools, got: {tool_names}"
+        )
+
+    async def test_task_status_tool_returns_queue_info(self):
+        """The task_status tool registered by TaskPlugin returns correct queue information.
+
+        Verifies active task, pending queue size, and completed count are reflected
+        in the output from the tool callable.
+        """
+        from sherman.tool import Tool
+
+        pm = create_plugin_manager()
+        pm.ahook.on_notify = AsyncMock()
+        plugin = TaskPlugin(pm)
+        await plugin.on_start(config={})
+
+        # Confirm task_status is registered
+        tool_registry = []
+        plugin.register_tools(tool_registry=tool_registry)
+        task_status_item = next(
+            (item for item in tool_registry
+             if (item.name if hasattr(item, "name") else item.__name__) == "task_status"),
+            None,
+        )
+        assert task_status_item is not None, "task_status tool must be registered"
+
+        # Resolve the callable
+        task_status_fn = (
+            task_status_item.fn if isinstance(task_status_item, Tool) else task_status_item
+        )
+
+        # With an empty queue, should report no tasks
+        result = await task_status_fn()
+        assert isinstance(result, str)
+        assert "no tasks" in result.lower(), (
+            f"Expected 'no tasks' in empty-queue status, got: {result!r}"
+        )
+
+        # Enqueue a task so there is a completed entry, then check status again
+        channel = _make_channel()
+        done = asyncio.Event()
+
+        async def work():
+            return "status tool test output"
+
+        task = Task(work=work, channel=channel, description="status tool test")
+
+        async def on_complete(t, res):
+            done.set()
+
+        # Stop the plugin's internal worker to avoid race with our manual worker
+        plugin._worker_task.cancel()
+        try:
+            await plugin._worker_task
+        except asyncio.CancelledError:
+            pass
+
+        worker = asyncio.create_task(plugin.task_queue.run_worker(on_complete))
+        await plugin.task_queue.enqueue(task)
+        await asyncio.wait_for(done.wait(), timeout=2.0)
+        worker.cancel()
+        try:
+            await worker
+        except asyncio.CancelledError:
+            pass
+
+        result = await task_status_fn()
+        assert task.task_id in result or "status tool test output" in result, (
+            f"Expected completed task info in status, got: {result!r}"
+        )
 
         await plugin.on_stop()

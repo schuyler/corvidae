@@ -152,11 +152,10 @@ async def run_agent_turn(
 `run_agent_turn` appends the assistant message to `messages` in place
 before returning. Callers should not append it again.
 
-**`run_agent_loop`** — multi-turn blocking loop. Preserved for
-background task execution (BackgroundPlugin) and future sub-agent use.
-Calls the LLM, executes tool calls inline, repeats until a text
-response or max_turns. Injects `ToolContext` and `_tool_call_id` into
-tools that declare them.
+**`run_agent_loop`** — multi-turn blocking loop. Used by subagent
+execution. Calls the LLM, executes tool calls inline, repeats until a
+text response or max_turns. Injects `ToolContext` into tools that
+declare a `_ctx` parameter.
 
 Also in `agent_loop.py`:
 - `strip_thinking(text)` — removes `<think>...</think>` blocks
@@ -277,8 +276,7 @@ task's `work` closure:
 
 - Parses the tool call arguments
 - Looks up the tool function in `self.tools`
-- Injects `ToolContext` for tools declaring `_ctx`, or `_tool_call_id`
-  for backward compatibility
+- Injects `ToolContext` for tools declaring `_ctx`
 - Calls the tool, returns the string result
 - On unknown tool or exception, returns an error string (no crash)
 
@@ -334,33 +332,8 @@ catches exceptions, and delivers the result via `on_notify`.
 task and completed results.
 
 **TaskPlugin** — hookimpl that owns the TaskQueue. Starts/stops the
-worker on lifecycle hooks. On task completion, fires `on_notify` and
-`on_task_complete`.
-
-## Background System (Legacy)
-
-`background.py` — the pre-redesign background task system. Still
-present; to be removed in a future cleanup phase.
-
-**BackgroundTask** — carries LLM instructions (unlike Task which
-carries an arbitrary async callable):
-
-```python
-@dataclass
-class BackgroundTask:
-    channel: Channel
-    description: str
-    instructions: str
-    task_id: str
-    created_at: float
-    tool_call_id: str | None = None
-```
-
-**BackgroundPlugin** — owns its own TaskQueue, runs `run_agent_loop`
-for each queued task with a separate system prompt. Registers
-`background_task` and `task_status` tools. Uses a separate LLM client
-(`llm.background` config) if configured, otherwise shares the main
-client.
+worker on lifecycle hooks. Registers the `task_status` tool. On task
+completion, fires `on_notify` and `on_task_complete`.
 
 ## Subagent Tool
 
@@ -380,12 +353,12 @@ if the task queue or channel context is unavailable.
 ### How it works
 
 1. Retrieves `agent_plugin.tool_registry` via `pm.agent_plugin`.
-2. Calls `registry.exclude("subagent", "background_task")` to remove itself
-   and the legacy placeholder from the subagent's tool set.
+2. Calls `registry.exclude("subagent")` to remove itself from the subagent's tool set.
 3. Builds a `messages` list (system prompt + user instructions) and a
    `work` coroutine that captures it, creates a fresh `LLMClient`, calls
-   `run_agent_loop`, strips thinking from the result, then shuts the
-   client down.
+   `run_agent_loop` with `channel` and `task_queue` from `_ctx` (enabling
+   the subagent to enqueue nested tasks), strips thinking from the result,
+   then shuts the client down.
 4. Wraps `work` in a `Task` with `tool_call_id` from `_ctx`, enqueues it on
    `ctx.task_queue`.
 5. Returns immediately; result is delivered via `TaskPlugin → on_notify →
@@ -413,15 +386,13 @@ Registered via `CoreToolsPlugin` in `tools/__init__.py`:
 | `write_file(path, content)` | `tools/files.py` | Write file, creates parent dirs |
 | `web_fetch(url)` | `tools/web.py` | Fetch URL, 15s timeout, 50KB truncation |
 
-Additionally, `SubagentPlugin` registers `subagent` and
-`BackgroundPlugin` registers `background_task` and `task_status` as
-tool closures during `on_start`.
+Additionally, `SubagentPlugin` registers `subagent` and `TaskPlugin`
+registers `task_status` as tool closures during `on_start`.
 
 | Tool | File | Purpose |
 |------|------|---------|
 | `subagent(instructions, description)` | `tools/subagent.py` | Launch background subagent with own LLM session |
-| `background_task(description, instructions)` | `background.py` | Legacy; launch background agent (replaced by `subagent`) |
-| `task_status()` | `background.py` | Report background task queue status |
+| `task_status()` | `task.py` | Report task queue status |
 
 ## Transports
 
@@ -451,7 +422,7 @@ llm:
     model: "model-name"
     api_key: "optional"
     extra_body: {}              # optional, passed through to LLM
-  background:                   # optional separate LLM for background tasks
+  background:                   # optional separate LLM for subagent tasks
     base_url: "..."
     model: "..."
 
@@ -491,10 +462,9 @@ Defined in `main.py`:
 1. CoreToolsPlugin — registers tools
 2. CLIPlugin — stdin/stdout transport
 3. IRCPlugin — IRC transport
-4. BackgroundPlugin — legacy background tasks
-5. TaskPlugin — new task queue
-6. SubagentPlugin — registers subagent tool (after TaskPlugin so task_queue is available)
-7. AgentPlugin — agent loop (last, so all tools and queues are ready)
+4. TaskPlugin — task queue
+5. SubagentPlugin — registers the subagent tool
+6. AgentPlugin — agent loop (last, so all tools and queues are ready)
 
 ## Directory Layout
 
@@ -510,7 +480,6 @@ sherman/
 ├── logging.py            # StructuredFormatter, _DEFAULT_LOGGING
 ├── agent.py              # AgentPlugin (single-turn dispatch)
 ├── task.py               # Task, TaskQueue, TaskPlugin
-├── background.py         # BackgroundTask, BackgroundPlugin (legacy)
 ├── main.py               # daemon entry point
 ├── channels/
 │   ├── cli.py            # CLIPlugin
@@ -535,30 +504,10 @@ results are still pending, the conversation may interleave user
 messages with tool results. The SerialQueue serializes processing (no
 races), but ordering depends on arrival time.
 
-**Dual task queues.** BackgroundPlugin and TaskPlugin each own a separate
-`TaskQueue`. Subagent tasks use the TaskPlugin queue; `background_task` uses
-the BackgroundPlugin queue. Both deliver results via `on_notify → AgentPlugin`.
-The queues do not coordinate, so a channel may have tasks running in both
-simultaneously. This resolves when BackgroundPlugin is removed.
-
 ## Unimplemented
 
 The following items appear in earlier design documents but are not yet
 implemented. Each needs discussion before proceeding.
-
-### Cleanup: delete BackgroundPlugin (task system phase 5)
-
-`background.py` and `BackgroundPlugin` should be removed once the
-`subagent` tool replaces the `background_task` tool. The new Task
-system (`task.py`) handles async work dispatch; BackgroundPlugin is
-redundant but still registered and functional.
-
-Items to address:
-- Delete `background.py`
-- Remove BackgroundPlugin registration from `main.py`
-- Move or replace `task_status` tool
-- Delete `_truncate` or move to a shared util
-- Update tests in `test_background.py`
 
 ### Hot-loading
 

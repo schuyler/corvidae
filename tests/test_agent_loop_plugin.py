@@ -96,7 +96,7 @@ async def _build_plugin_and_channel(agent_defaults=None, channel_config=None):
     pm.ahook.on_task_complete = AsyncMock()
     # NOTE: on_notify is NOT mocked — both AgentPlugin and TaskPlugin use it.
 
-    # Register TaskPlugin (replaces BackgroundPlugin in Phase 3).
+    # Register TaskPlugin.
     task_plugin = TaskPlugin(pm)
     pm.register(task_plugin, name="task_plugin")
     await task_plugin.on_start(config={})
@@ -201,7 +201,6 @@ class TestOnStart:
 
         assert "my_test_tool" in plugin.tools
         assert plugin.tools["my_test_tool"] is my_test_tool
-        # Phase 3 adds background_task and task_status, increasing count
         assert len(plugin.tool_schemas) >= 1
         assert plugin.tool_schemas[0]["function"]["name"] == "my_test_tool"
 
@@ -269,8 +268,7 @@ class TestOnStart:
             await plugin.on_start(config=bad_config)
 
     async def test_on_start_config_parses_llm_main(self):
-        """on_start with llm.main creates self.client. Background LLM client
-        is now owned by BackgroundPlugin (tested in test_background.py)."""
+        """on_start with llm.main creates self.client."""
         pm = create_plugin_manager()
         pm.registry = ChannelRegistry(AGENT_DEFAULTS)
         pm.ahook.send_message = AsyncMock()
@@ -1180,7 +1178,7 @@ class TestOnNotify:
 
         await plugin.pm.ahook.on_notify(
             channel=channel,
-            source="background_task",
+            source="task",
             text="task done: success",
             tool_call_id="call_abc123",
             meta=None,
@@ -1203,38 +1201,11 @@ class TestOnNotify:
 
 
 # ---------------------------------------------------------------------------
-# Section 12 — bg_client tests moved to test_background.py (BackgroundPlugin)
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Section 13 — tool schema: _tool_call_id exclusion (design review C3)
+# Section 13 — tool schema: underscore param exclusion (design review C3)
 # ---------------------------------------------------------------------------
 
 
 class TestToolSchema:
-    def test_tool_call_id_not_in_background_task_schema(self):
-        """When background_task has _tool_call_id in its signature, it must
-        NOT appear in the generated tool schema (design review C3).
-
-        _-prefixed parameters are injected at call time by run_agent_loop,
-        not supplied by the LLM.
-        """
-        from sherman.agent_loop import tool_to_schema
-
-        async def background_task(
-            description: str,
-            instructions: str,
-            _tool_call_id: str = None,
-        ) -> str:
-            """Launch a long-running task in the background."""
-            pass
-
-        schema = tool_to_schema(background_task)
-        properties = schema["function"]["parameters"].get("properties", {})
-        assert "_tool_call_id" not in properties, \
-            f"_tool_call_id must not appear in tool schema properties, got: {list(properties.keys())}"
-
     def test_underscore_params_excluded_from_schema(self):
         """Any parameter whose name starts with _ is excluded from the schema."""
         from sherman.agent_loop import tool_to_schema
@@ -1251,47 +1222,3 @@ class TestToolSchema:
         # y may or may not appear depending on whether optional params are included,
         # but the key assertion is that _injected is absent
 
-    async def test_tool_call_id_injected_at_call_time(self):
-        """When run_agent_loop calls a tool that has _tool_call_id in its
-        signature, the call_id is injected from the tool call, not from
-        LLM-supplied args."""
-        from sherman.agent_loop import run_agent_loop
-
-        injected_call_ids: list[str] = []
-
-        async def my_tool(description: str, _tool_call_id: str = None) -> str:
-            """A tool that captures its injected call id."""
-            injected_call_ids.append(_tool_call_id)
-            return "done"
-
-        # LLM returns a tool call — args do NOT contain _tool_call_id
-        messages = [{"role": "user", "content": "go"}]
-        tool_calls_response = {
-            "choices": [{
-                "message": {
-                    "role": "assistant",
-                    "content": "",
-                    "tool_calls": [{
-                        "id": "call_inject_test",
-                        "function": {
-                            "name": "my_tool",
-                            "arguments": json.dumps({"description": "test task"}),
-                        },
-                    }],
-                }
-            }]
-        }
-        final_response = {"choices": [{"message": {"role": "assistant", "content": "all done"}}]}
-
-        mock_client = MagicMock()
-        mock_client.chat = AsyncMock(side_effect=[tool_calls_response, final_response])
-
-        tools = {"my_tool": my_tool}
-        from sherman.agent_loop import tool_to_schema
-        schemas = [tool_to_schema(my_tool)]
-
-        await run_agent_loop(mock_client, messages, tools, schemas)
-
-        assert len(injected_call_ids) == 1, "Tool must have been called once"
-        assert injected_call_ids[0] == "call_inject_test", \
-            f"Expected call_id 'call_inject_test' injected, got: {injected_call_ids[0]}"

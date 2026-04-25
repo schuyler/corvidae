@@ -24,7 +24,6 @@ from pathlib import Path
 import yaml
 
 from sherman.agent import AgentPlugin
-from sherman.background import BackgroundPlugin
 from sherman.channel import ChannelRegistry, load_channel_config
 from sherman.channels.cli import CLIPlugin
 from sherman.channels.irc import IRCPlugin
@@ -88,11 +87,7 @@ async def main(config_path: str = "agent.yaml") -> None:
     irc_plugin = IRCPlugin(pm)
     pm.register(irc_plugin, name="irc")
 
-    # Register BackgroundPlugin before AgentPlugin (provides task_queue)
-    bg_plugin = BackgroundPlugin(pm)
-    pm.register(bg_plugin, name="background")
-
-    # Register TaskPlugin before AgentPlugin (provides new task queue)
+    # Register TaskPlugin before AgentPlugin (provides task queue)
     from sherman.task import TaskPlugin
     task_plugin = TaskPlugin(pm)
     pm.register(task_plugin, name="task")

@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from sherman.channel import Channel
 
 from sherman.hooks import hookimpl
+from sherman.tool import Tool
 
 logger = logging.getLogger(__name__)
 
@@ -50,11 +51,7 @@ class Task:
 
 
 class TaskQueue:
-    """Async worker queue that processes Tasks one at a time.
-
-    Unlike background.TaskQueue which takes external execute_fn and
-    on_complete callbacks, this one calls ``await task.work()`` directly.
-    """
+    """Async worker queue that processes Tasks one at a time."""
 
     def __init__(self) -> None:
         self.queue: asyncio.Queue[Task] = asyncio.Queue()
@@ -142,17 +139,24 @@ class TaskQueue:
 
 
 class TaskPlugin:
-    """Plugin owning the new TaskQueue.
-
-    In Phase 1, coexists with BackgroundPlugin. TaskPlugin registers no
-    tools (avoids name collision with BackgroundPlugin's task_status).
-    Tool registration deferred to Phase 3+.
-    """
+    """Plugin owning the TaskQueue and task_status tool."""
 
     def __init__(self, pm) -> None:
         self.pm = pm
         self.task_queue: TaskQueue | None = None
         self._worker_task: asyncio.Task | None = None
+
+    @hookimpl
+    def register_tools(self, tool_registry: list) -> None:
+        plugin = self  # captured by closure
+
+        async def task_status() -> str:
+            """Return the current status of the task queue."""
+            if plugin.task_queue is None:
+                return "Task queue not initialized."
+            return plugin.task_queue.status()
+
+        tool_registry.append(Tool.from_function(task_status))
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
@@ -193,4 +197,9 @@ class TaskPlugin:
             text=f"[Task {task.task_id}] {result}",
             tool_call_id=task.tool_call_id,
             meta={"task_id": task.task_id},
+        )
+        await self.pm.ahook.on_task_complete(
+            channel=task.channel,
+            task_id=task.task_id,
+            result=result,
         )

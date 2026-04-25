@@ -91,13 +91,6 @@ class TestLoggerNamingConvention:
         assert hasattr(mod, "_pm_logger"), "hooks.py must define module-level `_pm_logger`"
         assert mod._pm_logger.name == "sherman.plugin_manager"
 
-    def test_background_has_module_logger(self):
-        """sherman.background must expose a module-level `logger` attribute
-        whose name matches the module __name__."""
-        import sherman.background as mod
-        assert hasattr(mod, "logger"), "background.py must define module-level `logger`"
-        assert mod.logger.name == "sherman.background"
-
 
 # ---------------------------------------------------------------------------
 # Section 2: main.py — _DEFAULT_LOGGING and dictConfig
