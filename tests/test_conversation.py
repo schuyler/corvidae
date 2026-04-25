@@ -2,7 +2,7 @@
 
 import json
 import time
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import aiosqlite
 
@@ -57,10 +57,12 @@ class TestConversationLogPersistence:
             )
         await db.commit()
 
+        from sherman.conversation import MessageType
         conv = ConversationLog(db, channel_id="chan1")
         await conv.load()
 
-        assert conv.messages == messages
+        expected = [{**msg, "_message_type": MessageType.MESSAGE} for msg in messages]
+        assert conv.messages == expected
 
     async def test_load_orders_by_timestamp(self, db):
         msg_early = {"role": "user", "content": "early"}
@@ -78,10 +80,14 @@ class TestConversationLogPersistence:
         )
         await db.commit()
 
+        from sherman.conversation import MessageType
         conv = ConversationLog(db, channel_id="chan1")
         await conv.load()
 
-        assert conv.messages == [msg_early, msg_late]
+        assert conv.messages == [
+            {**msg_early, "_message_type": MessageType.MESSAGE},
+            {**msg_late, "_message_type": MessageType.MESSAGE},
+        ]
 
     async def test_load_filters_by_channel(self, db):
         msg_chan1 = {"role": "user", "content": "for chan1"}
@@ -98,10 +104,11 @@ class TestConversationLogPersistence:
         )
         await db.commit()
 
+        from sherman.conversation import MessageType
         conv = ConversationLog(db, channel_id="chan1")
         await conv.load()
 
-        assert conv.messages == [msg_chan1]
+        assert conv.messages == [{**msg_chan1, "_message_type": MessageType.MESSAGE}]
 
 
 class TestConversationLogTokenEstimate:
@@ -170,10 +177,12 @@ class TestConversationLogCompaction:
 
         await conv.compact_if_needed(mock_client, max_tokens=50)
 
+        from sherman.conversation import MessageType
         assert len(conv.messages) == 3  # summary msg + 2 retained
         assert conv.messages[0] == {
             "role": "assistant",
             "content": "[Summary of earlier conversation]\nmock summary",
+            "_message_type": MessageType.SUMMARY,
         }
         assert conv.messages[1:] == expected_retained
 
@@ -273,9 +282,11 @@ class TestConversationLogCompaction:
         # Must not raise TypeError
         await conv.compact_if_needed(mock_client, max_tokens=100)
 
+        from sherman.conversation import MessageType
         assert conv.messages[0] == {
             "role": "assistant",
             "content": "[Summary of earlier conversation]\nnone-content summary",
+            "_message_type": MessageType.SUMMARY,
         }
 
     async def test_compact_list_content_treated_as_zero_tokens(self, db):
@@ -399,8 +410,8 @@ class TestConversationLogCompaction:
 
 
 class TestDurableCompaction:
-    async def test_init_db_adds_is_summary_column(self):
-        """init_db() must create the is_summary column on message_log."""
+    async def test_init_db_has_message_type_column(self):
+        """init_db() must create the message_type column on message_log."""
         async with aiosqlite.connect(":memory:") as conn:
             await init_db(conn)
 
@@ -408,11 +419,11 @@ class TestDurableCompaction:
                 columns = await cursor.fetchall()
 
             column_names = [col[1] for col in columns]
-            assert "is_summary" in column_names, (
-                f"is_summary column not found; got columns: {column_names}"
+            assert "message_type" in column_names, (
+                f"message_type column not found; got columns: {column_names}"
             )
 
-    async def test_init_db_idempotent_with_existing_column(self):
+    async def test_init_db_idempotent(self):
         """Calling init_db() twice must not raise an error."""
         async with aiosqlite.connect(":memory:") as conn:
             await init_db(conn)
@@ -423,10 +434,10 @@ class TestDurableCompaction:
                 columns = await cursor.fetchall()
 
             column_names = [col[1] for col in columns]
-            assert "is_summary" in column_names
+            assert "message_type" in column_names
 
     async def test_compact_persists_summary_row(self, db):
-        """After compaction, exactly one is_summary=1 row exists; retained count matches token-walk."""
+        """After compaction, exactly one message_type='summary' row exists; retained count matches token-walk."""
         # Token math: 10 messages x 35 chars, max_tokens=50.
         # token_estimate = int(350/3.5) = 100 ≥ 40 → triggers; len=10>5 → proceeds.
         # retain_budget=25; each msg = 10 tokens.
@@ -452,7 +463,7 @@ class TestDurableCompaction:
         await conv.compact_if_needed(mock_client, max_tokens=50)
 
         async with db.execute(
-            "SELECT COUNT(*) FROM message_log WHERE channel_id = ? AND is_summary = 1",
+            "SELECT COUNT(*) FROM message_log WHERE channel_id = ? AND message_type = 'summary'",
             ("chan1",),
         ) as cursor:
             row = await cursor.fetchone()
@@ -461,7 +472,7 @@ class TestDurableCompaction:
 
         # Verify the persisted message content is the summary
         async with db.execute(
-            "SELECT message FROM message_log WHERE channel_id = ? AND is_summary = 1",
+            "SELECT message FROM message_log WHERE channel_id = ? AND message_type = 'summary'",
             ("chan1",),
         ) as cursor:
             summary_row = await cursor.fetchone()
@@ -489,30 +500,35 @@ class TestDurableCompaction:
 
         # Retained message (lower id than summary — this is normal after compaction)
         await db.execute(
-            "INSERT INTO message_log (channel_id, message, timestamp, is_summary) VALUES (?, ?, ?, 0)",
+            "INSERT INTO message_log (channel_id, message, timestamp, message_type) VALUES (?, ?, ?, 'message')",
             ("chan1", json.dumps(retained_msg), base_ts),
         )
         # Summary row
         await db.execute(
-            "INSERT INTO message_log (channel_id, message, timestamp, is_summary) VALUES (?, ?, ?, 1)",
+            "INSERT INTO message_log (channel_id, message, timestamp, message_type) VALUES (?, ?, ?, 'summary')",
             ("chan1", json.dumps(summary_msg), base_ts + 1),
         )
         # New message added after compaction
         await db.execute(
-            "INSERT INTO message_log (channel_id, message, timestamp, is_summary) VALUES (?, ?, ?, 0)",
+            "INSERT INTO message_log (channel_id, message, timestamp, message_type) VALUES (?, ?, ?, 'message')",
             ("chan1", json.dumps(new_msg), base_ts + 2),
         )
         await db.commit()
 
+        from sherman.conversation import MessageType
         conv = ConversationLog(db, channel_id="chan1")
         await conv.load()
 
-        assert conv.messages == [summary_msg, retained_msg, new_msg], (
+        expected_summary = {**summary_msg, "_message_type": MessageType.SUMMARY}
+        expected_retained = {**retained_msg, "_message_type": MessageType.MESSAGE}
+        expected_new = {**new_msg, "_message_type": MessageType.MESSAGE}
+        assert conv.messages == [expected_summary, expected_retained, expected_new], (
             f"Expected [summary, retained, new], got: {conv.messages}"
         )
 
     async def test_load_without_summary_loads_all(self, db):
         """When no summary rows exist, load() loads everything (existing behavior)."""
+        from sherman.conversation import MessageType
         base_ts = time.time()
         messages = [
             {"role": "user", "content": "first"},
@@ -529,7 +545,8 @@ class TestDurableCompaction:
         conv = ConversationLog(db, channel_id="chan1")
         await conv.load()
 
-        assert conv.messages == messages
+        expected = [{**msg, "_message_type": MessageType.MESSAGE} for msg in messages]
+        assert conv.messages == expected
 
     async def test_repeated_compaction_load_correct(self, db):
         """After two compactions, load() returns only the newest summary + its retained messages.
@@ -555,6 +572,7 @@ class TestDurableCompaction:
         """
         base_ts = time.time()
 
+        from sherman.conversation import MessageType
         # 2 retained messages from first compaction (simulating cleaned-up state)
         retained_messages = [
             {"role": "user", "content": "a" * 35}
@@ -562,7 +580,7 @@ class TestDurableCompaction:
         ]
         for i, msg in enumerate(retained_messages):
             await db.execute(
-                "INSERT INTO message_log (channel_id, message, timestamp, is_summary) VALUES (?, ?, ?, 0)",
+                "INSERT INTO message_log (channel_id, message, timestamp, message_type) VALUES (?, ?, ?, 'message')",
                 ("chan1", json.dumps(msg), base_ts + i),
             )
 
@@ -572,7 +590,7 @@ class TestDurableCompaction:
             "content": "[Summary of earlier conversation]\nfirst summary",
         }
         await db.execute(
-            "INSERT INTO message_log (channel_id, message, timestamp, is_summary) VALUES (?, ?, ?, 1)",
+            "INSERT INTO message_log (channel_id, message, timestamp, message_type) VALUES (?, ?, ?, 'summary')",
             ("chan1", json.dumps(first_summary_msg), base_ts + 5),
         )
 
@@ -584,7 +602,7 @@ class TestDurableCompaction:
         extra_base_ts = base_ts + 10
         for i, msg in enumerate(extra_messages):
             await db.execute(
-                "INSERT INTO message_log (channel_id, message, timestamp, is_summary) VALUES (?, ?, ?, 0)",
+                "INSERT INTO message_log (channel_id, message, timestamp, message_type) VALUES (?, ?, ?, 'message')",
                 ("chan1", json.dumps(msg), extra_base_ts + i),
             )
         await db.commit()
@@ -597,7 +615,8 @@ class TestDurableCompaction:
         assert len(conv.messages) == 7, (
             f"Expected 7 messages after load(), got {len(conv.messages)}"
         )
-        assert conv.messages[0] == first_summary_msg
+        first_summary_msg_tagged = {**first_summary_msg, "_message_type": MessageType.SUMMARY}
+        assert conv.messages[0] == first_summary_msg_tagged
 
         mock_client = AsyncMock()
         mock_client.chat = AsyncMock(
@@ -611,7 +630,8 @@ class TestDurableCompaction:
             "role": "assistant",
             "content": "[Summary of earlier conversation]\nsecond summary",
         }
-        assert conv.messages[0] == second_summary_msg
+        second_summary_msg_tagged = {**second_summary_msg, "_message_type": MessageType.SUMMARY}
+        assert conv.messages[0] == second_summary_msg_tagged
         assert conv.messages[1:] == expected_retained
         assert len(conv.messages) == 3
 
@@ -619,11 +639,11 @@ class TestDurableCompaction:
         conv2 = ConversationLog(db, channel_id="chan1")
         await conv2.load()
 
-        assert conv2.messages[0] == second_summary_msg
+        assert conv2.messages[0] == second_summary_msg_tagged
         assert len(conv2.messages) == 3, (
             f"Expected 3 messages (1 summary + 2 retained), got: {len(conv2.messages)}"
         )
-        assert first_summary_msg not in conv2.messages
+        assert first_summary_msg_tagged not in conv2.messages
 
 
 class TestIdBasedSummaryOrdering:
@@ -643,19 +663,20 @@ class TestIdBasedSummaryOrdering:
         msg_after_1 = {"role": "user", "content": "after summary 1"}
         msg_after_2 = {"role": "assistant", "content": "after summary 2"}
 
+        from sherman.conversation import MessageType
         # Insert the summary row first so it gets a lower id
         await db.execute(
-            "INSERT INTO message_log (channel_id, message, timestamp, is_summary) VALUES (?, ?, ?, 1)",
+            "INSERT INTO message_log (channel_id, message, timestamp, message_type) VALUES (?, ?, ?, 'summary')",
             ("chan1", json.dumps(summary_msg), shared_ts),
         )
         # Insert two non-summary messages with the *same* timestamp as the summary.
         # These have higher ids and should be returned by load() after the fix.
         await db.execute(
-            "INSERT INTO message_log (channel_id, message, timestamp, is_summary) VALUES (?, ?, ?, 0)",
+            "INSERT INTO message_log (channel_id, message, timestamp, message_type) VALUES (?, ?, ?, 'message')",
             ("chan1", json.dumps(msg_after_1), shared_ts),
         )
         await db.execute(
-            "INSERT INTO message_log (channel_id, message, timestamp, is_summary) VALUES (?, ?, ?, 0)",
+            "INSERT INTO message_log (channel_id, message, timestamp, message_type) VALUES (?, ?, ?, 'message')",
             ("chan1", json.dumps(msg_after_2), shared_ts),
         )
         await db.commit()
@@ -666,7 +687,12 @@ class TestIdBasedSummaryOrdering:
         # After the fix (id-based): [summary, msg_after_1, msg_after_2]
         # With current code (timestamp >): messages with timestamp == summary_ts are
         # excluded, so conv.messages == [summary_msg] only — assertion below fails.
-        assert conv.messages == [summary_msg, msg_after_1, msg_after_2], (
+        expected = [
+            {**summary_msg, "_message_type": MessageType.SUMMARY},
+            {**msg_after_1, "_message_type": MessageType.MESSAGE},
+            {**msg_after_2, "_message_type": MessageType.MESSAGE},
+        ]
+        assert conv.messages == expected, (
             f"Expected [summary, msg_after_1, msg_after_2], got: {conv.messages}"
         )
 
@@ -686,7 +712,7 @@ class TestIdBasedSummaryOrdering:
         messages = [{"role": "user", "content": "a" * 35} for _ in range(10)]
         for msg in messages:
             await db.execute(
-                "INSERT INTO message_log (channel_id, message, timestamp, is_summary) VALUES (?, ?, ?, 0)",
+                "INSERT INTO message_log (channel_id, message, timestamp, message_type) VALUES (?, ?, ?, 'message')",
                 ("chan1", json.dumps(msg), shared_ts),
             )
         await db.commit()
@@ -707,7 +733,7 @@ class TestIdBasedSummaryOrdering:
         # Verify the summary row: with the fix the timestamp should NOT be shared_ts - 0.001.
         # The current code DOES write shared_ts - 0.001 — detecting this is the failure signal.
         async with db.execute(
-            "SELECT timestamp FROM message_log WHERE channel_id = ? AND is_summary = 1",
+            "SELECT timestamp FROM message_log WHERE channel_id = ? AND message_type = 'summary'",
             ("chan1",),
         ) as cursor:
             summary_row = await cursor.fetchone()
@@ -735,11 +761,12 @@ class TestIdBasedSummaryOrdering:
         """
         shared_ts = 1_000_000.0
 
+        from sherman.conversation import MessageType
         # Insert 10 messages all with the exact same timestamp
         messages = [{"role": "user", "content": "a" * 35} for _ in range(10)]
         for msg in messages:
             await db.execute(
-                "INSERT INTO message_log (channel_id, message, timestamp, is_summary) VALUES (?, ?, ?, 0)",
+                "INSERT INTO message_log (channel_id, message, timestamp, message_type) VALUES (?, ?, ?, 'message')",
                 ("chan1", json.dumps(msg), shared_ts),
             )
         await db.commit()
@@ -761,6 +788,7 @@ class TestIdBasedSummaryOrdering:
         expected_summary_msg = {
             "role": "assistant",
             "content": "[Summary of earlier conversation]\nrapid summary",
+            "_message_type": MessageType.SUMMARY,
         }
         # In-memory state should be correct regardless of persistence
         assert conv.messages[0] == expected_summary_msg
@@ -780,3 +808,192 @@ class TestIdBasedSummaryOrdering:
             f"Expected 3 messages (summary + 2 retained), got {len(conv2.messages)}. "
             f"If this is 11, the timestamp arithmetic bug is confirmed."
         )
+
+
+class TestMessageType:
+    """Tests for MessageType enum, in-memory tagging, and message_type DB column.
+
+    All tests import MessageType from sherman.conversation. This import will
+    fail (ImportError) until Phase 1 is implemented — that is the intended
+    red state.
+    """
+
+    async def test_message_type_enum_values(self):
+        """MessageType enum must expose MESSAGE='message' and SUMMARY='summary',
+        and round-trip correctly from a DB string via MessageType(value)."""
+        from sherman.conversation import MessageType  # fails until Phase 1
+
+        assert MessageType.MESSAGE == "message", (
+            f"Expected MessageType.MESSAGE == 'message', got {MessageType.MESSAGE!r}"
+        )
+        assert MessageType.SUMMARY == "summary", (
+            f"Expected MessageType.SUMMARY == 'summary', got {MessageType.SUMMARY!r}"
+        )
+        # Round-trip: constructing from the string value must give the enum member
+        assert MessageType("message") is MessageType.MESSAGE
+        assert MessageType("summary") is MessageType.SUMMARY
+
+    async def test_persist_with_explicit_message_type(self, db):
+        """_persist(msg, MessageType.SUMMARY) must write message_type='summary' to DB."""
+        from sherman.conversation import MessageType  # fails until Phase 1
+
+        conv = ConversationLog(db, channel_id="chan1")
+        msg = {"role": "assistant", "content": "a summary"}
+
+        await conv._persist(msg, MessageType.SUMMARY)
+
+        async with db.execute(
+            "SELECT message_type FROM message_log WHERE channel_id = ?",
+            ("chan1",),
+        ) as cursor:
+            row = await cursor.fetchone()
+
+        assert row is not None, "Row should exist after _persist"
+        assert row[0] == "summary", (
+            f"Expected message_type='summary', got {row[0]!r}"
+        )
+
+    async def test_persist_default_message_type(self, db):
+        """_persist(msg) with no message_type arg must write message_type='message' to DB."""
+        from sherman.conversation import MessageType  # fails until Phase 1
+
+        conv = ConversationLog(db, channel_id="chan1")
+        msg = {"role": "user", "content": "hello"}
+
+        await conv._persist(msg)
+
+        async with db.execute(
+            "SELECT message_type FROM message_log WHERE channel_id = ?",
+            ("chan1",),
+        ) as cursor:
+            row = await cursor.fetchone()
+
+        assert row is not None, "Row should exist after _persist"
+        assert row[0] == "message", (
+            f"Expected message_type='message', got {row[0]!r}"
+        )
+
+    async def test_load_tags_messages_with_message_type(self, db):
+        """load() must tag every in-memory message dict with a '_message_type' key."""
+        from sherman.conversation import MessageType  # fails until Phase 1
+
+        base_ts = time.time()
+        messages = [
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "second"},
+        ]
+        for i, msg in enumerate(messages):
+            await db.execute(
+                "INSERT INTO message_log (channel_id, message, timestamp) VALUES (?, ?, ?)",
+                ("chan1", json.dumps(msg), base_ts + i),
+            )
+        await db.commit()
+
+        conv = ConversationLog(db, channel_id="chan1")
+        await conv.load()
+
+        assert len(conv.messages) == 2, (
+            f"Expected 2 messages, got {len(conv.messages)}"
+        )
+        for i, loaded_msg in enumerate(conv.messages):
+            assert "_message_type" in loaded_msg, (
+                f"Message at index {i} is missing '_message_type' key: {loaded_msg!r}"
+            )
+            assert loaded_msg["_message_type"] == MessageType.MESSAGE, (
+                f"Expected MessageType.MESSAGE at index {i}, got {loaded_msg['_message_type']!r}"
+            )
+
+    async def test_build_prompt_strips_message_type(self, db):
+        """build_prompt() must return dicts with no '_message_type' key,
+        even when self.messages contains tagged dicts."""
+        from sherman.conversation import MessageType  # fails until Phase 1
+
+        conv = ConversationLog(db, channel_id="chan1")
+        conv.system_prompt = "You are helpful."
+        conv.messages = [
+            {"role": "user", "content": "hi", "_message_type": MessageType.MESSAGE},
+            {"role": "assistant", "content": "hello", "_message_type": MessageType.MESSAGE},
+        ]
+
+        prompt = conv.build_prompt()
+
+        # The system message is index 0; message dicts start at index 1
+        for i, msg in enumerate(prompt):
+            assert "_message_type" not in msg, (
+                f"Prompt message at index {i} still contains '_message_type': {msg!r}"
+            )
+
+    async def test_append_tags_in_memory_message(self, db):
+        """append(msg) must tag the in-memory copy with _message_type=MessageType.MESSAGE."""
+        from sherman.conversation import MessageType  # fails until Phase 1
+
+        conv = ConversationLog(db, channel_id="chan1")
+        msg = {"role": "user", "content": "hello"}
+
+        await conv.append(msg)
+
+        assert len(conv.messages) == 1, (
+            f"Expected 1 message in conv.messages, got {len(conv.messages)}"
+        )
+        last = conv.messages[-1]
+        assert "_message_type" in last, (
+            f"In-memory message after append() is missing '_message_type': {last!r}"
+        )
+        assert last["_message_type"] == MessageType.MESSAGE, (
+            f"Expected MessageType.MESSAGE, got {last['_message_type']!r}"
+        )
+        # Original dict must not be mutated
+        assert "_message_type" not in msg, (
+            "append() must not mutate the original message dict"
+        )
+
+    async def test_compact_filters_non_message_from_older(self, db):
+        """compact_if_needed must exclude SUMMARY-typed entries from the older
+        portion passed to the summarizer.
+
+        Setup: 10 messages that trigger compaction, with the first message
+        (index 0, which ends up in 'older') typed as SUMMARY. The summarizer
+        must only receive MESSAGE-typed entries, so the SUMMARY-typed dict
+        must not appear in the messages list sent to _summarize().
+        """
+        from sherman.conversation import MessageType  # fails until Phase 1
+
+        conv = ConversationLog(db, channel_id="chan1")
+        conv.system_prompt = ""
+
+        # Build 10 messages. The first one is typed SUMMARY to simulate a
+        # pre-existing summary entry in the older portion.
+        # Token math: 10 msgs x 35 chars → int(350/3.5)=100 ≥ 40 → triggers; len=10>5.
+        # retain_count=2 → older = messages[0:8], retained = messages[-2:].
+        # The SUMMARY-typed message at index 0 falls in older and must be filtered out.
+        conv.messages = [
+            {"role": "assistant", "content": "a" * 35, "_message_type": MessageType.SUMMARY},
+        ] + [
+            {"role": "user", "content": "a" * 35, "_message_type": MessageType.MESSAGE}
+            for _ in range(9)
+        ]
+
+        captured_older = []
+
+        async def capture_summarize(client, messages):
+            captured_older.extend(messages)
+            return "filtered summary"
+
+        mock_client = AsyncMock()
+        mock_client.chat = AsyncMock(
+            return_value={"choices": [{"message": {"content": "filtered summary"}}]}
+        )
+
+        # Patch _summarize to capture what older list is passed in
+        with patch.object(conv, "_summarize", side_effect=capture_summarize):
+            await conv.compact_if_needed(mock_client, max_tokens=50)
+
+        # The SUMMARY-typed dict (index 0) must not appear in older passed to summarizer
+        for msg in captured_older:
+            assert msg.get("_message_type") != MessageType.SUMMARY, (
+                f"SUMMARY-typed message must be filtered from older before summarization: {msg!r}"
+            )
+            # _message_type must also be stripped before LLM serialization
+            assert "_message_type" not in msg, (
+                f"_message_type key must be stripped before passing to _summarize: {msg!r}"
+            )
