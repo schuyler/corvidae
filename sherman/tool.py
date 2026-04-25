@@ -155,6 +155,48 @@ class ToolRegistry:
         return len(self._tools)
 
 
+async def execute_tool_call(
+    tool_fn: Callable,
+    args: dict,
+    *,
+    channel: "Channel | None" = None,
+    tool_call_id: str,
+    task_queue: "TaskQueue | None" = None,
+) -> str:
+    """Invoke a tool function, injecting ToolContext if the function declares ``_ctx``.
+
+    Inspects the function signature for a ``_ctx`` parameter. If present,
+    constructs a ToolContext from the provided channel, tool_call_id, and
+    task_queue and injects it. Otherwise, calls with args only.
+
+    Does **not** catch exceptions — callers are responsible for error handling
+    since the two call sites (AgentPlugin and run_agent_loop) have different
+    error-reporting requirements.
+
+    Args:
+        tool_fn: The async tool callable to invoke.
+        args: Dict of keyword arguments from the LLM (JSON-parsed).
+        channel: Channel for ToolContext injection. None when unavailable.
+        tool_call_id: The LLM-assigned call ID for this invocation.
+        task_queue: TaskQueue for ToolContext injection. None when unavailable.
+
+    Returns:
+        str(result) of the tool function's return value.
+    """
+    sig = inspect.signature(tool_fn)
+    call_kwargs = dict(args)
+
+    if "_ctx" in sig.parameters:
+        call_kwargs["_ctx"] = ToolContext(
+            channel=channel,
+            tool_call_id=tool_call_id,
+            task_queue=task_queue,
+        )
+
+    result = await tool_fn(**call_kwargs)
+    return str(result)
+
+
 @dataclass
 class ToolContext:
     """Context injected into tools that declare a ``_ctx`` parameter.
