@@ -93,7 +93,6 @@ async def _build_plugin_and_channel(
 
     pm.ahook.send_message = AsyncMock()
     pm.ahook.on_agent_response = AsyncMock()
-    pm.ahook.on_task_complete = AsyncMock()
     # NOTE: on_notify is NOT mocked — both AgentPlugin and TaskPlugin use it.
 
     # Register TaskPlugin
@@ -625,7 +624,6 @@ class TestNoTaskQueueLogsError:
         pm.register(registry, name="registry")
         pm.ahook.send_message = AsyncMock()
         pm.ahook.on_agent_response = AsyncMock()
-        pm.ahook.on_task_complete = AsyncMock()
         # NOTE: No TaskPlugin registered — pm.get_plugin("task") will return None
 
         plugin = AgentPlugin(pm)

@@ -76,6 +76,8 @@ class CLIPlugin:
         (e.g. `(32.5s)`). Prints the next `>` prompt after the response so
         timing is correct now that on_message is fire-and-enqueue.
         """
+        # Broadcast-filter: pluggy calls all transports; return early if this
+        # channel does not belong to the CLI transport.
         if not channel.matches_transport("cli"):
             return
         if latency_ms is not None:

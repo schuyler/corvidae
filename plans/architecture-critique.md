@@ -53,20 +53,35 @@ history. Compaction only works within a single session.
 
 ### 6. `send_message` is an unusual hook
 
-Pluggy hooks broadcast to all listeners. `send_message` is meant to
+~~Pluggy hooks broadcast to all listeners. `send_message` is meant to
 dispatch to a single transport, but if both CLI and IRC are registered,
 both get called. Routing is implicit — each transport filters
-internally. This works until it doesn't.
+internally. This works until it doesn't.~~
+
+**Addressed (documented).** The broadcast-filter pattern is documented in
+the `send_message` hookspec docstring in `hooks.py`, and inline comments
+in `channels/cli.py` and `channels/irc.py` explain the transport check.
+The pattern is retained as-is — restructuring overhead exceeds benefit
+given the transport count will remain small.
 
 ### 7. `on_task_complete` is dead surface area
 
-Nothing implements it. `on_notify` already handles the same event path.
-Two hooks fire after every task completion for the price of one.
+~~Nothing implements it. `on_notify` already handles the same event path.
+Two hooks fire after every task completion for the price of one.~~
+
+**Addressed.** `on_task_complete` hookspec removed from `AgentSpec` in
+`hooks.py`. The `pm.ahook.on_task_complete(...)` broadcast call removed
+from `TaskPlugin._on_task_complete` in `task.py`. The private method
+`_on_task_complete` is retained — it delivers results via `on_notify`.
+Associated hookspec test and mock stubs cleaned up.
 
 ### 8. `resolve_system_prompt` is misplaced
 
-It lives in `conversation.py` with no dependency on `ConversationLog` or
-the DB. It belongs in `channel.py` or a standalone module.
+~~It lives in `conversation.py` with no dependency on `ConversationLog` or
+the DB. It belongs in `channel.py` or a standalone module.~~
+
+**Addressed.** `resolve_system_prompt` moved to `channel.py`. Imports
+updated in `agent.py`, `tests/test_prompt.py`, and `tests/test_logging.py`.
 
 ## Minor but worth noting
 
@@ -112,4 +127,4 @@ overall layering (transport → agent → LLM) is sound. The codebase is
    injection, but eliminates the monkey-patching.
 4. **Make compaction durable** — either write a compaction marker to the
    DB, or accept that compaction is session-scoped and document it.
-5. **Move `resolve_system_prompt` out of `conversation.py`**.
+5. ~~**Move `resolve_system_prompt` out of `conversation.py`**.~~ Done (moved to `channel.py`).

@@ -93,7 +93,6 @@ async def _build_plugin_and_channel(agent_defaults=None, channel_config=None):
     # Async mocks for outbound hooks.
     pm.ahook.send_message = AsyncMock()
     pm.ahook.on_agent_response = AsyncMock()
-    pm.ahook.on_task_complete = AsyncMock()
     # NOTE: on_notify is NOT mocked — both AgentPlugin and TaskPlugin use it.
 
     # Register TaskPlugin.

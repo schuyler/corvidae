@@ -36,8 +36,8 @@ from pathlib import Path
 import aiosqlite
 
 from sherman.agent_loop import run_agent_turn, strip_reasoning_content, strip_thinking
-from sherman.channel import Channel, ChannelRegistry
-from sherman.conversation import ConversationLog, init_db, resolve_system_prompt
+from sherman.channel import Channel, ChannelRegistry, resolve_system_prompt
+from sherman.conversation import ConversationLog, init_db
 from sherman.hooks import get_dependency, hookimpl
 from sherman.llm import LLMClient
 from sherman.queue import SerialQueue
