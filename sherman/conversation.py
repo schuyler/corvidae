@@ -47,14 +47,37 @@ class ConversationLog:
     async def load(self) -> None:
         """Load messages from DB for this channel, ordered by timestamp.
 
-        Logs the message count at DEBUG level.
+        If a summary row exists, loads only that summary plus non-summary rows
+        after it. Otherwise loads all rows in order. Logs the message count at
+        DEBUG level.
         """
         async with self.db.execute(
-            "SELECT message FROM message_log WHERE channel_id = ? ORDER BY timestamp",
+            "SELECT timestamp, message FROM message_log "
+            "WHERE channel_id = ? AND is_summary = 1 "
+            "ORDER BY timestamp DESC LIMIT 1",
             (self.channel_id,),
         ) as cursor:
-            rows = await cursor.fetchall()
-        self.messages = [json.loads(row[0]) for row in rows]
+            summary_row = await cursor.fetchone()
+
+        if summary_row:
+            summary_ts, summary_message = summary_row
+            async with self.db.execute(
+                "SELECT message FROM message_log "
+                "WHERE channel_id = ? AND timestamp > ? AND is_summary = 0 "
+                "ORDER BY timestamp, id",
+                (self.channel_id, summary_ts),
+            ) as cursor:
+                rows = await cursor.fetchall()
+            self.messages = [json.loads(summary_message)] + [json.loads(row[0]) for row in rows]
+        else:
+            async with self.db.execute(
+                "SELECT message FROM message_log "
+                "WHERE channel_id = ? AND is_summary = 0 "
+                "ORDER BY timestamp, id",
+                (self.channel_id,),
+            ) as cursor:
+                rows = await cursor.fetchall()
+            self.messages = [json.loads(row[0]) for row in rows]
 
         logger.debug(
             "messages loaded from DB",
@@ -115,6 +138,7 @@ class ConversationLog:
         }
         messages_before = len(self.messages)
         self.messages = [summary_msg] + last_20
+        await self._persist_summary(summary_msg)
 
         logger.info(
             "compaction completed",
@@ -144,6 +168,28 @@ class ConversationLog:
         )
         await self.db.commit()
 
+    async def _persist_summary(self, summary_msg: dict) -> None:
+        """Persist a compaction summary to the DB.
+
+        Inserts a summary row with is_summary=1 timestamped just before the
+        oldest retained message so that load() can use it as a cutoff.
+        """
+        num_retained = len(self.messages) - 1
+        async with self.db.execute(
+            "SELECT timestamp FROM message_log "
+            "WHERE channel_id = ? AND is_summary = 0 "
+            "ORDER BY timestamp DESC, id DESC LIMIT 1 OFFSET ?",
+            (self.channel_id, num_retained - 1),
+        ) as cursor:
+            row = await cursor.fetchone()
+        summary_ts = row[0] - 0.001 if row else time.time()
+        await self.db.execute(
+            "INSERT INTO message_log (channel_id, message, timestamp, is_summary) "
+            "VALUES (?, ?, ?, 1)",
+            (self.channel_id, json.dumps(summary_msg), summary_ts),
+        )
+        await self.db.commit()
+
     async def _summarize(self, client: LLMClient, messages: list[dict]) -> str:
         """Ask LLM to summarize messages.
 
@@ -168,9 +214,16 @@ async def init_db(db: aiosqlite.Connection) -> None:
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             channel_id TEXT NOT NULL,
             message TEXT NOT NULL,
-            timestamp REAL NOT NULL
+            timestamp REAL NOT NULL,
+            is_summary INTEGER NOT NULL DEFAULT 0
         )"""
     )
+    try:
+        await db.execute(
+            "ALTER TABLE message_log ADD COLUMN is_summary INTEGER NOT NULL DEFAULT 0"
+        )
+    except aiosqlite.OperationalError:
+        pass  # Column already exists — this is the expected case for existing DBs
     await db.execute(
         "CREATE INDEX IF NOT EXISTS idx_log_channel ON message_log (channel_id, timestamp)"
     )
