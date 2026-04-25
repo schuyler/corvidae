@@ -209,10 +209,6 @@ async def run_agent_loop(
                             task_queue=task_queue,
                         )
 
-                    # Backward compat: inject _tool_call_id (removed in Phase 5)
-                    if "_tool_call_id" in tool_sig.parameters:
-                        call_kwargs["_tool_call_id"] = call_id
-
                     content = await tool_fn(**call_kwargs)
                     tool_latency_ms = round((time.monotonic() - tool_start) * 1000, 1)
                     logger.info(

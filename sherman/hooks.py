@@ -131,7 +131,7 @@ class AgentSpec:
 
         Args:
             channel: The Channel to notify.
-            source: Origin of the notification (e.g. "background_task").
+            source: Origin of the notification (e.g. "task").
             text: The notification content.
             tool_call_id: If set, the notification is a deferred tool result
                           and will be formatted as role="tool" in the conversation.

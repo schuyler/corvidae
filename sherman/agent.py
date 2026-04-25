@@ -57,7 +57,7 @@ class QueueItem:
         content: The text content to process.
         channel: The Channel this item belongs to.
         sender: For user messages, the sender identity; None for notifications.
-        source: For notifications, the origin (e.g. "background_task"); None for user messages.
+        source: For notifications, the origin (e.g. "task"); None for user messages.
         tool_call_id: For deferred tool results (background task completions).
         meta: Extensible metadata (task_id, etc.).
     """
@@ -297,9 +297,6 @@ class AgentPlugin:
                             tool_call_id=call_id,
                             task_queue=task_queue,
                         )
-                    # Backward compat: inject _tool_call_id (removed in Phase 5)
-                    if "_tool_call_id" in sig.parameters:
-                        call_kwargs["_tool_call_id"] = call_id
 
                     result = await tool_fn(**call_kwargs)
                     return str(result)

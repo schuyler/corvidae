@@ -53,10 +53,9 @@ class SubagentPlugin:
         if channel is None:
             return "Error: no channel context available for subagent"
 
-        # Get tools, excluding subagent itself to prevent recursion and
-        # background_task which is a placeholder that raises RuntimeError
+        # Get tools, excluding subagent itself to prevent recursion
         agent = self.pm.agent_plugin
-        registry = agent.tool_registry.exclude("subagent", "background_task")
+        registry = agent.tool_registry.exclude("subagent")
         tools_dict = registry.as_dict()
         tool_schemas = registry.schemas()
 

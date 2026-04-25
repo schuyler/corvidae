@@ -72,7 +72,7 @@ async def _make_started_plugin(config=None) -> SubagentPlugin:
     """Create a SubagentPlugin and call on_start with the given config."""
     if config is None:
         config = BASE_CONFIG
-    pm, _ = _make_pm_with_tool_registry("shell", "subagent", "background_task")
+    pm, _ = _make_pm_with_tool_registry("shell", "subagent")
     plugin = SubagentPlugin(pm)
     await plugin.on_start(config=config)
     return plugin
@@ -423,40 +423,6 @@ class TestToolExclusionVerification:
         assert "subagent" not in captured_tools, \
             "subagent must not appear in the tool registry passed to run_agent_loop"
 
-    async def test_work_excludes_background_task_from_tool_registry(self):
-        """The tool registry passed to run_agent_loop does not contain 'background_task'."""
-        plugin = await _make_started_plugin()
-
-        channel = _make_channel()
-        task_queue = MagicMock(spec=TaskQueue)
-        task_queue.enqueue = AsyncMock()
-
-        ctx = ToolContext(
-            channel=channel,
-            tool_call_id="call-excl-02",
-            task_queue=task_queue,
-        )
-
-        captured_tools = {}
-
-        mock_client = MagicMock()
-        mock_client.start = AsyncMock()
-        mock_client.stop = AsyncMock()
-
-        async def capture_run_agent_loop(client, messages, tools, tool_schemas, **kwargs):
-            captured_tools.update(tools)
-            return "done"
-
-        with patch("sherman.tools.subagent.LLMClient", return_value=mock_client), \
-             patch("sherman.tools.subagent.run_agent_loop", side_effect=capture_run_agent_loop), \
-             patch("sherman.tools.subagent.strip_thinking", side_effect=lambda x: x):
-            await plugin._launch("instructions", "desc", ctx)
-            enqueued_task = task_queue.enqueue.call_args[0][0]
-            await enqueued_task.work()
-
-        assert "background_task" not in captured_tools, \
-            "background_task must not appear in the tool registry passed to run_agent_loop"
-
     async def test_work_passes_channel_and_task_queue_to_run_agent_loop(self):
         """work() passes channel and task_queue kwargs to run_agent_loop."""
         plugin = await _make_started_plugin()
@@ -494,9 +460,9 @@ class TestToolExclusionVerification:
             "work() must pass task_queue to run_agent_loop"
 
     async def test_work_includes_other_tools_in_registry(self):
-        """Tools other than subagent and background_task are passed to run_agent_loop."""
+        """Tools other than subagent are passed to run_agent_loop."""
         # Register shell in addition to the excluded tools
-        pm, registry = _make_pm_with_tool_registry("shell", "subagent", "background_task")
+        pm, registry = _make_pm_with_tool_registry("shell", "subagent")
         plugin = SubagentPlugin(pm)
         await plugin.on_start(config=BASE_CONFIG)
 
