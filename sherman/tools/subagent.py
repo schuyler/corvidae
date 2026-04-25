@@ -1,9 +1,11 @@
 """Subagent tool for the sherman agent daemon."""
 
+from __future__ import annotations
+
 import logging
 
 from sherman.agent_loop import run_agent_loop, strip_thinking
-from sherman.hooks import hookimpl
+from sherman.hooks import get_dependency, hookimpl
 from sherman.llm import LLMClient
 from sherman.task import Task
 from sherman.tool import ToolContext
@@ -18,6 +20,8 @@ SUBAGENT_SYSTEM_PROMPT = (
 
 
 class SubagentPlugin:
+    depends_on = {"agent_loop"}
+
     def __init__(self, pm) -> None:
         self.pm = pm
         self._llm_config: dict | None = None
@@ -54,7 +58,8 @@ class SubagentPlugin:
             return "Error: no channel context available for subagent"
 
         # Get tools, excluding subagent itself to prevent recursion
-        agent = self.pm.agent_plugin
+        from sherman.agent import AgentPlugin
+        agent = get_dependency(self.pm, "agent_loop", AgentPlugin)
         registry = agent.tool_registry.exclude("subagent")
         tools_dict = registry.as_dict()
         tool_schemas = registry.schemas()

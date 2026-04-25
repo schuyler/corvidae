@@ -27,7 +27,7 @@ from sherman.agent import AgentPlugin
 from sherman.channel import ChannelRegistry, load_channel_config
 from sherman.channels.cli import CLIPlugin
 from sherman.channels.irc import IRCPlugin
-from sherman.hooks import create_plugin_manager
+from sherman.hooks import create_plugin_manager, validate_dependencies
 from sherman.logging import (  # noqa: F401 — re-exported for backward compat
     StructuredFormatter,
     _BUILTIN_LOG_ATTRS,
@@ -68,9 +68,9 @@ async def main(config_path: str = "agent.yaml") -> None:
     agent_defaults = config.get("agent", {})
     registry = ChannelRegistry(agent_defaults)
 
-    # Option B injection: attach registry to PM so plugins access it
-    # via self.pm.registry
-    pm.registry = registry
+    # Register registry as a named plugin so plugins access it
+    # via pm.get_plugin("registry") / get_dependency()
+    pm.register(registry, name="registry")
 
     # Pre-register channels from YAML config (must happen before on_start)
     load_channel_config(config, registry)
@@ -100,7 +100,8 @@ async def main(config_path: str = "agent.yaml") -> None:
     # Register AgentPlugin after tool-providing and transport plugins
     agent_loop = AgentPlugin(pm)
     pm.register(agent_loop, name="agent_loop")
-    pm.agent_plugin = agent_loop
+
+    validate_dependencies(pm)
 
     await pm.ahook.on_start(config=config)
 

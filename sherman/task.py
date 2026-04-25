@@ -161,7 +161,6 @@ class TaskPlugin:
     @hookimpl
     async def on_start(self, config: dict) -> None:
         self.task_queue = TaskQueue()
-        self.pm.task_plugin = self  # attach for discovery
 
         async def _complete_wrapper(task: Task, result: str) -> None:
             return await self._on_task_complete(task, result)

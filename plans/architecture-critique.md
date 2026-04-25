@@ -30,10 +30,18 @@ layer on top.
 
 ### 4. The plugin manager is a service locator
 
-`pm.registry`, `pm.task_plugin`, `pm.agent_plugin` are monkey-patched
+~~`pm.registry`, `pm.task_plugin`, `pm.agent_plugin` are monkey-patched
 onto the PM at runtime. This makes initialization order load-bearing
 (enforced only by code comments in `main.py`) and isn't type-safe. It's
-the pattern pluggy is supposed to prevent.
+the pattern pluggy is supposed to prevent.~~
+
+**Addressed.** Plugins now declare `depends_on` class attributes (sets of
+plugin name strings) and retrieve dependencies via `get_dependency(pm,
+name, expected_type)` from `hooks.py`, which raises typed errors on
+missing or mistyped plugins. `validate_dependencies(pm)` runs at startup
+in `main.py` after all registrations, verifying the full dependency graph
+before `on_start` fires. `ChannelRegistry` is registered as a named
+plugin (`"registry"`) on the PM rather than monkey-patched.
 
 ## Medium concerns
 
@@ -91,14 +99,17 @@ overall layering (transport → agent → LLM) is sound. The codebase is
 
 ## Refactoring opportunities, ranked by impact
 
-1. **Unify tool dispatch** — extract the `_ctx` injection + tool
+1. ~~**Unify tool dispatch** — extract the `_ctx` injection + tool
    execution into a single function in `tool.py`, called by both
-   `_dispatch_tool_calls` and `run_agent_loop`.
-2. **Make `run_agent_loop` call `run_agent_turn`** — eliminate the
-   duplicated LLM-call code.
-3. **Replace PM monkey-patching with explicit dependency injection** —
+   `_dispatch_tool_calls` and `run_agent_loop`.~~ Done (`execute_tool_call`
+   in `tool.py`).
+2. ~~**Make `run_agent_loop` call `run_agent_turn`** — eliminate the
+   duplicated LLM-call code.~~ Done (same commit as #1).
+3. ~~**Replace PM monkey-patching with explicit dependency injection** —
    pass `TaskQueue` and `ToolRegistry` directly rather than fishing them
-   off the PM at runtime.
+   off the PM at runtime.~~ Addressed via `depends_on` / `get_dependency()`
+   / `validate_dependencies()`. Uses typed PM lookup rather than direct
+   injection, but eliminates the monkey-patching.
 4. **Make compaction durable** — either write a compaction marker to the
    DB, or accept that compaction is session-scoped and document it.
 5. **Move `resolve_system_prompt` out of `conversation.py`**.

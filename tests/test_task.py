@@ -617,21 +617,6 @@ class TestTaskPlugin:
 
         await plugin.on_stop()
 
-    async def test_pm_task_plugin_attached(self):
-        """on_start attaches self to pm.task_plugin for discovery."""
-        pm = create_plugin_manager()
-        pm.ahook.on_notify = AsyncMock()
-        plugin = TaskPlugin(pm)
-
-        assert not hasattr(pm, "task_plugin")
-
-        await plugin.on_start(config={})
-
-        assert hasattr(pm, "task_plugin")
-        assert pm.task_plugin is plugin
-
-        await plugin.on_stop()
-
     def test_register_tools_registers_task_status(self):
         """TaskPlugin.register_tools appends a task_status tool to the registry.
 

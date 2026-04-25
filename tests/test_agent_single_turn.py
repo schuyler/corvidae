@@ -89,7 +89,7 @@ async def _build_plugin_and_channel(
 
     pm = create_plugin_manager()
     registry = ChannelRegistry(agent_defaults)
-    pm.registry = registry
+    pm.register(registry, name="registry")
 
     pm.ahook.send_message = AsyncMock()
     pm.ahook.on_agent_response = AsyncMock()
@@ -98,13 +98,15 @@ async def _build_plugin_and_channel(
 
     # Register TaskPlugin
     task_plugin = TaskPlugin(pm)
-    pm.register(task_plugin, name="task_plugin")
+    pm.register(task_plugin, name="task")
     await task_plugin.on_start(config={})
 
     plugin = AgentPlugin(pm)
     pm.register(plugin, name="agent_loop")
 
     plugin.db = db
+    # Inject the registry directly (tests bypass on_start where _registry is resolved).
+    plugin._registry = registry
 
     channel = registry.get_or_create(
         "test",
@@ -124,7 +126,7 @@ async def plugin_and_channel(request):
         channel_config=params.get("channel_config"),
     )
     yield plugin, channel, db
-    task_plugin = getattr(plugin.pm, "task_plugin", None)
+    task_plugin = plugin.pm.get_plugin("task")
     if task_plugin:
         await task_plugin.on_stop()
     await db.close()
@@ -139,7 +141,7 @@ async def _drain(plugin, channel):
 async def _drain_task_queue(plugin):
     """Wait for all pending tasks in the TaskQueue to complete, including on_complete callbacks."""
     import asyncio
-    task_plugin = getattr(plugin.pm, "task_plugin", None)
+    task_plugin = plugin.pm.get_plugin("task")
     if task_plugin and task_plugin.task_queue:
         await task_plugin.task_queue.queue.join()
         # queue.join() unblocks after task_done() but before on_complete runs.
@@ -178,7 +180,7 @@ class TestToolCallDispatchesTask:
 
         # Capture tasks enqueued by replacing enqueue with a spy
         enqueued_tasks: list[Task] = []
-        task_plugin = plugin.pm.task_plugin
+        task_plugin = plugin.pm.get_plugin("task")
         original_enqueue = task_plugin.task_queue.enqueue
 
         async def spy_enqueue(task: Task) -> None:
@@ -283,7 +285,7 @@ class TestMultipleToolCallsDispatched:
         plugin.client = mock_client
 
         enqueued_tasks: list[Task] = []
-        task_plugin = plugin.pm.task_plugin
+        task_plugin = plugin.pm.get_plugin("task")
         original_enqueue = task_plugin.task_queue.enqueue
 
         async def spy_enqueue(task: Task) -> None:
@@ -404,7 +406,7 @@ class TestMaxTurnsExceededSuppressesToolCalls:
         plugin.client = mock_client
 
         enqueued_tasks: list[Task] = []
-        task_plugin = plugin.pm.task_plugin
+        task_plugin = plugin.pm.get_plugin("task")
         original_enqueue = task_plugin.task_queue.enqueue
 
         async def spy_enqueue(task: Task) -> None:
@@ -427,7 +429,7 @@ class TestMaxTurnsExceededSuppressesToolCalls:
             assert len(enqueued_tasks) == 1  # still only 1
             assert plugin.pm.ahook.send_message.called
         finally:
-            task_plugin = getattr(plugin.pm, "task_plugin", None)
+            task_plugin = plugin.pm.get_plugin("task")
             if task_plugin:
                 await task_plugin.on_stop()
             await db.close()
@@ -478,7 +480,7 @@ class TestMaxTurnsExceededSendsFallbackText:
             sent_text = plugin.pm.ahook.send_message.call_args.kwargs["text"]
             assert "max tool-calling rounds reached" in sent_text
         finally:
-            task_plugin = getattr(plugin.pm, "task_plugin", None)
+            task_plugin = plugin.pm.get_plugin("task")
             if task_plugin:
                 await task_plugin.on_stop()
             await db.close()
@@ -525,7 +527,7 @@ class TestToolDispatchWithToolContext:
         assert isinstance(ctx, ToolContext)
         assert ctx.channel is channel
         assert ctx.tool_call_id == "call-ctx"
-        assert ctx.task_queue is plugin.pm.task_plugin.task_queue
+        assert ctx.task_queue is plugin.pm.get_plugin("task").task_queue
 
 
 # ---------------------------------------------------------------------------
@@ -620,15 +622,16 @@ class TestNoTaskQueueLogsError:
 
         pm = create_plugin_manager()
         registry = ChannelRegistry(AGENT_DEFAULTS)
-        pm.registry = registry
+        pm.register(registry, name="registry")
         pm.ahook.send_message = AsyncMock()
         pm.ahook.on_agent_response = AsyncMock()
         pm.ahook.on_task_complete = AsyncMock()
-        # NOTE: No TaskPlugin registered — pm.task_plugin will not exist
+        # NOTE: No TaskPlugin registered — pm.get_plugin("task") will return None
 
         plugin = AgentPlugin(pm)
         pm.register(plugin, name="agent_loop")
         plugin.db = db
+        plugin._registry = registry
 
         async def my_tool(x: str) -> str:
             """A tool."""

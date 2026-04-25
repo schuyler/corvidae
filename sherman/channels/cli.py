@@ -4,7 +4,8 @@ import asyncio
 import logging
 import sys
 
-from sherman.hooks import hookimpl
+from sherman.channel import ChannelRegistry
+from sherman.hooks import get_dependency, hookimpl
 
 logger = logging.getLogger(__name__)
 
@@ -16,14 +17,18 @@ class CLIPlugin:
     at least one cli channel is configured.
     """
 
+    depends_on = {"registry"}
+
     def __init__(self, pm) -> None:
         self.pm = pm
         self._task: asyncio.Task | None = None
+        self._registry: ChannelRegistry | None = None
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
         """Start the stdin read loop if any cli channels are configured."""
-        if not self.pm.registry.by_transport("cli"):
+        self._registry = get_dependency(self.pm, "registry", ChannelRegistry)
+        if not self._registry.by_transport("cli"):
             logger.debug("CLIPlugin: no cli channels configured, skipping read loop")
             return
         self._task = asyncio.create_task(self._read_loop(), name="cli-read-loop")
@@ -34,7 +39,7 @@ class CLIPlugin:
         Always routes to the cli:local channel. CLI is single-user/single-scope
         by design — only cli:local receives stdin input.
         """
-        channel = self.pm.registry.get_or_create("cli", "local")
+        channel = self._registry.get_or_create("cli", "local")
         print("Agent ready. Type a message, or Ctrl-D to quit.\n")
 
         # Print initial prompt — subsequent prompts appear in send_message

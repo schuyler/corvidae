@@ -9,8 +9,8 @@ import pydle
 
 logger = logging.getLogger("sherman.irc_plugin")
 
-from sherman.channel import Channel
-from sherman.hooks import hookimpl
+from sherman.channel import Channel, ChannelRegistry
+from sherman.hooks import get_dependency, hookimpl
 
 
 class IRCClient(pydle.Client):
@@ -86,14 +86,18 @@ class IRCClient(pydle.Client):
 class IRCPlugin:
     """IRC transport plugin following CLIPlugin pattern."""
 
+    depends_on = {"registry"}
+
     def __init__(self, pm):
         self.pm = pm
         self.client: Optional[IRCClient] = None
         self._connect_task: Optional[asyncio.Task] = None
         self.channels: list[str] = []
+        self._registry: Optional[ChannelRegistry] = None
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
+        self._registry = get_dependency(self.pm, "registry", ChannelRegistry)
         irc_config = config.get("irc")
         if irc_config is None:
             return
@@ -111,7 +115,7 @@ class IRCPlugin:
         """Forward channel messages to agent loop (called by IRCClient)."""
         if self.client is not None and by == self.client.nickname:
             return
-        channel = self.pm.registry.get_or_create("irc", target)
+        channel = self._registry.get_or_create("irc", target)
         await self.pm.ahook.on_message(
             channel=channel,
             sender=by,
@@ -122,7 +126,7 @@ class IRCPlugin:
         """Forward private messages to agent loop (called by IRCClient)."""
         if self.client is not None and by == self.client.nickname:
             return
-        channel = self.pm.registry.get_or_create("irc", by)
+        channel = self._registry.get_or_create("irc", by)
         await self.pm.ahook.on_message(
             channel=channel,
             sender=by,

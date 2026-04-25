@@ -797,7 +797,7 @@ class TestAgentPluginLogging:
 
         pm = create_plugin_manager()
         registry = ChannelRegistry({"system_prompt": "Test.", "max_context_tokens": 8000})
-        pm.registry = registry
+        pm.register(registry, name="registry")
         pm.ahook.send_message = AsyncMock()
         pm.ahook.on_agent_response = AsyncMock()
 
@@ -835,13 +835,14 @@ class TestAgentPluginLogging:
         pm = create_plugin_manager()
         registry = ChannelRegistry({"system_prompt": "Test.", "max_context_tokens": 8000,
                                      "keep_thinking_in_history": False})
-        pm.registry = registry
+        pm.register(registry, name="registry")
         pm.ahook.send_message = AsyncMock()
         pm.ahook.on_agent_response = AsyncMock()
 
         plugin = AgentPlugin(pm)
         pm.register(plugin, name="agent_loop")
         plugin.db = db
+        plugin._registry = registry
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(
@@ -892,13 +893,14 @@ class TestAgentPluginLogging:
         pm = create_plugin_manager()
         registry = ChannelRegistry({"system_prompt": "Test.", "max_context_tokens": 8000,
                                      "keep_thinking_in_history": False})
-        pm.registry = registry
+        pm.register(registry, name="registry")
         pm.ahook.send_message = AsyncMock()
         pm.ahook.on_agent_response = AsyncMock()
 
         plugin = AgentPlugin(pm)
         pm.register(plugin, name="agent_loop")
         plugin.db = db
+        plugin._registry = registry
 
         channel = registry.get_or_create("test", "scope1")
         assert channel.conversation is None

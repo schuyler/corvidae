@@ -242,9 +242,10 @@ CREATE INDEX idx_log_channel ON message_log(channel_id, timestamp);
 ## AgentPlugin
 
 `agent.py` — the central plugin. Implements `on_start`, `on_message`,
-`on_notify`, `on_stop`. Sets `pm.agent_plugin = self` during
-registration so other plugins (e.g. `SubagentPlugin`) can access
-`tool_registry` at call time.
+`on_notify`, `on_stop`. Declares `depends_on = {"registry"}` so
+`validate_dependencies(pm)` can verify its dependency is registered at
+startup. Retrieves `ChannelRegistry` during `on_start` via
+`get_dependency(pm, "registry", ChannelRegistry)` from `hooks.py`.
 
 ### Message processing
 
@@ -271,8 +272,11 @@ per-channel `SerialQueue`. The queue's consumer calls
 ### Tool call dispatch
 
 `_dispatch_tool_calls` creates a `Task` for each tool call and enqueues
-it on the `TaskQueue` (accessed via `pm.task_plugin.task_queue`). Each
-task's `work` closure:
+it on the `TaskQueue` (accessed via
+`getattr(pm.get_plugin("task"), "task_queue", None)`). `TaskPlugin` is
+intentionally not declared in `AgentPlugin.depends_on` — it is treated
+as optional, and tool dispatch degrades gracefully (logs an error) if
+the task queue is unavailable. Each task's `work` closure:
 
 - Parses the tool call arguments
 - Looks up the tool function in `self.tools`
@@ -352,7 +356,9 @@ if the task queue or channel context is unavailable.
 
 ### How it works
 
-1. Retrieves `agent_plugin.tool_registry` via `pm.agent_plugin`.
+1. At tool-call time (not `on_start`), retrieves `AgentPlugin` via
+   `get_dependency(self.pm, "agent_loop", AgentPlugin)` and accesses
+   its `tool_registry`.
 2. Calls `registry.exclude("subagent")` to remove itself from the subagent's tool set.
 3. Builds a `messages` list (system prompt + user instructions) and a
    `work` coroutine that captures it, creates a fresh `LLMClient`, calls
@@ -459,12 +465,54 @@ Relative paths resolve against the directory containing `agent.yaml`.
 
 Defined in `main.py`:
 
-1. CoreToolsPlugin — registers tools
-2. CLIPlugin — stdin/stdout transport
-3. IRCPlugin — IRC transport
-4. TaskPlugin — task queue
-5. SubagentPlugin — registers the subagent tool
-6. AgentPlugin — agent loop (last, so all tools and queues are ready)
+1. `ChannelRegistry` — registered as a named plugin (`"registry"`) on the PM
+2. CoreToolsPlugin — registers tools
+3. CLIPlugin — stdin/stdout transport
+4. IRCPlugin — IRC transport
+5. TaskPlugin — task queue
+6. SubagentPlugin — registers the subagent tool
+7. AgentPlugin — agent loop (last, so all tools and queues are ready)
+
+After all registrations, `validate_dependencies(pm)` runs to verify that
+every plugin's `depends_on` set names a registered plugin. Startup aborts
+with `RuntimeError` if any dependency is missing.
+
+## Plugin Dependencies
+
+Plugins declare dependencies using a class-level `depends_on` attribute (a
+set of plugin name strings). `validate_dependencies(pm)` in `hooks.py`
+iterates all registered plugins and raises `RuntimeError` if any declared
+dependency is not found in the PM. It runs in `main.py` after all plugins
+are registered, before `on_start`.
+
+**`get_dependency(pm, name, expected_type)`** — typed lookup via
+`pm.get_plugin(name)`. Raises `RuntimeError` if the plugin is not
+registered; raises `TypeError` if the plugin is not an instance of
+`expected_type`. Returns the plugin cast to `expected_type`. Defined in
+`hooks.py`.
+
+**`validate_dependencies(pm)`** — iterates every registered plugin, checks
+for a `depends_on` attribute, and raises `RuntimeError` naming the missing
+dependency and the plugin that declared it. Runs once at startup.
+
+### Current dependency graph
+
+```
+AgentPlugin      → "registry"   (ChannelRegistry)
+CLIPlugin        → "registry"   (ChannelRegistry)
+IRCPlugin        → "registry"   (ChannelRegistry)
+SubagentPlugin   → "agent_loop" (AgentPlugin)
+```
+
+Transport plugins use `get_dependency(pm, "registry", ChannelRegistry)` in
+`on_start` to retrieve the shared `ChannelRegistry`. `SubagentPlugin` calls
+`get_dependency(pm, "agent_loop", AgentPlugin)` at tool-call time (inside
+`_launch`) to access `AgentPlugin.tool_registry`.
+
+`AgentPlugin` also accesses `TaskPlugin` via `pm.get_plugin("task")`, but
+this is intentionally not declared in `depends_on` — `TaskPlugin` is
+treated as optional, and `_dispatch_tool_calls` degrades gracefully
+(logs an error and returns) when the task queue is unavailable.
 
 ## Directory Layout
 
