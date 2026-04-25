@@ -367,7 +367,7 @@ class AgentPlugin:
 
         # 8. Strip reasoning_content from in-memory copy if configured
         if not resolved["keep_thinking_in_history"]:
-            strip_reasoning_content([result.message])
+            strip_reasoning_content([conv.messages[-1]])
 
         # 9. Dispatch tool calls or send text response
         # Check-before-increment: turn_counter < max_turns_limit allows dispatch

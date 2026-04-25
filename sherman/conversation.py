@@ -11,6 +11,7 @@ Logging:
     - INFO: compaction completed (before/after counts)
 """
 
+import enum
 import json
 import logging
 import time
@@ -20,6 +21,20 @@ import aiosqlite
 from sherman.llm import LLMClient
 
 logger = logging.getLogger(__name__)
+
+
+class MessageType(str, enum.Enum):
+    """Persistence category for a message log entry.
+
+    Controls storage and filtering behavior, not conversational role.
+    Values match the ``message_type`` TEXT column in the ``message_log`` table.
+
+    MESSAGE: an ordinary conversation message (user or assistant turn).
+    SUMMARY: a compaction summary that replaces a range of older messages.
+    """
+
+    MESSAGE = "message"
+    SUMMARY = "summary"
 
 
 class ConversationLog:
@@ -53,7 +68,7 @@ class ConversationLog:
         """
         async with self.db.execute(
             "SELECT id, message FROM message_log "
-            "WHERE channel_id = ? AND is_summary = 1 "
+            "WHERE channel_id = ? AND message_type = 'summary' "
             "ORDER BY id DESC LIMIT 1",
             (self.channel_id,),
         ) as cursor:
@@ -61,38 +76,61 @@ class ConversationLog:
 
         if summary_row:
             summary_id, summary_message = summary_row
+            summary_msg = json.loads(summary_message)
+            summary_msg["_message_type"] = MessageType.SUMMARY
             # Load all non-summary rows — summarized messages are deleted
             # during compaction, so only retained + new messages remain.
             async with self.db.execute(
-                "SELECT message FROM message_log "
-                "WHERE channel_id = ? AND is_summary = 0 "
+                "SELECT message, message_type FROM message_log "
+                "WHERE channel_id = ? AND message_type = 'message' "
                 "ORDER BY id",
                 (self.channel_id,),
             ) as cursor:
                 rows = await cursor.fetchall()
-            self.messages = [json.loads(summary_message)] + [json.loads(row[0]) for row in rows]
+            loaded = []
+            for row in rows:
+                msg = json.loads(row[0])
+                msg["_message_type"] = MessageType(row[1])
+                loaded.append(msg)
+            self.messages = [summary_msg] + loaded
         else:
             async with self.db.execute(
-                "SELECT message FROM message_log "
-                "WHERE channel_id = ? AND is_summary = 0 "
+                "SELECT message, message_type FROM message_log "
+                "WHERE channel_id = ? AND message_type = 'message' "
                 "ORDER BY timestamp, id",
                 (self.channel_id,),
             ) as cursor:
                 rows = await cursor.fetchall()
-            self.messages = [json.loads(row[0]) for row in rows]
+            loaded = []
+            for row in rows:
+                msg = json.loads(row[0])
+                msg["_message_type"] = MessageType(row[1])
+                loaded.append(msg)
+            self.messages = loaded
 
         logger.debug(
             "messages loaded from DB",
             extra={"count": len(self.messages)},
         )
 
-    async def append(self, message: dict) -> None:
+    async def append(self, message: dict, message_type: MessageType = MessageType.MESSAGE) -> None:
         """Append to both self.messages and persistent log.
+
+        Args:
+            message: The message dict to store (e.g. ``{"role": "user", "content": "..."}``).
+            message_type: Persistence category for the entry. Defaults to
+                ``MessageType.MESSAGE``.
+
+        A shallow copy of ``message`` is made before adding ``_message_type``
+        to the in-memory entry, so the caller's dict is not mutated. The
+        original (untagged) dict is written to the DB.
 
         Logs the role and content length at DEBUG level.
         """
-        self.messages.append(message)
-        await self._persist(message)
+        tagged = dict(message)
+        tagged["_message_type"] = message_type
+        self.messages.append(tagged)
+        await self._persist(message, message_type)
 
         logger.debug(
             "message appended",
@@ -157,14 +195,24 @@ class ConversationLog:
         older = self.messages[:-retain_count]
         retained = self.messages[-retain_count:]
 
-        summary_text = await self._summarize(client, older)
-        summary_msg = {
+        # Filter older to MESSAGE-type only; exclude SUMMARY entries from summarizer input.
+        older = [m for m in older if m.get("_message_type", MessageType.MESSAGE) == MessageType.MESSAGE]
+        # Strip _message_type before passing to LLM to avoid serializing internal metadata.
+        older_clean = [{k: v for k, v in m.items() if k != "_message_type"} for m in older]
+
+        summary_text = await self._summarize(client, older_clean)
+        summary_msg_untagged = {
             "role": "assistant",
             "content": f"[Summary of earlier conversation]\n{summary_text}",
         }
+        summary_msg = {**summary_msg_untagged, "_message_type": MessageType.SUMMARY}
         messages_before = len(self.messages)
+        # Update self.messages before _persist_summary — _persist_summary derives
+        # num_retained from len(self.messages) - 1, so the list must reflect the
+        # post-compaction state (summary + retained) before persistence runs.
         self.messages = [summary_msg] + retained
-        await self._persist_summary(summary_msg)
+        # Pass the untagged dict to persistence to avoid serializing _message_type into the DB.
+        await self._persist_summary(summary_msg_untagged)
 
         logger.info(
             "compaction completed",
@@ -179,18 +227,31 @@ class ConversationLog:
         """Return [system_message, *self.messages].
 
         The system message is prepended to the in-memory message list.
-        This does not modify self.messages.
+        This does not modify self.messages. Strips internal _message_type
+        metadata from each message dict before returning.
         """
-        return [{"role": "system", "content": self.system_prompt}] + self.messages
+        cleaned = []
+        for msg in self.messages:
+            # Strip _message_type: it is internal metadata and must not be sent to the LLM.
+            if "_message_type" in msg:
+                msg = {k: v for k, v in msg.items() if k != "_message_type"}
+            cleaned.append(msg)
+        return [{"role": "system", "content": self.system_prompt}] + cleaned
 
-    async def _persist(self, message: dict) -> None:
-        """INSERT into message_log.
+    async def _persist(self, message: dict, message_type: MessageType = MessageType.MESSAGE) -> None:
+        """INSERT a single row into message_log.
 
-        Serializes the message dict to JSON and stores with timestamp.
+        Args:
+            message: The message dict to serialize. Must not contain
+                ``_message_type``; callers are responsible for stripping it.
+            message_type: Value written to the ``message_type`` column.
+                Defaults to ``MessageType.MESSAGE``.
+
+        Serializes ``message`` to JSON and stores it with the current timestamp.
         """
         await self.db.execute(
-            "INSERT INTO message_log (channel_id, message, timestamp) VALUES (?, ?, ?)",
-            (self.channel_id, json.dumps(message), time.time()),
+            "INSERT INTO message_log (channel_id, message, timestamp, message_type) VALUES (?, ?, ?, ?)",
+            (self.channel_id, json.dumps(message), time.time(), message_type),
         )
         await self.db.commit()
 
@@ -212,7 +273,7 @@ class ConversationLog:
         # Find the id of the oldest retained message
         async with self.db.execute(
             "SELECT id FROM message_log "
-            "WHERE channel_id = ? AND is_summary = 0 "
+            "WHERE channel_id = ? AND message_type = 'message' "
             "ORDER BY id DESC LIMIT 1 OFFSET ?",
             (self.channel_id, num_retained - 1),
         ) as cursor:
@@ -223,20 +284,20 @@ class ConversationLog:
             # Delete summarized messages (non-summary rows before retained set)
             await self.db.execute(
                 "DELETE FROM message_log "
-                "WHERE channel_id = ? AND is_summary = 0 AND id < ?",
+                "WHERE channel_id = ? AND message_type = 'message' AND id < ?",
                 (self.channel_id, oldest_retained_id),
             )
         # Delete old summary rows
         await self.db.execute(
             "DELETE FROM message_log "
-            "WHERE channel_id = ? AND is_summary = 1",
+            "WHERE channel_id = ? AND message_type = 'summary'",
             (self.channel_id,),
         )
         # Insert the new summary
         await self.db.execute(
-            "INSERT INTO message_log (channel_id, message, timestamp, is_summary) "
-            "VALUES (?, ?, ?, 1)",
-            (self.channel_id, json.dumps(summary_msg), time.time()),
+            "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
+            "VALUES (?, ?, ?, ?)",
+            (self.channel_id, json.dumps(summary_msg), time.time(), MessageType.SUMMARY),
         )
         await self.db.commit()
 
@@ -265,15 +326,9 @@ async def init_db(db: aiosqlite.Connection) -> None:
             channel_id TEXT NOT NULL,
             message TEXT NOT NULL,
             timestamp REAL NOT NULL,
-            is_summary INTEGER NOT NULL DEFAULT 0
+            message_type TEXT NOT NULL DEFAULT 'message'
         )"""
     )
-    try:
-        await db.execute(
-            "ALTER TABLE message_log ADD COLUMN is_summary INTEGER NOT NULL DEFAULT 0"
-        )
-    except aiosqlite.OperationalError:
-        pass  # Column already exists — this is the expected case for existing DBs
     await db.execute(
         "CREATE INDEX IF NOT EXISTS idx_log_channel ON message_log (channel_id, timestamp)"
     )
