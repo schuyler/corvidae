@@ -83,11 +83,13 @@ given the transport count will remain small.
 
 ### 9. `compact_if_needed` hardcodes 20-message retention
 
-The boundary between "summarize" and "keep" is a magic number.
+~~The boundary between "summarize" and "keep" is a magic number.
 Parameterizing it in config would be slightly better, but the right
 approach is to choose the compaction boundary by token count or at least
 by text size (KB), since message sizes vary wildly and a fixed count is
-meaningless as a proxy for context consumption.
+meaningless as a proxy for context consumption.~~
+
+**Addressed:** replaced hardcoded 20-message split with token-budget backward walk. Retain budget = 50% of max_context_tokens. Guard changed from >20 to >5. Also fixed token_estimate() to handle None/non-string content.
 
 ### 7. `on_task_complete` is dead surface area
 

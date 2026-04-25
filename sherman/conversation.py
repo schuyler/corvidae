@@ -105,22 +105,30 @@ class ConversationLog:
 
         Uses a simple character-based heuristic: ~3.5 characters per token.
         Includes system prompt length plus all message content lengths.
+        Non-string content (None, lists) is treated as 0 characters.
         """
         total_chars = len(self.system_prompt)
         for msg in self.messages:
-            total_chars += len(msg.get("content", ""))
+            content = msg.get("content") or ""
+            if not isinstance(content, str):
+                content = ""
+            total_chars += len(content)
         return int(total_chars / 3.5)
 
     async def compact_if_needed(self, client: LLMClient, max_tokens: int) -> None:
-        """If token_estimate >= 80% of max_tokens AND len(messages) > 20,
-        summarize older messages. Keep last 20, replace rest with summary.
+        """If token_estimate >= 80% of max_tokens AND len(messages) > 5,
+        summarize older messages using a token-budget backward walk.
+
+        Retains the most-recent messages that fit within 50% of max_tokens,
+        summarizes all older messages, and replaces them with a single summary
+        entry. Non-string content is treated as 0 tokens.
 
         Logs a WARNING when compaction is triggered and INFO when completed
         with before/after message counts.
         """
         if self.token_estimate() < max_tokens * 0.8:
             return
-        if len(self.messages) <= 20:
+        if len(self.messages) <= 5:
             return
 
         logger.warning(
@@ -128,8 +136,24 @@ class ConversationLog:
             extra={"channel_id": self.channel_id},
         )
 
-        older = self.messages[:-20]
-        last_20 = self.messages[-20:]
+        retain_budget = int(max_tokens * 0.5)
+        retain_count = 0
+        retain_tokens = 0
+        for msg in reversed(self.messages):
+            content = msg.get("content") or ""
+            if not isinstance(content, str):
+                content = ""
+            msg_tokens = int(len(content) / 3.5)
+            if retain_tokens + msg_tokens > retain_budget and retain_count > 0:
+                break
+            retain_tokens += msg_tokens
+            retain_count += 1
+
+        if retain_count >= len(self.messages):
+            return
+
+        older = self.messages[:-retain_count]
+        retained = self.messages[-retain_count:]
 
         summary_text = await self._summarize(client, older)
         summary_msg = {
@@ -137,7 +161,7 @@ class ConversationLog:
             "content": f"[Summary of earlier conversation]\n{summary_text}",
         }
         messages_before = len(self.messages)
-        self.messages = [summary_msg] + last_20
+        self.messages = [summary_msg] + retained
         await self._persist_summary(summary_msg)
 
         logger.info(
