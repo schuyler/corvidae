@@ -1840,3 +1840,153 @@ class TestProcessToolResult:
         assert received["tool_name"] == "specific_tool"
         assert received["result"] == "raw output"
 
+
+# ---------------------------------------------------------------------------
+# Section 18 — before_agent_turn hook (Phase 2 red phase)
+# ---------------------------------------------------------------------------
+
+
+class TestBeforeAgentTurn:
+    """Tests for the before_agent_turn hook added in Phase 2.
+
+    All tests here fail until:
+    - before_agent_turn hookspec is added to AgentSpec in hooks.py
+    - before_agent_turn is called in _process_queue_item in agent.py
+      (between compaction and build_prompt)
+    """
+
+    async def test_before_agent_turn_hook_fires(self):
+        """before_agent_turn must be called before the LLM invocation.
+
+        A plugin implementing the hook records that it was called. After
+        draining the queue, we verify the hook fired.
+
+        This fails until the hookspec exists and _process_queue_item calls it.
+        """
+        from sherman.hooks import hookimpl
+        from sherman.agent_loop import AgentTurnResult
+
+        plugin, channel, db = await _build_plugin_and_channel()
+
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(return_value=_make_text_response("answer"))
+        plugin.client = mock_client
+
+        hook_calls = []
+
+        class BeforeTurnPlugin:
+            @hookimpl
+            async def before_agent_turn(self, channel):
+                hook_calls.append(channel)
+
+        plugin.pm.register(BeforeTurnPlugin(), name="before_turn_plugin")
+
+        await plugin.on_message(channel=channel, sender="user", text="hello")
+        await _drain(plugin, channel)
+
+        assert len(hook_calls) == 1, (
+            f"Expected before_agent_turn to be called once, got {len(hook_calls)} calls"
+        )
+        assert hook_calls[0] is channel, (
+            "before_agent_turn must receive the channel as argument"
+        )
+
+        await db.close()
+
+    async def test_before_agent_turn_injection_visible_in_prompt(self):
+        """A plugin that injects a CONTEXT entry via channel.conversation.append()
+        in before_agent_turn must have that entry appear in the prompt sent to the LLM.
+
+        The hook fires between compaction and build_prompt, so appended entries
+        are included in the prompt for that turn.
+
+        This fails until the hookspec exists and the call site is between
+        compaction and build_prompt.
+        """
+        from sherman.hooks import hookimpl
+        from sherman.conversation import MessageType
+
+        plugin, channel, db = await _build_plugin_and_channel()
+
+        context_content = "context: user is in timezone UTC+2"
+        prompt_messages_received = []
+
+        class InjectPlugin:
+            @hookimpl
+            async def before_agent_turn(self, channel):
+                await channel.conversation.append(
+                    {"role": "system", "content": context_content},
+                    message_type=MessageType.CONTEXT,
+                )
+
+        plugin.pm.register(InjectPlugin(), name="inject_plugin")
+
+        # Capture the prompt passed to the LLM
+        original_chat = None
+
+        async def capture_chat(messages, **kwargs):
+            prompt_messages_received.extend(messages)
+            return _make_text_response("ok")
+
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(side_effect=capture_chat)
+        plugin.client = mock_client
+
+        await plugin.on_message(channel=channel, sender="user", text="hello")
+        await _drain(plugin, channel)
+
+        assert any(
+            m.get("content") == context_content for m in prompt_messages_received
+        ), (
+            f"Injected CONTEXT entry not found in prompt. "
+            f"Prompt messages: {prompt_messages_received}"
+        )
+
+        await db.close()
+
+    async def test_before_agent_turn_fires_on_tool_result_turn(self):
+        """before_agent_turn must fire on tool-result (notification) turns,
+        not only on user-message turns.
+
+        Design Decision 3: the hook fires on every LLM invocation, including
+        the follow-up turn triggered by a tool result.
+
+        This test sends a tool result via on_notify and verifies the hook
+        fires on that turn.
+        """
+        from sherman.hooks import hookimpl
+
+        plugin, channel, db = await _build_plugin_and_channel()
+
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(return_value=_make_text_response("tool result acknowledged"))
+        plugin.client = mock_client
+
+        hook_call_channels = []
+
+        class BeforeTurnPlugin:
+            @hookimpl
+            async def before_agent_turn(self, channel):
+                hook_call_channels.append(channel)
+
+        plugin.pm.register(BeforeTurnPlugin(), name="before_turn_notify_plugin")
+
+        # Trigger a tool-result turn via on_notify
+        await plugin.pm.ahook.on_notify(
+            channel=channel,
+            source="task",
+            text="tool completed: success",
+            tool_call_id="call_xyz",
+            meta=None,
+        )
+        await _drain(plugin, channel)
+
+        assert len(hook_call_channels) >= 1, (
+            "before_agent_turn must fire on tool-result (notification) turns"
+        )
+        assert all(ch is channel for ch in hook_call_channels), (
+            "before_agent_turn must receive the correct channel"
+        )
+
+        await db.close()
+

@@ -31,10 +31,14 @@ class MessageType(str, enum.Enum):
 
     MESSAGE: an ordinary conversation message (user or assistant turn).
     SUMMARY: a compaction summary that replaces a range of older messages.
+    CONTEXT: plugin-injected contextual information (memory, notes, retrieved
+             documents, etc.) that should appear in the prompt but is not part
+             of the conversational turn history.
     """
 
     MESSAGE = "message"
     SUMMARY = "summary"
+    CONTEXT = "context"
 
 
 class ConversationLog:
@@ -82,7 +86,7 @@ class ConversationLog:
             # during compaction, so only retained + new messages remain.
             async with self.db.execute(
                 "SELECT message, message_type FROM message_log "
-                "WHERE channel_id = ? AND message_type = 'message' "
+                "WHERE channel_id = ? AND message_type != 'summary' "
                 "ORDER BY id",
                 (self.channel_id,),
             ) as cursor:
@@ -96,7 +100,7 @@ class ConversationLog:
         else:
             async with self.db.execute(
                 "SELECT message, message_type FROM message_log "
-                "WHERE channel_id = ? AND message_type = 'message' "
+                "WHERE channel_id = ? AND message_type != 'summary' "
                 "ORDER BY timestamp, id",
                 (self.channel_id,),
             ) as cursor:
@@ -238,6 +242,49 @@ class ConversationLog:
             cleaned.append(msg)
         return [{"role": "system", "content": self.system_prompt}] + cleaned
 
+    async def remove_by_type(self, message_type: MessageType) -> int:
+        """Remove all entries of a given type from both memory and DB.
+
+        Returns the number of entries removed. Plugins use this to clean up
+        injected entries before re-injecting fresh ones, preventing
+        unbounded accumulation.
+
+        Raises ValueError if message_type is MESSAGE or SUMMARY — those types
+        are managed by compaction, not by this method.
+
+        Args:
+            message_type: The type to remove. Must not be MESSAGE or SUMMARY.
+
+        Returns:
+            The number of in-memory entries removed.
+        """
+        if message_type in (MessageType.MESSAGE, MessageType.SUMMARY):
+            raise ValueError(
+                f"Cannot remove {message_type.value!r} entries — "
+                f"use compaction for MESSAGE and SUMMARY lifecycle"
+            )
+        before = len(self.messages)
+        self.messages = [
+            m for m in self.messages
+            if m.get("_message_type") != message_type
+        ]
+        removed = before - len(self.messages)
+        await self.db.execute(
+            "DELETE FROM message_log "
+            "WHERE channel_id = ? AND message_type = ?",
+            (self.channel_id, message_type),
+        )
+        await self.db.commit()
+        logger.debug(
+            "removed entries by type",
+            extra={
+                "channel_id": self.channel_id,
+                "message_type": message_type.value,
+                "count": removed,
+            },
+        )
+        return removed
+
     async def _persist(self, message: dict, message_type: MessageType = MessageType.MESSAGE) -> None:
         """INSERT a single row into message_log.
 
@@ -269,24 +316,49 @@ class ConversationLog:
         keeps in-memory and DB state in sync, and compact_if_needed is the
         only caller.
         """
-        num_retained = len(self.messages) - 1
-        # Find the id of the oldest retained message
-        async with self.db.execute(
-            "SELECT id FROM message_log "
-            "WHERE channel_id = ? AND message_type = 'message' "
-            "ORDER BY id DESC LIMIT 1 OFFSET ?",
-            (self.channel_id, num_retained - 1),
-        ) as cursor:
-            row = await cursor.fetchone()
+        # Count all non-summary entries in the retained set.
+        # self.messages = [summary_msg] + retained after compact_if_needed runs.
+        # retained can include MESSAGE, CONTEXT, and any future non-summary types.
+        num_retained_total = len(self.messages) - 1
 
-        if row:
-            oldest_retained_id = row[0]
-            # Delete summarized messages (non-summary rows before retained set)
+        if num_retained_total == 0:
+            # No non-summary entries in the retained set.
+            # Delete all non-summary rows for this channel unconditionally.
             await self.db.execute(
                 "DELETE FROM message_log "
-                "WHERE channel_id = ? AND message_type = 'message' AND id < ?",
-                (self.channel_id, oldest_retained_id),
+                "WHERE channel_id = ? AND message_type != 'summary'",
+                (self.channel_id,),
             )
+        else:
+            # Find the id of the oldest retained non-summary row.
+            # Since ids are assigned in insertion order and self.messages
+            # is loaded/maintained in id order, this corresponds to
+            # retained[0] (the oldest entry kept after compaction).
+            async with self.db.execute(
+                "SELECT id FROM message_log "
+                "WHERE channel_id = ? AND message_type != 'summary' "
+                "ORDER BY id DESC LIMIT 1 OFFSET ?",
+                (self.channel_id, num_retained_total - 1),
+            ) as cursor:
+                row = await cursor.fetchone()
+
+            if row:
+                oldest_retained_id = row[0]
+                # Delete all non-summary rows before the retained window.
+                # This covers MESSAGE rows (summarized away) and CONTEXT rows
+                # (they annotated conversation that has been summarized).
+                await self.db.execute(
+                    "DELETE FROM message_log "
+                    "WHERE channel_id = ? AND message_type != 'summary' AND id < ?",
+                    (self.channel_id, oldest_retained_id),
+                )
+            else:
+                logger.warning(
+                    "_persist_summary: boundary query returned no row; "
+                    "skipping pre-retained deletion (possible SUMMARY-in-retained edge case)",
+                    extra={"channel_id": self.channel_id, "num_retained_total": num_retained_total},
+                )
+
         # Delete old summary rows
         await self.db.execute(
             "DELETE FROM message_log "
