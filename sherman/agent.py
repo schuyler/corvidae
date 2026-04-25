@@ -343,7 +343,15 @@ class AgentPlugin:
         except Exception:
             logger.warning("compaction failed, skipping", exc_info=True)
 
-        # 6. Build prompt and call run_agent_turn (single LLM invocation)
+        # 6. Let plugins inject context before the LLM call
+        try:
+            await self.pm.ahook.before_agent_turn(channel=channel)
+        except Exception:
+            logger.warning(
+                "before_agent_turn hook failed, skipping", exc_info=True
+            )
+
+        # 7. Build prompt and call run_agent_turn (single LLM invocation)
         messages = conv.build_prompt()
 
         try:
@@ -362,14 +370,14 @@ class AgentPlugin:
             )
             return
 
-        # 7. Persist assistant message (run_agent_turn already appended to messages in place)
+        # 8. Persist assistant message (run_agent_turn already appended to messages in place)
         await conv.append(result.message)
 
-        # 8. Strip reasoning_content from in-memory copy if configured
+        # 9. Strip reasoning_content from in-memory copy if configured
         if not resolved["keep_thinking_in_history"]:
             strip_reasoning_content([conv.messages[-1]])
 
-        # 9. Dispatch tool calls or send text response
+        # 10. Dispatch tool calls or send text response
         # Check-before-increment: turn_counter < max_turns_limit allows dispatch
         if result.tool_calls and channel.turn_counter < max_turns_limit:
             channel.turn_counter += 1

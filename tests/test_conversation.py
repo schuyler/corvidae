@@ -997,3 +997,587 @@ class TestMessageType:
             assert "_message_type" not in msg, (
                 f"_message_type key must be stripped before passing to _summarize: {msg!r}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: CONTEXT MessageType, remove_by_type, load/compaction changes
+# ---------------------------------------------------------------------------
+
+
+class TestMessageTypeContext:
+    """Tests for the CONTEXT MessageType variant added in Phase 2.
+
+    Tests here will fail until CONTEXT is added to the MessageType enum.
+    """
+
+    async def test_message_type_context_value(self):
+        """MessageType.CONTEXT must equal the string 'context'."""
+        from sherman.conversation import MessageType
+
+        assert MessageType.CONTEXT == "context", (
+            f"Expected MessageType.CONTEXT == 'context', got {MessageType.CONTEXT!r}"
+        )
+
+    async def test_append_with_context_type(self, db):
+        """append() with message_type=MessageType.CONTEXT must persist a row
+        with message_type='context' in the DB."""
+        from sherman.conversation import MessageType
+
+        conv = ConversationLog(db, channel_id="chan1")
+        msg = {"role": "system", "content": "remembered: user prefers terse replies"}
+
+        await conv.append(msg, message_type=MessageType.CONTEXT)
+
+        async with db.execute(
+            "SELECT message_type FROM message_log WHERE channel_id = ?",
+            ("chan1",),
+        ) as cursor:
+            row = await cursor.fetchone()
+
+        assert row is not None, "Row should exist after append()"
+        assert row[0] == "context", (
+            f"Expected message_type='context', got {row[0]!r}"
+        )
+
+    async def test_load_includes_context_entries(self, db):
+        """load() must return both MESSAGE and CONTEXT rows (not filter CONTEXT out).
+
+        Current code uses WHERE message_type = 'message', so CONTEXT rows are
+        silently dropped. This test will fail until the WHERE clause changes to
+        != 'summary'.
+        """
+        from sherman.conversation import MessageType
+
+        base_ts = time.time()
+        msg_msg = {"role": "user", "content": "hello"}
+        msg_ctx = {"role": "system", "content": "context: user is in Paris"}
+
+        await db.execute(
+            "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
+            "VALUES (?, ?, ?, 'message')",
+            ("chan1", json.dumps(msg_msg), base_ts),
+        )
+        await db.execute(
+            "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
+            "VALUES (?, ?, ?, 'context')",
+            ("chan1", json.dumps(msg_ctx), base_ts + 1),
+        )
+        await db.commit()
+
+        conv = ConversationLog(db, channel_id="chan1")
+        await conv.load()
+
+        assert len(conv.messages) == 2, (
+            f"Expected 2 messages (MESSAGE + CONTEXT), got {len(conv.messages)}: {conv.messages}"
+        )
+        types_loaded = {m["_message_type"] for m in conv.messages}
+        assert MessageType.MESSAGE in types_loaded, "MESSAGE entry not loaded"
+        assert MessageType.CONTEXT in types_loaded, (
+            "CONTEXT entry not loaded — load() is filtering it out"
+        )
+
+    async def test_load_with_summary_includes_context(self, db):
+        """When a summary row exists, load() must load both MESSAGE and CONTEXT
+        rows with id > summary_id (not just MESSAGE rows).
+
+        This fails until the summary-branch WHERE clause changes from
+        message_type = 'message' to message_type != 'summary'.
+        """
+        from sherman.conversation import MessageType
+
+        base_ts = time.time()
+        summary_msg = {"role": "assistant", "content": "[Summary of earlier conversation]\nold stuff"}
+        msg_message = {"role": "user", "content": "retained message"}
+        msg_context = {"role": "system", "content": "context: user timezone is UTC+1"}
+
+        await db.execute(
+            "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
+            "VALUES (?, ?, ?, 'summary')",
+            ("chan1", json.dumps(summary_msg), base_ts),
+        )
+        await db.execute(
+            "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
+            "VALUES (?, ?, ?, 'message')",
+            ("chan1", json.dumps(msg_message), base_ts + 1),
+        )
+        await db.execute(
+            "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
+            "VALUES (?, ?, ?, 'context')",
+            ("chan1", json.dumps(msg_context), base_ts + 2),
+        )
+        await db.commit()
+
+        conv = ConversationLog(db, channel_id="chan1")
+        await conv.load()
+
+        # Must have: summary + message + context
+        assert len(conv.messages) == 3, (
+            f"Expected 3 messages (SUMMARY + MESSAGE + CONTEXT), got {len(conv.messages)}: {conv.messages}"
+        )
+        assert conv.messages[0]["_message_type"] == MessageType.SUMMARY
+        types_after_summary = {m["_message_type"] for m in conv.messages[1:]}
+        assert MessageType.MESSAGE in types_after_summary, "MESSAGE entry not loaded"
+        assert MessageType.CONTEXT in types_after_summary, (
+            "CONTEXT entry not loaded — summary-branch WHERE filters it out"
+        )
+
+
+class TestCompactionWithContext:
+    """Tests for compaction behavior when CONTEXT entries are present.
+
+    These require MessageType.CONTEXT to exist and the load/persist changes.
+    """
+
+    async def test_compact_preserves_retained_context(self, db):
+        """CONTEXT entries in the retained window must survive compaction.
+
+        After compact_if_needed:
+        - in-memory: [summary, retained_msg, retained_ctx]
+        - DB: summary row + retained non-summary rows present
+
+        The compaction backward walk retains the last N entries by token budget.
+        CONTEXT entries in that window must survive.
+
+        Token math: 10 messages x 35 chars → int(350/3.5)=100 ≥ 40 → triggers;
+        len=10>5 → proceeds. retain_budget=25; each msg=10 tokens.
+        Walk: count=1(10), count=2(20), 30>25 AND count>0 → break. retain_count=2.
+
+        We make the last 2 entries a MESSAGE + CONTEXT pair so both end up retained.
+        """
+        from sherman.conversation import MessageType
+
+        conv = ConversationLog(db, channel_id="chan1")
+        conv.system_prompt = ""
+
+        base_ts = time.time()
+        # Insert 8 ordinary messages and 1 context entry and 1 message to DB
+        for i in range(8):
+            msg = {"role": "user", "content": "a" * 35}
+            await db.execute(
+                "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
+                "VALUES (?, ?, ?, 'message')",
+                ("chan1", json.dumps(msg), base_ts + i),
+            )
+        retained_msg = {"role": "user", "content": "b" * 35}
+        retained_ctx = {"role": "system", "content": "c" * 35}
+        await db.execute(
+            "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
+            "VALUES (?, ?, ?, 'message')",
+            ("chan1", json.dumps(retained_msg), base_ts + 8),
+        )
+        await db.execute(
+            "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
+            "VALUES (?, ?, ?, 'context')",
+            ("chan1", json.dumps(retained_ctx), base_ts + 9),
+        )
+        await db.commit()
+
+        # Set up in-memory state to match DB
+        conv.messages = (
+            [{"role": "user", "content": "a" * 35, "_message_type": MessageType.MESSAGE}] * 8
+            + [
+                {"role": "user", "content": "b" * 35, "_message_type": MessageType.MESSAGE},
+                {"role": "system", "content": "c" * 35, "_message_type": MessageType.CONTEXT},
+            ]
+        )
+
+        mock_client = AsyncMock()
+        mock_client.chat = AsyncMock(
+            return_value={"choices": [{"message": {"content": "compacted summary"}}]}
+        )
+
+        await conv.compact_if_needed(mock_client, max_tokens=50)
+
+        # In-memory: summary + 2 retained entries (msg + ctx)
+        assert len(conv.messages) == 3, (
+            f"Expected 3 messages (summary + 2 retained), got {len(conv.messages)}"
+        )
+        retained_types = {m["_message_type"] for m in conv.messages[1:]}
+        assert MessageType.CONTEXT in retained_types, (
+            "CONTEXT entry in retained window was not preserved after compaction"
+        )
+
+        # DB: context row must still exist for the channel
+        async with db.execute(
+            "SELECT COUNT(*) FROM message_log "
+            "WHERE channel_id = ? AND message_type = 'context'",
+            ("chan1",),
+        ) as cursor:
+            row = await cursor.fetchone()
+        assert row[0] >= 1, (
+            "CONTEXT row in retained window was deleted from DB during compaction"
+        )
+
+    async def test_compact_deletes_older_context(self, db):
+        """CONTEXT entries in the older (summarized) window must be deleted from DB.
+
+        After compaction, CONTEXT rows with id < oldest_retained_id must be gone.
+        This fails until _persist_summary uses the unified non-summary boundary.
+
+        Setup: 8 MESSAGE + 1 CONTEXT (older window) + 1 MESSAGE (retained).
+        retain_count=1 (only the last message fits in token budget with these sizes).
+        After compaction: only the 1 retained MESSAGE row + summary row should remain.
+        The CONTEXT in the older window must be deleted.
+
+        Token math: 9 messages x 35 chars + 1 x 35 chars = 10 x 35 = 350 chars;
+        int(350/3.5)=100 ≥ 40 → triggers; len=10>5.
+        retain_budget=25; each msg=10 tokens.
+        Walk backward: last msg(10≤25, count=1), second-to-last(20≤25, count=2),
+        third(30>25 AND count>0) → break. retain_count=2.
+
+        We place the CONTEXT entry at position -3 (in the older window after retain_count=2).
+        """
+        from sherman.conversation import MessageType
+
+        conv = ConversationLog(db, channel_id="chan1")
+        conv.system_prompt = ""
+
+        base_ts = time.time()
+        # 7 MESSAGE entries (older window)
+        for i in range(7):
+            msg = {"role": "user", "content": "a" * 35}
+            await db.execute(
+                "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
+                "VALUES (?, ?, ?, 'message')",
+                ("chan1", json.dumps(msg), base_ts + i),
+            )
+        # 1 CONTEXT entry (also in older window — position -3)
+        older_ctx = {"role": "system", "content": "old context that should be deleted"}
+        await db.execute(
+            "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
+            "VALUES (?, ?, ?, 'context')",
+            ("chan1", json.dumps(older_ctx), base_ts + 7),
+        )
+        # 2 retained MESSAGE entries
+        for i in range(2):
+            msg = {"role": "user", "content": "b" * 35}
+            await db.execute(
+                "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
+                "VALUES (?, ?, ?, 'message')",
+                ("chan1", json.dumps(msg), base_ts + 8 + i),
+            )
+        await db.commit()
+
+        # Set up in-memory state to match DB (7 msg + 1 ctx + 2 msg = 10 total)
+        conv.messages = (
+            [{"role": "user", "content": "a" * 35, "_message_type": MessageType.MESSAGE}] * 7
+            + [{"role": "system", "content": "old context that should be deleted",
+                "_message_type": MessageType.CONTEXT}]
+            + [{"role": "user", "content": "b" * 35, "_message_type": MessageType.MESSAGE}] * 2
+        )
+
+        mock_client = AsyncMock()
+        mock_client.chat = AsyncMock(
+            return_value={"choices": [{"message": {"content": "summary with older ctx deleted"}}]}
+        )
+
+        await conv.compact_if_needed(mock_client, max_tokens=50)
+
+        # DB: context row in the older window must be gone
+        async with db.execute(
+            "SELECT COUNT(*) FROM message_log "
+            "WHERE channel_id = ? AND message_type = 'context'",
+            ("chan1",),
+        ) as cursor:
+            row = await cursor.fetchone()
+        assert row[0] == 0, (
+            f"Expected 0 CONTEXT rows after compaction (older context should be deleted), "
+            f"got {row[0]}"
+        )
+
+
+class TestPersistSummaryWithContext:
+    """Tests for _persist_summary edge cases introduced by CONTEXT entries.
+
+    These test the unified non-summary boundary fix for _persist_summary.
+    """
+
+    async def test_persist_summary_correct_offset_with_context(self, db):
+        """When the retained set contains MESSAGE + CONTEXT entries interspersed,
+        _persist_summary must use a unified boundary so that MESSAGE rows in the
+        older window are deleted but retained MESSAGE rows are not.
+
+        Setup: older window = [MSG1, MSG2, MSG3, MSG4, MSG5]; retained window =
+        [CTX6, MSG7, MSG8] (3 non-summary entries). The oldest retained non-summary
+        row is CTX6 (id 6). All MESSAGE rows with id < 6 must be deleted.
+
+        This fails until _persist_summary uses the unified non-summary boundary
+        rather than counting only MESSAGE entries.
+        """
+        from sherman.conversation import MessageType
+
+        base_ts = time.time()
+
+        # Insert 5 MESSAGE rows (will be in older window after compaction)
+        older_msgs = []
+        for i in range(5):
+            msg = {"role": "user", "content": f"older {i}"}
+            await db.execute(
+                "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
+                "VALUES (?, ?, ?, 'message')",
+                ("chan1", json.dumps(msg), base_ts + i),
+            )
+            older_msgs.append(msg)
+
+        # Insert CONTEXT row (will be oldest retained entry)
+        ctx_msg = {"role": "system", "content": "retained context"}
+        await db.execute(
+            "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
+            "VALUES (?, ?, ?, 'context')",
+            ("chan1", json.dumps(ctx_msg), base_ts + 5),
+        )
+        # Insert 2 more MESSAGE rows (also retained)
+        retained_msgs = []
+        for i in range(2):
+            msg = {"role": "user", "content": f"retained {i}"}
+            await db.execute(
+                "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
+                "VALUES (?, ?, ?, 'message')",
+                ("chan1", json.dumps(msg), base_ts + 6 + i),
+            )
+            retained_msgs.append(msg)
+        await db.commit()
+
+        # Build summary message and fake summary_msg_untagged
+        summary_content = "[Summary of earlier conversation]\ntest summary"
+        summary_msg_untagged = {"role": "assistant", "content": summary_content}
+        summary_msg_tagged = {**summary_msg_untagged, "_message_type": MessageType.SUMMARY}
+
+        # Set conv.messages to post-compaction state: [summary, ctx, msg7, msg8]
+        conv = ConversationLog(db, channel_id="chan1")
+        conv.messages = [summary_msg_tagged] + [
+            {**ctx_msg, "_message_type": MessageType.CONTEXT},
+        ] + [
+            {**m, "_message_type": MessageType.MESSAGE} for m in retained_msgs
+        ]
+
+        await conv._persist_summary(summary_msg_untagged)
+
+        # All 5 older MESSAGE rows must be deleted
+        async with db.execute(
+            "SELECT COUNT(*) FROM message_log "
+            "WHERE channel_id = ? AND message_type = 'message'",
+            ("chan1",),
+        ) as cursor:
+            row = await cursor.fetchone()
+        assert row[0] == 2, (
+            f"Expected 2 retained MESSAGE rows, got {row[0]} "
+            f"(older MESSAGE rows should have been deleted)"
+        )
+
+        # The CONTEXT row must still exist (it's in the retained window)
+        async with db.execute(
+            "SELECT COUNT(*) FROM message_log "
+            "WHERE channel_id = ? AND message_type = 'context'",
+            ("chan1",),
+        ) as cursor:
+            row = await cursor.fetchone()
+        assert row[0] == 1, (
+            f"Expected 1 retained CONTEXT row, got {row[0]}"
+        )
+
+    async def test_persist_summary_context_only_retained(self, db):
+        """When retained set contains only CONTEXT entries (no MESSAGE),
+        _persist_summary must delete all MESSAGE rows. The CONTEXT entry
+        in the retained window should survive (it has a valid id above
+        the deletion boundary).
+
+        Setup: retained = [CTX1] (1 non-summary, 0 MESSAGE).
+        num_retained_total = 1, so the else branch runs with OFFSET 0
+        finding the CONTEXT row as the boundary.
+        """
+        from sherman.conversation import MessageType
+
+        base_ts = time.time()
+
+        # Insert 5 MESSAGE rows (older window — all should be deleted)
+        for i in range(5):
+            msg = {"role": "user", "content": f"older {i}"}
+            await db.execute(
+                "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
+                "VALUES (?, ?, ?, 'message')",
+                ("chan1", json.dumps(msg), base_ts + i),
+            )
+        # Insert 1 CONTEXT row (the only retained entry)
+        ctx_msg = {"role": "system", "content": "sole retained context"}
+        await db.execute(
+            "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
+            "VALUES (?, ?, ?, 'context')",
+            ("chan1", json.dumps(ctx_msg), base_ts + 5),
+        )
+        await db.commit()
+
+        summary_content = "[Summary of earlier conversation]\nzero-message summary"
+        summary_msg_untagged = {"role": "assistant", "content": summary_content}
+        summary_msg_tagged = {**summary_msg_untagged, "_message_type": MessageType.SUMMARY}
+
+        # retained = [CTX] only — num_retained_total = 1
+        conv = ConversationLog(db, channel_id="chan1")
+        conv.messages = [summary_msg_tagged, {**ctx_msg, "_message_type": MessageType.CONTEXT}]
+
+        await conv._persist_summary(summary_msg_untagged)
+
+        # All MESSAGE rows must be deleted
+        async with db.execute(
+            "SELECT COUNT(*) FROM message_log "
+            "WHERE channel_id = ? AND message_type = 'message'",
+            ("chan1",),
+        ) as cursor:
+            row = await cursor.fetchone()
+        assert row[0] == 0, (
+            f"Expected 0 MESSAGE rows after context-only-retained compaction, got {row[0]}"
+        )
+
+        # CONTEXT row must still exist (it's in the retained window)
+        async with db.execute(
+            "SELECT COUNT(*) FROM message_log "
+            "WHERE channel_id = ? AND message_type = 'context'",
+            ("chan1",),
+        ) as cursor:
+            row = await cursor.fetchone()
+        assert row[0] == 1, (
+            f"Expected 1 CONTEXT row after context-only-retained compaction, got {row[0]}"
+        )
+
+    async def test_persist_summary_zero_retained(self, db):
+        """When num_retained_total == 0 (retained set is completely empty),
+        _persist_summary must delete all non-summary rows unconditionally.
+
+        This tests the guard against OFFSET -1 which has undefined SQLite
+        behavior. With conv.messages = [summary_only], num_retained_total = 0.
+        """
+        from sherman.conversation import MessageType
+
+        base_ts = time.time()
+
+        # Insert 5 MESSAGE rows and 2 CONTEXT rows — all should be deleted
+        for i in range(5):
+            msg = {"role": "user", "content": f"older msg {i}"}
+            await db.execute(
+                "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
+                "VALUES (?, ?, ?, 'message')",
+                ("chan1", json.dumps(msg), base_ts + i),
+            )
+        for i in range(2):
+            ctx = {"role": "system", "content": f"older ctx {i}"}
+            await db.execute(
+                "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
+                "VALUES (?, ?, ?, 'context')",
+                ("chan1", json.dumps(ctx), base_ts + 5 + i),
+            )
+        await db.commit()
+
+        summary_content = "[Summary of earlier conversation]\nzero-retained summary"
+        summary_msg_untagged = {"role": "assistant", "content": summary_content}
+        summary_msg_tagged = {**summary_msg_untagged, "_message_type": MessageType.SUMMARY}
+
+        # retained is empty — num_retained_total = 0
+        conv = ConversationLog(db, channel_id="chan1")
+        conv.messages = [summary_msg_tagged]
+
+        # Must not raise any SQLite error (no OFFSET query at all)
+        await conv._persist_summary(summary_msg_untagged)
+
+        # All MESSAGE rows must be deleted
+        async with db.execute(
+            "SELECT COUNT(*) FROM message_log "
+            "WHERE channel_id = ? AND message_type = 'message'",
+            ("chan1",),
+        ) as cursor:
+            row = await cursor.fetchone()
+        assert row[0] == 0, (
+            f"Expected 0 MESSAGE rows after zero-retained compaction, got {row[0]}"
+        )
+
+        # All CONTEXT rows must also be deleted (num_retained_total == 0
+        # deletes all non-summary rows)
+        async with db.execute(
+            "SELECT COUNT(*) FROM message_log "
+            "WHERE channel_id = ? AND message_type = 'context'",
+            ("chan1",),
+        ) as cursor:
+            row = await cursor.fetchone()
+        assert row[0] == 0, (
+            f"Expected 0 CONTEXT rows after zero-retained compaction, got {row[0]}"
+        )
+
+
+class TestRemoveByType:
+    """Tests for the new ConversationLog.remove_by_type() method (Phase 2).
+
+    All tests here fail until remove_by_type() is added to ConversationLog.
+    """
+
+    async def test_remove_by_type_removes_context(self, db):
+        """remove_by_type(CONTEXT) must remove all CONTEXT entries from both
+        in-memory messages and the DB, and return the count removed."""
+        from sherman.conversation import MessageType
+
+        conv = ConversationLog(db, channel_id="chan1")
+        base_ts = time.time()
+
+        # Append a MESSAGE and two CONTEXT entries
+        msg = {"role": "user", "content": "hello"}
+        ctx1 = {"role": "system", "content": "context: user is in Paris"}
+        ctx2 = {"role": "system", "content": "context: user prefers terse replies"}
+
+        await conv.append(msg, message_type=MessageType.MESSAGE)
+        await conv.append(ctx1, message_type=MessageType.CONTEXT)
+        await conv.append(ctx2, message_type=MessageType.CONTEXT)
+
+        assert len(conv.messages) == 3
+
+        removed = await conv.remove_by_type(MessageType.CONTEXT)
+
+        # Returns count of removed entries
+        assert removed == 2, f"Expected 2 removed, got {removed}"
+
+        # In-memory: only the MESSAGE entry remains
+        assert len(conv.messages) == 1, (
+            f"Expected 1 message remaining, got {len(conv.messages)}"
+        )
+        assert conv.messages[0]["_message_type"] == MessageType.MESSAGE
+
+        # DB: no CONTEXT rows remain
+        async with db.execute(
+            "SELECT COUNT(*) FROM message_log "
+            "WHERE channel_id = ? AND message_type = 'context'",
+            ("chan1",),
+        ) as cursor:
+            row = await cursor.fetchone()
+        assert row[0] == 0, (
+            f"Expected 0 CONTEXT rows in DB after remove_by_type, got {row[0]}"
+        )
+
+        # DB: MESSAGE row still present
+        async with db.execute(
+            "SELECT COUNT(*) FROM message_log "
+            "WHERE channel_id = ? AND message_type = 'message'",
+            ("chan1",),
+        ) as cursor:
+            row = await cursor.fetchone()
+        assert row[0] == 1, (
+            f"Expected 1 MESSAGE row in DB, got {row[0]}"
+        )
+
+    async def test_remove_by_type_rejects_message(self, db):
+        """remove_by_type(MESSAGE) must raise ValueError — MESSAGE lifecycle
+        is managed by compaction, not by remove_by_type."""
+        from sherman.conversation import MessageType
+        import pytest
+
+        conv = ConversationLog(db, channel_id="chan1")
+
+        with pytest.raises(ValueError):
+            await conv.remove_by_type(MessageType.MESSAGE)
+
+    async def test_remove_by_type_rejects_summary(self, db):
+        """remove_by_type(SUMMARY) must raise ValueError — SUMMARY lifecycle
+        is managed by compaction, not by remove_by_type."""
+        from sherman.conversation import MessageType
+        import pytest
+
+        conv = ConversationLog(db, channel_id="chan1")
+
+        with pytest.raises(ValueError):
+            await conv.remove_by_type(MessageType.SUMMARY)

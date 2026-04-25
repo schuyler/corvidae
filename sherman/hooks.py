@@ -295,3 +295,21 @@ class AgentSpec:
         Plugins can use this to perform periodic background work such as
         polling RSS feeds, checking email, or running maintenance tasks.
         """
+
+    @hookspec
+    async def before_agent_turn(self, channel: "Channel") -> None:
+        """Called before each LLM invocation, after compaction.
+
+        Plugins can inject context entries into the conversation log by calling
+        ``channel.conversation.append(msg, message_type=MessageType.CONTEXT)``.
+        Injected entries will appear in the prompt for this turn. They are
+        persisted to the DB and survive compaction (compaction only summarizes
+        MESSAGE entries).
+
+        This hook fires on every turn including tool-result turns. Plugins can
+        inspect channel state to filter if needed.
+
+        Args:
+            channel: The Channel being processed. Use ``channel.conversation``
+                to access the ConversationLog for appending context entries.
+        """
