@@ -137,7 +137,7 @@ class TestRegistryPopulatedBeforeOnStart:
             @hookimpl
             async def on_start(self, config):
                 # Capture the registry state at on_start time via closure over pm
-                registry_snapshot.append(pm.registry)
+                registry_snapshot.append(pm.get_plugin("registry"))
 
         inspector = InspectorPlugin()
 

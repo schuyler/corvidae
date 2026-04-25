@@ -30,10 +30,13 @@ def _make_pm_with_registry(transport: str | None = None):
 
     If transport is given, pre-register one channel with that transport
     so that registry.by_transport(transport) returns a non-empty list.
+
+    Returns (pm, registry). Callers that bypass on_start must set
+    plugin._registry = registry on the CLIPlugin instance.
     """
     pm = create_plugin_manager()
     registry = ChannelRegistry(AGENT_DEFAULTS)
-    pm.registry = registry
+    pm.register(registry, name="registry")
 
     pm.ahook.on_message = AsyncMock()
     pm.ahook.send_message = AsyncMock()
@@ -103,6 +106,7 @@ class TestReadLoop:
         pm, registry = _make_pm_with_registry(transport="cli")
         plugin = CLIPlugin(pm)
         pm.register(plugin, name="cli")
+        plugin._registry = registry  # bypass on_start
 
         lines = iter(["hello world\n", ""])
 
@@ -133,9 +137,10 @@ class TestReadLoop:
 
         Verify on_message is NOT called.
         """
-        pm, _registry = _make_pm_with_registry(transport="cli")
+        pm, registry = _make_pm_with_registry(transport="cli")
         plugin = CLIPlugin(pm)
         pm.register(plugin, name="cli")
+        plugin._registry = registry  # bypass on_start
 
         lines = iter(["\n", ""])
 

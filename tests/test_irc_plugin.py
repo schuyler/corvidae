@@ -73,7 +73,7 @@ def _make_pm_with_registry():
     """Create a plugin manager with a ChannelRegistry."""
     pm = create_plugin_manager()
     registry = ChannelRegistry(AGENT_DEFAULTS)
-    pm.registry = registry
+    pm.register(registry, name="registry")
     pm.ahook.on_message = AsyncMock()
     pm.ahook.send_message = AsyncMock()
     return pm, registry
@@ -146,6 +146,7 @@ class TestIRCClientEvents:
         pm, registry = _make_pm_with_registry()
         plugin = IRCPlugin(pm)
         pm.register(plugin, name="irc")
+        plugin._registry = registry  # bypass on_start
 
         with patch('sherman.channels.irc.IRCClient') as mock_client_class:
             mock_client = MagicMock()
@@ -169,9 +170,10 @@ class TestIRCClientEvents:
 
     async def test_on_channel_message_ignores_self(self):
         """Messages from own nick are filtered out."""
-        pm, _registry = _make_pm_with_registry()
+        pm, registry = _make_pm_with_registry()
         plugin = IRCPlugin(pm)
         pm.register(plugin, name="irc")
+        plugin._registry = registry  # bypass on_start
 
         with patch('sherman.channels.irc.IRCClient') as mock_client_class:
             mock_client = MagicMock()
@@ -193,6 +195,7 @@ class TestIRCClientEvents:
         pm, registry = _make_pm_with_registry()
         plugin = IRCPlugin(pm)
         pm.register(plugin, name="irc")
+        plugin._registry = registry  # bypass on_start
 
         with patch('sherman.channels.irc.IRCClient') as mock_client_class:
             mock_client = MagicMock()

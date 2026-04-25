@@ -8,7 +8,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from sherman.channel import Channel, ChannelConfig
+from sherman.agent import AgentPlugin
+from sherman.channel import Channel, ChannelConfig, ChannelRegistry
 from sherman.hooks import create_plugin_manager
 from sherman.task import Task, TaskQueue
 from sherman.tool import Tool, ToolContext, ToolRegistry
@@ -49,23 +50,28 @@ def _make_channel(transport="test", scope="scope1") -> Channel:
 
 
 def _make_pm_with_tool_registry(*tool_names: str):
-    """Build a minimal plugin manager with a mock agent_plugin that has a
+    """Build a minimal plugin manager with an AgentPlugin that has a
     ToolRegistry containing named placeholder tools."""
     pm = create_plugin_manager()
 
-    registry = ToolRegistry()
+    # Register a minimal ChannelRegistry so AgentPlugin can be created.
+    pm.register(ChannelRegistry({}), name="registry")
+
+    tool_registry = ToolRegistry()
     for name in tool_names:
         async def _placeholder() -> str:
             """Placeholder tool."""
             return "ok"
         _placeholder.__name__ = name
-        registry.add(Tool(name=name, fn=_placeholder, schema={}))
+        tool_registry.add(Tool(name=name, fn=_placeholder, schema={}))
 
-    mock_agent_plugin = MagicMock()
-    mock_agent_plugin.tool_registry = registry
-    pm.agent_plugin = mock_agent_plugin
+    # Use a real AgentPlugin with tool_registry set directly to avoid
+    # calling on_start (which requires a live LLM client and DB).
+    agent_plugin = AgentPlugin(pm)
+    agent_plugin.tool_registry = tool_registry
+    pm.register(agent_plugin, name="agent_loop")
 
-    return pm, registry
+    return pm, tool_registry
 
 
 async def _make_started_plugin(config=None) -> SubagentPlugin:

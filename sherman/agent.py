@@ -36,9 +36,9 @@ from pathlib import Path
 import aiosqlite
 
 from sherman.agent_loop import run_agent_turn, strip_reasoning_content, strip_thinking
-from sherman.channel import Channel
+from sherman.channel import Channel, ChannelRegistry
 from sherman.conversation import ConversationLog, init_db, resolve_system_prompt
-from sherman.hooks import hookimpl
+from sherman.hooks import get_dependency, hookimpl
 from sherman.llm import LLMClient
 from sherman.queue import SerialQueue
 from sherman.task import Task
@@ -81,7 +81,10 @@ class AgentPlugin:
         tool_schemas: List of tool schemas for LLM function calling
         base_dir: Base path for resolving relative system prompt files
         _queues: Per-channel serial queues (dict[channel_id, SerialQueue])
+        _registry: ChannelRegistry, resolved in on_start via get_dependency
     """
+
+    depends_on = {"registry"}
 
     def __init__(self, pm) -> None:
         self.pm = pm
@@ -91,6 +94,7 @@ class AgentPlugin:
         self.tool_schemas: list[dict] = []
         self.base_dir: Path = Path(".")
         self._queues: dict[str, SerialQueue] = {}
+        self._registry: ChannelRegistry | None = None
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
@@ -198,7 +202,7 @@ class AgentPlugin:
             channel.turn_counter = 0
 
         # 3. Resolve config and read max_turns_limit
-        resolved = self.pm.registry.resolve_config(channel)
+        resolved = self._registry.resolve_config(channel)
         max_turns_limit = resolved["max_turns"]
 
         # 4. Append message to conversation log (persisted)
@@ -266,9 +270,7 @@ class AgentPlugin:
         self, tool_calls: list[dict], channel: Channel
     ) -> None:
         """Dispatch LLM tool calls as Tasks to the TaskQueue."""
-        task_queue = getattr(
-            getattr(self.pm, "task_plugin", None), "task_queue", None
-        )
+        task_queue = getattr(self.pm.get_plugin("task"), "task_queue", None)
         if task_queue is None:
             logger.error("tool calls requested but no TaskQueue available")
             return
@@ -320,7 +322,7 @@ class AgentPlugin:
         if channel.conversation is not None:
             return
         conv = ConversationLog(self.db, channel.id)
-        resolved = self.pm.registry.resolve_config(channel)
+        resolved = self._registry.resolve_config(channel)
         conv.system_prompt = resolve_system_prompt(resolved["system_prompt"], self.base_dir)
         await conv.load()
         channel.conversation = conv
@@ -332,6 +334,7 @@ class AgentPlugin:
 
     async def _start_plugin(self, config: dict) -> None:
         """Initialize LLM client, database, and tools."""
+        self._registry = get_dependency(self.pm, "registry", ChannelRegistry)
         self.tools = {}
         self.tool_schemas = []
         self.base_dir = config.get("_base_dir", Path("."))
@@ -370,7 +373,7 @@ class AgentPlugin:
             "on_start complete",
             extra={
                 "tool_count": len(self.tools),
-                "channel_count": len(self.pm.registry.all()),
+                "channel_count": len(self._registry.all()),
             },
         )
 

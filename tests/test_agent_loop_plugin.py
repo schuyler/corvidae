@@ -88,7 +88,7 @@ async def _build_plugin_and_channel(agent_defaults=None, channel_config=None):
 
     pm = create_plugin_manager()
     registry = ChannelRegistry(agent_defaults)
-    pm.registry = registry
+    pm.register(registry, name="registry")
 
     # Async mocks for outbound hooks.
     pm.ahook.send_message = AsyncMock()
@@ -98,7 +98,7 @@ async def _build_plugin_and_channel(agent_defaults=None, channel_config=None):
 
     # Register TaskPlugin.
     task_plugin = TaskPlugin(pm)
-    pm.register(task_plugin, name="task_plugin")
+    pm.register(task_plugin, name="task")
     await task_plugin.on_start(config={})
 
     plugin = AgentPlugin(pm)
@@ -106,6 +106,8 @@ async def _build_plugin_and_channel(agent_defaults=None, channel_config=None):
 
     # Inject a pre-opened DB so we don't open a second connection inside on_start.
     plugin.db = db
+    # Inject the registry directly (tests bypass on_start where _registry is resolved).
+    plugin._registry = registry
 
     channel = registry.get_or_create(
         "test",
@@ -139,7 +141,7 @@ class TestOnStart:
         """on_start with valid config creates LLMClient and opens DB.
         Verify client.start() is called."""
         pm = create_plugin_manager()
-        pm.registry = ChannelRegistry(AGENT_DEFAULTS)
+        pm.register(ChannelRegistry(AGENT_DEFAULTS), name="registry")
         pm.ahook.send_message = AsyncMock()
         pm.ahook.on_agent_response = AsyncMock()
 
@@ -180,7 +182,7 @@ class TestOnStart:
                 tool_registry.append(my_test_tool)
 
         pm = create_plugin_manager()
-        pm.registry = ChannelRegistry(AGENT_DEFAULTS)
+        pm.register(ChannelRegistry(AGENT_DEFAULTS), name="registry")
         pm.ahook.send_message = AsyncMock()
         pm.ahook.on_agent_response = AsyncMock()
 
@@ -207,7 +209,7 @@ class TestOnStart:
     async def test_on_start_stores_base_dir_from_config(self):
         """on_start reads config["_base_dir"] and stores it as plugin.base_dir."""
         pm = create_plugin_manager()
-        pm.registry = ChannelRegistry(AGENT_DEFAULTS)
+        pm.register(ChannelRegistry(AGENT_DEFAULTS), name="registry")
         pm.ahook.send_message = AsyncMock()
         pm.ahook.on_agent_response = AsyncMock()
 
@@ -231,7 +233,7 @@ class TestOnStart:
     async def test_on_start_defaults_base_dir_to_cwd(self):
         """on_start sets plugin.base_dir to Path(".") when _base_dir is absent."""
         pm = create_plugin_manager()
-        pm.registry = ChannelRegistry(AGENT_DEFAULTS)
+        pm.register(ChannelRegistry(AGENT_DEFAULTS), name="registry")
         pm.ahook.send_message = AsyncMock()
         pm.ahook.on_agent_response = AsyncMock()
 
@@ -252,7 +254,7 @@ class TestOnStart:
     async def test_on_start_missing_llm_main_raises(self):
         """Config without llm.main raises a clear error (flat llm block is rejected)."""
         pm = create_plugin_manager()
-        pm.registry = ChannelRegistry(AGENT_DEFAULTS)
+        pm.register(ChannelRegistry(AGENT_DEFAULTS), name="registry")
         plugin = AgentPlugin(pm)
         pm.register(plugin, name="agent_loop")
 
@@ -270,7 +272,7 @@ class TestOnStart:
     async def test_on_start_config_parses_llm_main(self):
         """on_start with llm.main creates self.client."""
         pm = create_plugin_manager()
-        pm.registry = ChannelRegistry(AGENT_DEFAULTS)
+        pm.register(ChannelRegistry(AGENT_DEFAULTS), name="registry")
         pm.ahook.send_message = AsyncMock()
         pm.ahook.on_agent_response = AsyncMock()
 
@@ -806,13 +808,14 @@ class TestOnMessageCompactionAndConfig:
             "max_context_tokens": 8000,
             "keep_thinking_in_history": False,
         })
-        pm.registry = registry
+        pm.register(registry, name="registry")
         pm.ahook.send_message = AsyncMock()
         pm.ahook.on_agent_response = AsyncMock()
 
         plugin = AgentPlugin(pm)
         pm.register(plugin, name="agent_loop")
         plugin.db = db
+        plugin._registry = registry
 
         cfg_a = ChannelConfig(system_prompt="Channel A prompt.")
         cfg_b = ChannelConfig(system_prompt="Channel B prompt.")
@@ -844,7 +847,7 @@ class TestOnStop:
     async def test_on_stop_cleans_up(self):
         """on_stop closes the LLM client and the DB connection."""
         pm = create_plugin_manager()
-        pm.registry = ChannelRegistry(AGENT_DEFAULTS)
+        pm.register(ChannelRegistry(AGENT_DEFAULTS), name="registry")
 
         plugin = AgentPlugin(pm)
         pm.register(plugin, name="agent_loop")
@@ -865,7 +868,7 @@ class TestOnStop:
     async def test_on_stop_cancels_all_queues(self):
         """on_stop cancels all channel queue consumers."""
         pm = create_plugin_manager()
-        pm.registry = ChannelRegistry(AGENT_DEFAULTS)
+        pm.register(ChannelRegistry(AGENT_DEFAULTS), name="registry")
         pm.ahook.send_message = AsyncMock()
         pm.ahook.on_agent_response = AsyncMock()
 
@@ -947,7 +950,7 @@ class TestOnMessageToolCallRoundTrip:
         # 2. Drain: _process_queue_item runs, dispatches tool Task
         await _drain(plugin, channel)
         # 3. Wait for TaskQueue to execute the tool task
-        task_plugin = plugin.pm.task_plugin
+        task_plugin = plugin.pm.get_plugin("task")
         await task_plugin.task_queue.queue.join()
         # 4. queue.join() unblocks after task_done() but before on_complete fires.
         #    Yield to let worker call on_complete -> on_notify -> enqueue notification.

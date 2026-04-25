@@ -1,18 +1,54 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 
 import apluggy as pluggy
 
 if TYPE_CHECKING:
     from sherman.channel import Channel
 
+T = TypeVar("T")
+
 # NOTE: marker name is "sherman", not "agent" as in design.md
 hookspec = pluggy.HookspecMarker("sherman")
 hookimpl = pluggy.HookimplMarker("sherman")
 
 _pm_logger = logging.getLogger("sherman.plugin_manager")
+
+
+def get_dependency(pm: pluggy.PluginManager, name: str, expected_type: type[T]) -> T:
+    """Typed wrapper around pm.get_plugin(name).
+
+    Raises RuntimeError if the plugin is not registered.
+    Raises TypeError if the plugin is not an instance of expected_type.
+    """
+    plugin = pm.get_plugin(name)
+    if plugin is None:
+        raise RuntimeError(f"Required plugin {name!r} is not registered")
+    if not isinstance(plugin, expected_type):
+        raise TypeError(
+            f"Plugin {name!r} is {type(plugin).__name__}, expected {expected_type.__name__}"
+        )
+    return plugin
+
+
+def validate_dependencies(pm: pluggy.PluginManager) -> None:
+    """Verify all declared plugin dependencies are registered.
+
+    Iterates registered plugins, checks each for a `depends_on` attribute,
+    and raises RuntimeError if any declared dependency is not registered.
+    """
+    for plugin in pm.get_plugins():
+        depends_on = getattr(plugin, "depends_on", None)
+        if depends_on is None:
+            continue
+        for dep_name in depends_on:
+            if pm.get_plugin(dep_name) is None:
+                raise RuntimeError(
+                    f"Plugin {type(plugin).__name__} depends on {dep_name!r}, "
+                    f"which is not registered"
+                )
 
 
 def create_plugin_manager() -> pluggy.PluginManager:
