@@ -32,6 +32,7 @@ class ChannelConfig:
     system_prompt: str | list[str] | None = None
     max_context_tokens: int | None = None
     keep_thinking_in_history: bool | None = None
+    max_turns: int | None = None
     # Future: tool allowlist/denylist, response length, etc.
 
     def resolve(self, agent_defaults: dict) -> dict:
@@ -55,6 +56,10 @@ class ChannelConfig:
                 if self.keep_thinking_in_history is not None
                 else agent_defaults.get("keep_thinking_in_history", False)
             ),
+            "max_turns": (
+                self.max_turns if self.max_turns is not None
+                else agent_defaults.get("max_turns", 10)
+            ),
         }
 
         logger.debug(
@@ -75,6 +80,7 @@ class Channel:
     conversation: ConversationLog | None = None
     created_at: float = field(default_factory=time)
     last_active: float = field(default_factory=time)
+    turn_counter: int = 0  # consecutive LLM turns without user message
 
     @property
     def id(self) -> str:
@@ -173,6 +179,7 @@ def load_channel_config(config: dict, registry: ChannelRegistry) -> None:
             system_prompt=overrides.get("system_prompt"),
             max_context_tokens=overrides.get("max_context_tokens"),
             keep_thinking_in_history=overrides.get("keep_thinking_in_history"),
+            max_turns=overrides.get("max_turns"),
         )
         registry.get_or_create(transport, scope, config=channel_config)
 

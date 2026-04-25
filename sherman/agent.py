@@ -22,27 +22,28 @@ Config:
 Logging:
     - INFO: on_start complete, on_message received, agent response sent,
       conversation initialized
-    - ERROR: LLM client not initialized, agent loop failures
-    - Latency is tracked via time.monotonic() around run_agent_loop
+    - ERROR: LLM client not initialized, run_agent_turn failures, missing TaskQueue
+    - Latency is tracked via AgentTurnResult.latency_ms
 """
 
 import asyncio
+import inspect
+import json
 import logging
-import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import aiosqlite
 
-from sherman.agent_loop import _truncate, run_agent_loop, strip_reasoning_content, strip_thinking
-from sherman.background import BackgroundTask
+from sherman.agent_loop import run_agent_turn, strip_reasoning_content, strip_thinking
 from sherman.channel import Channel
 from sherman.conversation import ConversationLog, init_db, resolve_system_prompt
 from sherman.hooks import hookimpl
 from sherman.llm import LLMClient
 from sherman.queue import SerialQueue
-from sherman.tool import Tool, ToolRegistry
+from sherman.task import Task
+from sherman.tool import Tool, ToolContext, ToolRegistry
 
 logger = logging.getLogger("sherman.agent")
 
@@ -192,84 +193,63 @@ class AgentPlugin:
         # 1. Lazy-initialize conversation on the channel
         await self._ensure_conversation(channel)
         conv = channel.conversation
-        resolved = self.pm.registry.resolve_config(channel)
 
-        # 2. Append message to conversation log (persisted)
+        # 2. Reset turn_counter on user messages
+        if item.role == "user":
+            channel.turn_counter = 0
+
+        # 3. Resolve config and read max_turns_limit
+        resolved = self.pm.registry.resolve_config(channel)
+        max_turns_limit = resolved["max_turns"]
+
+        # 4. Append message to conversation log (persisted)
         await conv.append(conversation_message)
 
-        # 3. Compact if approaching context limit
+        # 5. Compact if approaching context limit
         await conv.compact_if_needed(self.client, resolved["max_context_tokens"])
 
-        # 4. Build per-call background_task closure capturing local channel.
-        # Resolve task_queue from BackgroundPlugin if registered.
-        task_queue = getattr(getattr(self.pm, "background", None), "task_queue", None)
-
-        async def background_task(
-            description: str, instructions: str, _tool_call_id: str | None = None
-        ) -> str:
-            """Launch a long-running task in the background."""
-            if not task_queue:
-                return "Error: background task system not initialized"
-            task = BackgroundTask(
-                channel=channel,
-                description=description,
-                instructions=instructions,
-                tool_call_id=_tool_call_id,
-            )
-            await task_queue.enqueue(task)
-            logger.debug(
-                "background_task enqueued",
-                extra={
-                    "task_id": task.task_id,
-                    "channel": channel.id,
-                    "description": _truncate(description),
-                },
-            )
-            return f"Task {task.task_id} enqueued: {description}"
-
-        local_tools = {**self.tools, "background_task": background_task}
-
-        # 5. Build prompt and run agent loop
+        # 6. Build prompt and call run_agent_turn (single LLM invocation)
         messages = conv.build_prompt()
-        messages_before = len(messages)
 
-        # Resolve new task queue from TaskPlugin
-        task_queue_ref = getattr(
-            getattr(self.pm, "task_plugin", None), "task_queue", None
-        )
-
-        start = time.monotonic()
         try:
-            raw_response = await run_agent_loop(
-                self.client, messages, local_tools, self.tool_schemas,
-                channel=channel,
-                task_queue=task_queue_ref,
-            )
-        except Exception:  # broad catch: aiohttp, KeyError, TimeoutError, etc.
-            logger.exception("run_agent_loop failed for channel %s", channel.id)
+            result = await run_agent_turn(self.client, messages, self.tool_schemas)
+        except Exception:
+            logger.exception("run_agent_turn failed for channel %s", channel.id)
             await self.pm.ahook.send_message(
                 channel=channel,
                 text="Sorry, I encountered an error and could not process your message.",
             )
             return
 
-        latency_ms = round((time.monotonic() - start) * 1000, 1)
+        # 7. Persist assistant message (run_agent_turn already appended to messages in place)
+        await conv.append(result.message)
 
-        # 6. Persist new messages appended by run_agent_loop
-        new_messages = messages[messages_before:]
-        for msg in new_messages:
-            await conv.append(msg)
-
-        # 7. Thinking token handling for active history.
+        # 8. Strip reasoning_content from in-memory copy if configured
         if not resolved["keep_thinking_in_history"]:
-            strip_reasoning_content(new_messages)
+            strip_reasoning_content([result.message])
 
-        # 8. Strip thinking for display and send response
-        display_response = strip_thinking(raw_response)
+        # 9. Dispatch tool calls or send text response
+        # Check-before-increment: turn_counter < max_turns_limit allows dispatch
+        if result.tool_calls and channel.turn_counter < max_turns_limit:
+            channel.turn_counter += 1
+            await self._dispatch_tool_calls(result.tool_calls, channel)
+            # Do NOT send text response; return and wait for tool results
+            return
+        elif result.tool_calls:
+            # Max turns reached — suppress tool dispatch, send fallback text
+            logger.warning(
+                "max_turns reached, suppressing tool calls",
+                extra={"channel": channel.id, "turn_counter": channel.turn_counter},
+            )
+            display_response = strip_thinking(result.text) or "(max tool-calling rounds reached)"
+        else:
+            # No tool calls — normal text response
+            channel.turn_counter += 1
+            display_response = strip_thinking(result.text)
 
         logger.info(
             "agent response sent",
-            extra={"channel": channel.id, "latency_ms": latency_ms},
+            extra={"channel": channel.id, "latency_ms": result.latency_ms},
         )
 
         await self.pm.ahook.on_agent_response(
@@ -280,8 +260,62 @@ class AgentPlugin:
         await self.pm.ahook.send_message(
             channel=channel,
             text=display_response,
-            latency_ms=latency_ms,
+            latency_ms=result.latency_ms,
         )
+
+    async def _dispatch_tool_calls(
+        self, tool_calls: list[dict], channel: Channel
+    ) -> None:
+        """Dispatch LLM tool calls as Tasks to the TaskQueue."""
+        task_queue = getattr(
+            getattr(self.pm, "task_plugin", None), "task_queue", None
+        )
+        if task_queue is None:
+            logger.error("tool calls requested but no TaskQueue available")
+            return
+
+        for call in tool_calls:
+            call_id = call["id"]
+            fn_name = call["function"]["name"]
+            raw_args = call["function"]["arguments"]
+
+            async def make_work(fn_name=fn_name, raw_args=raw_args, call_id=call_id):
+                """Execute a single tool call. Captures fn_name, raw_args, call_id via defaults."""
+                args = json.loads(raw_args)
+                if fn_name not in self.tools:
+                    logger.warning("unknown tool called: %s", fn_name)
+                    return f"Error: unknown tool '{fn_name}'"
+                try:
+                    tool_fn = self.tools[fn_name]
+                    sig = inspect.signature(tool_fn)
+                    call_kwargs = dict(args)
+
+                    # Inject ToolContext for tools that declare _ctx
+                    if "_ctx" in sig.parameters:
+                        call_kwargs["_ctx"] = ToolContext(
+                            channel=channel,
+                            tool_call_id=call_id,
+                            task_queue=task_queue,
+                        )
+                    # Backward compat: inject _tool_call_id (removed in Phase 5)
+                    if "_tool_call_id" in sig.parameters:
+                        call_kwargs["_tool_call_id"] = call_id
+
+                    result = await tool_fn(**call_kwargs)
+                    return str(result)
+                except Exception:
+                    logger.warning(
+                        "tool %s raised exception", fn_name, exc_info=True
+                    )
+                    return f"Error: tool '{fn_name}' failed"
+
+            task = Task(
+                work=make_work,
+                channel=channel,
+                tool_call_id=call_id,
+                description=f"tool:{fn_name}",
+            )
+            await task_queue.enqueue(task)
 
     @hookimpl
     async def on_stop(self) -> None:
@@ -356,30 +390,3 @@ class AgentPlugin:
         if self.db:
             await self.db.close()
 
-    # ---------------------------------------------------------------------------
-    # Legacy delegation methods — kept for test compatibility during transition
-    # Background task execution is now owned by BackgroundPlugin, but these
-    # delegation stubs let existing tests that monkey-patch _on_task_complete
-    # and _execute_background_task on the plugin instance continue to work.
-    # ---------------------------------------------------------------------------
-
-    async def _execute_background_task(self, task) -> str:
-        """Execute a background task (delegates to BackgroundPlugin).
-
-        Legacy delegation stub — kept for test compatibility. BackgroundPlugin
-        owns background task execution; this method routes to it.
-        """
-        bg = getattr(self.pm, "background", None)
-        if bg is not None:
-            return await bg._execute_task(task)
-        raise RuntimeError("No BackgroundPlugin registered")
-
-    async def _on_task_complete(self, task, result: str) -> None:
-        """Handle a completed background task (delegates to BackgroundPlugin).
-
-        Legacy delegation stub — kept for test compatibility.
-        """
-        bg = getattr(self.pm, "background", None)
-        if bg is not None:
-            return await bg._on_task_complete(task, result)
-        raise RuntimeError("No BackgroundPlugin registered")
