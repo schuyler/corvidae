@@ -1224,3 +1224,619 @@ class TestToolSchema:
         # y may or may not appear depending on whether optional params are included,
         # but the key assertion is that _injected is absent
 
+
+# ---------------------------------------------------------------------------
+# Section 14 — should_process_message hook (red phase)
+# ---------------------------------------------------------------------------
+
+
+class TestShouldProcessMessage:
+    async def test_returns_false_rejects_message(self):
+        """When should_process_message returns False, on_message does not enqueue
+        the message and send_message is never called."""
+        from sherman.hooks import hookimpl
+
+        plugin, channel, db = await _build_plugin_and_channel()
+
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(return_value=_make_text_response("should not reach"))
+        plugin.client = mock_client
+
+        class RejectPlugin:
+            @hookimpl
+            async def should_process_message(self, channel, sender, text):
+                return False
+
+        plugin.pm.register(RejectPlugin(), name="reject_plugin")
+
+        await plugin.on_message(channel=channel, sender="user", text="blocked message")
+        await _drain(plugin, channel)
+
+        plugin.pm.ahook.send_message.assert_not_awaited()
+
+        await db.close()
+
+    async def test_returns_true_accepts_message(self):
+        """When should_process_message returns True, the message is enqueued
+        and processed normally."""
+        from sherman.hooks import hookimpl
+
+        plugin, channel, db = await _build_plugin_and_channel()
+
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(return_value=_make_text_response("accepted response"))
+        plugin.client = mock_client
+
+        class AcceptPlugin:
+            @hookimpl
+            async def should_process_message(self, channel, sender, text):
+                return True
+
+        plugin.pm.register(AcceptPlugin(), name="accept_plugin")
+
+        await plugin.on_message(channel=channel, sender="user", text="accepted message")
+        await _drain(plugin, channel)
+
+        plugin.pm.ahook.send_message.assert_awaited_once()
+
+        await db.close()
+
+    async def test_returns_none_accepts_message(self):
+        """When should_process_message returns None (no opinion), the message is
+        accepted by default."""
+        from sherman.hooks import hookimpl
+
+        plugin, channel, db = await _build_plugin_and_channel()
+
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(return_value=_make_text_response("default accept"))
+        plugin.client = mock_client
+
+        class NeutralPlugin:
+            @hookimpl
+            async def should_process_message(self, channel, sender, text):
+                return None
+
+        plugin.pm.register(NeutralPlugin(), name="neutral_plugin")
+
+        await plugin.on_message(channel=channel, sender="user", text="hi")
+        await _drain(plugin, channel)
+
+        plugin.pm.ahook.send_message.assert_awaited_once()
+
+        await db.close()
+
+    async def test_no_hook_impls_accepts_message(self):
+        """When no should_process_message implementations exist, messages are accepted
+        (default behavior unchanged)."""
+        plugin, channel, db = await _build_plugin_and_channel()
+
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(return_value=_make_text_response("no filter"))
+        plugin.client = mock_client
+
+        await plugin.on_message(channel=channel, sender="user", text="hi")
+        await _drain(plugin, channel)
+
+        plugin.pm.ahook.send_message.assert_awaited_once()
+
+        await db.close()
+
+    async def test_is_false_identity_check_not_falsiness(self):
+        """The gate check uses 'is False', not truthiness.
+        A return value of 0 or empty string should NOT reject the message."""
+        from sherman.hooks import hookimpl
+
+        plugin, channel, db = await _build_plugin_and_channel()
+
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(return_value=_make_text_response("not rejected"))
+        plugin.client = mock_client
+
+        class FalsyPlugin:
+            @hookimpl
+            async def should_process_message(self, channel, sender, text):
+                return 0  # falsy but not False — should NOT reject
+
+        plugin.pm.register(FalsyPlugin(), name="falsy_plugin")
+
+        await plugin.on_message(channel=channel, sender="user", text="hi")
+        await _drain(plugin, channel)
+
+        # 0 is falsy but not `is False`, so message should proceed
+        plugin.pm.ahook.send_message.assert_awaited_once()
+
+        await db.close()
+
+
+# ---------------------------------------------------------------------------
+# Section 15 — on_llm_error hook (red phase)
+# ---------------------------------------------------------------------------
+
+
+class TestOnLlmError:
+    async def test_hook_returns_string_sent_as_error_message(self):
+        """When on_llm_error returns a string, that string is sent via send_message."""
+        from sherman.hooks import hookimpl
+
+        plugin, channel, db = await _build_plugin_and_channel()
+
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(side_effect=RuntimeError("LLM failed"))
+        plugin.client = mock_client
+
+        class ErrorPlugin:
+            @hookimpl
+            async def on_llm_error(self, channel, error):
+                return "Custom error: please try again later."
+
+        plugin.pm.register(ErrorPlugin(), name="error_plugin")
+
+        await plugin.on_message(channel=channel, sender="user", text="trigger error")
+        await _drain(plugin, channel)
+
+        plugin.pm.ahook.send_message.assert_awaited_once()
+        call_kwargs = plugin.pm.ahook.send_message.call_args
+        assert call_kwargs.kwargs["text"] == "Custom error: please try again later."
+
+        await db.close()
+
+    async def test_hook_returns_none_uses_default_error_message(self):
+        """When on_llm_error returns None, the default error message is used."""
+        from sherman.hooks import hookimpl
+
+        plugin, channel, db = await _build_plugin_and_channel()
+
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(side_effect=RuntimeError("LLM failed"))
+        plugin.client = mock_client
+
+        class NullErrorPlugin:
+            @hookimpl
+            async def on_llm_error(self, channel, error):
+                return None
+
+        plugin.pm.register(NullErrorPlugin(), name="null_error_plugin")
+
+        await plugin.on_message(channel=channel, sender="user", text="trigger error")
+        await _drain(plugin, channel)
+
+        plugin.pm.ahook.send_message.assert_awaited_once()
+        call_kwargs = plugin.pm.ahook.send_message.call_args
+        sent_text = call_kwargs.kwargs["text"]
+        assert "error" in sent_text.lower() or "sorry" in sent_text.lower()
+
+        await db.close()
+
+    async def test_no_hook_impl_uses_default_error_message(self):
+        """With no on_llm_error implementation, the default error message is used."""
+        plugin, channel, db = await _build_plugin_and_channel()
+
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(side_effect=RuntimeError("LLM failed"))
+        plugin.client = mock_client
+
+        await plugin.on_message(channel=channel, sender="user", text="trigger error")
+        await _drain(plugin, channel)
+
+        plugin.pm.ahook.send_message.assert_awaited_once()
+        call_kwargs = plugin.pm.ahook.send_message.call_args
+        sent_text = call_kwargs.kwargs["text"]
+        assert "error" in sent_text.lower() or "sorry" in sent_text.lower()
+
+        await db.close()
+
+    async def test_exception_object_passed_to_hook(self):
+        """The exception object is passed to on_llm_error as the 'error' parameter."""
+        from sherman.hooks import hookimpl
+
+        plugin, channel, db = await _build_plugin_and_channel()
+
+        original_exc = RuntimeError("specific error message")
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(side_effect=original_exc)
+        plugin.client = mock_client
+
+        received_error = {}
+
+        class InspectPlugin:
+            @hookimpl
+            async def on_llm_error(self, channel, error):
+                received_error["exc"] = error
+                return "handled"
+
+        plugin.pm.register(InspectPlugin(), name="inspect_plugin")
+
+        await plugin.on_message(channel=channel, sender="user", text="trigger error")
+        await _drain(plugin, channel)
+
+        assert "exc" in received_error
+        assert received_error["exc"] is original_exc
+
+        await db.close()
+
+
+# ---------------------------------------------------------------------------
+# Section 16 — compact_conversation hook (red phase)
+# ---------------------------------------------------------------------------
+
+
+class TestCompactConversation:
+    async def test_hook_returns_true_skips_default_compaction(self):
+        """When compact_conversation returns True, default compact_if_needed
+        is not called."""
+        from sherman.hooks import hookimpl
+        from sherman.agent_loop import AgentTurnResult
+
+        plugin, channel, db = await _build_plugin_and_channel()
+
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(return_value=_make_text_response("answer"))
+        plugin.client = mock_client
+
+        # Trigger conversation init
+        await plugin.on_message(channel=channel, sender="user", text="hi")
+        await _drain(plugin, channel)
+
+        class CompactPlugin:
+            @hookimpl
+            async def compact_conversation(self, conversation, client, max_tokens):
+                return True  # claim we handled it
+
+        plugin.pm.register(CompactPlugin(), name="compact_plugin")
+
+        # Track whether compact_if_needed is called
+        compact_called = []
+        conv = channel.conversation
+        original_compact = conv.compact_if_needed
+
+        async def tracking_compact(client, max_tokens):
+            compact_called.append(True)
+            return await original_compact(client, max_tokens)
+
+        conv.compact_if_needed = tracking_compact
+
+        turn_result = AgentTurnResult(
+            message={"role": "assistant", "content": "second answer"},
+            tool_calls=[],
+            text="second answer",
+            latency_ms=1.0,
+        )
+        with patch("sherman.agent.run_agent_turn", new_callable=AsyncMock,
+                   return_value=turn_result):
+            await plugin.on_message(channel=channel, sender="user", text="second")
+            await _drain(plugin, channel)
+
+        assert not compact_called, (
+            "compact_if_needed must not be called when hook returns True"
+        )
+
+        await db.close()
+
+    async def test_hook_returns_none_runs_default_compaction(self):
+        """When compact_conversation returns None, default compact_if_needed runs."""
+        from sherman.hooks import hookimpl
+        from sherman.agent_loop import AgentTurnResult
+
+        plugin, channel, db = await _build_plugin_and_channel()
+
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(return_value=_make_text_response("answer"))
+        plugin.client = mock_client
+
+        # Trigger conversation init
+        await plugin.on_message(channel=channel, sender="user", text="hi")
+        await _drain(plugin, channel)
+
+        class DeferPlugin:
+            @hookimpl
+            async def compact_conversation(self, conversation, client, max_tokens):
+                return None  # defer to default
+
+        plugin.pm.register(DeferPlugin(), name="defer_plugin")
+
+        compact_called = []
+        conv = channel.conversation
+        original_compact = conv.compact_if_needed
+
+        async def tracking_compact(client, max_tokens):
+            compact_called.append(True)
+            return await original_compact(client, max_tokens)
+
+        conv.compact_if_needed = tracking_compact
+
+        turn_result = AgentTurnResult(
+            message={"role": "assistant", "content": "second answer"},
+            tool_calls=[],
+            text="second answer",
+            latency_ms=1.0,
+        )
+        with patch("sherman.agent.run_agent_turn", new_callable=AsyncMock,
+                   return_value=turn_result):
+            await plugin.on_message(channel=channel, sender="user", text="second")
+            await _drain(plugin, channel)
+
+        assert compact_called, (
+            "compact_if_needed must be called when hook returns None"
+        )
+
+        await db.close()
+
+    async def test_hook_exception_caught_and_logged(self, caplog):
+        """An exception in compact_conversation is caught and logged.
+        Both the hook call AND the default compaction are wrapped in one
+        try/except, so when the hook raises, the entire compaction block
+        is skipped — default compact_if_needed does NOT run."""
+        import logging
+        from sherman.hooks import hookimpl
+        from sherman.agent_loop import AgentTurnResult
+
+        plugin, channel, db = await _build_plugin_and_channel()
+
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(return_value=_make_text_response("answer"))
+        plugin.client = mock_client
+
+        # Trigger conversation init
+        await plugin.on_message(channel=channel, sender="user", text="hi")
+        await _drain(plugin, channel)
+
+        class ExplodingPlugin:
+            @hookimpl
+            async def compact_conversation(self, conversation, client, max_tokens):
+                raise RuntimeError("compaction plugin exploded")
+
+        plugin.pm.register(ExplodingPlugin(), name="exploding_plugin")
+
+        compact_called = []
+        conv = channel.conversation
+        original_compact = conv.compact_if_needed
+
+        async def tracking_compact(client, max_tokens):
+            compact_called.append(True)
+            return await original_compact(client, max_tokens)
+
+        conv.compact_if_needed = tracking_compact
+
+        turn_result = AgentTurnResult(
+            message={"role": "assistant", "content": "second answer"},
+            tool_calls=[],
+            text="second answer",
+            latency_ms=1.0,
+        )
+        with caplog.at_level(logging.WARNING, logger="sherman.agent"):
+            with patch("sherman.agent.run_agent_turn", new_callable=AsyncMock,
+                       return_value=turn_result):
+                await plugin.on_message(channel=channel, sender="user", text="second")
+                await _drain(plugin, channel)
+
+        # Exception should be caught and logged
+        warning_records = [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING and "compact" in r.getMessage().lower()
+        ]
+        assert warning_records, "Expected WARNING log about compaction failure"
+
+        # When hook raises, the entire try/except block is skipped —
+        # default compact_if_needed must NOT be called
+        assert not compact_called, (
+            "compact_if_needed must not be called when hook raises; "
+            "both hook and default are in one try/except"
+        )
+
+        await db.close()
+
+    async def test_hook_returns_false_runs_default(self):
+        """When compact_conversation returns False, default compact_if_needed
+        runs because `not False` is True at the call site (`if not handled:`).
+
+        False is non-None so call_firstresult_hook stops iterating, but the
+        call site treats False as 'not handled' and falls through to default."""
+        from sherman.hooks import hookimpl
+        from sherman.agent_loop import AgentTurnResult
+
+        plugin, channel, db = await _build_plugin_and_channel()
+
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(return_value=_make_text_response("answer"))
+        plugin.client = mock_client
+
+        # Trigger conversation init
+        await plugin.on_message(channel=channel, sender="user", text="hi")
+        await _drain(plugin, channel)
+
+        class FalsePlugin:
+            @hookimpl
+            async def compact_conversation(self, conversation, client, max_tokens):
+                return False  # non-None stops iteration, but not False => default runs
+
+        plugin.pm.register(FalsePlugin(), name="false_plugin")
+
+        compact_called = []
+        conv = channel.conversation
+        original_compact = conv.compact_if_needed
+
+        async def tracking_compact(client, max_tokens):
+            compact_called.append(True)
+            return await original_compact(client, max_tokens)
+
+        conv.compact_if_needed = tracking_compact
+
+        turn_result = AgentTurnResult(
+            message={"role": "assistant", "content": "second answer"},
+            tool_calls=[],
+            text="second answer",
+            latency_ms=1.0,
+        )
+        with patch("sherman.agent.run_agent_turn", new_callable=AsyncMock,
+                   return_value=turn_result):
+            await plugin.on_message(channel=channel, sender="user", text="second")
+            await _drain(plugin, channel)
+
+        assert compact_called, (
+            "compact_if_needed must be called when hook returns False; "
+            "`not False` is True so default compaction runs"
+        )
+
+        await db.close()
+
+
+# ---------------------------------------------------------------------------
+# Section 17 — process_tool_result hook (red phase)
+# ---------------------------------------------------------------------------
+
+
+class TestProcessToolResult:
+    async def test_hook_returns_string_replaces_tool_result(self):
+        """When process_tool_result returns a string, that string replaces the
+        original tool result in the conversation."""
+        from sherman.hooks import call_firstresult_hook, hookimpl
+        from sherman.agent_loop import run_agent_loop
+
+        tool_fn = AsyncMock(return_value="original tool output")
+        client = MagicMock()
+        client.chat = AsyncMock(
+            side_effect=[
+                _make_tool_call_response(
+                    [_make_tool_call("c1", "my_tool", {})]
+                ),
+                _make_text_response("done"),
+            ]
+        )
+
+        pm = create_plugin_manager()
+
+        class TransformPlugin:
+            @hookimpl
+            async def process_tool_result(self, tool_name, result, channel):
+                return "transformed: " + result
+
+        pm.register(TransformPlugin(), name="transform")
+
+        messages = [{"role": "user", "content": "go"}]
+        await run_agent_loop(
+            client,
+            messages,
+            tools={"my_tool": tool_fn},
+            tool_schemas=[],
+            pm=pm,
+        )
+
+        tool_messages = [m for m in messages if m["role"] == "tool"]
+        assert len(tool_messages) == 1
+        assert tool_messages[0]["content"] == "transformed: original tool output"
+
+    async def test_hook_returns_none_keeps_original_result(self):
+        """When process_tool_result returns None, the original tool result is kept."""
+        from sherman.agent_loop import run_agent_loop
+        from sherman.hooks import hookimpl
+
+        tool_fn = AsyncMock(return_value="original output")
+        client = MagicMock()
+        client.chat = AsyncMock(
+            side_effect=[
+                _make_tool_call_response(
+                    [_make_tool_call("c1", "my_tool", {})]
+                ),
+                _make_text_response("done"),
+            ]
+        )
+
+        pm = create_plugin_manager()
+
+        class PassthroughPlugin:
+            @hookimpl
+            async def process_tool_result(self, tool_name, result, channel):
+                return None
+
+        pm.register(PassthroughPlugin(), name="passthrough")
+
+        messages = [{"role": "user", "content": "go"}]
+        await run_agent_loop(
+            client,
+            messages,
+            tools={"my_tool": tool_fn},
+            tool_schemas=[],
+            pm=pm,
+        )
+
+        tool_messages = [m for m in messages if m["role"] == "tool"]
+        assert len(tool_messages) == 1
+        assert tool_messages[0]["content"] == "original output"
+
+    async def test_pm_no_impls_keeps_original_result(self):
+        """When pm is provided but has no process_tool_result implementations,
+        the original tool result is kept.
+
+        This tests the 'no impl, fallback to default' path which requires BOTH
+        the pm parameter AND the hook integration logic to exist in
+        run_agent_loop. A bare signature addition is not sufficient."""
+        from sherman.agent_loop import run_agent_loop
+
+        tool_fn = AsyncMock(return_value="original result")
+        client = MagicMock()
+        client.chat = AsyncMock(
+            side_effect=[
+                _make_tool_call_response(
+                    [_make_tool_call("c1", "my_tool", {})]
+                ),
+                _make_text_response("done"),
+            ]
+        )
+
+        # A real pm with no process_tool_result impls registered
+        pm = create_plugin_manager()
+
+        messages = [{"role": "user", "content": "go"}]
+        await run_agent_loop(
+            client,
+            messages,
+            tools={"my_tool": tool_fn},
+            tool_schemas=[],
+            pm=pm,
+        )
+
+        tool_messages = [m for m in messages if m["role"] == "tool"]
+        assert len(tool_messages) == 1
+        assert tool_messages[0]["content"] == "original result"
+
+    async def test_hook_receives_correct_tool_name_and_result(self):
+        """process_tool_result receives the correct tool_name and result args."""
+        from sherman.agent_loop import run_agent_loop
+        from sherman.hooks import hookimpl
+
+        tool_fn = AsyncMock(return_value="raw output")
+        client = MagicMock()
+        client.chat = AsyncMock(
+            side_effect=[
+                _make_tool_call_response(
+                    [_make_tool_call("c1", "specific_tool", {})]
+                ),
+                _make_text_response("done"),
+            ]
+        )
+
+        pm = create_plugin_manager()
+        received = {}
+
+        class InspectPlugin:
+            @hookimpl
+            async def process_tool_result(self, tool_name, result, channel):
+                received["tool_name"] = tool_name
+                received["result"] = result
+                return None
+
+        pm.register(InspectPlugin(), name="inspect")
+
+        messages = [{"role": "user", "content": "go"}]
+        await run_agent_loop(
+            client,
+            messages,
+            tools={"specific_tool": tool_fn},
+            tool_schemas=[],
+            pm=pm,
+        )
+
+        assert received["tool_name"] == "specific_tool"
+        assert received["result"] == "raw output"
+
