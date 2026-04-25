@@ -154,7 +154,7 @@ class AgentSpec:
 
         Plugins implementing this hook can inject messages into a channel so
         the agent loop sees and reacts to them. The AgentPlugin hookimpl
-        enqueues a QueueItem(role="notification") on the channel's queue.
+        enqueues a QueueItem(role=QueueItemRole.NOTIFICATION) on the channel's queue.
 
         Note: all parameters are required (no defaults) so pluggy forwards
         them correctly to hookimpl implementations. Callers should pass

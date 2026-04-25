@@ -82,7 +82,11 @@ class Channel:
     conversation: ConversationLog | None = None
     created_at: float = field(default_factory=time)
     last_active: float = field(default_factory=time)
-    turn_counter: int = 0  # consecutive LLM turns without user message
+    turn_counter: int = 0  # Consecutive LLM turns without user message. Lives on Channel
+    # (not on AgentPlugin) because the re-entrant agent loop design means tool
+    # results re-enter via on_notify → serial queue → _process_queue_item.
+    # The counter must be accessible across re-entries; Channel is the only
+    # per-conversation object that persists across these re-entries.
 
     @property
     def id(self) -> str:

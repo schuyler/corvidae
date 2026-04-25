@@ -222,7 +222,7 @@ class TestTaskQueue:
         assert active_during[0] is task
 
     async def test_completed_dict(self):
-        """Result is stored in completed dict keyed by task_id."""
+        """Result is stored in completed deque as (task_id, result) tuples."""
         queue = TaskQueue()
         channel = _make_channel()
         done = asyncio.Event()
@@ -244,8 +244,10 @@ class TestTaskQueue:
         except asyncio.CancelledError:
             pass
 
-        assert task.task_id in queue.completed
-        assert queue.completed[task.task_id] == "stored result"
+        stored_ids = [tid for tid, _ in queue.completed]
+        assert task.task_id in stored_ids
+        result = next(res for tid, res in queue.completed if tid == task.task_id)
+        assert result == "stored result"
 
     async def test_work_error(self):
         """When work() raises, error is stored in completed and on_complete is called; worker continues."""
@@ -279,15 +281,17 @@ class TestTaskQueue:
         except asyncio.CancelledError:
             pass
 
-        assert task_fail.task_id in queue.completed
-        fail_result = queue.completed[task_fail.task_id]
+        stored_ids = [tid for tid, _ in queue.completed]
+        assert task_fail.task_id in stored_ids
+        fail_result = next(res for tid, res in queue.completed if tid == task_fail.task_id)
         assert "failed" in fail_result.lower() or "boom" in fail_result.lower()
 
         completed_ids = [c[0] for c in completions]
         assert task_fail.task_id in completed_ids
         assert task_ok.task_id in completed_ids
 
-        assert queue.completed[task_ok.task_id] == "success"
+        ok_result = next(res for tid, res in queue.completed if tid == task_ok.task_id)
+        assert ok_result == "success"
 
     async def test_worker_cancellation(self):
         """Cancelling the worker task raises CancelledError cleanly."""
@@ -694,4 +698,124 @@ class TestOnTaskCompleteRemoved:
         assert not hasattr(AgentSpec, "on_task_complete"), (
             "on_task_complete is a dead hook with no implementations; "
             "it should be removed from AgentSpec"
+        )
+
+
+# ---------------------------------------------------------------------------
+# RED PHASE: Bounded completed deque (architecture critique)
+# ---------------------------------------------------------------------------
+
+
+class TestCompletedDeque:
+    def test_completed_is_deque(self):
+        """TaskQueue.completed must be a collections.deque, not a dict."""
+        import collections
+        queue = TaskQueue()
+        assert isinstance(queue.completed, collections.deque), (
+            "completed must be a deque (not a dict)"
+        )
+
+    async def test_completed_deque_bounded_at_100(self):
+        """After 101+ completions, only the last 100 entries are retained."""
+        import collections
+        queue = TaskQueue()
+        channel = _make_channel()
+        all_done = asyncio.Event()
+        count = [0]
+
+        def make_work(i):
+            async def work():
+                return f"result-{i}"
+            return work
+
+        async def on_complete(t, result):
+            count[0] += 1
+            if count[0] == 101:
+                all_done.set()
+
+        worker = asyncio.create_task(queue.run_worker(on_complete))
+        for i in range(101):
+            task = Task(work=make_work(i), channel=channel, description=f"t{i}")
+            await queue.enqueue(task)
+
+        await asyncio.wait_for(all_done.wait(), timeout=5.0)
+        worker.cancel()
+        try:
+            await worker
+        except asyncio.CancelledError:
+            pass
+
+        assert len(queue.completed) == 100, (
+            f"Expected 100 entries after 101 completions, got {len(queue.completed)}"
+        )
+
+    async def test_completed_deque_retains_most_recent(self):
+        """After overflow, the deque contains the most recent entries (not the oldest)."""
+        import collections
+        queue = TaskQueue()
+        channel = _make_channel()
+        all_done = asyncio.Event()
+        count = [0]
+
+        def make_work(i):
+            async def work():
+                return f"result-{i}"
+            return work
+
+        task_ids = []
+
+        async def on_complete(t, result):
+            count[0] += 1
+            if count[0] == 101:
+                all_done.set()
+
+        worker = asyncio.create_task(queue.run_worker(on_complete))
+        for i in range(101):
+            task = Task(work=make_work(i), channel=channel, description=f"t{i}")
+            task_ids.append(task.task_id)
+            await queue.enqueue(task)
+
+        await asyncio.wait_for(all_done.wait(), timeout=5.0)
+        worker.cancel()
+        try:
+            await worker
+        except asyncio.CancelledError:
+            pass
+
+        # The oldest (task_ids[0]) should have been evicted; the newest should remain
+        stored_ids = [entry[0] for entry in queue.completed]
+        assert task_ids[0] not in stored_ids, (
+            "The oldest entry should have been evicted from the bounded deque"
+        )
+        assert task_ids[-1] in stored_ids, (
+            "The most recent entry should still be in the deque"
+        )
+
+    async def test_status_still_works_with_deque(self):
+        """status() must still work correctly when completed is a deque."""
+        queue = TaskQueue()
+        channel = _make_channel()
+        done = asyncio.Event()
+
+        async def work():
+            return "deque task output"
+
+        task = Task(work=work, channel=channel, description="deque status test")
+
+        async def on_complete(t, result):
+            done.set()
+
+        worker = asyncio.create_task(queue.run_worker(on_complete))
+        await queue.enqueue(task)
+        await asyncio.wait_for(done.wait(), timeout=2.0)
+        worker.cancel()
+        try:
+            await worker
+        except asyncio.CancelledError:
+            pass
+
+        status = queue.status()
+        assert isinstance(status, str), "status() must return a string"
+        assert "deque task output" in status or task.task_id in status, (
+            f"status() must show completed task info, got: {status!r}"
         )

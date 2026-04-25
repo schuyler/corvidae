@@ -474,6 +474,35 @@ class TestOnStop:
 # Section 6 — reconnection (1 test)
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# RED PHASE: send_message latency_ms parameter (architecture critique)
+# ---------------------------------------------------------------------------
+
+
+class TestSendMessageLatencyMs:
+    async def test_send_message_accepts_latency_ms_kwarg(self):
+        """send_message must accept latency_ms as an optional keyword argument.
+
+        RED phase: fails until IRCPlugin.send_message signature includes latency_ms.
+        """
+        pm, registry = _make_pm_with_registry()
+        plugin = IRCPlugin(pm)
+        pm.register(plugin, name="irc")
+
+        with patch('sherman.channels.irc.IRCClient') as mock_client_class:
+            mock_client = MagicMock()
+            mock_client_class.return_value = mock_client
+            plugin.client = mock_client
+            plugin.client.message = AsyncMock()
+
+            channel = registry.get_or_create("irc", "#test")
+            # Must not raise TypeError for unexpected keyword argument
+            await plugin.send_message(channel=channel, text="hello", latency_ms=42.5)
+
+            # The message should still be sent normally
+            plugin.client.message.assert_awaited_once_with("#test", "hello")
+
+
 class TestReconnection:
     async def test_connect_with_retry_exponential_backoff(self):
         """Delay doubles each failure, caps at 300s."""

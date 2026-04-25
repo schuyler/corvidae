@@ -855,6 +855,45 @@ async def test_run_agent_turn_reasoning_content_debug_log(caplog):
     assert rec.reasoning_content_length > 0
 
 
+# ---------------------------------------------------------------------------
+# RED PHASE: tool exception error message includes fn_name (architecture critique)
+# ---------------------------------------------------------------------------
+
+
+async def test_tool_exception_error_message_includes_tool_name():
+    """When a tool raises an exception in run_agent_loop, the tool result message
+    must include the tool name.
+
+    RED phase: fails until agent_loop.py line 199 changes from
+    'Error: unknown error' to "Error: tool '{fn_name}' raised an exception".
+    """
+    async def bad_tool(**kwargs):
+        raise RuntimeError("deliberate failure")
+
+    client = MagicMock()
+    client.chat = AsyncMock(
+        side_effect=[
+            _make_tool_call_response(
+                [_make_tool_call("call_err", "bad_tool", {})]
+            ),
+            _make_text_response("recovered"),
+        ]
+    )
+
+    messages = [{"role": "user", "content": "trigger error"}]
+    await run_agent_loop(
+        client,
+        messages,
+        tools={"bad_tool": bad_tool},
+        tool_schemas=[],
+    )
+
+    tool_result = next(m for m in messages if m["role"] == "tool")
+    assert "bad_tool" in tool_result["content"], (
+        f"Error message must include the tool name 'bad_tool', got: {tool_result['content']!r}"
+    )
+
+
 # Case 11: exception from client.chat() → messages unchanged, exception propagates
 @_skip_no_agent_turn
 async def test_run_agent_turn_exception_leaves_messages_unchanged():

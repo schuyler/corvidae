@@ -112,24 +112,31 @@ updated in `agent.py`, `tests/test_prompt.py`, and `tests/test_logging.py`.
 
 ## Minor but worth noting
 
-- **`QueueItem.role` is stringly typed** — `"user"` / `"notification"`
+- ~~**`QueueItem.role` is stringly typed** — `"user"` / `"notification"`
   as a string discriminator, with branching in `_process_queue_item`. An
-  enum would be cleaner.
-- **`completed` dict in `TaskQueue` grows unboundedly** — no eviction.
+  enum would be cleaner.~~ **Fixed:** `QueueItemRole` enum added to `agent.py`.
+- ~~**`completed` dict in `TaskQueue` grows unboundedly** — no eviction.~~
+  **Fixed:** replaced with `collections.deque(maxlen=100)` of `(task_id, result)` tuples.
 - **`split_message` in `irc.py`** is the densest function in the codebase
   (~108 lines, three-tier recursive splitting) with no visible tests.
-- **`CLIPlugin.send_message` accepts `latency_ms`;
-  `IRCPlugin.send_message` does not** — silent interface divergence.
-- **`token_estimate` may crash on tool messages** —
-  `len(msg.get("content", ""))` on `None` content raises `TypeError`.
-- **Backward-compat path for bare callables in `register_tools`** has no
-  callers — dead code.
-- **`Channel.turn_counter`** is state logically owned by the agent loop,
-  not the channel abstraction.
-- **`run_agent_loop` exception error message is generic** —
+  **Not a concern:** 27 tests exist in `test_irc_plugin.py`.
+- ~~**`CLIPlugin.send_message` accepts `latency_ms`;
+  `IRCPlugin.send_message` does not** — silent interface divergence.~~
+  **Fixed:** `IRCPlugin.send_message` now accepts `latency_ms: float | None = None`.
+- ~~**`token_estimate` may crash on tool messages** —
+  `len(msg.get("content", ""))` on `None` content raises `TypeError`.~~
+  **Fixed:** addressed in critique #9 (token_estimate handles None/non-string content).
+- **Backward-compat path for bare callables in `register_tools`** — not
+  dead code. `test_agent_loop_plugin::test_on_start_collects_tools` appends
+  a bare function, and third-party plugins could do the same. Retained.
+- ~~**`Channel.turn_counter`** is state logically owned by the agent loop,
+  not the channel abstraction.~~ **Documented:** extended comment on `turn_counter`
+  in `channel.py` explains why it lives on `Channel` (re-entrant loop design).
+- ~~**`run_agent_loop` exception error message is generic** —
   `agent_loop.py:199` uses `"Error: unknown error"` on tool exceptions,
   omitting the tool name. The adjacent unknown-tool path includes
-  `fn_name`. Also a redundant f-string with no interpolation.
+  `fn_name`. Also a redundant f-string with no interpolation.~~
+  **Fixed:** error message now reads `f"Error: tool '{fn_name}' raised an exception"`.
 
 ## What's good
 
