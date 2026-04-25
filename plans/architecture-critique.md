@@ -47,9 +47,16 @@ plugin (`"registry"`) on the PM rather than monkey-patched.
 
 ### 5. Compaction isn't durable
 
-`compact_if_needed` updates the in-memory message list but never writes
+~~`compact_if_needed` updates the in-memory message list but never writes
 back to the DB. After restart, `load()` replays the full uncompacted
-history. Compaction only works within a single session.
+history. Compaction only works within a single session.~~
+
+**Addressed.** `compact_if_needed` now persists a summary row with
+`is_summary = 1` to the DB via `_persist_summary()`. On `load()`, the
+newest summary is found and only non-summary rows after it are loaded.
+Old messages remain untouched in the DB (additive-only writes). Schema
+migration handled via `ALTER TABLE` with `OperationalError` catch in
+`init_db()`.
 
 ### 6. `send_message` is an unusual hook
 
@@ -63,6 +70,14 @@ the `send_message` hookspec docstring in `hooks.py`, and inline comments
 in `channels/cli.py` and `channels/irc.py` explain the transport check.
 The pattern is retained as-is — restructuring overhead exceeds benefit
 given the transport count will remain small.
+
+### 9. `compact_if_needed` hardcodes 20-message retention
+
+The boundary between "summarize" and "keep" is a magic number.
+Parameterizing it in config would be slightly better, but the right
+approach is to choose the compaction boundary by token count or at least
+by text size (KB), since message sizes vary wildly and a fixed count is
+meaningless as a proxy for context consumption.
 
 ### 7. `on_task_complete` is dead surface area
 
@@ -125,6 +140,7 @@ overall layering (transport → agent → LLM) is sound. The codebase is
    off the PM at runtime.~~ Addressed via `depends_on` / `get_dependency()`
    / `validate_dependencies()`. Uses typed PM lookup rather than direct
    injection, but eliminates the monkey-patching.
-4. **Make compaction durable** — either write a compaction marker to the
-   DB, or accept that compaction is session-scoped and document it.
+4. ~~**Make compaction durable** — either write a compaction marker to the
+   DB, or accept that compaction is session-scoped and document it.~~ Done
+   (summary rows with `is_summary = 1`, summary-aware `load()`).
 5. ~~**Move `resolve_system_prompt` out of `conversation.py`**.~~ Done (moved to `channel.py`).
