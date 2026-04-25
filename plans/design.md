@@ -69,6 +69,7 @@ class AgentSpec:
     async def on_llm_error(self, channel: Channel, error: Exception) -> str | None
     async def compact_conversation(self, conversation: ConversationLog, client: LLMClient, max_tokens: int) -> bool | None
     async def process_tool_result(self, tool_name: str, result: str, channel: Channel | None) -> str | None
+    async def before_agent_turn(self, channel: Channel) -> None
     async def on_idle(self) -> None
 ```
 
@@ -109,6 +110,7 @@ usual way.
 | `on_llm_error` | firstresult | `_process_queue_item`, after LLM exception; return error string or None for default |
 | `compact_conversation` | firstresult | `_process_queue_item`, step 5; return True=handled, None=run default |
 | `process_tool_result` | firstresult | `run_agent_loop` (subagent path only, not interactive messages), after tool execution; return replacement string or None for default |
+| `before_agent_turn` | broadcast | `_process_queue_item`, before LLM call; plugins inject context into conversation log |
 | `on_idle` | broadcast | `IdleMonitor`, when all queues empty and cooldown elapsed |
 
 ## Channel System
@@ -272,6 +274,29 @@ Tools that don't declare `_ctx` work without modification.
   `reasoning_content` from in-memory messages when
   `keep_thinking_in_history=false`
 
+### Message types
+
+```python
+class MessageType(str, enum.Enum):
+    MESSAGE = "message"    # ordinary conversation turn (user or assistant)
+    SUMMARY = "summary"    # compaction summary replacing older messages
+    CONTEXT = "context"    # plugin-injected context (memory, notes, etc.)
+```
+
+`message_type` is a persistence category, orthogonal to conversational
+role (`user`, `assistant`, `tool`, `system`). It controls how compaction
+treats a row: `compact_if_needed` only summarizes `MESSAGE` entries;
+`SUMMARY` and `CONTEXT` rows are retained through compaction.
+
+In-memory message dicts carry a `_message_type` metadata key (set during
+`load()` and `append()`). `build_prompt()` strips it before returning
+messages to the LLM. `append()` accepts an optional `message_type`
+parameter (default `MessageType.MESSAGE`), allowing plugins to inject
+non-message entries directly into the conversation log.
+
+The `before_agent_turn` hook gives plugins a chance to inject entries
+(e.g., `CONTEXT` rows) into the conversation log before each LLM call.
+
 ### Database schema
 
 ```sql
@@ -280,14 +305,10 @@ CREATE TABLE message_log (
     channel_id TEXT NOT NULL,
     message TEXT NOT NULL,      -- JSON
     timestamp REAL NOT NULL,
-    is_summary INTEGER NOT NULL DEFAULT 0
+    message_type TEXT NOT NULL DEFAULT 'message'
 );
 CREATE INDEX idx_log_channel ON message_log(channel_id, timestamp);
 ```
-
-`is_summary` marks rows written by compaction (the synthetic summary
-message). Added via `ALTER TABLE message_log ADD COLUMN is_summary
-INTEGER NOT NULL DEFAULT 0` on existing databases.
 
 ## AgentPlugin
 
