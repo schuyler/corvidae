@@ -70,6 +70,11 @@ class TaskQueue:
         """
         return next(iter(self._active_tasks), None)
 
+    @property
+    def is_idle(self) -> bool:
+        """True when no tasks are queued or actively being processed."""
+        return self.queue.qsize() == 0 and not self._active_tasks
+
     async def enqueue(self, task: Task) -> None:
         """Add a task to the queue."""
         logger.debug(

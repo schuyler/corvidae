@@ -65,10 +65,51 @@ class AgentSpec:
     def register_tools(self, tool_registry: ToolRegistry) -> None  # sync; use Tool.from_function(fn) to register
     async def on_agent_response(self, channel: Channel, request_text: str, response_text: str) -> None
     async def on_notify(self, channel: Channel, source: str, text: str, tool_call_id: str | None, meta: dict | None) -> None
+    async def should_process_message(self, channel: Channel, sender: str, text: str) -> bool | None
+    async def on_llm_error(self, channel: Channel, error: Exception) -> str | None
+    async def compact_conversation(self, conversation: ConversationLog, client: LLMClient, max_tokens: int) -> bool | None
+    async def process_tool_result(self, tool_name: str, result: str, channel: Channel | None) -> str | None
+    async def on_idle(self) -> None
 ```
 
 `create_plugin_manager()` in `hooks.py` creates the manager and adds
 hookspecs.
+
+### Firstresult hooks
+
+`should_process_message`, `on_llm_error`, `compact_conversation`, and
+`process_tool_result` use firstresult semantics: the first non-`None`
+return value wins and no further implementations run.
+
+apluggy does not support `firstresult=True` on async hooks. These hooks
+are called via `call_firstresult_hook(pm, hook_name, **kwargs)` in
+`hooks.py` instead of `pm.ahook`. The helper iterates implementations
+in pluggy priority order (tryfirst → regular → trylast), awaits each,
+and returns the first non-`None` result.
+
+Hook wrappers (`@hookimpl(wrapper=True)` and
+`@hookimpl(hookwrapper=True)`) are not supported by
+`call_firstresult_hook` and are silently skipped.
+
+`on_idle` is a broadcast hook called via `pm.ahook.on_idle()` in the
+usual way.
+
+### Hook reference
+
+| Hook | Semantics | Call site |
+|------|-----------|-----------|
+| `on_start` | broadcast | daemon startup, after config load |
+| `on_stop` | broadcast | SIGINT/SIGTERM |
+| `on_message` | broadcast | inbound message from any transport |
+| `send_message` | broadcast | outbound message delivery |
+| `register_tools` | broadcast (sync) | startup tool collection |
+| `on_agent_response` | broadcast | after agent loop produces a response |
+| `on_notify` | broadcast | inject a notification into a channel queue |
+| `should_process_message` | firstresult | `on_message`, before enqueue; False=reject, True=accept, None=no opinion |
+| `on_llm_error` | firstresult | `_process_queue_item`, after LLM exception; return error string or None for default |
+| `compact_conversation` | firstresult | `_process_queue_item`, step 5; return True=handled, None=run default |
+| `process_tool_result` | firstresult | `run_agent_loop` (subagent path only, not interactive messages), after tool execution; return replacement string or None for default |
+| `on_idle` | broadcast | `IdleMonitor`, when all queues empty and cooldown elapsed |
 
 ## Channel System
 
@@ -160,7 +201,9 @@ before returning. Callers should not append it again.
 **`run_agent_loop`** — multi-turn blocking loop. Used by subagent
 execution. Calls the LLM, executes tool calls inline, repeats until a
 text response or max_turns. Injects `ToolContext` into tools that
-declare a `_ctx` parameter.
+declare a `_ctx` parameter. Accepts an optional `pm` keyword argument;
+when provided, calls the `process_tool_result` hook after each tool
+execution. When `pm` is `None`, the hook is skipped.
 
 Also in `agent_loop.py`:
 - `strip_thinking(text)` — removes `<think>...</think>` blocks
@@ -256,6 +299,11 @@ startup. Retrieves `ChannelRegistry` during `on_start` via
 
 ### Message processing
 
+`on_message` calls `call_firstresult_hook` for `should_process_message`
+before enqueuing. If the result is `False` (identity check, not
+falsiness), the message is dropped. Any other result (`True` or `None`)
+proceeds to enqueue.
+
 `on_message` and `on_notify` both enqueue a `QueueItem` onto a
 per-channel `SerialQueue`. The queue's consumer calls
 `_process_queue_item`, which:
@@ -264,7 +312,8 @@ per-channel `SerialQueue`. The queue's consumer calls
 2. Resets `turn_counter` to 0 on user messages
 3. Resolves channel config (including `max_turns`)
 4. Appends the inbound message to conversation log
-5. Compacts if approaching context limit
+5. Calls `compact_conversation` hook (firstresult); falls back to
+   `conv.compact_if_needed()` if no plugin handles it
 6. Calls `run_agent_turn` (single LLM invocation)
 7. Persists the assistant message
 8. Strips `reasoning_content` from in-memory copy if configured
@@ -275,6 +324,33 @@ per-channel `SerialQueue`. The queue's consumer calls
    - **Tool calls, at limit**: send fallback text
      `"(max tool-calling rounds reached)"`
    - **No tool calls**: increment counter, send text response
+
+If `run_agent_turn` raises an exception, `on_llm_error` (firstresult)
+is called. Its return value is used as the error message sent to the
+channel. If no plugin returns a string, the default error message is
+sent.
+
+### IdleMonitor
+
+`IdleMonitor` is a background asyncio task that fires `on_idle` when
+the system is idle. It is created by `AgentPlugin._start_plugin` and
+stopped in `on_stop` before queue teardown.
+
+**Idle condition:** all `SerialQueue` instances have `is_empty=True`,
+`TaskQueue.is_idle` is `True` (no queued or active tasks), and at
+least `idle_cooldown_seconds` have elapsed since the last `on_idle`
+firing.
+
+**Polling:** checks the idle condition every `idle_poll_interval`
+seconds. Exceptions from `on_idle` implementations are caught and
+logged as warnings; the monitor continues running.
+
+**Config:**
+```yaml
+daemon:
+  idle_cooldown_seconds: 30   # minimum seconds between on_idle firings (default 30)
+  idle_poll_interval: 2       # seconds between idle checks (default 2)
+```
 
 ### Tool call dispatch
 
@@ -346,6 +422,8 @@ catches exceptions, and delivers the result via `on_notify`.
 **TaskQueue** — FIFO async worker with configurable concurrency. Accepts
 `max_workers` (default 1) to run up to that many tasks simultaneously.
 Tracks active tasks and completed results (bounded deque, last 100).
+`is_idle` property returns `True` when the queue has no pending items
+and no tasks are currently executing.
 
 **TaskPlugin** — hookimpl that owns the TaskQueue. Reads
 `daemon.max_task_workers` from config (default 4) to set concurrency.
@@ -434,6 +512,8 @@ boundaries.
 ```yaml
 daemon:
   session_db: sessions.db
+  idle_cooldown_seconds: 30   # minimum seconds between on_idle firings (default 30)
+  idle_poll_interval: 2       # seconds between idle checks (default 2)
 
 llm:
   main:
@@ -534,12 +614,12 @@ sherman/
 ├── hooks.py              # AgentSpec, hookimpl, create_plugin_manager
 ├── tool.py               # Tool, ToolRegistry, tool_to_schema, ToolContext
 ├── channel.py            # Channel, ChannelConfig, ChannelRegistry, resolve_system_prompt
-├── queue.py              # SerialQueue
+├── queue.py              # SerialQueue (is_empty property)
 ├── llm.py                # LLMClient
 ├── agent_loop.py         # run_agent_turn(), run_agent_loop(), strip_thinking
 ├── conversation.py       # ConversationLog, init_db
 ├── logging.py            # StructuredFormatter, _DEFAULT_LOGGING
-├── agent.py              # AgentPlugin (single-turn dispatch)
+├── agent.py              # AgentPlugin (single-turn dispatch), IdleMonitor
 ├── task.py               # Task, TaskQueue, TaskPlugin
 ├── main.py               # daemon entry point
 ├── channels/

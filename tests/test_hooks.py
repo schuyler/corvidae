@@ -155,3 +155,286 @@ def test_validate_dependencies_skips_plugins_without_depends_on():
 
     # Should not raise.
     validate_dependencies(pm)
+
+
+# ---------------------------------------------------------------------------
+# New hookspecs on AgentSpec (red phase)
+# ---------------------------------------------------------------------------
+
+
+def test_agentspec_has_should_process_message():
+    """should_process_message hookspec exists on AgentSpec."""
+    assert hasattr(AgentSpec, "should_process_message"), (
+        "AgentSpec must have a should_process_message hookspec"
+    )
+
+
+def test_agentspec_has_on_llm_error():
+    """on_llm_error hookspec exists on AgentSpec."""
+    assert hasattr(AgentSpec, "on_llm_error"), (
+        "AgentSpec must have an on_llm_error hookspec"
+    )
+
+
+def test_agentspec_has_compact_conversation():
+    """compact_conversation hookspec exists on AgentSpec."""
+    assert hasattr(AgentSpec, "compact_conversation"), (
+        "AgentSpec must have a compact_conversation hookspec"
+    )
+
+
+def test_agentspec_has_process_tool_result():
+    """process_tool_result hookspec exists on AgentSpec."""
+    assert hasattr(AgentSpec, "process_tool_result"), (
+        "AgentSpec must have a process_tool_result hookspec"
+    )
+
+
+def test_agentspec_has_on_idle():
+    """on_idle hookspec exists on AgentSpec."""
+    assert hasattr(AgentSpec, "on_idle"), (
+        "AgentSpec must have an on_idle hookspec"
+    )
+
+
+# ---------------------------------------------------------------------------
+# call_firstresult_hook (red phase)
+# ---------------------------------------------------------------------------
+
+
+async def test_call_firstresult_hook_returns_none_when_no_impls():
+    """Returns None when no implementations are registered."""
+    from sherman.hooks import call_firstresult_hook
+
+    pm = create_plugin_manager()
+    result = await call_firstresult_hook(pm, "should_process_message",
+                                         channel=None, sender="user", text="hi")
+    assert result is None
+
+
+async def test_call_firstresult_hook_returns_first_non_none():
+    """Returns the first non-None result from registered implementations,
+    and does NOT call further implementations after the first non-None result."""
+    from sherman.hooks import call_firstresult_hook
+
+    call_order = []
+
+    class PluginA:
+        @hookimpl
+        async def should_process_message(self, channel, sender, text):
+            call_order.append("A")
+            return None  # no opinion
+
+    class PluginB:
+        @hookimpl
+        async def should_process_message(self, channel, sender, text):
+            call_order.append("B")
+            return True  # accept — stops iteration
+
+    class PluginC:
+        @hookimpl
+        async def should_process_message(self, channel, sender, text):
+            call_order.append("C")
+            return False  # would reject — must not be reached
+
+    pm = create_plugin_manager()
+    pm.register(PluginA(), name="a")
+    pm.register(PluginB(), name="b")
+    pm.register(PluginC(), name="c")
+
+    result = await call_firstresult_hook(pm, "should_process_message",
+                                          channel=None, sender="user", text="hi")
+    # PluginB returns True — C must not run after a non-None result
+    assert result is True
+    assert call_order == ["A", "B"], (
+        f"Expected only A and B to be called (short-circuit after B), "
+        f"got: {call_order}"
+    )
+
+
+async def test_call_firstresult_hook_skips_none_results():
+    """Skips None-returning implementations and continues to the next."""
+    from sherman.hooks import call_firstresult_hook
+
+    call_order = []
+
+    class PluginFirst:
+        @hookimpl
+        async def should_process_message(self, channel, sender, text):
+            call_order.append("first")
+            return None
+
+    class PluginSecond:
+        @hookimpl
+        async def should_process_message(self, channel, sender, text):
+            call_order.append("second")
+            return False
+
+    pm = create_plugin_manager()
+    pm.register(PluginFirst(), name="first")
+    pm.register(PluginSecond(), name="second")
+
+    result = await call_firstresult_hook(pm, "should_process_message",
+                                          channel=None, sender="user", text="hi")
+    assert result is False
+    assert "first" in call_order
+    assert "second" in call_order
+
+
+async def test_call_firstresult_hook_respects_tryfirst():
+    """tryfirst implementations run before regular implementations."""
+    from sherman.hooks import call_firstresult_hook
+
+    call_order = []
+
+    class RegularPlugin:
+        @hookimpl
+        async def should_process_message(self, channel, sender, text):
+            call_order.append("regular")
+            return "regular_result"
+
+    class FirstPlugin:
+        @hookimpl(tryfirst=True)
+        async def should_process_message(self, channel, sender, text):
+            call_order.append("tryfirst")
+            return "first_result"
+
+    pm = create_plugin_manager()
+    pm.register(RegularPlugin(), name="regular")
+    pm.register(FirstPlugin(), name="first_plugin")
+
+    result = await call_firstresult_hook(pm, "should_process_message",
+                                          channel=None, sender="user", text="hi")
+    # tryfirst must run first and short-circuit
+    assert result == "first_result"
+    assert call_order[0] == "tryfirst"
+    assert "regular" not in call_order
+
+
+async def test_call_firstresult_hook_respects_trylast():
+    """trylast implementations run after regular implementations."""
+    from sherman.hooks import call_firstresult_hook
+
+    call_order = []
+
+    class LastPlugin:
+        @hookimpl(trylast=True)
+        async def should_process_message(self, channel, sender, text):
+            call_order.append("trylast")
+            return "last_result"
+
+    class RegularPlugin:
+        @hookimpl
+        async def should_process_message(self, channel, sender, text):
+            call_order.append("regular")
+            return "regular_result"
+
+    pm = create_plugin_manager()
+    pm.register(LastPlugin(), name="last_plugin")
+    pm.register(RegularPlugin(), name="regular")
+
+    result = await call_firstresult_hook(pm, "should_process_message",
+                                          channel=None, sender="user", text="hi")
+    # Regular runs first and short-circuits; trylast is never reached
+    assert result == "regular_result"
+    assert call_order[0] == "regular"
+    assert "trylast" not in call_order
+
+
+async def test_call_firstresult_hook_skips_wrapper_impls():
+    """Wrapper implementations are skipped (not direct result producers)."""
+    from sherman.hooks import call_firstresult_hook
+
+    class WrapperPlugin:
+        @hookimpl(wrapper=True)
+        def should_process_message(self, channel, sender, text):
+            # wrappers are generators; this should never be called as a result producer
+            outcome = yield  # pragma: no cover
+            return outcome  # pragma: no cover
+
+    class NormalPlugin:
+        @hookimpl
+        async def should_process_message(self, channel, sender, text):
+            return True
+
+    pm = create_plugin_manager()
+    pm.register(WrapperPlugin(), name="wrapper")
+    pm.register(NormalPlugin(), name="normal")
+
+    # Should return the normal plugin's result, not error on the wrapper
+    result = await call_firstresult_hook(pm, "should_process_message",
+                                          channel=None, sender="user", text="hi")
+    assert result is True
+
+
+async def test_call_firstresult_hook_filters_kwargs_to_impl_signature():
+    """Filters kwargs to match each implementation's parameter list."""
+    from sherman.hooks import call_firstresult_hook
+
+    received_kwargs = {}
+
+    class SparsePlugin:
+        @hookimpl
+        async def should_process_message(self, sender):
+            # Only accepts 'sender' — not channel or text
+            received_kwargs["sender"] = sender
+            return "ok"
+
+    pm = create_plugin_manager()
+    pm.register(SparsePlugin(), name="sparse")
+
+    # Should not raise even though channel and text are not in SparsePlugin's signature
+    result = await call_firstresult_hook(pm, "should_process_message",
+                                          channel=object(), sender="alice", text="hi")
+    assert result == "ok"
+    assert received_kwargs == {"sender": "alice"}
+
+
+async def test_call_firstresult_hook_returns_none_when_all_return_none():
+    """Returns None when all implementations return None."""
+    from sherman.hooks import call_firstresult_hook
+
+    class PluginA:
+        @hookimpl
+        async def should_process_message(self, channel, sender, text):
+            return None
+
+    class PluginB:
+        @hookimpl
+        async def should_process_message(self, channel, sender, text):
+            return None
+
+    pm = create_plugin_manager()
+    pm.register(PluginA(), name="a")
+    pm.register(PluginB(), name="b")
+
+    result = await call_firstresult_hook(pm, "should_process_message",
+                                          channel=None, sender="user", text="hi")
+    assert result is None
+
+
+async def test_call_firstresult_hook_unknown_hook_name_returns_none():
+    """Returns None when the hook name does not exist on the spec."""
+    from sherman.hooks import call_firstresult_hook
+
+    pm = create_plugin_manager()
+    result = await call_firstresult_hook(pm, "nonexistent_hook_name",
+                                          channel=None, sender="user", text="hi")
+    assert result is None
+
+
+async def test_call_firstresult_hook_supports_sync_impls():
+    """Sync implementations (non-async) are also supported."""
+    from sherman.hooks import call_firstresult_hook
+
+    class SyncPlugin:
+        @hookimpl
+        def should_process_message(self, channel, sender, text):
+            return "sync_result"
+
+    pm = create_plugin_manager()
+    pm.register(SyncPlugin(), name="sync")
+
+    result = await call_firstresult_hook(pm, "should_process_message",
+                                          channel=None, sender="user", text="hi")
+    assert result == "sync_result"

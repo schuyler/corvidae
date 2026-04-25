@@ -44,6 +44,16 @@ class SerialQueue:
         self._queue: asyncio.Queue = asyncio.Queue()
         self._consumer_task: asyncio.Task | None = None
 
+    @property
+    def is_empty(self) -> bool:
+        """True when the queue has no pending items.
+
+        Note: This does not account for an item currently being processed.
+        A queue with is_empty=True may still have a consumer actively
+        processing the last dequeued item.
+        """
+        return self._queue.empty()
+
     async def enqueue(self, item) -> None:
         """Add an item to the queue.
 

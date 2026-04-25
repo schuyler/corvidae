@@ -19,6 +19,7 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable
 
+from sherman.hooks import call_firstresult_hook
 from sherman.llm import LLMClient
 from sherman.tool import ToolContext, execute_tool_call, tool_to_schema  # noqa: F401 — re-exported for backward compat
 
@@ -117,6 +118,7 @@ async def run_agent_loop(
     *,
     channel: "Channel | None" = None,
     task_queue: "TaskQueue | None" = None,
+    pm=None,
 ) -> str:
     """Run the agent loop to completion. Mutates messages in place.
 
@@ -197,6 +199,17 @@ async def run_agent_loop(
                         "tool %s raised exception", fn_name, exc_info=True
                     )
                     content = f"Error: tool '{fn_name}' raised an exception"
+
+            # Hook: process_tool_result (firstresult)
+            # Fires after logging so metrics reflect original content.
+            # Fires before messages.append so the transformed value enters the conversation.
+            if pm is not None:
+                hook_result = await call_firstresult_hook(
+                    pm, "process_tool_result",
+                    tool_name=fn_name, result=content, channel=channel,
+                )
+                if hook_result is not None:
+                    content = hook_result
 
             messages.append({
                 "role": "tool",

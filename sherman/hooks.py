@@ -1,5 +1,23 @@
+"""Plugin system for the Sherman agent daemon.
+
+Defines the AgentSpec hookspecs that plugins implement, the hookimpl
+marker for decorating implementations, and utility functions for the
+plugin manager lifecycle.
+
+Exports:
+    hookspec        — decorator for hookspec methods on AgentSpec
+    hookimpl        — decorator for plugin implementations
+    AgentSpec       — hook specifications for all lifecycle, messaging,
+                      and extension-point hooks
+    create_plugin_manager()     — create and configure the PluginManager
+    call_firstresult_hook()     — async firstresult helper (apluggy workaround)
+    get_dependency()            — typed plugin lookup
+    validate_dependencies()     — dependency graph verification at startup
+"""
 from __future__ import annotations
 
+import asyncio
+import inspect
 import logging
 from typing import TYPE_CHECKING, TypeVar
 
@@ -7,6 +25,8 @@ import apluggy as pluggy
 
 if TYPE_CHECKING:
     from sherman.channel import Channel
+    from sherman.conversation import ConversationLog
+    from sherman.llm import LLMClient
 
 T = TypeVar("T")
 
@@ -65,6 +85,51 @@ def create_plugin_manager() -> pluggy.PluginManager:
     _pm_logger.debug("plugin manager created")
 
     return pm
+
+
+async def call_firstresult_hook(pm: pluggy.PluginManager, hook_name: str, **kwargs) -> object | None:
+    """Call an async hook, returning the first non-None result.
+
+    Workaround for apluggy's inability to handle firstresult=True on async hooks.
+    Iterates hook implementations in priority order: tryfirst implementations
+    first, then regular implementations in registration order (FIFO), then
+    trylast implementations. Returns the first non-None result, or None if all
+    impls return None or no impls are registered.
+
+    Args:
+        pm: The plugin manager instance.
+        hook_name: The hook method name on AgentSpec (e.g. "should_process_message").
+        **kwargs: Arguments to pass to each hook implementation.
+
+    Returns:
+        The first non-None return value, or None.
+
+    Note: Hook wrappers (@hookimpl(wrapper=True) and
+    @hookimpl(hookwrapper=True)) are not supported and will be silently
+    skipped.
+    """
+    hook_caller = getattr(pm.hook, hook_name, None)
+    if hook_caller is None:
+        return None
+    # get_hookimpls() returns implementations in registration order.
+    # Sort by priority: tryfirst first (0), regular middle (1), trylast last (2).
+    # Within each group, Python's stable sort preserves registration order.
+    impls = sorted(
+        hook_caller.get_hookimpls(),
+        key=lambda i: 0 if i.tryfirst else (2 if i.trylast else 1),
+    )
+    for impl in impls:
+        # Skip wrappers -- they are not direct result producers.
+        if impl.wrapper or impl.hookwrapper:
+            continue
+        # Filter kwargs to only those the impl accepts.
+        filtered = {k: v for k, v in kwargs.items() if k in impl.argnames}
+        result = impl.function(**filtered)
+        if inspect.isawaitable(result):
+            result = await result
+        if result is not None:
+            return result
+    return None
 
 
 class AgentSpec:
@@ -168,4 +233,65 @@ class AgentSpec:
                           and will be formatted as role="tool" in the conversation.
                           Pass None when not a deferred tool result.
             meta: Optional extensible metadata (task_id, etc.). Pass None if unused.
+        """
+
+    @hookspec
+    async def should_process_message(
+        self, channel: Channel, sender: str, text: str
+    ) -> bool | None:
+        """Gate hook: decide whether to process an incoming message.
+
+        Called before the message is enqueued. Return False to reject,
+        True to explicitly accept (short-circuits), None for no opinion.
+        First non-None result wins.
+        Note: Hook wrappers are not supported for this hook.
+        """
+
+    @hookspec
+    async def on_llm_error(
+        self, channel: Channel, error: Exception
+    ) -> str | None:
+        """Called when run_agent_turn raises an exception.
+
+        Return a string to use as the error message sent to the channel.
+        Return None to use the default error message.
+        First non-None result wins.
+        Note: Hook wrappers are not supported for this hook.
+        """
+
+    @hookspec
+    async def compact_conversation(
+        self, conversation: "ConversationLog", client: "LLMClient", max_tokens: int
+    ) -> bool | None:
+        """Optionally replace the default compaction strategy.
+
+        Return True if compaction was handled (skip default).
+        Return None to defer to the next implementation or the default.
+        Do NOT return False: call_firstresult_hook stops iteration on any
+        non-None result, so False would stop other plugins from running but
+        the call site (which checks truthiness) would still run the default —
+        a confusing combination. Use None to defer, True to handle.
+        Note: Hook wrappers are not supported for this hook.
+        """
+
+    @hookspec
+    async def process_tool_result(
+        self, tool_name: str, result: str, channel: "Channel | None"
+    ) -> str | None:
+        """Transform a tool result before it enters the conversation.
+
+        Called after execute_tool_call returns. Return a replacement string
+        to use instead of the default result. Return None to keep the default.
+        First non-None result wins.
+        Note: Hook wrappers are not supported for this hook.
+        Note: This hook only fires during subagent execution (run_agent_loop),
+        not during interactive message processing via AgentPlugin.
+        """
+
+    @hookspec
+    async def on_idle(self) -> None:
+        """Broadcast hook: fired when all queues are empty and cooldown has elapsed.
+
+        Plugins can use this to perform periodic background work such as
+        polling RSS feeds, checking email, or running maintenance tasks.
         """
