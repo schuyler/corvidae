@@ -424,76 +424,12 @@ class TestTaskQueue:
 
 
 class TestBackgroundTaskTool:
-    async def test_background_task_enqueues(self):
-        """Calling the per-message background_task closure enqueues a task."""
-        plugin, bg_plugin, channel, db = await _build_plugin_with_mocks()
-
-        # Simulate on_message creating the per-call closure by calling on_message
-        # with a mocked run_agent_loop that invokes the background_task tool.
-        # Instead, directly exercise the closure created in on_message by
-        # inspecting what happens when on_message calls run_agent_loop.
-
-        enqueued_tasks = []
-        original_enqueue = bg_plugin.task_queue.enqueue
-
-        async def tracking_enqueue(task):
-            enqueued_tasks.append(task)
-            await original_enqueue(task)
-
-        bg_plugin.task_queue.enqueue = tracking_enqueue
-
-        # Patch run_agent_loop to call background_task via local_tools
-        async def fake_run_agent_loop(client, messages, tools, tool_schemas, **kwargs):
-            # Call the per-call background_task closure from local_tools
-            result = await tools["background_task"](
-                description="my bg task",
-                instructions="do the thing",
-            )
-            return result
-
-        with patch("sherman.agent.run_agent_loop", side_effect=fake_run_agent_loop):
-            await plugin.on_message(channel=channel, sender="user", text="launch task")
-            # Drain so the consumer runs fake_run_agent_loop (which calls background_task)
-            if channel.id in plugin._queues:
-                await plugin._queues[channel.id].drain()
-
-        assert len(enqueued_tasks) == 1
-        assert enqueued_tasks[0].description == "my bg task"
-        assert enqueued_tasks[0].instructions == "do the thing"
-
-        await plugin.on_stop()
-        await bg_plugin.on_stop()
-        await db.close()
-
-    async def test_background_task_uses_current_channel(self):
-        """The per-call closure captures the correct channel."""
-        plugin, bg_plugin, channel, db = await _build_plugin_with_mocks()
-
-        captured_channels = []
-        original_enqueue = bg_plugin.task_queue.enqueue
-
-        async def tracking_enqueue(task):
-            captured_channels.append(task.channel)
-            await original_enqueue(task)
-
-        bg_plugin.task_queue.enqueue = tracking_enqueue
-
-        async def fake_run_agent_loop(client, messages, tools, tool_schemas, **kwargs):
-            await tools["background_task"](description="desc", instructions="instr")
-            return "done"
-
-        with patch("sherman.agent.run_agent_loop", side_effect=fake_run_agent_loop):
-            await plugin.on_message(channel=channel, sender="user", text="go")
-            # Drain so the consumer runs fake_run_agent_loop (which calls background_task)
-            if channel.id in plugin._queues:
-                await plugin._queues[channel.id].drain()
-
-        assert len(captured_channels) == 1
-        assert captured_channels[0] is channel
-
-        await plugin.on_stop()
-        await bg_plugin.on_stop()
-        await db.close()
+    # test_background_task_enqueues and test_background_task_uses_current_channel
+    # have been removed in Phase 3. They tested the `background_task` closure
+    # that was injected into local_tools and passed to run_agent_loop. Phase 3
+    # removed that closure: tool calls are now dispatched as Tasks via TaskPlugin,
+    # not via a per-message closure. The background_task tool behavior is tested
+    # in test_agent_single_turn.py.
 
     async def test_task_status_reports_correctly(self):
         """task_status closure returns the queue status string."""
@@ -516,8 +452,11 @@ class TestBackgroundTaskTool:
 
 
 class TestBackgroundWorkerIntegration:
-    async def test_worker_executes_with_agent_loop(self):
-        """Worker calls run_agent_loop for a queued task and then send_message."""
+    async def test_worker_executes_with_agent_turn(self):
+        """Worker completes a BackgroundTask; the notification triggers run_agent_turn
+        and send_message is called with the agent's acknowledgement."""
+        from sherman.agent_loop import AgentTurnResult
+
         plugin, bg_plugin, channel, db = await _build_plugin_with_mocks()
 
         loop_done = asyncio.Event()
@@ -541,17 +480,25 @@ class TestBackgroundWorkerIntegration:
             instructions="do background work",
         )
 
-        async def fake_agent_run_agent_loop(client, messages, tools, tool_schemas, **kwargs):
-            return "agent acknowledgement"
+        fake_turn_result = AgentTurnResult(
+            message={"role": "assistant", "content": "agent acknowledgement"},
+            tool_calls=[],
+            text="agent acknowledgement",
+            latency_ms=1.0,
+        )
+
+        async def fake_agent_run_agent_turn(client, messages, tool_schemas):
+            messages.append(fake_turn_result.message)
+            return fake_turn_result
 
         with patch("sherman.background.run_agent_loop", side_effect=fake_run_agent_loop), \
-             patch("sherman.agent.run_agent_loop", side_effect=fake_agent_run_agent_loop):
+             patch("sherman.agent.run_agent_turn", side_effect=fake_agent_run_agent_turn):
             await bg_plugin.task_queue.enqueue(task)
             await asyncio.wait_for(loop_done.wait(), timeout=2.0)
             await asyncio.wait_for(complete_done.wait(), timeout=2.0)
             # _on_task_complete calls on_notify which enqueues to the channel queue.
             # Drain so the notification consumer runs (and calls send_message) while
-            # run_agent_loop is still patched.
+            # run_agent_turn is still patched.
             if channel.id in plugin._queues:
                 await asyncio.wait_for(plugin._queues[channel.id].drain(), timeout=2.0)
 
@@ -563,6 +510,8 @@ class TestBackgroundWorkerIntegration:
 
     async def test_worker_posts_to_correct_channel(self):
         """Two tasks on different channels are routed to their respective channels."""
+        from sherman.agent_loop import AgentTurnResult
+
         plugin, bg_plugin, channel_a, db = await _build_plugin_with_mocks()
 
         pm = plugin.pm
@@ -592,17 +541,25 @@ class TestBackgroundWorkerIntegration:
         task_a = BackgroundTask(channel=channel_a, description="a", instructions="do a")
         task_b = BackgroundTask(channel=channel_b, description="b", instructions="do b")
 
-        async def fake_agent_run_agent_loop(client, messages, tools, tool_schemas, **kwargs):
-            return "agent ack"
+        ack_result = AgentTurnResult(
+            message={"role": "assistant", "content": "agent ack"},
+            tool_calls=[],
+            text="agent ack",
+            latency_ms=1.0,
+        )
+
+        async def fake_agent_run_agent_turn(client, messages, tool_schemas):
+            messages.append(ack_result.message)
+            return ack_result
 
         with patch("sherman.background.run_agent_loop", side_effect=fake_run_agent_loop), \
-             patch("sherman.agent.run_agent_loop", side_effect=fake_agent_run_agent_loop):
+             patch("sherman.agent.run_agent_turn", side_effect=fake_agent_run_agent_turn):
             await bg_plugin.task_queue.enqueue(task_a)
             await bg_plugin.task_queue.enqueue(task_b)
             await asyncio.wait_for(task_a_done.wait(), timeout=3.0)
             await asyncio.wait_for(task_b_done.wait(), timeout=3.0)
             # _on_task_complete calls on_notify which enqueues to each channel queue.
-            # Drain both so the notification consumers run while run_agent_loop is patched.
+            # Drain both so the notification consumers run while run_agent_turn is patched.
             for ch in [channel_a, channel_b]:
                 if ch.id in plugin._queues:
                     await asyncio.wait_for(plugin._queues[ch.id].drain(), timeout=2.0)
@@ -619,6 +576,8 @@ class TestBackgroundWorkerIntegration:
 
     async def test_on_task_complete_hook_fired(self):
         """on_task_complete hook is called with correct task_id and result."""
+        from sherman.agent_loop import AgentTurnResult
+
         plugin, bg_plugin, channel, db = await _build_plugin_with_mocks()
 
         done = asyncio.Event()
@@ -636,15 +595,23 @@ class TestBackgroundWorkerIntegration:
 
         task = BackgroundTask(channel=channel, description="hook test", instructions="fire hook")
 
-        async def fake_agent_run_agent_loop(client, messages, tools, tool_schemas, **kwargs):
-            return "agent ack"
+        ack_result = AgentTurnResult(
+            message={"role": "assistant", "content": "agent ack"},
+            tool_calls=[],
+            text="agent ack",
+            latency_ms=1.0,
+        )
+
+        async def fake_agent_run_agent_turn(client, messages, tool_schemas):
+            messages.append(ack_result.message)
+            return ack_result
 
         with patch("sherman.background.run_agent_loop", side_effect=fake_run_agent_loop), \
-             patch("sherman.agent.run_agent_loop", side_effect=fake_agent_run_agent_loop):
+             patch("sherman.agent.run_agent_turn", side_effect=fake_agent_run_agent_turn):
             await bg_plugin.task_queue.enqueue(task)
             await asyncio.wait_for(done.wait(), timeout=2.0)
             # _on_task_complete calls on_notify which enqueues to the channel queue.
-            # Drain so the notification consumer runs while run_agent_loop is patched.
+            # Drain so the notification consumer runs while run_agent_turn is patched.
             if channel.id in plugin._queues:
                 await asyncio.wait_for(plugin._queues[channel.id].drain(), timeout=2.0)
 
