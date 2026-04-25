@@ -11,6 +11,16 @@ single place in the code shows the whole flow. This is the hardest thing
 to reason about in the codebase, and it's the most important thing to
 reason about.
 
+**Assessed and documented.** `_process_queue_item` is the center — it owns
+all decisions (LLM calls, tool dispatch vs. response, turn counting,
+compaction). The "distributed" quality comes from tool execution: results
+re-enter via `on_notify` → serial queue → `_process_queue_item` rather
+than returning inline. This is intentional — it keeps the channel's serial
+queue unblocked during tool execution, so user messages can interleave
+mid-cycle. Collapsing it into a literal loop (as `run_agent_loop` does for
+subagents) would mean either blocking the queue or giving up interleaving.
+The tradeoff is documented in `_process_queue_item`'s docstring.
+
 ### 2. Tool dispatch is implemented twice
 
 `_ctx` injection and tool execution exist in both
