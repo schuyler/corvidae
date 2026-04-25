@@ -372,6 +372,7 @@ class AgentPlugin:
                 tool_registry.add(item)
             else:
                 tool_registry.add(Tool.from_function(item))
+        self.tool_registry = tool_registry
         self.tools = tool_registry.as_dict()
         self.tool_schemas = tool_registry.schemas()
 

@@ -243,7 +243,9 @@ CREATE INDEX idx_log_channel ON message_log(channel_id, timestamp);
 ## AgentPlugin
 
 `agent.py` — the central plugin. Implements `on_start`, `on_message`,
-`on_notify`, `on_stop`.
+`on_notify`, `on_stop`. Sets `pm.agent_plugin = self` during
+registration so other plugins (e.g. `SubagentPlugin`) can access
+`tool_registry` at call time.
 
 ### Message processing
 
@@ -360,6 +362,46 @@ for each queued task with a separate system prompt. Registers
 (`llm.background` config) if configured, otherwise shares the main
 client.
 
+## Subagent Tool
+
+`tools/subagent.py` — `SubagentPlugin` registers the `subagent` tool, which
+launches a background agent with its own LLM session and the full tool set.
+
+### Tool signature
+
+```python
+async def subagent(instructions: str, description: str, _ctx: ToolContext) -> str
+```
+
+`_ctx` is system-injected (excluded from the LLM-visible schema). Returns a
+confirmation string with the enqueued task ID on success, or an error string
+if the task queue or channel context is unavailable.
+
+### How it works
+
+1. Retrieves `agent_plugin.tool_registry` via `pm.agent_plugin`.
+2. Calls `registry.exclude("subagent", "background_task")` to remove itself
+   and the legacy placeholder from the subagent's tool set.
+3. Builds a `messages` list (system prompt + user instructions) and a
+   `work` coroutine that captures it, creates a fresh `LLMClient`, calls
+   `run_agent_loop`, strips thinking from the result, then shuts the
+   client down.
+4. Wraps `work` in a `Task` with `tool_call_id` from `_ctx`, enqueues it on
+   `ctx.task_queue`.
+5. Returns immediately; result is delivered via `TaskPlugin → on_notify →
+   AgentPlugin` (same path as all other tasks).
+
+### LLM configuration
+
+Uses `llm.background` if present in config, otherwise `llm.main`. Configured
+at `on_start` time; subagent calls after startup use the value captured then.
+
+### System prompt
+
+The `SUBAGENT_SYSTEM_PROMPT` constant (defined in `tools/subagent.py`) is
+used as the subagent's system message. It instructs the subagent to work
+step-by-step and summarize results on completion.
+
 ## Tools
 
 Registered via `CoreToolsPlugin` in `tools/__init__.py`:
@@ -371,8 +413,15 @@ Registered via `CoreToolsPlugin` in `tools/__init__.py`:
 | `write_file(path, content)` | `tools/files.py` | Write file, creates parent dirs |
 | `web_fetch(url)` | `tools/web.py` | Fetch URL, 15s timeout, 50KB truncation |
 
-Additionally, `BackgroundPlugin` registers `background_task` and
-`task_status` as tool closures during `on_start`.
+Additionally, `SubagentPlugin` registers `subagent` and
+`BackgroundPlugin` registers `background_task` and `task_status` as
+tool closures during `on_start`.
+
+| Tool | File | Purpose |
+|------|------|---------|
+| `subagent(instructions, description)` | `tools/subagent.py` | Launch background subagent with own LLM session |
+| `background_task(description, instructions)` | `background.py` | Legacy; launch background agent (replaced by `subagent`) |
+| `task_status()` | `background.py` | Report background task queue status |
 
 ## Transports
 
@@ -444,7 +493,8 @@ Defined in `main.py`:
 3. IRCPlugin — IRC transport
 4. BackgroundPlugin — legacy background tasks
 5. TaskPlugin — new task queue
-6. AgentPlugin — agent loop (last, so all tools and queues are ready)
+6. SubagentPlugin — registers subagent tool (after TaskPlugin so task_queue is available)
+7. AgentPlugin — agent loop (last, so all tools and queues are ready)
 
 ## Directory Layout
 
@@ -469,7 +519,8 @@ sherman/
     ├── __init__.py       # CoreToolsPlugin
     ├── shell.py
     ├── files.py
-    └── web.py
+    ├── web.py
+    └── subagent.py       # SubagentPlugin, subagent tool
 ```
 
 ## Known Risks
@@ -483,6 +534,12 @@ behavior or premature responses. Batching can be added later if needed.
 results are still pending, the conversation may interleave user
 messages with tool results. The SerialQueue serializes processing (no
 races), but ordering depends on arrival time.
+
+**Dual task queues.** BackgroundPlugin and TaskPlugin each own a separate
+`TaskQueue`. Subagent tasks use the TaskPlugin queue; `background_task` uses
+the BackgroundPlugin queue. Both deliver results via `on_notify → AgentPlugin`.
+The queues do not coordinate, so a channel may have tasks running in both
+simultaneously. This resolves when BackgroundPlugin is removed.
 
 ## Unimplemented
 
@@ -502,14 +559,6 @@ Items to address:
 - Move or replace `task_status` tool
 - Delete `_truncate` or move to a shared util
 - Update tests in `test_background.py`
-
-### Subagent tool (task system phase 4)
-
-A `tools/subagent.py` tool that constructs a `run_agent_loop` coroutine
-with its own LLMClient and enqueues it as a Task. Replaces the
-`background_task` tool. Needs access to the available tool set and
-default LLM config — either via ToolContext (extended) or closure at
-registration time.
 
 ### Hot-loading
 
