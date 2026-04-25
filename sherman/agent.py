@@ -160,7 +160,24 @@ class AgentPlugin:
         return self._queues[channel_id]
 
     async def _process_queue_item(self, item: QueueItem) -> None:
-        """Process one item from the channel queue."""
+        """Process one item from the channel queue.
+
+        This method is the center of the agent loop. It is called once per
+        user message and once per tool result. The tool-calling cycle is not
+        a loop in this code — it is implemented via re-entry through the
+        channel's serial queue:
+
+            _process_queue_item (LLM call, tool calls detected)
+              → _dispatch_tool_calls (enqueue Tasks on TaskQueue)
+              → TaskQueue.run_worker (execute tool in background)
+              → _on_task_complete → on_notify (enqueue notification)
+              → _process_queue_item again (with tool result)
+
+        This re-entrant design keeps the serial queue unblocked during tool
+        execution, allowing user messages to interleave mid-cycle. A literal
+        loop (as run_agent_loop uses for subagents) would block the queue
+        for the entire tool-calling sequence.
+        """
         logger.debug(
             "processing queue item",
             extra={
