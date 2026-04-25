@@ -64,7 +64,6 @@ class AgentSpec:
     async def send_message(self, channel: Channel, text: str, latency_ms: float | None = None) -> None
     def register_tools(self, tool_registry: list) -> None  # sync
     async def on_agent_response(self, channel: Channel, request_text: str, response_text: str) -> None
-    async def on_task_complete(self, channel: Channel, task_id: str, result: str) -> None
     async def on_notify(self, channel: Channel, source: str, text: str, tool_call_id: str | None, meta: dict | None) -> None
 ```
 
@@ -113,6 +112,12 @@ scope, config)` returns an existing channel or creates one.
 
 `load_channel_config(config, registry)` pre-registers channels from
 YAML before `on_start`.
+
+**resolve_system_prompt(value, base_dir)** — if `value` is a string,
+returns it directly. If a list of paths, reads each file and
+concatenates with `\n\n`. Relative paths resolve against `base_dir`
+(the directory containing `agent.yaml`). Called at conversation init
+time, so editing prompt files takes effect on the next new conversation.
 
 ## LLM Client
 
@@ -212,12 +217,6 @@ Tools that don't declare `_ctx` work without modification.
   80% of limit, summarizes older messages via an LLM call, keeping the
   last 20 messages intact. Compaction only affects the in-memory prompt;
   the persistent log is append-only.
-
-**resolve_system_prompt(value, base_dir)** — if `value` is a string,
-returns it directly. If a list of paths, reads each file and
-concatenates with `\n\n`. Relative paths resolve against `base_dir`
-(the directory containing `agent.yaml`). Called at conversation init
-time, so editing prompt files takes effect on the next new conversation.
 
 **Thinking token handling** — three layers:
 - Display: `strip_thinking()` removes `<think>` blocks from content
@@ -337,7 +336,7 @@ task and completed results.
 
 **TaskPlugin** — hookimpl that owns the TaskQueue. Starts/stops the
 worker on lifecycle hooks. Registers the `task_status` tool. On task
-completion, fires `on_notify` and `on_task_complete`.
+completion, fires `on_notify`.
 
 ## Subagent Tool
 
@@ -520,11 +519,11 @@ treated as optional, and `_dispatch_tool_calls` degrades gracefully
 sherman/
 ├── hooks.py              # AgentSpec, hookimpl, create_plugin_manager
 ├── tool.py               # Tool, ToolRegistry, tool_to_schema, ToolContext
-├── channel.py            # Channel, ChannelConfig, ChannelRegistry
+├── channel.py            # Channel, ChannelConfig, ChannelRegistry, resolve_system_prompt
 ├── queue.py              # SerialQueue
 ├── llm.py                # LLMClient
 ├── agent_loop.py         # run_agent_turn(), run_agent_loop(), strip_thinking
-├── conversation.py       # ConversationLog, init_db, resolve_system_prompt
+├── conversation.py       # ConversationLog, init_db
 ├── logging.py            # StructuredFormatter, _DEFAULT_LOGGING
 ├── agent.py              # AgentPlugin (single-turn dispatch)
 ├── task.py               # Task, TaskQueue, TaskPlugin

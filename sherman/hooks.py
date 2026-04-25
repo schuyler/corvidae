@@ -102,8 +102,15 @@ class AgentSpec:
     async def send_message(self, channel: Channel, text: str, latency_ms: float | None = None) -> None:
         """Called to deliver an outbound message to a channel.
 
-        Transport plugins implement this to forward the message over
-        their protocol.
+        Pluggy broadcasts this hook to all registered transport plugins.
+        Each transport must filter for its own channels by calling
+        ``channel.matches_transport("<transport_name>")`` and returning
+        early if the channel does not belong to it.
+
+        ``latency_ms`` is optional — transports that do not display
+        timing information (e.g. IRC) may omit it from their hookimpl
+        signature entirely. Pluggy tolerates hookimpls that omit
+        optional parameters.
 
         Args:
             channel: The Channel object identifying the target.
@@ -132,18 +139,6 @@ class AgentSpec:
             channel: The Channel where the conversation occurred.
             request_text: The original user message that triggered the loop.
             response_text: The final text produced by the agent loop.
-        """
-
-    @hookspec
-    async def on_task_complete(
-        self, channel: Channel, task_id: str, result: str
-    ) -> None:
-        """Called when a background task finishes.
-
-        Args:
-            channel: The Channel associated with the task.
-            task_id: Unique identifier for the completed task.
-            result: The output produced by the task.
         """
 
     @hookspec

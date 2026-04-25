@@ -5,26 +5,21 @@ persisted to SQLite and kept in-memory for efficient access. When the estimated
 token count approaches the context limit, older messages are summarized via the
 LLM and replaced with a single summary entry.
 
-Also hosts resolve_system_prompt(), absorbed from prompt.py.
-
 Logging:
     - DEBUG: messages loaded, message appended
     - WARNING: compaction triggered (approaching context limit)
     - INFO: compaction completed (before/after counts)
-    - DEBUG/WARNING: system prompt resolution (from sherman.prompt logger)
 """
 
 import json
 import logging
 import time
-from pathlib import Path
 
 import aiosqlite
 
 from sherman.llm import LLMClient
 
 logger = logging.getLogger(__name__)
-_prompt_logger = logging.getLogger("sherman.prompt")
 
 
 class ConversationLog:
@@ -182,51 +177,3 @@ async def init_db(db: aiosqlite.Connection) -> None:
     await db.commit()
 
 
-def resolve_system_prompt(value: str | list[str], base_dir: Path) -> str:
-    """Resolve a system_prompt config value to a string.
-
-    If value is a string, return it directly.
-    If value is a list of paths, read each file and concatenate
-    with double newlines. Relative paths are resolved against
-    base_dir. Absolute paths are used as-is.
-
-    Args:
-        value: Either a literal prompt string or a list of file paths
-        base_dir: Base directory for resolving relative paths
-
-    Returns:
-        The resolved system prompt as a single string
-
-    Raises:
-        FileNotFoundError: If any path in the list does not exist.
-        TypeError: If value is neither str nor list.
-
-    Logs:
-        DEBUG: Resolution method (string/file list) and result length
-        WARNING: Empty list resolves to empty string
-    """
-    if isinstance(value, str):
-        _prompt_logger.debug(
-            "system prompt resolved from literal string",
-            extra={"length": len(value)},
-        )
-        return value
-    if isinstance(value, list):
-        if not value:
-            _prompt_logger.warning("empty system prompt list resolved to empty string")
-            return ""
-        parts = []
-        for entry in value:
-            path = Path(entry)
-            if not path.is_absolute():
-                path = base_dir / path
-            parts.append(path.read_text().strip())
-        result = "\n\n".join(parts)
-        _prompt_logger.debug(
-            "system prompt resolved from file list",
-            extra={"file_count": len(value), "length": len(result)},
-        )
-        return result
-    raise TypeError(
-        f"system_prompt must be str or list[str], got {type(value).__name__!r}"
-    )

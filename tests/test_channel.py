@@ -320,3 +320,47 @@ class TestChannelConfigListSystemPrompt:
         cfg = ChannelConfig()  # no override
         result = cfg.resolve(agent_defaults)
         assert result["system_prompt"] == ["soul.md", "irc.md"]
+
+
+# ---------------------------------------------------------------------------
+# Item 8 red-phase: resolve_system_prompt must be importable from sherman.channel
+# ---------------------------------------------------------------------------
+
+
+class TestResolveSystemPromptInChannel:
+    def test_resolve_system_prompt_importable_from_channel(self):
+        """resolve_system_prompt must be importable from sherman.channel after relocation.
+
+        RED phase: this test fails while the function still lives in sherman.conversation.
+        It passes once the function is moved to sherman.channel.
+        """
+        from sherman.channel import resolve_system_prompt  # noqa: F401
+
+    def test_resolve_system_prompt_basic_string(self):
+        """resolve_system_prompt imported from sherman.channel works for a string input.
+
+        RED phase: fails until the function is available in sherman.channel.
+        """
+        from pathlib import Path
+
+        from sherman.channel import resolve_system_prompt
+
+        result = resolve_system_prompt("You are a helpful assistant.", Path("/tmp"))
+        assert result == "You are a helpful assistant."
+
+    def test_resolve_system_prompt_not_in_conversation(self):
+        """resolve_system_prompt must be removed from sherman.conversation after relocation."""
+        import sherman.conversation as mod
+
+        assert not hasattr(mod, "resolve_system_prompt"), (
+            "resolve_system_prompt should be removed from sherman.conversation"
+        )
+
+    def test_prompt_logger_in_channel(self):
+        """_prompt_logger must live in sherman.channel after relocation."""
+        import sherman.channel as mod
+
+        assert hasattr(mod, "_prompt_logger"), (
+            "channel.py must define _prompt_logger"
+        )
+        assert mod._prompt_logger.name == "sherman.prompt"

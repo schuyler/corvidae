@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from sherman.channel import Channel, ChannelConfig
-from sherman.hooks import create_plugin_manager
+from sherman.hooks import AgentSpec, create_plugin_manager
 
 from sherman.task import Task, TaskPlugin, TaskQueue
 
@@ -586,37 +586,6 @@ class TestTaskPlugin:
 
         await plugin.on_stop()
 
-    async def test_on_task_complete_fires_on_task_complete_hook(self):
-        """TaskPlugin fires on_task_complete hook (in addition to on_notify) when a task completes.
-
-        Phase 5: BackgroundPlugin is deleted, so TaskPlugin takes over firing
-        on_task_complete. This replaces the Phase 1 test that asserted it was NOT fired.
-        """
-        pm = create_plugin_manager()
-        pm.ahook.on_notify = AsyncMock()
-        pm.ahook.on_task_complete = AsyncMock()
-        plugin = TaskPlugin(pm)
-        await plugin.on_start(config={})
-
-        channel = _make_channel()
-
-        async def work():
-            return "result"
-
-        task = Task(work=work, channel=channel)
-        await plugin._on_task_complete(task, "result")
-
-        # on_notify was called
-        pm.ahook.on_notify.assert_awaited_once()
-        # on_task_complete IS called (Phase 5: TaskPlugin takes over from BackgroundPlugin)
-        pm.ahook.on_task_complete.assert_awaited_once()
-        call_kwargs = pm.ahook.on_task_complete.call_args.kwargs
-        assert call_kwargs["channel"] is channel
-        assert call_kwargs["task_id"] == task.task_id
-        assert call_kwargs["result"] == "result"
-
-        await plugin.on_stop()
-
     def test_register_tools_registers_task_status(self):
         """TaskPlugin.register_tools appends a task_status tool to the registry.
 
@@ -708,3 +677,21 @@ class TestTaskPlugin:
         )
 
         await plugin.on_stop()
+
+
+# ---------------------------------------------------------------------------
+# Item 7 red-phase: on_task_complete must NOT be in AgentSpec (dead hook)
+# ---------------------------------------------------------------------------
+
+
+class TestOnTaskCompleteRemoved:
+    def test_agent_spec_does_not_define_on_task_complete(self):
+        """AgentSpec must not define on_task_complete after the dead hook is removed.
+
+        RED phase: this test fails while on_task_complete still exists in AgentSpec.
+        It passes once the hookspec and call site are deleted.
+        """
+        assert not hasattr(AgentSpec, "on_task_complete"), (
+            "on_task_complete is a dead hook with no implementations; "
+            "it should be removed from AgentSpec"
+        )

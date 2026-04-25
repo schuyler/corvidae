@@ -197,8 +197,3 @@ class TaskPlugin:
             tool_call_id=task.tool_call_id,
             meta={"task_id": task.task_id},
         )
-        await self.pm.ahook.on_task_complete(
-            channel=task.channel,
-            task_id=task.task_id,
-            result=result,
-        )

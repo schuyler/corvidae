@@ -19,7 +19,7 @@ import yaml
 
 from sherman.channel import ChannelConfig, ChannelRegistry, load_channel_config
 from sherman.conversation import ConversationLog, init_db
-from sherman.conversation import resolve_system_prompt
+from sherman.channel import resolve_system_prompt
 
 
 # ---------------------------------------------------------------------------
@@ -68,9 +68,9 @@ class TestLoggerNamingConvention:
         assert mod.logger.name == "sherman.channel"
 
     def test_prompt_has_module_logger(self):
-        """resolve_system_prompt logs under 'sherman.prompt' (canonical: sherman.conversation)."""
-        import sherman.conversation as mod
-        assert hasattr(mod, "_prompt_logger"), "conversation.py must define module-level `_prompt_logger`"
+        """resolve_system_prompt logs under 'sherman.prompt' (canonical: sherman.channel)."""
+        import sherman.channel as mod
+        assert hasattr(mod, "_prompt_logger"), "channel.py must define module-level `_prompt_logger`"
         assert mod._prompt_logger.name == "sherman.prompt"
 
     def test_main_has_module_logger(self):
