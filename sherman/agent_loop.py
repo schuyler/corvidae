@@ -12,7 +12,6 @@ Logging:
     - WARNING: max rounds reached, unknown tool called, tool exception
 """
 
-import inspect
 import json
 import logging
 import re
@@ -21,7 +20,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable
 
 from sherman.llm import LLMClient
-from sherman.tool import ToolContext, tool_to_schema  # noqa: F401 — re-exported for backward compat
+from sherman.tool import ToolContext, execute_tool_call, tool_to_schema  # noqa: F401 — re-exported for backward compat
 
 if TYPE_CHECKING:
     from sherman.channel import Channel
@@ -144,33 +143,11 @@ async def run_agent_loop(
         WARNING: Max turns reached, unknown tools, tool exceptions
     """
     for _ in range(max_turns):
-        start = time.monotonic()
-        response = await client.chat(messages, tools=tool_schemas or None)
-        latency_ms = round((time.monotonic() - start) * 1000, 1)
-        msg = response["choices"][0]["message"]
-        msg.setdefault("role", "assistant")
-        messages.append(msg)
-
-        tool_calls = msg.get("tool_calls")
-        logger.info(
-            "LLM response received",
-            extra={
-                "role": msg.get("role"),
-                "tool_calls_count": len(tool_calls) if tool_calls else 0,
-                "latency_ms": latency_ms,
-            },
-        )
-        logger.debug(
-            "LLM response content",
-            extra={
-                "content": _truncate(msg.get("content") or ""),
-                "has_reasoning_content": "reasoning_content" in msg,
-                "reasoning_content_length": len(msg["reasoning_content"]) if "reasoning_content" in msg else None,
-            },
-        )
+        result = await run_agent_turn(client, messages, tool_schemas)
+        tool_calls = result.tool_calls or None  # run_agent_turn returns [] for no tool calls; existing code checks `if not tool_calls`
 
         if not tool_calls:
-            return msg.get("content", "")
+            return result.text
 
         for call in tool_calls:
             call_id = call["id"]
@@ -196,20 +173,13 @@ async def run_agent_loop(
                 try:
                     tool_start = time.monotonic()
                     tool_fn = tools[fn_name]
-                    # Inject _-prefixed parameters from context, not from
-                    # LLM-supplied args.
-                    tool_sig = inspect.signature(tool_fn)
-                    call_kwargs = dict(args)
-
-                    # Inject ToolContext for tools that declare _ctx
-                    if "_ctx" in tool_sig.parameters:
-                        call_kwargs["_ctx"] = ToolContext(
-                            channel=channel,
-                            tool_call_id=call_id,
-                            task_queue=task_queue,
-                        )
-
-                    content = await tool_fn(**call_kwargs)
+                    content = await execute_tool_call(
+                        tool_fn,
+                        args,
+                        channel=channel,
+                        tool_call_id=call_id,
+                        task_queue=task_queue,
+                    )
                     tool_latency_ms = round((time.monotonic() - tool_start) * 1000, 1)
                     logger.info(
                         "tool call result",

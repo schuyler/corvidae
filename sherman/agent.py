@@ -27,7 +27,6 @@ Logging:
 """
 
 import asyncio
-import inspect
 import json
 import logging
 from collections.abc import Callable
@@ -43,7 +42,7 @@ from sherman.hooks import hookimpl
 from sherman.llm import LLMClient
 from sherman.queue import SerialQueue
 from sherman.task import Task
-from sherman.tool import Tool, ToolContext, ToolRegistry
+from sherman.tool import Tool, ToolContext, ToolRegistry, execute_tool_call
 
 logger = logging.getLogger("sherman.agent")
 
@@ -287,19 +286,13 @@ class AgentPlugin:
                     return f"Error: unknown tool '{fn_name}'"
                 try:
                     tool_fn = self.tools[fn_name]
-                    sig = inspect.signature(tool_fn)
-                    call_kwargs = dict(args)
-
-                    # Inject ToolContext for tools that declare _ctx
-                    if "_ctx" in sig.parameters:
-                        call_kwargs["_ctx"] = ToolContext(
-                            channel=channel,
-                            tool_call_id=call_id,
-                            task_queue=task_queue,
-                        )
-
-                    result = await tool_fn(**call_kwargs)
-                    return str(result)
+                    return await execute_tool_call(
+                        tool_fn,
+                        args,
+                        channel=channel,
+                        tool_call_id=call_id,
+                        task_queue=task_queue,
+                    )
                 except Exception:
                     logger.warning(
                         "tool %s raised exception", fn_name, exc_info=True
