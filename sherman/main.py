@@ -97,6 +97,11 @@ async def main(config_path: str = "agent.yaml") -> None:
     task_plugin = TaskPlugin(pm)
     pm.register(task_plugin, name="task")
 
+    # Register SubagentPlugin after TaskPlugin, before AgentPlugin
+    from sherman.tools.subagent import SubagentPlugin
+    subagent_plugin = SubagentPlugin(pm)
+    pm.register(subagent_plugin, name="subagent")
+
     # Register AgentPlugin after tool-providing and transport plugins
     agent_loop = AgentPlugin(pm)
     pm.register(agent_loop, name="agent_loop")
