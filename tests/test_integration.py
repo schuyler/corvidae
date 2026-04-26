@@ -4,7 +4,7 @@ Assembles the full plugin graph (with FakeTransportPlugin replacing CLI/IRC)
 and exercises message routing, tool dispatch, persistence, multi-channel
 isolation, error handling, and tool collection.
 
-Baseline test count: 473 (all passing before this file was added).
+Baseline test count: 525 (all passing before this file was added).
 """
 
 from __future__ import annotations
