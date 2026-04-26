@@ -185,6 +185,19 @@ class AgentSpec:
         """
 
     @hookspec
+    async def before_register_tools(self, config: dict) -> None:
+        """Called inside AgentPlugin._start_plugin, right before register_tools.
+
+        Plugins that need async setup to populate their tool lists (e.g.,
+        MCP client connections) implement this hook. By the time it returns,
+        the plugin's cached tools must be ready for synchronous collection
+        via register_tools.
+
+        Args:
+            config: The full parsed YAML config dict.
+        """
+
+    @hookspec
     def register_tools(self, tool_registry: list) -> None:
         """Called during startup so plugins can add tools to the agent loop.
 

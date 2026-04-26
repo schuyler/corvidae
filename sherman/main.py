@@ -102,6 +102,11 @@ async def main(config_path: str = "agent.yaml") -> None:
     subagent_plugin = SubagentPlugin(pm)
     pm.register(subagent_plugin, name="subagent")
 
+    # Register McpClientPlugin before AgentPlugin (provides MCP server tools)
+    from sherman.mcp_client import McpClientPlugin
+    mcp_plugin = McpClientPlugin()
+    pm.register(mcp_plugin, name="mcp")
+
     # Register CompactionPlugin before AgentPlugin (provides default compaction strategy)
     from sherman.compaction import CompactionPlugin
     compaction_plugin = CompactionPlugin()
