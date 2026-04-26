@@ -1,4 +1,4 @@
-"""Tests for execute_tool_call() in sherman/tool.py.
+"""Tests for execute_tool_call() in corvidae/tool.py.
 
 These tests are expected to FAIL with ImportError until execute_tool_call
 is implemented.
@@ -6,7 +6,7 @@ is implemented.
 
 import pytest
 
-from sherman.tool import execute_tool_call, ToolContext
+from corvidae.tool import execute_tool_call, ToolContext
 
 
 # ---------------------------------------------------------------------------
@@ -57,8 +57,8 @@ async def test_execute_tool_call_basic():
 async def test_execute_tool_call_injects_ctx():
     """Tool declaring _ctx receives a ToolContext with correct fields."""
     from unittest.mock import MagicMock
-    from sherman.task import TaskQueue
-    from sherman.channel import Channel, ChannelConfig
+    from corvidae.task import TaskQueue
+    from corvidae.channel import Channel, ChannelConfig
 
     channel = Channel(transport="test", scope="s1", config=ChannelConfig())
     task_queue = TaskQueue()
@@ -93,7 +93,7 @@ async def test_execute_tool_call_no_ctx_when_not_declared():
         call_kwargs.append({"a": a, "b": b})
         return a + b
 
-    from sherman.channel import Channel, ChannelConfig
+    from corvidae.channel import Channel, ChannelConfig
     channel = Channel(transport="test", scope="s2", config=ChannelConfig())
 
     await execute_tool_call(
@@ -162,7 +162,7 @@ class TestToolResultTruncation:
 
     async def test_result_within_limit_unchanged(self):
         """A tool returning 100 chars returns that result unchanged."""
-        from sherman.tool import MAX_TOOL_RESULT_CHARS  # noqa: F401 — import confirms constant exists
+        from corvidae.tool import MAX_TOOL_RESULT_CHARS  # noqa: F401 — import confirms constant exists
 
         output = "x" * 100
 
@@ -176,7 +176,7 @@ class TestToolResultTruncation:
 
     async def test_result_at_limit_unchanged(self):
         """A tool returning exactly MAX_TOOL_RESULT_CHARS returns that result unchanged."""
-        from sherman.tool import MAX_TOOL_RESULT_CHARS
+        from corvidae.tool import MAX_TOOL_RESULT_CHARS
 
         output = "y" * MAX_TOOL_RESULT_CHARS
 
@@ -190,7 +190,7 @@ class TestToolResultTruncation:
 
     async def test_result_exceeds_limit_truncated(self):
         """A tool returning 150_000 chars is truncated to MAX_TOOL_RESULT_CHARS."""
-        from sherman.tool import MAX_TOOL_RESULT_CHARS
+        from corvidae.tool import MAX_TOOL_RESULT_CHARS
 
         output = "z" * 150_000
 
@@ -205,7 +205,7 @@ class TestToolResultTruncation:
 
     async def test_truncation_notice_format(self):
         """Truncation notice includes the original length."""
-        from sherman.tool import MAX_TOOL_RESULT_CHARS
+        from corvidae.tool import MAX_TOOL_RESULT_CHARS
 
         original_len = 150_000
         output = "a" * original_len

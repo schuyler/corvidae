@@ -1,8 +1,8 @@
-"""Daemon entry point for sherman.
+"""Daemon entry point for corvidae.
 
 This module configures logging from the YAML config file (or applies defaults)
-before any other initialization. All sherman modules use module-level loggers
-named `sherman.<module>` via `logging.getLogger(__name__)`. The `sherman` root
+before any other initialization. All corvidae modules use module-level loggers
+named `corvidae.<module>` via `logging.getLogger(__name__)`. The `corvidae` root
 logger controls the entire logging hierarchy.
 
 Logging Configuration:
@@ -23,17 +23,17 @@ from pathlib import Path
 
 import yaml
 
-from sherman.agent import AgentPlugin
-from sherman.channel import ChannelRegistry, load_channel_config
-from sherman.channels.cli import CLIPlugin
-from sherman.channels.irc import IRCPlugin
-from sherman.hooks import create_plugin_manager, validate_dependencies
-from sherman.logging import (  # noqa: F401 — re-exported for backward compat
+from corvidae.agent import AgentPlugin
+from corvidae.channel import ChannelRegistry, load_channel_config
+from corvidae.channels.cli import CLIPlugin
+from corvidae.channels.irc import IRCPlugin
+from corvidae.hooks import create_plugin_manager, validate_dependencies
+from corvidae.logging import (  # noqa: F401 — re-exported for backward compat
     StructuredFormatter,
     _BUILTIN_LOG_ATTRS,
     _DEFAULT_LOGGING,
 )
-from sherman.tools import CoreToolsPlugin
+from corvidae.tools import CoreToolsPlugin
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +62,7 @@ async def main(config_path: str = "agent.yaml") -> None:
     config["_base_dir"] = Path(config_path).parent
 
     pm = create_plugin_manager()
-    pm.load_setuptools_entrypoints("sherman")
+    pm.load_setuptools_entrypoints("corvidae")
 
     # Extract agent-level defaults for channel config resolution
     agent_defaults = config.get("agent", {})
@@ -76,7 +76,7 @@ async def main(config_path: str = "agent.yaml") -> None:
     load_channel_config(config, registry)
 
     # Register PersistencePlugin after registry, before other plugins
-    from sherman.persistence import PersistencePlugin
+    from corvidae.persistence import PersistencePlugin
     persistence_plugin = PersistencePlugin(pm)
     pm.register(persistence_plugin, name="persistence")
 
@@ -93,27 +93,27 @@ async def main(config_path: str = "agent.yaml") -> None:
     pm.register(irc_plugin, name="irc")
 
     # Register TaskPlugin before AgentPlugin (provides task queue)
-    from sherman.task import TaskPlugin
+    from corvidae.task import TaskPlugin
     task_plugin = TaskPlugin(pm)
     pm.register(task_plugin, name="task")
 
     # Register SubagentPlugin after TaskPlugin, before AgentPlugin
-    from sherman.tools.subagent import SubagentPlugin
+    from corvidae.tools.subagent import SubagentPlugin
     subagent_plugin = SubagentPlugin(pm)
     pm.register(subagent_plugin, name="subagent")
 
     # Register McpClientPlugin before AgentPlugin (provides MCP server tools)
-    from sherman.mcp_client import McpClientPlugin
+    from corvidae.mcp_client import McpClientPlugin
     mcp_plugin = McpClientPlugin()
     pm.register(mcp_plugin, name="mcp")
 
     # Register CompactionPlugin before AgentPlugin (provides default compaction strategy)
-    from sherman.compaction import CompactionPlugin
+    from corvidae.compaction import CompactionPlugin
     compaction_plugin = CompactionPlugin()
     pm.register(compaction_plugin, name="compaction")
 
     # Register ThinkingPlugin before AgentPlugin (handles <think> block stripping)
-    from sherman.thinking import ThinkingPlugin
+    from corvidae.thinking import ThinkingPlugin
     thinking_plugin = ThinkingPlugin(pm)
     pm.register(thinking_plugin, name="thinking")
 
@@ -125,7 +125,7 @@ async def main(config_path: str = "agent.yaml") -> None:
     pm.register(agent_loop, name="agent_loop")
 
     # Register IdleMonitorPlugin after AgentPlugin (depends on agent_loop)
-    from sherman.idle import IdleMonitorPlugin
+    from corvidae.idle import IdleMonitorPlugin
     idle_monitor_plugin = IdleMonitorPlugin(pm)
     pm.register(idle_monitor_plugin, name="idle_monitor")
 

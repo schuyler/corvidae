@@ -1,4 +1,4 @@
-# Sherman Design Document
+# Corvidae Design Document
 
 An asyncio agent daemon that connects to IRC (and later other
 transports), routes messages through an LLM via the OpenAI-compatible
@@ -464,7 +464,7 @@ Steps:
 5. Assigns `channel.conversation = conv`
 6. Returns `True`
 
-Initialization events log to `sherman.persistence`.
+Initialization events log to `corvidae.persistence`.
 
 **Graceful degradation:** without `PersistencePlugin`, the `ensure_conversation`
 hook returns `None`. `AgentPlugin` logs an error and drops the message; no crash.
@@ -532,7 +532,7 @@ in-memory history regardless of `keep_thinking_in_history`.
 `compaction.py` — implements the `compact_conversation` hook to keep
 conversation history within the configured token budget. Registered as
 `"compaction"` in `main.py` before `AgentPlugin`. Logger name:
-`sherman.compaction`.
+`corvidae.compaction`.
 
 ### compact_conversation
 
@@ -777,7 +777,7 @@ treated as optional, and `_dispatch_tool_calls` degrades gracefully
 ## Directory Layout
 
 ```
-sherman/
+corvidae/
 ├── hooks.py              # AgentSpec, hookimpl, create_plugin_manager
 ├── tool.py               # Tool, ToolRegistry, tool_to_schema, ToolContext
 ├── channel.py            # Channel, ChannelConfig, ChannelRegistry, resolve_system_prompt
@@ -822,11 +822,11 @@ messages with tool results. The SerialQueue serializes processing (no
 races), but ordering depends on arrival time.
 
 **Shell sandboxing.** The `shell` tool runs commands without any
-sandbox or privilege restriction. This is intentional: Sherman is a
+sandbox or privilege restriction. This is intentional: Corvidae is a
 personal agent daemon running on the user's own machine, not a
 multi-tenant service. Sandboxing would add complexity while providing
 no security benefit in the single-user deployment model. This would
-need to change before deploying Sherman in any shared or untrusted
+need to change before deploying Corvidae in any shared or untrusted
 environment.
 
 ## Unimplemented

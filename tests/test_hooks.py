@@ -2,9 +2,9 @@ import pytest
 import apluggy as pluggy
 from pluggy import HookimplMarker, HookspecMarker
 
-from sherman.hooks import AgentSpec, hookimpl, hookspec
-from sherman.hooks import create_plugin_manager
-from sherman.hooks import get_dependency, validate_dependencies
+from corvidae.hooks import AgentSpec, hookimpl, hookspec
+from corvidae.hooks import create_plugin_manager
+from corvidae.hooks import get_dependency, validate_dependencies
 
 
 def test_hookspec_marker_exists():
@@ -46,7 +46,7 @@ def test_sync_hook_register_tools():
 
 
 async def test_multiple_plugins_receive_hook():
-    from sherman.channel import Channel
+    from corvidae.channel import Channel
 
     received = []
 
@@ -204,7 +204,7 @@ def test_agentspec_has_on_idle():
 
 async def test_call_firstresult_hook_returns_none_when_no_impls():
     """Returns None when no implementations are registered."""
-    from sherman.hooks import call_firstresult_hook
+    from corvidae.hooks import call_firstresult_hook
 
     pm = create_plugin_manager()
     result = await call_firstresult_hook(pm, "should_process_message",
@@ -215,7 +215,7 @@ async def test_call_firstresult_hook_returns_none_when_no_impls():
 async def test_call_firstresult_hook_returns_first_non_none():
     """Returns the first non-None result from registered implementations,
     and does NOT call further implementations after the first non-None result."""
-    from sherman.hooks import call_firstresult_hook
+    from corvidae.hooks import call_firstresult_hook
 
     call_order = []
 
@@ -254,7 +254,7 @@ async def test_call_firstresult_hook_returns_first_non_none():
 
 async def test_call_firstresult_hook_skips_none_results():
     """Skips None-returning implementations and continues to the next."""
-    from sherman.hooks import call_firstresult_hook
+    from corvidae.hooks import call_firstresult_hook
 
     call_order = []
 
@@ -283,7 +283,7 @@ async def test_call_firstresult_hook_skips_none_results():
 
 async def test_call_firstresult_hook_respects_tryfirst():
     """tryfirst implementations run before regular implementations."""
-    from sherman.hooks import call_firstresult_hook
+    from corvidae.hooks import call_firstresult_hook
 
     call_order = []
 
@@ -313,7 +313,7 @@ async def test_call_firstresult_hook_respects_tryfirst():
 
 async def test_call_firstresult_hook_respects_trylast():
     """trylast implementations run after regular implementations."""
-    from sherman.hooks import call_firstresult_hook
+    from corvidae.hooks import call_firstresult_hook
 
     call_order = []
 
@@ -343,7 +343,7 @@ async def test_call_firstresult_hook_respects_trylast():
 
 async def test_call_firstresult_hook_skips_wrapper_impls():
     """Wrapper implementations are skipped (not direct result producers)."""
-    from sherman.hooks import call_firstresult_hook
+    from corvidae.hooks import call_firstresult_hook
 
     class WrapperPlugin:
         @hookimpl(wrapper=True)
@@ -369,7 +369,7 @@ async def test_call_firstresult_hook_skips_wrapper_impls():
 
 async def test_call_firstresult_hook_filters_kwargs_to_impl_signature():
     """Filters kwargs to match each implementation's parameter list."""
-    from sherman.hooks import call_firstresult_hook
+    from corvidae.hooks import call_firstresult_hook
 
     received_kwargs = {}
 
@@ -392,7 +392,7 @@ async def test_call_firstresult_hook_filters_kwargs_to_impl_signature():
 
 async def test_call_firstresult_hook_returns_none_when_all_return_none():
     """Returns None when all implementations return None."""
-    from sherman.hooks import call_firstresult_hook
+    from corvidae.hooks import call_firstresult_hook
 
     class PluginA:
         @hookimpl
@@ -415,7 +415,7 @@ async def test_call_firstresult_hook_returns_none_when_all_return_none():
 
 async def test_call_firstresult_hook_unknown_hook_name_returns_none():
     """Returns None when the hook name does not exist on the spec."""
-    from sherman.hooks import call_firstresult_hook
+    from corvidae.hooks import call_firstresult_hook
 
     pm = create_plugin_manager()
     result = await call_firstresult_hook(pm, "nonexistent_hook_name",
@@ -425,7 +425,7 @@ async def test_call_firstresult_hook_unknown_hook_name_returns_none():
 
 async def test_call_firstresult_hook_supports_sync_impls():
     """Sync implementations (non-async) are also supported."""
-    from sherman.hooks import call_firstresult_hook
+    from corvidae.hooks import call_firstresult_hook
 
     class SyncPlugin:
         @hookimpl

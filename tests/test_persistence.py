@@ -1,7 +1,7 @@
-"""Tests for sherman.persistence.PersistencePlugin.
+"""Tests for corvidae.persistence.PersistencePlugin.
 
-RED phase: these tests fail because sherman/persistence.py does not exist yet
-and the ensure_conversation hookspec has not been added to sherman/hooks.py.
+RED phase: these tests fail because corvidae/persistence.py does not exist yet
+and the ensure_conversation hookspec has not been added to corvidae/hooks.py.
 """
 
 import logging
@@ -11,9 +11,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import aiosqlite
 import pytest
 
-from sherman.channel import Channel, ChannelConfig, ChannelRegistry
-from sherman.conversation import ConversationLog, init_db
-from sherman.hooks import call_firstresult_hook, create_plugin_manager
+from corvidae.channel import Channel, ChannelConfig, ChannelRegistry
+from corvidae.conversation import ConversationLog, init_db
+from corvidae.hooks import call_firstresult_hook, create_plugin_manager
 
 
 # ---------------------------------------------------------------------------
@@ -22,19 +22,19 @@ from sherman.hooks import call_firstresult_hook, create_plugin_manager
 
 
 @pytest.fixture(autouse=True)
-def _reset_sherman_logger():
-    """Ensure the sherman logger propagates to root so caplog captures records.
+def _reset_corvidae_logger():
+    """Ensure the corvidae logger propagates to root so caplog captures records.
 
     Other test modules (test_logging.py) may apply dictConfig with
-    propagate=False on the sherman logger. This fixture resets it.
+    propagate=False on the corvidae logger. This fixture resets it.
     """
-    sherman_logger = logging.getLogger("sherman")
-    original_propagate = sherman_logger.propagate
-    original_handlers = sherman_logger.handlers[:]
-    sherman_logger.propagate = True
+    corvidae_logger = logging.getLogger("corvidae")
+    original_propagate = corvidae_logger.propagate
+    original_handlers = corvidae_logger.handlers[:]
+    corvidae_logger.propagate = True
     yield
-    sherman_logger.propagate = original_propagate
-    sherman_logger.handlers = original_handlers
+    corvidae_logger.propagate = original_propagate
+    corvidae_logger.handlers = original_handlers
 
 
 # ---------------------------------------------------------------------------
@@ -69,7 +69,7 @@ async def _make_plugin_with_db(db=None):
     Returns (plugin, registry, db).  Callers are responsible for closing db
     if they passed None (i.e., a fresh db was created here).
     """
-    from sherman.persistence import PersistencePlugin
+    from corvidae.persistence import PersistencePlugin
 
     pm = create_plugin_manager()
     registry = _make_registry()
@@ -95,7 +95,7 @@ async def _make_plugin_with_db(db=None):
 class TestOnStart:
     async def test_on_start_opens_db_and_creates_tables(self, tmp_path):
         """on_start opens an aiosqlite connection and runs init_db when db is None."""
-        from sherman.persistence import PersistencePlugin
+        from corvidae.persistence import PersistencePlugin
 
         pm = create_plugin_manager()
         registry = _make_registry()
@@ -119,7 +119,7 @@ class TestOnStart:
 
     async def test_on_start_skips_db_open_when_pre_injected(self, tmp_path):
         """on_start must not replace a pre-injected db."""
-        from sherman.persistence import PersistencePlugin
+        from corvidae.persistence import PersistencePlugin
 
         pm = create_plugin_manager()
         registry = _make_registry()
@@ -184,7 +184,7 @@ class TestOnStop:
 
     async def test_on_stop_with_no_db_does_not_crash(self):
         """on_stop must be a no-op when db is None."""
-        from sherman.persistence import PersistencePlugin
+        from corvidae.persistence import PersistencePlugin
 
         pm = create_plugin_manager()
         registry = _make_registry()
@@ -287,7 +287,7 @@ class TestHookIntegration:
     async def test_ensure_conversation_callable_via_call_firstresult_hook(self):
         """PersistencePlugin's ensure_conversation must be reachable via
         call_firstresult_hook — confirming hookspec wiring is correct."""
-        from sherman.persistence import PersistencePlugin
+        from corvidae.persistence import PersistencePlugin
 
         pm = create_plugin_manager()
         registry = _make_registry()
@@ -336,8 +336,8 @@ class TestGracefulDegradation:
     async def test_no_persistence_plugin_logs_error_in_agent(self, caplog):
         """AgentPlugin must log an ERROR when no persistence plugin handles
         ensure_conversation, and must not call the LLM."""
-        from sherman.agent import AgentPlugin
-        from sherman.task import TaskPlugin
+        from corvidae.agent import AgentPlugin
+        from corvidae.task import TaskPlugin
 
         pm = create_plugin_manager()
         registry = _make_registry()
@@ -362,7 +362,7 @@ class TestGracefulDegradation:
 
         channel = registry.get_or_create("test", "scope1", config=ChannelConfig())
 
-        with caplog.at_level(logging.ERROR, logger="sherman.agent"):
+        with caplog.at_level(logging.ERROR, logger="corvidae.agent"):
             await plugin.on_message(channel=channel, sender="user", text="hello")
             # Drain the queue so _process_queue_item runs
             if channel.id in plugin.queues:

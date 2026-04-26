@@ -18,7 +18,7 @@ Algorithm:
 import json
 import logging
 
-from sherman.hooks import hookimpl
+from corvidae.hooks import hookimpl
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +32,7 @@ class CompactionPlugin:
 
         Returns True if compaction was performed, None otherwise.
         """
-        from sherman.conversation import MessageType
+        from corvidae.conversation import MessageType
 
         if conversation.token_estimate() < 0.8 * max_tokens:
             return None

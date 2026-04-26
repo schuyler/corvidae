@@ -1,20 +1,20 @@
-"""Tests for sherman.tools.subagent — SubagentPlugin.
+"""Tests for corvidae.tools.subagent — SubagentPlugin.
 
 These are Red TDD tests. They will fail with ImportError until
-sherman/tools/subagent.py is implemented.
+corvidae/tools/subagent.py is implemented.
 """
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from sherman.agent import AgentPlugin
-from sherman.channel import Channel, ChannelConfig, ChannelRegistry
-from sherman.hooks import create_plugin_manager
-from sherman.task import Task, TaskQueue
-from sherman.tool import Tool, ToolContext, ToolRegistry
+from corvidae.agent import AgentPlugin
+from corvidae.channel import Channel, ChannelConfig, ChannelRegistry
+from corvidae.hooks import create_plugin_manager
+from corvidae.task import Task, TaskQueue
+from corvidae.tool import Tool, ToolContext, ToolRegistry
 
-from sherman.tools.subagent import SubagentPlugin  # ImportError until implemented
+from corvidae.tools.subagent import SubagentPlugin  # ImportError until implemented
 
 
 # ---------------------------------------------------------------------------
@@ -292,9 +292,9 @@ class TestLLMClientLifecycle:
             call_order.append("run_agent_loop")
             return "done"
 
-        with patch("sherman.tools.subagent.LLMClient", return_value=mock_client), \
-             patch("sherman.tools.subagent.run_agent_loop", side_effect=fake_run_agent_loop), \
-             patch("sherman.tools.subagent.strip_thinking", side_effect=lambda x: x):
+        with patch("corvidae.tools.subagent.LLMClient", return_value=mock_client), \
+             patch("corvidae.tools.subagent.run_agent_loop", side_effect=fake_run_agent_loop), \
+             patch("corvidae.tools.subagent.strip_thinking", side_effect=lambda x: x):
             await plugin._launch("instructions", "desc", ctx)
 
             # Extract the work() coroutine from the enqueued Task and run it
@@ -335,9 +335,9 @@ class TestLLMClientLifecycle:
             call_order.append("run_agent_loop")
             return "done"
 
-        with patch("sherman.tools.subagent.LLMClient", return_value=mock_client), \
-             patch("sherman.tools.subagent.run_agent_loop", side_effect=fake_run_agent_loop), \
-             patch("sherman.tools.subagent.strip_thinking", side_effect=lambda x: x):
+        with patch("corvidae.tools.subagent.LLMClient", return_value=mock_client), \
+             patch("corvidae.tools.subagent.run_agent_loop", side_effect=fake_run_agent_loop), \
+             patch("corvidae.tools.subagent.strip_thinking", side_effect=lambda x: x):
             await plugin._launch("instructions", "desc", ctx)
             enqueued_task = task_queue.enqueue.call_args[0][0]
             await enqueued_task.work()
@@ -378,8 +378,8 @@ class TestLLMClientLifecycle:
         # strip_thinking is not patched here because it is never reached
         # when run_agent_loop raises — the exception exits work() before
         # strip_thinking is called.
-        with patch("sherman.tools.subagent.LLMClient", return_value=mock_client), \
-             patch("sherman.tools.subagent.run_agent_loop", side_effect=raising_run_agent_loop):
+        with patch("corvidae.tools.subagent.LLMClient", return_value=mock_client), \
+             patch("corvidae.tools.subagent.run_agent_loop", side_effect=raising_run_agent_loop):
             await plugin._launch("instructions", "desc", ctx)
             enqueued_task = task_queue.enqueue.call_args[0][0]
 
@@ -419,9 +419,9 @@ class TestToolExclusionVerification:
             captured_tools.update(tools)
             return "done"
 
-        with patch("sherman.tools.subagent.LLMClient", return_value=mock_client), \
-             patch("sherman.tools.subagent.run_agent_loop", side_effect=capture_run_agent_loop), \
-             patch("sherman.tools.subagent.strip_thinking", side_effect=lambda x: x):
+        with patch("corvidae.tools.subagent.LLMClient", return_value=mock_client), \
+             patch("corvidae.tools.subagent.run_agent_loop", side_effect=capture_run_agent_loop), \
+             patch("corvidae.tools.subagent.strip_thinking", side_effect=lambda x: x):
             await plugin._launch("instructions", "desc", ctx)
             enqueued_task = task_queue.enqueue.call_args[0][0]
             await enqueued_task.work()
@@ -453,9 +453,9 @@ class TestToolExclusionVerification:
             captured_kwargs.update(kwargs)
             return "done"
 
-        with patch("sherman.tools.subagent.LLMClient", return_value=mock_client), \
-             patch("sherman.tools.subagent.run_agent_loop", side_effect=capture_run_agent_loop), \
-             patch("sherman.tools.subagent.strip_thinking", side_effect=lambda x: x):
+        with patch("corvidae.tools.subagent.LLMClient", return_value=mock_client), \
+             patch("corvidae.tools.subagent.run_agent_loop", side_effect=capture_run_agent_loop), \
+             patch("corvidae.tools.subagent.strip_thinking", side_effect=lambda x: x):
             await plugin._launch("instructions", "desc", ctx)
             enqueued_task = task_queue.enqueue.call_args[0][0]
             await enqueued_task.work()
@@ -492,9 +492,9 @@ class TestToolExclusionVerification:
             captured_tools.update(tools)
             return "done"
 
-        with patch("sherman.tools.subagent.LLMClient", return_value=mock_client), \
-             patch("sherman.tools.subagent.run_agent_loop", side_effect=capture_run_agent_loop), \
-             patch("sherman.tools.subagent.strip_thinking", side_effect=lambda x: x):
+        with patch("corvidae.tools.subagent.LLMClient", return_value=mock_client), \
+             patch("corvidae.tools.subagent.run_agent_loop", side_effect=capture_run_agent_loop), \
+             patch("corvidae.tools.subagent.strip_thinking", side_effect=lambda x: x):
             await plugin._launch("instructions", "desc", ctx)
             enqueued_task = task_queue.enqueue.call_args[0][0]
             await enqueued_task.work()
@@ -530,8 +530,8 @@ class TestErrorPaths:
         async def raising_run_agent_loop(client, messages, tools, tool_schemas, **kwargs):
             raise ConnectionError("cannot reach LLM")
 
-        with patch("sherman.tools.subagent.LLMClient", return_value=mock_client), \
-             patch("sherman.tools.subagent.run_agent_loop", side_effect=raising_run_agent_loop):
+        with patch("corvidae.tools.subagent.LLMClient", return_value=mock_client), \
+             patch("corvidae.tools.subagent.run_agent_loop", side_effect=raising_run_agent_loop):
             await plugin._launch("instructions", "desc", ctx)
             enqueued_task = task_queue.enqueue.call_args[0][0]
 

@@ -19,18 +19,18 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import aiohttp
 import pytest
 
-from sherman.agent import AgentPlugin
-from sherman.channel import Channel, ChannelConfig, ChannelRegistry
-from sherman.compaction import CompactionPlugin
-from sherman.hooks import create_plugin_manager, hookimpl, validate_dependencies
-from sherman.idle import IdleMonitorPlugin
-from sherman.llm import LLMClient
-from sherman.mcp_client import McpClientPlugin
-from sherman.persistence import PersistencePlugin
-from sherman.task import TaskPlugin
-from sherman.thinking import ThinkingPlugin
-from sherman.tools import CoreToolsPlugin
-from sherman.tools.subagent import SubagentPlugin
+from corvidae.agent import AgentPlugin
+from corvidae.channel import Channel, ChannelConfig, ChannelRegistry
+from corvidae.compaction import CompactionPlugin
+from corvidae.hooks import create_plugin_manager, hookimpl, validate_dependencies
+from corvidae.idle import IdleMonitorPlugin
+from corvidae.llm import LLMClient
+from corvidae.mcp_client import McpClientPlugin
+from corvidae.persistence import PersistencePlugin
+from corvidae.task import TaskPlugin
+from corvidae.thinking import ThinkingPlugin
+from corvidae.tools import CoreToolsPlugin
+from corvidae.tools.subagent import SubagentPlugin
 
 pytestmark = pytest.mark.timeout(30)
 
@@ -86,7 +86,7 @@ class FakeTransportPlugin:
 
     @hookimpl
     async def on_start(self, config):
-        from sherman.hooks import get_dependency
+        from corvidae.hooks import get_dependency
         self._registry = get_dependency(self.pm, "registry", ChannelRegistry)
 
     @hookimpl
@@ -251,7 +251,7 @@ async def _build_harness(config: dict) -> IntegrationHarness:
     mock_client.start = AsyncMock()
     mock_client.stop = AsyncMock()
 
-    with patch("sherman.agent.LLMClient", return_value=mock_client):
+    with patch("corvidae.agent.LLMClient", return_value=mock_client):
         await pm.ahook.on_start(config=config)
         await agent_loop.on_start(config=config)
 
@@ -1248,7 +1248,7 @@ class TestGroupEErrorHandling:
             raise RuntimeError("no task plugin")
 
         config = make_config()
-        with patch("sherman.agent.LLMClient", return_value=mock_client):
+        with patch("corvidae.agent.LLMClient", return_value=mock_client):
             await pm.ahook.on_start(config=config)
             await agent_loop.on_start(config=config)
 
@@ -1264,7 +1264,7 @@ class TestGroupEErrorHandling:
 
         channel = registry.get_or_create("test", "e3")
 
-        with caplog.at_level(logging.ERROR, logger="sherman.agent"):
+        with caplog.at_level(logging.ERROR, logger="corvidae.agent"):
             await pm.ahook.on_message(channel=channel, sender="user", text="use tool")
             await agent_loop.queues[channel.id].drain()
 

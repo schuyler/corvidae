@@ -14,15 +14,15 @@ from unittest.mock import AsyncMock, MagicMock
 import aiosqlite
 import pytest
 
-from sherman.agent import AgentPlugin
-from sherman.agent_loop import AgentTurnResult, run_agent_turn  # noqa: F401 (used in comments/type checking)
-from sherman.channel import Channel, ChannelConfig, ChannelRegistry
-from sherman.conversation import init_db
-from sherman.hooks import create_plugin_manager
-from sherman.persistence import PersistencePlugin
-from sherman.task import Task, TaskPlugin, TaskQueue
-from sherman.thinking import ThinkingPlugin
-from sherman.tool import ToolContext
+from corvidae.agent import AgentPlugin
+from corvidae.agent_loop import AgentTurnResult, run_agent_turn  # noqa: F401 (used in comments/type checking)
+from corvidae.channel import Channel, ChannelConfig, ChannelRegistry
+from corvidae.conversation import init_db
+from corvidae.hooks import create_plugin_manager
+from corvidae.persistence import PersistencePlugin
+from corvidae.task import Task, TaskPlugin, TaskQueue
+from corvidae.thinking import ThinkingPlugin
+from corvidae.tool import ToolContext
 
 
 # ---------------------------------------------------------------------------
@@ -664,7 +664,7 @@ class TestNoTaskQueueLogsError:
         channel = registry.get_or_create("test", "scope_notq")
 
         # Should not raise even though no TaskPlugin is registered
-        with caplog.at_level(logging.ERROR, logger="sherman.agent"):
+        with caplog.at_level(logging.ERROR, logger="corvidae.agent"):
             await plugin.on_message(channel=channel, sender="user", text="hi")
             await _drain(plugin, channel)
 
@@ -780,7 +780,7 @@ class TestCompactionFailureResilience:
     ):
         """A compaction failure does not prevent run_agent_turn or send_message.
 
-        Patches call_firstresult_hook in sherman.agent to raise RuntimeError
+        Patches call_firstresult_hook in corvidae.agent to raise RuntimeError
         when invoked for compact_conversation, simulating a plugin crash.
         The agent's try/except must catch it, log a WARNING, and continue.
         """
@@ -793,15 +793,15 @@ class TestCompactionFailureResilience:
         mock_client.chat = AsyncMock(return_value=_make_text_response("response after failed compaction"))
         plugin.client = mock_client
 
-        original_hook = __import__("sherman.hooks", fromlist=["call_firstresult_hook"]).call_firstresult_hook
+        original_hook = __import__("corvidae.hooks", fromlist=["call_firstresult_hook"]).call_firstresult_hook
 
         async def exploding_hook(pm, hook_name, **kwargs):
             if hook_name == "compact_conversation":
                 raise RuntimeError("compaction boom")
             return await original_hook(pm, hook_name, **kwargs)
 
-        with caplog.at_level(logging.WARNING, logger="sherman.agent"):
-            with patch("sherman.agent.call_firstresult_hook", side_effect=exploding_hook):
+        with caplog.at_level(logging.WARNING, logger="corvidae.agent"):
+            with patch("corvidae.agent.call_firstresult_hook", side_effect=exploding_hook):
                 await plugin.on_message(channel=channel, sender="user", text="hello")
                 await _drain(plugin, channel)
 

@@ -20,10 +20,10 @@ from time import time
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from sherman.conversation import ConversationLog
+    from corvidae.conversation import ConversationLog
 
 logger = logging.getLogger(__name__)
-_prompt_logger = logging.getLogger("sherman.prompt")
+_prompt_logger = logging.getLogger("corvidae.prompt")
 
 
 @dataclass

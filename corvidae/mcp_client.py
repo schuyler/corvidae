@@ -26,8 +26,8 @@ import logging
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 
-from sherman.hooks import hookimpl
-from sherman.tool import Tool
+from corvidae.hooks import hookimpl
+from corvidae.tool import Tool
 
 logger = logging.getLogger(__name__)
 

@@ -326,7 +326,7 @@ These plugins are registered by `main.py` and are part of the default
 daemon. They can be omitted if the application does not need their
 functionality; each degrades gracefully when absent.
 
-### McpClientPlugin (`sherman/mcp_client.py`)
+### McpClientPlugin (`corvidae/mcp_client.py`)
 
 Connects to external [MCP](https://modelcontextprotocol.io/) servers and
 exposes their tools to the agent loop. Registered as `"mcp"` before
@@ -368,7 +368,7 @@ wins and the duplicate is skipped with a WARNING.
 **Without this plugin:** MCP servers cannot be used. No tools are affected
 if the `mcp:` config key is absent — the plugin no-ops.
 
-### ThinkingPlugin (`sherman/thinking.py`)
+### ThinkingPlugin (`corvidae/thinking.py`)
 
 Strips `<think>...</think>` blocks and `reasoning_content` from LLM
 output. Registered as `"thinking"` before `agent_loop`.
@@ -387,7 +387,7 @@ Implements two hooks:
 verbatim, and `reasoning_content` remains in in-memory history
 regardless of the `keep_thinking_in_history` config value.
 
-### IdleMonitorPlugin (`sherman/idle.py`)
+### IdleMonitorPlugin (`corvidae/idle.py`)
 
 Fires the `on_idle` broadcast hook when all queues are quiescent.
 Registered as `"idle_monitor"` after `agent_loop`.

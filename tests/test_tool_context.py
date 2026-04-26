@@ -3,8 +3,8 @@
 import json
 from unittest.mock import AsyncMock, MagicMock
 
-from sherman.agent_loop import run_agent_loop, tool_to_schema
-from sherman.tool import ToolContext
+from corvidae.agent_loop import run_agent_loop, tool_to_schema
+from corvidae.tool import ToolContext
 
 
 # ---------------------------------------------------------------------------
@@ -133,7 +133,7 @@ async def test_ctx_has_correct_tool_call_id():
 
 async def test_ctx_has_correct_channel():
     """The ToolContext injected contains the channel passed to run_agent_loop."""
-    from sherman.channel import Channel, ChannelConfig
+    from corvidae.channel import Channel, ChannelConfig
 
     received_ctx = []
 
@@ -167,7 +167,7 @@ async def test_ctx_has_correct_channel():
 
 async def test_ctx_has_correct_task_queue():
     """The ToolContext injected contains the task_queue passed to run_agent_loop."""
-    from sherman.task import TaskQueue
+    from corvidae.task import TaskQueue
 
     received_ctx = []
 

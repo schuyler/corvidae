@@ -1,6 +1,6 @@
 """Tests for IdleMonitor class (red phase).
 
-IdleMonitor is a new class in sherman.agent that polls for system idle state
+IdleMonitor is a new class in corvidae.agent that polls for system idle state
 and fires the on_idle hook when all queues are empty and the cooldown has elapsed.
 """
 
@@ -11,8 +11,8 @@ from unittest.mock import AsyncMock, MagicMock, NonCallableMagicMock, patch
 
 import pytest
 
-from sherman.hooks import create_plugin_manager, hookimpl
-from sherman.queue import SerialQueue
+from corvidae.hooks import create_plugin_manager, hookimpl
+from corvidae.queue import SerialQueue
 
 
 # ---------------------------------------------------------------------------
@@ -45,12 +45,12 @@ def _non_empty_queues():
 
 
 def _import_idle_monitor():
-    """Import IdleMonitor from sherman.idle; skip if not yet implemented."""
+    """Import IdleMonitor from corvidae.idle; skip if not yet implemented."""
     try:
-        from sherman.idle import IdleMonitor
+        from corvidae.idle import IdleMonitor
         return IdleMonitor
     except ImportError:
-        pytest.fail("IdleMonitor not found in sherman.idle — implement it")
+        pytest.fail("IdleMonitor not found in corvidae.idle — implement it")
 
 
 # ---------------------------------------------------------------------------
@@ -294,7 +294,7 @@ async def test_idle_monitor_exception_in_hook_caught_and_monitor_continues(caplo
     )
     monitor._last_fired = 0.0
 
-    with caplog.at_level(logging.WARNING, logger="sherman.idle"):
+    with caplog.at_level(logging.WARNING, logger="corvidae.idle"):
         monitor.start()
         # Wait for the hook to fire at least twice (first raises, second succeeds)
         deadline = time.monotonic() + 2.0
@@ -347,14 +347,14 @@ async def test_idle_monitor_updates_last_fired_after_hook():
 
 # ---------------------------------------------------------------------------
 # IdleMonitorPlugin tests (Phase C — will fail with ImportError until
-# sherman/idle.py is created)
+# corvidae/idle.py is created)
 # ---------------------------------------------------------------------------
 
 
 class TestIdleMonitorPlugin:
     """Tests for IdleMonitorPlugin.
 
-    These tests import from sherman.idle which does not exist yet.
+    These tests import from corvidae.idle which does not exist yet.
     They are expected to fail with ImportError (red phase).
     """
 
@@ -365,10 +365,10 @@ class TestIdleMonitorPlugin:
         the new explicit sequencing: broadcast first, then agent.on_start() explicitly.
         Verify plugin._monitor is not None and has a running background task.
         """
-        from sherman.idle import IdleMonitorPlugin
-        from sherman.agent import AgentPlugin
-        from sherman.channel import ChannelRegistry
-        from sherman.persistence import PersistencePlugin
+        from corvidae.idle import IdleMonitorPlugin
+        from corvidae.agent import AgentPlugin
+        from corvidae.channel import ChannelRegistry
+        from corvidae.persistence import PersistencePlugin
 
         pm = create_plugin_manager()
         registry = ChannelRegistry({"system_prompt": "", "max_context_tokens": 8000})
@@ -394,9 +394,9 @@ class TestIdleMonitorPlugin:
         mock_client.start = AsyncMock()
         mock_client.stop = AsyncMock()
 
-        with patch("sherman.agent.LLMClient", return_value=mock_client), \
-             patch("sherman.persistence.aiosqlite.connect", new_callable=AsyncMock) as mock_connect, \
-             patch("sherman.persistence.init_db", new_callable=AsyncMock):
+        with patch("corvidae.agent.LLMClient", return_value=mock_client), \
+             patch("corvidae.persistence.aiosqlite.connect", new_callable=AsyncMock) as mock_connect, \
+             patch("corvidae.persistence.init_db", new_callable=AsyncMock):
             mock_connect.return_value = AsyncMock()
             # Mirrors new main.py sequencing: broadcast first, then explicit agent start.
             # AgentPlugin.on_start no longer has @hookimpl after the race-condition fix,
@@ -425,10 +425,10 @@ class TestIdleMonitorPlugin:
         agent.on_stop() before broadcast on_stop().  Verify the monitor's background
         task is done after shutdown.
         """
-        from sherman.idle import IdleMonitorPlugin
-        from sherman.agent import AgentPlugin
-        from sherman.channel import ChannelRegistry
-        from sherman.persistence import PersistencePlugin
+        from corvidae.idle import IdleMonitorPlugin
+        from corvidae.agent import AgentPlugin
+        from corvidae.channel import ChannelRegistry
+        from corvidae.persistence import PersistencePlugin
 
         pm = create_plugin_manager()
         registry = ChannelRegistry({"system_prompt": "", "max_context_tokens": 8000})
@@ -454,9 +454,9 @@ class TestIdleMonitorPlugin:
         mock_client.start = AsyncMock()
         mock_client.stop = AsyncMock()
 
-        with patch("sherman.agent.LLMClient", return_value=mock_client), \
-             patch("sherman.persistence.aiosqlite.connect", new_callable=AsyncMock) as mock_connect, \
-             patch("sherman.persistence.init_db", new_callable=AsyncMock):
+        with patch("corvidae.agent.LLMClient", return_value=mock_client), \
+             patch("corvidae.persistence.aiosqlite.connect", new_callable=AsyncMock) as mock_connect, \
+             patch("corvidae.persistence.init_db", new_callable=AsyncMock):
             mock_connect.return_value = AsyncMock()
             # New sequencing: broadcast first, then explicit agent start.
             await pm.ahook.on_start(config=config)
@@ -485,10 +485,10 @@ class TestIdleMonitorPlugin:
         idle_plugin._monitor._queues is the same object as agent.queues
         (same dict reference, not a copy).
         """
-        from sherman.idle import IdleMonitorPlugin
-        from sherman.agent import AgentPlugin
-        from sherman.channel import ChannelRegistry
-        from sherman.persistence import PersistencePlugin
+        from corvidae.idle import IdleMonitorPlugin
+        from corvidae.agent import AgentPlugin
+        from corvidae.channel import ChannelRegistry
+        from corvidae.persistence import PersistencePlugin
 
         pm = create_plugin_manager()
         registry = ChannelRegistry({"system_prompt": "", "max_context_tokens": 8000})
@@ -514,9 +514,9 @@ class TestIdleMonitorPlugin:
         mock_client.start = AsyncMock()
         mock_client.stop = AsyncMock()
 
-        with patch("sherman.agent.LLMClient", return_value=mock_client), \
-             patch("sherman.persistence.aiosqlite.connect", new_callable=AsyncMock) as mock_connect, \
-             patch("sherman.persistence.init_db", new_callable=AsyncMock):
+        with patch("corvidae.agent.LLMClient", return_value=mock_client), \
+             patch("corvidae.persistence.aiosqlite.connect", new_callable=AsyncMock) as mock_connect, \
+             patch("corvidae.persistence.init_db", new_callable=AsyncMock):
             mock_connect.return_value = AsyncMock()
             # New sequencing: broadcast first, then explicit agent start.
             await pm.ahook.on_start(config=config)
@@ -536,10 +536,10 @@ class TestIdleMonitorPlugin:
 
         on_idle is a broadcast hook; zero implementations means a no-op.
         """
-        from sherman.idle import IdleMonitorPlugin  # noqa: F401
+        from corvidae.idle import IdleMonitorPlugin  # noqa: F401
 
         pm = create_plugin_manager()
-        from sherman.agent import AgentPlugin
+        from corvidae.agent import AgentPlugin
         agent = AgentPlugin(pm)
         pm.register(agent, name="agent_loop")
         # IdleMonitorPlugin is intentionally NOT registered.

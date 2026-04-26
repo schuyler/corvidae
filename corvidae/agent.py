@@ -32,15 +32,15 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 
-from sherman.agent_loop import run_agent_turn
-from sherman.channel import Channel, ChannelRegistry
-from sherman.hooks import call_firstresult_hook, get_dependency, hookimpl
-from sherman.llm import LLMClient
-from sherman.queue import SerialQueue
-from sherman.task import Task
-from sherman.tool import Tool, ToolContext, ToolRegistry, execute_tool_call
+from corvidae.agent_loop import run_agent_turn
+from corvidae.channel import Channel, ChannelRegistry
+from corvidae.hooks import call_firstresult_hook, get_dependency, hookimpl
+from corvidae.llm import LLMClient
+from corvidae.queue import SerialQueue
+from corvidae.task import Task
+from corvidae.tool import Tool, ToolContext, ToolRegistry, execute_tool_call
 
-logger = logging.getLogger("sherman.agent")
+logger = logging.getLogger("corvidae.agent")
 
 
 class QueueItemRole(Enum):

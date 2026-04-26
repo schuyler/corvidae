@@ -1,4 +1,4 @@
-"""Task system for the sherman agent daemon.
+"""Task system for the corvidae agent daemon.
 
 Contains:
   - Task: dataclass representing a unit of async work with delivery context
@@ -18,10 +18,10 @@ from time import time
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from sherman.channel import Channel
+    from corvidae.channel import Channel
 
-from sherman.hooks import hookimpl
-from sherman.tool import Tool
+from corvidae.hooks import hookimpl
+from corvidae.tool import Tool
 
 logger = logging.getLogger(__name__)
 

@@ -5,8 +5,8 @@ into a standalone plugin that can be unregistered without crashing the system.
 """
 from __future__ import annotations
 
-from sherman.agent_loop import strip_reasoning_content, strip_thinking
-from sherman.hooks import hookimpl
+from corvidae.agent_loop import strip_reasoning_content, strip_thinking
+from corvidae.hooks import hookimpl
 
 
 class ThinkingPlugin:

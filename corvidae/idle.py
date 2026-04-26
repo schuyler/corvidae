@@ -12,9 +12,9 @@ import asyncio
 import logging
 import time
 
-from sherman.agent import AgentPlugin
-from sherman.hooks import get_dependency, hookimpl
-from sherman.queue import SerialQueue
+from corvidae.agent import AgentPlugin
+from corvidae.hooks import get_dependency, hookimpl
+from corvidae.queue import SerialQueue
 
 logger = logging.getLogger(__name__)
 

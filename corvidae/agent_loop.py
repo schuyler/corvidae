@@ -19,13 +19,13 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable
 
-from sherman.hooks import call_firstresult_hook
-from sherman.llm import LLMClient
-from sherman.tool import ToolContext, execute_tool_call, tool_to_schema  # noqa: F401 — re-exported for backward compat
+from corvidae.hooks import call_firstresult_hook
+from corvidae.llm import LLMClient
+from corvidae.tool import ToolContext, execute_tool_call, tool_to_schema  # noqa: F401 — re-exported for backward compat
 
 if TYPE_CHECKING:
-    from sherman.channel import Channel
-    from sherman.task import TaskQueue
+    from corvidae.channel import Channel
+    from corvidae.task import TaskQueue
 
 logger = logging.getLogger(__name__)
 
