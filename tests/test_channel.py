@@ -300,7 +300,7 @@ class TestChannelConfigListSystemPrompt:
         """ChannelConfig with a list system_prompt preserves the list through resolve().
 
         The list is NOT resolved to a string at this layer — that happens later
-        in _ensure_conversation via resolve_system_prompt().
+        in PersistencePlugin.ensure_conversation via resolve_system_prompt().
         """
         cfg = ChannelConfig(system_prompt=["a.md", "b.md"])
         result = cfg.resolve({})

@@ -19,6 +19,7 @@ from sherman.agent_loop import AgentTurnResult, run_agent_turn  # noqa: F401 (us
 from sherman.channel import Channel, ChannelConfig, ChannelRegistry
 from sherman.conversation import init_db
 from sherman.hooks import create_plugin_manager
+from sherman.persistence import PersistencePlugin
 from sherman.task import Task, TaskPlugin, TaskQueue
 from sherman.thinking import ThinkingPlugin
 from sherman.tool import ToolContext
@@ -101,6 +102,12 @@ async def _build_plugin_and_channel(
     pm.register(task_plugin, name="task")
     await task_plugin.on_start(config={})
 
+    # Register PersistencePlugin with injected in-memory DB
+    persistence = PersistencePlugin(pm)
+    persistence.db = db
+    persistence._registry = registry
+    pm.register(persistence, name="persistence")
+
     # Register ThinkingPlugin before AgentPlugin
     thinking_plugin = ThinkingPlugin(pm)
     pm.register(thinking_plugin, name="thinking")
@@ -108,7 +115,6 @@ async def _build_plugin_and_channel(
     plugin = AgentPlugin(pm)
     pm.register(plugin, name="agent_loop")
 
-    plugin.db = db
     # Inject the registry directly (tests bypass on_start where _registry is resolved).
     plugin._registry = registry
 
@@ -631,9 +637,14 @@ class TestNoTaskQueueLogsError:
         pm.ahook.on_agent_response = AsyncMock()
         # NOTE: No TaskPlugin registered — pm.get_plugin("task") will return None
 
+        # Register PersistencePlugin with injected in-memory DB
+        persistence = PersistencePlugin(pm)
+        persistence.db = db
+        persistence._registry = registry
+        pm.register(persistence, name="persistence")
+
         plugin = AgentPlugin(pm)
         pm.register(plugin, name="agent_loop")
-        plugin.db = db
         plugin._registry = registry
 
         async def my_tool(x: str) -> str:

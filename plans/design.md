@@ -23,21 +23,21 @@ Three layers:
    platform-specific messages to/from a common Channel abstraction.
 
 ```
-┌─────────────────────────────────────────────┐
-│              Plugin Manager                 │
-│          (apluggy.PluginManager)            │
-│                                             │
-│  ┌─────────┐  ┌──────────┐  ┌───────────┐  │
-│  │   IRC   │  │  Agent   │  │   Task    │  │
-│  │Transport│  │  Plugin  │  │  Plugin   │  │
-│  │ Plugin  │  │          │  │           │  │
-│  └─────────┘  └──────────┘  └───────────┘  │
-│                     │                       │
-│          ┌──────────┴──────────┐            │
-│          │  llama-server       │            │
-│          │  (OpenAI-compat)    │            │
-│          └─────────────────────┘            │
-└─────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│                   Plugin Manager                     │
+│               (apluggy.PluginManager)                │
+│                                                      │
+│  ┌─────────────┐  ┌─────────┐  ┌──────────────────┐ │
+│  │ Persistence │  │   IRC   │  │  Agent Plugin    │ │
+│  │   Plugin    │  │Transport│  │  (agent loop)    │ │
+│  │  (DB/conv)  │  │ Plugin  │  │                  │ │
+│  └──────┬──────┘  └─────────┘  └────────┬─────────┘ │
+│         │                               │           │
+│  ┌──────▼──────┐              ┌──────────▼─────────┐ │
+│  │   SQLite    │              │    llama-server     │ │
+│  │  (sessions) │              │   (OpenAI-compat)   │ │
+│  └─────────────┘              └────────────────────┘ │
+└──────────────────────────────────────────────────────┘
 ```
 
 ## Dependencies
@@ -73,6 +73,7 @@ class AgentSpec:
     async def after_persist_assistant(self, channel: Channel, message: dict) -> None
     async def transform_display_text(self, channel: Channel, text: str, result_message: dict) -> str | None
     async def on_idle(self) -> None
+    async def ensure_conversation(self, channel: Channel) -> bool | None
 ```
 
 `create_plugin_manager()` in `hooks.py` creates the manager and adds
@@ -81,9 +82,9 @@ hookspecs.
 ### Firstresult hooks
 
 `should_process_message`, `on_llm_error`, `compact_conversation`,
-`process_tool_result`, and `transform_display_text` use firstresult
-semantics: the first non-`None` return value wins and no further
-implementations run.
+`process_tool_result`, `transform_display_text`, and `ensure_conversation`
+use firstresult semantics: the first non-`None` return value wins and no
+further implementations run.
 
 apluggy does not support `firstresult=True` on async hooks. These hooks
 are called via `call_firstresult_hook(pm, hook_name, **kwargs)` in
@@ -117,6 +118,7 @@ usual way.
 | `after_persist_assistant` | broadcast | `_process_queue_item`, after assistant message is persisted; plugins may mutate the in-memory dict |
 | `transform_display_text` | firstresult | `_process_queue_item`, before `send_message`; return transformed text or None to leave unchanged |
 | `on_idle` | broadcast | `IdleMonitor`, when all queues empty and cooldown elapsed |
+| `ensure_conversation` | firstresult | `_process_queue_item`, before agent turn when `channel.conversation is None`; return True=initialized, None=defer |
 
 ## Channel System
 
@@ -327,6 +329,10 @@ CREATE INDEX idx_log_channel ON message_log(channel_id, timestamp);
 startup. Retrieves `ChannelRegistry` during `on_start` via
 `get_dependency(pm, "registry", ChannelRegistry)` from `hooks.py`.
 
+DB lifecycle (open/close) and conversation initialization are delegated to
+`PersistencePlugin` via the `ensure_conversation` hook. AgentPlugin does not
+manage a database connection or a `base_dir`.
+
 `AgentPlugin.queues` is a public `dict[str, SerialQueue]` (keyed by
 channel ID). `IdleMonitorPlugin` holds a reference to this dict; queues
 added after `IdleMonitorPlugin.on_start` are included automatically
@@ -343,7 +349,9 @@ proceeds to enqueue.
 per-channel `SerialQueue`. The queue's consumer calls
 `_process_queue_item`, which:
 
-1. Lazy-initializes conversation on the channel
+1. Calls `ensure_conversation` hook (firstresult) when `channel.conversation
+   is None`; if no plugin returns a non-`None` result, logs an error and
+   drops the message
 2. Resets `turn_counter` to 0 on user messages
 3. Resolves channel config (including `max_turns`)
 4. Appends the inbound message to conversation log
@@ -415,6 +423,44 @@ class QueueItem:
     tool_call_id: str | None = None
     meta: dict = field(default_factory=dict)
 ```
+
+## PersistencePlugin
+
+`persistence.py` — manages the SQLite database lifecycle and
+per-channel conversation initialization. Registered as `"persistence"` in
+`main.py`, immediately after `ChannelRegistry`.
+
+`PersistencePlugin` depends on `"registry"`. Its `on_start` retrieves
+`ChannelRegistry` via `get_dependency(pm, "registry", ChannelRegistry)`,
+reads `daemon.session_db` from config (default `"sessions.db"`), opens the
+database with `aiosqlite.connect`, and calls `init_db` to create the schema.
+`on_stop` closes the connection.
+
+`PersistencePlugin.db` is public for test injection: setting `persistence.db`
+before `on_start` causes the `if self.db is None:` guard to skip the open.
+`PersistencePlugin.base_dir` holds the directory containing `agent.yaml` and
+is used to resolve relative system prompt file paths.
+
+### ensure_conversation
+
+Implements the `ensure_conversation` firstresult hook. Called by
+`AgentPlugin._process_queue_item` when `channel.conversation is None`.
+
+Steps:
+1. If `channel.conversation` is already set, returns `True` immediately
+2. Creates a `ConversationLog` bound to the plugin's DB connection and
+   the channel ID
+3. Resolves the channel config via `ChannelRegistry.resolve_config` and
+   calls `resolve_system_prompt` with `self.base_dir`; assigns
+   `conv.system_prompt` (**must** happen before `load()`)
+4. Calls `conv.load()` to populate history from the DB
+5. Assigns `channel.conversation = conv`
+6. Returns `True`
+
+Initialization events log to `sherman.persistence`.
+
+**Graceful degradation:** without `PersistencePlugin`, the `ensure_conversation`
+hook returns `None`. `AgentPlugin` logs an error and drops the message; no crash.
 
 ## IdleMonitorPlugin
 
@@ -634,15 +680,16 @@ Relative paths resolve against the directory containing `agent.yaml`.
 Defined in `main.py`:
 
 1. `ChannelRegistry` — registered as a named plugin (`"registry"`) on the PM
-2. CoreToolsPlugin — registers tools
-3. CLIPlugin — stdin/stdout transport
-4. IRCPlugin — IRC transport
-5. TaskPlugin — task queue
-6. SubagentPlugin — registers the subagent tool
-7. CompactionPlugin — provides default `compact_conversation` implementation
-8. ThinkingPlugin — handles `<think>` stripping and `reasoning_content` removal
-9. AgentPlugin — agent loop (after all tools, transports, and support plugins)
-10. IdleMonitorPlugin — idle monitor (after `AgentPlugin`, depends on `agent_loop`)
+2. `PersistencePlugin` — DB lifecycle and conversation initialization (after registry, before everything else)
+3. CoreToolsPlugin — registers tools
+4. CLIPlugin — stdin/stdout transport
+5. IRCPlugin — IRC transport
+6. TaskPlugin — task queue
+7. SubagentPlugin — registers the subagent tool
+8. CompactionPlugin — provides default `compact_conversation` implementation
+9. ThinkingPlugin — handles `<think>` stripping and `reasoning_content` removal
+10. AgentPlugin — agent loop (after all tools, transports, and support plugins)
+11. IdleMonitorPlugin — idle monitor (after `AgentPlugin`, depends on `agent_loop`)
 
 After all registrations, `validate_dependencies(pm)` runs to verify that
 every plugin's `depends_on` set names a registered plugin. Startup aborts
@@ -672,6 +719,7 @@ dependency and the plugin that declared it. Runs once at startup.
 AgentPlugin         → "registry"    (ChannelRegistry)
 CLIPlugin           → "registry"    (ChannelRegistry)
 IRCPlugin           → "registry"    (ChannelRegistry)
+PersistencePlugin   → "registry"    (ChannelRegistry)
 SubagentPlugin      → "agent_loop"  (AgentPlugin)
 IdleMonitorPlugin   → "agent_loop"  (AgentPlugin)
 ```
@@ -699,6 +747,7 @@ sherman/
 ├── conversation.py       # ConversationLog, init_db
 ├── logging.py            # StructuredFormatter, _DEFAULT_LOGGING
 ├── agent.py              # AgentPlugin (single-turn dispatch)
+├── persistence.py        # PersistencePlugin (DB lifecycle, conversation init)
 ├── idle.py               # IdleMonitor, IdleMonitorPlugin
 ├── thinking.py           # ThinkingPlugin
 ├── compaction.py         # CompactionPlugin
