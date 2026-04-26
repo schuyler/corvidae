@@ -1,13 +1,12 @@
-"""Conversation log with SQLite persistence and LLM-based compaction.
+"""Conversation log with SQLite persistence.
 
 This module provides per-channel conversation history management. Messages are
-persisted to SQLite and kept in-memory for efficient access. When the estimated
-token count approaches the context limit, older messages are summarized via the
-LLM and replaced with a single summary entry.
+persisted to SQLite and kept in-memory for efficient access. Compaction is
+handled externally via CompactionPlugin, which calls replace_with_summary()
+when the estimated token count approaches the context limit.
 
 Logging:
     - DEBUG: messages loaded, message appended
-    - WARNING: compaction triggered (approaching context limit)
     - INFO: compaction completed (before/after counts)
 """
 
@@ -17,8 +16,6 @@ import logging
 import time
 
 import aiosqlite
-
-from sherman.llm import LLMClient
 
 logger = logging.getLogger(__name__)
 
@@ -159,64 +156,89 @@ class ConversationLog:
             total_chars += len(content)
         return int(total_chars / 3.5)
 
-    async def compact_if_needed(self, client: LLMClient, max_tokens: int) -> None:
-        """If token_estimate >= 80% of max_tokens AND len(messages) > 5,
-        summarize older messages using a token-budget backward walk.
+    async def replace_with_summary(self, summary_msg: dict, retain_count: int) -> None:
+        """Replace older messages with a summary, retaining the most recent entries.
 
-        Retains the most-recent messages that fit within 50% of max_tokens,
-        summarizes all older messages, and replaces them with a single summary
-        entry. Non-string content is treated as 0 tokens.
+        Updates the in-memory message list and the DB atomically. The in-memory
+        list is updated BEFORE DB writes because the DB logic derives
+        num_retained_total from len(self.messages) - 1.
 
-        Logs a WARNING when compaction is triggered and INFO when completed
-        with before/after message counts.
+        Args:
+            summary_msg: Untagged summary dict (role/content). Will be tagged
+                with _message_type=SUMMARY in-memory; stored without the tag in DB.
+            retain_count: Number of most-recent messages to keep alongside the
+                summary. Must not exceed len(self.messages).
+
+        Raises:
+            ValueError: If retain_count > len(self.messages).
+
+        Logs compaction completion with before/after counts at INFO level.
         """
-        if self.token_estimate() < max_tokens * 0.8:
-            return
-        if len(self.messages) <= 5:
-            return
+        if retain_count > len(self.messages):
+            raise ValueError(
+                f"retain_count ({retain_count}) exceeds len(messages) ({len(self.messages)})"
+            )
 
-        logger.warning(
-            "compaction triggered (approaching context limit)",
-            extra={"channel_id": self.channel_id},
-        )
-
-        retain_budget = int(max_tokens * 0.5)
-        retain_count = 0
-        retain_tokens = 0
-        for msg in reversed(self.messages):
-            content = msg.get("content") or ""
-            if not isinstance(content, str):
-                content = ""
-            msg_tokens = int(len(content) / 3.5)
-            if retain_tokens + msg_tokens > retain_budget and retain_count > 0:
-                break
-            retain_tokens += msg_tokens
-            retain_count += 1
-
-        if retain_count >= len(self.messages):
-            return
-
-        older = self.messages[:-retain_count]
-        retained = self.messages[-retain_count:]
-
-        # Filter older to MESSAGE-type only; exclude SUMMARY entries from summarizer input.
-        older = [m for m in older if m.get("_message_type", MessageType.MESSAGE) == MessageType.MESSAGE]
-        # Strip _message_type before passing to LLM to avoid serializing internal metadata.
-        older_clean = [{k: v for k, v in m.items() if k != "_message_type"} for m in older]
-
-        summary_text = await self._summarize(client, older_clean)
-        summary_msg_untagged = {
-            "role": "assistant",
-            "content": f"[Summary of earlier conversation]\n{summary_text}",
-        }
-        summary_msg = {**summary_msg_untagged, "_message_type": MessageType.SUMMARY}
+        retained = self.messages[-retain_count:] if retain_count > 0 else []
+        tagged = {**summary_msg, "_message_type": MessageType.SUMMARY}
         messages_before = len(self.messages)
-        # Update self.messages before _persist_summary — _persist_summary derives
-        # num_retained from len(self.messages) - 1, so the list must reflect the
-        # post-compaction state (summary + retained) before persistence runs.
-        self.messages = [summary_msg] + retained
-        # Pass the untagged dict to persistence to avoid serializing _message_type into the DB.
-        await self._persist_summary(summary_msg_untagged)
+
+        # Set in-memory state BEFORE DB writes — DB logic reads len(self.messages) - 1.
+        self.messages = [tagged] + retained
+
+        # --- DB persistence (inlined from _persist_summary) ---
+        # Count all non-summary entries in the retained set.
+        # self.messages = [summary_msg] + retained after the assignment above.
+        # retained can include MESSAGE, CONTEXT, and any future non-summary types.
+        num_retained_total = len(self.messages) - 1
+
+        if num_retained_total == 0:
+            # No non-summary entries retained — delete all non-summary rows unconditionally.
+            await self.db.execute(
+                "DELETE FROM message_log "
+                "WHERE channel_id = ? AND message_type != 'summary'",
+                (self.channel_id,),
+            )
+        else:
+            # Find the id of the oldest retained non-summary row.
+            # IDs are assigned in insertion order and self.messages is maintained
+            # in id order, so the oldest retained entry corresponds to OFFSET
+            # num_retained_total - 1 from the newest non-summary row.
+            async with self.db.execute(
+                "SELECT id FROM message_log "
+                "WHERE channel_id = ? AND message_type != 'summary' "
+                "ORDER BY id DESC LIMIT 1 OFFSET ?",
+                (self.channel_id, num_retained_total - 1),
+            ) as cursor:
+                row = await cursor.fetchone()
+
+            if row:
+                oldest_retained_id = row[0]
+                # Delete all non-summary rows before the retained window.
+                await self.db.execute(
+                    "DELETE FROM message_log "
+                    "WHERE channel_id = ? AND message_type != 'summary' AND id < ?",
+                    (self.channel_id, oldest_retained_id),
+                )
+            else:
+                logger.warning(
+                    "replace_with_summary: boundary query returned no row; "
+                    "skipping pre-retained deletion (possible SUMMARY-in-retained edge case)",
+                    extra={"channel_id": self.channel_id, "num_retained_total": num_retained_total},
+                )
+
+        # Delete old summary rows and insert the new one.
+        await self.db.execute(
+            "DELETE FROM message_log "
+            "WHERE channel_id = ? AND message_type = 'summary'",
+            (self.channel_id,),
+        )
+        await self.db.execute(
+            "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
+            "VALUES (?, ?, ?, ?)",
+            (self.channel_id, json.dumps(summary_msg), time.time(), MessageType.SUMMARY),
+        )
+        await self.db.commit()
 
         logger.info(
             "compaction completed",
@@ -301,89 +323,6 @@ class ConversationLog:
             (self.channel_id, json.dumps(message), time.time(), message_type),
         )
         await self.db.commit()
-
-    async def _persist_summary(self, summary_msg: dict) -> None:
-        """Persist a compaction summary to the DB.
-
-        Deletes summarized (non-retained) messages and old summary rows,
-        then inserts the new summary. After this, the DB contains only
-        retained messages and the summary row. load() finds the summary
-        and loads all remaining non-summary rows.
-
-        Invariant: self.messages must reflect the current DB state — i.e.,
-        len(self.messages) - 1 retained messages must correspond to the
-        most recent non-summary rows in the DB. This holds because append()
-        keeps in-memory and DB state in sync, and compact_if_needed is the
-        only caller.
-        """
-        # Count all non-summary entries in the retained set.
-        # self.messages = [summary_msg] + retained after compact_if_needed runs.
-        # retained can include MESSAGE, CONTEXT, and any future non-summary types.
-        num_retained_total = len(self.messages) - 1
-
-        if num_retained_total == 0:
-            # No non-summary entries in the retained set.
-            # Delete all non-summary rows for this channel unconditionally.
-            await self.db.execute(
-                "DELETE FROM message_log "
-                "WHERE channel_id = ? AND message_type != 'summary'",
-                (self.channel_id,),
-            )
-        else:
-            # Find the id of the oldest retained non-summary row.
-            # Since ids are assigned in insertion order and self.messages
-            # is loaded/maintained in id order, this corresponds to
-            # retained[0] (the oldest entry kept after compaction).
-            async with self.db.execute(
-                "SELECT id FROM message_log "
-                "WHERE channel_id = ? AND message_type != 'summary' "
-                "ORDER BY id DESC LIMIT 1 OFFSET ?",
-                (self.channel_id, num_retained_total - 1),
-            ) as cursor:
-                row = await cursor.fetchone()
-
-            if row:
-                oldest_retained_id = row[0]
-                # Delete all non-summary rows before the retained window.
-                # This covers MESSAGE rows (summarized away) and CONTEXT rows
-                # (they annotated conversation that has been summarized).
-                await self.db.execute(
-                    "DELETE FROM message_log "
-                    "WHERE channel_id = ? AND message_type != 'summary' AND id < ?",
-                    (self.channel_id, oldest_retained_id),
-                )
-            else:
-                logger.warning(
-                    "_persist_summary: boundary query returned no row; "
-                    "skipping pre-retained deletion (possible SUMMARY-in-retained edge case)",
-                    extra={"channel_id": self.channel_id, "num_retained_total": num_retained_total},
-                )
-
-        # Delete old summary rows
-        await self.db.execute(
-            "DELETE FROM message_log "
-            "WHERE channel_id = ? AND message_type = 'summary'",
-            (self.channel_id,),
-        )
-        # Insert the new summary
-        await self.db.execute(
-            "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
-            "VALUES (?, ?, ?, ?)",
-            (self.channel_id, json.dumps(summary_msg), time.time(), MessageType.SUMMARY),
-        )
-        await self.db.commit()
-
-    async def _summarize(self, client: LLMClient, messages: list[dict]) -> str:
-        """Ask LLM to summarize messages.
-
-        Sends the messages to the LLM with a system prompt asking for
-        a concise summary that preserves key facts, decisions, and context.
-        """
-        response = await client.chat([
-            {"role": "system", "content": "Summarize the following conversation concisely, preserving key facts, decisions, and context that would be needed to continue the conversation."},
-            {"role": "user", "content": json.dumps(messages)},
-        ])
-        return response["choices"][0]["message"]["content"]
 
 
 async def init_db(db: aiosqlite.Connection) -> None:

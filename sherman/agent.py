@@ -333,13 +333,11 @@ class AgentPlugin:
 
         # 5. Compact if approaching context limit
         try:
-            handled = await call_firstresult_hook(
+            await call_firstresult_hook(
                 self.pm, "compact_conversation",
                 conversation=conv, client=self.client,
                 max_tokens=resolved["max_context_tokens"],
             )
-            if not handled:
-                await conv.compact_if_needed(self.client, resolved["max_context_tokens"])
         except Exception:
             logger.warning("compaction failed, skipping", exc_info=True)
 

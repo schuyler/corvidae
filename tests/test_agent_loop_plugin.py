@@ -744,8 +744,12 @@ class TestOnMessageThinkingTokens:
 
 class TestOnMessageCompactionAndConfig:
     async def test_on_message_compacts_before_agent_turn(self):
-        """When token estimate is high, compact_if_needed runs before
-        run_agent_turn."""
+        """compact_conversation hook fires before run_agent_turn.
+
+        Registers a tracking plugin to confirm compact_conversation is called
+        with the correct client and max_tokens, and that it runs before the LLM.
+        """
+        from sherman.hooks import hookimpl
         from sherman.agent_loop import AgentTurnResult
 
         plugin, channel, db = await _build_plugin_and_channel()
@@ -757,19 +761,18 @@ class TestOnMessageCompactionAndConfig:
         await plugin.on_message(channel=channel, sender="user", text="hi")
         await _drain(plugin, channel)
 
-        # Verify compact_if_needed was called by patching it on the conversation
-        # object. We do this on a second message after the conversation exists.
-        conv = channel.conversation
-        original_compact = conv.compact_if_needed
+        # Register a compact_conversation hook that records calls and returns None
         compact_calls = []
         call_order = []
 
-        async def mock_compact(client, max_tokens):
-            compact_calls.append((client, max_tokens))
-            call_order.append("compact")
-            await original_compact(client, max_tokens)
+        class TrackingCompactPlugin:
+            @hookimpl
+            async def compact_conversation(self, conversation, client, max_tokens):
+                compact_calls.append((client, max_tokens))
+                call_order.append("compact")
+                return None  # defer — no actual compaction needed in this test
 
-        conv.compact_if_needed = mock_compact
+        plugin.pm.register(TrackingCompactPlugin(), name="tracking_compact")
 
         turn_result = AgentTurnResult(
             message={"role": "assistant", "content": "answer"},
@@ -1462,9 +1465,9 @@ class TestOnLlmError:
 
 
 class TestCompactConversation:
-    async def test_hook_returns_true_skips_default_compaction(self):
-        """When compact_conversation returns True, default compact_if_needed
-        is not called."""
+    async def test_custom_plugin_returning_true_short_circuits(self):
+        """A custom compact_conversation plugin that returns True is invoked
+        and the agent turn still runs. The hook call completes normally."""
         from sherman.hooks import hookimpl
         from sherman.agent_loop import AgentTurnResult
 
@@ -1477,24 +1480,16 @@ class TestCompactConversation:
         # Trigger conversation init
         await plugin.on_message(channel=channel, sender="user", text="hi")
         await _drain(plugin, channel)
+
+        compact_called = []
 
         class CompactPlugin:
             @hookimpl
             async def compact_conversation(self, conversation, client, max_tokens):
-                return True  # claim we handled it
+                compact_called.append(True)
+                return True  # handled
 
         plugin.pm.register(CompactPlugin(), name="compact_plugin")
-
-        # Track whether compact_if_needed is called
-        compact_called = []
-        conv = channel.conversation
-        original_compact = conv.compact_if_needed
-
-        async def tracking_compact(client, max_tokens):
-            compact_called.append(True)
-            return await original_compact(client, max_tokens)
-
-        conv.compact_if_needed = tracking_compact
 
         turn_result = AgentTurnResult(
             message={"role": "assistant", "content": "second answer"},
@@ -1507,14 +1502,15 @@ class TestCompactConversation:
             await plugin.on_message(channel=channel, sender="user", text="second")
             await _drain(plugin, channel)
 
-        assert not compact_called, (
-            "compact_if_needed must not be called when hook returns True"
-        )
+        # Custom plugin was called and agent turn ran without error.
+        assert compact_called, "CompactPlugin.compact_conversation must have been called"
+        plugin.pm.ahook.send_message.assert_called()
 
         await db.close()
 
-    async def test_hook_returns_none_runs_default_compaction(self):
-        """When compact_conversation returns None, default compact_if_needed runs."""
+    async def test_no_compaction_plugin_agent_turn_still_runs(self):
+        """When no compact_conversation impl returns a non-None result,
+        the agent loop continues normally without error."""
         from sherman.hooks import hookimpl
         from sherman.agent_loop import AgentTurnResult
 
@@ -1524,26 +1520,13 @@ class TestCompactConversation:
         mock_client.chat = AsyncMock(return_value=_make_text_response("answer"))
         plugin.client = mock_client
 
-        # Trigger conversation init
-        await plugin.on_message(channel=channel, sender="user", text="hi")
-        await _drain(plugin, channel)
-
+        # Register a plugin that returns None (defers)
         class DeferPlugin:
             @hookimpl
             async def compact_conversation(self, conversation, client, max_tokens):
-                return None  # defer to default
+                return None
 
         plugin.pm.register(DeferPlugin(), name="defer_plugin")
-
-        compact_called = []
-        conv = channel.conversation
-        original_compact = conv.compact_if_needed
-
-        async def tracking_compact(client, max_tokens):
-            compact_called.append(True)
-            return await original_compact(client, max_tokens)
-
-        conv.compact_if_needed = tracking_compact
 
         turn_result = AgentTurnResult(
             message={"role": "assistant", "content": "second answer"},
@@ -1556,17 +1539,14 @@ class TestCompactConversation:
             await plugin.on_message(channel=channel, sender="user", text="second")
             await _drain(plugin, channel)
 
-        assert compact_called, (
-            "compact_if_needed must be called when hook returns None"
-        )
+        # Agent turn ran without error; send_message was called.
+        plugin.pm.ahook.send_message.assert_called()
 
         await db.close()
 
     async def test_hook_exception_caught_and_logged(self, caplog):
-        """An exception in compact_conversation is caught and logged.
-        Both the hook call AND the default compaction are wrapped in one
-        try/except, so when the hook raises, the entire compaction block
-        is skipped — default compact_if_needed does NOT run."""
+        """An exception in compact_conversation is caught and logged as WARNING.
+        The agent turn still runs after the compaction block fails."""
         import logging
         from sherman.hooks import hookimpl
         from sherman.agent_loop import AgentTurnResult
@@ -1588,16 +1568,6 @@ class TestCompactConversation:
 
         plugin.pm.register(ExplodingPlugin(), name="exploding_plugin")
 
-        compact_called = []
-        conv = channel.conversation
-        original_compact = conv.compact_if_needed
-
-        async def tracking_compact(client, max_tokens):
-            compact_called.append(True)
-            return await original_compact(client, max_tokens)
-
-        conv.compact_if_needed = tracking_compact
-
         turn_result = AgentTurnResult(
             message={"role": "assistant", "content": "second answer"},
             tool_calls=[],
@@ -1610,28 +1580,21 @@ class TestCompactConversation:
                 await plugin.on_message(channel=channel, sender="user", text="second")
                 await _drain(plugin, channel)
 
-        # Exception should be caught and logged
+        # Exception must be caught and logged
         warning_records = [
             r for r in caplog.records
             if r.levelno == logging.WARNING and "compact" in r.getMessage().lower()
         ]
         assert warning_records, "Expected WARNING log about compaction failure"
 
-        # When hook raises, the entire try/except block is skipped —
-        # default compact_if_needed must NOT be called
-        assert not compact_called, (
-            "compact_if_needed must not be called when hook raises; "
-            "both hook and default are in one try/except"
-        )
+        # Agent turn must still have run despite the exception
+        plugin.pm.ahook.send_message.assert_called()
 
         await db.close()
 
-    async def test_hook_returns_false_runs_default(self):
-        """When compact_conversation returns False, default compact_if_needed
-        runs because `not False` is True at the call site (`if not handled:`).
-
-        False is non-None so call_firstresult_hook stops iterating, but the
-        call site treats False as 'not handled' and falls through to default."""
+    async def test_compaction_hook_receives_correct_args(self):
+        """compact_conversation is called with conversation, client, and max_tokens
+        matching the channel's resolved config."""
         from sherman.hooks import hookimpl
         from sherman.agent_loop import AgentTurnResult
 
@@ -1645,22 +1608,17 @@ class TestCompactConversation:
         await plugin.on_message(channel=channel, sender="user", text="hi")
         await _drain(plugin, channel)
 
-        class FalsePlugin:
+        captured = {}
+
+        class CapturingPlugin:
             @hookimpl
             async def compact_conversation(self, conversation, client, max_tokens):
-                return False  # non-None stops iteration, but not False => default runs
+                captured["conversation"] = conversation
+                captured["client"] = client
+                captured["max_tokens"] = max_tokens
+                return None
 
-        plugin.pm.register(FalsePlugin(), name="false_plugin")
-
-        compact_called = []
-        conv = channel.conversation
-        original_compact = conv.compact_if_needed
-
-        async def tracking_compact(client, max_tokens):
-            compact_called.append(True)
-            return await original_compact(client, max_tokens)
-
-        conv.compact_if_needed = tracking_compact
+        plugin.pm.register(CapturingPlugin(), name="capturing_plugin")
 
         turn_result = AgentTurnResult(
             message={"role": "assistant", "content": "second answer"},
@@ -1673,10 +1631,9 @@ class TestCompactConversation:
             await plugin.on_message(channel=channel, sender="user", text="second")
             await _drain(plugin, channel)
 
-        assert compact_called, (
-            "compact_if_needed must be called when hook returns False; "
-            "`not False` is True so default compaction runs"
-        )
+        assert captured.get("client") is mock_client
+        assert captured.get("max_tokens") == 8000  # from AGENT_DEFAULTS
+        assert captured.get("conversation") is channel.conversation
 
         await db.close()
 
