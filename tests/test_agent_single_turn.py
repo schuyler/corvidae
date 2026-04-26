@@ -711,30 +711,35 @@ class TestCompactionFailureResilience:
     ):
         """A compaction failure does not prevent run_agent_turn or send_message.
 
-        Patches call_firstresult_hook in corvidae.agent to raise RuntimeError
-        when invoked for compact_conversation, simulating a plugin crash.
-        The agent's try/except must catch it, log a WARNING, and continue.
+        Registers a plugin whose compact_conversation hookimpl raises RuntimeError,
+        simulating a plugin crash. The agent's try/except must catch it, log a
+        WARNING, and continue.
         """
         import logging
-        from unittest.mock import patch
+        from corvidae.hooks import hookimpl
 
         plugin, channel, db = plugin_and_channel
+
+        # Pre-initialize the conversation so ensure_conversation short-circuits
+        # during on_message.  With broadcast dispatch every hook fires; without
+        # this the persistence plugin would try to load from the DB concurrently
+        # with the crashing compaction plugin.
+        await plugin.pm.ahook.ensure_conversation(channel=channel)
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("response after failed compaction"))
         plugin.client = mock_client
 
-        original_hook = __import__("corvidae.hooks", fromlist=["call_firstresult_hook"]).call_firstresult_hook
-
-        async def exploding_hook(pm, hook_name, **kwargs):
-            if hook_name == "compact_conversation":
+        class CrashingCompactionPlugin:
+            @hookimpl
+            async def compact_conversation(self, conversation, client, max_tokens):
                 raise RuntimeError("compaction boom")
-            return await original_hook(pm, hook_name, **kwargs)
+
+        plugin.pm.register(CrashingCompactionPlugin(), name="crashing_compaction")
 
         with caplog.at_level(logging.WARNING, logger="corvidae.agent"):
-            with patch("corvidae.agent.call_firstresult_hook", side_effect=exploding_hook):
-                await plugin.on_message(channel=channel, sender="user", text="hello")
-                await drain(plugin, channel)
+            await plugin.on_message(channel=channel, sender="user", text="hello")
+            await drain(plugin, channel)
 
         # Despite compaction failure, run_agent_turn must have been called
         # (evidenced by mock_client.chat being called) and send_message must have fired.

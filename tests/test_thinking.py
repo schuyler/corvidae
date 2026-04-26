@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, AsyncMock
 import pytest
 
 from corvidae.thinking import ThinkingPlugin
-from corvidae.hooks import create_plugin_manager, call_firstresult_hook
+from corvidae.hooks import create_plugin_manager, resolve_hook_results, HookStrategy
 
 
 def _make_pm(keep_thinking_in_history=False, registry_missing=False):
@@ -151,7 +151,8 @@ class TestGracefulDegradationWithoutThinkingPlugin:
         """When no ThinkingPlugin is registered, the system does not crash.
 
         after_persist_assistant is a broadcast hook — zero implementations is a no-op.
-        transform_display_text via call_firstresult_hook returns None when no impl exists.
+        transform_display_text via broadcast dispatch + resolve_hook_results returns None
+        when no impl exists.
         """
         pm = create_plugin_manager()
         # ThinkingPlugin intentionally NOT registered.
@@ -161,12 +162,13 @@ class TestGracefulDegradationWithoutThinkingPlugin:
         # Broadcast hook with no implementations — must not raise.
         await pm.ahook.after_persist_assistant(channel=mock_channel, message={})
 
-        # firstresult hook with no implementations — must return None.
-        result = await call_firstresult_hook(
-            pm,
-            "transform_display_text",
+        # Broadcast dispatch with no implementations — resolve_hook_results must return None.
+        results = await pm.ahook.transform_display_text(
             channel=mock_channel,
             text="<think>foo</think>bar",
             result_message={},
+        )
+        result = resolve_hook_results(
+            results, "transform_display_text", HookStrategy.VALUE_FIRST
         )
         assert result is None

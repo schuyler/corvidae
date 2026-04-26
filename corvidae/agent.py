@@ -36,7 +36,7 @@ from enum import Enum
 
 from corvidae.agent_loop import run_agent_turn
 from corvidae.channel import Channel, ChannelRegistry
-from corvidae.hooks import call_firstresult_hook, get_dependency, hookimpl
+from corvidae.hooks import resolve_hook_results, HookStrategy, get_dependency, hookimpl
 from corvidae.llm import LLMClient
 from corvidae.queue import SerialQueue
 from corvidae.task import Task
@@ -116,11 +116,11 @@ class AgentPlugin:
             extra={"channel": channel.id, "sender": sender},
         )
 
-        # Hook: should_process_message (firstresult)
-        gate_result = await call_firstresult_hook(
-            self.pm, "should_process_message",
+        # Hook: should_process_message (broadcast, reject-wins)
+        results = await self.pm.ahook.should_process_message(
             channel=channel, sender=sender, text=text,
         )
+        gate_result = resolve_hook_results(results, "should_process_message", HookStrategy.REJECT_WINS)
         if gate_result is False:
             logger.info(
                 "message rejected by should_process_message hook",
@@ -229,9 +229,8 @@ class AgentPlugin:
 
         # 1. Lazy-initialize conversation on the channel
         if channel.conversation is None:
-            result = await call_firstresult_hook(
-                self.pm, "ensure_conversation", channel=channel,
-            )
+            results = await self.pm.ahook.ensure_conversation(channel=channel)
+            result = resolve_hook_results(results, "ensure_conversation", HookStrategy.ACCEPT_WINS)
             if result is None:
                 logger.error(
                     "no persistence plugin initialized conversation for %s",
@@ -253,8 +252,7 @@ class AgentPlugin:
 
         # 5. Compact if approaching context limit
         try:
-            await call_firstresult_hook(
-                self.pm, "compact_conversation",
+            await self.pm.ahook.compact_conversation(
                 conversation=conv, client=self.client,
                 max_tokens=resolved["max_context_tokens"],
             )
@@ -276,9 +274,9 @@ class AgentPlugin:
             result = await run_agent_turn(self.client, messages, self.tool_schemas)
         except Exception as exc:
             logger.exception("run_agent_turn failed for channel %s", channel.id)
-            error_msg = await call_firstresult_hook(
-                self.pm, "on_llm_error",
-                channel=channel, error=exc,
+            results = await self.pm.ahook.on_llm_error(channel=channel, error=exc)
+            error_msg = resolve_hook_results(
+                results, "on_llm_error", HookStrategy.VALUE_FIRST, pm=self.pm,
             )
             if error_msg is None:
                 error_msg = DEFAULT_LLM_ERROR_MESSAGE
@@ -321,17 +319,21 @@ class AgentPlugin:
                 "max_turns reached, suppressing tool calls",
                 extra={"channel": channel.id, "turn_counter": channel.turn_counter},
             )
-            transformed = await call_firstresult_hook(
-                self.pm, "transform_display_text",
+            results = await self.pm.ahook.transform_display_text(
                 channel=channel, text=result.text, result_message=result.message,
+            )
+            transformed = resolve_hook_results(
+                results, "transform_display_text", HookStrategy.VALUE_FIRST, pm=self.pm,
             )
             display_response = (transformed if transformed is not None else result.text) or MAX_TURNS_FALLBACK_MESSAGE
         else:
             # No tool calls — normal text response
             channel.turn_counter += 1
-            transformed = await call_firstresult_hook(
-                self.pm, "transform_display_text",
+            results = await self.pm.ahook.transform_display_text(
                 channel=channel, text=result.text, result_message=result.message,
+            )
+            transformed = resolve_hook_results(
+                results, "transform_display_text", HookStrategy.VALUE_FIRST, pm=self.pm,
             )
             display_response = transformed if transformed is not None else result.text
 
