@@ -186,7 +186,7 @@ class MyPlugin:
 
 ## Plugin dependencies
 
-Declare `depends_on` as a class attribute (a set of plugin names). `validate_dependencies()` raises `RuntimeError` at startup if any declared dependency is not registered.
+Declare `depends_on` as a class attribute (a set of plugin names). `validate_dependencies()` raises `RuntimeError` at startup if any declared dependency is not registered, or if the dependency graph contains a cycle. The error message includes the full cycle path, e.g. `Dependency cycle detected: a -> b -> a`.
 
 ```python
 class MyPlugin:
@@ -249,6 +249,18 @@ channels:
     max_context_tokens: 16000
 ```
 
+**IRC transport config:**
+
+```yaml
+irc:
+  host: irc.libera.chat       # IRC server (default irc.libera.chat)
+  port: 6667                   # IRC port (default 6667)
+  nick: corvidae               # Bot nickname (default corvidae)
+  tls: false                   # Use TLS (default false)
+  channels: ["#general"]       # Channels to join
+  message_chunk_size: 400      # Max UTF-8 bytes per IRC message (default 400)
+```
+
 ## Registration order
 
 The current registration sequence in `main.py`:
@@ -276,6 +288,12 @@ Tool-providing plugins and transport plugins register before `agent_loop`. The `
 
 `idle_monitor` registers after `agent_loop` because it depends on `"agent_loop"`. Its `on_start` uses `@hookimpl(trylast=True)` to run late in the broadcast. Because `AgentPlugin.on_start` is called after the broadcast completes, `idle_monitor` is always initialized before `AgentPlugin` starts.
 
+## Hook exception safety
+
+Broadcast hook calls from `AgentPlugin` are wrapped in `try/except`. If a plugin raises an exception from `before_agent_turn`, `after_persist_assistant`, `on_agent_response`, or `send_message`, the exception is logged at WARNING or ERROR level and processing continues. Plugins do not need to catch their own exceptions to protect the queue consumer.
+
+Gate hooks called via `call_firstresult_hook` are not wrapped — exceptions propagate to the call site. The exception is `compact_conversation`, whose `call_firstresult_hook` invocation is wrapped: a compaction failure is logged at WARNING and the turn continues without compaction.
+
 ## Async considerations
 
 All broadcast hooks are `async`. Corvidae uses apluggy's `pm.ahook.*` for async dispatch.
@@ -297,7 +315,12 @@ result = await call_firstresult_hook(
 
 These tools are registered by built-in plugins. They are available to the LLM in every standard Corvidae deployment.
 
-All tool results are truncated at `MAX_TOOL_RESULT_CHARS` (100,000 characters) by `execute_tool_call` in `corvidae/tool.py`. The truncation appends `[truncated — N chars total]` so the LLM knows output was cut.
+All tool results are truncated at `MAX_TOOL_RESULT_CHARS` (default 100,000 characters) by `execute_tool_call` in `corvidae/tool.py`. The truncation appends `[truncated — N chars total]` so the LLM knows output was cut. Override via config:
+
+```yaml
+agent:
+  max_tool_result_chars: 100000  # read by AgentPlugin and SubagentPlugin
+```
 
 ### CoreToolsPlugin tools
 
@@ -305,10 +328,20 @@ Registered by `CoreToolsPlugin` (registered as `core_tools` in `main.py`).
 
 | Tool | Parameters | What it does |
 |------|------------|--------------|
-| `shell` | `command: str` | Runs a shell command and returns combined stdout/stderr. Times out after 30 seconds. Returns `"(no output)"` if the command produces none. Non-zero exit codes are appended to the output. |
-| `read_file` | `path: str` | Reads a file and returns its text content. Returns an error string for missing files, directories, unreadable files, or files larger than 1 MB. |
+| `shell` | `command: str` | Runs a shell command and returns combined stdout/stderr. Times out after `tools.shell_timeout` seconds (default 30). Returns `"(no output)"` if the command produces none. Non-zero exit codes are appended to the output. |
+| `read_file` | `path: str` | Reads a file and returns its text content. Returns an error string for missing files, directories, unreadable files, or files larger than `tools.max_file_read_bytes` bytes (default 1 MB). |
 | `write_file` | `path: str`, `content: str` | Writes `content` to `path`, creating parent directories as needed. Returns a confirmation with the byte count, or an error string on failure. |
-| `web_fetch` | `url: str` | Fetches a URL via HTTP GET and returns the response body as text. Times out after 15 seconds. Truncates responses at 50,000 characters (independent of `MAX_TOOL_RESULT_CHARS`). |
+| `web_fetch` | `url: str` | Fetches a URL via HTTP GET and returns the response body as text. Times out after `tools.web_fetch_timeout` seconds (default 15). Truncates responses at `tools.web_max_response_bytes` characters (default 50,000, independent of `MAX_TOOL_RESULT_CHARS`). |
+
+**CoreToolsPlugin config:**
+
+```yaml
+tools:
+  shell_timeout: 30              # seconds before shell command is killed
+  web_fetch_timeout: 15          # seconds before web request is aborted
+  web_max_response_bytes: 50000  # response body truncation limit
+  max_file_read_bytes: 1048576   # file size limit (1 MB)
+```
 
 ### SubagentPlugin tools
 
@@ -386,6 +419,68 @@ Implements two hooks:
 **Without this plugin:** `<think>` blocks pass through to the channel
 verbatim, and `reasoning_content` remains in in-memory history
 regardless of the `keep_thinking_in_history` config value.
+
+### CompactionPlugin (`corvidae/compaction.py`)
+
+Compacts conversation history when it approaches the channel's
+`max_context_tokens` limit. Registered as `"compaction"` before `agent_loop`.
+
+Implements one hook:
+
+- `compact_conversation` — fires before each LLM call. Checks whether the
+  token estimate exceeds `compaction_threshold * max_tokens`. If so, and if
+  the conversation has more than `min_messages_to_compact` messages,
+  summarizes older messages to fit within `compaction_retention * max_tokens`.
+  Returns `True` when compaction ran; `None` when the threshold was not met.
+
+Token estimation divides total character count by `chars_per_token`. The same
+`chars_per_token` value must be used when constructing `ConversationLog`
+instances (done by `PersistencePlugin`); configure both via `agent.chars_per_token`.
+
+**Config:**
+```yaml
+agent:
+  compaction_threshold: 0.8      # compact when token estimate exceeds this fraction of max_context_tokens
+  compaction_retention: 0.5      # retain this fraction of max_context_tokens after compaction
+  min_messages_to_compact: 5     # skip compaction if conversation has this many messages or fewer
+  chars_per_token: 3.5           # character-to-token ratio used for token estimation
+```
+
+**Without this plugin:** conversations grow without bound. The LLM will
+receive an error from the API when the context limit is exceeded.
+
+### PersistencePlugin (`corvidae/persistence.py`)
+
+Opens the SQLite database, runs schema migrations via `init_db`, and sets
+the journal mode. Registered as `"persistence"` before `agent_loop`.
+Implements `on_start`, `on_stop`, and `ensure_conversation`.
+
+**Config:**
+```yaml
+daemon:
+  session_db: sessions.db       # path to SQLite database file (default "sessions.db")
+  sqlite_journal_mode: wal      # SQLite journal mode (default "wal");
+                                # allowed values: delete, truncate, persist, memory, wal, off
+```
+
+**Without this plugin:** `ensure_conversation` is never fulfilled; `AgentPlugin`
+logs an error and drops every message.
+
+### TaskPlugin (`corvidae/task.py`)
+
+Owns the `TaskQueue` and delivers task results via the `on_notify` hook.
+Registered as `"task"` before `agent_loop`.
+
+**Config:**
+```yaml
+daemon:
+  max_task_workers: 4       # concurrent task workers (default 4)
+  completed_task_buffer: 100  # number of completed task records to retain in memory
+```
+
+**Without this plugin:** tool calls that return asynchronously (e.g., `subagent`)
+cannot complete. `AgentPlugin` logs an error when tool dispatch is attempted
+without a `TaskQueue`.
 
 ### IdleMonitorPlugin (`corvidae/idle.py`)
 

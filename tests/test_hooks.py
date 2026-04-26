@@ -423,6 +423,84 @@ async def test_call_firstresult_hook_unknown_hook_name_returns_none():
     assert result is None
 
 
+# ---------------------------------------------------------------------------
+# validate_dependencies — cycle detection (red phase)
+# ---------------------------------------------------------------------------
+
+
+def test_validate_dependencies_raises_on_direct_cycle():
+    """A depends on B and B depends on A — a direct cycle must raise RuntimeError
+    with the cycle path in the message."""
+
+    class _PluginA:
+        depends_on = {"b"}
+
+    class _PluginB:
+        depends_on = {"a"}
+
+    pm = create_plugin_manager()
+    pm.register(_PluginA(), name="a")
+    pm.register(_PluginB(), name="b")
+
+    with pytest.raises(RuntimeError, match=r"cycle"):
+        validate_dependencies(pm)
+
+
+def test_validate_dependencies_raises_on_indirect_cycle():
+    """A → B → C → A — an indirect three-node cycle must raise RuntimeError."""
+
+    class _PluginA:
+        depends_on = {"b"}
+
+    class _PluginB:
+        depends_on = {"c"}
+
+    class _PluginC:
+        depends_on = {"a"}
+
+    pm = create_plugin_manager()
+    pm.register(_PluginA(), name="a")
+    pm.register(_PluginB(), name="b")
+    pm.register(_PluginC(), name="c")
+
+    with pytest.raises(RuntimeError, match=r"cycle"):
+        validate_dependencies(pm)
+
+
+def test_validate_dependencies_raises_on_self_dependency():
+    """A plugin that lists itself in depends_on must raise RuntimeError."""
+
+    class _SelfDepPlugin:
+        depends_on = {"self_dep"}
+
+    pm = create_plugin_manager()
+    pm.register(_SelfDepPlugin(), name="self_dep")
+
+    with pytest.raises(RuntimeError, match=r"cycle"):
+        validate_dependencies(pm)
+
+
+def test_validate_dependencies_does_not_raise_on_valid_dag():
+    """A → B → C and A → C (diamond-ish DAG) must NOT raise — no cycle present."""
+
+    class _PluginA:
+        depends_on = {"b", "c"}
+
+    class _PluginB:
+        depends_on = {"c"}
+
+    class _PluginC:
+        pass
+
+    pm = create_plugin_manager()
+    pm.register(_PluginA(), name="a")
+    pm.register(_PluginB(), name="b")
+    pm.register(_PluginC(), name="c")
+
+    # Should not raise.
+    validate_dependencies(pm)
+
+
 async def test_call_firstresult_hook_supports_sync_impls():
     """Sync implementations (non-async) are also supported."""
     from corvidae.hooks import call_firstresult_hook
