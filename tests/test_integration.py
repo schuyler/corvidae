@@ -948,21 +948,43 @@ class TestGroupDMultiChannel:
         assert len(default_msgs) == 1
         assert default_msgs[0][1] == "default done"
 
-    async def test_d3_concurrent_operations_no_cross_contamination(self, harness):
-        """D3. Two channels operate independently; conversations not cross-contaminated."""
+    async def test_d3_concurrent_compaction_and_tool_call(self):
+        """D3. Compaction on channel A while channel B has an in-flight tool call.
+
+        Channel A: accumulates enough messages (with small max_context_tokens) to
+        trigger compaction. Channel B: sends a message that dispatches a gated tool
+        (blocking). While channel B's tool is blocked, channel A receives another
+        message that pushes it over the compaction threshold. After releasing channel
+        B's gate, verify:
+        - Channel A's compaction completed and a summary is present
+        - Channel B's tool call completed normally (conversation not corrupted)
+        - Neither channel's ConversationLog references the other's data
+        """
+        # Build a custom harness with small max_context_tokens to trigger compaction.
+        # 256 tokens * 0.8 threshold = ~204.8 token trigger point.
+        # With long_text of 200 chars: token estimate = 200 / 3.5 ≈ 57 tokens per message.
+        # After 5 round-trips (10 messages): ≈570 tokens >> 204.8 → compaction triggers.
+        config = make_config(extra={
+            "agent": {
+                "system_prompt": "You are a test agent.",
+                "max_context_tokens": 256,
+            },
+        })
+        h = await _build_harness(config)
+
         gate = asyncio.Event()
 
         async def gated_tool(x: str) -> str:
-            """Gated."""
+            """Gated tool that blocks until gate is set."""
             await gate.wait()
             return "gated_result"
 
-        harness.agent.tools["gated_tool"] = gated_tool
-        harness.agent.tool_schemas.append({
+        h.agent.tools["gated_tool"] = gated_tool
+        h.agent.tool_schemas.append({
             "type": "function",
             "function": {
                 "name": "gated_tool",
-                "description": "Gated.",
+                "description": "Gated tool that blocks until gate is set.",
                 "parameters": {
                     "type": "object",
                     "properties": {"x": {"type": "string"}},
@@ -971,38 +993,116 @@ class TestGroupDMultiChannel:
             },
         })
 
-        chan_a = harness.registry.get_or_create("test", "d3_a")
-        chan_b = harness.registry.get_or_create("test", "d3_b")
+        chan_a = h.registry.get_or_create("test", "d3_a")
+        chan_b = h.registry.get_or_create("test", "d3_b")
 
-        harness.mock_client.chat = AsyncMock(
-            side_effect=[
-                # chan_b: immediate text response
-                _make_text_response("b response"),
-                # chan_a: tool call → blocks
-                _make_tool_call_response([_make_tool_call("ga1", "gated_tool", {"x": "v"})]),
-                # chan_a: after gate releases → text
-                _make_text_response("a after gate"),
-            ]
+        # Use a function side_effect because two channels are involved and
+        # call ordering between them is non-deterministic.
+        # Identify channel by presence of unique content markers in messages.
+        async def chat_side_effect(messages, tools=None, extra_body=None):
+            # Check for channel B marker ("b_msg") in any user message content.
+            has_b_marker = any(
+                "b_msg" in (m.get("content") or "")
+                for m in messages
+                if isinstance(m.get("content"), str)
+            )
+            if has_b_marker:
+                call_n = chat_side_effect.b_calls
+                chat_side_effect.b_calls += 1
+                if call_n == 0:
+                    # First call from B: dispatch gated tool
+                    return _make_tool_call_response([
+                        _make_tool_call("d3_gate", "gated_tool", {"x": "v"})
+                    ])
+                else:
+                    # Second call from B: after tool result → text response
+                    return _make_text_response("b after tool")
+            else:
+                # Channel A: always returns a simple text response.
+                # Compaction is handled by fake_summarize, not the LLM mock.
+                return _make_text_response("a response")
+
+        chat_side_effect.b_calls = 0
+        h.mock_client.chat = chat_side_effect
+
+        long_text = "a_long_msg_" + ("x" * 200)
+
+        async def fake_summarize(self_inner, client, messages):
+            return "channel A summary"
+
+        with patch.object(CompactionPlugin, "_summarize", fake_summarize):
+            # Phase 1: Build up channel A's conversation history (5 round-trips).
+            # After 5 user messages + 5 assistant responses, the token estimate
+            # will exceed 80% of 256 tokens, so the 6th message triggers compaction.
+            for i in range(5):
+                await h.pm.ahook.on_message(
+                    channel=chan_a, sender="user", text=long_text
+                )
+                await channel_queue_drain(h, chan_a)
+
+            # Phase 2: Send channel B's message and drain its queue so the tool
+            # task is dispatched (queue slot freed) but the tool is still blocked.
+            await h.pm.ahook.on_message(
+                channel=chan_b, sender="user", text="b_msg trigger tool"
+            )
+            await channel_queue_drain(h, chan_b)
+
+            # At this point: chan_b's gated_tool is in flight, gate not set.
+            # Phase 3: Trigger compaction on channel A by sending a 6th message.
+            # This appends the user message, token_estimate exceeds threshold,
+            # CompactionPlugin.compact_conversation runs (calls fake_summarize),
+            # then the LLM is called for the 6th response.
+            await h.pm.ahook.on_message(
+                channel=chan_a, sender="user", text=long_text
+            )
+            await channel_queue_drain(h, chan_a)
+
+            # Phase 4: Release the gate → channel B's tool completes → on_notify
+            # enqueues the tool result → LLM called again → final text response.
+            gate.set()
+            await h.drain_all()
+
+        # Verify channel A: summary is present in conversation
+        msgs_a = chan_a.conversation.messages
+        summary_msgs_a = [
+            m for m in msgs_a
+            if isinstance(m.get("content"), str)
+            and m["content"].startswith("[Summary")
+        ]
+        assert len(summary_msgs_a) >= 1, (
+            "Channel A should have a compaction summary after 6 large messages"
         )
 
-        # Send to chan_b (text response, no blocking)
-        await harness.pm.ahook.on_message(channel=chan_b, sender="user", text="b message")
-        await channel_queue_drain(harness, chan_b)
+        # Verify channel B: tool call completed normally
+        msgs_b = chan_b.conversation.messages
+        roles_b = [m["role"] for m in msgs_b]
+        assert "tool" in roles_b, (
+            "Channel B should have a tool result message after gate release"
+        )
+        # Last assistant message should be the post-tool text response
+        assistant_msgs_b = [m for m in msgs_b if m["role"] == "assistant" and not m.get("tool_calls")]
+        assert any(
+            m.get("content") == "b after tool" for m in assistant_msgs_b
+        ), "Channel B should have received the final 'b after tool' response"
 
-        # Send to chan_a (tool call, blocks on gate)
-        await harness.pm.ahook.on_message(channel=chan_a, sender="user", text="a message")
-        await channel_queue_drain(harness, chan_a)
+        # Verify no cross-contamination: channel A has no channel B content, vice versa
+        a_contents = [
+            m.get("content", "") for m in msgs_a
+            if isinstance(m.get("content"), str)
+        ]
+        b_contents = [
+            m.get("content", "") for m in msgs_b
+            if isinstance(m.get("content"), str)
+        ]
+        assert not any("b_msg" in c for c in a_contents), (
+            "Channel A's conversation should not contain channel B's messages"
+        )
+        assert not any("a_long_msg" in c for c in b_contents), (
+            "Channel B's conversation should not contain channel A's messages"
+        )
 
-        # Release gate → chan_a finishes
-        gate.set()
-        await harness.drain_all()
-
-        # Neither channel's conversation has the other's data
-        msgs_a = [m["content"] for m in chan_a.conversation.messages if isinstance(m.get("content"), str)]
-        msgs_b = [m["content"] for m in chan_b.conversation.messages if isinstance(m.get("content"), str)]
-
-        assert not any("b message" in c for c in msgs_a)
-        assert not any("a message" in c for c in msgs_b)
+        await h.agent.on_stop()
+        await h.pm.ahook.on_stop()
 
 
 # ---------------------------------------------------------------------------
