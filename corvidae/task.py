@@ -25,6 +25,12 @@ from corvidae.tool import Tool
 
 logger = logging.getLogger(__name__)
 
+# Result string used when a task raises an unhandled exception.
+# Format with task_id=<str> and error=<exc or "(unknown error)">.
+TASK_FAILURE_TEMPLATE = "Task {task_id} failed: {error}"
+# Number of completed task records shown in TaskQueue.status() output.
+STATUS_HISTORY_COUNT = 3
+
 
 @dataclass
 class Task:
@@ -54,11 +60,11 @@ class Task:
 class TaskQueue:
     """Async worker queue that processes Tasks with configurable concurrency."""
 
-    def __init__(self, max_workers: int = 1) -> None:
+    def __init__(self, max_workers: int = 1, completed_buffer: int = 100) -> None:
         self.max_workers = max_workers
         self.queue: asyncio.Queue[Task] = asyncio.Queue()
         self._active_tasks: list[Task] = []
-        self.completed: collections.deque[tuple[str, str]] = collections.deque(maxlen=100)
+        self.completed: collections.deque[tuple[str, str]] = collections.deque(maxlen=completed_buffer)
 
     @property
     def active_task(self) -> Task | None:
@@ -123,7 +129,7 @@ class TaskQueue:
                 "task started",
                 extra={"task_id": task.task_id, "description": task.description},
             )
-            result = f"Task {task.task_id} failed: (unknown error)"
+            result = TASK_FAILURE_TEMPLATE.format(task_id=task.task_id, error="(unknown error)")
             try:
                 result = await task.work()
                 logger.debug(
@@ -142,7 +148,7 @@ class TaskQueue:
                     extra={"task_id": task.task_id},
                     exc_info=True,
                 )
-                result = f"Task {task.task_id} failed: {exc}"
+                result = TASK_FAILURE_TEMPLATE.format(task_id=task.task_id, error=exc)
             finally:
                 self.queue.task_done()
             self.completed.append((task.task_id, result))
@@ -168,7 +174,7 @@ class TaskQueue:
             parts.append(f"Pending: {pending} task(s)")
 
         if self.completed:
-            recent = list(self.completed)[-3:]  # already (task_id, result) tuples
+            recent = list(self.completed)[-STATUS_HISTORY_COUNT:]  # already (task_id, result) tuples
             completed_lines = []
             for tid, res in recent:
                 completed_lines.append(f"  [{tid}] {res}")
@@ -202,8 +208,10 @@ class TaskPlugin:
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
-        max_workers = config.get("daemon", {}).get("max_task_workers", 4)
-        self.task_queue = TaskQueue(max_workers=max_workers)
+        daemon_config = config.get("daemon", {})
+        max_workers = daemon_config.get("max_task_workers", 4)
+        completed_buffer = daemon_config.get("completed_task_buffer", 100)
+        self.task_queue = TaskQueue(max_workers=max_workers, completed_buffer=completed_buffer)
 
         async def _complete_wrapper(task: Task, result: str) -> None:
             return await self._on_task_complete(task, result)

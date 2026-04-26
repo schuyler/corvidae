@@ -18,6 +18,8 @@ Config:
         base_url: ...
         model: ...
         extra_body: ...
+    agent:
+      max_tool_result_chars: 100000  # optional — tool result truncation limit
 
 Logging:
     - INFO: on_start complete, on_message received, agent response sent
@@ -41,6 +43,10 @@ from corvidae.task import Task
 from corvidae.tool import Tool, ToolContext, ToolRegistry, execute_tool_call
 
 logger = logging.getLogger("corvidae.agent")
+
+DEFAULT_LLM_ERROR_MESSAGE = "Sorry, I encountered an error and could not process your message."
+# Note: same text as MAX_ROUNDS_REACHED_MESSAGE in agent_loop.py — kept in sync.
+MAX_TURNS_FALLBACK_MESSAGE = "(max tool-calling rounds reached)"
 
 
 class QueueItemRole(Enum):
@@ -94,6 +100,7 @@ class AgentPlugin:
         self.tool_schemas: list[dict] = []
         self.queues: dict[str, SerialQueue] = {}
         self._registry: ChannelRegistry | None = None
+        self._max_tool_result_chars: int = 100_000
 
     async def on_start(self, config: dict) -> None:
         await self._start_plugin(config)
@@ -274,7 +281,7 @@ class AgentPlugin:
                 channel=channel, error=exc,
             )
             if error_msg is None:
-                error_msg = "Sorry, I encountered an error and could not process your message."
+                error_msg = DEFAULT_LLM_ERROR_MESSAGE
             await self.pm.ahook.send_message(
                 channel=channel,
                 text=error_msg,
@@ -304,7 +311,7 @@ class AgentPlugin:
                 self.pm, "transform_display_text",
                 channel=channel, text=result.text, result_message=result.message,
             )
-            display_response = (transformed if transformed is not None else result.text) or "(max tool-calling rounds reached)"
+            display_response = (transformed if transformed is not None else result.text) or MAX_TURNS_FALLBACK_MESSAGE
         else:
             # No tool calls — normal text response
             channel.turn_counter += 1
@@ -358,6 +365,7 @@ class AgentPlugin:
                         channel=channel,
                         tool_call_id=call_id,
                         task_queue=task_queue,
+                        max_result_chars=self._max_tool_result_chars,
                     )
                 except Exception:
                     logger.warning(
@@ -386,6 +394,8 @@ class AgentPlugin:
         self.tools = {}
         self.tool_schemas = []
         llm_config = config.get("llm", {})
+        agent_config = config.get("agent", {})
+        self._max_tool_result_chars = agent_config.get("max_tool_result_chars", 100_000)
 
         # Breaking change: llm.main is required.
         main_config = llm_config["main"]
@@ -422,4 +432,3 @@ class AgentPlugin:
         """Close LLM client."""
         if self.client:
             await self.client.stop()
-

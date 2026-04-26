@@ -54,11 +54,12 @@ class ConversationLog:
         system_prompt: The system prompt prepended by ``build_prompt``.
     """
 
-    def __init__(self, db: aiosqlite.Connection, channel_id: str):
+    def __init__(self, db: aiosqlite.Connection, channel_id: str, chars_per_token: float = 3.5):
         self.db = db
         self.channel_id = channel_id
         self.messages: list[dict] = []
         self.system_prompt: str = ""
+        self.chars_per_token: float = chars_per_token
 
     async def load(self) -> None:
         """Load messages from DB for this channel, ordered by id.
@@ -142,10 +143,10 @@ class ConversationLog:
         )
 
     def token_estimate(self) -> int:
-        """Rough token count: int(total_chars / 3.5).
+        """Rough token count: int(total_chars / chars_per_token).
 
-        Uses a simple character-based heuristic: ~3.5 characters per token.
-        Includes system prompt length plus all message content lengths.
+        Uses a simple character-based heuristic (~3.5 characters per token by
+        default). Includes system prompt length plus all message content lengths.
         Non-string content (None, lists) is treated as 0 characters.
         """
         total_chars = len(self.system_prompt)
@@ -154,7 +155,7 @@ class ConversationLog:
             if not isinstance(content, str):
                 content = ""
             total_chars += len(content)
-        return int(total_chars / 3.5)
+        return int(total_chars / self.chars_per_token)
 
     async def replace_with_summary(self, summary_msg: dict, retain_count: int) -> None:
         """Replace older messages with a summary, retaining the most recent entries.

@@ -19,7 +19,10 @@ from typing import TYPE_CHECKING
 
 from pydantic import create_model
 
+# Maximum characters in a tool result before truncation. Override via agent.max_tool_result_chars in agent.yaml.
 MAX_TOOL_RESULT_CHARS = 100_000
+# Appended to truncated tool results. Format with original_len=<int>. Uses em-dash (U+2014).
+TOOL_TRUNCATION_TEMPLATE = "\n[truncated \u2014 {original_len} chars total]"  # em-dash, matching current code
 
 if TYPE_CHECKING:
     from corvidae.channel import Channel
@@ -164,6 +167,7 @@ async def execute_tool_call(
     channel: "Channel | None" = None,
     tool_call_id: str,
     task_queue: "TaskQueue | None" = None,
+    max_result_chars: int = MAX_TOOL_RESULT_CHARS,
 ) -> str:
     """Invoke a tool function, injecting ToolContext if the function declares ``_ctx``.
 
@@ -181,6 +185,8 @@ async def execute_tool_call(
         channel: Channel for ToolContext injection. None when unavailable.
         tool_call_id: The LLM-assigned call ID for this invocation.
         task_queue: TaskQueue for ToolContext injection. None when unavailable.
+        max_result_chars: Maximum length of the result string before truncation.
+            Defaults to MAX_TOOL_RESULT_CHARS.
 
     Returns:
         str(result) of the tool function's return value.
@@ -197,9 +203,9 @@ async def execute_tool_call(
 
     result = await tool_fn(**call_kwargs)
     result_str = str(result)
-    if len(result_str) > MAX_TOOL_RESULT_CHARS:
+    if len(result_str) > max_result_chars:
         original_len = len(result_str)
-        result_str = result_str[:MAX_TOOL_RESULT_CHARS] + f"\n[truncated — {original_len} chars total]"
+        result_str = result_str[:max_result_chars] + TOOL_TRUNCATION_TEMPLATE.format(original_len=original_len)
     return result_str
 
 

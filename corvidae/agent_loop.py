@@ -21,13 +21,17 @@ from typing import TYPE_CHECKING, Callable
 
 from corvidae.hooks import call_firstresult_hook
 from corvidae.llm import LLMClient
-from corvidae.tool import ToolContext, execute_tool_call, tool_to_schema  # noqa: F401 — re-exported for backward compat
+from corvidae.tool import MAX_TOOL_RESULT_CHARS, ToolContext, execute_tool_call, tool_to_schema  # noqa: F401 — re-exported for backward compat
 
 if TYPE_CHECKING:
     from corvidae.channel import Channel
     from corvidae.task import TaskQueue
 
 logger = logging.getLogger(__name__)
+
+LOG_TRUNCATION_LENGTH = 200
+# Note: same text as MAX_TURNS_FALLBACK_MESSAGE in agent.py — kept in sync.
+MAX_ROUNDS_REACHED_MESSAGE = "(max tool-calling rounds reached)"
 
 
 @dataclass
@@ -100,7 +104,7 @@ async def run_agent_turn(
     return AgentTurnResult(message=msg, tool_calls=tool_calls, text=text, latency_ms=latency_ms)
 
 
-def _truncate(s: str, maxlen: int = 200) -> str:
+def _truncate(s: str, maxlen: int = LOG_TRUNCATION_LENGTH) -> str:
     """Truncate a string to maxlen characters, appending '...' if truncated.
 
     Available for use in log calls where result content needs to be included
@@ -119,6 +123,7 @@ async def run_agent_loop(
     channel: "Channel | None" = None,
     task_queue: "TaskQueue | None" = None,
     pm=None,
+    max_result_chars: int = MAX_TOOL_RESULT_CHARS,
 ) -> str:
     """Run the agent loop to completion. Mutates messages in place.
 
@@ -134,6 +139,8 @@ async def run_agent_loop(
         tools: Dict mapping tool names to async callable functions
         tool_schemas: List of tool schemas for LLM function calling
         max_turns: Maximum iterations before giving up
+        max_result_chars: Maximum length of tool result strings before truncation.
+            Defaults to MAX_TOOL_RESULT_CHARS.
 
     Returns:
         Final text content from the last LLM response, or a placeholder
@@ -181,6 +188,7 @@ async def run_agent_loop(
                         channel=channel,
                         tool_call_id=call_id,
                         task_queue=task_queue,
+                        max_result_chars=max_result_chars,
                     )
                     tool_latency_ms = round((time.monotonic() - tool_start) * 1000, 1)
                     logger.info(
@@ -218,7 +226,7 @@ async def run_agent_loop(
             })
 
     logger.warning("max tool-calling rounds reached")
-    return "(max tool-calling rounds reached)"
+    return MAX_ROUNDS_REACHED_MESSAGE
 
 
 def strip_thinking(text: str) -> str:

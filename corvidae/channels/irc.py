@@ -94,6 +94,7 @@ class IRCPlugin:
         self._connect_task: Optional[asyncio.Task] = None
         self.channels: list[str] = []
         self._registry: Optional[ChannelRegistry] = None
+        self._message_chunk_size: int = 400
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
@@ -107,6 +108,7 @@ class IRCPlugin:
         nick = irc_config.get("nick", "corvidae")
         self.channels = irc_config.get("channels", [])
         tls = irc_config.get("tls", False)
+        self._message_chunk_size = irc_config.get("message_chunk_size", 400)
 
         self.client = IRCClient(self, nick, server=server, port=port, tls=tls)
         self._connect_task = asyncio.create_task(self.client.connect_with_retry())
@@ -141,7 +143,7 @@ class IRCPlugin:
             return
         if self.client is None or not self.client.connected:
             return
-        chunks = split_message(text)
+        chunks = split_message(text, max_len=self._message_chunk_size)
         for chunk in chunks:
             for line in chunk.split('\n'):
                 line = line.rstrip('\r')

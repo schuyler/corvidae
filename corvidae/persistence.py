@@ -38,11 +38,14 @@ class PersistencePlugin:
         self.db: aiosqlite.Connection | None = None
         self.base_dir: Path = Path(".")
         self._registry: ChannelRegistry | None = None
+        self._chars_per_token: float = 3.5
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
         self._registry = get_dependency(self.pm, "registry", ChannelRegistry)
         self.base_dir = config.get("_base_dir", Path("."))
+        agent_config = config.get("agent", {})
+        self._chars_per_token = agent_config.get("chars_per_token", 3.5)
 
         # Open SQLite database (only if not already injected for testing)
         if self.db is None:
@@ -61,7 +64,7 @@ class PersistencePlugin:
         if channel.conversation is not None:
             return True
 
-        conv = ConversationLog(self.db, channel.id)
+        conv = ConversationLog(self.db, channel.id, chars_per_token=self._chars_per_token)
         resolved = self._registry.resolve_config(channel)
         conv.system_prompt = resolve_system_prompt(
             resolved["system_prompt"], self.base_dir

@@ -5,8 +5,12 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Error string returned when the subprocess exceeds the configured timeout.
+# Format with timeout=<seconds>. Used by CoreToolsPlugin.shell.
+TIMEOUT_ERROR_TEMPLATE = "Error: command timed out after {timeout} seconds"
 
-async def shell(command: str) -> str:
+
+async def shell(command: str, timeout: int = 30) -> str:
     """Execute a shell command and return the output."""
     try:
         proc = await asyncio.create_subprocess_shell(
@@ -15,14 +19,14 @@ async def shell(command: str) -> str:
             stderr=asyncio.subprocess.PIPE,
         )
         stdout_bytes, stderr_bytes = await asyncio.wait_for(
-            proc.communicate(), timeout=30
+            proc.communicate(), timeout=timeout
         )
     except asyncio.TimeoutError:
         try:
             proc.kill()
         except OSError:
             logger.debug("proc.kill() failed (process may have already exited)", exc_info=True)
-        return "Error: command timed out after 30 seconds"
+        return TIMEOUT_ERROR_TEMPLATE.format(timeout=timeout)
 
     stdout = stdout_bytes.decode(errors="replace").strip()
     stderr = stderr_bytes.decode(errors="replace").strip()
@@ -39,3 +43,9 @@ async def shell(command: str) -> str:
         return "(no output)"
 
     return "\n".join(parts)
+
+
+# Expose the module-level constant as a function attribute so that
+# `import corvidae.tools.shell as m; m.TIMEOUT_ERROR_TEMPLATE` works
+# even when the package re-exports the function under the submodule name.
+shell.TIMEOUT_ERROR_TEMPLATE = TIMEOUT_ERROR_TEMPLATE  # type: ignore[attr-defined]
