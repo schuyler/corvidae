@@ -352,6 +352,7 @@ class TestGroupALifecycle:
 
         idle_monitor = harness.pm.get_plugin("idle_monitor")
 
+        tasks_before = set(asyncio.all_tasks())
         await harness.agent.on_stop()
         await harness.pm.ahook.on_stop()
 
@@ -367,6 +368,11 @@ class TestGroupALifecycle:
 
         # LLM client stop() was called
         harness.mock_client.stop.assert_called_once()
+
+        # No new async tasks leaked: tasks after on_stop should be subset of tasks_before
+        tasks_after = set(asyncio.all_tasks())
+        new_tasks = tasks_after - tasks_before
+        assert not new_tasks, f"Leaked tasks after on_stop: {new_tasks}"
 
         # Mark fixture teardown as already done
         harness._stopped = True
@@ -398,8 +404,7 @@ class TestGroupBRoundTrip:
         assert chan.conversation is not None
         msgs = chan.conversation.messages
         roles = [m["role"] for m in msgs]
-        assert "user" in roles
-        assert "assistant" in roles
+        assert roles == ["user", "assistant"]
 
     async def test_b2_tool_call_full_cycle(self, harness):
         """B2. Message → tool call → result → response (full cycle)."""
@@ -779,8 +784,14 @@ class TestGroupCPersistence:
         long_text = "x" * 300
         response_text = "y" * 300
 
-        # We need >5 messages to trigger compaction. Provide enough responses
-        # including a summarization response.
+        # Patch _summarize to return a canned summary without making an LLM call.
+        # This keeps the side_effect list deterministic: one response per user message,
+        # no ordering dependency on when compaction happens to trigger.
+        async def fake_summarize(self, client, messages):
+            return "test summary"
+
+        # We need >5 messages to trigger compaction.
+        # side_effect contains only normal conversation LLM responses (one per message).
         h1.mock_client.chat = AsyncMock(
             side_effect=[
                 _make_text_response(response_text),  # msg 1
@@ -788,14 +799,14 @@ class TestGroupCPersistence:
                 _make_text_response(response_text),  # msg 3
                 _make_text_response(response_text),  # msg 4
                 _make_text_response(response_text),  # msg 5
-                _make_text_response("Compaction summary text"),  # summarize call
                 _make_text_response(response_text),  # msg 6 (post-compaction)
             ]
         )
 
-        for i in range(6):
-            await h1.inject_message("test:c2", "user", long_text)
-            await h1.drain_all()
+        with patch.object(CompactionPlugin, "_summarize", fake_summarize):
+            for i in range(6):
+                await h1.inject_message("test:c2", "user", long_text)
+                await h1.drain_all()
 
         await h1.agent.on_stop()
         await h1.pm.ahook.on_stop()
@@ -1150,7 +1161,7 @@ class TestGroupEErrorHandling:
         await pm.ahook.on_message(channel=channel, sender="user", text="just text")
         await agent_loop.queues[channel.id].drain()
 
-        assert len(fake_transport.sent) >= 1
+        assert len(fake_transport.sent) == 1
 
         await agent_loop.on_stop()
         await pm.ahook.on_stop()
