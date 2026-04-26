@@ -1116,7 +1116,7 @@ class TestGroupDMultiChannel:
         assert not any("b_msg" in c for c in a_contents), (
             "Channel A's conversation should not contain channel B's messages"
         )
-        assert not any("a_long_msg" in c for c in b_contents), (
+        assert not any("a_msg_" in c for c in b_contents), (
             "Channel B's conversation should not contain channel A's messages"
         )
 
