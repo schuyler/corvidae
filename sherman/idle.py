@@ -108,7 +108,9 @@ class IdleMonitorPlugin:
     """Plugin that monitors system idle state and fires the on_idle hook.
 
     Depends on agent_loop being registered. Uses trylast=True on on_start
-    so it fires after AgentPlugin.on_start has fully initialized.
+    to run late in the broadcast. AgentPlugin.on_start is called separately
+    by main.py after the broadcast completes, so it is always fully
+    initialized before IdleMonitor begins polling.
     """
 
     depends_on = {"agent_loop"}

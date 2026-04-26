@@ -268,9 +268,13 @@ agent_loop     (AgentPlugin)
 idle_monitor   (IdleMonitorPlugin)
 ```
 
-Tool-providing plugins and transport plugins register before `agent_loop`. The `agent_loop` plugin collects tools during `on_start`, so anything appending to `tool_registry` must be registered first. Note: `on_start` hooks run concurrently via `asyncio.gather`, so there is no ordering guarantee between plugins' `on_start` coroutines. `McpClientPlugin` uses `on_start` for MCP connections; in practice LLM client startup is slower than MCP connections, so tools are ready before `AgentPlugin` collects them. See `plans/async-hook-ordering.md` for discussion of the general ordering problem.
+Tool-providing plugins and transport plugins register before `agent_loop`. The `agent_loop` plugin collects tools during `on_start`, so anything appending to `tool_registry` must be registered first.
 
-`idle_monitor` registers after `agent_loop` because it depends on `"agent_loop"` and its `on_start` uses `@hookimpl(trylast=True)` to run after `AgentPlugin.on_start` has fully initialized.
+**Startup order:** `main.py` calls `pm.ahook.on_start(config=config)` first, which runs all plugins' `on_start` hooks concurrently via `asyncio.gather`. Then it calls `agent_loop.on_start(config=config)` explicitly. This guarantees that all plugins (including `McpClientPlugin`) have completed initialization before `AgentPlugin` collects tools via `register_tools`. `AgentPlugin.on_start` does not have `@hookimpl` — it is called only by `main.py`.
+
+**Shutdown order:** `main.py` calls `agent_loop.on_stop()` first (drains queues, closes LLM client), then `pm.ahook.on_stop()` to tear down all other plugins.
+
+`idle_monitor` registers after `agent_loop` because it depends on `"agent_loop"`. Its `on_start` uses `@hookimpl(trylast=True)` to run late in the broadcast. Because `AgentPlugin.on_start` is called after the broadcast completes, `idle_monitor` is always initialized before `AgentPlugin` starts.
 
 ## Async considerations
 
@@ -332,8 +336,8 @@ Implements three hooks:
 
 - `on_start` — connects to all servers listed under `mcp.servers`
   in `agent.yaml`, fetches their tool lists, and builds cached `Tool` instances.
-  Runs concurrently with other `on_start` hooks; see `plans/async-hook-ordering.md`
-  for the known ordering issue.
+  Runs in the broadcast; completes before `AgentPlugin.on_start` calls
+  `register_tools`.
 - `register_tools` — appends the cached tools to `tool_registry`.
 - `on_stop` — closes all MCP sessions and transports via `AsyncExitStack`.
 
@@ -389,7 +393,9 @@ Fires the `on_idle` broadcast hook when all queues are quiescent.
 Registered as `"idle_monitor"` after `agent_loop`.
 
 Depends on `"agent_loop"`. Its `on_start` uses `@hookimpl(trylast=True)`
-so it runs after `AgentPlugin.on_start` has fully initialized. It
+to run late in the broadcast. `AgentPlugin.on_start` is called by
+`main.py` after the broadcast completes, so the idle monitor is always
+initialized before the agent starts. It
 retrieves `AgentPlugin.queues` (a `dict[str, SerialQueue]`) by reference,
 so queues created after `IdleMonitorPlugin.on_start` are included
 automatically.
