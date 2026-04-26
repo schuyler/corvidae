@@ -241,10 +241,17 @@ class TaskPlugin:
                 "result_length": len(result),
             },
         )
-        await self.pm.ahook.on_notify(
-            channel=task.channel,
-            source="task",
-            text=f"[Task {task.task_id}] {result}",
-            tool_call_id=task.tool_call_id,
-            meta={"task_id": task.task_id},
-        )
+        try:
+            await self.pm.ahook.on_notify(
+                channel=task.channel,
+                source="task",
+                text=f"[Task {task.task_id}] {result}",
+                tool_call_id=task.tool_call_id,
+                meta={"task_id": task.task_id},
+            )
+        except Exception:
+            logger.warning(
+                "on_notify hook failed in _on_task_complete",
+                exc_info=True,
+                extra={"channel": task.channel.id, "task_id": task.task_id},
+            )
