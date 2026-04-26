@@ -1,5 +1,5 @@
 [project]
-name = "sherman"
+name = "corvidae"
 version = "0.0.1"
 requires-python = ">=3.13"
 dependencies = [
@@ -19,10 +19,10 @@ dev = [
 ]
 
 [project.scripts]
-sherman = "sherman.main:cli"
+corvidae = "corvidae.main:cli"
 
 [tool.setuptools.packages.find]
-include = ["sherman*"]
+include = ["corvidae*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

@@ -22,8 +22,8 @@ from pydantic import create_model
 MAX_TOOL_RESULT_CHARS = 100_000
 
 if TYPE_CHECKING:
-    from sherman.channel import Channel
-    from sherman.task import TaskQueue
+    from corvidae.channel import Channel
+    from corvidae.task import TaskQueue
 
 
 def tool_to_schema(fn: Callable) -> dict:

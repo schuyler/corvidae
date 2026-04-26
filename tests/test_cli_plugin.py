@@ -1,4 +1,4 @@
-"""Tests for sherman.channels.cli.CLIPlugin."""
+"""Tests for corvidae.channels.cli.CLIPlugin."""
 
 import asyncio
 import sys
@@ -6,10 +6,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from sherman.channel import Channel, ChannelConfig, ChannelRegistry
-from sherman.hooks import create_plugin_manager
+from corvidae.channel import Channel, ChannelConfig, ChannelRegistry
+from corvidae.hooks import create_plugin_manager
 
-from sherman.channels.cli import CLIPlugin
+from corvidae.channels.cli import CLIPlugin
 
 
 # ---------------------------------------------------------------------------

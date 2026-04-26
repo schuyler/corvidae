@@ -17,9 +17,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import yaml
 
-from sherman.channel import ChannelConfig, ChannelRegistry, load_channel_config
-from sherman.conversation import ConversationLog, init_db
-from sherman.channel import resolve_system_prompt
+from corvidae.channel import ChannelConfig, ChannelRegistry, load_channel_config
+from corvidae.conversation import ConversationLog, init_db
+from corvidae.channel import resolve_system_prompt
 
 
 # ---------------------------------------------------------------------------
@@ -43,53 +43,53 @@ class TestLoggerNamingConvention:
     """Every module must have a module-level logger named after __name__."""
 
     def test_agent_loop_has_module_logger(self):
-        """sherman.agent_loop must expose a module-level `logger` attribute
+        """corvidae.agent_loop must expose a module-level `logger` attribute
         whose name matches the module __name__."""
-        import sherman.agent_loop as mod
+        import corvidae.agent_loop as mod
         assert hasattr(mod, "logger"), "agent_loop.py must define module-level `logger`"
-        assert mod.logger.name == "sherman.agent_loop"
+        assert mod.logger.name == "corvidae.agent_loop"
 
     def test_llm_has_module_logger(self):
-        """sherman.llm must expose a module-level `logger` attribute."""
-        import sherman.llm as mod
+        """corvidae.llm must expose a module-level `logger` attribute."""
+        import corvidae.llm as mod
         assert hasattr(mod, "logger"), "llm.py must define module-level `logger`"
-        assert mod.logger.name == "sherman.llm"
+        assert mod.logger.name == "corvidae.llm"
 
     def test_conversation_has_module_logger(self):
-        """sherman.conversation must expose a module-level `logger` attribute."""
-        import sherman.conversation as mod
+        """corvidae.conversation must expose a module-level `logger` attribute."""
+        import corvidae.conversation as mod
         assert hasattr(mod, "logger"), "conversation.py must define module-level `logger`"
-        assert mod.logger.name == "sherman.conversation"
+        assert mod.logger.name == "corvidae.conversation"
 
     def test_channel_has_module_logger(self):
-        """sherman.channel must expose a module-level `logger` attribute."""
-        import sherman.channel as mod
+        """corvidae.channel must expose a module-level `logger` attribute."""
+        import corvidae.channel as mod
         assert hasattr(mod, "logger"), "channel.py must define module-level `logger`"
-        assert mod.logger.name == "sherman.channel"
+        assert mod.logger.name == "corvidae.channel"
 
     def test_prompt_has_module_logger(self):
-        """resolve_system_prompt logs under 'sherman.prompt' (canonical: sherman.channel)."""
-        import sherman.channel as mod
+        """resolve_system_prompt logs under 'corvidae.prompt' (canonical: corvidae.channel)."""
+        import corvidae.channel as mod
         assert hasattr(mod, "_prompt_logger"), "channel.py must define module-level `_prompt_logger`"
-        assert mod._prompt_logger.name == "sherman.prompt"
+        assert mod._prompt_logger.name == "corvidae.prompt"
 
     def test_main_has_module_logger(self):
-        """sherman.main must expose a module-level `logger` attribute."""
-        import sherman.main as mod
+        """corvidae.main must expose a module-level `logger` attribute."""
+        import corvidae.main as mod
         assert hasattr(mod, "logger"), "main.py must define module-level `logger`"
-        assert mod.logger.name == "sherman.main"
+        assert mod.logger.name == "corvidae.main"
 
     def test_agent_loop_plugin_has_module_logger(self):
-        """AgentPlugin logs under 'sherman.agent' (canonical: sherman.agent)."""
-        import sherman.agent as mod
+        """AgentPlugin logs under 'corvidae.agent' (canonical: corvidae.agent)."""
+        import corvidae.agent as mod
         assert hasattr(mod, "logger")
-        assert mod.logger.name == "sherman.agent"
+        assert mod.logger.name == "corvidae.agent"
 
     def test_plugin_manager_has_module_logger(self):
-        """create_plugin_manager logs under 'sherman.plugin_manager' (canonical: sherman.hooks)."""
-        import sherman.hooks as mod
+        """create_plugin_manager logs under 'corvidae.plugin_manager' (canonical: corvidae.hooks)."""
+        import corvidae.hooks as mod
         assert hasattr(mod, "_pm_logger"), "hooks.py must define module-level `_pm_logger`"
-        assert mod._pm_logger.name == "sherman.plugin_manager"
+        assert mod._pm_logger.name == "corvidae.plugin_manager"
 
 
 # ---------------------------------------------------------------------------
@@ -102,12 +102,12 @@ class TestMainLogging:
 
     def test_default_logging_constant_exists(self):
         """main.py must define _DEFAULT_LOGGING as a module-level constant."""
-        import sherman.main as mod
+        import corvidae.main as mod
         assert hasattr(mod, "_DEFAULT_LOGGING"), "main.py must define _DEFAULT_LOGGING"
 
     def test_default_logging_constant_has_required_keys(self):
         """_DEFAULT_LOGGING must have version, formatters, handlers, loggers, root."""
-        import sherman.main as mod
+        import corvidae.main as mod
         d = mod._DEFAULT_LOGGING
         assert d.get("version") == 1
         assert "formatters" in d
@@ -115,15 +115,15 @@ class TestMainLogging:
         assert "loggers" in d
         assert "root" in d
 
-    def test_default_logging_sherman_level_is_info(self):
-        """_DEFAULT_LOGGING must configure sherman logger at INFO."""
-        import sherman.main as mod
-        sherman_cfg = mod._DEFAULT_LOGGING["loggers"].get("sherman", {})
-        assert sherman_cfg.get("level") == "INFO"
+    def test_default_logging_corvidae_level_is_info(self):
+        """_DEFAULT_LOGGING must configure corvidae logger at INFO."""
+        import corvidae.main as mod
+        corvidae_cfg = mod._DEFAULT_LOGGING["loggers"].get("corvidae", {})
+        assert corvidae_cfg.get("level") == "INFO"
 
     def test_default_logging_disable_existing_is_false(self):
         """_DEFAULT_LOGGING must set disable_existing_loggers to False."""
-        import sherman.main as mod
+        import corvidae.main as mod
         assert mod._DEFAULT_LOGGING.get("disable_existing_loggers") is False
 
     async def test_main_calls_dictconfig_with_defaults(self):
@@ -143,8 +143,8 @@ class TestMainLogging:
             import signal
 
             with patch("logging.config.dictConfig") as mock_dictconfig, \
-                 patch("sherman.main.create_plugin_manager") as mock_pm_factory, \
-                 patch("sherman.main.AgentPlugin") as mock_agent_cls:
+                 patch("corvidae.main.create_plugin_manager") as mock_pm_factory, \
+                 patch("corvidae.main.AgentPlugin") as mock_agent_cls:
                 mock_pm = MagicMock()
                 mock_pm.ahook.on_start = AsyncMock(return_value=[])
                 mock_pm.ahook.on_stop = AsyncMock(return_value=[])
@@ -156,13 +156,13 @@ class TestMainLogging:
 
                 async def run():
                     asyncio.get_running_loop().call_later(0.05, os.kill, os.getpid(), signal.SIGINT)
-                    from sherman.main import main
+                    from corvidae.main import main
                     await main(config_path)
 
                 await run()
 
             mock_dictconfig.assert_called()
-            from sherman.main import _DEFAULT_LOGGING
+            from corvidae.main import _DEFAULT_LOGGING
             first_call_arg = mock_dictconfig.call_args_list[0][0][0]
             assert first_call_arg == _DEFAULT_LOGGING, (
                 "dictConfig should be called with _DEFAULT_LOGGING when no logging key in config"
@@ -177,7 +177,7 @@ class TestMainLogging:
             "version": 1,
             "disable_existing_loggers": False,
             "handlers": {"null": {"class": "logging.NullHandler"}},
-            "loggers": {"sherman": {"level": "DEBUG", "handlers": ["null"], "propagate": False}},
+            "loggers": {"corvidae": {"level": "DEBUG", "handlers": ["null"], "propagate": False}},
             "root": {"level": "ERROR", "handlers": ["null"]},
         }
         with tempfile.NamedTemporaryFile(
@@ -197,8 +197,8 @@ class TestMainLogging:
             import signal
 
             with patch("logging.config.dictConfig") as mock_dictconfig, \
-                 patch("sherman.main.create_plugin_manager") as mock_pm_factory, \
-                 patch("sherman.main.AgentPlugin") as mock_agent_cls:
+                 patch("corvidae.main.create_plugin_manager") as mock_pm_factory, \
+                 patch("corvidae.main.AgentPlugin") as mock_agent_cls:
                 mock_pm = MagicMock()
                 mock_pm.ahook.on_start = AsyncMock(return_value=[])
                 mock_pm.ahook.on_stop = AsyncMock(return_value=[])
@@ -210,7 +210,7 @@ class TestMainLogging:
 
                 async def run():
                     asyncio.get_running_loop().call_later(0.05, os.kill, os.getpid(), signal.SIGINT)
-                    from sherman.main import main
+                    from corvidae.main import main
                     await main(config_path)
 
                 await run()
@@ -239,10 +239,10 @@ class TestMainLogging:
             import asyncio
             import signal
 
-            with caplog.at_level(logging.INFO, logger="sherman.main"), \
+            with caplog.at_level(logging.INFO, logger="corvidae.main"), \
                  patch("logging.config.dictConfig"), \
-                 patch("sherman.main.create_plugin_manager") as mock_pm_factory, \
-                 patch("sherman.main.AgentPlugin") as mock_agent_cls:
+                 patch("corvidae.main.create_plugin_manager") as mock_pm_factory, \
+                 patch("corvidae.main.AgentPlugin") as mock_agent_cls:
                 mock_pm = MagicMock()
                 mock_pm.ahook.on_start = AsyncMock(return_value=[])
                 mock_pm.ahook.on_stop = AsyncMock(return_value=[])
@@ -254,15 +254,15 @@ class TestMainLogging:
 
                 async def run():
                     asyncio.get_running_loop().call_later(0.05, os.kill, os.getpid(), signal.SIGINT)
-                    from sherman.main import main
+                    from corvidae.main import main
                     await main(config_path)
 
                 await run()
 
-            log_messages = [r.message for r in caplog.records if r.name == "sherman.main"]
+            log_messages = [r.message for r in caplog.records if r.name == "corvidae.main"]
             assert any("logging" in m.lower() or "starting" in m.lower() or "configured" in m.lower()
                        for m in log_messages), (
-                f"Expected startup INFO log in sherman.main, got: {log_messages}"
+                f"Expected startup INFO log in corvidae.main, got: {log_messages}"
             )
         finally:
             os.unlink(config_path)
@@ -283,10 +283,10 @@ class TestMainLogging:
             import asyncio
             import signal
 
-            with caplog.at_level(logging.INFO, logger="sherman.main"), \
+            with caplog.at_level(logging.INFO, logger="corvidae.main"), \
                  patch("logging.config.dictConfig"), \
-                 patch("sherman.main.create_plugin_manager") as mock_pm_factory, \
-                 patch("sherman.main.AgentPlugin") as mock_agent_cls:
+                 patch("corvidae.main.create_plugin_manager") as mock_pm_factory, \
+                 patch("corvidae.main.AgentPlugin") as mock_agent_cls:
                 mock_pm = MagicMock()
                 mock_pm.ahook.on_start = AsyncMock(return_value=[])
                 mock_pm.ahook.on_stop = AsyncMock(return_value=[])
@@ -298,15 +298,15 @@ class TestMainLogging:
 
                 async def run():
                     asyncio.get_running_loop().call_later(0.05, os.kill, os.getpid(), signal.SIGINT)
-                    from sherman.main import main
+                    from corvidae.main import main
                     await main(config_path)
 
                 await run()
 
-            log_messages = [r.message for r in caplog.records if r.name == "sherman.main"]
+            log_messages = [r.message for r in caplog.records if r.name == "corvidae.main"]
             assert any("shutdown" in m.lower() or "stopping" in m.lower() or "signal" in m.lower()
                        for m in log_messages), (
-                f"Expected shutdown INFO log in sherman.main, got: {log_messages}"
+                f"Expected shutdown INFO log in corvidae.main, got: {log_messages}"
             )
         finally:
             os.unlink(config_path)
@@ -322,15 +322,15 @@ class TestLLMLogging:
 
     async def test_llm_start_logs_info(self, caplog):
         """LLMClient.start() must emit an INFO log containing base_url and model."""
-        from sherman.llm import LLMClient
+        from corvidae.llm import LLMClient
         client = LLMClient(base_url="http://localhost:8080", model="test-model")
 
-        with caplog.at_level(logging.INFO, logger="sherman.llm"), \
+        with caplog.at_level(logging.INFO, logger="corvidae.llm"), \
              patch("aiohttp.ClientSession") as mock_session_cls:
             mock_session_cls.return_value = MagicMock()
             await client.start()
 
-        records = [r for r in caplog.records if r.name == "sherman.llm"]
+        records = [r for r in caplog.records if r.name == "corvidae.llm"]
         assert records, "LLMClient.start() must emit at least one log record"
         assert any(r.levelno == logging.INFO for r in records), (
             "LLMClient.start() must emit an INFO record"
@@ -338,23 +338,23 @@ class TestLLMLogging:
 
     async def test_llm_stop_logs_info(self, caplog):
         """LLMClient.stop() must emit an INFO log."""
-        from sherman.llm import LLMClient
+        from corvidae.llm import LLMClient
         client = LLMClient(base_url="http://localhost:8080", model="test-model")
         mock_session = AsyncMock()
         mock_session.close = AsyncMock()
         client.session = mock_session
 
-        with caplog.at_level(logging.INFO, logger="sherman.llm"):
+        with caplog.at_level(logging.INFO, logger="corvidae.llm"):
             await client.stop()
 
-        records = [r for r in caplog.records if r.name == "sherman.llm"]
+        records = [r for r in caplog.records if r.name == "corvidae.llm"]
         assert records, "LLMClient.stop() must emit at least one log record"
 
     async def test_llm_chat_logs_info_with_token_usage(self, caplog):
         """LLMClient.chat() must emit an INFO log after success including
         model, latency_ms, and token usage fields."""
         from aiohttp import ClientResponseError
-        from sherman.llm import LLMClient
+        from corvidae.llm import LLMClient
 
         mock_completion = {
             "choices": [{"message": {"role": "assistant", "content": "hi"}}],
@@ -380,10 +380,10 @@ class TestLLMLogging:
         client = LLMClient(base_url="http://localhost:8080", model="test-model")
         client.session = mock_session
 
-        with caplog.at_level(logging.INFO, logger="sherman.llm"):
+        with caplog.at_level(logging.INFO, logger="corvidae.llm"):
             await client.chat([{"role": "user", "content": "hi"}])
 
-        records = [r for r in caplog.records if r.name == "sherman.llm"]
+        records = [r for r in caplog.records if r.name == "corvidae.llm"]
         info_records = [r for r in records if r.levelno == logging.INFO]
         assert info_records, "LLMClient.chat() must emit an INFO log after completion"
 
@@ -396,7 +396,7 @@ class TestLLMLogging:
     async def test_llm_chat_logs_error_on_http_failure(self, caplog):
         """LLMClient.chat() must emit an ERROR log when the HTTP call fails."""
         from aiohttp import ClientResponseError
-        from sherman.llm import LLMClient
+        from corvidae.llm import LLMClient
 
         mock_response = AsyncMock()
         mock_response.status = 500
@@ -416,18 +416,18 @@ class TestLLMLogging:
         client = LLMClient(base_url="http://localhost:8080", model="test-model")
         client.session = mock_session
 
-        with caplog.at_level(logging.ERROR, logger="sherman.llm"), \
+        with caplog.at_level(logging.ERROR, logger="corvidae.llm"), \
              pytest.raises(ClientResponseError):
             await client.chat([{"role": "user", "content": "hi"}])
 
-        records = [r for r in caplog.records if r.name == "sherman.llm"]
+        records = [r for r in caplog.records if r.name == "corvidae.llm"]
         error_records = [r for r in records if r.levelno == logging.ERROR]
         assert error_records, "LLMClient.chat() must emit an ERROR log on HTTP failure"
 
     async def test_llm_chat_logs_debug_request(self, caplog):
         """LLMClient.chat() must emit a DEBUG log before the request with
         message count and tool count (not content)."""
-        from sherman.llm import LLMClient
+        from corvidae.llm import LLMClient
 
         mock_completion = {
             "choices": [{"message": {"role": "assistant", "content": "ok"}}],
@@ -447,10 +447,10 @@ class TestLLMLogging:
         client = LLMClient(base_url="http://localhost:8080", model="test-model")
         client.session = mock_session
 
-        with caplog.at_level(logging.DEBUG, logger="sherman.llm"):
+        with caplog.at_level(logging.DEBUG, logger="corvidae.llm"):
             await client.chat([{"role": "user", "content": "test"}])
 
-        records = [r for r in caplog.records if r.name == "sherman.llm"]
+        records = [r for r in caplog.records if r.name == "corvidae.llm"]
         debug_records = [r for r in records if r.levelno == logging.DEBUG]
         assert debug_records, "LLMClient.chat() must emit a DEBUG log before the request"
 
@@ -465,7 +465,7 @@ class TestAgentLoopLogging:
 
     async def test_max_turns_logs_warning(self, caplog):
         """When max turns are exhausted, agent_loop must emit a WARNING log."""
-        from sherman.agent_loop import run_agent_loop
+        from corvidae.agent_loop import run_agent_loop
 
         client = MagicMock()
         client.chat = AsyncMock(
@@ -481,7 +481,7 @@ class TestAgentLoopLogging:
         )
         noop = AsyncMock(return_value="result")
 
-        with caplog.at_level(logging.WARNING, logger="sherman.agent_loop"):
+        with caplog.at_level(logging.WARNING, logger="corvidae.agent_loop"):
             await run_agent_loop(
                 client,
                 [{"role": "user", "content": "go"}],
@@ -490,7 +490,7 @@ class TestAgentLoopLogging:
                 max_turns=2,
             )
 
-        records = [r for r in caplog.records if r.name == "sherman.agent_loop"]
+        records = [r for r in caplog.records if r.name == "corvidae.agent_loop"]
         warning_records = [r for r in records if r.levelno == logging.WARNING]
         assert warning_records, (
             "run_agent_loop must emit a WARNING when max_turns is reached"
@@ -498,7 +498,7 @@ class TestAgentLoopLogging:
 
     async def test_unknown_tool_logs_warning(self, caplog):
         """When LLM calls an unknown tool, agent_loop must emit a WARNING log."""
-        from sherman.agent_loop import run_agent_loop
+        from corvidae.agent_loop import run_agent_loop
 
         client = MagicMock()
         client.chat = AsyncMock(
@@ -514,7 +514,7 @@ class TestAgentLoopLogging:
             ]
         )
 
-        with caplog.at_level(logging.WARNING, logger="sherman.agent_loop"):
+        with caplog.at_level(logging.WARNING, logger="corvidae.agent_loop"):
             await run_agent_loop(
                 client,
                 [{"role": "user", "content": "go"}],
@@ -522,7 +522,7 @@ class TestAgentLoopLogging:
                 tool_schemas=[],
             )
 
-        records = [r for r in caplog.records if r.name == "sherman.agent_loop"]
+        records = [r for r in caplog.records if r.name == "corvidae.agent_loop"]
         warning_records = [r for r in records if r.levelno == logging.WARNING]
         assert warning_records, (
             "run_agent_loop must emit a WARNING when an unknown tool is called"
@@ -530,7 +530,7 @@ class TestAgentLoopLogging:
 
     async def test_tool_exception_logs_warning(self, caplog):
         """When a tool raises, agent_loop must emit a WARNING log with exc_info."""
-        from sherman.agent_loop import run_agent_loop
+        from corvidae.agent_loop import run_agent_loop
 
         async def bad_tool(**kwargs):
             raise ValueError("something broke")
@@ -549,7 +549,7 @@ class TestAgentLoopLogging:
             ]
         )
 
-        with caplog.at_level(logging.WARNING, logger="sherman.agent_loop"):
+        with caplog.at_level(logging.WARNING, logger="corvidae.agent_loop"):
             await run_agent_loop(
                 client,
                 [{"role": "user", "content": "go"}],
@@ -557,7 +557,7 @@ class TestAgentLoopLogging:
                 tool_schemas=[],
             )
 
-        records = [r for r in caplog.records if r.name == "sherman.agent_loop"]
+        records = [r for r in caplog.records if r.name == "corvidae.agent_loop"]
         warning_records = [r for r in records if r.levelno == logging.WARNING]
         assert warning_records, (
             "run_agent_loop must emit a WARNING when a tool raises an exception"
@@ -566,7 +566,7 @@ class TestAgentLoopLogging:
     async def test_turn_info_log(self, caplog):
         """Each turn in run_agent_loop must emit at least one INFO log, and at
         least one INFO record must carry a latency_ms attribute."""
-        from sherman.agent_loop import run_agent_loop
+        from corvidae.agent_loop import run_agent_loop
 
         client = MagicMock()
         client.chat = AsyncMock(
@@ -575,7 +575,7 @@ class TestAgentLoopLogging:
             }
         )
 
-        with caplog.at_level(logging.INFO, logger="sherman.agent_loop"):
+        with caplog.at_level(logging.INFO, logger="corvidae.agent_loop"):
             await run_agent_loop(
                 client,
                 [{"role": "user", "content": "hi"}],
@@ -583,7 +583,7 @@ class TestAgentLoopLogging:
                 tool_schemas=[],
             )
 
-        records = [r for r in caplog.records if r.name == "sherman.agent_loop"]
+        records = [r for r in caplog.records if r.name == "corvidae.agent_loop"]
         info_records = [r for r in records if r.levelno == logging.INFO]
         assert info_records, (
             "run_agent_loop must emit at least one INFO log per turn"
@@ -603,7 +603,7 @@ class TestConversationLogging:
 
     async def test_compaction_triggered_logs_warning(self, db, caplog):
         """CompactionPlugin.compact_conversation must log WARNING when compaction is triggered."""
-        from sherman.compaction import CompactionPlugin
+        from corvidae.compaction import CompactionPlugin
 
         conv = ConversationLog(db, channel_id="test:chan1")
         conv.system_prompt = ""
@@ -616,12 +616,12 @@ class TestConversationLogging:
         )
 
         plugin = CompactionPlugin()
-        with caplog.at_level(logging.WARNING, logger="sherman.compaction"):
+        with caplog.at_level(logging.WARNING, logger="corvidae.compaction"):
             await plugin.compact_conversation(
                 conversation=conv, client=mock_client, max_tokens=100
             )
 
-        records = [r for r in caplog.records if r.name == "sherman.compaction"]
+        records = [r for r in caplog.records if r.name == "corvidae.compaction"]
         warning_records = [r for r in records if r.levelno == logging.WARNING]
         assert warning_records, (
             "CompactionPlugin.compact_conversation must emit WARNING when compaction is triggered"
@@ -630,7 +630,7 @@ class TestConversationLogging:
     async def test_compaction_completed_logs_info(self, db, caplog):
         """ConversationLog.replace_with_summary must log INFO after compaction with
         messages_before and messages_after counts."""
-        from sherman.compaction import CompactionPlugin
+        from corvidae.compaction import CompactionPlugin
 
         conv = ConversationLog(db, channel_id="test:chan1")
         conv.system_prompt = ""
@@ -654,12 +654,12 @@ class TestConversationLogging:
         )
 
         plugin = CompactionPlugin()
-        with caplog.at_level(logging.INFO, logger="sherman.conversation"):
+        with caplog.at_level(logging.INFO, logger="corvidae.conversation"):
             await plugin.compact_conversation(
                 conversation=conv, client=mock_client, max_tokens=100
             )
 
-        records = [r for r in caplog.records if r.name == "sherman.conversation"]
+        records = [r for r in caplog.records if r.name == "corvidae.conversation"]
         info_records = [r for r in records if r.levelno == logging.INFO]
         assert info_records, (
             "replace_with_summary must emit INFO when compaction completes"
@@ -670,10 +670,10 @@ class TestConversationLogging:
         messages loaded."""
         conv = ConversationLog(db, channel_id="test:chan1")
 
-        with caplog.at_level(logging.DEBUG, logger="sherman.conversation"):
+        with caplog.at_level(logging.DEBUG, logger="corvidae.conversation"):
             await conv.load()
 
-        records = [r for r in caplog.records if r.name == "sherman.conversation"]
+        records = [r for r in caplog.records if r.name == "corvidae.conversation"]
         debug_records = [r for r in records if r.levelno == logging.DEBUG]
         assert debug_records, (
             "ConversationLog.load() must emit a DEBUG log with message count"
@@ -684,10 +684,10 @@ class TestConversationLogging:
         length."""
         conv = ConversationLog(db, channel_id="test:chan1")
 
-        with caplog.at_level(logging.DEBUG, logger="sherman.conversation"):
+        with caplog.at_level(logging.DEBUG, logger="corvidae.conversation"):
             await conv.append({"role": "user", "content": "hello"})
 
-        records = [r for r in caplog.records if r.name == "sherman.conversation"]
+        records = [r for r in caplog.records if r.name == "corvidae.conversation"]
         debug_records = [r for r in records if r.levelno == logging.DEBUG]
         assert debug_records, (
             "ConversationLog.append() must emit a DEBUG log with role and content length"
@@ -713,10 +713,10 @@ class TestChannelLogging:
         }
         registry = ChannelRegistry({})
 
-        with caplog.at_level(logging.INFO, logger="sherman.channel"):
+        with caplog.at_level(logging.INFO, logger="corvidae.channel"):
             load_channel_config(config, registry)
 
-        records = [r for r in caplog.records if r.name == "sherman.channel"]
+        records = [r for r in caplog.records if r.name == "corvidae.channel"]
         info_records = [r for r in records if r.levelno == logging.INFO]
         assert len(info_records) >= 2, (
             "load_channel_config must emit at least one INFO log per registered channel"
@@ -728,11 +728,11 @@ class TestChannelLogging:
         config = {"channels": {"nocolon": {}}}
         registry = ChannelRegistry({})
 
-        with caplog.at_level(logging.WARNING, logger="sherman.channel"), \
+        with caplog.at_level(logging.WARNING, logger="corvidae.channel"), \
              pytest.raises(ValueError):
             load_channel_config(config, registry)
 
-        records = [r for r in caplog.records if r.name == "sherman.channel"]
+        records = [r for r in caplog.records if r.name == "corvidae.channel"]
         warning_records = [r for r in records if r.levelno == logging.WARNING]
         assert warning_records, (
             "load_channel_config must emit a WARNING for invalid channel key format"
@@ -740,15 +740,15 @@ class TestChannelLogging:
 
     def test_resolve_config_logs_debug(self, caplog):
         """ChannelRegistry.resolve_config must emit a DEBUG log."""
-        from sherman.channel import ChannelConfig, ChannelRegistry
+        from corvidae.channel import ChannelConfig, ChannelRegistry
 
         registry = ChannelRegistry({"system_prompt": "Agent.", "max_context_tokens": 8000})
         channel = registry.get_or_create("irc", "#lex", config=ChannelConfig())
 
-        with caplog.at_level(logging.DEBUG, logger="sherman.channel"):
+        with caplog.at_level(logging.DEBUG, logger="corvidae.channel"):
             registry.resolve_config(channel)
 
-        records = [r for r in caplog.records if r.name == "sherman.channel"]
+        records = [r for r in caplog.records if r.name == "corvidae.channel"]
         debug_records = [r for r in records if r.levelno == logging.DEBUG]
         assert debug_records, (
             "ChannelRegistry.resolve_config must emit a DEBUG log"
@@ -765,11 +765,11 @@ class TestPromptLogging:
 
     def test_empty_list_logs_warning(self, caplog):
         """resolve_system_prompt with an empty list must emit a WARNING."""
-        with caplog.at_level(logging.WARNING, logger="sherman.prompt"):
+        with caplog.at_level(logging.WARNING, logger="corvidae.prompt"):
             result = resolve_system_prompt([], Path("/tmp"))
 
         assert result == ""
-        records = [r for r in caplog.records if r.name == "sherman.prompt"]
+        records = [r for r in caplog.records if r.name == "corvidae.prompt"]
         warning_records = [r for r in records if r.levelno == logging.WARNING]
         assert warning_records, (
             "resolve_system_prompt must emit a WARNING when value is an empty list"
@@ -777,10 +777,10 @@ class TestPromptLogging:
 
     def test_string_prompt_logs_debug(self, caplog):
         """resolve_system_prompt with a string must emit a DEBUG log."""
-        with caplog.at_level(logging.DEBUG, logger="sherman.prompt"):
+        with caplog.at_level(logging.DEBUG, logger="corvidae.prompt"):
             resolve_system_prompt("You are helpful.", Path("/tmp"))
 
-        records = [r for r in caplog.records if r.name == "sherman.prompt"]
+        records = [r for r in caplog.records if r.name == "corvidae.prompt"]
         debug_records = [r for r in records if r.levelno == logging.DEBUG]
         assert debug_records, (
             "resolve_system_prompt must emit a DEBUG log for string input"
@@ -791,10 +791,10 @@ class TestPromptLogging:
         f = tmp_path / "prompt.md"
         f.write_text("You are a bot.")
 
-        with caplog.at_level(logging.DEBUG, logger="sherman.prompt"):
+        with caplog.at_level(logging.DEBUG, logger="corvidae.prompt"):
             resolve_system_prompt([str(f)], tmp_path)
 
-        records = [r for r in caplog.records if r.name == "sherman.prompt"]
+        records = [r for r in caplog.records if r.name == "corvidae.prompt"]
         debug_records = [r for r in records if r.levelno == logging.DEBUG]
         assert debug_records, (
             "resolve_system_prompt must emit a DEBUG log for file list input"
@@ -811,12 +811,12 @@ class TestPluginManagerLogging:
 
     def test_create_plugin_manager_logs_debug(self, caplog):
         """create_plugin_manager() must emit a DEBUG log."""
-        from sherman.hooks import create_plugin_manager
+        from corvidae.hooks import create_plugin_manager
 
-        with caplog.at_level(logging.DEBUG, logger="sherman.plugin_manager"):
+        with caplog.at_level(logging.DEBUG, logger="corvidae.plugin_manager"):
             create_plugin_manager()
 
-        records = [r for r in caplog.records if r.name == "sherman.plugin_manager"]
+        records = [r for r in caplog.records if r.name == "corvidae.plugin_manager"]
         debug_records = [r for r in records if r.levelno == logging.DEBUG]
         assert debug_records, (
             "create_plugin_manager() must emit a DEBUG log"
@@ -834,8 +834,8 @@ class TestAgentPluginLogging:
 
     async def test_on_start_logs_info_tool_and_channel_count(self, caplog):
         """on_start must emit an INFO log with tool_count and channel_count."""
-        from sherman.agent import AgentPlugin
-        from sherman.hooks import create_plugin_manager
+        from corvidae.agent import AgentPlugin
+        from corvidae.hooks import create_plugin_manager
 
         pm = create_plugin_manager()
         registry = ChannelRegistry({"system_prompt": "Test.", "max_context_tokens": 8000})
@@ -849,14 +849,14 @@ class TestAgentPluginLogging:
         mock_client = MagicMock()
         mock_client.start = AsyncMock()
 
-        with caplog.at_level(logging.INFO, logger="sherman.agent"), \
-             patch("sherman.agent.LLMClient", return_value=mock_client):
+        with caplog.at_level(logging.INFO, logger="corvidae.agent"), \
+             patch("corvidae.agent.LLMClient", return_value=mock_client):
             await plugin.on_start(config={
                 "llm": {"main": {"base_url": "http://localhost:8080", "model": "test"}},
                 "daemon": {"session_db": ":memory:"},
             })
 
-        records = [r for r in caplog.records if r.name == "sherman.agent"]
+        records = [r for r in caplog.records if r.name == "corvidae.agent"]
         info_records = [r for r in records if r.levelno == logging.INFO]
         assert info_records, (
             "on_start must emit at least one INFO log (tool_count, channel_count)"
@@ -868,9 +868,9 @@ class TestAgentPluginLogging:
 
     async def _make_on_message_plugin(self, db):
         """Shared setup for on_message tests: returns (plugin, channel)."""
-        from sherman.agent import AgentPlugin
-        from sherman.hooks import create_plugin_manager
-        from sherman.persistence import PersistencePlugin
+        from corvidae.agent import AgentPlugin
+        from corvidae.hooks import create_plugin_manager
+        from corvidae.persistence import PersistencePlugin
 
         pm = create_plugin_manager()
         registry = ChannelRegistry({"system_prompt": "Test.", "max_context_tokens": 8000,
@@ -902,10 +902,10 @@ class TestAgentPluginLogging:
         """on_message must emit an INFO log with channel and sender."""
         plugin, channel = await self._make_on_message_plugin(db)
 
-        with caplog.at_level(logging.INFO, logger="sherman.agent"):
+        with caplog.at_level(logging.INFO, logger="corvidae.agent"):
             await plugin.on_message(channel=channel, sender="alice", text="hello")
 
-        records = [r for r in caplog.records if r.name == "sherman.agent"]
+        records = [r for r in caplog.records if r.name == "corvidae.agent"]
         info_records = [r for r in records if r.levelno == logging.INFO]
         assert info_records, (
             "on_message must emit at least one INFO log (channel, sender)"
@@ -915,14 +915,14 @@ class TestAgentPluginLogging:
         """on_message must emit an INFO log after response with latency_ms field."""
         plugin, channel = await self._make_on_message_plugin(db)
 
-        with caplog.at_level(logging.INFO, logger="sherman.agent"):
+        with caplog.at_level(logging.INFO, logger="corvidae.agent"):
             await plugin.on_message(channel=channel, sender="alice", text="hello")
             # Drain the channel queue so the consumer (which emits latency log)
             # runs before we check caplog records.
             if channel.id in plugin.queues:
                 await plugin.queues[channel.id].drain()
 
-        records = [r for r in caplog.records if r.name == "sherman.agent"]
+        records = [r for r in caplog.records if r.name == "corvidae.agent"]
         info_records = [r for r in records if r.levelno == logging.INFO]
         # At least one must have latency_ms
         assert any(hasattr(r, "latency_ms") for r in info_records), (
@@ -932,8 +932,8 @@ class TestAgentPluginLogging:
     async def test_ensure_conversation_logs_info(self, db, caplog):
         """PersistencePlugin.ensure_conversation must emit an INFO log when initializing
         a new conversation for a channel."""
-        from sherman.hooks import create_plugin_manager
-        from sherman.persistence import PersistencePlugin
+        from corvidae.hooks import create_plugin_manager
+        from corvidae.persistence import PersistencePlugin
 
         pm = create_plugin_manager()
         registry = ChannelRegistry({"system_prompt": "Test.", "max_context_tokens": 8000,
@@ -948,10 +948,10 @@ class TestAgentPluginLogging:
         channel = registry.get_or_create("test", "scope1")
         assert channel.conversation is None
 
-        with caplog.at_level(logging.INFO, logger="sherman.persistence"):
+        with caplog.at_level(logging.INFO, logger="corvidae.persistence"):
             await persistence.ensure_conversation(channel=channel)
 
-        records = [r for r in caplog.records if r.name == "sherman.persistence"]
+        records = [r for r in caplog.records if r.name == "corvidae.persistence"]
         info_records = [r for r in records if r.levelno == logging.INFO]
         assert info_records, (
             "PersistencePlugin.ensure_conversation must emit INFO log when initializing a new conversation"

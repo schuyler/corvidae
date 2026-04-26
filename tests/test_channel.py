@@ -1,8 +1,8 @@
-"""Tests for sherman.channel: ChannelConfig, Channel, ChannelRegistry, load_channel_config."""
+"""Tests for corvidae.channel: ChannelConfig, Channel, ChannelRegistry, load_channel_config."""
 
 import pytest
 from time import time
-from sherman.channel import Channel, ChannelConfig, ChannelRegistry, load_channel_config
+from corvidae.channel import Channel, ChannelConfig, ChannelRegistry, load_channel_config
 
 
 # ---------------------------------------------------------------------------
@@ -323,44 +323,44 @@ class TestChannelConfigListSystemPrompt:
 
 
 # ---------------------------------------------------------------------------
-# Item 8 red-phase: resolve_system_prompt must be importable from sherman.channel
+# Item 8 red-phase: resolve_system_prompt must be importable from corvidae.channel
 # ---------------------------------------------------------------------------
 
 
 class TestResolveSystemPromptInChannel:
     def test_resolve_system_prompt_importable_from_channel(self):
-        """resolve_system_prompt must be importable from sherman.channel after relocation.
+        """resolve_system_prompt must be importable from corvidae.channel after relocation.
 
-        RED phase: this test fails while the function still lives in sherman.conversation.
-        It passes once the function is moved to sherman.channel.
+        RED phase: this test fails while the function still lives in corvidae.conversation.
+        It passes once the function is moved to corvidae.channel.
         """
-        from sherman.channel import resolve_system_prompt  # noqa: F401
+        from corvidae.channel import resolve_system_prompt  # noqa: F401
 
     def test_resolve_system_prompt_basic_string(self):
-        """resolve_system_prompt imported from sherman.channel works for a string input.
+        """resolve_system_prompt imported from corvidae.channel works for a string input.
 
-        RED phase: fails until the function is available in sherman.channel.
+        RED phase: fails until the function is available in corvidae.channel.
         """
         from pathlib import Path
 
-        from sherman.channel import resolve_system_prompt
+        from corvidae.channel import resolve_system_prompt
 
         result = resolve_system_prompt("You are a helpful assistant.", Path("/tmp"))
         assert result == "You are a helpful assistant."
 
     def test_resolve_system_prompt_not_in_conversation(self):
-        """resolve_system_prompt must be removed from sherman.conversation after relocation."""
-        import sherman.conversation as mod
+        """resolve_system_prompt must be removed from corvidae.conversation after relocation."""
+        import corvidae.conversation as mod
 
         assert not hasattr(mod, "resolve_system_prompt"), (
-            "resolve_system_prompt should be removed from sherman.conversation"
+            "resolve_system_prompt should be removed from corvidae.conversation"
         )
 
     def test_prompt_logger_in_channel(self):
-        """_prompt_logger must live in sherman.channel after relocation."""
-        import sherman.channel as mod
+        """_prompt_logger must live in corvidae.channel after relocation."""
+        import corvidae.channel as mod
 
         assert hasattr(mod, "_prompt_logger"), (
             "channel.py must define _prompt_logger"
         )
-        assert mod._prompt_logger.name == "sherman.prompt"
+        assert mod._prompt_logger.name == "corvidae.prompt"

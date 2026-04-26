@@ -1,13 +1,13 @@
-# sherman/tools/__init__.py
+# corvidae/tools/__init__.py
 
 import aiohttp
 
-from sherman.hooks import hookimpl
-from sherman.tool import Tool
+from corvidae.hooks import hookimpl
+from corvidae.tool import Tool
 
-from sherman.tools.shell import shell
-from sherman.tools.files import read_file, write_file
-from sherman.tools.web import web_fetch_with_session, web_fetch
+from corvidae.tools.shell import shell
+from corvidae.tools.files import read_file, write_file
+from corvidae.tools.web import web_fetch_with_session, web_fetch
 
 
 class CoreToolsPlugin:

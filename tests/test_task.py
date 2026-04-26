@@ -1,4 +1,4 @@
-"""Tests for sherman.task — Task, TaskQueue, TaskPlugin."""
+"""Tests for corvidae.task — Task, TaskQueue, TaskPlugin."""
 
 import asyncio
 import logging
@@ -7,10 +7,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from sherman.channel import Channel, ChannelConfig
-from sherman.hooks import AgentSpec, create_plugin_manager
+from corvidae.channel import Channel, ChannelConfig
+from corvidae.hooks import AgentSpec, create_plugin_manager
 
-from sherman.task import Task, TaskPlugin, TaskQueue
+from corvidae.task import Task, TaskPlugin, TaskQueue
 
 
 # ---------------------------------------------------------------------------
@@ -19,19 +19,19 @@ from sherman.task import Task, TaskPlugin, TaskQueue
 
 
 @pytest.fixture(autouse=True)
-def _reset_sherman_logger():
-    """Ensure the sherman logger propagates to root so caplog captures records.
+def _reset_corvidae_logger():
+    """Ensure the corvidae logger propagates to root so caplog captures records.
 
     Other test modules (test_logging.py) may apply dictConfig with
-    propagate=False on the sherman logger. This fixture resets it.
+    propagate=False on the corvidae logger. This fixture resets it.
     """
-    sherman_logger = logging.getLogger("sherman")
-    original_propagate = sherman_logger.propagate
-    original_handlers = sherman_logger.handlers[:]
-    sherman_logger.propagate = True
+    corvidae_logger = logging.getLogger("corvidae")
+    original_propagate = corvidae_logger.propagate
+    original_handlers = corvidae_logger.handlers[:]
+    corvidae_logger.propagate = True
     yield
-    sherman_logger.propagate = original_propagate
-    sherman_logger.handlers = original_handlers
+    corvidae_logger.propagate = original_propagate
+    corvidae_logger.handlers = original_handlers
 
 
 def _make_channel(transport="test", scope="scope1") -> Channel:
@@ -388,10 +388,10 @@ class TestTaskQueueLogging:
 
         task = Task(work=work, channel=channel, description="log test task")
 
-        with caplog.at_level(logging.DEBUG, logger="sherman.task"):
+        with caplog.at_level(logging.DEBUG, logger="corvidae.task"):
             await queue.enqueue(task)
 
-        records = [r for r in caplog.records if r.name == "sherman.task"]
+        records = [r for r in caplog.records if r.name == "corvidae.task"]
         matching = [
             r for r in records
             if r.levelno == logging.DEBUG and r.getMessage() == "task enqueued"
@@ -421,7 +421,7 @@ class TestTaskQueueLogging:
         async def on_complete(t, result):
             pass
 
-        with caplog.at_level(logging.DEBUG, logger="sherman.task"):
+        with caplog.at_level(logging.DEBUG, logger="corvidae.task"):
             worker = asyncio.create_task(queue.run_worker(on_complete))
             await queue.enqueue(task)
             await asyncio.wait_for(done.wait(), timeout=2.0)
@@ -431,7 +431,7 @@ class TestTaskQueueLogging:
             except asyncio.CancelledError:
                 pass
 
-        records = [r for r in caplog.records if r.name == "sherman.task"]
+        records = [r for r in caplog.records if r.name == "corvidae.task"]
         matching = [
             r for r in records
             if r.levelno == logging.DEBUG and r.getMessage() == "task started"
@@ -458,7 +458,7 @@ class TestTaskQueueLogging:
         async def on_complete(t, result):
             done.set()
 
-        with caplog.at_level(logging.DEBUG, logger="sherman.task"):
+        with caplog.at_level(logging.DEBUG, logger="corvidae.task"):
             worker = asyncio.create_task(queue.run_worker(on_complete))
             await queue.enqueue(task)
             await asyncio.wait_for(done.wait(), timeout=2.0)
@@ -468,7 +468,7 @@ class TestTaskQueueLogging:
             except asyncio.CancelledError:
                 pass
 
-        records = [r for r in caplog.records if r.name == "sherman.task"]
+        records = [r for r in caplog.records if r.name == "corvidae.task"]
         matching = [
             r for r in records
             if r.levelno == logging.DEBUG and r.getMessage() == "task completed"
@@ -495,7 +495,7 @@ class TestTaskQueueLogging:
         async def on_complete(t, result):
             done.set()
 
-        with caplog.at_level(logging.DEBUG, logger="sherman.task"):
+        with caplog.at_level(logging.DEBUG, logger="corvidae.task"):
             worker = asyncio.create_task(queue.run_worker(on_complete))
             await queue.enqueue(task)
             await asyncio.wait_for(done.wait(), timeout=2.0)
@@ -505,7 +505,7 @@ class TestTaskQueueLogging:
             except asyncio.CancelledError:
                 pass
 
-        records = [r for r in caplog.records if r.name == "sherman.task"]
+        records = [r for r in caplog.records if r.name == "corvidae.task"]
         matching = [
             r for r in records
             if r.levelno == logging.WARNING and r.getMessage() == "task failed"
@@ -618,7 +618,7 @@ class TestTaskPlugin:
         Verifies active task, pending queue size, and completed count are reflected
         in the output from the tool callable.
         """
-        from sherman.tool import Tool
+        from corvidae.tool import Tool
 
         pm = create_plugin_manager()
         pm.ahook.on_notify = AsyncMock()

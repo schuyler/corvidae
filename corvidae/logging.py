@@ -1,7 +1,7 @@
-"""Structured logging utilities for Sherman.
+"""Structured logging utilities for Corvidae.
 
 This module provides the StructuredFormatter and default logging configuration
-used by the Sherman daemon.
+used by the Corvidae daemon.
 
 Logging Configuration:
     The `logging` key in agent.yaml is passed to `logging.config.dictConfig()`.
@@ -27,13 +27,13 @@ class StructuredFormatter(logging.Formatter):
     is appended to the formatted message, e.g.::
 
         logger.debug("tool call arguments", extra={"tool": "shell", "arguments": "ls"})
-        # → "2026-04-23 12:00:00 DEBUG    sherman.agent_loop: tool call arguments  tool='shell' arguments='ls'"
+        # → "2026-04-23 12:00:00 DEBUG    corvidae.agent_loop: tool call arguments  tool='shell' arguments='ls'"
 
     Reference this class in a YAML logging config with::
 
         formatters:
           structured:
-            (): sherman.logging.StructuredFormatter
+            (): corvidae.logging.StructuredFormatter
             format: "%(asctime)s %(levelname)-8s %(name)s: %(message)s"
     """
 
@@ -61,10 +61,10 @@ class StructuredFormatter(logging.Formatter):
 # Default logging configuration applied when no `logging` section exists in
 # agent.yaml. Passed directly to logging.config.dictConfig(). Key choices:
 #   - Output to stderr (stdout reserved for structured output if needed)
-#   - Sherman loggers at INFO (production operational level)
+#   - Corvidae loggers at INFO (production operational level)
 #   - Root logger at WARNING (suppresses noisy library debug output)
 #   - disable_existing_loggers: False preserves loggers created at import time
-#   - propagate: False on sherman logger prevents double-output through root
+#   - propagate: False on corvidae logger prevents double-output through root
 #
 # Users can override by providing a `logging` section in agent.yaml that
 # follows the same schema (log levels, file handlers, JSON formatters, etc.).
@@ -86,7 +86,7 @@ _DEFAULT_LOGGING = {
         },
     },
     "loggers": {
-        "sherman": {
+        "corvidae": {
             "level": "INFO",
             "handlers": ["console"],
             "propagate": False,

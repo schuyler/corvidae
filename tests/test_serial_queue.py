@@ -3,7 +3,7 @@
 import asyncio
 import pytest
 
-from sherman.queue import SerialQueue
+from corvidae.queue import SerialQueue
 
 
 # ---------------------------------------------------------------------------

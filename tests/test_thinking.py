@@ -1,11 +1,11 @@
-"""Tests for sherman.thinking.ThinkingPlugin."""
+"""Tests for corvidae.thinking.ThinkingPlugin."""
 
 from unittest.mock import MagicMock, AsyncMock
 
 import pytest
 
-from sherman.thinking import ThinkingPlugin
-from sherman.hooks import create_plugin_manager, call_firstresult_hook
+from corvidae.thinking import ThinkingPlugin
+from corvidae.hooks import create_plugin_manager, call_firstresult_hook
 
 
 def _make_pm(keep_thinking_in_history=False, registry_missing=False):

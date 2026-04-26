@@ -1,11 +1,11 @@
-# sherman/channels/cli.py
+# corvidae/channels/cli.py
 
 import asyncio
 import logging
 import sys
 
-from sherman.channel import ChannelRegistry
-from sherman.hooks import get_dependency, hookimpl
+from corvidae.channel import ChannelRegistry
+from corvidae.hooks import get_dependency, hookimpl
 
 logger = logging.getLogger(__name__)
 

@@ -1,6 +1,6 @@
-"""Tests for sherman.tools — CoreToolsPlugin and its four tool functions.
+"""Tests for corvidae.tools — CoreToolsPlugin and its four tool functions.
 
-All tests are expected to FAIL until sherman/tools.py is implemented.
+All tests are expected to FAIL until corvidae/tools.py is implemented.
 """
 
 import asyncio
@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 # The import under test — will raise ImportError until the file exists.
-from sherman.tools import CoreToolsPlugin, read_file, shell, web_fetch, write_file
+from corvidae.tools import CoreToolsPlugin, read_file, shell, web_fetch, write_file
 
 
 # ---------------------------------------------------------------------------
@@ -199,7 +199,7 @@ class TestCoreToolsPlugin:
         assert len(registry) == 4
 
     def test_registered_tool_names(self):
-        from sherman.tool import Tool
+        from corvidae.tool import Tool
         plugin = CoreToolsPlugin()
         registry = []
         plugin.register_tools(tool_registry=registry)

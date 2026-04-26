@@ -1,4 +1,4 @@
-"""Tests for sherman.agent.AgentPlugin."""
+"""Tests for corvidae.agent.AgentPlugin."""
 
 import json
 from pathlib import Path
@@ -8,14 +8,14 @@ from unittest.mock import ANY, AsyncMock, MagicMock, patch
 import aiosqlite
 import pytest
 
-from sherman.channel import Channel, ChannelConfig, ChannelRegistry
-from sherman.conversation import ConversationLog, init_db
-from sherman.hooks import create_plugin_manager
+from corvidae.channel import Channel, ChannelConfig, ChannelRegistry
+from corvidae.conversation import ConversationLog, init_db
+from corvidae.hooks import create_plugin_manager
 
-from sherman.agent import AgentPlugin
-from sherman.persistence import PersistencePlugin
-from sherman.task import TaskPlugin
-from sherman.thinking import ThinkingPlugin
+from corvidae.agent import AgentPlugin
+from corvidae.persistence import PersistencePlugin
+from corvidae.task import TaskPlugin
+from corvidae.thinking import ThinkingPlugin
 
 
 # ---------------------------------------------------------------------------
@@ -149,7 +149,7 @@ class TestOnStart:
     async def test_on_start_creates_client(self):
         """on_start with valid config creates LLMClient. Verify client.start() is called."""
         import aiosqlite
-        from sherman.conversation import init_db
+        from corvidae.conversation import init_db
 
         pm = create_plugin_manager()
         registry = ChannelRegistry(AGENT_DEFAULTS)
@@ -171,7 +171,7 @@ class TestOnStart:
         mock_client = MagicMock()
         mock_client.start = AsyncMock()
 
-        with patch("sherman.agent.LLMClient", return_value=mock_client) as mock_cls:
+        with patch("corvidae.agent.LLMClient", return_value=mock_client) as mock_cls:
             await plugin.on_start(config=BASE_CONFIG)
 
         mock_cls.assert_called_once_with(
@@ -190,7 +190,7 @@ class TestOnStart:
             """A test tool."""
             return f"result: {x}"
 
-        from sherman.hooks import hookimpl
+        from corvidae.hooks import hookimpl
 
         class ToolPlugin:
             @hookimpl
@@ -211,7 +211,7 @@ class TestOnStart:
         mock_client = MagicMock()
         mock_client.start = AsyncMock()
 
-        with patch("sherman.agent.LLMClient", return_value=mock_client):
+        with patch("corvidae.agent.LLMClient", return_value=mock_client):
             await plugin.on_start(config=BASE_CONFIG)
 
         assert "my_test_tool" in plugin.tools
@@ -222,7 +222,7 @@ class TestOnStart:
     async def test_on_start_stores_base_dir_from_config(self):
         """on_start reads config["_base_dir"] and stores it as PersistencePlugin.base_dir."""
         import aiosqlite
-        from sherman.conversation import init_db
+        from corvidae.conversation import init_db
 
         pm = create_plugin_manager()
         registry = ChannelRegistry(AGENT_DEFAULTS)
@@ -246,7 +246,7 @@ class TestOnStart:
         config_with_base_dir = dict(BASE_CONFIG)
         config_with_base_dir["_base_dir"] = Path("/some/dir")
 
-        with patch("sherman.agent.LLMClient", return_value=mock_client):
+        with patch("corvidae.agent.LLMClient", return_value=mock_client):
             await plugin.on_start(config=config_with_base_dir)
         await persistence.on_start(config=config_with_base_dir)
 
@@ -256,7 +256,7 @@ class TestOnStart:
     async def test_on_start_defaults_base_dir_to_cwd(self):
         """on_start sets PersistencePlugin.base_dir to Path(".") when _base_dir is absent."""
         import aiosqlite
-        from sherman.conversation import init_db
+        from corvidae.conversation import init_db
 
         pm = create_plugin_manager()
         registry = ChannelRegistry(AGENT_DEFAULTS)
@@ -277,7 +277,7 @@ class TestOnStart:
         mock_client = MagicMock()
         mock_client.start = AsyncMock()
 
-        with patch("sherman.agent.LLMClient", return_value=mock_client):
+        with patch("corvidae.agent.LLMClient", return_value=mock_client):
             await plugin.on_start(config=BASE_CONFIG)
         await persistence.on_start(config=BASE_CONFIG)
 
@@ -329,7 +329,7 @@ class TestOnStart:
             "daemon": {"session_db": ":memory:"},
         }
 
-        with patch("sherman.agent.LLMClient", return_value=mock_main_client):
+        with patch("corvidae.agent.LLMClient", return_value=mock_main_client):
             await plugin.on_start(config=config_with_bg)
 
         # AgentPlugin only creates the main client
@@ -411,7 +411,7 @@ class TestOnMessagePersistenceAndLoop:
 
     async def test_on_message_calls_run_agent_turn(self):
         """Verify run_agent_turn is called with the correct arguments."""
-        from sherman.agent_loop import AgentTurnResult
+        from corvidae.agent_loop import AgentTurnResult
 
         plugin, channel, db = await _build_plugin_and_channel()
 
@@ -425,7 +425,7 @@ class TestOnMessagePersistenceAndLoop:
             latency_ms=1.0,
         )
 
-        with patch("sherman.agent.run_agent_turn", new_callable=AsyncMock) as mock_turn:
+        with patch("corvidae.agent.run_agent_turn", new_callable=AsyncMock) as mock_turn:
             mock_turn.return_value = turn_result
             await plugin.on_message(channel=channel, sender="user", text="query")
             await _drain(plugin, channel)
@@ -507,7 +507,7 @@ class TestOnMessagePersistenceAndLoop:
         mock_client = MagicMock()
         mock_client.start = AsyncMock()
 
-        with patch("sherman.agent.LLMClient", return_value=mock_client) as mock_cls:
+        with patch("corvidae.agent.LLMClient", return_value=mock_client) as mock_cls:
             await plugin.on_start(config)
 
         # Verify LLMClient was created with extra_body
@@ -539,7 +539,7 @@ class TestOnMessagePersistenceAndLoop:
         mock_client = MagicMock()
         mock_client.start = AsyncMock()
 
-        with patch("sherman.agent.LLMClient", return_value=mock_client) as mock_cls:
+        with patch("corvidae.agent.LLMClient", return_value=mock_client) as mock_cls:
             await plugin.on_start(config)
 
         # Verify LLMClient was created with extra_body=None
@@ -571,7 +571,7 @@ class TestOnMessagePersistenceAndLoop:
         mock_client = MagicMock()
         mock_client.start = AsyncMock()
 
-        with patch("sherman.agent.LLMClient", return_value=mock_client) as mock_cls:
+        with patch("corvidae.agent.LLMClient", return_value=mock_client) as mock_cls:
             await plugin.on_start(config)
 
         # Verify LLMClient was created with extra_body=None
@@ -603,7 +603,7 @@ class TestOnMessagePersistenceAndLoop:
         mock_client = MagicMock()
         mock_client.start = AsyncMock()
 
-        with patch("sherman.agent.LLMClient", return_value=mock_client) as mock_cls:
+        with patch("corvidae.agent.LLMClient", return_value=mock_client) as mock_cls:
             await plugin.on_start(config)
 
         # Verify LLMClient was created with extra_body={}
@@ -768,8 +768,8 @@ class TestOnMessageCompactionAndConfig:
         Registers a tracking plugin to confirm compact_conversation is called
         with the correct client and max_tokens, and that it runs before the LLM.
         """
-        from sherman.hooks import hookimpl
-        from sherman.agent_loop import AgentTurnResult
+        from corvidae.hooks import hookimpl
+        from corvidae.agent_loop import AgentTurnResult
 
         plugin, channel, db = await _build_plugin_and_channel()
 
@@ -800,7 +800,7 @@ class TestOnMessageCompactionAndConfig:
             latency_ms=1.0,
         )
 
-        with patch("sherman.agent.run_agent_turn", new_callable=AsyncMock) as mock_turn:
+        with patch("corvidae.agent.run_agent_turn", new_callable=AsyncMock) as mock_turn:
             async def tracking_turn(*args, **kwargs):
                 call_order.append("turn")
                 return turn_result
@@ -900,7 +900,7 @@ class TestOnStop:
         plugin.client = mock_client
 
         # Create a couple of channel queues on the plugin so we can verify they are stopped.
-        from sherman.queue import SerialQueue, QueueItem
+        from corvidae.queue import SerialQueue, QueueItem
 
         async def noop(item):
             pass
@@ -942,7 +942,7 @@ class TestOnMessageToolCallRoundTrip:
             return "tool output"
 
         plugin.tools = {"my_plugin_tool": my_plugin_tool}
-        from sherman.agent_loop import tool_to_schema
+        from corvidae.agent_loop import tool_to_schema
         plugin.tool_schemas = [tool_to_schema(my_plugin_tool)]
 
         mock_client = MagicMock()
@@ -1227,7 +1227,7 @@ class TestOnNotify:
 class TestToolSchema:
     def test_underscore_params_excluded_from_schema(self):
         """Any parameter whose name starts with _ is excluded from the schema."""
-        from sherman.agent_loop import tool_to_schema
+        from corvidae.agent_loop import tool_to_schema
 
         async def my_tool(x: str, _injected: str = None, y: int = 0) -> str:
             """A tool with injected params."""
@@ -1251,7 +1251,7 @@ class TestShouldProcessMessage:
     async def test_returns_false_rejects_message(self):
         """When should_process_message returns False, on_message does not enqueue
         the message and send_message is never called."""
-        from sherman.hooks import hookimpl
+        from corvidae.hooks import hookimpl
 
         plugin, channel, db = await _build_plugin_and_channel()
 
@@ -1276,7 +1276,7 @@ class TestShouldProcessMessage:
     async def test_returns_true_accepts_message(self):
         """When should_process_message returns True, the message is enqueued
         and processed normally."""
-        from sherman.hooks import hookimpl
+        from corvidae.hooks import hookimpl
 
         plugin, channel, db = await _build_plugin_and_channel()
 
@@ -1301,7 +1301,7 @@ class TestShouldProcessMessage:
     async def test_returns_none_accepts_message(self):
         """When should_process_message returns None (no opinion), the message is
         accepted by default."""
-        from sherman.hooks import hookimpl
+        from corvidae.hooks import hookimpl
 
         plugin, channel, db = await _build_plugin_and_channel()
 
@@ -1342,7 +1342,7 @@ class TestShouldProcessMessage:
     async def test_is_false_identity_check_not_falsiness(self):
         """The gate check uses 'is False', not truthiness.
         A return value of 0 or empty string should NOT reject the message."""
-        from sherman.hooks import hookimpl
+        from corvidae.hooks import hookimpl
 
         plugin, channel, db = await _build_plugin_and_channel()
 
@@ -1374,7 +1374,7 @@ class TestShouldProcessMessage:
 class TestOnLlmError:
     async def test_hook_returns_string_sent_as_error_message(self):
         """When on_llm_error returns a string, that string is sent via send_message."""
-        from sherman.hooks import hookimpl
+        from corvidae.hooks import hookimpl
 
         plugin, channel, db = await _build_plugin_and_channel()
 
@@ -1400,7 +1400,7 @@ class TestOnLlmError:
 
     async def test_hook_returns_none_uses_default_error_message(self):
         """When on_llm_error returns None, the default error message is used."""
-        from sherman.hooks import hookimpl
+        from corvidae.hooks import hookimpl
 
         plugin, channel, db = await _build_plugin_and_channel()
 
@@ -1445,7 +1445,7 @@ class TestOnLlmError:
 
     async def test_exception_object_passed_to_hook(self):
         """The exception object is passed to on_llm_error as the 'error' parameter."""
-        from sherman.hooks import hookimpl
+        from corvidae.hooks import hookimpl
 
         plugin, channel, db = await _build_plugin_and_channel()
 
@@ -1482,8 +1482,8 @@ class TestCompactConversation:
     async def test_custom_plugin_returning_true_short_circuits(self):
         """A custom compact_conversation plugin that returns True is invoked
         and the agent turn still runs. The hook call completes normally."""
-        from sherman.hooks import hookimpl
-        from sherman.agent_loop import AgentTurnResult
+        from corvidae.hooks import hookimpl
+        from corvidae.agent_loop import AgentTurnResult
 
         plugin, channel, db = await _build_plugin_and_channel()
 
@@ -1511,7 +1511,7 @@ class TestCompactConversation:
             text="second answer",
             latency_ms=1.0,
         )
-        with patch("sherman.agent.run_agent_turn", new_callable=AsyncMock,
+        with patch("corvidae.agent.run_agent_turn", new_callable=AsyncMock,
                    return_value=turn_result):
             await plugin.on_message(channel=channel, sender="user", text="second")
             await _drain(plugin, channel)
@@ -1525,8 +1525,8 @@ class TestCompactConversation:
     async def test_no_compaction_plugin_agent_turn_still_runs(self):
         """When no compact_conversation impl returns a non-None result,
         the agent loop continues normally without error."""
-        from sherman.hooks import hookimpl
-        from sherman.agent_loop import AgentTurnResult
+        from corvidae.hooks import hookimpl
+        from corvidae.agent_loop import AgentTurnResult
 
         plugin, channel, db = await _build_plugin_and_channel()
 
@@ -1548,7 +1548,7 @@ class TestCompactConversation:
             text="second answer",
             latency_ms=1.0,
         )
-        with patch("sherman.agent.run_agent_turn", new_callable=AsyncMock,
+        with patch("corvidae.agent.run_agent_turn", new_callable=AsyncMock,
                    return_value=turn_result):
             await plugin.on_message(channel=channel, sender="user", text="second")
             await _drain(plugin, channel)
@@ -1562,8 +1562,8 @@ class TestCompactConversation:
         """An exception in compact_conversation is caught and logged as WARNING.
         The agent turn still runs after the compaction block fails."""
         import logging
-        from sherman.hooks import hookimpl
-        from sherman.agent_loop import AgentTurnResult
+        from corvidae.hooks import hookimpl
+        from corvidae.agent_loop import AgentTurnResult
 
         plugin, channel, db = await _build_plugin_and_channel()
 
@@ -1588,8 +1588,8 @@ class TestCompactConversation:
             text="second answer",
             latency_ms=1.0,
         )
-        with caplog.at_level(logging.WARNING, logger="sherman.agent"):
-            with patch("sherman.agent.run_agent_turn", new_callable=AsyncMock,
+        with caplog.at_level(logging.WARNING, logger="corvidae.agent"):
+            with patch("corvidae.agent.run_agent_turn", new_callable=AsyncMock,
                        return_value=turn_result):
                 await plugin.on_message(channel=channel, sender="user", text="second")
                 await _drain(plugin, channel)
@@ -1609,8 +1609,8 @@ class TestCompactConversation:
     async def test_compaction_hook_receives_correct_args(self):
         """compact_conversation is called with conversation, client, and max_tokens
         matching the channel's resolved config."""
-        from sherman.hooks import hookimpl
-        from sherman.agent_loop import AgentTurnResult
+        from corvidae.hooks import hookimpl
+        from corvidae.agent_loop import AgentTurnResult
 
         plugin, channel, db = await _build_plugin_and_channel()
 
@@ -1640,7 +1640,7 @@ class TestCompactConversation:
             text="second answer",
             latency_ms=1.0,
         )
-        with patch("sherman.agent.run_agent_turn", new_callable=AsyncMock,
+        with patch("corvidae.agent.run_agent_turn", new_callable=AsyncMock,
                    return_value=turn_result):
             await plugin.on_message(channel=channel, sender="user", text="second")
             await _drain(plugin, channel)
@@ -1661,8 +1661,8 @@ class TestProcessToolResult:
     async def test_hook_returns_string_replaces_tool_result(self):
         """When process_tool_result returns a string, that string replaces the
         original tool result in the conversation."""
-        from sherman.hooks import call_firstresult_hook, hookimpl
-        from sherman.agent_loop import run_agent_loop
+        from corvidae.hooks import call_firstresult_hook, hookimpl
+        from corvidae.agent_loop import run_agent_loop
 
         tool_fn = AsyncMock(return_value="original tool output")
         client = MagicMock()
@@ -1699,8 +1699,8 @@ class TestProcessToolResult:
 
     async def test_hook_returns_none_keeps_original_result(self):
         """When process_tool_result returns None, the original tool result is kept."""
-        from sherman.agent_loop import run_agent_loop
-        from sherman.hooks import hookimpl
+        from corvidae.agent_loop import run_agent_loop
+        from corvidae.hooks import hookimpl
 
         tool_fn = AsyncMock(return_value="original output")
         client = MagicMock()
@@ -1742,7 +1742,7 @@ class TestProcessToolResult:
         This tests the 'no impl, fallback to default' path which requires BOTH
         the pm parameter AND the hook integration logic to exist in
         run_agent_loop. A bare signature addition is not sufficient."""
-        from sherman.agent_loop import run_agent_loop
+        from corvidae.agent_loop import run_agent_loop
 
         tool_fn = AsyncMock(return_value="original result")
         client = MagicMock()
@@ -1773,8 +1773,8 @@ class TestProcessToolResult:
 
     async def test_hook_receives_correct_tool_name_and_result(self):
         """process_tool_result receives the correct tool_name and result args."""
-        from sherman.agent_loop import run_agent_loop
-        from sherman.hooks import hookimpl
+        from corvidae.agent_loop import run_agent_loop
+        from corvidae.hooks import hookimpl
 
         tool_fn = AsyncMock(return_value="raw output")
         client = MagicMock()
@@ -1834,8 +1834,8 @@ class TestBeforeAgentTurn:
 
         This fails until the hookspec exists and _process_queue_item calls it.
         """
-        from sherman.hooks import hookimpl
-        from sherman.agent_loop import AgentTurnResult
+        from corvidae.hooks import hookimpl
+        from corvidae.agent_loop import AgentTurnResult
 
         plugin, channel, db = await _build_plugin_and_channel()
 
@@ -1874,8 +1874,8 @@ class TestBeforeAgentTurn:
         This fails until the hookspec exists and the call site is between
         compaction and build_prompt.
         """
-        from sherman.hooks import hookimpl
-        from sherman.conversation import MessageType
+        from corvidae.hooks import hookimpl
+        from corvidae.conversation import MessageType
 
         plugin, channel, db = await _build_plugin_and_channel()
 
@@ -1925,7 +1925,7 @@ class TestBeforeAgentTurn:
         This test sends a tool result via on_notify and verifies the hook
         fires on that turn.
         """
-        from sherman.hooks import hookimpl
+        from corvidae.hooks import hookimpl
 
         plugin, channel, db = await _build_plugin_and_channel()
 

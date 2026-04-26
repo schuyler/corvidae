@@ -7,10 +7,10 @@ from typing import Optional
 
 import pydle
 
-logger = logging.getLogger("sherman.irc_plugin")
+logger = logging.getLogger("corvidae.irc_plugin")
 
-from sherman.channel import Channel, ChannelRegistry
-from sherman.hooks import get_dependency, hookimpl
+from corvidae.channel import Channel, ChannelRegistry
+from corvidae.hooks import get_dependency, hookimpl
 
 
 class IRCClient(pydle.Client):
@@ -104,7 +104,7 @@ class IRCPlugin:
 
         server = irc_config.get("host", "irc.libera.chat")
         port = irc_config.get("port", 6667)
-        nick = irc_config.get("nick", "sherman")
+        nick = irc_config.get("nick", "corvidae")
         self.channels = irc_config.get("channels", [])
         tls = irc_config.get("tls", False)
 

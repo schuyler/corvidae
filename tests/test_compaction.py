@@ -1,6 +1,6 @@
-"""Tests for sherman.compaction.CompactionPlugin.
+"""Tests for corvidae.compaction.CompactionPlugin.
 
-These tests are the RED phase: they fail until sherman/compaction.py is created
+These tests are the RED phase: they fail until corvidae/compaction.py is created
 and ConversationLog.replace_with_summary() is implemented.
 """
 
@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, patch
 
 import aiosqlite
 
-from sherman.conversation import ConversationLog, init_db
+from corvidae.conversation import ConversationLog, init_db
 
 
 class TestConversationLogCompaction:
@@ -21,7 +21,7 @@ class TestConversationLogCompaction:
         conv.messages = [{"role": "user", "content": "hi"} for _ in range(5)]
         original_messages = list(conv.messages)
 
-        from sherman.compaction import CompactionPlugin
+        from corvidae.compaction import CompactionPlugin
         plugin = CompactionPlugin()
 
         mock_client = AsyncMock()
@@ -52,13 +52,13 @@ class TestConversationLogCompaction:
             return_value={"choices": [{"message": {"content": "mock summary"}}]}
         )
 
-        from sherman.compaction import CompactionPlugin
+        from corvidae.compaction import CompactionPlugin
         plugin = CompactionPlugin()
         result = await plugin.compact_conversation(
             conversation=conv, client=mock_client, max_tokens=50
         )
 
-        from sherman.conversation import MessageType
+        from corvidae.conversation import MessageType
         assert result is True
         assert len(conv.messages) == 3  # summary msg + 2 retained
         assert conv.messages[0] == {
@@ -86,7 +86,7 @@ class TestConversationLogCompaction:
             return_value={"choices": [{"message": {"content": "mock summary"}}]}
         )
 
-        from sherman.compaction import CompactionPlugin
+        from corvidae.compaction import CompactionPlugin
         plugin = CompactionPlugin()
         result = await plugin.compact_conversation(
             conversation=conv, client=mock_client, max_tokens=100
@@ -116,7 +116,7 @@ class TestConversationLogCompaction:
             return_value={"choices": [{"message": {"content": "large summary"}}]}
         )
 
-        from sherman.compaction import CompactionPlugin
+        from corvidae.compaction import CompactionPlugin
         plugin = CompactionPlugin()
         await plugin.compact_conversation(
             conversation=conv, client=mock_client, max_tokens=1000
@@ -145,7 +145,7 @@ class TestConversationLogCompaction:
             return_value={"choices": [{"message": {"content": "small summary"}}]}
         )
 
-        from sherman.compaction import CompactionPlugin
+        from corvidae.compaction import CompactionPlugin
         plugin = CompactionPlugin()
         await plugin.compact_conversation(
             conversation=conv, client=mock_client, max_tokens=100
@@ -174,14 +174,14 @@ class TestConversationLogCompaction:
             return_value={"choices": [{"message": {"content": "none-content summary"}}]}
         )
 
-        from sherman.compaction import CompactionPlugin
+        from corvidae.compaction import CompactionPlugin
         plugin = CompactionPlugin()
         # Must not raise TypeError
         await plugin.compact_conversation(
             conversation=conv, client=mock_client, max_tokens=100
         )
 
-        from sherman.conversation import MessageType
+        from corvidae.conversation import MessageType
         assert conv.messages[0] == {
             "role": "assistant",
             "content": "[Summary of earlier conversation]\nnone-content summary",
@@ -212,7 +212,7 @@ class TestConversationLogCompaction:
             return_value={"choices": [{"message": {"content": "list-content summary"}}]}
         )
 
-        from sherman.compaction import CompactionPlugin
+        from corvidae.compaction import CompactionPlugin
         plugin = CompactionPlugin()
         await plugin.compact_conversation(
             conversation=conv, client=mock_client, max_tokens=50
@@ -243,7 +243,7 @@ class TestConversationLogCompaction:
             return_value={"choices": [{"message": {"content": "should not summarize"}}]}
         )
 
-        from sherman.compaction import CompactionPlugin
+        from corvidae.compaction import CompactionPlugin
         plugin = CompactionPlugin()
         result = await plugin.compact_conversation(
             conversation=conv, client=mock_client, max_tokens=200
@@ -276,7 +276,7 @@ class TestConversationLogCompaction:
             return_value={"choices": [{"message": {"content": "huge summary"}}]}
         )
 
-        from sherman.compaction import CompactionPlugin
+        from corvidae.compaction import CompactionPlugin
         plugin = CompactionPlugin()
         await plugin.compact_conversation(
             conversation=conv, client=mock_client, max_tokens=100
@@ -313,7 +313,7 @@ class TestConversationLogCompaction:
             return_value={"choices": [{"message": {"content": "boundary summary"}}]}
         )
 
-        from sherman.compaction import CompactionPlugin
+        from corvidae.compaction import CompactionPlugin
         plugin = CompactionPlugin()
         await plugin.compact_conversation(
             conversation=conv, client=mock_client, max_tokens=100
@@ -376,7 +376,7 @@ class TestDurableCompaction:
             return_value={"choices": [{"message": {"content": "mock summary"}}]}
         )
 
-        from sherman.compaction import CompactionPlugin
+        from corvidae.compaction import CompactionPlugin
         plugin = CompactionPlugin()
         await plugin.compact_conversation(
             conversation=conv, client=mock_client, max_tokens=50
@@ -435,7 +435,7 @@ class TestDurableCompaction:
         )
         await db.commit()
 
-        from sherman.conversation import MessageType
+        from corvidae.conversation import MessageType
         conv = ConversationLog(db, channel_id="chan1")
         await conv.load()
 
@@ -448,7 +448,7 @@ class TestDurableCompaction:
 
     async def test_load_without_summary_loads_all(self, db):
         """When no summary rows exist, load() loads everything (existing behavior)."""
-        from sherman.conversation import MessageType
+        from corvidae.conversation import MessageType
         base_ts = time.time()
         messages = [
             {"role": "user", "content": "first"},
@@ -492,7 +492,7 @@ class TestDurableCompaction:
         """
         base_ts = time.time()
 
-        from sherman.conversation import MessageType
+        from corvidae.conversation import MessageType
         # 2 retained messages from first compaction (simulating cleaned-up state)
         retained_messages = [
             {"role": "user", "content": "a" * 35}
@@ -545,7 +545,7 @@ class TestDurableCompaction:
 
         expected_retained = conv.messages[-2:]
 
-        from sherman.compaction import CompactionPlugin
+        from corvidae.compaction import CompactionPlugin
         plugin = CompactionPlugin()
         await plugin.compact_conversation(
             conversation=conv, client=mock_client, max_tokens=50
@@ -588,7 +588,7 @@ class TestIdBasedSummaryOrdering:
         msg_after_1 = {"role": "user", "content": "after summary 1"}
         msg_after_2 = {"role": "assistant", "content": "after summary 2"}
 
-        from sherman.conversation import MessageType
+        from corvidae.conversation import MessageType
         # Insert the summary row first so it gets a lower id
         await db.execute(
             "INSERT INTO message_log (channel_id, message, timestamp, message_type) VALUES (?, ?, ?, 'summary')",
@@ -651,7 +651,7 @@ class TestIdBasedSummaryOrdering:
 
         # Token math: 10 msgs x 35 chars → int(350/3.5)=100 ≥ 40 → triggers; len=10>5.
         # retain_count=2; conv.messages = [summary, msgs[-2], msgs[-1]].
-        from sherman.compaction import CompactionPlugin
+        from corvidae.compaction import CompactionPlugin
         plugin = CompactionPlugin()
         await plugin.compact_conversation(
             conversation=conv, client=mock_client, max_tokens=50
@@ -687,7 +687,7 @@ class TestIdBasedSummaryOrdering:
         """
         shared_ts = 1_000_000.0
 
-        from sherman.conversation import MessageType
+        from corvidae.conversation import MessageType
         # Insert 10 messages all with the exact same timestamp
         messages = [{"role": "user", "content": "a" * 35} for _ in range(10)]
         for msg in messages:
@@ -709,7 +709,7 @@ class TestIdBasedSummaryOrdering:
         # Token math: 10 msgs x 35 chars → int(350/3.5)=100 ≥ 40 → triggers; len=10>5.
         # retain_budget=25; each msg=10 tokens.
         # Walk: count=1(10), count=2(20), 30>25 AND count>0 → break. retain_count=2.
-        from sherman.compaction import CompactionPlugin
+        from corvidae.compaction import CompactionPlugin
         plugin = CompactionPlugin()
         await plugin.compact_conversation(
             conversation=conv, client=mock_client, max_tokens=50
@@ -754,7 +754,7 @@ class TestCompactionWithContext:
 
         We make the last 2 entries a MESSAGE + CONTEXT pair so both end up retained.
         """
-        from sherman.conversation import MessageType
+        from corvidae.conversation import MessageType
 
         conv = ConversationLog(db, channel_id="chan1")
         conv.system_prompt = ""
@@ -796,7 +796,7 @@ class TestCompactionWithContext:
             return_value={"choices": [{"message": {"content": "compacted summary"}}]}
         )
 
-        from sherman.compaction import CompactionPlugin
+        from corvidae.compaction import CompactionPlugin
         plugin = CompactionPlugin()
         await plugin.compact_conversation(
             conversation=conv, client=mock_client, max_tokens=50
@@ -840,7 +840,7 @@ class TestCompactionWithContext:
 
         We place the CONTEXT entry at position -3 (in the older window after retain_count=2).
         """
-        from sherman.conversation import MessageType
+        from corvidae.conversation import MessageType
 
         conv = ConversationLog(db, channel_id="chan1")
         conv.system_prompt = ""
@@ -884,7 +884,7 @@ class TestCompactionWithContext:
             return_value={"choices": [{"message": {"content": "summary with older ctx deleted"}}]}
         )
 
-        from sherman.compaction import CompactionPlugin
+        from corvidae.compaction import CompactionPlugin
         plugin = CompactionPlugin()
         await plugin.compact_conversation(
             conversation=conv, client=mock_client, max_tokens=50
@@ -915,7 +915,7 @@ class TestCompactFiltersNonMessage:
         must only receive MESSAGE-typed entries, so the SUMMARY-typed dict
         must not appear in the messages list sent to the LLM.
         """
-        from sherman.conversation import MessageType
+        from corvidae.conversation import MessageType
 
         conv = ConversationLog(db, channel_id="chan1")
         conv.system_prompt = ""
@@ -943,7 +943,7 @@ class TestCompactFiltersNonMessage:
             return_value={"choices": [{"message": {"content": "filtered summary"}}]}
         )
 
-        from sherman.compaction import CompactionPlugin
+        from corvidae.compaction import CompactionPlugin
         plugin = CompactionPlugin()
 
         # Patch the plugin's _summarize to capture what older list is passed in

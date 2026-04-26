@@ -1,6 +1,6 @@
-"""Tests for sherman.mcp_client — McpClientPlugin.
+"""Tests for corvidae.mcp_client — McpClientPlugin.
 
-All tests are expected to FAIL until sherman/mcp_client.py is implemented.
+All tests are expected to FAIL until corvidae/mcp_client.py is implemented.
 
 Design assumptions (from plans/mcp-client-plugin.md):
 - McpClientPlugin.on_start(config) is an async hookimpl.
@@ -29,7 +29,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 # The import under test — will raise ImportError until the file exists.
-from sherman.mcp_client import McpClientPlugin, _McpServerState, _call_mcp_tool, _make_tool, _mcp_tool_to_schema
+from corvidae.mcp_client import McpClientPlugin, _McpServerState, _call_mcp_tool, _make_tool, _mcp_tool_to_schema
 
 
 # ---------------------------------------------------------------------------
@@ -38,19 +38,19 @@ from sherman.mcp_client import McpClientPlugin, _McpServerState, _call_mcp_tool,
 
 
 @pytest.fixture(autouse=True)
-def _reset_sherman_logger():
-    """Ensure the sherman logger propagates to root so caplog captures records.
+def _reset_corvidae_logger():
+    """Ensure the corvidae logger propagates to root so caplog captures records.
 
     Other test modules (test_main.py) may apply dictConfig with
-    propagate=False on the sherman logger. This fixture resets it.
+    propagate=False on the corvidae logger. This fixture resets it.
     """
-    sherman_logger = logging.getLogger("sherman")
-    original_propagate = sherman_logger.propagate
-    original_handlers = sherman_logger.handlers[:]
-    sherman_logger.propagate = True
+    corvidae_logger = logging.getLogger("corvidae")
+    original_propagate = corvidae_logger.propagate
+    original_handlers = corvidae_logger.handlers[:]
+    corvidae_logger.propagate = True
     yield
-    sherman_logger.propagate = original_propagate
-    sherman_logger.handlers = original_handlers
+    corvidae_logger.propagate = original_propagate
+    corvidae_logger.handlers = original_handlers
 
 
 # ---------------------------------------------------------------------------
@@ -377,7 +377,7 @@ class TestOnStartUnknownTransport:
             }
         }
 
-        with caplog.at_level(logging.WARNING, logger="sherman.mcp_client"):
+        with caplog.at_level(logging.WARNING, logger="corvidae.mcp_client"):
             # Should not raise.
             await plugin.on_start(config=config)
 
@@ -395,7 +395,7 @@ class TestRegisterTools:
 
     def test_extends_registry_with_cached_tools(self):
         """Cached tools are appended to the provided tool_registry list."""
-        from sherman.tool import Tool
+        from corvidae.tool import Tool
 
         plugin = McpClientPlugin()
 
@@ -421,7 +421,7 @@ class TestRegisterTools:
 
     def test_does_not_replace_existing_registry_items(self):
         """register_tools extends (not replaces) an existing registry."""
-        from sherman.tool import Tool
+        from corvidae.tool import Tool
 
         plugin = McpClientPlugin()
 
@@ -886,7 +886,7 @@ class TestToolNameCollision:
 
         plugin._servers = [server_a, server_b]
 
-        with caplog.at_level(logging.WARNING, logger="sherman.mcp_client"):
+        with caplog.at_level(logging.WARNING, logger="corvidae.mcp_client"):
             plugin._build_tool_list()
 
         assert any("collision" in record.message.lower() or "duplicate" in record.message.lower()
@@ -969,7 +969,7 @@ class TestNonTextContentBlocks:
         tool_result = _make_tool_result([image_block])
         mock_session.call_tool = AsyncMock(return_value=tool_result)
 
-        with caplog.at_level(logging.DEBUG, logger="sherman.mcp_client"):
+        with caplog.at_level(logging.DEBUG, logger="corvidae.mcp_client"):
             await _call_mcp_tool(mock_session, "tool", {}, 30.0, "myserver")
 
         assert any(record.levelno == logging.DEBUG for record in caplog.records)

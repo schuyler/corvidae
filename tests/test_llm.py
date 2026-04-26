@@ -1,11 +1,11 @@
-"""Tests for sherman.llm.LLMClient."""
+"""Tests for corvidae.llm.LLMClient."""
 
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from sherman.llm import LLMClient
+from corvidae.llm import LLMClient
 
 
 BASE_URL = "http://localhost:8080"

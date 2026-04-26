@@ -1,4 +1,4 @@
-"""Tests for sherman.agent_loop -- run_agent_loop, tool_to_schema, strip_thinking."""
+"""Tests for corvidae.agent_loop -- run_agent_loop, tool_to_schema, strip_thinking."""
 
 import json
 import logging
@@ -6,10 +6,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from sherman.agent_loop import run_agent_loop, strip_thinking, tool_to_schema
+from corvidae.agent_loop import run_agent_loop, strip_thinking, tool_to_schema
 
 try:
-    from sherman.agent_loop import AgentTurnResult, run_agent_turn
+    from corvidae.agent_loop import AgentTurnResult, run_agent_turn
 except ImportError:
     AgentTurnResult = None
     run_agent_turn = None
@@ -312,7 +312,7 @@ async def test_run_agent_loop_does_not_pass_extra_body():
 async def test_llm_client_extra_body_applied_in_chat():
     """LLMClient with extra_body merges it into the request payload.
     Verify the instance extra_body is applied when client.chat() is called."""
-    from sherman.llm import LLMClient
+    from corvidae.llm import LLMClient
     import aiohttp
     from unittest.mock import patch, AsyncMock, MagicMock
 
@@ -327,7 +327,7 @@ async def test_llm_client_extra_body_applied_in_chat():
 
 async def test_llm_client_no_extra_body_by_default():
     """LLMClient without extra_body has extra_body=None."""
-    from sherman.llm import LLMClient
+    from corvidae.llm import LLMClient
 
     client = LLMClient(base_url="http://localhost:8080", model="test-model")
     assert client.extra_body is None
@@ -347,10 +347,10 @@ async def test_llm_response_logs_info_with_latency_ms(caplog):
     client.chat = AsyncMock(return_value=_make_text_response("hello"))
 
     messages = [{"role": "user", "content": "hi"}]
-    with caplog.at_level(logging.INFO, logger="sherman.agent_loop"):
+    with caplog.at_level(logging.INFO, logger="corvidae.agent_loop"):
         await run_agent_loop(client, messages, tools={}, tool_schemas=[])
 
-    records = [r for r in caplog.records if r.name == "sherman.agent_loop"]
+    records = [r for r in caplog.records if r.name == "corvidae.agent_loop"]
     matching = [r for r in records if r.levelno == logging.INFO and r.getMessage() == "LLM response received"]
     assert matching, "Expected INFO record with message 'LLM response received'"
     assert hasattr(matching[0], "latency_ms"), "'LLM response received' log must have latency_ms attribute"
@@ -372,10 +372,10 @@ async def test_tool_call_result_logs_info_with_latency_ms(caplog):
     )
 
     messages = [{"role": "user", "content": "go"}]
-    with caplog.at_level(logging.INFO, logger="sherman.agent_loop"):
+    with caplog.at_level(logging.INFO, logger="corvidae.agent_loop"):
         await run_agent_loop(client, messages, tools={"my_tool": tool_fn}, tool_schemas=[])
 
-    records = [r for r in caplog.records if r.name == "sherman.agent_loop"]
+    records = [r for r in caplog.records if r.name == "corvidae.agent_loop"]
     matching = [r for r in records if r.levelno == logging.INFO and r.getMessage() == "tool call result"]
     assert matching, "Expected INFO record with message 'tool call result'"
     assert hasattr(matching[0], "latency_ms"), "'tool call result' log must have latency_ms attribute"
@@ -397,10 +397,10 @@ async def test_tool_call_dispatched_logs_info(caplog):
     )
 
     messages = [{"role": "user", "content": "go"}]
-    with caplog.at_level(logging.INFO, logger="sherman.agent_loop"):
+    with caplog.at_level(logging.INFO, logger="corvidae.agent_loop"):
         await run_agent_loop(client, messages, tools={"my_tool": tool_fn}, tool_schemas=[])
 
-    records = [r for r in caplog.records if r.name == "sherman.agent_loop"]
+    records = [r for r in caplog.records if r.name == "corvidae.agent_loop"]
     matching = [r for r in records if r.levelno == logging.INFO and r.getMessage() == "tool call dispatched"]
     assert matching, "Expected INFO record with message 'tool call dispatched'"
 
@@ -418,10 +418,10 @@ async def test_tool_call_result_not_logged_for_unknown_tool(caplog):
     )
 
     messages = [{"role": "user", "content": "go"}]
-    with caplog.at_level(logging.INFO, logger="sherman.agent_loop"):
+    with caplog.at_level(logging.INFO, logger="corvidae.agent_loop"):
         await run_agent_loop(client, messages, tools={}, tool_schemas=[])
 
-    records = [r for r in caplog.records if r.name == "sherman.agent_loop"]
+    records = [r for r in caplog.records if r.name == "corvidae.agent_loop"]
     result_records = [r for r in records if r.levelno == logging.INFO and r.getMessage() == "tool call result"]
     assert not result_records, "'tool call result' INFO must NOT be emitted for unknown tool"
 
@@ -442,10 +442,10 @@ async def test_tool_call_result_not_logged_on_exception(caplog):
     )
 
     messages = [{"role": "user", "content": "go"}]
-    with caplog.at_level(logging.INFO, logger="sherman.agent_loop"):
+    with caplog.at_level(logging.INFO, logger="corvidae.agent_loop"):
         await run_agent_loop(client, messages, tools={"bad_tool": bad_tool}, tool_schemas=[])
 
-    records = [r for r in caplog.records if r.name == "sherman.agent_loop"]
+    records = [r for r in caplog.records if r.name == "corvidae.agent_loop"]
     result_records = [r for r in records if r.levelno == logging.INFO and r.getMessage() == "tool call result"]
     assert not result_records, "'tool call result' INFO must NOT be emitted when tool raises"
 
@@ -465,10 +465,10 @@ async def test_llm_response_content_debug_log(caplog):
     client.chat = AsyncMock(return_value=_make_text_response("hello"))
 
     messages = [{"role": "user", "content": "hi"}]
-    with caplog.at_level(logging.DEBUG, logger="sherman.agent_loop"):
+    with caplog.at_level(logging.DEBUG, logger="corvidae.agent_loop"):
         await run_agent_loop(client, messages, tools={}, tool_schemas=[])
 
-    records = [r for r in caplog.records if r.name == "sherman.agent_loop"]
+    records = [r for r in caplog.records if r.name == "corvidae.agent_loop"]
     matching = [
         r for r in records
         if r.levelno == logging.DEBUG and r.getMessage() == "LLM response content"
@@ -508,10 +508,10 @@ async def test_llm_response_content_debug_log_with_reasoning(caplog):
     client.chat = AsyncMock(return_value=response)
 
     messages = [{"role": "user", "content": "hi"}]
-    with caplog.at_level(logging.DEBUG, logger="sherman.agent_loop"):
+    with caplog.at_level(logging.DEBUG, logger="corvidae.agent_loop"):
         await run_agent_loop(client, messages, tools={}, tool_schemas=[])
 
-    records = [r for r in caplog.records if r.name == "sherman.agent_loop"]
+    records = [r for r in caplog.records if r.name == "corvidae.agent_loop"]
     matching = [
         r for r in records
         if r.levelno == logging.DEBUG and r.getMessage() == "LLM response content"
@@ -539,10 +539,10 @@ async def test_llm_response_content_truncated(caplog):
     client.chat = AsyncMock(return_value=_make_text_response(long_content))
 
     messages = [{"role": "user", "content": "hi"}]
-    with caplog.at_level(logging.DEBUG, logger="sherman.agent_loop"):
+    with caplog.at_level(logging.DEBUG, logger="corvidae.agent_loop"):
         await run_agent_loop(client, messages, tools={}, tool_schemas=[])
 
-    records = [r for r in caplog.records if r.name == "sherman.agent_loop"]
+    records = [r for r in caplog.records if r.name == "corvidae.agent_loop"]
     matching = [
         r for r in records
         if r.levelno == logging.DEBUG and r.getMessage() == "LLM response content"
@@ -575,10 +575,10 @@ async def test_tool_call_arguments_debug_log(caplog):
     )
 
     messages = [{"role": "user", "content": "go"}]
-    with caplog.at_level(logging.DEBUG, logger="sherman.agent_loop"):
+    with caplog.at_level(logging.DEBUG, logger="corvidae.agent_loop"):
         await run_agent_loop(client, messages, tools={"my_tool": tool_fn}, tool_schemas=[])
 
-    records = [r for r in caplog.records if r.name == "sherman.agent_loop"]
+    records = [r for r in caplog.records if r.name == "corvidae.agent_loop"]
     matching = [
         r for r in records
         if r.levelno == logging.DEBUG and r.getMessage() == "tool call arguments"
@@ -610,10 +610,10 @@ async def test_tool_call_result_content_debug_log(caplog):
     )
 
     messages = [{"role": "user", "content": "go"}]
-    with caplog.at_level(logging.DEBUG, logger="sherman.agent_loop"):
+    with caplog.at_level(logging.DEBUG, logger="corvidae.agent_loop"):
         await run_agent_loop(client, messages, tools={"my_tool": tool_fn}, tool_schemas=[])
 
-    records = [r for r in caplog.records if r.name == "sherman.agent_loop"]
+    records = [r for r in caplog.records if r.name == "corvidae.agent_loop"]
     matching = [
         r for r in records
         if r.levelno == logging.DEBUG and r.getMessage() == "tool call result content"
@@ -646,10 +646,10 @@ async def test_tool_call_result_content_not_logged_on_exception(caplog):
     )
 
     messages = [{"role": "user", "content": "go"}]
-    with caplog.at_level(logging.DEBUG, logger="sherman.agent_loop"):
+    with caplog.at_level(logging.DEBUG, logger="corvidae.agent_loop"):
         await run_agent_loop(client, messages, tools={"bad_tool": bad_tool}, tool_schemas=[])
 
-    records = [r for r in caplog.records if r.name == "sherman.agent_loop"]
+    records = [r for r in caplog.records if r.name == "corvidae.agent_loop"]
     result_content_records = [
         r for r in records
         if r.levelno == logging.DEBUG and r.getMessage() == "tool call result content"
@@ -797,10 +797,10 @@ async def test_run_agent_turn_logging_info_and_debug(caplog):
     client.chat = AsyncMock(return_value=_make_text_response("logged"))
 
     messages = [{"role": "user", "content": "hi"}]
-    with caplog.at_level(logging.DEBUG, logger="sherman.agent_loop"):
+    with caplog.at_level(logging.DEBUG, logger="corvidae.agent_loop"):
         await run_agent_turn(client, messages, tool_schemas=[])
 
-    records = [r for r in caplog.records if r.name == "sherman.agent_loop"]
+    records = [r for r in caplog.records if r.name == "corvidae.agent_loop"]
 
     info_records = [
         r for r in records
@@ -838,10 +838,10 @@ async def test_run_agent_turn_reasoning_content_debug_log(caplog):
     client.chat = AsyncMock(return_value=response)
 
     messages = [{"role": "user", "content": "reason through it"}]
-    with caplog.at_level(logging.DEBUG, logger="sherman.agent_loop"):
+    with caplog.at_level(logging.DEBUG, logger="corvidae.agent_loop"):
         await run_agent_turn(client, messages, tool_schemas=[])
 
-    records = [r for r in caplog.records if r.name == "sherman.agent_loop"]
+    records = [r for r in caplog.records if r.name == "corvidae.agent_loop"]
     debug_records = [
         r for r in records
         if r.levelno == logging.DEBUG and r.getMessage() == "LLM response content"

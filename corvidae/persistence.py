@@ -14,9 +14,9 @@ from pathlib import Path
 
 import aiosqlite
 
-from sherman.channel import ChannelRegistry, resolve_system_prompt
-from sherman.conversation import ConversationLog, init_db
-from sherman.hooks import get_dependency, hookimpl
+from corvidae.channel import ChannelRegistry, resolve_system_prompt
+from corvidae.conversation import ConversationLog, init_db
+from corvidae.hooks import get_dependency, hookimpl
 
 logger = logging.getLogger(__name__)
 

@@ -1,14 +1,14 @@
-"""Subagent tool for the sherman agent daemon."""
+"""Subagent tool for the corvidae agent daemon."""
 
 from __future__ import annotations
 
 import logging
 
-from sherman.agent_loop import run_agent_loop, strip_thinking
-from sherman.hooks import get_dependency, hookimpl
-from sherman.llm import LLMClient
-from sherman.task import Task
-from sherman.tool import ToolContext
+from corvidae.agent_loop import run_agent_loop, strip_thinking
+from corvidae.hooks import get_dependency, hookimpl
+from corvidae.llm import LLMClient
+from corvidae.task import Task
+from corvidae.tool import ToolContext
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +34,7 @@ class SubagentPlugin:
 
     @hookimpl
     def register_tools(self, tool_registry: list) -> None:
-        from sherman.tool import Tool
+        from corvidae.tool import Tool
 
         plugin = self  # captured by closure
 
@@ -58,7 +58,7 @@ class SubagentPlugin:
             return "Error: no channel context available for subagent"
 
         # Get tools, excluding subagent itself to prevent recursion
-        from sherman.agent import AgentPlugin
+        from corvidae.agent import AgentPlugin
         agent = get_dependency(self.pm, "agent_loop", AgentPlugin)
         registry = agent.tool_registry.exclude("subagent")
         tools_dict = registry.as_dict()

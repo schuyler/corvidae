@@ -1,4 +1,4 @@
-"""Tests for sherman.conversation.ConversationLog and init_db."""
+"""Tests for corvidae.conversation.ConversationLog and init_db."""
 
 import json
 import time
@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 import aiosqlite
 
-from sherman.conversation import ConversationLog, init_db
+from corvidae.conversation import ConversationLog, init_db
 
 
 class TestInitDb:
@@ -57,7 +57,7 @@ class TestConversationLogPersistence:
             )
         await db.commit()
 
-        from sherman.conversation import MessageType
+        from corvidae.conversation import MessageType
         conv = ConversationLog(db, channel_id="chan1")
         await conv.load()
 
@@ -80,7 +80,7 @@ class TestConversationLogPersistence:
         )
         await db.commit()
 
-        from sherman.conversation import MessageType
+        from corvidae.conversation import MessageType
         conv = ConversationLog(db, channel_id="chan1")
         await conv.load()
 
@@ -104,7 +104,7 @@ class TestConversationLogPersistence:
         )
         await db.commit()
 
-        from sherman.conversation import MessageType
+        from corvidae.conversation import MessageType
         conv = ConversationLog(db, channel_id="chan1")
         await conv.load()
 
@@ -153,7 +153,7 @@ class TestReplaceWithSummary:
 
         Verify messages = [summary+tag, retained[-2], retained[-1]].
         """
-        from sherman.conversation import MessageType
+        from corvidae.conversation import MessageType
 
         conv = ConversationLog(db, channel_id="chan1")
         conv.system_prompt = ""
@@ -172,7 +172,7 @@ class TestReplaceWithSummary:
 
     async def test_replace_with_summary_zero_retain(self, db):
         """retain_count=0 — messages = [summary+tag] only."""
-        from sherman.conversation import MessageType
+        from corvidae.conversation import MessageType
 
         conv = ConversationLog(db, channel_id="chan1")
         conv.messages = [
@@ -189,7 +189,7 @@ class TestReplaceWithSummary:
     async def test_replace_with_summary_raises_on_too_many_retained(self, db):
         """retain_count > len(messages) raises ValueError."""
         import pytest
-        from sherman.conversation import MessageType
+        from corvidae.conversation import MessageType
 
         conv = ConversationLog(db, channel_id="chan1")
         conv.messages = [
@@ -203,7 +203,7 @@ class TestReplaceWithSummary:
 
     async def test_replace_with_summary_db_persistence(self, db):
         """After replace_with_summary, DB has 1 summary row + correct retained rows."""
-        from sherman.conversation import MessageType
+        from corvidae.conversation import MessageType
 
         base_ts = time.time()
         conv = ConversationLog(db, channel_id="chan1")
@@ -250,7 +250,7 @@ class TestReplaceWithSummary:
 class TestMessageType:
     """Tests for MessageType enum, in-memory tagging, and message_type DB column.
 
-    All tests import MessageType from sherman.conversation. This import will
+    All tests import MessageType from corvidae.conversation. This import will
     fail (ImportError) until Phase 1 is implemented — that is the intended
     red state.
     """
@@ -258,7 +258,7 @@ class TestMessageType:
     async def test_message_type_enum_values(self):
         """MessageType enum must expose MESSAGE='message' and SUMMARY='summary',
         and round-trip correctly from a DB string via MessageType(value)."""
-        from sherman.conversation import MessageType  # fails until Phase 1
+        from corvidae.conversation import MessageType  # fails until Phase 1
 
         assert MessageType.MESSAGE == "message", (
             f"Expected MessageType.MESSAGE == 'message', got {MessageType.MESSAGE!r}"
@@ -272,7 +272,7 @@ class TestMessageType:
 
     async def test_persist_with_explicit_message_type(self, db):
         """_persist(msg, MessageType.SUMMARY) must write message_type='summary' to DB."""
-        from sherman.conversation import MessageType  # fails until Phase 1
+        from corvidae.conversation import MessageType  # fails until Phase 1
 
         conv = ConversationLog(db, channel_id="chan1")
         msg = {"role": "assistant", "content": "a summary"}
@@ -292,7 +292,7 @@ class TestMessageType:
 
     async def test_persist_default_message_type(self, db):
         """_persist(msg) with no message_type arg must write message_type='message' to DB."""
-        from sherman.conversation import MessageType  # fails until Phase 1
+        from corvidae.conversation import MessageType  # fails until Phase 1
 
         conv = ConversationLog(db, channel_id="chan1")
         msg = {"role": "user", "content": "hello"}
@@ -312,7 +312,7 @@ class TestMessageType:
 
     async def test_load_tags_messages_with_message_type(self, db):
         """load() must tag every in-memory message dict with a '_message_type' key."""
-        from sherman.conversation import MessageType  # fails until Phase 1
+        from corvidae.conversation import MessageType  # fails until Phase 1
 
         base_ts = time.time()
         messages = [
@@ -343,7 +343,7 @@ class TestMessageType:
     async def test_build_prompt_strips_message_type(self, db):
         """build_prompt() must return dicts with no '_message_type' key,
         even when self.messages contains tagged dicts."""
-        from sherman.conversation import MessageType  # fails until Phase 1
+        from corvidae.conversation import MessageType  # fails until Phase 1
 
         conv = ConversationLog(db, channel_id="chan1")
         conv.system_prompt = "You are helpful."
@@ -362,7 +362,7 @@ class TestMessageType:
 
     async def test_append_tags_in_memory_message(self, db):
         """append(msg) must tag the in-memory copy with _message_type=MessageType.MESSAGE."""
-        from sherman.conversation import MessageType  # fails until Phase 1
+        from corvidae.conversation import MessageType  # fails until Phase 1
 
         conv = ConversationLog(db, channel_id="chan1")
         msg = {"role": "user", "content": "hello"}
@@ -398,7 +398,7 @@ class TestMessageTypeContext:
 
     async def test_message_type_context_value(self):
         """MessageType.CONTEXT must equal the string 'context'."""
-        from sherman.conversation import MessageType
+        from corvidae.conversation import MessageType
 
         assert MessageType.CONTEXT == "context", (
             f"Expected MessageType.CONTEXT == 'context', got {MessageType.CONTEXT!r}"
@@ -407,7 +407,7 @@ class TestMessageTypeContext:
     async def test_append_with_context_type(self, db):
         """append() with message_type=MessageType.CONTEXT must persist a row
         with message_type='context' in the DB."""
-        from sherman.conversation import MessageType
+        from corvidae.conversation import MessageType
 
         conv = ConversationLog(db, channel_id="chan1")
         msg = {"role": "system", "content": "remembered: user prefers terse replies"}
@@ -432,7 +432,7 @@ class TestMessageTypeContext:
         silently dropped. This test will fail until the WHERE clause changes to
         != 'summary'.
         """
-        from sherman.conversation import MessageType
+        from corvidae.conversation import MessageType
 
         base_ts = time.time()
         msg_msg = {"role": "user", "content": "hello"}
@@ -469,7 +469,7 @@ class TestMessageTypeContext:
         This fails until the summary-branch WHERE clause changes from
         message_type = 'message' to message_type != 'summary'.
         """
-        from sherman.conversation import MessageType
+        from corvidae.conversation import MessageType
 
         base_ts = time.time()
         summary_msg = {"role": "assistant", "content": "[Summary of earlier conversation]\nold stuff"}
@@ -524,7 +524,7 @@ class TestPersistSummaryWithContext:
         [CTX6, MSG7, MSG8] (3 non-summary entries). The oldest retained non-summary
         row is CTX6 (id 6). All MESSAGE rows with id < 6 must be deleted.
         """
-        from sherman.conversation import MessageType
+        from corvidae.conversation import MessageType
 
         base_ts = time.time()
 
@@ -603,7 +603,7 @@ class TestPersistSummaryWithContext:
 
         Setup: retained = [CTX1] (1 non-summary, 0 MESSAGE).
         """
-        from sherman.conversation import MessageType
+        from corvidae.conversation import MessageType
 
         base_ts = time.time()
 
@@ -666,7 +666,7 @@ class TestPersistSummaryWithContext:
         """When retain_count == 0 (retained set is completely empty),
         replace_with_summary must delete all non-summary rows unconditionally.
         """
-        from sherman.conversation import MessageType
+        from corvidae.conversation import MessageType
 
         base_ts = time.time()
 
@@ -736,7 +736,7 @@ class TestPersistSummaryWithContext:
         which tested _persist_summary with num_retained_total=0. Here we use a
         distinct scenario: 3 retained (context-only), verifying correct DB state.
         """
-        from sherman.conversation import MessageType
+        from corvidae.conversation import MessageType
 
         base_ts = time.time()
 
@@ -822,7 +822,7 @@ class TestRemoveByType:
     async def test_remove_by_type_removes_context(self, db):
         """remove_by_type(CONTEXT) must remove all CONTEXT entries from both
         in-memory messages and the DB, and return the count removed."""
-        from sherman.conversation import MessageType
+        from corvidae.conversation import MessageType
 
         conv = ConversationLog(db, channel_id="chan1")
         base_ts = time.time()
@@ -874,7 +874,7 @@ class TestRemoveByType:
     async def test_remove_by_type_rejects_message(self, db):
         """remove_by_type(MESSAGE) must raise ValueError — MESSAGE lifecycle
         is managed by compaction, not by remove_by_type."""
-        from sherman.conversation import MessageType
+        from corvidae.conversation import MessageType
         import pytest
 
         conv = ConversationLog(db, channel_id="chan1")
@@ -885,7 +885,7 @@ class TestRemoveByType:
     async def test_remove_by_type_rejects_summary(self, db):
         """remove_by_type(SUMMARY) must raise ValueError — SUMMARY lifecycle
         is managed by compaction, not by remove_by_type."""
-        from sherman.conversation import MessageType
+        from corvidae.conversation import MessageType
         import pytest
 
         conv = ConversationLog(db, channel_id="chan1")

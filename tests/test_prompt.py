@@ -1,10 +1,10 @@
-"""Tests for sherman.channel.resolve_system_prompt."""
+"""Tests for corvidae.channel.resolve_system_prompt."""
 
 from pathlib import Path
 
 import pytest
 
-from sherman.channel import resolve_system_prompt
+from corvidae.channel import resolve_system_prompt
 
 
 # ---------------------------------------------------------------------------

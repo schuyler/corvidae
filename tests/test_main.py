@@ -1,4 +1,4 @@
-"""Tests for sherman.main."""
+"""Tests for corvidae.main."""
 
 import asyncio
 import os
@@ -9,8 +9,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import yaml
 
-from sherman.channel import ChannelRegistry
-from sherman.main import main
+from corvidae.channel import ChannelRegistry
+from corvidae.main import main
 
 
 # ---------------------------------------------------------------------------
@@ -51,8 +51,8 @@ class TestMainLoadsConfigAndCreatesPM:
             config_path = f.name
 
         try:
-            with patch("sherman.main.create_plugin_manager") as mock_create, \
-                 patch("sherman.main.AgentPlugin") as mock_agent_cls:
+            with patch("corvidae.main.create_plugin_manager") as mock_create, \
+                 patch("corvidae.main.AgentPlugin") as mock_agent_cls:
                 # Return a minimal object that satisfies pm.ahook.on_start / on_stop
                 mock_pm = MagicMock()
                 mock_pm.ahook.on_start = AsyncMock(return_value=[])
@@ -96,8 +96,8 @@ class TestAgentPluginLifecycleOrdering:
         call_order: list[str] = []
 
         try:
-            with patch("sherman.main.create_plugin_manager") as mock_create, \
-                 patch("sherman.main.AgentPlugin") as mock_agent_cls:
+            with patch("corvidae.main.create_plugin_manager") as mock_create, \
+                 patch("corvidae.main.AgentPlugin") as mock_agent_cls:
                 mock_pm = MagicMock()
 
                 async def broadcast_on_start(**kwargs):
@@ -163,8 +163,8 @@ class TestAgentPluginLifecycleOrdering:
 class TestMainCallsOnStartAndOnStop:
     async def test_main_calls_on_start_and_on_stop(self):
         """main() should call on_start and on_stop on all registered plugins."""
-        from sherman.hooks import hookimpl
-        from sherman.hooks import create_plugin_manager
+        from corvidae.hooks import hookimpl
+        from corvidae.hooks import create_plugin_manager
 
         on_start_mock = AsyncMock()
         on_stop_mock = AsyncMock()
@@ -194,16 +194,16 @@ class TestMainCallsOnStartAndOnStop:
             mock_client.start = AsyncMock()
             mock_client.stop = AsyncMock()
             with patch(
-                "sherman.main.create_plugin_manager",
+                "corvidae.main.create_plugin_manager",
                 side_effect=patched_create_plugin_manager,
             ), patch(
-                "sherman.agent.LLMClient",
+                "corvidae.agent.LLMClient",
                 return_value=mock_client,
             ), patch(
-                "sherman.persistence.aiosqlite.connect",
+                "corvidae.persistence.aiosqlite.connect",
                 new_callable=AsyncMock,
             ) as mock_connect, patch(
-                "sherman.persistence.init_db",
+                "corvidae.persistence.init_db",
                 new_callable=AsyncMock,
             ):
                 mock_db = MagicMock()
@@ -222,8 +222,8 @@ class TestRegistryPopulatedBeforeOnStart:
     async def test_registry_populated_before_on_start(self):
         """pm.registry must be a ChannelRegistry with pre-configured channels
         by the time on_start fires."""
-        from sherman.hooks import hookimpl
-        from sherman.hooks import create_plugin_manager
+        from corvidae.hooks import hookimpl
+        from corvidae.hooks import create_plugin_manager
 
         registry_snapshot: list = []
 
@@ -268,16 +268,16 @@ class TestRegistryPopulatedBeforeOnStart:
             mock_client.start = AsyncMock()
             mock_client.stop = AsyncMock()
             with patch(
-                "sherman.main.create_plugin_manager",
+                "corvidae.main.create_plugin_manager",
                 side_effect=patched_create_plugin_manager,
             ), patch(
-                "sherman.agent.LLMClient",
+                "corvidae.agent.LLMClient",
                 return_value=mock_client,
             ), patch(
-                "sherman.persistence.aiosqlite.connect",
+                "corvidae.persistence.aiosqlite.connect",
                 new_callable=AsyncMock,
             ) as mock_connect, patch(
-                "sherman.persistence.init_db",
+                "corvidae.persistence.init_db",
                 new_callable=AsyncMock,
             ):
                 mock_db = MagicMock()

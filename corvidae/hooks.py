@@ -24,17 +24,17 @@ from typing import TYPE_CHECKING, TypeVar
 import apluggy as pluggy
 
 if TYPE_CHECKING:
-    from sherman.channel import Channel
-    from sherman.conversation import ConversationLog
-    from sherman.llm import LLMClient
+    from corvidae.channel import Channel
+    from corvidae.conversation import ConversationLog
+    from corvidae.llm import LLMClient
 
 T = TypeVar("T")
 
-# NOTE: marker name is "sherman", not "agent" as in design.md
-hookspec = pluggy.HookspecMarker("sherman")
-hookimpl = pluggy.HookimplMarker("sherman")
+# NOTE: marker name is "corvidae", not "agent" as in design.md
+hookspec = pluggy.HookspecMarker("corvidae")
+hookimpl = pluggy.HookimplMarker("corvidae")
 
-_pm_logger = logging.getLogger("sherman.plugin_manager")
+_pm_logger = logging.getLogger("corvidae.plugin_manager")
 
 
 def get_dependency(pm: pluggy.PluginManager, name: str, expected_type: type[T]) -> T:
@@ -75,11 +75,11 @@ def create_plugin_manager() -> pluggy.PluginManager:
     """Create and configure the plugin manager with AgentSpec hooks.
 
     Returns:
-        A pluggy.PluginManager instance with the Sherman AgentSpec loaded.
+        A pluggy.PluginManager instance with the Corvidae AgentSpec loaded.
 
     Logs a DEBUG message when the manager is created.
     """
-    pm = pluggy.PluginManager("sherman")
+    pm = pluggy.PluginManager("corvidae")
     pm.add_hookspecs(AgentSpec)
 
     _pm_logger.debug("plugin manager created")

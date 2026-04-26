@@ -8,7 +8,7 @@ never race through the agent loop.
 Logging:
     - ERROR: exceptions from process_fn (consumer continues after logging)
 
-Note: QueueItem is defined in sherman.agent and re-exported from here
+Note: QueueItem is defined in corvidae.agent and re-exported from here
 for backward compatibility.
 """
 
@@ -20,7 +20,7 @@ from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from sherman.agent import QueueItem
+    from corvidae.agent import QueueItem
 
 logger = logging.getLogger(__name__)
 
@@ -103,12 +103,12 @@ class SerialQueue:
         self._consumer_task = None
 
 
-# Backward-compat re-export: QueueItem is now defined in sherman.agent.
+# Backward-compat re-export: QueueItem is now defined in corvidae.agent.
 # Lazy import via __getattr__ avoids circular import (agent.py imports SerialQueue
 # from this module). Type checkers may not resolve this — the TYPE_CHECKING import
 # above handles static analysis.
 def __getattr__(name: str):
     if name == "QueueItem":
-        from sherman.agent import QueueItem
+        from corvidae.agent import QueueItem
         return QueueItem
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
