@@ -16,13 +16,14 @@ import pytest
 
 from corvidae.agent import AgentPlugin
 from corvidae.agent_loop import AgentTurnResult, run_agent_turn  # noqa: F401 (used in comments/type checking)
-from corvidae.channel import Channel, ChannelConfig, ChannelRegistry
+from corvidae.channel import ChannelConfig, ChannelRegistry
 from corvidae.conversation import init_db
 from corvidae.hooks import create_plugin_manager
 from corvidae.persistence import PersistencePlugin
 from corvidae.task import Task, TaskPlugin, TaskQueue
-from corvidae.thinking import ThinkingPlugin
 from corvidae.tool import ToolContext
+
+from helpers import build_plugin_and_channel, drain, drain_task_queue
 
 
 # ---------------------------------------------------------------------------
@@ -74,64 +75,11 @@ def _make_tool_call(call_id: str, name: str, args: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 
-async def _build_plugin_and_channel(
-    agent_defaults=None,
-    channel_config=None,
-):
-    """Create plugin manager, registry, in-memory DB, TaskPlugin, AgentPlugin, and channel.
-
-    Callers must call task_plugin.on_stop() and db.close() in teardown.
-    Use the plugin_and_channel fixture instead when possible.
-    """
-    if agent_defaults is None:
-        agent_defaults = AGENT_DEFAULTS
-
-    db = await aiosqlite.connect(":memory:")
-    await init_db(db)
-
-    pm = create_plugin_manager()
-    registry = ChannelRegistry(agent_defaults)
-    pm.register(registry, name="registry")
-
-    pm.ahook.send_message = AsyncMock()
-    pm.ahook.on_agent_response = AsyncMock()
-    # NOTE: on_notify is NOT mocked — both AgentPlugin and TaskPlugin use it.
-
-    # Register TaskPlugin
-    task_plugin = TaskPlugin(pm)
-    pm.register(task_plugin, name="task")
-    await task_plugin.on_start(config={})
-
-    # Register PersistencePlugin with injected in-memory DB
-    persistence = PersistencePlugin(pm)
-    persistence.db = db
-    persistence._registry = registry
-    pm.register(persistence, name="persistence")
-
-    # Register ThinkingPlugin before AgentPlugin
-    thinking_plugin = ThinkingPlugin(pm)
-    pm.register(thinking_plugin, name="thinking")
-
-    plugin = AgentPlugin(pm)
-    pm.register(plugin, name="agent_loop")
-
-    # Inject the registry directly (tests bypass on_start where _registry is resolved).
-    plugin._registry = registry
-
-    channel = registry.get_or_create(
-        "test",
-        "scope1",
-        config=channel_config or ChannelConfig(),
-    )
-
-    return plugin, channel, db
-
-
 @pytest.fixture
 async def plugin_and_channel(request):
     """Pytest fixture yielding (plugin, channel, db) with TaskPlugin teardown."""
     params = getattr(request, "param", {}) or {}
-    plugin, channel, db = await _build_plugin_and_channel(
+    plugin, channel, db = await build_plugin_and_channel(
         agent_defaults=params.get("agent_defaults"),
         channel_config=params.get("channel_config"),
     )
@@ -140,23 +88,6 @@ async def plugin_and_channel(request):
     if task_plugin:
         await task_plugin.on_stop()
     await db.close()
-
-
-async def _drain(plugin, channel):
-    """Drain the channel's SerialQueue. Safe when queue was never created."""
-    if channel.id in plugin.queues:
-        await plugin.queues[channel.id].drain()
-
-
-async def _drain_task_queue(plugin):
-    """Wait for all pending tasks in the TaskQueue to complete, including on_complete callbacks."""
-    import asyncio
-    task_plugin = plugin.pm.get_plugin("task")
-    if task_plugin and task_plugin.task_queue:
-        await task_plugin.task_queue.queue.join()
-        # queue.join() unblocks after task_done() but before on_complete runs.
-        # Yield to let the worker coroutine continue and fire on_complete -> on_notify.
-        await asyncio.sleep(0)
 
 
 # ---------------------------------------------------------------------------
@@ -201,7 +132,7 @@ class TestToolCallDispatchesTask:
         task_plugin.task_queue.enqueue = spy_enqueue
 
         await plugin.on_message(channel=channel, sender="user", text="hello")
-        await _drain(plugin, channel)
+        await drain(plugin, channel)
 
         # Phase 3: AgentPlugin._dispatch_tool_calls enqueues exactly one Task
         assert len(enqueued_tasks) == 1
@@ -243,13 +174,13 @@ class TestToolCallResultTriggersContinuation:
         plugin.client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="do the thing")
-        await _drain(plugin, channel)
+        await drain(plugin, channel)
 
         # Wait for TaskQueue to execute the tool task
-        await _drain_task_queue(plugin)
+        await drain_task_queue(plugin)
 
         # The task completion triggers on_notify -> new QueueItem -> second LLM turn
-        await _drain(plugin, channel)
+        await drain(plugin, channel)
 
         # After full cycle, send_message is called with the final text
         plugin.pm.ahook.send_message.assert_called_once()
@@ -305,7 +236,7 @@ class TestMultipleToolCallsDispatched:
         task_plugin.task_queue.enqueue = spy_enqueue
 
         await plugin.on_message(channel=channel, sender="user", text="do three things")
-        await _drain(plugin, channel)
+        await drain(plugin, channel)
 
         assert len(enqueued_tasks) == 3
         call_ids = {t.tool_call_id for t in enqueued_tasks}
@@ -332,7 +263,7 @@ class TestMaxTurnsResetsOnUserMessage:
         plugin.client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="reset me")
-        await _drain(plugin, channel)
+        await drain(plugin, channel)
 
         # After a user message with a text response, turn_counter was reset to 0
         # then incremented to 1 (one LLM turn taken, no tool calls).
@@ -369,11 +300,11 @@ class TestMaxTurnsIncrementsOnNotification:
         plugin.client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="go")
-        await _drain(plugin, channel)
+        await drain(plugin, channel)
         assert channel.turn_counter == 1
 
-        await _drain_task_queue(plugin)
-        await _drain(plugin, channel)
+        await drain_task_queue(plugin)
+        await drain(plugin, channel)
 
         # After notification turn: counter should be 2
         assert channel.turn_counter == 2
@@ -389,7 +320,7 @@ class TestMaxTurnsExceededSuppressesToolCalls:
         """With max_turns=1, first tool call is dispatched; second is suppressed."""
         # ChannelConfig(max_turns=1) constructed at runtime to avoid collection
         # errors before the field exists.
-        plugin, channel, db = await _build_plugin_and_channel(
+        plugin, channel, db = await build_plugin_and_channel(
             channel_config=ChannelConfig(max_turns=1),
         )
 
@@ -428,12 +359,12 @@ class TestMaxTurnsExceededSuppressesToolCalls:
         try:
             # First turn: user message -> first tool call dispatched
             await plugin.on_message(channel=channel, sender="user", text="go")
-            await _drain(plugin, channel)
+            await drain(plugin, channel)
             assert len(enqueued_tasks) == 1
 
             # Task executes and triggers notification
-            await _drain_task_queue(plugin)
-            await _drain(plugin, channel)
+            await drain_task_queue(plugin)
+            await drain(plugin, channel)
 
             # Second LLM turn hit max_turns -> no second task, but send_message called
             assert len(enqueued_tasks) == 1  # still only 1
@@ -455,7 +386,7 @@ class TestMaxTurnsExceededSendsFallbackText:
         """When max_turns hit and LLM produced only tool calls, fallback text sent."""
         # ChannelConfig(max_turns=1) constructed at runtime to avoid collection
         # errors before the field exists.
-        plugin, channel, db = await _build_plugin_and_channel(
+        plugin, channel, db = await build_plugin_and_channel(
             channel_config=ChannelConfig(max_turns=1),
         )
 
@@ -482,9 +413,9 @@ class TestMaxTurnsExceededSendsFallbackText:
 
         try:
             await plugin.on_message(channel=channel, sender="user", text="go")
-            await _drain(plugin, channel)
-            await _drain_task_queue(plugin)
-            await _drain(plugin, channel)
+            await drain(plugin, channel)
+            await drain_task_queue(plugin)
+            await drain(plugin, channel)
 
             plugin.pm.ahook.send_message.assert_called_once()
             sent_text = plugin.pm.ahook.send_message.call_args.kwargs["text"]
@@ -528,9 +459,9 @@ class TestToolDispatchWithToolContext:
         plugin.client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="use ctx tool")
-        await _drain(plugin, channel)
-        await _drain_task_queue(plugin)
-        await _drain(plugin, channel)
+        await drain(plugin, channel)
+        await drain_task_queue(plugin)
+        await drain(plugin, channel)
 
         assert len(received_ctx) == 1
         ctx = received_ctx[0]
@@ -564,9 +495,9 @@ class TestToolDispatchUnknownTool:
         plugin.client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="use missing tool")
-        await _drain(plugin, channel)
-        await _drain_task_queue(plugin)
-        await _drain(plugin, channel)
+        await drain(plugin, channel)
+        await drain_task_queue(plugin)
+        await drain(plugin, channel)
 
         # The task should have completed with an error message, triggering a
         # second LLM call. The conversation should contain a tool result with error.
@@ -606,9 +537,9 @@ class TestToolDispatchToolRaises:
 
         # Should not raise
         await plugin.on_message(channel=channel, sender="user", text="use failing tool")
-        await _drain(plugin, channel)
-        await _drain_task_queue(plugin)
-        await _drain(plugin, channel)
+        await drain(plugin, channel)
+        await drain_task_queue(plugin)
+        await drain(plugin, channel)
 
         # Conversation should have a tool result with an error message
         conv = channel.conversation
@@ -666,7 +597,7 @@ class TestNoTaskQueueLogsError:
         # Should not raise even though no TaskPlugin is registered
         with caplog.at_level(logging.ERROR, logger="corvidae.agent"):
             await plugin.on_message(channel=channel, sender="user", text="hi")
-            await _drain(plugin, channel)
+            await drain(plugin, channel)
 
         # Must log an error about the missing TaskQueue
         error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
@@ -707,7 +638,7 @@ class TestAssistantMessageWithToolCallsPersisted:
         plugin.client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="persist test")
-        await _drain(plugin, channel)
+        await drain(plugin, channel)
 
         conv = channel.conversation
         assistant_messages = [m for m in conv.messages if m.get("role") == "assistant"]
@@ -760,7 +691,7 @@ class TestNoSendMessageWhenToolCallsDispatched:
         plugin.client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="use tool")
-        await _drain(plugin, channel)
+        await drain(plugin, channel)
 
         # Under Phase 3 single-turn dispatch: after the first drain,
         # _process_queue_item dispatches the tool Task and returns.
@@ -803,7 +734,7 @@ class TestCompactionFailureResilience:
         with caplog.at_level(logging.WARNING, logger="corvidae.agent"):
             with patch("corvidae.agent.call_firstresult_hook", side_effect=exploding_hook):
                 await plugin.on_message(channel=channel, sender="user", text="hello")
-                await _drain(plugin, channel)
+                await drain(plugin, channel)
 
         # Despite compaction failure, run_agent_turn must have been called
         # (evidenced by mock_client.chat being called) and send_message must have fired.

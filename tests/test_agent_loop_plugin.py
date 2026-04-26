@@ -8,14 +8,14 @@ from unittest.mock import ANY, AsyncMock, MagicMock, patch
 import aiosqlite
 import pytest
 
-from corvidae.channel import Channel, ChannelConfig, ChannelRegistry
+from corvidae.channel import ChannelConfig, ChannelRegistry
 from corvidae.conversation import ConversationLog, init_db
 from corvidae.hooks import create_plugin_manager
 
 from corvidae.agent import AgentPlugin
 from corvidae.persistence import PersistencePlugin
-from corvidae.task import TaskPlugin
-from corvidae.thinking import ThinkingPlugin
+
+from helpers import build_plugin_and_channel, drain
 
 
 # ---------------------------------------------------------------------------
@@ -76,68 +76,6 @@ def _make_tool_call(call_id: str, name: str, args: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 
-async def _build_plugin_and_channel(agent_defaults=None, channel_config=None):
-    """Helper: create plugin manager, registry, in-memory DB, plugin, and a channel.
-
-    Returns (plugin, channel, db) so tests can inspect state directly.
-    Callers must call task_plugin.on_stop() and db.close() in teardown.
-    """
-    if agent_defaults is None:
-        agent_defaults = AGENT_DEFAULTS
-
-    db = await aiosqlite.connect(":memory:")
-    await init_db(db)
-
-    pm = create_plugin_manager()
-    registry = ChannelRegistry(agent_defaults)
-    pm.register(registry, name="registry")
-
-    # Async mocks for outbound hooks.
-    pm.ahook.send_message = AsyncMock()
-    pm.ahook.on_agent_response = AsyncMock()
-    # NOTE: on_notify is NOT mocked — both AgentPlugin and TaskPlugin use it.
-
-    # Register TaskPlugin.
-    task_plugin = TaskPlugin(pm)
-    pm.register(task_plugin, name="task")
-    await task_plugin.on_start(config={})
-
-    # Register PersistencePlugin with injected in-memory DB
-    persistence = PersistencePlugin(pm)
-    persistence.db = db
-    persistence._registry = registry
-    pm.register(persistence, name="persistence")
-
-    # Register ThinkingPlugin before AgentPlugin
-    thinking_plugin = ThinkingPlugin(pm)
-    pm.register(thinking_plugin, name="thinking")
-
-    plugin = AgentPlugin(pm)
-    pm.register(plugin, name="agent_loop")
-
-    # Inject the registry directly (tests bypass on_start where _registry is resolved).
-    plugin._registry = registry
-
-    channel = registry.get_or_create(
-        "test",
-        "scope1",
-        config=channel_config or ChannelConfig(),
-    )
-
-    return plugin, channel, db
-
-
-async def _drain(plugin, channel):
-    """Drain the channel's queue after on_message returns.
-
-    With the channel queue design, on_message is fire-and-enqueue, so
-    callers must drain to wait for processing before asserting on results.
-
-    Guards against missing queue (CR2: avoids KeyError when queue was
-    never created, e.g. in test_on_task_complete_does_not_call_send_message_directly).
-    """
-    if channel.id in plugin.queues:
-        await plugin.queues[channel.id].drain()
 
 
 # ---------------------------------------------------------------------------
@@ -346,7 +284,7 @@ class TestOnMessageConversationInit:
     async def test_on_message_initializes_conversation(self):
         """First message on a channel creates ConversationLog, sets
         system_prompt from resolved config, calls load()."""
-        plugin, channel, db = await _build_plugin_and_channel()
+        plugin, channel, db = await build_plugin_and_channel()
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("hello"))
@@ -355,7 +293,7 @@ class TestOnMessageConversationInit:
         assert channel.conversation is None
 
         await plugin.on_message(channel=channel, sender="user", text="hi")
-        await _drain(plugin, channel)
+        await drain(plugin, channel)
 
         assert channel.conversation is not None
         assert isinstance(channel.conversation, ConversationLog)
@@ -365,18 +303,18 @@ class TestOnMessageConversationInit:
 
     async def test_on_message_reuses_existing_conversation(self):
         """Second message on the same channel reuses the ConversationLog."""
-        plugin, channel, db = await _build_plugin_and_channel()
+        plugin, channel, db = await build_plugin_and_channel()
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("hello"))
         plugin.client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="first")
-        await _drain(plugin, channel)
+        await drain(plugin, channel)
         conv_first = channel.conversation
 
         await plugin.on_message(channel=channel, sender="user", text="second")
-        await _drain(plugin, channel)
+        await drain(plugin, channel)
         conv_second = channel.conversation
 
         assert conv_first is conv_second
@@ -393,14 +331,14 @@ class TestOnMessagePersistenceAndLoop:
     async def test_on_message_appends_user_message(self):
         """User message is persisted in the conversation log before the
         agent loop runs."""
-        plugin, channel, db = await _build_plugin_and_channel()
+        plugin, channel, db = await build_plugin_and_channel()
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("response"))
         plugin.client = mock_client
 
         await plugin.on_message(channel=channel, sender="alice", text="test message")
-        await _drain(plugin, channel)
+        await drain(plugin, channel)
 
         conv = channel.conversation
         user_messages = [m for m in conv.messages if m["role"] == "user"]
@@ -413,7 +351,7 @@ class TestOnMessagePersistenceAndLoop:
         """Verify run_agent_turn is called with the correct arguments."""
         from corvidae.agent_loop import AgentTurnResult
 
-        plugin, channel, db = await _build_plugin_and_channel()
+        plugin, channel, db = await build_plugin_and_channel()
 
         mock_client = MagicMock()
         plugin.client = mock_client
@@ -428,7 +366,7 @@ class TestOnMessagePersistenceAndLoop:
         with patch("corvidae.agent.run_agent_turn", new_callable=AsyncMock) as mock_turn:
             mock_turn.return_value = turn_result
             await plugin.on_message(channel=channel, sender="user", text="query")
-            await _drain(plugin, channel)
+            await drain(plugin, channel)
 
         mock_turn.assert_awaited_once()
         call_args = mock_turn.call_args
@@ -446,14 +384,14 @@ class TestOnMessagePersistenceAndLoop:
     async def test_on_message_persists_agent_response(self):
         """New messages appended by run_agent_turn are persisted to the
         conversation log."""
-        plugin, channel, db = await _build_plugin_and_channel()
+        plugin, channel, db = await build_plugin_and_channel()
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("agent reply"))
         plugin.client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="hello")
-        await _drain(plugin, channel)
+        await drain(plugin, channel)
 
         conv = channel.conversation
         assistant_messages = [m for m in conv.messages if m["role"] == "assistant"]
@@ -465,14 +403,14 @@ class TestOnMessagePersistenceAndLoop:
     async def test_on_message_sends_response(self):
         """Verify send_message hook and on_agent_response hook are called
         with the display text."""
-        plugin, channel, db = await _build_plugin_and_channel()
+        plugin, channel, db = await build_plugin_and_channel()
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("my answer"))
         plugin.client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="question")
-        await _drain(plugin, channel)
+        await drain(plugin, channel)
 
         plugin.pm.ahook.send_message.assert_awaited_once_with(
             channel=channel,
@@ -502,7 +440,7 @@ class TestOnMessagePersistenceAndLoop:
             "_base_dir": Path(".")
         }
 
-        plugin, channel, db = await _build_plugin_and_channel()
+        plugin, channel, db = await build_plugin_and_channel()
 
         mock_client = MagicMock()
         mock_client.start = AsyncMock()
@@ -534,7 +472,7 @@ class TestOnMessagePersistenceAndLoop:
             "_base_dir": Path(".")
         }
 
-        plugin, channel, db = await _build_plugin_and_channel()
+        plugin, channel, db = await build_plugin_and_channel()
 
         mock_client = MagicMock()
         mock_client.start = AsyncMock()
@@ -566,7 +504,7 @@ class TestOnMessagePersistenceAndLoop:
             "_base_dir": Path(".")
         }
 
-        plugin, channel, db = await _build_plugin_and_channel()
+        plugin, channel, db = await build_plugin_and_channel()
 
         mock_client = MagicMock()
         mock_client.start = AsyncMock()
@@ -598,7 +536,7 @@ class TestOnMessagePersistenceAndLoop:
             "_base_dir": Path(".")
         }
 
-        plugin, channel, db = await _build_plugin_and_channel()
+        plugin, channel, db = await build_plugin_and_channel()
 
         mock_client = MagicMock()
         mock_client.start = AsyncMock()
@@ -626,7 +564,7 @@ class TestOnMessageThinkingTokens:
     async def test_on_message_strips_thinking_for_display(self):
         """If raw response contains <think> tags, the displayed text
         (sent via send_message and on_agent_response) has them stripped."""
-        plugin, channel, db = await _build_plugin_and_channel()
+        plugin, channel, db = await build_plugin_and_channel()
 
         raw = "<think>internal reasoning</think>clean answer"
         mock_client = MagicMock()
@@ -634,7 +572,7 @@ class TestOnMessageThinkingTokens:
         plugin.client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="hi")
-        await _drain(plugin, channel)
+        await drain(plugin, channel)
 
         plugin.pm.ahook.send_message.assert_awaited_once_with(
             channel=channel,
@@ -649,7 +587,7 @@ class TestOnMessageThinkingTokens:
         removed from the newly appended in-memory assistant messages.
         Pre-existing assistant messages are not touched."""
         # keep_thinking_in_history=False is the default in AGENT_DEFAULTS
-        plugin, channel, db = await _build_plugin_and_channel()
+        plugin, channel, db = await build_plugin_and_channel()
 
         # Pre-existing message already in the conversation (simulated prior turn)
         prior_msg = {"role": "assistant", "content": "prior", "reasoning_content": "prior thinking"}
@@ -673,7 +611,7 @@ class TestOnMessageThinkingTokens:
         plugin.client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="query")
-        await _drain(plugin, channel)
+        await drain(plugin, channel)
 
         # Prior message still has reasoning_content (not touched)
         assert conv.messages[0].get("reasoning_content") == "prior thinking"
@@ -693,7 +631,7 @@ class TestOnMessageThinkingTokens:
             "max_context_tokens": 8000,
             "keep_thinking_in_history": True,
         }
-        plugin, channel, db = await _build_plugin_and_channel(
+        plugin, channel, db = await build_plugin_and_channel(
             agent_defaults=agent_defaults_with_thinking
         )
 
@@ -709,7 +647,7 @@ class TestOnMessageThinkingTokens:
         plugin.client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="query")
-        await _drain(plugin, channel)
+        await drain(plugin, channel)
 
         conv = channel.conversation
         assistant_messages = [m for m in conv.messages if m.get("role") == "assistant"]
@@ -725,7 +663,7 @@ class TestOnMessageThinkingTokens:
         Queries message_log directly — does NOT rely on conv.messages, which
         may have been stripped in memory."""
         # keep_thinking_in_history=False (default) strips in-memory, not on disk
-        plugin, channel, db = await _build_plugin_and_channel()
+        plugin, channel, db = await build_plugin_and_channel()
 
         response_msg = {
             "role": "assistant",
@@ -739,7 +677,7 @@ class TestOnMessageThinkingTokens:
         plugin.client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="query")
-        await _drain(plugin, channel)
+        await drain(plugin, channel)
 
         # Query the DB directly for this channel's assistant messages
         async with db.execute(
@@ -771,14 +709,14 @@ class TestOnMessageCompactionAndConfig:
         from corvidae.hooks import hookimpl
         from corvidae.agent_loop import AgentTurnResult
 
-        plugin, channel, db = await _build_plugin_and_channel()
+        plugin, channel, db = await build_plugin_and_channel()
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("answer"))
         plugin.client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="hi")
-        await _drain(plugin, channel)
+        await drain(plugin, channel)
 
         # Register a compact_conversation hook that records calls and returns None
         compact_calls = []
@@ -808,7 +746,7 @@ class TestOnMessageCompactionAndConfig:
             mock_turn.side_effect = tracking_turn
 
             await plugin.on_message(channel=channel, sender="user", text="second message")
-            await _drain(plugin, channel)
+            await drain(plugin, channel)
 
         assert len(compact_calls) == 1
         assert compact_calls[0][0] is mock_client
@@ -854,8 +792,8 @@ class TestOnMessageCompactionAndConfig:
 
         await plugin.on_message(channel=channel_a, sender="user", text="hello")
         await plugin.on_message(channel=channel_b, sender="user", text="hello")
-        await _drain(plugin, channel_a)
-        await _drain(plugin, channel_b)
+        await drain(plugin, channel_a)
+        await drain(plugin, channel_b)
 
         assert channel_a.conversation.system_prompt == "Channel A prompt."
         assert channel_b.conversation.system_prompt == "Channel B prompt."
@@ -932,7 +870,7 @@ class TestOnMessageToolCallRoundTrip:
     async def test_on_message_tool_call_round_trip(self):
         """Mock LLM returns a tool call, the tool executes via TaskQueue, then
         LLM returns a final text response via the notification path."""
-        plugin, channel, db = await _build_plugin_and_channel()
+        plugin, channel, db = await build_plugin_and_channel()
 
         tool_result_store = {}
 
@@ -964,7 +902,7 @@ class TestOnMessageToolCallRoundTrip:
         # 1. on_message enqueues user QueueItem
         await plugin.on_message(channel=channel, sender="user", text="use the tool")
         # 2. Drain: _process_queue_item runs, dispatches tool Task
-        await _drain(plugin, channel)
+        await drain(plugin, channel)
         # 3. Wait for TaskQueue to execute the tool task
         task_plugin = plugin.pm.get_plugin("task")
         await task_plugin.task_queue.queue.join()
@@ -972,7 +910,7 @@ class TestOnMessageToolCallRoundTrip:
         #    Yield to let worker call on_complete -> on_notify -> enqueue notification.
         await asyncio.sleep(0)
         # 5. Drain: second _process_queue_item runs with tool result, sends response
-        await _drain(plugin, channel)
+        await drain(plugin, channel)
 
         assert tool_result_store.get("called_with") == "test query"
         plugin.pm.ahook.send_message.assert_awaited_once_with(
@@ -1008,7 +946,7 @@ class TestEnsureConversationPromptResolution:
             "max_context_tokens": 8000,
             "keep_thinking_in_history": False,
         }
-        plugin, channel, db = await _build_plugin_and_channel(
+        plugin, channel, db = await build_plugin_and_channel(
             agent_defaults=agent_defaults
         )
         plugin.pm.get_plugin("persistence").base_dir = tmp_path
@@ -1018,7 +956,7 @@ class TestEnsureConversationPromptResolution:
         plugin.client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="hello")
-        await _drain(plugin, channel)
+        await drain(plugin, channel)
 
         assert channel.conversation is not None
         assert channel.conversation.system_prompt == "You are Sherman.\n\nThis is IRC."
@@ -1031,14 +969,14 @@ class TestEnsureConversationPromptResolution:
         This is a regression test — existing string-based config must
         continue to work identically after Phase 2.5.
         """
-        plugin, channel, db = await _build_plugin_and_channel()
+        plugin, channel, db = await build_plugin_and_channel()
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("ok"))
         plugin.client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="hello")
-        await _drain(plugin, channel)
+        await drain(plugin, channel)
 
         assert channel.conversation is not None
         assert channel.conversation.system_prompt == "You are a test assistant."
@@ -1062,7 +1000,7 @@ class TestEnsureConversationPromptResolution:
             "keep_thinking_in_history": False,
         }
         channel_cfg = ChannelConfig(system_prompt="Channel string wins.")
-        plugin, channel, db = await _build_plugin_and_channel(
+        plugin, channel, db = await build_plugin_and_channel(
             agent_defaults=agent_defaults,
             channel_config=channel_cfg,
         )
@@ -1073,7 +1011,7 @@ class TestEnsureConversationPromptResolution:
         plugin.client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="hello")
-        await _drain(plugin, channel)
+        await drain(plugin, channel)
 
         assert channel.conversation is not None
         assert channel.conversation.system_prompt == "Channel string wins."
@@ -1095,7 +1033,7 @@ class TestEnsureConversationPromptResolution:
             "keep_thinking_in_history": False,
         }
         channel_cfg = ChannelConfig(system_prompt=["channel.md"])
-        plugin, channel, db = await _build_plugin_and_channel(
+        plugin, channel, db = await build_plugin_and_channel(
             agent_defaults=agent_defaults,
             channel_config=channel_cfg,
         )
@@ -1106,7 +1044,7 @@ class TestEnsureConversationPromptResolution:
         plugin.client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="hello")
-        await _drain(plugin, channel)
+        await drain(plugin, channel)
 
         assert channel.conversation is not None
         assert channel.conversation.system_prompt == "Channel list content."
@@ -1127,7 +1065,7 @@ class TestOnMessageErrorHandling:
         - on_message returns without re-raising
         - The user message persisted before the failure remains in the log
         """
-        plugin, channel, db = await _build_plugin_and_channel()
+        plugin, channel, db = await build_plugin_and_channel()
 
         mock_client = MagicMock()
         # chat raises to simulate run_agent_turn failure
@@ -1136,7 +1074,7 @@ class TestOnMessageErrorHandling:
 
         # Should not raise
         await plugin.on_message(channel=channel, sender="user", text="trigger error")
-        await _drain(plugin, channel)
+        await drain(plugin, channel)
 
         # send_message should be called with the error text
         plugin.pm.ahook.send_message.assert_awaited_once()
@@ -1166,7 +1104,7 @@ class TestOnNotify:
     async def test_on_notify_enqueues_and_triggers_agent_loop(self):
         """on_notify enqueues a notification item; after draining, send_message
         is called with the agent's response to the notification."""
-        plugin, channel, db = await _build_plugin_and_channel()
+        plugin, channel, db = await build_plugin_and_channel()
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("notified response"))
@@ -1176,7 +1114,7 @@ class TestOnNotify:
             channel=channel, source="test", text="background event happened",
             tool_call_id=None, meta=None,
         )
-        await _drain(plugin, channel)
+        await drain(plugin, channel)
 
         plugin.pm.ahook.send_message.assert_awaited_once_with(
             channel=channel,
@@ -1189,7 +1127,7 @@ class TestOnNotify:
     async def test_on_notify_with_tool_call_id(self):
         """on_notify with tool_call_id passes it through so the conversation
         message uses role=tool."""
-        plugin, channel, db = await _build_plugin_and_channel()
+        plugin, channel, db = await build_plugin_and_channel()
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("tool result acknowledged"))
@@ -1202,7 +1140,7 @@ class TestOnNotify:
             tool_call_id="call_abc123",
             meta=None,
         )
-        await _drain(plugin, channel)
+        await drain(plugin, channel)
 
         # After draining, agent responded — verify the conversation contained
         # a tool-role message with the right call_id.
@@ -1253,7 +1191,7 @@ class TestShouldProcessMessage:
         the message and send_message is never called."""
         from corvidae.hooks import hookimpl
 
-        plugin, channel, db = await _build_plugin_and_channel()
+        plugin, channel, db = await build_plugin_and_channel()
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("should not reach"))
@@ -1267,7 +1205,7 @@ class TestShouldProcessMessage:
         plugin.pm.register(RejectPlugin(), name="reject_plugin")
 
         await plugin.on_message(channel=channel, sender="user", text="blocked message")
-        await _drain(plugin, channel)
+        await drain(plugin, channel)
 
         plugin.pm.ahook.send_message.assert_not_awaited()
 
@@ -1278,7 +1216,7 @@ class TestShouldProcessMessage:
         and processed normally."""
         from corvidae.hooks import hookimpl
 
-        plugin, channel, db = await _build_plugin_and_channel()
+        plugin, channel, db = await build_plugin_and_channel()
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("accepted response"))
@@ -1292,7 +1230,7 @@ class TestShouldProcessMessage:
         plugin.pm.register(AcceptPlugin(), name="accept_plugin")
 
         await plugin.on_message(channel=channel, sender="user", text="accepted message")
-        await _drain(plugin, channel)
+        await drain(plugin, channel)
 
         plugin.pm.ahook.send_message.assert_awaited_once()
 
@@ -1303,7 +1241,7 @@ class TestShouldProcessMessage:
         accepted by default."""
         from corvidae.hooks import hookimpl
 
-        plugin, channel, db = await _build_plugin_and_channel()
+        plugin, channel, db = await build_plugin_and_channel()
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("default accept"))
@@ -1317,7 +1255,7 @@ class TestShouldProcessMessage:
         plugin.pm.register(NeutralPlugin(), name="neutral_plugin")
 
         await plugin.on_message(channel=channel, sender="user", text="hi")
-        await _drain(plugin, channel)
+        await drain(plugin, channel)
 
         plugin.pm.ahook.send_message.assert_awaited_once()
 
@@ -1326,14 +1264,14 @@ class TestShouldProcessMessage:
     async def test_no_hook_impls_accepts_message(self):
         """When no should_process_message implementations exist, messages are accepted
         (default behavior unchanged)."""
-        plugin, channel, db = await _build_plugin_and_channel()
+        plugin, channel, db = await build_plugin_and_channel()
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("no filter"))
         plugin.client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="hi")
-        await _drain(plugin, channel)
+        await drain(plugin, channel)
 
         plugin.pm.ahook.send_message.assert_awaited_once()
 
@@ -1344,7 +1282,7 @@ class TestShouldProcessMessage:
         A return value of 0 or empty string should NOT reject the message."""
         from corvidae.hooks import hookimpl
 
-        plugin, channel, db = await _build_plugin_and_channel()
+        plugin, channel, db = await build_plugin_and_channel()
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("not rejected"))
@@ -1358,7 +1296,7 @@ class TestShouldProcessMessage:
         plugin.pm.register(FalsyPlugin(), name="falsy_plugin")
 
         await plugin.on_message(channel=channel, sender="user", text="hi")
-        await _drain(plugin, channel)
+        await drain(plugin, channel)
 
         # 0 is falsy but not `is False`, so message should proceed
         plugin.pm.ahook.send_message.assert_awaited_once()
@@ -1376,7 +1314,7 @@ class TestOnLlmError:
         """When on_llm_error returns a string, that string is sent via send_message."""
         from corvidae.hooks import hookimpl
 
-        plugin, channel, db = await _build_plugin_and_channel()
+        plugin, channel, db = await build_plugin_and_channel()
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(side_effect=RuntimeError("LLM failed"))
@@ -1390,7 +1328,7 @@ class TestOnLlmError:
         plugin.pm.register(ErrorPlugin(), name="error_plugin")
 
         await plugin.on_message(channel=channel, sender="user", text="trigger error")
-        await _drain(plugin, channel)
+        await drain(plugin, channel)
 
         plugin.pm.ahook.send_message.assert_awaited_once()
         call_kwargs = plugin.pm.ahook.send_message.call_args
@@ -1402,7 +1340,7 @@ class TestOnLlmError:
         """When on_llm_error returns None, the default error message is used."""
         from corvidae.hooks import hookimpl
 
-        plugin, channel, db = await _build_plugin_and_channel()
+        plugin, channel, db = await build_plugin_and_channel()
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(side_effect=RuntimeError("LLM failed"))
@@ -1416,7 +1354,7 @@ class TestOnLlmError:
         plugin.pm.register(NullErrorPlugin(), name="null_error_plugin")
 
         await plugin.on_message(channel=channel, sender="user", text="trigger error")
-        await _drain(plugin, channel)
+        await drain(plugin, channel)
 
         plugin.pm.ahook.send_message.assert_awaited_once()
         call_kwargs = plugin.pm.ahook.send_message.call_args
@@ -1427,14 +1365,14 @@ class TestOnLlmError:
 
     async def test_no_hook_impl_uses_default_error_message(self):
         """With no on_llm_error implementation, the default error message is used."""
-        plugin, channel, db = await _build_plugin_and_channel()
+        plugin, channel, db = await build_plugin_and_channel()
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(side_effect=RuntimeError("LLM failed"))
         plugin.client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="trigger error")
-        await _drain(plugin, channel)
+        await drain(plugin, channel)
 
         plugin.pm.ahook.send_message.assert_awaited_once()
         call_kwargs = plugin.pm.ahook.send_message.call_args
@@ -1447,7 +1385,7 @@ class TestOnLlmError:
         """The exception object is passed to on_llm_error as the 'error' parameter."""
         from corvidae.hooks import hookimpl
 
-        plugin, channel, db = await _build_plugin_and_channel()
+        plugin, channel, db = await build_plugin_and_channel()
 
         original_exc = RuntimeError("specific error message")
         mock_client = MagicMock()
@@ -1465,7 +1403,7 @@ class TestOnLlmError:
         plugin.pm.register(InspectPlugin(), name="inspect_plugin")
 
         await plugin.on_message(channel=channel, sender="user", text="trigger error")
-        await _drain(plugin, channel)
+        await drain(plugin, channel)
 
         assert "exc" in received_error
         assert received_error["exc"] is original_exc
@@ -1485,7 +1423,7 @@ class TestCompactConversation:
         from corvidae.hooks import hookimpl
         from corvidae.agent_loop import AgentTurnResult
 
-        plugin, channel, db = await _build_plugin_and_channel()
+        plugin, channel, db = await build_plugin_and_channel()
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("answer"))
@@ -1493,7 +1431,7 @@ class TestCompactConversation:
 
         # Trigger conversation init
         await plugin.on_message(channel=channel, sender="user", text="hi")
-        await _drain(plugin, channel)
+        await drain(plugin, channel)
 
         compact_called = []
 
@@ -1514,7 +1452,7 @@ class TestCompactConversation:
         with patch("corvidae.agent.run_agent_turn", new_callable=AsyncMock,
                    return_value=turn_result):
             await plugin.on_message(channel=channel, sender="user", text="second")
-            await _drain(plugin, channel)
+            await drain(plugin, channel)
 
         # Custom plugin was called and agent turn ran without error.
         assert compact_called, "CompactPlugin.compact_conversation must have been called"
@@ -1528,7 +1466,7 @@ class TestCompactConversation:
         from corvidae.hooks import hookimpl
         from corvidae.agent_loop import AgentTurnResult
 
-        plugin, channel, db = await _build_plugin_and_channel()
+        plugin, channel, db = await build_plugin_and_channel()
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("answer"))
@@ -1551,7 +1489,7 @@ class TestCompactConversation:
         with patch("corvidae.agent.run_agent_turn", new_callable=AsyncMock,
                    return_value=turn_result):
             await plugin.on_message(channel=channel, sender="user", text="second")
-            await _drain(plugin, channel)
+            await drain(plugin, channel)
 
         # Agent turn ran without error; send_message was called.
         plugin.pm.ahook.send_message.assert_called()
@@ -1565,7 +1503,7 @@ class TestCompactConversation:
         from corvidae.hooks import hookimpl
         from corvidae.agent_loop import AgentTurnResult
 
-        plugin, channel, db = await _build_plugin_and_channel()
+        plugin, channel, db = await build_plugin_and_channel()
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("answer"))
@@ -1573,7 +1511,7 @@ class TestCompactConversation:
 
         # Trigger conversation init
         await plugin.on_message(channel=channel, sender="user", text="hi")
-        await _drain(plugin, channel)
+        await drain(plugin, channel)
 
         class ExplodingPlugin:
             @hookimpl
@@ -1592,7 +1530,7 @@ class TestCompactConversation:
             with patch("corvidae.agent.run_agent_turn", new_callable=AsyncMock,
                        return_value=turn_result):
                 await plugin.on_message(channel=channel, sender="user", text="second")
-                await _drain(plugin, channel)
+                await drain(plugin, channel)
 
         # Exception must be caught and logged
         warning_records = [
@@ -1612,7 +1550,7 @@ class TestCompactConversation:
         from corvidae.hooks import hookimpl
         from corvidae.agent_loop import AgentTurnResult
 
-        plugin, channel, db = await _build_plugin_and_channel()
+        plugin, channel, db = await build_plugin_and_channel()
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("answer"))
@@ -1620,7 +1558,7 @@ class TestCompactConversation:
 
         # Trigger conversation init
         await plugin.on_message(channel=channel, sender="user", text="hi")
-        await _drain(plugin, channel)
+        await drain(plugin, channel)
 
         captured = {}
 
@@ -1643,7 +1581,7 @@ class TestCompactConversation:
         with patch("corvidae.agent.run_agent_turn", new_callable=AsyncMock,
                    return_value=turn_result):
             await plugin.on_message(channel=channel, sender="user", text="second")
-            await _drain(plugin, channel)
+            await drain(plugin, channel)
 
         assert captured.get("client") is mock_client
         assert captured.get("max_tokens") == 8000  # from AGENT_DEFAULTS
@@ -1837,7 +1775,7 @@ class TestBeforeAgentTurn:
         from corvidae.hooks import hookimpl
         from corvidae.agent_loop import AgentTurnResult
 
-        plugin, channel, db = await _build_plugin_and_channel()
+        plugin, channel, db = await build_plugin_and_channel()
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("answer"))
@@ -1853,7 +1791,7 @@ class TestBeforeAgentTurn:
         plugin.pm.register(BeforeTurnPlugin(), name="before_turn_plugin")
 
         await plugin.on_message(channel=channel, sender="user", text="hello")
-        await _drain(plugin, channel)
+        await drain(plugin, channel)
 
         assert len(hook_calls) == 1, (
             f"Expected before_agent_turn to be called once, got {len(hook_calls)} calls"
@@ -1877,7 +1815,7 @@ class TestBeforeAgentTurn:
         from corvidae.hooks import hookimpl
         from corvidae.conversation import MessageType
 
-        plugin, channel, db = await _build_plugin_and_channel()
+        plugin, channel, db = await build_plugin_and_channel()
 
         context_content = "context: user is in timezone UTC+2"
         prompt_messages_received = []
@@ -1904,7 +1842,7 @@ class TestBeforeAgentTurn:
         plugin.client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="hello")
-        await _drain(plugin, channel)
+        await drain(plugin, channel)
 
         assert any(
             m.get("content") == context_content for m in prompt_messages_received
@@ -1927,7 +1865,7 @@ class TestBeforeAgentTurn:
         """
         from corvidae.hooks import hookimpl
 
-        plugin, channel, db = await _build_plugin_and_channel()
+        plugin, channel, db = await build_plugin_and_channel()
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("tool result acknowledged"))
@@ -1950,7 +1888,7 @@ class TestBeforeAgentTurn:
             tool_call_id="call_xyz",
             meta=None,
         )
-        await _drain(plugin, channel)
+        await drain(plugin, channel)
 
         assert len(hook_call_channels) >= 1, (
             "before_agent_turn must fire on tool-result (notification) turns"

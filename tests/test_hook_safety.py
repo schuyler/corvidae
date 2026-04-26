@@ -20,90 +20,23 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
-import aiosqlite
 import pytest
 
-from corvidae.agent import AgentPlugin
-from corvidae.channel import Channel, ChannelConfig, ChannelRegistry
-from corvidae.conversation import init_db
-from corvidae.hooks import create_plugin_manager, hookimpl
-from corvidae.persistence import PersistencePlugin
-from corvidae.task import Task, TaskPlugin
-from corvidae.thinking import ThinkingPlugin
+from corvidae.hooks import hookimpl
+from corvidae.task import Task
+
+from helpers import build_plugin_and_channel, drain, drain_task_queue
 
 
 # ---------------------------------------------------------------------------
-# Shared helpers — copied from test_agent_single_turn.py for isolation
+# Shared helpers
 # ---------------------------------------------------------------------------
-
-AGENT_DEFAULTS = {
-    "system_prompt": "You are a test assistant.",
-    "max_context_tokens": 8000,
-    "keep_thinking_in_history": False,
-}
 
 
 def _make_text_response(text: str) -> dict:
     return {"choices": [{"message": {"role": "assistant", "content": text}}]}
-
-
-async def _build_plugin_and_channel(agent_defaults=None, channel_config=None):
-    """Assemble plugin graph with in-memory DB. Returns (plugin, channel, db).
-
-    Callers are responsible for teardown: task_plugin.on_stop() and db.close().
-    """
-    if agent_defaults is None:
-        agent_defaults = AGENT_DEFAULTS
-
-    db = await aiosqlite.connect(":memory:")
-    await init_db(db)
-
-    pm = create_plugin_manager()
-    registry = ChannelRegistry(agent_defaults)
-    pm.register(registry, name="registry")
-
-    # NOTE: send_message and on_agent_response are deliberately NOT mocked here;
-    # each test will set them up according to its specific scenario.
-
-    task_plugin = TaskPlugin(pm)
-    pm.register(task_plugin, name="task")
-    await task_plugin.on_start(config={})
-
-    persistence = PersistencePlugin(pm)
-    persistence.db = db
-    persistence._registry = registry
-    pm.register(persistence, name="persistence")
-
-    thinking_plugin = ThinkingPlugin(pm)
-    pm.register(thinking_plugin, name="thinking")
-
-    plugin = AgentPlugin(pm)
-    pm.register(plugin, name="agent_loop")
-    plugin._registry = registry
-
-    channel = registry.get_or_create(
-        "test",
-        "scope1",
-        config=channel_config or ChannelConfig(),
-    )
-
-    return plugin, channel, db
-
-
-async def _drain(plugin, channel):
-    """Drain the channel's SerialQueue."""
-    if channel.id in plugin.queues:
-        await plugin.queues[channel.id].drain()
-
-
-async def _drain_task_queue(plugin):
-    """Wait for all TaskQueue tasks to complete including on_complete callbacks."""
-    task_plugin = plugin.pm.get_plugin("task")
-    if task_plugin and task_plugin.task_queue:
-        await task_plugin.task_queue.queue.join()
-        await asyncio.sleep(0)
 
 
 # ---------------------------------------------------------------------------
@@ -170,7 +103,7 @@ class TestAfterPersistAssistantHookSafety:
     async def test_after_persist_assistant_raise_continues_processing(
         self, caplog
     ):
-        plugin, channel, db = await _build_plugin_and_channel()
+        plugin, channel, db = await build_plugin_and_channel(mock_send_message=False, mock_on_agent_response=False)
         try:
             pm = plugin.pm
 
@@ -196,7 +129,7 @@ class TestAfterPersistAssistantHookSafety:
 
             with caplog.at_level(logging.WARNING, logger="corvidae.agent"):
                 await plugin.on_message(channel=channel, sender="user", text="hi")
-                await _drain(plugin, channel)
+                await drain(plugin, channel)
 
             # The raising plugin must have been called
             assert raising._call_count == 1, (
@@ -245,7 +178,7 @@ class TestOnAgentResponseHookSafety:
     async def test_on_agent_response_raise_does_not_skip_send_message(
         self, caplog
     ):
-        plugin, channel, db = await _build_plugin_and_channel()
+        plugin, channel, db = await build_plugin_and_channel(mock_send_message=False, mock_on_agent_response=False)
         try:
             pm = plugin.pm
 
@@ -269,7 +202,7 @@ class TestOnAgentResponseHookSafety:
 
             with caplog.at_level(logging.WARNING, logger="corvidae.agent"):
                 await plugin.on_message(channel=channel, sender="user", text="hello")
-                await _drain(plugin, channel)
+                await drain(plugin, channel)
 
             # on_agent_response must have been called
             assert raising._call_count == 1, (
@@ -318,7 +251,7 @@ class TestSendMessageNormalPathHookSafety:
     """
 
     async def test_send_message_raise_is_caught_with_error_log(self, caplog):
-        plugin, channel, db = await _build_plugin_and_channel()
+        plugin, channel, db = await build_plugin_and_channel(mock_send_message=False, mock_on_agent_response=False)
         try:
             pm = plugin.pm
 
@@ -334,7 +267,7 @@ class TestSendMessageNormalPathHookSafety:
 
             with caplog.at_level(logging.ERROR, logger="corvidae.agent"):
                 await plugin.on_message(channel=channel, sender="user", text="hi")
-                await _drain(plugin, channel)
+                await drain(plugin, channel)
 
             # send_message must have been attempted
             assert raising._call_count >= 1, (
@@ -356,7 +289,7 @@ class TestSendMessageNormalPathHookSafety:
             )
             second_call_count_before = raising._call_count
             await plugin.on_message(channel=channel, sender="user", text="second message")
-            await _drain(plugin, channel)
+            await drain(plugin, channel)
 
             assert raising._call_count > second_call_count_before, (
                 "Queue consumer crashed after first send_message failure — "
@@ -389,7 +322,7 @@ class TestSendMessageErrorPathHookSafety:
     """
 
     async def test_send_message_on_error_path_raise_is_caught(self, caplog):
-        plugin, channel, db = await _build_plugin_and_channel()
+        plugin, channel, db = await build_plugin_and_channel(mock_send_message=False, mock_on_agent_response=False)
         try:
             pm = plugin.pm
 
@@ -404,7 +337,7 @@ class TestSendMessageErrorPathHookSafety:
 
             with caplog.at_level(logging.WARNING, logger="corvidae.agent"):
                 await plugin.on_message(channel=channel, sender="user", text="hi")
-                await _drain(plugin, channel)
+                await drain(plugin, channel)
 
             # send_message must have been attempted on the error path
             assert raising._call_count >= 1, (
@@ -426,7 +359,7 @@ class TestSendMessageErrorPathHookSafety:
             )
             second_call_count_before = raising._call_count
             await plugin.on_message(channel=channel, sender="user", text="try again")
-            await _drain(plugin, channel)
+            await drain(plugin, channel)
 
             assert raising._call_count > second_call_count_before, (
                 "Queue consumer crashed after error-path send_message failure — "
@@ -461,7 +394,7 @@ class TestOnNotifyInTaskCompleteSafety:
     """
 
     async def test_on_notify_raise_does_not_crash_task_worker(self, caplog):
-        plugin, channel, db = await _build_plugin_and_channel()
+        plugin, channel, db = await build_plugin_and_channel(mock_send_message=False, mock_on_agent_response=False)
         try:
             pm = plugin.pm
 
@@ -513,8 +446,8 @@ class TestOnNotifyInTaskCompleteSafety:
 
             with caplog.at_level(logging.WARNING, logger="corvidae"):
                 await plugin.on_message(channel=channel, sender="user", text="use tool")
-                await _drain(plugin, channel)
-                await _drain_task_queue(plugin)
+                await drain(plugin, channel)
+                await drain_task_queue(plugin)
                 # Give the event loop a few cycles to let the exception surface
                 for _ in range(5):
                     await asyncio.sleep(0)
@@ -539,7 +472,7 @@ class TestOnNotifyInTaskCompleteSafety:
             )
             task_plugin = plugin.pm.get_plugin("task")
             await task_plugin.task_queue.enqueue(second_task)
-            await _drain_task_queue(plugin)
+            await drain_task_queue(plugin)
             for _ in range(3):
                 await asyncio.sleep(0)
 

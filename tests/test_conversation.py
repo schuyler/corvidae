@@ -892,3 +892,82 @@ class TestRemoveByType:
 
         with pytest.raises(ValueError):
             await conv.remove_by_type(MessageType.SUMMARY)
+
+
+# ---------------------------------------------------------------------------
+# Simplification tests (Red TDD phase)
+# ---------------------------------------------------------------------------
+
+
+class TestParseMessageRows:
+    """Tests for the _parse_message_rows module-level helper (Item 3).
+
+    These tests fail until _parse_message_rows is extracted from ConversationLog.load().
+    """
+
+    def test_parse_message_rows_import(self):
+        """_parse_message_rows must be importable from corvidae.conversation."""
+        from corvidae.conversation import _parse_message_rows  # noqa: F401
+
+    def test_parse_message_rows_basic(self):
+        """_parse_message_rows correctly parses (json, message_type) rows and tags _message_type."""
+        import json
+        from corvidae.conversation import MessageType, _parse_message_rows
+
+        msg1 = {"role": "user", "content": "hello"}
+        msg2 = {"role": "assistant", "content": "hi"}
+        rows = [
+            (json.dumps(msg1), "message"),
+            (json.dumps(msg2), "message"),
+        ]
+
+        result = _parse_message_rows(rows)
+
+        assert len(result) == 2
+        assert result[0] == {**msg1, "_message_type": MessageType.MESSAGE}
+        assert result[1] == {**msg2, "_message_type": MessageType.MESSAGE}
+
+    def test_parse_message_rows_mixed_types(self):
+        """_parse_message_rows handles rows with different message_type values."""
+        import json
+        from corvidae.conversation import MessageType, _parse_message_rows
+
+        msg_msg = {"role": "user", "content": "a message"}
+        msg_ctx = {"role": "system", "content": "some context"}
+        rows = [
+            (json.dumps(msg_msg), "message"),
+            (json.dumps(msg_ctx), "context"),
+        ]
+
+        result = _parse_message_rows(rows)
+
+        assert len(result) == 2
+        assert result[0]["_message_type"] == MessageType.MESSAGE
+        assert result[1]["_message_type"] == MessageType.CONTEXT
+
+    def test_parse_message_rows_empty(self):
+        """_parse_message_rows returns an empty list for empty input."""
+        from corvidae.conversation import _parse_message_rows
+
+        result = _parse_message_rows([])
+
+        assert result == []
+
+
+class TestDefaultCharsPerToken:
+    """Tests for the DEFAULT_CHARS_PER_TOKEN module-level constant (Item 6).
+
+    These tests fail until DEFAULT_CHARS_PER_TOKEN is added to corvidae.conversation.
+    """
+
+    def test_default_chars_per_token_import(self):
+        """DEFAULT_CHARS_PER_TOKEN must be importable from corvidae.conversation."""
+        from corvidae.conversation import DEFAULT_CHARS_PER_TOKEN  # noqa: F401
+
+    def test_default_chars_per_token_value(self):
+        """DEFAULT_CHARS_PER_TOKEN must equal 3.5."""
+        from corvidae.conversation import DEFAULT_CHARS_PER_TOKEN
+
+        assert DEFAULT_CHARS_PER_TOKEN == 3.5, (
+            f"Expected DEFAULT_CHARS_PER_TOKEN == 3.5, got {DEFAULT_CHARS_PER_TOKEN!r}"
+        )
