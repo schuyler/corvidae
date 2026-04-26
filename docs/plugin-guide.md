@@ -92,6 +92,7 @@ async def send_message(self, channel, text: str) -> None:
 
 | Hook | Type | When |
 |------|------|------|
+| `before_register_tools(config: dict)` | async broadcast | Inside `AgentPlugin._start_plugin`, right before `register_tools`. Plugins that need async setup to populate their tool lists implement this hook. |
 | `register_tools(tool_registry: list)` | sync broadcast | During `on_start`, to collect tools |
 | `on_agent_response(channel, request_text: str, response_text: str)` | async broadcast | After agent produces a response |
 | `before_agent_turn(channel)` | async broadcast | Before each LLM invocation |
@@ -255,18 +256,20 @@ The current registration sequence in `main.py`:
 
 ```
 registry       (ChannelRegistry)
+persistence    (PersistencePlugin)
 core_tools     (CoreToolsPlugin)
 cli            (CLIPlugin)
 irc            (IRCPlugin)
 task           (TaskPlugin)
 subagent       (SubagentPlugin)
+mcp            (McpClientPlugin)
 compaction     (CompactionPlugin)
 thinking       (ThinkingPlugin)
 agent_loop     (AgentPlugin)
 idle_monitor   (IdleMonitorPlugin)
 ```
 
-Tool-providing plugins and transport plugins register before `agent_loop`. The `agent_loop` plugin collects tools during `on_start`, so anything appending to `tool_registry` must be registered first.
+Tool-providing plugins and transport plugins register before `agent_loop`. The `agent_loop` plugin collects tools during `on_start`, so anything appending to `tool_registry` must be registered first. Plugins that need async setup before tool collection (like `McpClientPlugin`) implement `before_register_tools` rather than `on_start`, because `on_start` hooks run concurrently via `asyncio.gather`.
 
 `idle_monitor` registers after `agent_loop` because it depends on `"agent_loop"` and its `on_start` uses `@hookimpl(trylast=True)` to run after `AgentPlugin.on_start` has fully initialized.
 
@@ -319,6 +322,49 @@ Registered by `SubagentPlugin` (registered as `subagent` in `main.py`).
 These plugins are registered by `main.py` and are part of the default
 daemon. They can be omitted if the application does not need their
 functionality; each degrades gracefully when absent.
+
+### McpClientPlugin (`sherman/mcp_client.py`)
+
+Connects to external [MCP](https://modelcontextprotocol.io/) servers and
+exposes their tools to the agent loop. Registered as `"mcp"` before
+`agent_loop`.
+
+Implements three hooks:
+
+- `before_register_tools` — connects to all servers listed under `mcp.servers`
+  in `agent.yaml`, fetches their tool lists, and builds cached `Tool` instances.
+  Uses `before_register_tools` (not `on_start`) because apluggy dispatches
+  `on_start` via `asyncio.gather` — connections must complete before
+  `AgentPlugin` collects tools.
+- `register_tools` — appends the cached tools to `tool_registry`.
+- `on_stop` — closes all MCP sessions and transports via `AsyncExitStack`.
+
+**Config:**
+```yaml
+mcp:
+  servers:
+    filesystem:
+      transport: stdio
+      command: npx
+      args: ["-y", "@modelcontextprotocol/server-filesystem", "/home/user/projects"]
+      env:                     # optional: extra env vars for the subprocess
+        NODE_ENV: production
+      tool_prefix: "fs"        # optional: prefix for tool names; defaults to server name
+      timeout_seconds: 30      # optional: per-call timeout; default 30
+
+    remote_api:
+      transport: sse
+      url: "http://localhost:8001/sse"
+      timeout_seconds: 60
+```
+
+Tool names are prefixed to avoid collisions: a server named `filesystem`
+produces tools like `filesystem__read_file`. Set `tool_prefix: ""` to
+disable prefixing. If two servers produce the same tool name, the first
+wins and the duplicate is skipped with a WARNING.
+
+**Without this plugin:** MCP servers cannot be used. No tools are affected
+if the `mcp:` config key is absent — the plugin no-ops.
 
 ### ThinkingPlugin (`sherman/thinking.py`)
 
