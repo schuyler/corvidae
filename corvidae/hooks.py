@@ -54,14 +54,26 @@ def get_dependency(pm: pluggy.PluginManager, name: str, expected_type: type[T]) 
 
 
 def validate_dependencies(pm: pluggy.PluginManager) -> None:
-    """Verify all declared plugin dependencies are registered.
+    """Verify all declared plugin dependencies are registered and acyclic.
 
     Iterates registered plugins, checks each for a `depends_on` attribute,
-    and raises RuntimeError if any declared dependency is not registered.
+    raises RuntimeError if any declared dependency is not registered, and
+    detects dependency cycles via DFS.
     """
+    # Build adjacency graph: plugin_name -> set of dependency names
+    graph: dict[str, set[str]] = {}
+
     for plugin in pm.get_plugins():
         depends_on = getattr(plugin, "depends_on", None)
         if depends_on is None:
+            continue
+        # Find the registered name for this plugin
+        plugin_name = None
+        for p_name, p in pm.list_name_plugin():
+            if p is plugin:
+                plugin_name = p_name
+                break
+        if plugin_name is None:
             continue
         for dep_name in depends_on:
             if pm.get_plugin(dep_name) is None:
@@ -69,6 +81,34 @@ def validate_dependencies(pm: pluggy.PluginManager) -> None:
                     f"Plugin {type(plugin).__name__} depends on {dep_name!r}, "
                     f"which is not registered"
                 )
+        graph[plugin_name] = set(depends_on)
+
+    # Detect cycles via DFS with three-color marking
+    WHITE, GRAY, BLACK = 0, 1, 2
+    color: dict[str, int] = {name: WHITE for name in graph}
+    path: list[str] = []
+
+    def dfs(node: str) -> None:
+        if node not in color:
+            return  # leaf node with no depends_on
+        if color[node] == BLACK:
+            return
+        if color[node] == GRAY:
+            cycle_start = path.index(node)
+            cycle = path[cycle_start:] + [node]
+            raise RuntimeError(
+                f"Dependency cycle detected: {' -> '.join(cycle)}"
+            )
+        color[node] = GRAY
+        path.append(node)
+        for dep in graph.get(node, set()):
+            dfs(dep)
+        path.pop()
+        color[node] = BLACK
+
+    for node in list(graph.keys()):
+        if color.get(node, WHITE) == WHITE:
+            dfs(node)
 
 
 def create_plugin_manager() -> pluggy.PluginManager:
