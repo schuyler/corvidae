@@ -1,7 +1,7 @@
 """Per-channel serial queue for agent loop invocations.
 
 Each channel gets its own SerialQueue instance, owned by AgentPlugin
-as _queues: dict[str, SerialQueue]. The queue serializes all processing
+as queues: dict[str, SerialQueue]. The queue serializes all processing
 (user messages and notifications) for a channel so concurrent arrivals
 never race through the agent loop.
 

@@ -29,7 +29,6 @@ Logging:
 import asyncio
 import json
 import logging
-import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
@@ -37,7 +36,7 @@ from pathlib import Path
 
 import aiosqlite
 
-from sherman.agent_loop import run_agent_turn, strip_reasoning_content, strip_thinking
+from sherman.agent_loop import run_agent_turn
 from sherman.channel import Channel, ChannelRegistry, resolve_system_prompt
 from sherman.conversation import ConversationLog, init_db
 from sherman.hooks import call_firstresult_hook, get_dependency, hookimpl
@@ -78,91 +77,6 @@ class QueueItem:
     meta: dict = field(default_factory=dict)
 
 
-class IdleMonitor:
-    """Polls for system idle state and fires the on_idle hook.
-
-    Runs a background asyncio task that checks every poll_interval seconds
-    whether all SerialQueues are empty and the TaskQueue is idle. When both
-    conditions are true and at least cooldown_seconds have elapsed since the
-    last firing, broadcasts the on_idle hook to all registered plugins.
-
-    Exceptions raised by on_idle implementations are caught and logged as
-    warnings; the monitor continues running.
-
-    Created by AgentPlugin._start_plugin and stopped in AgentPlugin.on_stop
-    before queue teardown.
-    """
-
-    def __init__(
-        self,
-        pm,
-        queues: dict[str, SerialQueue],
-        cooldown_seconds: float = 30.0,
-        poll_interval: float = 2.0,
-    ) -> None:
-        """
-        Args:
-            pm: The plugin manager instance.
-            queues: Reference to AgentPlugin._queues (dict[channel_id, SerialQueue]).
-                IdleMonitor checks all queues on each poll; new queues added after
-                construction are included automatically because this is a reference.
-            cooldown_seconds: Minimum seconds between on_idle firings.
-            poll_interval: Seconds between idle state checks.
-        """
-        self._pm = pm
-        self._queues = queues
-        self._cooldown = cooldown_seconds
-        self._poll_interval = poll_interval
-        self._last_fired: float = 0.0
-        self._task: asyncio.Task | None = None
-
-    def _is_idle(self) -> bool:
-        """Return True if the system is in an idle state.
-
-        Checks: all SerialQueues have is_empty=True, TaskQueue.is_idle is True
-        (if TaskPlugin is registered), and cooldown_seconds have elapsed since
-        the last on_idle firing.
-        """
-        for q in self._queues.values():
-            if not q.is_empty:
-                return False
-        task_plugin = self._pm.get_plugin("task")
-        if task_plugin is not None:
-            tq = getattr(task_plugin, "task_queue", None)
-            if tq is not None:
-                if not tq.is_idle:
-                    return False
-        if time.monotonic() - self._last_fired < self._cooldown:
-            return False
-        return True
-
-    async def _run(self) -> None:
-        """Consumer loop: polls idle state and fires on_idle when conditions are met."""
-        while True:
-            await asyncio.sleep(self._poll_interval)
-            if self._is_idle():
-                try:
-                    await self._pm.ahook.on_idle()
-                except Exception:
-                    logger.warning("on_idle hook raised exception", exc_info=True)
-                self._last_fired = time.monotonic()
-
-    def start(self) -> None:
-        """Launch the background polling task. No-op if already running."""
-        if self._task is None or self._task.done():
-            self._task = asyncio.create_task(self._run())
-
-    async def stop(self) -> None:
-        """Cancel the background polling task and wait for it to finish."""
-        if self._task and not self._task.done():
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-        self._task = None
-
-
 class AgentPlugin:
     """Plugin that wires the agent loop into the hook system.
 
@@ -173,7 +87,8 @@ class AgentPlugin:
         tools: Dict mapping tool names to async callable functions
         tool_schemas: List of tool schemas for LLM function calling
         base_dir: Base path for resolving relative system prompt files
-        _queues: Per-channel serial queues (dict[channel_id, SerialQueue])
+        queues: Per-channel serial queues (dict[channel_id, SerialQueue]).
+            Public attribute; IdleMonitorPlugin references this dict directly.
         _registry: ChannelRegistry, resolved in on_start via get_dependency
     """
 
@@ -186,9 +101,8 @@ class AgentPlugin:
         self.tools: dict[str, Callable] = {}
         self.tool_schemas: list[dict] = []
         self.base_dir: Path = Path(".")
-        self._queues: dict[str, SerialQueue] = {}
+        self.queues: dict[str, SerialQueue] = {}
         self._registry: ChannelRegistry | None = None
-        self._idle_monitor: IdleMonitor | None = None
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
@@ -259,11 +173,11 @@ class AgentPlugin:
     def _get_or_create_queue(self, channel) -> SerialQueue:
         """Return existing SerialQueue for channel or create and start a new one."""
         channel_id = channel.id
-        if channel_id not in self._queues:
+        if channel_id not in self.queues:
             q = SerialQueue()
             q.start(self._process_queue_item)
-            self._queues[channel_id] = q
-        return self._queues[channel_id]
+            self.queues[channel_id] = q
+        return self.queues[channel_id]
 
     async def _process_queue_item(self, item: QueueItem) -> None:
         """Process one item from the channel queue.
@@ -371,9 +285,8 @@ class AgentPlugin:
         # 8. Persist assistant message (run_agent_turn already appended to messages in place)
         await conv.append(result.message)
 
-        # 9. Strip reasoning_content from in-memory copy if configured
-        if not resolved["keep_thinking_in_history"]:
-            strip_reasoning_content([conv.messages[-1]])
+        # 9. Let plugins post-process the in-memory assistant message (e.g., strip reasoning_content)
+        await self.pm.ahook.after_persist_assistant(channel=channel, message=conv.messages[-1])
 
         # 10. Dispatch tool calls or send text response
         # Check-before-increment: turn_counter < max_turns_limit allows dispatch
@@ -388,11 +301,19 @@ class AgentPlugin:
                 "max_turns reached, suppressing tool calls",
                 extra={"channel": channel.id, "turn_counter": channel.turn_counter},
             )
-            display_response = strip_thinking(result.text) or "(max tool-calling rounds reached)"
+            transformed = await call_firstresult_hook(
+                self.pm, "transform_display_text",
+                channel=channel, text=result.text, result_message=result.message,
+            )
+            display_response = (transformed if transformed is not None else result.text) or "(max tool-calling rounds reached)"
         else:
             # No tool calls — normal text response
             channel.turn_counter += 1
-            display_response = strip_thinking(result.text)
+            transformed = await call_firstresult_hook(
+                self.pm, "transform_display_text",
+                channel=channel, text=result.text, result_message=result.message,
+            )
+            display_response = transformed if transformed is not None else result.text
 
         logger.info(
             "agent response sent",
@@ -455,11 +376,8 @@ class AgentPlugin:
 
     @hookimpl
     async def on_stop(self) -> None:
-        if self._idle_monitor:
-            await self._idle_monitor.stop()
-
         # Cancel all channel queue consumers.
-        for queue in self._queues.values():
+        for queue in self.queues.values():
             await queue.stop()
 
         await self._stop_plugin()
@@ -523,14 +441,6 @@ class AgentPlugin:
                 "channel_count": len(self._registry.all()),
             },
         )
-
-        daemon_config = config.get("daemon", {})
-        self._idle_monitor = IdleMonitor(
-            pm=self.pm, queues=self._queues,
-            cooldown_seconds=daemon_config.get("idle_cooldown_seconds", 30),
-            poll_interval=daemon_config.get("idle_poll_interval", 2),
-        )
-        self._idle_monitor.start()
 
     async def _stop_plugin(self) -> None:
         """Close LLM client and database."""

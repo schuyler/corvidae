@@ -272,7 +272,7 @@ class TestQueueItemRole:
         plugin = AgentPlugin.__new__(AgentPlugin)
         plugin.pm = pm
         plugin.client = object()  # non-None so on_message proceeds
-        plugin._queues = {}
+        plugin.queues = {}
         plugin._registry = registry
 
         captured_items = []
@@ -284,7 +284,7 @@ class TestQueueItemRole:
 
         q = SerialQueue()
         q.start(fake_process)
-        plugin._queues[ch.id] = q
+        plugin.queues[ch.id] = q
 
         await plugin.on_message(channel=ch, sender="alice", text="hello")
         await q.drain()
@@ -305,7 +305,7 @@ class TestQueueItemRole:
         plugin = AgentPlugin.__new__(AgentPlugin)
         plugin.pm = pm
         plugin.client = object()
-        plugin._queues = {}
+        plugin.queues = {}
         plugin._registry = registry
 
         captured_items = []
@@ -317,7 +317,7 @@ class TestQueueItemRole:
 
         q = SerialQueue()
         q.start(fake_process)
-        plugin._queues[ch.id] = q
+        plugin.queues[ch.id] = q
 
         await plugin.on_notify(channel=ch, source="task", text="done", tool_call_id=None, meta=None)
         await q.drain()

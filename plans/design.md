@@ -70,6 +70,8 @@ class AgentSpec:
     async def compact_conversation(self, conversation: ConversationLog, client: LLMClient, max_tokens: int) -> bool | None
     async def process_tool_result(self, tool_name: str, result: str, channel: Channel | None) -> str | None
     async def before_agent_turn(self, channel: Channel) -> None
+    async def after_persist_assistant(self, channel: Channel, message: dict) -> None
+    async def transform_display_text(self, channel: Channel, text: str, result_message: dict) -> str | None
     async def on_idle(self) -> None
 ```
 
@@ -78,9 +80,10 @@ hookspecs.
 
 ### Firstresult hooks
 
-`should_process_message`, `on_llm_error`, `compact_conversation`, and
-`process_tool_result` use firstresult semantics: the first non-`None`
-return value wins and no further implementations run.
+`should_process_message`, `on_llm_error`, `compact_conversation`,
+`process_tool_result`, and `transform_display_text` use firstresult
+semantics: the first non-`None` return value wins and no further
+implementations run.
 
 apluggy does not support `firstresult=True` on async hooks. These hooks
 are called via `call_firstresult_hook(pm, hook_name, **kwargs)` in
@@ -111,6 +114,8 @@ usual way.
 | `compact_conversation` | firstresult | `_process_queue_item`, step 5; return True=handled, None=run default |
 | `process_tool_result` | firstresult | `run_agent_loop` (subagent path only, not interactive messages), after tool execution; return replacement string or None for default |
 | `before_agent_turn` | broadcast | `_process_queue_item`, before LLM call; plugins inject context into conversation log |
+| `after_persist_assistant` | broadcast | `_process_queue_item`, after assistant message is persisted; plugins may mutate the in-memory dict |
+| `transform_display_text` | firstresult | `_process_queue_item`, before `send_message`; return transformed text or None to leave unchanged |
 | `on_idle` | broadcast | `IdleMonitor`, when all queues empty and cooldown elapsed |
 
 ## Channel System
@@ -267,12 +272,16 @@ Tools that don't declare `_ctx` work without modification.
   are deleted, so the working set survives restarts.
 
 **Thinking token handling** — three layers:
-- Display: `strip_thinking()` removes `<think>` blocks from content
+- Display: `ThinkingPlugin.transform_display_text` calls `strip_thinking()`
+  to remove `<think>` blocks before the text is sent to the channel
 - Persistent log: full message dict preserved (including
   `reasoning_content`)
-- Active prompt: `strip_reasoning_content()` removes
-  `reasoning_content` from in-memory messages when
+- Active prompt: `ThinkingPlugin.after_persist_assistant` calls
+  `strip_reasoning_content()` on the in-memory message when
   `keep_thinking_in_history=false`
+
+If `ThinkingPlugin` is not registered, `<think>` blocks pass through
+to the channel and `reasoning_content` remains in the in-memory history.
 
 ### Message types
 
@@ -318,6 +327,11 @@ CREATE INDEX idx_log_channel ON message_log(channel_id, timestamp);
 startup. Retrieves `ChannelRegistry` during `on_start` via
 `get_dependency(pm, "registry", ChannelRegistry)` from `hooks.py`.
 
+`AgentPlugin.queues` is a public `dict[str, SerialQueue]` (keyed by
+channel ID). `IdleMonitorPlugin` holds a reference to this dict; queues
+added after `IdleMonitorPlugin.on_start` are included automatically
+because the reference is live.
+
 ### Message processing
 
 `on_message` calls `call_firstresult_hook` for `should_process_message`
@@ -335,43 +349,25 @@ per-channel `SerialQueue`. The queue's consumer calls
 4. Appends the inbound message to conversation log
 5. Calls `compact_conversation` hook (firstresult); falls back to
    `conv.compact_if_needed()` if no plugin handles it
-6. Calls `run_agent_turn` (single LLM invocation)
-7. Persists the assistant message
-8. Strips `reasoning_content` from in-memory copy if configured
-9. Decision point:
-   - **Tool calls, under limit** (`turn_counter < max_turns`):
-     increment counter, dispatch tool calls as Tasks, return without
-     sending a response
-   - **Tool calls, at limit**: send fallback text
-     `"(max tool-calling rounds reached)"`
-   - **No tool calls**: increment counter, send text response
+6. Calls `before_agent_turn` hook (broadcast)
+7. Calls `run_agent_turn` (single LLM invocation)
+8. Persists the assistant message
+9. Calls `after_persist_assistant` hook (broadcast); `ThinkingPlugin`
+   uses this to strip `reasoning_content` from the in-memory copy
+10. Decision point:
+    - **Tool calls, under limit** (`turn_counter < max_turns`):
+      increment counter, dispatch tool calls as Tasks, return without
+      sending a response
+    - **Tool calls, at limit**: send fallback text
+      `"(max tool-calling rounds reached)"`
+    - **No tool calls**: calls `transform_display_text` hook
+      (firstresult; `ThinkingPlugin` uses this to strip `<think>` blocks),
+      then increments counter, sends text response
 
 If `run_agent_turn` raises an exception, `on_llm_error` (firstresult)
 is called. Its return value is used as the error message sent to the
 channel. If no plugin returns a string, the default error message is
 sent.
-
-### IdleMonitor
-
-`IdleMonitor` is a background asyncio task that fires `on_idle` when
-the system is idle. It is created by `AgentPlugin._start_plugin` and
-stopped in `on_stop` before queue teardown.
-
-**Idle condition:** all `SerialQueue` instances have `is_empty=True`,
-`TaskQueue.is_idle` is `True` (no queued or active tasks), and at
-least `idle_cooldown_seconds` have elapsed since the last `on_idle`
-firing.
-
-**Polling:** checks the idle condition every `idle_poll_interval`
-seconds. Exceptions from `on_idle` implementations are caught and
-logged as warnings; the monitor continues running.
-
-**Config:**
-```yaml
-daemon:
-  idle_cooldown_seconds: 30   # minimum seconds between on_idle firings (default 30)
-  idle_poll_interval: 2       # seconds between idle checks (default 2)
-```
 
 ### Tool call dispatch
 
@@ -419,6 +415,64 @@ class QueueItem:
     tool_call_id: str | None = None
     meta: dict = field(default_factory=dict)
 ```
+
+## IdleMonitorPlugin
+
+`idle.py` — monitors system idle state and fires `on_idle` when all
+queues are quiescent. Registered as `"idle_monitor"` in `main.py`.
+
+`IdleMonitorPlugin` depends on `"agent_loop"`. Its `on_start` is
+decorated with `@hookimpl(trylast=True)` so it runs after
+`AgentPlugin.on_start` has fully initialized.
+
+`IdleMonitorPlugin.on_start` calls `get_dependency(pm, "agent_loop",
+AgentPlugin)` to retrieve a reference to `AgentPlugin.queues`, then
+creates and starts an `IdleMonitor`.
+
+`IdleMonitorPlugin.on_stop` cancels the monitor before queue teardown.
+
+**Graceful degradation:** without `IdleMonitorPlugin`, the `on_idle`
+hook is never fired.
+
+### IdleMonitor
+
+`IdleMonitor` (`idle.py`) is a background asyncio task that polls for
+idle state and fires `on_idle` when conditions are met.
+
+**Idle condition:** all `SerialQueue` instances in `AgentPlugin.queues`
+have `is_empty=True`, `TaskQueue.is_idle` is `True` (no queued or
+active tasks; skipped if `TaskPlugin` is not registered), and at least
+`idle_cooldown_seconds` have elapsed since the last `on_idle` firing.
+
+**Polling:** checks the idle condition every `idle_poll_interval`
+seconds. Exceptions from `on_idle` implementations are caught and
+logged as warnings; the monitor continues running.
+
+**Config:**
+```yaml
+daemon:
+  idle_cooldown_seconds: 30   # minimum seconds between on_idle firings (default 30)
+  idle_poll_interval: 2       # seconds between idle checks (default 2)
+```
+
+## ThinkingPlugin
+
+`thinking.py` — strips `<think>` blocks and `reasoning_content` for
+display. Registered as `"thinking"` in `main.py` before `agent_loop`.
+
+Implements two hooks:
+
+- `after_persist_assistant`: reads `keep_thinking_in_history` from the
+  resolved channel config. If `False`, calls `strip_reasoning_content`
+  on the in-memory message dict. The DB copy is already written; this
+  only affects subsequent prompt builds.
+- `transform_display_text`: calls `strip_thinking` on the response text.
+  Returns the stripped string if it differs from the input, or `None`
+  if no `<think>` tags were present.
+
+**Graceful degradation:** without `ThinkingPlugin`, `<think>` blocks
+pass through to the channel and `reasoning_content` remains in the
+in-memory history regardless of `keep_thinking_in_history`.
 
 ## Task System
 
@@ -585,7 +639,10 @@ Defined in `main.py`:
 4. IRCPlugin — IRC transport
 5. TaskPlugin — task queue
 6. SubagentPlugin — registers the subagent tool
-7. AgentPlugin — agent loop (last, so all tools and queues are ready)
+7. CompactionPlugin — provides default `compact_conversation` implementation
+8. ThinkingPlugin — handles `<think>` stripping and `reasoning_content` removal
+9. AgentPlugin — agent loop (after all tools, transports, and support plugins)
+10. IdleMonitorPlugin — idle monitor (after `AgentPlugin`, depends on `agent_loop`)
 
 After all registrations, `validate_dependencies(pm)` runs to verify that
 every plugin's `depends_on` set names a registered plugin. Startup aborts
@@ -612,10 +669,11 @@ dependency and the plugin that declared it. Runs once at startup.
 ### Current dependency graph
 
 ```
-AgentPlugin      → "registry"   (ChannelRegistry)
-CLIPlugin        → "registry"   (ChannelRegistry)
-IRCPlugin        → "registry"   (ChannelRegistry)
-SubagentPlugin   → "agent_loop" (AgentPlugin)
+AgentPlugin         → "registry"    (ChannelRegistry)
+CLIPlugin           → "registry"    (ChannelRegistry)
+IRCPlugin           → "registry"    (ChannelRegistry)
+SubagentPlugin      → "agent_loop"  (AgentPlugin)
+IdleMonitorPlugin   → "agent_loop"  (AgentPlugin)
 ```
 
 Transport plugins use `get_dependency(pm, "registry", ChannelRegistry)` in
@@ -640,7 +698,10 @@ sherman/
 ├── agent_loop.py         # run_agent_turn(), run_agent_loop(), strip_thinking
 ├── conversation.py       # ConversationLog, init_db
 ├── logging.py            # StructuredFormatter, _DEFAULT_LOGGING
-├── agent.py              # AgentPlugin (single-turn dispatch), IdleMonitor
+├── agent.py              # AgentPlugin (single-turn dispatch)
+├── idle.py               # IdleMonitor, IdleMonitorPlugin
+├── thinking.py           # ThinkingPlugin
+├── compaction.py         # CompactionPlugin
 ├── task.py               # Task, TaskQueue, TaskPlugin
 ├── main.py               # daemon entry point
 ├── channels/

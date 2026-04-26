@@ -95,7 +95,12 @@ async def send_message(self, channel, text: str) -> None:
 | `register_tools(tool_registry: list)` | sync broadcast | During `on_start`, to collect tools |
 | `on_agent_response(channel, request_text: str, response_text: str)` | async broadcast | After agent produces a response |
 | `before_agent_turn(channel)` | async broadcast | Before each LLM invocation |
+| `after_persist_assistant(channel, message: dict)` | async broadcast | After assistant message is written to DB; plugins may mutate the in-memory dict |
 | `on_idle()` | async broadcast | All queues empty and cooldown elapsed |
+
+`after_persist_assistant` — the DB row is already written when this
+hook fires. Mutations to `message` affect in-memory prompt construction
+only; they do not update the persisted record.
 
 ### Gate hooks (firstresult)
 
@@ -107,10 +112,13 @@ Gate hooks return a value that short-circuits further processing. Use `call_firs
 | `on_llm_error(channel, error)` | `str \| None` | Non-None string replaces the default error message |
 | `compact_conversation(conversation, client, max_tokens)` | `bool \| None` | `True` signals compaction was handled; `None` defers to default |
 | `process_tool_result(tool_name, result, channel)` | `str \| None` | Non-None string replaces the tool result in the conversation |
+| `transform_display_text(channel, text, result_message)` | `str \| None` | Non-None string replaces the response text before it is sent to the channel |
 
 `compact_conversation` — do not return `False`. Return `None` to defer, `True` to signal handled. `False` stops iteration but the call site still runs the default, which is confusing.
 
 `process_tool_result` only fires during subagent execution (`run_agent_loop`), not during interactive message processing.
+
+`transform_display_text` — `result_message` is the raw assistant message dict from the LLM response. It may contain `reasoning_content` if the model produces thinking tokens. `text` is the string content extracted from that message. Return `None` to leave `text` unchanged.
 
 Example gate hook:
 
@@ -252,10 +260,15 @@ cli            (CLIPlugin)
 irc            (IRCPlugin)
 task           (TaskPlugin)
 subagent       (SubagentPlugin)
+compaction     (CompactionPlugin)
+thinking       (ThinkingPlugin)
 agent_loop     (AgentPlugin)
+idle_monitor   (IdleMonitorPlugin)
 ```
 
 Tool-providing plugins and transport plugins register before `agent_loop`. The `agent_loop` plugin collects tools during `on_start`, so anything appending to `tool_registry` must be registered first.
+
+`idle_monitor` registers after `agent_loop` because it depends on `"agent_loop"` and its `on_start` uses `@hookimpl(trylast=True)` to run after `AgentPlugin.on_start` has fully initialized.
 
 ## Async considerations
 
@@ -300,3 +313,53 @@ Registered by `SubagentPlugin` (registered as `subagent` in `main.py`).
 | `subagent` | `instructions: str`, `description: str`, `_ctx: ToolContext` | Enqueues a background task that runs a full agent loop with `instructions` as its prompt. Returns immediately with the enqueued task ID. Results are delivered via `on_notify` when the task completes. |
 
 `subagent` requires `ToolContext` (injected automatically — not an LLM parameter). It excludes itself from the subagent's tool registry to prevent recursion. The subagent uses the `llm.background` config block if present, falling back to `llm.main`.
+
+## Bundled plugins
+
+These plugins are registered by `main.py` and are part of the default
+daemon. They can be omitted if the application does not need their
+functionality; each degrades gracefully when absent.
+
+### ThinkingPlugin (`sherman/thinking.py`)
+
+Strips `<think>...</think>` blocks and `reasoning_content` from LLM
+output. Registered as `"thinking"` before `agent_loop`.
+
+Implements two hooks:
+
+- `after_persist_assistant` — reads `keep_thinking_in_history` from the
+  resolved channel config. If `False`, calls `strip_reasoning_content`
+  on the in-memory message dict. The DB copy is already written; this
+  only affects subsequent prompt builds.
+- `transform_display_text` — calls `strip_thinking` on the response
+  text. Returns the stripped string if it differs from the input, or
+  `None` if no `<think>` tags were present.
+
+**Without this plugin:** `<think>` blocks pass through to the channel
+verbatim, and `reasoning_content` remains in in-memory history
+regardless of the `keep_thinking_in_history` config value.
+
+### IdleMonitorPlugin (`sherman/idle.py`)
+
+Fires the `on_idle` broadcast hook when all queues are quiescent.
+Registered as `"idle_monitor"` after `agent_loop`.
+
+Depends on `"agent_loop"`. Its `on_start` uses `@hookimpl(trylast=True)`
+so it runs after `AgentPlugin.on_start` has fully initialized. It
+retrieves `AgentPlugin.queues` (a `dict[str, SerialQueue]`) by reference,
+so queues created after `IdleMonitorPlugin.on_start` are included
+automatically.
+
+**Idle condition:** all `SerialQueue` instances have `is_empty=True`,
+`TaskQueue.is_idle` is `True` (skipped if `TaskPlugin` is not
+registered), and at least `idle_cooldown_seconds` have elapsed since
+the last firing.
+
+**Config:**
+```yaml
+daemon:
+  idle_cooldown_seconds: 30   # minimum seconds between on_idle firings (default 30)
+  idle_poll_interval: 2       # seconds between idle checks (default 2)
+```
+
+**Without this plugin:** the `on_idle` hook is never fired.

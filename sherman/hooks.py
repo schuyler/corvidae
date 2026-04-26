@@ -313,3 +313,36 @@ class AgentSpec:
             channel: The Channel being processed. Use ``channel.conversation``
                 to access the ConversationLog for appending context entries.
         """
+
+    @hookspec
+    async def after_persist_assistant(self, channel: "Channel", message: dict) -> None:
+        """Called after the assistant message has been persisted to the conversation log.
+
+        Plugins may mutate the in-memory message dict (e.g., to strip
+        reasoning_content). The DB copy is already written at call time;
+        mutations affect only subsequent prompt builds. No return value is used.
+
+        Args:
+            channel: The Channel where the conversation is happening.
+            message: The in-memory assistant message dict just appended to the
+                conversation log. Mutations affect subsequent prompt builds only.
+        """
+
+    @hookspec
+    async def transform_display_text(
+        self, channel: "Channel", text: str, result_message: dict
+    ) -> "str | None":
+        """Called before sending the final text response to the channel.
+
+        Return a transformed string to replace text, or None to leave it
+        unchanged. First non-None result wins.
+        Note: Hook wrappers are not supported for this hook.
+
+        Args:
+            channel: The Channel the response will be sent to.
+            text: The raw response text from the LLM.
+            result_message: The full assistant message dict from the LLM response.
+
+        Returns:
+            A transformed string, or None to leave text unchanged.
+        """
