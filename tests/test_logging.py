@@ -896,8 +896,8 @@ class TestAgentPluginLogging:
             await plugin.on_message(channel=channel, sender="alice", text="hello")
             # Drain the channel queue so the consumer (which emits latency log)
             # runs before we check caplog records.
-            if channel.id in plugin._queues:
-                await plugin._queues[channel.id].drain()
+            if channel.id in plugin.queues:
+                await plugin.queues[channel.id].drain()
 
         records = [r for r in caplog.records if r.name == "sherman.agent"]
         info_records = [r for r in records if r.levelno == logging.INFO]

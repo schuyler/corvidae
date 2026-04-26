@@ -20,6 +20,7 @@ from sherman.channel import Channel, ChannelConfig, ChannelRegistry
 from sherman.conversation import init_db
 from sherman.hooks import create_plugin_manager
 from sherman.task import Task, TaskPlugin, TaskQueue
+from sherman.thinking import ThinkingPlugin
 from sherman.tool import ToolContext
 
 
@@ -100,6 +101,10 @@ async def _build_plugin_and_channel(
     pm.register(task_plugin, name="task")
     await task_plugin.on_start(config={})
 
+    # Register ThinkingPlugin before AgentPlugin
+    thinking_plugin = ThinkingPlugin(pm)
+    pm.register(thinking_plugin, name="thinking")
+
     plugin = AgentPlugin(pm)
     pm.register(plugin, name="agent_loop")
 
@@ -133,8 +138,8 @@ async def plugin_and_channel(request):
 
 async def _drain(plugin, channel):
     """Drain the channel's SerialQueue. Safe when queue was never created."""
-    if channel.id in plugin._queues:
-        await plugin._queues[channel.id].drain()
+    if channel.id in plugin.queues:
+        await plugin.queues[channel.id].drain()
 
 
 async def _drain_task_queue(plugin):

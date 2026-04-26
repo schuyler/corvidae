@@ -14,6 +14,7 @@ from sherman.hooks import create_plugin_manager
 
 from sherman.agent import AgentPlugin
 from sherman.task import TaskPlugin
+from sherman.thinking import ThinkingPlugin
 
 
 # ---------------------------------------------------------------------------
@@ -100,6 +101,10 @@ async def _build_plugin_and_channel(agent_defaults=None, channel_config=None):
     pm.register(task_plugin, name="task")
     await task_plugin.on_start(config={})
 
+    # Register ThinkingPlugin before AgentPlugin
+    thinking_plugin = ThinkingPlugin(pm)
+    pm.register(thinking_plugin, name="thinking")
+
     plugin = AgentPlugin(pm)
     pm.register(plugin, name="agent_loop")
 
@@ -126,8 +131,8 @@ async def _drain(plugin, channel):
     Guards against missing queue (CR2: avoids KeyError when queue was
     never created, e.g. in test_on_task_complete_does_not_call_send_message_directly).
     """
-    if channel.id in plugin._queues:
-        await plugin._queues[channel.id].drain()
+    if channel.id in plugin.queues:
+        await plugin.queues[channel.id].drain()
 
 
 # ---------------------------------------------------------------------------
@@ -896,7 +901,7 @@ class TestOnStop:
         q2 = SerialQueue()
         q2.start(noop)
 
-        plugin._queues = {
+        plugin.queues = {
             "test:ch1": q1,
             "test:ch2": q2,
         }

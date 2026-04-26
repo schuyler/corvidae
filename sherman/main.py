@@ -102,9 +102,19 @@ async def main(config_path: str = "agent.yaml") -> None:
     compaction_plugin = CompactionPlugin()
     pm.register(compaction_plugin, name="compaction")
 
+    # Register ThinkingPlugin before AgentPlugin (handles <think> block stripping)
+    from sherman.thinking import ThinkingPlugin
+    thinking_plugin = ThinkingPlugin(pm)
+    pm.register(thinking_plugin, name="thinking")
+
     # Register AgentPlugin after tool-providing and transport plugins
     agent_loop = AgentPlugin(pm)
     pm.register(agent_loop, name="agent_loop")
+
+    # Register IdleMonitorPlugin after AgentPlugin (depends on agent_loop)
+    from sherman.idle import IdleMonitorPlugin
+    idle_monitor_plugin = IdleMonitorPlugin(pm)
+    pm.register(idle_monitor_plugin, name="idle_monitor")
 
     validate_dependencies(pm)
 

@@ -45,12 +45,12 @@ def _non_empty_queues():
 
 
 def _import_idle_monitor():
-    """Import IdleMonitor from sherman.agent; skip if not yet implemented."""
+    """Import IdleMonitor from sherman.idle; skip if not yet implemented."""
     try:
-        from sherman.agent import IdleMonitor
+        from sherman.idle import IdleMonitor
         return IdleMonitor
     except ImportError:
-        pytest.fail("IdleMonitor not found in sherman.agent — implement it")
+        pytest.fail("IdleMonitor not found in sherman.idle — implement it")
 
 
 # ---------------------------------------------------------------------------
@@ -294,7 +294,7 @@ async def test_idle_monitor_exception_in_hook_caught_and_monitor_continues(caplo
     )
     monitor._last_fired = 0.0
 
-    with caplog.at_level(logging.WARNING, logger="sherman.agent"):
+    with caplog.at_level(logging.WARNING, logger="sherman.idle"):
         monitor.start()
         # Wait for the hook to fire at least twice (first raises, second succeeds)
         deadline = time.monotonic() + 2.0
@@ -343,3 +343,183 @@ async def test_idle_monitor_updates_last_fired_after_hook():
     assert monitor._last_fired >= before, (
         "_last_fired must be updated after on_idle fires"
     )
+
+
+# ---------------------------------------------------------------------------
+# IdleMonitorPlugin tests (Phase C — will fail with ImportError until
+# sherman/idle.py is created)
+# ---------------------------------------------------------------------------
+
+
+class TestIdleMonitorPlugin:
+    """Tests for IdleMonitorPlugin.
+
+    These tests import from sherman.idle which does not exist yet.
+    They are expected to fail with ImportError (red phase).
+    """
+
+    async def test_idle_monitor_plugin_on_start_creates_monitor(self):
+        """on_start creates an IdleMonitor and starts it.
+
+        Register AgentPlugin and IdleMonitorPlugin, call on_start on each.
+        Verify plugin._monitor is not None and has a running background task.
+        """
+        from sherman.idle import IdleMonitorPlugin
+        from sherman.agent import AgentPlugin
+        from sherman.channel import ChannelRegistry
+        from unittest.mock import patch, AsyncMock, MagicMock
+
+        pm = create_plugin_manager()
+        registry = ChannelRegistry({"system_prompt": "", "max_context_tokens": 8000})
+        pm.register(registry, name="registry")
+        pm.ahook.send_message = AsyncMock()
+        pm.ahook.on_agent_response = AsyncMock()
+
+        agent = AgentPlugin(pm)
+        pm.register(agent, name="agent_loop")
+
+        idle_plugin = IdleMonitorPlugin(pm)
+        pm.register(idle_plugin, name="idle_monitor")
+
+        config = {
+            "llm": {"main": {"base_url": "http://localhost:8080", "model": "test"}},
+            "daemon": {"session_db": ":memory:"},
+        }
+
+        mock_client = MagicMock()
+        mock_client.start = AsyncMock()
+        mock_client.stop = AsyncMock()
+
+        with patch("sherman.agent.LLMClient", return_value=mock_client), \
+             patch("sherman.agent.aiosqlite.connect", new_callable=AsyncMock) as mock_connect, \
+             patch("sherman.agent.init_db", new_callable=AsyncMock):
+            mock_connect.return_value = AsyncMock()
+            await pm.ahook.on_start(config=config)
+
+        try:
+            assert idle_plugin._monitor is not None, (
+                "IdleMonitorPlugin._monitor must be set after on_start"
+            )
+            assert idle_plugin._monitor._task is not None, (
+                "IdleMonitor background task must be started after on_start"
+            )
+            assert not idle_plugin._monitor._task.done(), (
+                "IdleMonitor background task must still be running"
+            )
+        finally:
+            if idle_plugin._monitor:
+                await idle_plugin._monitor.stop()
+
+    async def test_idle_monitor_plugin_on_stop_stops_monitor(self):
+        """on_stop stops the IdleMonitor background task.
+
+        After on_start, call on_stop. Verify the monitor's background task is done.
+        """
+        from sherman.idle import IdleMonitorPlugin
+        from sherman.agent import AgentPlugin
+        from sherman.channel import ChannelRegistry
+        from unittest.mock import patch, AsyncMock, MagicMock
+
+        pm = create_plugin_manager()
+        registry = ChannelRegistry({"system_prompt": "", "max_context_tokens": 8000})
+        pm.register(registry, name="registry")
+        pm.ahook.send_message = AsyncMock()
+        pm.ahook.on_agent_response = AsyncMock()
+
+        agent = AgentPlugin(pm)
+        pm.register(agent, name="agent_loop")
+
+        idle_plugin = IdleMonitorPlugin(pm)
+        pm.register(idle_plugin, name="idle_monitor")
+
+        config = {
+            "llm": {"main": {"base_url": "http://localhost:8080", "model": "test"}},
+            "daemon": {"session_db": ":memory:"},
+        }
+
+        mock_client = MagicMock()
+        mock_client.start = AsyncMock()
+        mock_client.stop = AsyncMock()
+
+        with patch("sherman.agent.LLMClient", return_value=mock_client), \
+             patch("sherman.agent.aiosqlite.connect", new_callable=AsyncMock) as mock_connect, \
+             patch("sherman.agent.init_db", new_callable=AsyncMock):
+            mock_connect.return_value = AsyncMock()
+            await pm.ahook.on_start(config=config)
+
+        monitor = idle_plugin._monitor
+        assert monitor is not None
+        task = monitor._task
+
+        await pm.ahook.on_stop()
+
+        assert monitor._task is None, (
+            "IdleMonitor._task must be None after on_stop"
+        )
+        assert task.done(), (
+            "IdleMonitor background task must be done after on_stop"
+        )
+
+    async def test_idle_monitor_plugin_uses_agent_queues(self):
+        """IdleMonitorPlugin passes the agent's queues dict reference to IdleMonitor.
+
+        After on_start, verify that idle_plugin._monitor._queues is the same
+        object as agent._queues (same dict reference, not a copy).
+        """
+        from sherman.idle import IdleMonitorPlugin
+        from sherman.agent import AgentPlugin
+        from sherman.channel import ChannelRegistry
+        from unittest.mock import patch, AsyncMock, MagicMock
+
+        pm = create_plugin_manager()
+        registry = ChannelRegistry({"system_prompt": "", "max_context_tokens": 8000})
+        pm.register(registry, name="registry")
+        pm.ahook.send_message = AsyncMock()
+        pm.ahook.on_agent_response = AsyncMock()
+
+        agent = AgentPlugin(pm)
+        pm.register(agent, name="agent_loop")
+
+        idle_plugin = IdleMonitorPlugin(pm)
+        pm.register(idle_plugin, name="idle_monitor")
+
+        config = {
+            "llm": {"main": {"base_url": "http://localhost:8080", "model": "test"}},
+            "daemon": {"session_db": ":memory:"},
+        }
+
+        mock_client = MagicMock()
+        mock_client.start = AsyncMock()
+        mock_client.stop = AsyncMock()
+
+        with patch("sherman.agent.LLMClient", return_value=mock_client), \
+             patch("sherman.agent.aiosqlite.connect", new_callable=AsyncMock) as mock_connect, \
+             patch("sherman.agent.init_db", new_callable=AsyncMock):
+            mock_connect.return_value = AsyncMock()
+            await pm.ahook.on_start(config=config)
+
+        try:
+            assert idle_plugin._monitor is not None
+            assert idle_plugin._monitor._queues is agent.queues, (
+                "IdleMonitor must hold a reference to agent.queues, not a copy"
+            )
+        finally:
+            if idle_plugin._monitor:
+                await idle_plugin._monitor.stop()
+
+    async def test_idle_monitor_plugin_not_registered_no_crash(self):
+        """When no IdleMonitorPlugin is registered, calling on_idle does not crash.
+
+        on_idle is a broadcast hook; zero implementations means a no-op.
+        """
+        from sherman.idle import IdleMonitorPlugin  # noqa: F401
+
+        pm = create_plugin_manager()
+        from sherman.agent import AgentPlugin
+        agent = AgentPlugin(pm)
+        pm.register(agent, name="agent_loop")
+        # IdleMonitorPlugin is intentionally NOT registered.
+
+        # Should not raise even with no on_idle implementations.
+        await pm.ahook.on_idle()
+
