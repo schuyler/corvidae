@@ -102,25 +102,26 @@ async def send_message(self, channel, text: str) -> None:
 hook fires. Mutations to `message` affect in-memory prompt construction
 only; they do not update the persisted record.
 
-### Gate hooks (firstresult)
+### Hook result resolution
 
-Gate hooks return a value that short-circuits further processing. Use `call_firstresult_hook()` to call them — apluggy's built-in `firstresult=True` does not work with async hooks.
+These hooks are broadcast to all plugins. The caller uses `resolve_hook_results` to reduce the result list to a single value according to a per-hook strategy.
 
-| Hook | Returns | Behavior |
-|------|---------|----------|
-| `should_process_message(channel, sender, text)` | `bool \| None` | `False` rejects the message, `True` accepts it; `None` defers |
-| `on_llm_error(channel, error)` | `str \| None` | Non-None string replaces the default error message |
-| `compact_conversation(conversation, client, max_tokens)` | `bool \| None` | `True` signals compaction was handled; `None` defers to default |
-| `process_tool_result(tool_name, result, channel)` | `str \| None` | Non-None string replaces the tool result in the conversation |
-| `transform_display_text(channel, text, result_message)` | `str \| None` | Non-None string replaces the response text before it is sent to the channel |
+| Hook | Strategy | Returns | Behavior |
+|------|----------|---------|----------|
+| `should_process_message(channel, sender, text)` | `REJECT_WINS` | `bool \| None` | Any `False` vetoes the message; any `True` (with no `False`) accepts; `None` if all defer |
+| `on_llm_error(channel, error)` | `VALUE_FIRST` | `str \| None` | Non-None string replaces the default error message; multiple non-None → alphabetically-first plugin wins with a warning |
+| `compact_conversation(conversation, client, max_tokens)` | broadcast only | `None` | Called for side effects; return value is not used by the caller |
+| `process_tool_result(tool_name, result, channel)` | `VALUE_FIRST` | `str \| None` | Non-None string replaces the tool result in the conversation; multiple non-None → alphabetically-first plugin wins with a warning |
+| `transform_display_text(channel, text, result_message)` | `VALUE_FIRST` | `str \| None` | Non-None string replaces the response text before it is sent to the channel; multiple non-None → alphabetically-first plugin wins with a warning |
+| `ensure_conversation(channel)` | `ACCEPT_WINS` | `bool \| None` | Any `True` means the conversation was initialized; `None` if none handled |
 
-`compact_conversation` — do not return `False`. Return `None` to defer, `True` to signal handled. `False` stops iteration but the call site still runs the default, which is confusing.
+`compact_conversation` — all registered implementations run. The return value is ignored by the caller. Use this hook for side effects (e.g., custom summarization that mutates the conversation in-place).
 
 `process_tool_result` only fires during subagent execution (`run_agent_loop`), not during interactive message processing.
 
 `transform_display_text` — `result_message` is the raw assistant message dict from the LLM response. It may contain `reasoning_content` if the model produces thinking tokens. `text` is the string content extracted from that message. Return `None` to leave `text` unchanged.
 
-Example gate hook:
+Example hook returning a value:
 
 ```python
 @hookimpl
@@ -292,24 +293,22 @@ Tool-providing plugins and transport plugins register before `agent_loop`. The `
 
 Broadcast hook calls from `AgentPlugin` are wrapped in `try/except`. If a plugin raises an exception from `before_agent_turn`, `after_persist_assistant`, `on_agent_response`, or `send_message`, the exception is logged at WARNING or ERROR level and processing continues. Plugins do not need to catch their own exceptions to protect the queue consumer.
 
-Gate hooks called via `call_firstresult_hook` are not wrapped — exceptions propagate to the call site. The exception is `compact_conversation`, whose `call_firstresult_hook` invocation is wrapped: a compaction failure is logged at WARNING and the turn continues without compaction.
+Hooks using `resolve_hook_results` are not wrapped — exceptions propagate to the call site. The exception is `compact_conversation`, whose broadcast invocation is wrapped: a compaction failure is logged at WARNING and the turn continues without compaction.
 
 ## Async considerations
 
 All broadcast hooks are `async`. Corvidae uses apluggy's `pm.ahook.*` for async dispatch.
 
-For gate hooks, call `call_firstresult_hook()` explicitly — do not rely on pluggy's `firstresult=True`, which does not work with async:
+For hooks that return a value, call `pm.ahook.<hook>(...)` and pass the result list to `resolve_hook_results` with the appropriate strategy:
 
 ```python
-from corvidae.hooks import call_firstresult_hook
+from corvidae.hooks import resolve_hook_results, HookStrategy
 
-result = await call_firstresult_hook(
-    pm, "should_process_message",
-    channel=channel, sender=sender, text=text
-)
+results = await pm.ahook.some_hook(channel=channel, ...)
+result = resolve_hook_results(results, "some_hook", HookStrategy.VALUE_FIRST, pm=pm)
 ```
 
-`call_firstresult_hook` respects `@hookimpl(tryfirst=True)` and `@hookimpl(trylast=True)` markers. Hook wrappers (`wrapper=True`, `hookwrapper=True`) are not supported and are silently skipped.
+`@hookimpl(tryfirst=True)` and `@hookimpl(trylast=True)` markers are respected by apluggy's broadcast dispatch and affect the order in which results are collected.
 
 ## Stock tools
 

@@ -79,25 +79,24 @@ class AgentSpec:
 `create_plugin_manager()` in `hooks.py` creates the manager and adds
 hookspecs.
 
-### Firstresult hooks
+### Broadcast dispatch and result resolution
 
-`should_process_message`, `on_llm_error`, `compact_conversation`,
-`process_tool_result`, `transform_display_text`, and `ensure_conversation`
-use firstresult semantics: the first non-`None` return value wins and no
-further implementations run.
+All hooks are called via `pm.ahook.<hook_name>(...)`, which broadcasts to
+every registered implementation and returns a list of results. For hooks
+that need a single resolved value, the caller passes the result list to
+`resolve_hook_results(results, hook_name, strategy, pm=pm)` from `hooks.py`.
 
-apluggy does not support `firstresult=True` on async hooks. These hooks
-are called via `call_firstresult_hook(pm, hook_name, **kwargs)` in
-`hooks.py` instead of `pm.ahook`. The helper iterates implementations
-in pluggy priority order (tryfirst → regular → trylast), awaits each,
-and returns the first non-`None` result.
+`HookStrategy` defines three resolution strategies:
 
-Hook wrappers (`@hookimpl(wrapper=True)` and
-`@hookimpl(hookwrapper=True)`) are not supported by
-`call_firstresult_hook` and are silently skipped.
+- **REJECT_WINS** — any `False` in the results returns `False`; otherwise
+  any `True` returns `True`; otherwise `None`.
+- **ACCEPT_WINS** — any `True` in the results returns `True`; otherwise `None`.
+- **VALUE_FIRST** — returns the first non-`None` result. If multiple plugins
+  return non-`None`, the alphabetically-first plugin name's result is used
+  and a warning is logged.
 
-`on_idle` is a broadcast hook called via `pm.ahook.on_idle()` in the
-usual way.
+Pure broadcast hooks (e.g. `on_start`, `on_idle`) do not call
+`resolve_hook_results`; their return values are ignored.
 
 ### Hook reference
 
@@ -110,15 +109,15 @@ usual way.
 | `register_tools` | broadcast (sync) | startup tool collection |
 | `on_agent_response` | broadcast | after agent loop produces a response |
 | `on_notify` | broadcast | inject a notification into a channel queue |
-| `should_process_message` | firstresult | `on_message`, before enqueue; False=reject, True=accept, None=no opinion |
-| `on_llm_error` | firstresult | `_process_queue_item`, after LLM exception; return error string or None for default |
-| `compact_conversation` | firstresult | `_process_queue_item`, step 5; return True=handled, None=no compaction this turn |
-| `process_tool_result` | firstresult | `run_agent_loop` (subagent path only, not interactive messages), after tool execution; return replacement string or None for default |
+| `should_process_message` | broadcast / REJECT_WINS | `on_message`, before enqueue; False=reject, True=accept, None=no opinion |
+| `on_llm_error` | broadcast / VALUE_FIRST | `_process_queue_item`, after LLM exception; return error string or None for default |
+| `compact_conversation` | broadcast | `_process_queue_item`, step 5; all implementations run for side effects |
+| `process_tool_result` | broadcast / VALUE_FIRST | `run_agent_loop` (subagent path only, not interactive messages), after tool execution; return replacement string or None for default |
 | `before_agent_turn` | broadcast | `_process_queue_item`, before LLM call; plugins inject context into conversation log |
 | `after_persist_assistant` | broadcast | `_process_queue_item`, after assistant message is persisted; plugins may mutate the in-memory dict |
-| `transform_display_text` | firstresult | `_process_queue_item`, before `send_message`; return transformed text or None to leave unchanged |
+| `transform_display_text` | broadcast / VALUE_FIRST | `_process_queue_item`, before `send_message`; return transformed text or None to leave unchanged |
 | `on_idle` | broadcast | `IdleMonitor`, when all queues empty and cooldown elapsed |
-| `ensure_conversation` | firstresult | `_process_queue_item`, before agent turn when `channel.conversation is None`; return True=initialized, None=defer |
+| `ensure_conversation` | broadcast / ACCEPT_WINS | `_process_queue_item`, before agent turn when `channel.conversation is None`; return True=initialized, None=defer |
 
 ## Channel System
 
@@ -345,23 +344,23 @@ because the reference is live.
 
 ### Message processing
 
-`on_message` calls `call_firstresult_hook` for `should_process_message`
-before enqueuing. If the result is `False` (identity check, not
-falsiness), the message is dropped. Any other result (`True` or `None`)
-proceeds to enqueue.
+`on_message` broadcasts `should_process_message` and passes the result
+list to `resolve_hook_results` with `HookStrategy.REJECT_WINS`. If the
+resolved result is `False` (identity check, not falsiness), the message
+is dropped. Any other result (`True` or `None`) proceeds to enqueue.
 
 `on_message` and `on_notify` both enqueue a `QueueItem` onto a
 per-channel `SerialQueue`. The queue's consumer calls
 `_process_queue_item`, which:
 
-1. Calls `ensure_conversation` hook (firstresult) when `channel.conversation
-   is None`; if no plugin returns a non-`None` result, logs an error and
-   drops the message
+1. Broadcasts `ensure_conversation` when `channel.conversation is None`
+   and resolves with `HookStrategy.ACCEPT_WINS`; if no plugin returns
+   `True`, logs an error and drops the message
 2. Resets `turn_counter` to 0 on user messages
 3. Resolves channel config (including `max_turns`)
 4. Appends the inbound message to conversation log
-5. Calls `compact_conversation` hook (firstresult); if no plugin returns
-   `True`, compaction does not run for this turn
+5. Broadcasts `compact_conversation`; all implementations run for side
+   effects; return values are not used
 6. Calls `before_agent_turn` hook (broadcast)
 7. Calls `run_agent_turn` (single LLM invocation)
 8. Persists the assistant message
@@ -371,18 +370,19 @@ per-channel `SerialQueue`. The queue's consumer calls
     - **Tool calls, under limit** (`turn_counter < max_turns`):
       increment counter, dispatch tool calls as Tasks, return without
       sending a response
-    - **Tool calls, at limit**: suppresses tool dispatch. Calls
-      `transform_display_text` hook (firstresult) on `result.text`. If the
-      resulting `display_response` is falsy (empty or `None`), sends
-      `"(max tool-calling rounds reached)"` as the response.
-    - **No tool calls**: calls `transform_display_text` hook
-      (firstresult; `ThinkingPlugin` uses this to strip `<think>` blocks),
-      then increments counter, sends text response
+    - **Tool calls, at limit**: suppresses tool dispatch. Broadcasts
+      `transform_display_text` on `result.text` and resolves with
+      `HookStrategy.VALUE_FIRST`. If the resulting `display_response` is
+      falsy (empty or `None`), sends `"(max tool-calling rounds reached)"`
+      as the response.
+    - **No tool calls**: broadcasts `transform_display_text` and resolves
+      with `HookStrategy.VALUE_FIRST` (`ThinkingPlugin` uses this to strip
+      `<think>` blocks), then increments counter, sends text response
 
-If `run_agent_turn` raises an exception, `on_llm_error` (firstresult)
-is called. Its return value is used as the error message sent to the
-channel. If no plugin returns a string, the default error message is
-sent.
+If `run_agent_turn` raises an exception, `on_llm_error` is broadcast and
+resolved with `HookStrategy.VALUE_FIRST`. Its return value is used as the
+error message sent to the channel. If no plugin returns a string, the
+default error message is sent.
 
 ### Tool call dispatch
 
@@ -450,8 +450,9 @@ is used to resolve relative system prompt file paths.
 
 ### ensure_conversation
 
-Implements the `ensure_conversation` firstresult hook. Called by
-`AgentPlugin._process_queue_item` when `channel.conversation is None`.
+Implements the `ensure_conversation` broadcast hook (resolved with
+`HookStrategy.ACCEPT_WINS`). Called by `AgentPlugin._process_queue_item`
+when `channel.conversation is None`.
 
 Steps:
 1. If `channel.conversation` is already set, returns `True` immediately
@@ -536,8 +537,8 @@ conversation history within the configured token budget. Registered as
 
 ### compact_conversation
 
-Implements the `compact_conversation` firstresult hook. Returns `True`
-if compaction ran, `None` otherwise.
+Implements the `compact_conversation` broadcast hook. The hook is called
+for side effects; its return value is not used by the caller.
 
 **Algorithm:**
 

@@ -5,6 +5,7 @@ from pluggy import HookimplMarker, HookspecMarker
 from corvidae.hooks import AgentSpec, hookimpl, hookspec
 from corvidae.hooks import create_plugin_manager
 from corvidae.hooks import get_dependency, validate_dependencies
+from corvidae.hooks import resolve_hook_results, HookStrategy
 
 
 def test_hookspec_marker_exists():
@@ -198,229 +199,195 @@ def test_agentspec_has_on_idle():
 
 
 # ---------------------------------------------------------------------------
-# call_firstresult_hook (red phase)
+# resolve_hook_results (red phase)
 # ---------------------------------------------------------------------------
 
 
-async def test_call_firstresult_hook_returns_none_when_no_impls():
-    """Returns None when no implementations are registered."""
-    from corvidae.hooks import call_firstresult_hook
+def test_resolve_hook_results_reject_wins_false_vetoes():
+    """REJECT_WINS: any False in results returns False."""
+    result = resolve_hook_results(
+        [None, True, False], "should_process_message", HookStrategy.REJECT_WINS
+    )
+    assert result is False
 
-    pm = create_plugin_manager()
-    result = await call_firstresult_hook(pm, "should_process_message",
-                                         channel=None, sender="user", text="hi")
+
+def test_resolve_hook_results_reject_wins_true_when_no_false():
+    """REJECT_WINS: True when no False is present."""
+    result = resolve_hook_results(
+        [None, True, None], "should_process_message", HookStrategy.REJECT_WINS
+    )
+    assert result is True
+
+
+def test_resolve_hook_results_reject_wins_none_when_all_none():
+    """REJECT_WINS: None when all results are None."""
+    result = resolve_hook_results(
+        [None, None], "should_process_message", HookStrategy.REJECT_WINS
+    )
     assert result is None
 
 
-async def test_call_firstresult_hook_returns_first_non_none():
-    """Returns the first non-None result from registered implementations,
-    and does NOT call further implementations after the first non-None result."""
-    from corvidae.hooks import call_firstresult_hook
+def test_resolve_hook_results_reject_wins_empty_list():
+    """REJECT_WINS: empty list returns None."""
+    result = resolve_hook_results(
+        [], "should_process_message", HookStrategy.REJECT_WINS
+    )
+    assert result is None
 
-    call_order = []
 
-    class PluginA:
+def test_resolve_hook_results_accept_wins_true_when_any_true():
+    """ACCEPT_WINS: True when any result is True."""
+    result = resolve_hook_results(
+        [None, True, None], "ensure_conversation", HookStrategy.ACCEPT_WINS
+    )
+    assert result is True
+
+
+def test_resolve_hook_results_accept_wins_none_when_no_true():
+    """ACCEPT_WINS: None when no True is present."""
+    result = resolve_hook_results(
+        [None, None], "ensure_conversation", HookStrategy.ACCEPT_WINS
+    )
+    assert result is None
+
+
+def test_resolve_hook_results_accept_wins_ignores_false():
+    """ACCEPT_WINS: False values are ignored; returns None if no True."""
+    result = resolve_hook_results(
+        [None, False, None], "ensure_conversation", HookStrategy.ACCEPT_WINS
+    )
+    assert result is None
+
+
+def test_resolve_hook_results_value_first_empty_list():
+    """VALUE_FIRST: empty list returns None."""
+    result = resolve_hook_results(
+        [], "transform_display_text", HookStrategy.VALUE_FIRST
+    )
+    assert result is None
+
+
+def test_resolve_hook_results_value_first_all_none():
+    """VALUE_FIRST: list of all None values returns None."""
+    result = resolve_hook_results(
+        [None, None], "transform_display_text", HookStrategy.VALUE_FIRST
+    )
+    assert result is None
+
+
+def test_resolve_hook_results_value_first_single_non_none():
+    """VALUE_FIRST: single non-None result is returned directly."""
+    result = resolve_hook_results(
+        [None, "hello", None], "transform_display_text", HookStrategy.VALUE_FIRST
+    )
+    assert result == "hello"
+
+
+async def test_resolve_hook_results_value_first_warns_and_picks_alphabetically_first(
+    caplog,
+):
+    """VALUE_FIRST: warns and picks alphabetically-first plugin name on conflict."""
+    import logging
+
+    class AlphaPlugin:
         @hookimpl
-        async def should_process_message(self, channel, sender, text):
-            call_order.append("A")
-            return None  # no opinion
+        async def transform_display_text(self, channel, text, result_message):
+            return "alpha result"
 
-    class PluginB:
+    class ZebraPlugin:
         @hookimpl
-        async def should_process_message(self, channel, sender, text):
-            call_order.append("B")
-            return True  # accept — stops iteration
-
-    class PluginC:
-        @hookimpl
-        async def should_process_message(self, channel, sender, text):
-            call_order.append("C")
-            return False  # would reject — must not be reached
+        async def transform_display_text(self, channel, text, result_message):
+            return "zebra result"
 
     pm = create_plugin_manager()
-    pm.register(PluginA(), name="a")
-    pm.register(PluginB(), name="b")
-    pm.register(PluginC(), name="c")
+    pm.register(AlphaPlugin(), name="alpha")
+    pm.register(ZebraPlugin(), name="zebra")
 
-    result = await call_firstresult_hook(pm, "should_process_message",
-                                          channel=None, sender="user", text="hi")
-    # PluginB returns True — C must not run after a non-None result
-    assert result is True
-    assert call_order == ["A", "B"], (
-        f"Expected only A and B to be called (short-circuit after B), "
-        f"got: {call_order}"
+    results = await pm.ahook.transform_display_text(
+        channel=None, text="hi", result_message={}
     )
 
+    with caplog.at_level(logging.WARNING, logger="corvidae.hooks"):
+        result = resolve_hook_results(
+            results, "transform_display_text", HookStrategy.VALUE_FIRST, pm=pm
+        )
 
-async def test_call_firstresult_hook_skips_none_results():
-    """Skips None-returning implementations and continues to the next."""
-    from corvidae.hooks import call_firstresult_hook
-
-    call_order = []
-
-    class PluginFirst:
-        @hookimpl
-        async def should_process_message(self, channel, sender, text):
-            call_order.append("first")
-            return None
-
-    class PluginSecond:
-        @hookimpl
-        async def should_process_message(self, channel, sender, text):
-            call_order.append("second")
-            return False
-
-    pm = create_plugin_manager()
-    pm.register(PluginFirst(), name="first")
-    pm.register(PluginSecond(), name="second")
-
-    result = await call_firstresult_hook(pm, "should_process_message",
-                                          channel=None, sender="user", text="hi")
-    assert result is False
-    assert "first" in call_order
-    assert "second" in call_order
+    assert result == "alpha result"
+    warning_records = [
+        r for r in caplog.records
+        if r.levelno == logging.WARNING and "transform_display_text" in r.getMessage()
+    ]
+    assert warning_records, "Expected a WARNING log naming the conflicting plugins"
 
 
-async def test_call_firstresult_hook_respects_tryfirst():
-    """tryfirst implementations run before regular implementations."""
-    from corvidae.hooks import call_firstresult_hook
+def test_resolve_hook_results_value_first_no_pm_falls_back_to_first(caplog):
+    """VALUE_FIRST: pm=None with multiple non-None results returns first, logs warning."""
+    import logging
 
-    call_order = []
+    with caplog.at_level(logging.WARNING, logger="corvidae.hooks"):
+        result = resolve_hook_results(
+            ["first_result", "second_result"],
+            "transform_display_text",
+            HookStrategy.VALUE_FIRST,
+            pm=None,
+        )
 
-    class RegularPlugin:
-        @hookimpl
-        async def should_process_message(self, channel, sender, text):
-            call_order.append("regular")
-            return "regular_result"
-
-    class FirstPlugin:
-        @hookimpl(tryfirst=True)
-        async def should_process_message(self, channel, sender, text):
-            call_order.append("tryfirst")
-            return "first_result"
-
-    pm = create_plugin_manager()
-    pm.register(RegularPlugin(), name="regular")
-    pm.register(FirstPlugin(), name="first_plugin")
-
-    result = await call_firstresult_hook(pm, "should_process_message",
-                                          channel=None, sender="user", text="hi")
-    # tryfirst must run first and short-circuit
     assert result == "first_result"
-    assert call_order[0] == "tryfirst"
-    assert "regular" not in call_order
+    warning_records = [
+        r for r in caplog.records
+        if r.levelno == logging.WARNING
+    ]
+    assert warning_records, "Expected a WARNING log when pm is None and multiple results exist"
 
 
-async def test_call_firstresult_hook_respects_trylast():
-    """trylast implementations run after regular implementations."""
-    from corvidae.hooks import call_firstresult_hook
+async def test_resolve_hook_results_value_first_result_plugin_correlation_correct(
+    caplog,
+):
+    """VALUE_FIRST: result-to-plugin correlation is correct despite apluggy's reversed
+    execution order. Register two plugins returning distinct values; verify that
+    resolve_hook_results attributes each result to the correct plugin name.
 
-    call_order = []
+    apluggy (like pluggy) executes hooks in reversed registration order, so the
+    results list is in reversed order relative to get_hookimpls(). This test
+    guards against a zip(impls, results) ordering mismatch.
+    """
+    import logging
 
-    class LastPlugin:
-        @hookimpl(trylast=True)
-        async def should_process_message(self, channel, sender, text):
-            call_order.append("trylast")
-            return "last_result"
+    # "alpha" registered first, "zebra" registered second.
+    # apluggy executes zebra first, then alpha (reversed order).
+    # results list: [zebra_result, alpha_result]
+    # get_hookimpls() returns [alpha_impl, zebra_impl] (registration order).
+    # reversed(get_hookimpls()) == [zebra_impl, alpha_impl], matching results order.
+    # Alphabetically: "alpha" < "zebra", so alpha's result wins.
 
-    class RegularPlugin:
+    class AlphaPlugin:
         @hookimpl
-        async def should_process_message(self, channel, sender, text):
-            call_order.append("regular")
-            return "regular_result"
+        async def transform_display_text(self, channel, text, result_message):
+            return "from alpha"
+
+    class ZebraPlugin:
+        @hookimpl
+        async def transform_display_text(self, channel, text, result_message):
+            return "from zebra"
 
     pm = create_plugin_manager()
-    pm.register(LastPlugin(), name="last_plugin")
-    pm.register(RegularPlugin(), name="regular")
+    pm.register(AlphaPlugin(), name="alpha")
+    pm.register(ZebraPlugin(), name="zebra")
 
-    result = await call_firstresult_hook(pm, "should_process_message",
-                                          channel=None, sender="user", text="hi")
-    # Regular runs first and short-circuits; trylast is never reached
-    assert result == "regular_result"
-    assert call_order[0] == "regular"
-    assert "trylast" not in call_order
+    results = await pm.ahook.transform_display_text(
+        channel=None, text="hi", result_message={}
+    )
 
+    with caplog.at_level(logging.WARNING, logger="corvidae.hooks"):
+        result = resolve_hook_results(
+            results, "transform_display_text", HookStrategy.VALUE_FIRST, pm=pm
+        )
 
-async def test_call_firstresult_hook_skips_wrapper_impls():
-    """Wrapper implementations are skipped (not direct result producers)."""
-    from corvidae.hooks import call_firstresult_hook
-
-    class WrapperPlugin:
-        @hookimpl(wrapper=True)
-        def should_process_message(self, channel, sender, text):
-            # wrappers are generators; this should never be called as a result producer
-            outcome = yield  # pragma: no cover
-            return outcome  # pragma: no cover
-
-    class NormalPlugin:
-        @hookimpl
-        async def should_process_message(self, channel, sender, text):
-            return True
-
-    pm = create_plugin_manager()
-    pm.register(WrapperPlugin(), name="wrapper")
-    pm.register(NormalPlugin(), name="normal")
-
-    # Should return the normal plugin's result, not error on the wrapper
-    result = await call_firstresult_hook(pm, "should_process_message",
-                                          channel=None, sender="user", text="hi")
-    assert result is True
-
-
-async def test_call_firstresult_hook_filters_kwargs_to_impl_signature():
-    """Filters kwargs to match each implementation's parameter list."""
-    from corvidae.hooks import call_firstresult_hook
-
-    received_kwargs = {}
-
-    class SparsePlugin:
-        @hookimpl
-        async def should_process_message(self, sender):
-            # Only accepts 'sender' — not channel or text
-            received_kwargs["sender"] = sender
-            return "ok"
-
-    pm = create_plugin_manager()
-    pm.register(SparsePlugin(), name="sparse")
-
-    # Should not raise even though channel and text are not in SparsePlugin's signature
-    result = await call_firstresult_hook(pm, "should_process_message",
-                                          channel=object(), sender="alice", text="hi")
-    assert result == "ok"
-    assert received_kwargs == {"sender": "alice"}
-
-
-async def test_call_firstresult_hook_returns_none_when_all_return_none():
-    """Returns None when all implementations return None."""
-    from corvidae.hooks import call_firstresult_hook
-
-    class PluginA:
-        @hookimpl
-        async def should_process_message(self, channel, sender, text):
-            return None
-
-    class PluginB:
-        @hookimpl
-        async def should_process_message(self, channel, sender, text):
-            return None
-
-    pm = create_plugin_manager()
-    pm.register(PluginA(), name="a")
-    pm.register(PluginB(), name="b")
-
-    result = await call_firstresult_hook(pm, "should_process_message",
-                                          channel=None, sender="user", text="hi")
-    assert result is None
-
-
-async def test_call_firstresult_hook_unknown_hook_name_returns_none():
-    """Returns None when the hook name does not exist on the spec."""
-    from corvidae.hooks import call_firstresult_hook
-
-    pm = create_plugin_manager()
-    result = await call_firstresult_hook(pm, "nonexistent_hook_name",
-                                          channel=None, sender="user", text="hi")
-    assert result is None
+    # Alphabetically "alpha" < "zebra", so alpha's result must be selected.
+    assert result == "from alpha", (
+        f"Expected 'from alpha' (alphabetically first plugin), got {result!r}. "
+        "This may indicate a zip(impls, results) ordering mismatch."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -501,18 +468,3 @@ def test_validate_dependencies_does_not_raise_on_valid_dag():
     validate_dependencies(pm)
 
 
-async def test_call_firstresult_hook_supports_sync_impls():
-    """Sync implementations (non-async) are also supported."""
-    from corvidae.hooks import call_firstresult_hook
-
-    class SyncPlugin:
-        @hookimpl
-        def should_process_message(self, channel, sender, text):
-            return "sync_result"
-
-    pm = create_plugin_manager()
-    pm.register(SyncPlugin(), name="sync")
-
-    result = await call_firstresult_hook(pm, "should_process_message",
-                                          channel=None, sender="user", text="hi")
-    assert result == "sync_result"

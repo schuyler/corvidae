@@ -13,7 +13,7 @@ import pytest
 
 from corvidae.channel import Channel, ChannelConfig, ChannelRegistry
 from corvidae.conversation import ConversationLog, init_db
-from corvidae.hooks import call_firstresult_hook, create_plugin_manager
+from corvidae.hooks import create_plugin_manager, resolve_hook_results, HookStrategy
 
 
 # ---------------------------------------------------------------------------
@@ -263,9 +263,9 @@ class TestEnsureConversation:
 
 
 class TestHookIntegration:
-    async def test_ensure_conversation_callable_via_call_firstresult_hook(self):
+    async def test_ensure_conversation_callable_via_broadcast_dispatch(self):
         """PersistencePlugin's ensure_conversation must be reachable via
-        call_firstresult_hook — confirming hookspec wiring is correct."""
+        broadcast dispatch + resolve_hook_results — confirming hookspec wiring is correct."""
         from corvidae.persistence import PersistencePlugin
 
         pm = create_plugin_manager()
@@ -281,8 +281,9 @@ class TestHookIntegration:
 
         channel = _make_channel(registry)
 
-        result = await call_firstresult_hook(
-            pm, "ensure_conversation", channel=channel
+        results = await pm.ahook.ensure_conversation(channel=channel)
+        result = resolve_hook_results(
+            results, "ensure_conversation", HookStrategy.ACCEPT_WINS
         )
 
         assert result is True
@@ -291,15 +292,16 @@ class TestHookIntegration:
         await db.close()
 
     async def test_no_persistence_plugin_returns_none_from_hook(self):
-        """When no PersistencePlugin is registered, call_firstresult_hook must
+        """When no PersistencePlugin is registered, broadcast dispatch must
         return None — graceful degradation path."""
         pm = create_plugin_manager()
         # PersistencePlugin intentionally NOT registered
 
         channel = _make_channel()
 
-        result = await call_firstresult_hook(
-            pm, "ensure_conversation", channel=channel
+        results = await pm.ahook.ensure_conversation(channel=channel)
+        result = resolve_hook_results(
+            results, "ensure_conversation", HookStrategy.ACCEPT_WINS
         )
 
         assert result is None

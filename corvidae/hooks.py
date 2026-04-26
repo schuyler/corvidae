@@ -10,15 +10,15 @@ Exports:
     AgentSpec       — hook specifications for all lifecycle, messaging,
                       and extension-point hooks
     create_plugin_manager()     — create and configure the PluginManager
-    call_firstresult_hook()     — async firstresult helper (apluggy workaround)
+    HookStrategy                — enum of result-resolution strategies
+    resolve_hook_results()      — post-process broadcast hook result lists
     get_dependency()            — typed plugin lookup
     validate_dependencies()     — dependency graph verification at startup
 """
 from __future__ import annotations
 
-import asyncio
-import inspect
 import logging
+from enum import Enum
 from typing import TYPE_CHECKING, TypeVar
 
 import apluggy as pluggy
@@ -35,6 +35,83 @@ hookspec = pluggy.HookspecMarker("corvidae")
 hookimpl = pluggy.HookimplMarker("corvidae")
 
 _pm_logger = logging.getLogger("corvidae.plugin_manager")
+_resolve_logger = logging.getLogger("corvidae.hooks")
+
+
+class HookStrategy(Enum):
+    """Strategy for resolving a list of broadcast hook results into a single value."""
+
+    REJECT_WINS = "reject_wins"
+    ACCEPT_WINS = "accept_wins"
+    VALUE_FIRST = "value_first"
+
+
+def resolve_hook_results(
+    results: list,
+    hook_name: str,
+    strategy: HookStrategy,
+    *,
+    pm: pluggy.PluginManager | None = None,
+) -> object | None:
+    """Resolve a list of broadcast hook results into a single value.
+
+    Args:
+        results: The list returned by ``await pm.ahook.<hook_name>(...)``.
+        hook_name: The hook method name (used for logging and tiebreaking).
+        strategy: One of HookStrategy.REJECT_WINS, ACCEPT_WINS, or VALUE_FIRST.
+        pm: Plugin manager, required for VALUE_FIRST tiebreaking with multiple
+            non-None results. If None, falls back to returning the first non-None
+            result with a warning logged.
+
+    Returns:
+        A single resolved value, or None.
+    """
+    if strategy is HookStrategy.REJECT_WINS:
+        non_none = [r for r in results if r is not None]
+        if any(r is False for r in non_none):
+            return False
+        if any(r is True for r in non_none):
+            return True
+        return None
+
+    if strategy is HookStrategy.ACCEPT_WINS:
+        if any(r is True for r in results):
+            return True
+        return None
+
+    # VALUE_FIRST
+    non_none = [r for r in results if r is not None]
+    if len(non_none) == 0:
+        return None
+    if len(non_none) == 1:
+        return non_none[0]
+
+    # Multiple non-None results: tiebreak by alphabetically-first plugin name.
+    if pm is None:
+        _resolve_logger.warning(
+            "hook %s: multiple non-None results but pm is None; returning first non-None",
+            hook_name,
+        )
+        return non_none[0]
+
+    hook_caller = getattr(pm.hook, hook_name)
+    # pluggy executes hooks in reversed(get_hookimpls()) order, so results[i]
+    # corresponds to reversed(get_hookimpls())[i].
+    impls = list(reversed(hook_caller.get_hookimpls()))
+    candidates = []
+    for impl, result in zip(impls, results):
+        if result is not None:
+            name = pm.get_name(impl.plugin) or type(impl.plugin).__name__
+            candidates.append((name, result))
+    candidates.sort(key=lambda pair: pair[0])
+    _resolve_logger.warning(
+        "hook %s: %d plugins returned non-None results: %s; using result from %s",
+        hook_name,
+        len(candidates),
+        [c[0] for c in candidates],
+        candidates[0][0],
+    )
+    return candidates[0][1]
 
 
 def get_dependency(pm: pluggy.PluginManager, name: str, expected_type: type[T]) -> T:
@@ -126,50 +203,6 @@ def create_plugin_manager() -> pluggy.PluginManager:
 
     return pm
 
-
-async def call_firstresult_hook(pm: pluggy.PluginManager, hook_name: str, **kwargs) -> object | None:
-    """Call an async hook, returning the first non-None result.
-
-    Workaround for apluggy's inability to handle firstresult=True on async hooks.
-    Iterates hook implementations in priority order: tryfirst implementations
-    first, then regular implementations in registration order (FIFO), then
-    trylast implementations. Returns the first non-None result, or None if all
-    impls return None or no impls are registered.
-
-    Args:
-        pm: The plugin manager instance.
-        hook_name: The hook method name on AgentSpec (e.g. "should_process_message").
-        **kwargs: Arguments to pass to each hook implementation.
-
-    Returns:
-        The first non-None return value, or None.
-
-    Note: Hook wrappers (@hookimpl(wrapper=True) and
-    @hookimpl(hookwrapper=True)) are not supported and will be silently
-    skipped.
-    """
-    hook_caller = getattr(pm.hook, hook_name, None)
-    if hook_caller is None:
-        return None
-    # get_hookimpls() returns implementations in registration order.
-    # Sort by priority: tryfirst first (0), regular middle (1), trylast last (2).
-    # Within each group, Python's stable sort preserves registration order.
-    impls = sorted(
-        hook_caller.get_hookimpls(),
-        key=lambda i: 0 if i.tryfirst else (2 if i.trylast else 1),
-    )
-    for impl in impls:
-        # Skip wrappers -- they are not direct result producers.
-        if impl.wrapper or impl.hookwrapper:
-            continue
-        # Filter kwargs to only those the impl accepts.
-        filtered = {k: v for k, v in kwargs.items() if k in impl.argnames}
-        result = impl.function(**filtered)
-        if inspect.isawaitable(result):
-            result = await result
-        if result is not None:
-            return result
-    return None
 
 
 class AgentSpec:
@@ -281,10 +314,8 @@ class AgentSpec:
     ) -> bool | None:
         """Gate hook: decide whether to process an incoming message.
 
-        Called before the message is enqueued. Return False to reject,
-        True to explicitly accept (short-circuits), None for no opinion.
-        First non-None result wins.
-        Note: Hook wrappers are not supported for this hook.
+        Broadcast hook. All implementations run. Any False vetoes (reject-wins).
+        Return False to reject, True to accept, None for no opinion.
         """
 
     @hookspec
@@ -293,25 +324,19 @@ class AgentSpec:
     ) -> str | None:
         """Called when run_agent_turn raises an exception.
 
-        Return a string to use as the error message sent to the channel.
-        Return None to use the default error message.
-        First non-None result wins.
-        Note: Hook wrappers are not supported for this hook.
+        Broadcast hook. Return a string to replace the default error message,
+        or None to defer. If multiple plugins return non-None, the
+        alphabetically-first plugin's result is used and a warning is logged.
         """
 
     @hookspec
     async def compact_conversation(
         self, conversation: "ConversationLog", client: "LLMClient", max_tokens: int
-    ) -> bool | None:
+    ) -> None:
         """Optionally replace the default compaction strategy.
 
-        Return True if compaction was handled (skip default).
-        Return None to defer to the next implementation or the default.
-        Do NOT return False: call_firstresult_hook stops iteration on any
-        non-None result, so False would stop other plugins from running but
-        the call site (which checks truthiness) would still run the default —
-        a confusing combination. Use None to defer, True to handle.
-        Note: Hook wrappers are not supported for this hook.
+        Broadcast hook. All implementations are called for side effects.
+        Return value is not used by the caller.
         """
 
     @hookspec
@@ -320,10 +345,9 @@ class AgentSpec:
     ) -> str | None:
         """Transform a tool result before it enters the conversation.
 
-        Called after execute_tool_call returns. Return a replacement string
-        to use instead of the default result. Return None to keep the default.
-        First non-None result wins.
-        Note: Hook wrappers are not supported for this hook.
+        Broadcast hook. Return a replacement string or None to keep the
+        original. If multiple plugins return non-None, the alphabetically-first
+        plugin's result is used and a warning is logged.
         Note: This hook only fires during subagent execution (run_agent_loop),
         not during interactive message processing via AgentPlugin.
         """
@@ -340,10 +364,8 @@ class AgentSpec:
     async def ensure_conversation(self, channel: "Channel") -> "bool | None":
         """Lazy-initialize a ConversationLog on a channel.
 
-        Called before each agent turn when channel.conversation is None.
-        Return True if conversation was initialized (or was already present),
-        None to defer to the next implementation.
-        First non-None result wins (called via call_firstresult_hook).
+        Broadcast hook. Return True if conversation was initialized (or was
+        already present). Any True means handled. Return None to defer.
 
         Args:
             channel: The Channel that needs a ConversationLog.
@@ -387,9 +409,9 @@ class AgentSpec:
     ) -> "str | None":
         """Called before sending the final text response to the channel.
 
-        Return a transformed string to replace text, or None to leave it
-        unchanged. First non-None result wins.
-        Note: Hook wrappers are not supported for this hook.
+        Broadcast hook. Return a transformed string or None to leave unchanged.
+        If multiple plugins return non-None, the alphabetically-first plugin's
+        result is used and a warning is logged.
 
         Args:
             channel: The Channel the response will be sent to.

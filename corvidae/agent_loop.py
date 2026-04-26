@@ -19,7 +19,7 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable
 
-from corvidae.hooks import call_firstresult_hook
+from corvidae.hooks import resolve_hook_results, HookStrategy
 from corvidae.llm import LLMClient
 from corvidae.tool import MAX_TOOL_RESULT_CHARS, ToolContext, execute_tool_call, tool_to_schema  # noqa: F401 — re-exported for backward compat
 
@@ -208,13 +208,15 @@ async def run_agent_loop(
                     )
                     content = f"Error: tool '{fn_name}' raised an exception"
 
-            # Hook: process_tool_result (firstresult)
+            # Hook: process_tool_result (broadcast, value-first)
             # Fires after logging so metrics reflect original content.
             # Fires before messages.append so the transformed value enters the conversation.
             if pm is not None:
-                hook_result = await call_firstresult_hook(
-                    pm, "process_tool_result",
+                results = await pm.ahook.process_tool_result(
                     tool_name=fn_name, result=content, channel=channel,
+                )
+                hook_result = resolve_hook_results(
+                    results, "process_tool_result", HookStrategy.VALUE_FIRST, pm=pm,
                 )
                 if hook_result is not None:
                     content = hook_result
