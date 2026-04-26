@@ -282,17 +282,31 @@ class AgentPlugin:
             )
             if error_msg is None:
                 error_msg = DEFAULT_LLM_ERROR_MESSAGE
-            await self.pm.ahook.send_message(
-                channel=channel,
-                text=error_msg,
-            )
+            try:
+                await self.pm.ahook.send_message(
+                    channel=channel,
+                    text=error_msg,
+                )
+            except Exception:
+                logger.warning(
+                    "send_message hook failed on error path",
+                    exc_info=True,
+                    extra={"channel": channel.id},
+                )
             return
 
         # 8. Persist assistant message (run_agent_turn already appended to messages in place)
         await conv.append(result.message)
 
         # 9. Let plugins post-process the in-memory assistant message (e.g., strip reasoning_content)
-        await self.pm.ahook.after_persist_assistant(channel=channel, message=conv.messages[-1])
+        try:
+            await self.pm.ahook.after_persist_assistant(channel=channel, message=conv.messages[-1])
+        except Exception:
+            logger.warning(
+                "after_persist_assistant hook failed",
+                exc_info=True,
+                extra={"channel": channel.id},
+            )
 
         # 10. Dispatch tool calls or send text response
         # Check-before-increment: turn_counter < max_turns_limit allows dispatch
@@ -326,16 +340,30 @@ class AgentPlugin:
             extra={"channel": channel.id, "latency_ms": result.latency_ms},
         )
 
-        await self.pm.ahook.on_agent_response(
-            channel=channel,
-            request_text=request_text,
-            response_text=display_response,
-        )
-        await self.pm.ahook.send_message(
-            channel=channel,
-            text=display_response,
-            latency_ms=result.latency_ms,
-        )
+        try:
+            await self.pm.ahook.on_agent_response(
+                channel=channel,
+                request_text=request_text,
+                response_text=display_response,
+            )
+        except Exception:
+            logger.warning(
+                "on_agent_response hook failed",
+                exc_info=True,
+                extra={"channel": channel.id},
+            )
+        try:
+            await self.pm.ahook.send_message(
+                channel=channel,
+                text=display_response,
+                latency_ms=result.latency_ms,
+            )
+        except Exception:
+            logger.error(
+                "send_message hook failed, response not delivered",
+                exc_info=True,
+                extra={"channel": channel.id},
+            )
 
     async def _dispatch_tool_calls(
         self, tool_calls: list[dict], channel: Channel
