@@ -61,6 +61,7 @@ def _make_tool_call_response(calls: list[dict]) -> dict:
 def _make_tool_call(call_id: str, name: str, args: dict) -> dict:
     return {
         "id": call_id,
+        "type": "function",
         "function": {
             "name": name,
             "arguments": json.dumps(args),
@@ -268,17 +269,9 @@ async def _build_harness(config: dict) -> IntegrationHarness:
 async def harness():
     h = await _build_harness(make_config())
     yield h
-    await h.agent.on_stop()
-    await h.pm.ahook.on_stop()
-
-
-@pytest.fixture
-async def harness_with_db(tmp_path):
-    config = make_config(db_path=str(tmp_path / "test.db"))
-    h = await _build_harness(config)
-    yield h, tmp_path
-    await h.agent.on_stop()
-    await h.pm.ahook.on_stop()
+    if not getattr(h, "_stopped", False):
+        await h.agent.on_stop()
+        await h.pm.ahook.on_stop()
 
 
 # ---------------------------------------------------------------------------
@@ -357,7 +350,7 @@ class TestGroupALifecycle:
         await harness.inject_message("test:scope", "user", "hi")
         await harness.drain_all()
 
-        tasks_before = set(asyncio.all_tasks())
+        idle_monitor = harness.pm.get_plugin("idle_monitor")
 
         await harness.agent.on_stop()
         await harness.pm.ahook.on_stop()
@@ -369,21 +362,14 @@ class TestGroupALifecycle:
         # TaskPlugin worker stopped
         assert harness.task_plugin._worker_task is None or harness.task_plugin._worker_task.done()
 
+        # IdleMonitorPlugin monitor task cancelled/done
+        assert idle_monitor._monitor is None or idle_monitor._monitor._task is None or idle_monitor._monitor._task.done()
+
         # LLM client stop() was called
         harness.mock_client.stop.assert_called_once()
 
         # Mark fixture teardown as already done
         harness._stopped = True
-
-    async def test_a3_on_stop_tears_down_cleanly_teardown(self, harness):
-        """Avoid double-teardown if the previous test variant ran."""
-        # This is covered by test_a3 itself; this test ensures the fixture cleanup
-        # doesn't error when agent is already stopped.
-        pass
-
-
-# Override teardown: if harness._stopped is set, skip second stop
-# (handled gracefully by the plugins themselves)
 
 
 # ---------------------------------------------------------------------------
@@ -657,6 +643,13 @@ class TestGroupBRoundTrip:
         assert "response to msg2" in texts
         assert "response to tool result" in texts
 
+        # Conversation log must have exact interleaved role sequence:
+        # user(msg1), assistant(tool_call), user(msg2), assistant(response to msg2),
+        # tool(result), assistant(response to tool result)
+        msgs = channel.conversation.messages
+        roles = [m["role"] for m in msgs]
+        assert roles == ["user", "assistant", "user", "assistant", "tool", "assistant"]
+
 
 async def channel_queue_drain(harness: IntegrationHarness, channel: Channel) -> None:
     """Drain just the queue for one specific channel."""
@@ -892,23 +885,57 @@ class TestGroupDMultiChannel:
             "test", "d2_limited",
             config=ChannelConfig(max_turns=1),
         )
+        # Default channel uses agent default max_turns (10)
+        default_channel = harness.registry.get_or_create("test", "d2_default")
 
-        harness.mock_client.chat = AsyncMock(
-            side_effect=[
-                # limited channel: turn 0 < 1 → dispatch (→1), then
-                _make_tool_call_response([_make_tool_call("lim1", "dummy_tool", {"x": "a"})]),
-                # limited channel notification: turn 1 < 1 is False → suppressed
-                _make_tool_call_response([_make_tool_call("lim2", "dummy_tool", {"x": "b"})]),
-            ]
-        )
+        # Use a side_effect function to route responses by inspecting message content.
+        # Ordering between channels is non-deterministic, so we identify which channel
+        # is calling by checking whether "limited_go" appears in the messages.
+        async def chat_side_effect(messages, tools=None, extra_body=None):
+            is_limited = any(
+                m.get("content") == "limited_go"
+                for m in messages
+                if isinstance(m.get("content"), str)
+            )
+            if is_limited:
+                # Limited channel: return tool call on first visit, then suppressed second visit
+                call_count = chat_side_effect.limited_calls
+                chat_side_effect.limited_calls += 1
+                if call_count == 0:
+                    # turn 0 < 1 → dispatch tool call (→ turn 1)
+                    return _make_tool_call_response([_make_tool_call("lim1", "dummy_tool", {"x": "a"})])
+                else:
+                    # turn 1 < 1 is False → suppressed (fallback sent)
+                    return _make_tool_call_response([_make_tool_call("lim2", "dummy_tool", {"x": "b"})])
+            else:
+                # Default channel: return tool call on first visit, then text after tool result
+                call_count = chat_side_effect.default_calls
+                chat_side_effect.default_calls += 1
+                if call_count == 0:
+                    # turn 0 < 10 → dispatch tool call (continues)
+                    return _make_tool_call_response([_make_tool_call("def1", "dummy_tool", {"x": "c"})])
+                else:
+                    # After tool result → text response
+                    return _make_text_response("default done")
 
-        await harness.pm.ahook.on_message(channel=limited_channel, sender="user", text="go")
+        chat_side_effect.limited_calls = 0
+        chat_side_effect.default_calls = 0
+
+        harness.mock_client.chat = chat_side_effect
+
+        await harness.pm.ahook.on_message(channel=limited_channel, sender="user", text="limited_go")
+        await harness.pm.ahook.on_message(channel=default_channel, sender="user", text="default_go")
         await harness.drain_until_stable()
 
-        # Limited channel sends fallback
+        # Limited channel sends fallback (max_turns suppressed)
         limited_msgs = [m for m in harness.sent_messages if m[0] is limited_channel]
         assert len(limited_msgs) == 1
         assert "max tool-calling rounds reached" in limited_msgs[0][1]
+
+        # Default channel is NOT suppressed: tool dispatched and final text response sent
+        default_msgs = [m for m in harness.sent_messages if m[0] is default_channel]
+        assert len(default_msgs) == 1
+        assert default_msgs[0][1] == "default done"
 
     async def test_d3_concurrent_operations_no_cross_contamination(self, harness):
         """D3. Two channels operate independently; conversations not cross-contaminated."""
