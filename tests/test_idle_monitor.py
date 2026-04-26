@@ -361,14 +361,14 @@ class TestIdleMonitorPlugin:
     async def test_idle_monitor_plugin_on_start_creates_monitor(self):
         """on_start creates an IdleMonitor and starts it.
 
-        Register AgentPlugin and IdleMonitorPlugin, call on_start on each.
+        Register AgentPlugin and IdleMonitorPlugin, call on_start on each using
+        the new explicit sequencing: broadcast first, then agent.on_start() explicitly.
         Verify plugin._monitor is not None and has a running background task.
         """
         from sherman.idle import IdleMonitorPlugin
         from sherman.agent import AgentPlugin
         from sherman.channel import ChannelRegistry
         from sherman.persistence import PersistencePlugin
-        from unittest.mock import patch, AsyncMock, MagicMock
 
         pm = create_plugin_manager()
         registry = ChannelRegistry({"system_prompt": "", "max_context_tokens": 8000})
@@ -398,7 +398,11 @@ class TestIdleMonitorPlugin:
              patch("sherman.persistence.aiosqlite.connect", new_callable=AsyncMock) as mock_connect, \
              patch("sherman.persistence.init_db", new_callable=AsyncMock):
             mock_connect.return_value = AsyncMock()
+            # Mirrors new main.py sequencing: broadcast first, then explicit agent start.
+            # AgentPlugin.on_start no longer has @hookimpl after the race-condition fix,
+            # so the broadcast alone is not sufficient to initialize the agent.
             await pm.ahook.on_start(config=config)
+            await agent.on_start(config=config)
 
         try:
             assert idle_plugin._monitor is not None, (
@@ -417,13 +421,14 @@ class TestIdleMonitorPlugin:
     async def test_idle_monitor_plugin_on_stop_stops_monitor(self):
         """on_stop stops the IdleMonitor background task.
 
-        After on_start, call on_stop. Verify the monitor's background task is done.
+        Uses the new explicit sequencing: broadcast on_start, then agent.on_start();
+        agent.on_stop() before broadcast on_stop().  Verify the monitor's background
+        task is done after shutdown.
         """
         from sherman.idle import IdleMonitorPlugin
         from sherman.agent import AgentPlugin
         from sherman.channel import ChannelRegistry
         from sherman.persistence import PersistencePlugin
-        from unittest.mock import patch, AsyncMock, MagicMock
 
         pm = create_plugin_manager()
         registry = ChannelRegistry({"system_prompt": "", "max_context_tokens": 8000})
@@ -453,12 +458,17 @@ class TestIdleMonitorPlugin:
              patch("sherman.persistence.aiosqlite.connect", new_callable=AsyncMock) as mock_connect, \
              patch("sherman.persistence.init_db", new_callable=AsyncMock):
             mock_connect.return_value = AsyncMock()
+            # New sequencing: broadcast first, then explicit agent start.
             await pm.ahook.on_start(config=config)
+            await agent.on_start(config=config)
 
         monitor = idle_plugin._monitor
         assert monitor is not None
         task = monitor._task
+        assert task is not None
 
+        # New shutdown sequencing: agent stops first, then broadcast.
+        await agent.on_stop()
         await pm.ahook.on_stop()
 
         assert monitor._task is None, (
@@ -471,14 +481,14 @@ class TestIdleMonitorPlugin:
     async def test_idle_monitor_plugin_uses_agent_queues(self):
         """IdleMonitorPlugin passes the agent's queues dict reference to IdleMonitor.
 
-        After on_start, verify that idle_plugin._monitor._queues is the same
-        object as agent._queues (same dict reference, not a copy).
+        After on_start (using new explicit sequencing), verify that
+        idle_plugin._monitor._queues is the same object as agent.queues
+        (same dict reference, not a copy).
         """
         from sherman.idle import IdleMonitorPlugin
         from sherman.agent import AgentPlugin
         from sherman.channel import ChannelRegistry
         from sherman.persistence import PersistencePlugin
-        from unittest.mock import patch, AsyncMock, MagicMock
 
         pm = create_plugin_manager()
         registry = ChannelRegistry({"system_prompt": "", "max_context_tokens": 8000})
@@ -508,7 +518,9 @@ class TestIdleMonitorPlugin:
              patch("sherman.persistence.aiosqlite.connect", new_callable=AsyncMock) as mock_connect, \
              patch("sherman.persistence.init_db", new_callable=AsyncMock):
             mock_connect.return_value = AsyncMock()
+            # New sequencing: broadcast first, then explicit agent start.
             await pm.ahook.on_start(config=config)
+            await agent.on_start(config=config)
 
         try:
             assert idle_plugin._monitor is not None

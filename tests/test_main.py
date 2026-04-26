@@ -51,17 +51,111 @@ class TestMainLoadsConfigAndCreatesPM:
             config_path = f.name
 
         try:
-            with patch("sherman.main.create_plugin_manager") as mock_create:
+            with patch("sherman.main.create_plugin_manager") as mock_create, \
+                 patch("sherman.main.AgentPlugin") as mock_agent_cls:
                 # Return a minimal object that satisfies pm.ahook.on_start / on_stop
                 mock_pm = MagicMock()
                 mock_pm.ahook.on_start = AsyncMock(return_value=[])
                 mock_pm.ahook.on_stop = AsyncMock(return_value=[])
                 mock_create.return_value = mock_pm
+                # AgentPlugin instance returned by the constructor must support
+                # the explicit on_start / on_stop calls that main() makes after
+                # the broadcast.
+                mock_agent = MagicMock()
+                mock_agent.on_start = AsyncMock()
+                mock_agent.on_stop = AsyncMock()
+                mock_agent_cls.return_value = mock_agent
 
                 _schedule_sigint()
                 await main(config_path)
 
                 mock_create.assert_called_once()
+        finally:
+            os.unlink(config_path)
+
+
+class TestAgentPluginLifecycleOrdering:
+    async def test_agent_on_start_called_after_broadcast(self):
+        """main() must call agent_loop.on_start() explicitly AFTER pm.ahook.on_start().
+
+        After the race-condition fix, AgentPlugin.on_start no longer participates
+        in the broadcast.  main() calls pm.ahook.on_start() first (all other plugins
+        init), then calls agent_loop.on_start() explicitly so that tool-providing
+        plugins (e.g. McpClientPlugin) are ready before tools are collected.
+
+        This test fails against the current code because the current main() only
+        calls pm.ahook.on_start() and relies on the @hookimpl broadcast — it never
+        makes the explicit agent_loop.on_start() call recorded here.
+        """
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".yaml", delete=False
+        ) as f:
+            _write_config(f.name)
+            config_path = f.name
+
+        call_order: list[str] = []
+
+        try:
+            with patch("sherman.main.create_plugin_manager") as mock_create, \
+                 patch("sherman.main.AgentPlugin") as mock_agent_cls:
+                mock_pm = MagicMock()
+
+                async def broadcast_on_start(**kwargs):
+                    call_order.append("broadcast_on_start")
+                    return []
+
+                async def broadcast_on_stop(**kwargs):
+                    call_order.append("broadcast_on_stop")
+                    return []
+
+                mock_pm.ahook.on_start = AsyncMock(side_effect=broadcast_on_start)
+                mock_pm.ahook.on_stop = AsyncMock(side_effect=broadcast_on_stop)
+                mock_create.return_value = mock_pm
+
+                mock_agent = MagicMock()
+
+                async def agent_on_start(**kwargs):
+                    call_order.append("agent_on_start")
+
+                async def agent_on_stop(**kwargs):
+                    call_order.append("agent_on_stop")
+
+                mock_agent.on_start = AsyncMock(side_effect=agent_on_start)
+                mock_agent.on_stop = AsyncMock(side_effect=agent_on_stop)
+                mock_agent_cls.return_value = mock_agent
+
+                _schedule_sigint()
+                await main(config_path)
+
+            # Startup: broadcast must fire before explicit agent.on_start
+            assert "broadcast_on_start" in call_order, (
+                "pm.ahook.on_start() was not called"
+            )
+            assert "agent_on_start" in call_order, (
+                "agent_loop.on_start() was not called explicitly — "
+                "after the fix main() must call it after the broadcast"
+            )
+            broadcast_start_idx = call_order.index("broadcast_on_start")
+            agent_start_idx = call_order.index("agent_on_start")
+            assert broadcast_start_idx < agent_start_idx, (
+                f"agent_loop.on_start() must be called AFTER pm.ahook.on_start(), "
+                f"but order was: {call_order}"
+            )
+
+            # Shutdown: explicit agent.on_stop must fire before broadcast
+            assert "broadcast_on_stop" in call_order, (
+                "pm.ahook.on_stop() was not called"
+            )
+            assert "agent_on_stop" in call_order, (
+                "agent_loop.on_stop() was not called explicitly — "
+                "after the fix main() must call it before the broadcast"
+            )
+            agent_stop_idx = call_order.index("agent_on_stop")
+            broadcast_stop_idx = call_order.index("broadcast_on_stop")
+            assert agent_stop_idx < broadcast_stop_idx, (
+                f"agent_loop.on_stop() must be called BEFORE pm.ahook.on_stop(), "
+                f"but order was: {call_order}"
+            )
         finally:
             os.unlink(config_path)
 

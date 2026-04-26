@@ -52,13 +52,9 @@ class McpClientPlugin:
         register_tools — extends tool_registry with cached Tool instances (sync)
         on_stop   — closes all sessions and transports via AsyncExitStack.aclose()
 
-    Known issue: apluggy dispatches on_start hooks via asyncio.gather,
-    so this coroutine runs concurrently with AgentPlugin.on_start. If
-    MCP connections take longer than LLM client startup, register_tools
-    may fire before _cached_tools is populated. In practice LLM client
-    startup is slower, so MCP tools are ready in time. The proper fix
-    is sequential or dependency-aware hook dispatch — see
-    plans/async-hook-ordering.md.
+    Ordering: main.py calls AgentPlugin.on_start explicitly after the
+    broadcast, so MCP connections are guaranteed to complete before
+    register_tools fires.
     """
 
     def __init__(self) -> None:
@@ -68,11 +64,7 @@ class McpClientPlugin:
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
-        """Connect to MCP servers and build tool list.
-
-        Called concurrently with other plugins' on_start via asyncio.gather.
-        See class docstring for the known ordering issue.
-        """
+        """Connect to MCP servers and build tool list."""
         servers_config = config.get("mcp", {}).get("servers", {})
         if not servers_config:
             logger.debug("McpClientPlugin: no servers configured")

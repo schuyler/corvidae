@@ -143,11 +143,16 @@ class TestMainLogging:
             import signal
 
             with patch("logging.config.dictConfig") as mock_dictconfig, \
-                 patch("sherman.main.create_plugin_manager") as mock_pm_factory:
+                 patch("sherman.main.create_plugin_manager") as mock_pm_factory, \
+                 patch("sherman.main.AgentPlugin") as mock_agent_cls:
                 mock_pm = MagicMock()
                 mock_pm.ahook.on_start = AsyncMock(return_value=[])
                 mock_pm.ahook.on_stop = AsyncMock(return_value=[])
                 mock_pm_factory.return_value = mock_pm
+                mock_agent = MagicMock()
+                mock_agent.on_start = AsyncMock()
+                mock_agent.on_stop = AsyncMock()
+                mock_agent_cls.return_value = mock_agent
 
                 async def run():
                     asyncio.get_running_loop().call_later(0.05, os.kill, os.getpid(), signal.SIGINT)
@@ -192,11 +197,16 @@ class TestMainLogging:
             import signal
 
             with patch("logging.config.dictConfig") as mock_dictconfig, \
-                 patch("sherman.main.create_plugin_manager") as mock_pm_factory:
+                 patch("sherman.main.create_plugin_manager") as mock_pm_factory, \
+                 patch("sherman.main.AgentPlugin") as mock_agent_cls:
                 mock_pm = MagicMock()
                 mock_pm.ahook.on_start = AsyncMock(return_value=[])
                 mock_pm.ahook.on_stop = AsyncMock(return_value=[])
                 mock_pm_factory.return_value = mock_pm
+                mock_agent = MagicMock()
+                mock_agent.on_start = AsyncMock()
+                mock_agent.on_stop = AsyncMock()
+                mock_agent_cls.return_value = mock_agent
 
                 async def run():
                     asyncio.get_running_loop().call_later(0.05, os.kill, os.getpid(), signal.SIGINT)
@@ -231,11 +241,16 @@ class TestMainLogging:
 
             with caplog.at_level(logging.INFO, logger="sherman.main"), \
                  patch("logging.config.dictConfig"), \
-                 patch("sherman.main.create_plugin_manager") as mock_pm_factory:
+                 patch("sherman.main.create_plugin_manager") as mock_pm_factory, \
+                 patch("sherman.main.AgentPlugin") as mock_agent_cls:
                 mock_pm = MagicMock()
                 mock_pm.ahook.on_start = AsyncMock(return_value=[])
                 mock_pm.ahook.on_stop = AsyncMock(return_value=[])
                 mock_pm_factory.return_value = mock_pm
+                mock_agent = MagicMock()
+                mock_agent.on_start = AsyncMock()
+                mock_agent.on_stop = AsyncMock()
+                mock_agent_cls.return_value = mock_agent
 
                 async def run():
                     asyncio.get_running_loop().call_later(0.05, os.kill, os.getpid(), signal.SIGINT)
@@ -270,11 +285,16 @@ class TestMainLogging:
 
             with caplog.at_level(logging.INFO, logger="sherman.main"), \
                  patch("logging.config.dictConfig"), \
-                 patch("sherman.main.create_plugin_manager") as mock_pm_factory:
+                 patch("sherman.main.create_plugin_manager") as mock_pm_factory, \
+                 patch("sherman.main.AgentPlugin") as mock_agent_cls:
                 mock_pm = MagicMock()
                 mock_pm.ahook.on_start = AsyncMock(return_value=[])
                 mock_pm.ahook.on_stop = AsyncMock(return_value=[])
                 mock_pm_factory.return_value = mock_pm
+                mock_agent = MagicMock()
+                mock_agent.on_start = AsyncMock()
+                mock_agent.on_stop = AsyncMock()
+                mock_agent_cls.return_value = mock_agent
 
                 async def run():
                     asyncio.get_running_loop().call_later(0.05, os.kill, os.getpid(), signal.SIGINT)

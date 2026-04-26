@@ -95,7 +95,6 @@ class AgentPlugin:
         self.queues: dict[str, SerialQueue] = {}
         self._registry: ChannelRegistry | None = None
 
-    @hookimpl
     async def on_start(self, config: dict) -> None:
         await self._start_plugin(config)
 
@@ -374,7 +373,6 @@ class AgentPlugin:
             )
             await task_queue.enqueue(task)
 
-    @hookimpl
     async def on_stop(self) -> None:
         # Cancel all channel queue consumers.
         for queue in self.queues.values():

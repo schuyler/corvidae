@@ -117,7 +117,10 @@ async def main(config_path: str = "agent.yaml") -> None:
     thinking_plugin = ThinkingPlugin(pm)
     pm.register(thinking_plugin, name="thinking")
 
-    # Register AgentPlugin after tool-providing and transport plugins
+    # Register AgentPlugin after tool-providing and transport plugins.
+    # AgentPlugin.on_start/on_stop are called explicitly (not via broadcast)
+    # so that on_start runs after all plugins are ready and on_stop runs
+    # before other plugins tear down resources.
     agent_loop = AgentPlugin(pm)
     pm.register(agent_loop, name="agent_loop")
 
@@ -129,6 +132,7 @@ async def main(config_path: str = "agent.yaml") -> None:
     validate_dependencies(pm)
 
     await pm.ahook.on_start(config=config)
+    await agent_loop.on_start(config=config)
 
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -139,6 +143,7 @@ async def main(config_path: str = "agent.yaml") -> None:
 
     logger.info("shutdown signal received, stopping")
 
+    await agent_loop.on_stop()
     await pm.ahook.on_stop()
 
 
