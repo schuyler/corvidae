@@ -579,10 +579,12 @@ class TestAgentLoopLogging:
 
 
 class TestConversationLogging:
-    """ConversationLog must log WARNING before compaction and INFO after."""
+    """CompactionPlugin must log WARNING before compaction; ConversationLog logs INFO after."""
 
     async def test_compaction_triggered_logs_warning(self, db, caplog):
-        """compact_if_needed must log WARNING when compaction is triggered."""
+        """CompactionPlugin.compact_conversation must log WARNING when compaction is triggered."""
+        from sherman.compaction import CompactionPlugin
+
         conv = ConversationLog(db, channel_id="test:chan1")
         conv.system_prompt = ""
         # 25 messages × 100 chars = 2500 chars; token_estimate ~714; 80% of 100 = 80 → triggers
@@ -593,34 +595,54 @@ class TestConversationLogging:
             return_value={"choices": [{"message": {"content": "summary"}}]}
         )
 
-        with caplog.at_level(logging.WARNING, logger="sherman.conversation"):
-            await conv.compact_if_needed(mock_client, max_tokens=100)
+        plugin = CompactionPlugin()
+        with caplog.at_level(logging.WARNING, logger="sherman.compaction"):
+            await plugin.compact_conversation(
+                conversation=conv, client=mock_client, max_tokens=100
+            )
 
-        records = [r for r in caplog.records if r.name == "sherman.conversation"]
+        records = [r for r in caplog.records if r.name == "sherman.compaction"]
         warning_records = [r for r in records if r.levelno == logging.WARNING]
         assert warning_records, (
-            "compact_if_needed must emit WARNING when compaction is triggered"
+            "CompactionPlugin.compact_conversation must emit WARNING when compaction is triggered"
         )
 
     async def test_compaction_completed_logs_info(self, db, caplog):
-        """compact_if_needed must log INFO after compaction with messages_before
-        and messages_after counts."""
+        """ConversationLog.replace_with_summary must log INFO after compaction with
+        messages_before and messages_after counts."""
+        from sherman.compaction import CompactionPlugin
+
         conv = ConversationLog(db, channel_id="test:chan1")
         conv.system_prompt = ""
         conv.messages = [{"role": "user", "content": "x" * 100} for _ in range(25)]
+
+        # Insert matching rows in DB so replace_with_summary can run boundary query
+        import time
+        import json
+        base_ts = time.time()
+        for i, msg in enumerate(conv.messages):
+            await db.execute(
+                "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
+                "VALUES (?, ?, ?, 'message')",
+                ("test:chan1", json.dumps({"role": msg["role"], "content": msg["content"]}), base_ts + i),
+            )
+        await db.commit()
 
         mock_client = AsyncMock()
         mock_client.chat = AsyncMock(
             return_value={"choices": [{"message": {"content": "summary"}}]}
         )
 
+        plugin = CompactionPlugin()
         with caplog.at_level(logging.INFO, logger="sherman.conversation"):
-            await conv.compact_if_needed(mock_client, max_tokens=100)
+            await plugin.compact_conversation(
+                conversation=conv, client=mock_client, max_tokens=100
+            )
 
         records = [r for r in caplog.records if r.name == "sherman.conversation"]
         info_records = [r for r in records if r.levelno == logging.INFO]
         assert info_records, (
-            "compact_if_needed must emit INFO when compaction completes"
+            "replace_with_summary must emit INFO when compaction completes"
         )
 
     async def test_load_debug_log(self, db, caplog):

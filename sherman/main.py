@@ -97,6 +97,11 @@ async def main(config_path: str = "agent.yaml") -> None:
     subagent_plugin = SubagentPlugin(pm)
     pm.register(subagent_plugin, name="subagent")
 
+    # Register CompactionPlugin before AgentPlugin (provides default compaction strategy)
+    from sherman.compaction import CompactionPlugin
+    compaction_plugin = CompactionPlugin()
+    pm.register(compaction_plugin, name="compaction")
+
     # Register AgentPlugin after tool-providing and transport plugins
     agent_loop = AgentPlugin(pm)
     pm.register(agent_loop, name="agent_loop")

@@ -762,11 +762,11 @@ class TestCompactionFailureResilience:
     async def test_compaction_failure_does_not_prevent_response(
         self, plugin_and_channel, caplog
     ):
-        """compact_if_needed raising does not prevent run_agent_turn or send_message.
+        """A compaction failure does not prevent run_agent_turn or send_message.
 
-        The fix (not yet implemented) wraps compact_if_needed in try/except,
-        logs a warning, and continues. This test MUST FAIL against current code
-        because the exception propagates and send_message is never called.
+        Patches call_firstresult_hook in sherman.agent to raise RuntimeError
+        when invoked for compact_conversation, simulating a plugin crash.
+        The agent's try/except must catch it, log a WARNING, and continue.
         """
         import logging
         from unittest.mock import patch
@@ -777,13 +777,15 @@ class TestCompactionFailureResilience:
         mock_client.chat = AsyncMock(return_value=_make_text_response("response after failed compaction"))
         plugin.client = mock_client
 
-        # Trigger lazy conversation init so channel.conversation is set
-        await plugin._ensure_conversation(channel)
-        conv = channel.conversation
+        original_hook = __import__("sherman.hooks", fromlist=["call_firstresult_hook"]).call_firstresult_hook
 
-        # Patch compact_if_needed to raise RuntimeError
+        async def exploding_hook(pm, hook_name, **kwargs):
+            if hook_name == "compact_conversation":
+                raise RuntimeError("compaction boom")
+            return await original_hook(pm, hook_name, **kwargs)
+
         with caplog.at_level(logging.WARNING, logger="sherman.agent"):
-            with patch.object(conv, "compact_if_needed", side_effect=RuntimeError("compaction boom")):
+            with patch("sherman.agent.call_firstresult_hook", side_effect=exploding_hook):
                 await plugin.on_message(channel=channel, sender="user", text="hello")
                 await _drain(plugin, channel)
 
