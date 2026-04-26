@@ -5,12 +5,12 @@ import os
 import pathlib
 
 
-async def read_file(path: str) -> str:
+async def read_file(path: str, max_size: int = 1024 * 1024) -> str:
     """Read the contents of a file."""
-    return await asyncio.to_thread(_read_file_sync, path)
+    return await asyncio.to_thread(_read_file_sync, path, max_size)
 
 
-def _read_file_sync(path: str) -> str:
+def _read_file_sync(path: str, max_size: int = 1024 * 1024) -> str:
     p = pathlib.Path(path)
     if not p.exists():
         return f"Error: file not found: {path}"
@@ -20,8 +20,9 @@ def _read_file_sync(path: str) -> str:
         size = p.stat().st_size
     except OSError as exc:
         return f"Error: could not stat file: {exc}"
-    if size > 1024 * 1024:
-        return f"Error: file too large (>1MB): {path}"
+    if size > max_size:
+        max_mb = max_size / (1024 * 1024)
+        return f"Error: file too large (>{max_mb:.0f}MB): {path}"
     try:
         return p.read_text(errors="replace")
     except OSError as exc:

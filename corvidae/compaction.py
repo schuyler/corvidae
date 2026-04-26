@@ -26,6 +26,22 @@ logger = logging.getLogger(__name__)
 class CompactionPlugin:
     """Plugin that implements default token-budget conversation compaction."""
 
+    def __init__(self) -> None:
+        self._compaction_threshold: float = 0.8
+        self._compaction_retention: float = 0.5
+        self._min_messages: int = 5
+        # chars_per_token: keep in sync with ConversationLog.chars_per_token default.
+        self._chars_per_token: float = 3.5
+
+    @hookimpl
+    async def on_start(self, config: dict) -> None:
+        agent_config = config.get("agent", {})
+        self._compaction_threshold = agent_config.get("compaction_threshold", 0.8)
+        self._compaction_retention = agent_config.get("compaction_retention", 0.5)
+        self._min_messages = agent_config.get("min_messages_to_compact", 5)
+        # chars_per_token: keep in sync with PersistencePlugin/ConversationLog.
+        self._chars_per_token = agent_config.get("chars_per_token", 3.5)
+
     @hookimpl
     async def compact_conversation(self, conversation, client, max_tokens):
         """Compact the conversation if it exceeds 80% of max_tokens.
@@ -34,10 +50,10 @@ class CompactionPlugin:
         """
         from corvidae.conversation import MessageType
 
-        if conversation.token_estimate() < 0.8 * max_tokens:
+        if conversation.token_estimate() < self._compaction_threshold * max_tokens:
             return None
 
-        if len(conversation.messages) <= 5:
+        if len(conversation.messages) <= self._min_messages:
             return None
 
         logger.warning(
@@ -45,14 +61,14 @@ class CompactionPlugin:
             extra={"channel_id": conversation.channel_id},
         )
 
-        retain_budget = int(max_tokens * 0.5)
+        retain_budget = int(max_tokens * self._compaction_retention)
         retain_count = 0
         retain_tokens = 0
         for msg in reversed(conversation.messages):
             content = msg.get("content") or ""
             if not isinstance(content, str):
                 content = ""
-            msg_tokens = int(len(content) / 3.5)
+            msg_tokens = int(len(content) / self._chars_per_token)
             if retain_tokens + msg_tokens > retain_budget and retain_count > 0:
                 break
             retain_tokens += msg_tokens

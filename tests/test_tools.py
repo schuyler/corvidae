@@ -227,7 +227,7 @@ class TestWebFetchSessionReuse:
     async def test_session_created_on_start(self):
         import aiohttp
         plugin = CoreToolsPlugin()
-        await plugin.on_start()
+        await plugin.on_start(config={})
         try:
             assert hasattr(plugin, "_session"), "CoreToolsPlugin must have a _session attribute after on_start"
             assert isinstance(plugin._session, aiohttp.ClientSession)
@@ -237,7 +237,7 @@ class TestWebFetchSessionReuse:
 
     async def test_session_closed_on_stop(self):
         plugin = CoreToolsPlugin()
-        await plugin.on_start()
+        await plugin.on_start(config={})
         session = plugin._session
         await plugin.on_stop()
         assert session.closed, "Session must be closed after on_stop"

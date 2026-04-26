@@ -25,11 +25,14 @@ class SubagentPlugin:
     def __init__(self, pm) -> None:
         self.pm = pm
         self._llm_config: dict | None = None
+        self._max_tool_result_chars: int = 100_000
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
         llm_config = config.get("llm", {})
         self._llm_config = llm_config.get("background") or llm_config["main"]
+        agent_config = config.get("agent", {})
+        self._max_tool_result_chars = agent_config.get("max_tool_result_chars", 100_000)
         logger.debug("SubagentPlugin started")
 
     @hookimpl
@@ -65,6 +68,7 @@ class SubagentPlugin:
         tool_schemas = registry.schemas()
 
         llm_cfg = self._llm_config
+        plugin = self
 
         messages = [
             {"role": "system", "content": SUBAGENT_SYSTEM_PROMPT},
@@ -84,6 +88,7 @@ class SubagentPlugin:
                     client, messages, tools_dict, tool_schemas,
                     channel=channel,
                     task_queue=task_queue,
+                    max_result_chars=plugin._max_tool_result_chars,
                 )
                 return strip_thinking(result)
             finally:
