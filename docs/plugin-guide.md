@@ -269,7 +269,7 @@ agent_loop     (AgentPlugin)
 idle_monitor   (IdleMonitorPlugin)
 ```
 
-Tool-providing plugins and transport plugins register before `agent_loop`. The `agent_loop` plugin collects tools during `on_start`, so anything appending to `tool_registry` must be registered first. Plugins that need async setup before tool collection (like `McpClientPlugin`) implement `before_register_tools` rather than `on_start`, because `on_start` hooks run concurrently via `asyncio.gather`.
+Tool-providing plugins and transport plugins register before `agent_loop`. The `agent_loop` plugin collects tools during `on_start`, so anything appending to `tool_registry` must be registered first. Plugins that need async setup before tool collection (like `McpClientPlugin`) implement `before_register_tools` rather than `on_start`, because `on_start` hooks run concurrently via `asyncio.gather` and there is no guarantee a plugin's `on_start` completes before `AgentPlugin._start_plugin` reaches tool collection.
 
 `idle_monitor` registers after `agent_loop` because it depends on `"agent_loop"` and its `on_start` uses `@hookimpl(trylast=True)` to run after `AgentPlugin.on_start` has fully initialized.
 
