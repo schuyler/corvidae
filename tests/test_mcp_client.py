@@ -3,7 +3,7 @@
 All tests are expected to FAIL until sherman/mcp_client.py is implemented.
 
 Design assumptions (from plans/mcp-client-plugin.md):
-- McpClientPlugin.before_register_tools(config) is an async hookimpl.
+- McpClientPlugin.on_start(config) is an async hookimpl.
 - McpClientPlugin.register_tools(tool_registry) is a sync hookimpl.
 - McpClientPlugin.on_stop() is an async hookimpl.
 - Tool naming: "{prefix}__{mcp_tool_name}" when prefix is set, else just "{mcp_tool_name}".
@@ -17,7 +17,7 @@ Design assumptions (from plans/mcp-client-plugin.md):
 - Duplicate tool names: first registration wins; warning logged, duplicate skipped.
 - Non-text content blocks: dropped (logged at DEBUG), text blocks only are joined.
 - on_stop: calls AsyncExitStack.aclose() to close all sessions.
-- before_register_tools with no config: returns early, no sessions connected.
+- on_start with no config: returns early, no sessions connected.
 - Empty result: returns "(no output)" when no text blocks are present.
 """
 
@@ -106,17 +106,17 @@ def _make_server_state(
 
 
 # ---------------------------------------------------------------------------
-# TestBeforeRegisterToolsNoConfig
+# TestOnStartNoConfig
 # ---------------------------------------------------------------------------
 
 
-class TestBeforeRegisterToolsNoConfig:
-    """before_register_tools returns early when no MCP servers are configured."""
+class TestOnStartNoConfig:
+    """on_start returns early when no MCP servers are configured."""
 
     async def test_no_mcp_key_in_config(self):
         """Config with no 'mcp' key: no servers connected, _cached_tools empty."""
         plugin = McpClientPlugin()
-        await plugin.before_register_tools(config={})
+        await plugin.on_start(config={})
         assert plugin._servers == []
         assert plugin._cached_tools == []
         assert plugin._exit_stack is None
@@ -124,7 +124,7 @@ class TestBeforeRegisterToolsNoConfig:
     async def test_empty_servers_dict(self):
         """Config with 'mcp.servers: {}': no servers connected, _cached_tools empty."""
         plugin = McpClientPlugin()
-        await plugin.before_register_tools(config={"mcp": {"servers": {}}})
+        await plugin.on_start(config={"mcp": {"servers": {}}})
         assert plugin._servers == []
         assert plugin._cached_tools == []
         assert plugin._exit_stack is None
@@ -132,19 +132,19 @@ class TestBeforeRegisterToolsNoConfig:
     async def test_missing_servers_key(self):
         """Config with 'mcp: {}': no servers connected, _cached_tools empty."""
         plugin = McpClientPlugin()
-        await plugin.before_register_tools(config={"mcp": {}})
+        await plugin.on_start(config={"mcp": {}})
         assert plugin._servers == []
         assert plugin._cached_tools == []
         assert plugin._exit_stack is None
 
 
 # ---------------------------------------------------------------------------
-# TestBeforeRegisterToolsWithStdioServer
+# TestOnStartWithStdioServer
 # ---------------------------------------------------------------------------
 
 
-class TestBeforeRegisterToolsWithStdioServer:
-    """before_register_tools connects, initializes session, fetches tools."""
+class TestOnStartWithStdioServer:
+    """on_start connects, initializes session, fetches tools."""
 
     async def test_connects_stdio_server_and_fetches_tools(self):
         """A configured stdio server results in a populated _servers list."""
@@ -187,7 +187,7 @@ class TestBeforeRegisterToolsWithStdioServer:
             patch("mcp.client.stdio.StdioServerParameters"),
             patch("mcp.ClientSession", return_value=mock_client_session_cm),
         ):
-            await plugin.before_register_tools(config=config)
+            await plugin.on_start(config=config)
 
         assert len(plugin._servers) == 1
         assert plugin._servers[0].name == "fs"
@@ -227,7 +227,7 @@ class TestBeforeRegisterToolsWithStdioServer:
             patch("mcp.client.stdio.StdioServerParameters"),
             patch("mcp.ClientSession", return_value=mock_client_session_cm),
         ):
-            await plugin.before_register_tools(config=config)
+            await plugin.on_start(config=config)
 
         mock_session.initialize.assert_called_once()
 
@@ -269,7 +269,7 @@ class TestBeforeRegisterToolsWithStdioServer:
             patch("mcp.client.stdio.StdioServerParameters"),
             patch("mcp.ClientSession", return_value=mock_client_session_cm),
         ):
-            await plugin.before_register_tools(config=config)
+            await plugin.on_start(config=config)
 
         assert len(plugin._cached_tools) == 2
 
@@ -298,18 +298,18 @@ class TestBeforeRegisterToolsWithStdioServer:
             patch("mcp.client.stdio.StdioServerParameters"),
         ):
             # Should not raise.
-            await plugin.before_register_tools(config=config)
+            await plugin.on_start(config=config)
 
         assert plugin._servers == []
 
 
 # ---------------------------------------------------------------------------
-# TestBeforeRegisterToolsWithSseServer
+# TestOnStartWithSseServer
 # ---------------------------------------------------------------------------
 
 
-class TestBeforeRegisterToolsWithSseServer:
-    """before_register_tools connects via SSE transport when url config is given."""
+class TestOnStartWithSseServer:
+    """on_start connects via SSE transport when url config is given."""
 
     async def test_connects_sse_server_and_fetches_tools(self):
         """A configured SSE server results in a populated _servers list."""
@@ -347,7 +347,7 @@ class TestBeforeRegisterToolsWithSseServer:
             patch("mcp.client.sse.sse_client", return_value=mock_sse_cm),
             patch("mcp.ClientSession", return_value=mock_client_session_cm),
         ):
-            await plugin.before_register_tools(config=config)
+            await plugin.on_start(config=config)
 
         assert len(plugin._servers) == 1
         assert plugin._servers[0].name == "remote_api"
@@ -355,11 +355,11 @@ class TestBeforeRegisterToolsWithSseServer:
 
 
 # ---------------------------------------------------------------------------
-# TestBeforeRegisterToolsUnknownTransport
+# TestOnStartUnknownTransport
 # ---------------------------------------------------------------------------
 
 
-class TestBeforeRegisterToolsUnknownTransport:
+class TestOnStartUnknownTransport:
     """An unknown transport type logs a warning and skips the server."""
 
     async def test_unknown_transport_skipped_with_warning(self, caplog):
@@ -379,7 +379,7 @@ class TestBeforeRegisterToolsUnknownTransport:
 
         with caplog.at_level(logging.WARNING, logger="sherman.mcp_client"):
             # Should not raise.
-            await plugin.before_register_tools(config=config)
+            await plugin.on_start(config=config)
 
         assert plugin._servers == []
         assert any(record.levelno == logging.WARNING for record in caplog.records)

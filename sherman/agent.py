@@ -399,9 +399,6 @@ class AgentPlugin:
         )
         await self.client.start()
 
-        # Let plugins that need async setup prepare their tools.
-        await self.pm.ahook.before_register_tools(config=config)
-
         # Collect tools from all plugins via register_tools hook (sync).
         collected: list = []
         self.pm.hook.register_tools(tool_registry=collected)
