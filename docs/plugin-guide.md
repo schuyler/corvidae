@@ -1,0 +1,302 @@
+# Corvidae Plugin Guide
+
+Corvidae plugins extend the agent daemon using [apluggy](https://pypi.org/project/apluggy/) (async pluggy). A plugin is a class with `@hookimpl`-decorated methods corresponding to the hooks it wants to handle.
+
+```python
+from corvidae.hooks import hookimpl
+
+class GreetPlugin:
+    @hookimpl
+    async def on_message(self, channel, sender: str, text: str) -> None:
+        if text.strip().lower() == "hello":
+            await self.pm.ahook.send_message(channel=channel, text=f"Hello, {sender}!")
+```
+
+## Plugin anatomy
+
+A plugin is a plain Python class. It only needs to implement the hooks it cares about — all hooks are optional. The `@hookimpl` decorator marks each implementation.
+
+```python
+from corvidae.hooks import hookimpl
+
+class MyPlugin:
+    @hookimpl
+    async def on_start(self, config: dict) -> None:
+        self.setting = config.get("my_plugin", {}).get("setting", "default")
+
+    @hookimpl
+    async def on_stop(self) -> None:
+        # clean up resources
+        pass
+```
+
+## Registering a plugin
+
+### Built-in (in main.py)
+
+Add a `pm.register()` call before `validate_dependencies()`:
+
+```python
+# corvidae/main.py
+my_plugin = MyPlugin(pm)
+pm.register(my_plugin, name="my_plugin")
+
+validate_dependencies(pm)
+```
+
+Registration order matters: tool-providing and transport plugins must be registered before `agent_loop` so their tools are collected during `on_start`.
+
+### External (setuptools entry points)
+
+External plugins are loaded automatically via `pm.load_setuptools_entrypoints("corvidae")`. Declare them in `pyproject.toml`:
+
+```toml
+[project.entry-points.corvidae]
+my_plugin = "my_package:MyPlugin"
+```
+
+The entry point value must be importable and instantiable without arguments, or be a factory function returning the plugin instance.
+
+## Available hooks
+
+### Lifecycle
+
+| Hook | Type | When |
+|------|------|------|
+| `on_start(config: dict)` | async broadcast | Once at startup, after config is loaded |
+| `on_stop()` | async broadcast | On SIGINT/SIGTERM, before process exits |
+
+`config` is the full parsed `agent.yaml` dict. The key `_base_dir` (a `Path`) is injected by `main.py` pointing to the config file's directory.
+
+### Messaging
+
+| Hook | Type | When |
+|------|------|------|
+| `on_message(channel, sender: str, text: str)` | async broadcast | Inbound message arrives |
+| `send_message(channel, text: str, latency_ms: float \| None)` | async broadcast | Outbound delivery request |
+| `on_notify(channel, source: str, text: str, tool_call_id: str \| None, meta: dict \| None)` | async broadcast | Notification injected into channel |
+
+`send_message` is broadcast to all plugins. Transport plugins filter for their own channels:
+
+```python
+@hookimpl
+async def send_message(self, channel, text: str) -> None:
+    if not channel.matches_transport("mytransport"):
+        return
+    # deliver text to this channel
+```
+
+`latency_ms` is optional in `send_message` — omit it from your hookimpl signature if your transport doesn't use it. Pluggy tolerates missing optional parameters.
+
+### Extension points
+
+| Hook | Type | When |
+|------|------|------|
+| `register_tools(tool_registry: list)` | sync broadcast | During `on_start`, to collect tools |
+| `on_agent_response(channel, request_text: str, response_text: str)` | async broadcast | After agent produces a response |
+| `before_agent_turn(channel)` | async broadcast | Before each LLM invocation |
+| `on_idle()` | async broadcast | All queues empty and cooldown elapsed |
+
+### Gate hooks (firstresult)
+
+Gate hooks return a value that short-circuits further processing. Use `call_firstresult_hook()` to call them — apluggy's built-in `firstresult=True` does not work with async hooks.
+
+| Hook | Returns | Behavior |
+|------|---------|----------|
+| `should_process_message(channel, sender, text)` | `bool \| None` | `False` rejects the message, `True` accepts it; `None` defers |
+| `on_llm_error(channel, error)` | `str \| None` | Non-None string replaces the default error message |
+| `compact_conversation(conversation, client, max_tokens)` | `bool \| None` | `True` signals compaction was handled; `None` defers to default |
+| `process_tool_result(tool_name, result, channel)` | `str \| None` | Non-None string replaces the tool result in the conversation |
+
+`compact_conversation` — do not return `False`. Return `None` to defer, `True` to signal handled. `False` stops iteration but the call site still runs the default, which is confusing.
+
+`process_tool_result` only fires during subagent execution (`run_agent_loop`), not during interactive message processing.
+
+Example gate hook:
+
+```python
+@hookimpl
+async def should_process_message(self, channel, sender: str, text: str) -> bool | None:
+    if sender in self.blocklist:
+        return False
+    return None  # no opinion
+```
+
+## Tool registration
+
+Tools are async functions with type-annotated parameters. The docstring's first line becomes the tool description for the LLM. Register them in `register_tools`:
+
+```python
+from corvidae.hooks import hookimpl
+from corvidae.tool import Tool
+
+class WeatherPlugin:
+    @hookimpl
+    def register_tools(self, tool_registry: list) -> None:
+        async def get_weather(city: str, units: str = "metric") -> str:
+            """Get current weather for a city."""
+            return await fetch_weather(city, units)
+
+        tool_registry.append(Tool.from_function(get_weather))
+```
+
+`Tool.from_function()` infers the tool name from `fn.__name__` and generates a JSON schema from the type annotations. Parameters prefixed with `_` are excluded from the schema — they are injected at call time, not supplied by the LLM.
+
+## Context injection (ToolContext)
+
+Tools that need channel context, the task queue, or the tool call ID declare a `_ctx: ToolContext` parameter. Corvidae injects it automatically; the LLM never sees it.
+
+```python
+from corvidae.tool import Tool, ToolContext
+
+class MyPlugin:
+    @hookimpl
+    def register_tools(self, tool_registry: list) -> None:
+        async def enqueue_work(instructions: str, _ctx: ToolContext) -> str:
+            """Enqueue background work."""
+            from corvidae.task import Task
+
+            async def work():
+                return await do_something(instructions)
+
+            task = Task(
+                work=work,
+                channel=_ctx.channel,
+                tool_call_id=_ctx.tool_call_id,
+                description=instructions[:80],
+            )
+            await _ctx.task_queue.enqueue(task)
+            return f"Enqueued task {task.task_id}"
+
+        tool_registry.append(Tool.from_function(enqueue_work))
+```
+
+`ToolContext` attributes:
+- `channel: Channel | None` — the channel this tool call is executing on
+- `tool_call_id: str` — the LLM-assigned call ID for this invocation
+- `task_queue: TaskQueue | None` — the task queue (None if TaskPlugin is not registered)
+
+## Plugin dependencies
+
+Declare `depends_on` as a class attribute (a set of plugin names). `validate_dependencies()` raises `RuntimeError` at startup if any declared dependency is not registered.
+
+```python
+class MyPlugin:
+    depends_on = {"agent_loop", "task"}
+
+    def __init__(self, pm) -> None:
+        self.pm = pm
+```
+
+To get a typed reference to a dependency:
+
+```python
+from corvidae.hooks import get_dependency
+from corvidae.agent import AgentPlugin
+
+agent = get_dependency(self.pm, "agent_loop", AgentPlugin)
+registry = agent.tool_registry
+```
+
+`get_dependency` raises `RuntimeError` if the plugin is not found and `TypeError` if it is the wrong type.
+
+## Injecting context before agent turns
+
+`before_agent_turn` fires before every LLM call. Use it to inject contextual information (memory retrieval, current state, etc.) into the conversation:
+
+```python
+from corvidae.conversation import MessageType
+
+class MemoryPlugin:
+    @hookimpl
+    async def before_agent_turn(self, channel) -> None:
+        notes = await self.fetch_relevant_notes(channel.id)
+        if notes:
+            channel.conversation.append(
+                {"role": "user", "content": f"[Context]\n{notes}"},
+                message_type=MessageType.CONTEXT,
+            )
+```
+
+`MessageType.CONTEXT` entries survive compaction — compaction only summarizes `MESSAGE` entries.
+
+## Channels
+
+A channel is a `transport:scope` pair like `irc:#general` or `cli:local`. Each channel has its own `ConversationLog` with SQLite persistence.
+
+```python
+channel.id              # "irc:#general"
+channel.transport       # "irc"
+channel.scope           # "#general"
+channel.conversation    # ConversationLog
+channel.matches_transport("irc")  # True
+```
+
+Channels are created on-demand when messages arrive, or pre-registered in `agent.yaml`:
+
+```yaml
+channels:
+  irc:#general:
+    system_prompt: "You are the channel bot."
+    max_context_tokens: 16000
+```
+
+## Registration order
+
+The current registration sequence in `main.py`:
+
+```
+registry       (ChannelRegistry)
+core_tools     (CoreToolsPlugin)
+cli            (CLIPlugin)
+irc            (IRCPlugin)
+task           (TaskPlugin)
+subagent       (SubagentPlugin)
+agent_loop     (AgentPlugin)
+```
+
+Tool-providing plugins and transport plugins register before `agent_loop`. The `agent_loop` plugin collects tools during `on_start`, so anything appending to `tool_registry` must be registered first.
+
+## Async considerations
+
+All broadcast hooks are `async`. Corvidae uses apluggy's `pm.ahook.*` for async dispatch.
+
+For gate hooks, call `call_firstresult_hook()` explicitly — do not rely on pluggy's `firstresult=True`, which does not work with async:
+
+```python
+from corvidae.hooks import call_firstresult_hook
+
+result = await call_firstresult_hook(
+    pm, "should_process_message",
+    channel=channel, sender=sender, text=text
+)
+```
+
+`call_firstresult_hook` respects `@hookimpl(tryfirst=True)` and `@hookimpl(trylast=True)` markers. Hook wrappers (`wrapper=True`, `hookwrapper=True`) are not supported and are silently skipped.
+
+## Stock tools
+
+These tools are registered by built-in plugins. They are available to the LLM in every standard Corvidae deployment.
+
+All tool results are truncated at `MAX_TOOL_RESULT_CHARS` (100,000 characters) by `execute_tool_call` in `corvidae/tool.py`. The truncation appends `[truncated — N chars total]` so the LLM knows output was cut.
+
+### CoreToolsPlugin tools
+
+Registered by `CoreToolsPlugin` (registered as `core_tools` in `main.py`).
+
+| Tool | Parameters | What it does |
+|------|------------|--------------|
+| `shell` | `command: str` | Runs a shell command and returns combined stdout/stderr. Times out after 30 seconds. Returns `"(no output)"` if the command produces none. Non-zero exit codes are appended to the output. |
+| `read_file` | `path: str` | Reads a file and returns its text content. Returns an error string for missing files, directories, unreadable files, or files larger than 1 MB. |
+| `write_file` | `path: str`, `content: str` | Writes `content` to `path`, creating parent directories as needed. Returns a confirmation with the byte count, or an error string on failure. |
+| `web_fetch` | `url: str` | Fetches a URL via HTTP GET and returns the response body as text. Times out after 15 seconds. Truncates responses at 50,000 characters (independent of `MAX_TOOL_RESULT_CHARS`). |
+
+### SubagentPlugin tools
+
+Registered by `SubagentPlugin` (registered as `subagent` in `main.py`).
+
+| Tool | Parameters | What it does |
+|------|------------|--------------|
+| `subagent` | `instructions: str`, `description: str`, `_ctx: ToolContext` | Enqueues a background task that runs a full agent loop with `instructions` as its prompt. Returns immediately with the enqueued task ID. Results are delivered via `on_notify` when the task completes. |
+
+`subagent` requires `ToolContext` (injected automatically — not an LLM parameter). It excludes itself from the subagent's tool registry to prevent recursion. The subagent uses the `llm.background` config block if present, falling back to `llm.main`.
