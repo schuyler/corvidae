@@ -1,4 +1,4 @@
-"""Integration tests for the Sherman agent daemon.
+"""Integration tests for the Corvidae agent daemon.
 
 Assembles the full plugin graph (with FakeTransportPlugin replacing CLI/IRC)
 and exercises message routing, tool dispatch, persistence, multi-channel

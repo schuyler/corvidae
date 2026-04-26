@@ -1,4 +1,4 @@
-"""Plugin system for the Sherman agent daemon.
+"""Plugin system for the Corvidae agent daemon.
 
 Defines the AgentSpec hookspecs that plugins implement, the hookimpl
 marker for decorating implementations, and utility functions for the

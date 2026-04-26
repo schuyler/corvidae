@@ -44,7 +44,7 @@ class _McpServerState:
 
 
 class McpClientPlugin:
-    """Plugin that connects to MCP servers and exposes their tools to Sherman.
+    """Plugin that connects to MCP servers and exposes their tools to Corvidae.
 
     Lifecycle:
         on_start  — connects to MCP servers via AsyncExitStack, fetches tool
@@ -189,7 +189,7 @@ class McpClientPlugin:
 
 
 def _make_tool(server: _McpServerState, mcp_tool) -> Tool:
-    """Build a Sherman Tool from one MCP tool definition.
+    """Build a Corvidae Tool from one MCP tool definition.
 
     Captures session, original tool name, and timeout in the closure.
     No _ctx parameter — MCP tools receive only LLM-provided arguments.
@@ -217,9 +217,9 @@ _UNSAFE_SCHEMA_KEYS = frozenset({"$schema", "$id", "$comment", "$defs", "definit
 
 
 def _mcp_tool_to_schema(tool_name: str, mcp_tool) -> dict:
-    """Translate MCP tool to Sherman's OpenAI function-call schema.
+    """Translate MCP tool to Corvidae's OpenAI function-call schema.
 
-    MCP's inputSchema is already a JSON Schema dict — same format Sherman
+    MCP's inputSchema is already a JSON Schema dict — same format Corvidae
     uses for function parameters. Strips known-unsafe top-level keys before
     wrapping it in the OpenAI envelope.
 
