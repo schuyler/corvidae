@@ -92,7 +92,6 @@ async def send_message(self, channel, text: str) -> None:
 
 | Hook | Type | When |
 |------|------|------|
-| `before_register_tools(config: dict)` | async broadcast | Inside `AgentPlugin._start_plugin`, right before `register_tools`. Plugins that need async setup to populate their tool lists implement this hook. |
 | `register_tools(tool_registry: list)` | sync broadcast | During `on_start`, to collect tools |
 | `on_agent_response(channel, request_text: str, response_text: str)` | async broadcast | After agent produces a response |
 | `before_agent_turn(channel)` | async broadcast | Before each LLM invocation |
@@ -269,7 +268,7 @@ agent_loop     (AgentPlugin)
 idle_monitor   (IdleMonitorPlugin)
 ```
 
-Tool-providing plugins and transport plugins register before `agent_loop`. The `agent_loop` plugin collects tools during `on_start`, so anything appending to `tool_registry` must be registered first. Plugins that need async setup before tool collection (like `McpClientPlugin`) implement `before_register_tools` rather than `on_start`, because `on_start` hooks run concurrently via `asyncio.gather` and there is no guarantee a plugin's `on_start` completes before `AgentPlugin._start_plugin` reaches tool collection.
+Tool-providing plugins and transport plugins register before `agent_loop`. The `agent_loop` plugin collects tools during `on_start`, so anything appending to `tool_registry` must be registered first. Note: `on_start` hooks run concurrently via `asyncio.gather`, so there is no ordering guarantee between plugins' `on_start` coroutines. `McpClientPlugin` uses `on_start` for MCP connections; in practice LLM client startup is slower than MCP connections, so tools are ready before `AgentPlugin` collects them. See `plans/async-hook-ordering.md` for discussion of the general ordering problem.
 
 `idle_monitor` registers after `agent_loop` because it depends on `"agent_loop"` and its `on_start` uses `@hookimpl(trylast=True)` to run after `AgentPlugin.on_start` has fully initialized.
 
@@ -331,11 +330,10 @@ exposes their tools to the agent loop. Registered as `"mcp"` before
 
 Implements three hooks:
 
-- `before_register_tools` — connects to all servers listed under `mcp.servers`
+- `on_start` — connects to all servers listed under `mcp.servers`
   in `agent.yaml`, fetches their tool lists, and builds cached `Tool` instances.
-  Uses `before_register_tools` (not `on_start`) because apluggy dispatches
-  `on_start` via `asyncio.gather` — connections must complete before
-  `AgentPlugin` collects tools.
+  Runs concurrently with other `on_start` hooks; see `plans/async-hook-ordering.md`
+  for the known ordering issue.
 - `register_tools` — appends the cached tools to `tool_registry`.
 - `on_stop` — closes all MCP sessions and transports via `AsyncExitStack`.
 

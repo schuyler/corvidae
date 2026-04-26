@@ -1,6 +1,6 @@
 """McpClientPlugin — MCP client that exposes MCP server tools to the agent loop.
 
-Connects to configured MCP servers during before_register_tools, caches the tool list for
+Connects to configured MCP servers during on_start, caches the tool list for
 synchronous delivery via register_tools, and keeps sessions alive via
 AsyncExitStack for the daemon's lifetime.
 
@@ -47,22 +47,18 @@ class McpClientPlugin:
     """Plugin that connects to MCP servers and exposes their tools to Sherman.
 
     Lifecycle:
-        before_register_tools — connects to MCP servers via AsyncExitStack,
-                    fetches tool lists, builds cached Tool list. Called by
-                    AgentPlugin inside _start_plugin, right before
-                    register_tools.
+        on_start  — connects to MCP servers via AsyncExitStack, fetches tool
+                    lists, builds cached Tool list.
         register_tools — extends tool_registry with cached Tool instances (sync)
         on_stop   — closes all sessions and transports via AsyncExitStack.aclose()
 
-    Design note: ALL MCP initialization happens in before_register_tools, NOT
-    on_start. apluggy dispatches async broadcast hooks (on_start) via
-    asyncio.gather — all implementations run concurrently. AgentPlugin's
-    on_start calls _start_plugin, which calls before_register_tools and then
-    register_tools. If McpClientPlugin used on_start for any initialization,
-    there would be no guarantee it completes before AgentPlugin reaches
-    before_register_tools — the two on_start coroutines run concurrently.
-    By putting everything in before_register_tools, which AgentPlugin awaits
-    sequentially within _start_plugin, ordering is guaranteed.
+    Known issue: apluggy dispatches on_start hooks via asyncio.gather,
+    so this coroutine runs concurrently with AgentPlugin.on_start. If
+    MCP connections take longer than LLM client startup, register_tools
+    may fire before _cached_tools is populated. In practice LLM client
+    startup is slower, so MCP tools are ready in time. The proper fix
+    is sequential or dependency-aware hook dispatch — see
+    plans/async-hook-ordering.md.
     """
 
     def __init__(self) -> None:
@@ -71,13 +67,11 @@ class McpClientPlugin:
         self._exit_stack: AsyncExitStack | None = None
 
     @hookimpl
-    async def before_register_tools(self, config: dict) -> None:
+    async def on_start(self, config: dict) -> None:
         """Connect to MCP servers and build tool list.
 
-        Called by AgentPlugin._start_plugin right before register_tools.
-        Awaited sequentially within AgentPlugin's _start_plugin, so it
-        completes before register_tools fires — but note it may run while
-        other plugins' on_start coroutines are still executing concurrently.
+        Called concurrently with other plugins' on_start via asyncio.gather.
+        See class docstring for the known ordering issue.
         """
         servers_config = config.get("mcp", {}).get("servers", {})
         if not servers_config:
@@ -128,7 +122,7 @@ class McpClientPlugin:
             cfg: Server config dict with transport, command/args/env or url,
                  and optional tool_prefix and timeout_seconds keys.
 
-        Note: The caller (before_register_tools) catches all exceptions from
+        Note: The caller (on_start) catches all exceptions from
         this method, logs them as warnings, and skips the server. Exceptions
         that may arise include ValueError (unknown transport) and KeyError
         (missing required config keys like 'command' or 'url').
