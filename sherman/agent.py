@@ -5,7 +5,7 @@ File boundaries now match domain responsibility rather than execution phase.
 
 AgentPlugin is the central plugin that:
   - Manages per-channel serial queues
-  - Initializes LLM clients, DB, and tools on startup
+  - Initializes LLM clients and tools on startup
   - Processes inbound messages and notifications through the agent loop
 
 Config:
@@ -20,8 +20,7 @@ Config:
         extra_body: ...
 
 Logging:
-    - INFO: on_start complete, on_message received, agent response sent,
-      conversation initialized
+    - INFO: on_start complete, on_message received, agent response sent
     - ERROR: LLM client not initialized, run_agent_turn failures, missing TaskQueue
     - Latency is tracked via AgentTurnResult.latency_ms
 """
@@ -32,13 +31,9 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
-from pathlib import Path
-
-import aiosqlite
 
 from sherman.agent_loop import run_agent_turn
-from sherman.channel import Channel, ChannelRegistry, resolve_system_prompt
-from sherman.conversation import ConversationLog, init_db
+from sherman.channel import Channel, ChannelRegistry
 from sherman.hooks import call_firstresult_hook, get_dependency, hookimpl
 from sherman.llm import LLMClient
 from sherman.queue import SerialQueue
@@ -83,10 +78,8 @@ class AgentPlugin:
     Attributes:
         pm: Plugin manager instance (untyped due to pluggy limitations)
         client: LLM client for chat completions (main)
-        db: SQLite connection for conversation persistence
         tools: Dict mapping tool names to async callable functions
         tool_schemas: List of tool schemas for LLM function calling
-        base_dir: Base path for resolving relative system prompt files
         queues: Per-channel serial queues (dict[channel_id, SerialQueue]).
             Public attribute; IdleMonitorPlugin references this dict directly.
         _registry: ChannelRegistry, resolved in on_start via get_dependency
@@ -97,10 +90,8 @@ class AgentPlugin:
     def __init__(self, pm) -> None:
         self.pm = pm
         self.client: LLMClient | None = None
-        self.db: aiosqlite.Connection | None = None
         self.tools: dict[str, Callable] = {}
         self.tool_schemas: list[dict] = []
-        self.base_dir: Path = Path(".")
         self.queues: dict[str, SerialQueue] = {}
         self._registry: ChannelRegistry | None = None
 
@@ -231,7 +222,16 @@ class AgentPlugin:
             return
 
         # 1. Lazy-initialize conversation on the channel
-        await self._ensure_conversation(channel)
+        if channel.conversation is None:
+            result = await call_firstresult_hook(
+                self.pm, "ensure_conversation", channel=channel,
+            )
+            if result is None:
+                logger.error(
+                    "no persistence plugin initialized conversation for %s",
+                    channel.id,
+                )
+                return
         conv = channel.conversation
 
         # 2. Reset turn_counter on user messages
@@ -382,27 +382,11 @@ class AgentPlugin:
 
         await self._stop_plugin()
 
-    async def _ensure_conversation(self, channel) -> None:
-        """Lazy-initialize ConversationLog on a channel if not present."""
-        if channel.conversation is not None:
-            return
-        conv = ConversationLog(self.db, channel.id)
-        resolved = self._registry.resolve_config(channel)
-        conv.system_prompt = resolve_system_prompt(resolved["system_prompt"], self.base_dir)
-        await conv.load()
-        channel.conversation = conv
-
-        logger.info(
-            "conversation initialized for channel",
-            extra={"channel": channel.id},
-        )
-
     async def _start_plugin(self, config: dict) -> None:
-        """Initialize LLM client, database, and tools."""
+        """Initialize LLM client and tools."""
         self._registry = get_dependency(self.pm, "registry", ChannelRegistry)
         self.tools = {}
         self.tool_schemas = []
-        self.base_dir = config.get("_base_dir", Path("."))
         llm_config = config.get("llm", {})
 
         # Breaking change: llm.main is required.
@@ -414,12 +398,6 @@ class AgentPlugin:
             extra_body=main_config.get("extra_body"),
         )
         await self.client.start()
-
-        # Open SQLite database (only if not already injected for testing)
-        if self.db is None:
-            db_path = config.get("daemon", {}).get("session_db", "sessions.db")
-            self.db = await aiosqlite.connect(db_path)
-            await init_db(self.db)
 
         # Collect tools from all plugins via register_tools hook (sync).
         collected: list = []
@@ -443,9 +421,7 @@ class AgentPlugin:
         )
 
     async def _stop_plugin(self) -> None:
-        """Close LLM client and database."""
+        """Close LLM client."""
         if self.client:
             await self.client.stop()
-        if self.db:
-            await self.db.close()
 

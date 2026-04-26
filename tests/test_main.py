@@ -106,10 +106,10 @@ class TestMainCallsOnStartAndOnStop:
                 "sherman.agent.LLMClient",
                 return_value=mock_client,
             ), patch(
-                "sherman.agent.aiosqlite.connect",
+                "sherman.persistence.aiosqlite.connect",
                 new_callable=AsyncMock,
             ) as mock_connect, patch(
-                "sherman.agent.init_db",
+                "sherman.persistence.init_db",
                 new_callable=AsyncMock,
             ):
                 mock_db = MagicMock()
@@ -180,10 +180,10 @@ class TestRegistryPopulatedBeforeOnStart:
                 "sherman.agent.LLMClient",
                 return_value=mock_client,
             ), patch(
-                "sherman.agent.aiosqlite.connect",
+                "sherman.persistence.aiosqlite.connect",
                 new_callable=AsyncMock,
             ) as mock_connect, patch(
-                "sherman.agent.init_db",
+                "sherman.persistence.init_db",
                 new_callable=AsyncMock,
             ):
                 mock_db = MagicMock()

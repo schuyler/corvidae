@@ -830,10 +830,7 @@ class TestAgentPluginLogging:
         mock_client.start = AsyncMock()
 
         with caplog.at_level(logging.INFO, logger="sherman.agent"), \
-             patch("sherman.agent.LLMClient", return_value=mock_client), \
-             patch("sherman.agent.aiosqlite.connect", new_callable=AsyncMock) as mock_connect, \
-             patch("sherman.agent.init_db", new_callable=AsyncMock):
-            mock_connect.return_value = MagicMock()
+             patch("sherman.agent.LLMClient", return_value=mock_client):
             await plugin.on_start(config={
                 "llm": {"main": {"base_url": "http://localhost:8080", "model": "test"}},
                 "daemon": {"session_db": ":memory:"},
@@ -853,6 +850,7 @@ class TestAgentPluginLogging:
         """Shared setup for on_message tests: returns (plugin, channel)."""
         from sherman.agent import AgentPlugin
         from sherman.hooks import create_plugin_manager
+        from sherman.persistence import PersistencePlugin
 
         pm = create_plugin_manager()
         registry = ChannelRegistry({"system_prompt": "Test.", "max_context_tokens": 8000,
@@ -861,9 +859,14 @@ class TestAgentPluginLogging:
         pm.ahook.send_message = AsyncMock()
         pm.ahook.on_agent_response = AsyncMock()
 
+        # Register PersistencePlugin with injected in-memory DB
+        persistence = PersistencePlugin(pm)
+        persistence.db = db
+        persistence._registry = registry
+        pm.register(persistence, name="persistence")
+
         plugin = AgentPlugin(pm)
         pm.register(plugin, name="agent_loop")
-        plugin.db = db
         plugin._registry = registry
 
         mock_client = MagicMock()
@@ -907,31 +910,29 @@ class TestAgentPluginLogging:
         )
 
     async def test_ensure_conversation_logs_info(self, db, caplog):
-        """_ensure_conversation must emit an INFO log when initializing a new
-        conversation for a channel."""
-        from sherman.agent import AgentPlugin
+        """PersistencePlugin.ensure_conversation must emit an INFO log when initializing
+        a new conversation for a channel."""
         from sherman.hooks import create_plugin_manager
+        from sherman.persistence import PersistencePlugin
 
         pm = create_plugin_manager()
         registry = ChannelRegistry({"system_prompt": "Test.", "max_context_tokens": 8000,
                                      "keep_thinking_in_history": False})
         pm.register(registry, name="registry")
-        pm.ahook.send_message = AsyncMock()
-        pm.ahook.on_agent_response = AsyncMock()
 
-        plugin = AgentPlugin(pm)
-        pm.register(plugin, name="agent_loop")
-        plugin.db = db
-        plugin._registry = registry
+        persistence = PersistencePlugin(pm)
+        persistence.db = db
+        persistence._registry = registry
+        pm.register(persistence, name="persistence")
 
         channel = registry.get_or_create("test", "scope1")
         assert channel.conversation is None
 
-        with caplog.at_level(logging.INFO, logger="sherman.agent"):
-            await plugin._ensure_conversation(channel)
+        with caplog.at_level(logging.INFO, logger="sherman.persistence"):
+            await persistence.ensure_conversation(channel=channel)
 
-        records = [r for r in caplog.records if r.name == "sherman.agent"]
+        records = [r for r in caplog.records if r.name == "sherman.persistence"]
         info_records = [r for r in records if r.levelno == logging.INFO]
         assert info_records, (
-            "_ensure_conversation must emit INFO log when initializing a new conversation"
+            "PersistencePlugin.ensure_conversation must emit INFO log when initializing a new conversation"
         )

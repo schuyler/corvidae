@@ -297,6 +297,19 @@ class AgentSpec:
         """
 
     @hookspec
+    async def ensure_conversation(self, channel: "Channel") -> "bool | None":
+        """Lazy-initialize a ConversationLog on a channel.
+
+        Called before each agent turn when channel.conversation is None.
+        Return True if conversation was initialized (or was already present),
+        None to defer to the next implementation.
+        First non-None result wins (called via call_firstresult_hook).
+
+        Args:
+            channel: The Channel that needs a ConversationLog.
+        """
+
+    @hookspec
     async def before_agent_turn(self, channel: "Channel") -> None:
         """Called before each LLM invocation, after compaction.
 

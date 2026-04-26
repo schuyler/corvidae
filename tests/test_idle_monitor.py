@@ -367,6 +367,7 @@ class TestIdleMonitorPlugin:
         from sherman.idle import IdleMonitorPlugin
         from sherman.agent import AgentPlugin
         from sherman.channel import ChannelRegistry
+        from sherman.persistence import PersistencePlugin
         from unittest.mock import patch, AsyncMock, MagicMock
 
         pm = create_plugin_manager()
@@ -374,6 +375,9 @@ class TestIdleMonitorPlugin:
         pm.register(registry, name="registry")
         pm.ahook.send_message = AsyncMock()
         pm.ahook.on_agent_response = AsyncMock()
+
+        persistence = PersistencePlugin(pm)
+        pm.register(persistence, name="persistence")
 
         agent = AgentPlugin(pm)
         pm.register(agent, name="agent_loop")
@@ -391,8 +395,8 @@ class TestIdleMonitorPlugin:
         mock_client.stop = AsyncMock()
 
         with patch("sherman.agent.LLMClient", return_value=mock_client), \
-             patch("sherman.agent.aiosqlite.connect", new_callable=AsyncMock) as mock_connect, \
-             patch("sherman.agent.init_db", new_callable=AsyncMock):
+             patch("sherman.persistence.aiosqlite.connect", new_callable=AsyncMock) as mock_connect, \
+             patch("sherman.persistence.init_db", new_callable=AsyncMock):
             mock_connect.return_value = AsyncMock()
             await pm.ahook.on_start(config=config)
 
@@ -418,6 +422,7 @@ class TestIdleMonitorPlugin:
         from sherman.idle import IdleMonitorPlugin
         from sherman.agent import AgentPlugin
         from sherman.channel import ChannelRegistry
+        from sherman.persistence import PersistencePlugin
         from unittest.mock import patch, AsyncMock, MagicMock
 
         pm = create_plugin_manager()
@@ -425,6 +430,9 @@ class TestIdleMonitorPlugin:
         pm.register(registry, name="registry")
         pm.ahook.send_message = AsyncMock()
         pm.ahook.on_agent_response = AsyncMock()
+
+        persistence = PersistencePlugin(pm)
+        pm.register(persistence, name="persistence")
 
         agent = AgentPlugin(pm)
         pm.register(agent, name="agent_loop")
@@ -442,8 +450,8 @@ class TestIdleMonitorPlugin:
         mock_client.stop = AsyncMock()
 
         with patch("sherman.agent.LLMClient", return_value=mock_client), \
-             patch("sherman.agent.aiosqlite.connect", new_callable=AsyncMock) as mock_connect, \
-             patch("sherman.agent.init_db", new_callable=AsyncMock):
+             patch("sherman.persistence.aiosqlite.connect", new_callable=AsyncMock) as mock_connect, \
+             patch("sherman.persistence.init_db", new_callable=AsyncMock):
             mock_connect.return_value = AsyncMock()
             await pm.ahook.on_start(config=config)
 
@@ -469,6 +477,7 @@ class TestIdleMonitorPlugin:
         from sherman.idle import IdleMonitorPlugin
         from sherman.agent import AgentPlugin
         from sherman.channel import ChannelRegistry
+        from sherman.persistence import PersistencePlugin
         from unittest.mock import patch, AsyncMock, MagicMock
 
         pm = create_plugin_manager()
@@ -476,6 +485,9 @@ class TestIdleMonitorPlugin:
         pm.register(registry, name="registry")
         pm.ahook.send_message = AsyncMock()
         pm.ahook.on_agent_response = AsyncMock()
+
+        persistence = PersistencePlugin(pm)
+        pm.register(persistence, name="persistence")
 
         agent = AgentPlugin(pm)
         pm.register(agent, name="agent_loop")
@@ -493,8 +505,8 @@ class TestIdleMonitorPlugin:
         mock_client.stop = AsyncMock()
 
         with patch("sherman.agent.LLMClient", return_value=mock_client), \
-             patch("sherman.agent.aiosqlite.connect", new_callable=AsyncMock) as mock_connect, \
-             patch("sherman.agent.init_db", new_callable=AsyncMock):
+             patch("sherman.persistence.aiosqlite.connect", new_callable=AsyncMock) as mock_connect, \
+             patch("sherman.persistence.init_db", new_callable=AsyncMock):
             mock_connect.return_value = AsyncMock()
             await pm.ahook.on_start(config=config)
 

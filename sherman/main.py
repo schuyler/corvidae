@@ -75,6 +75,11 @@ async def main(config_path: str = "agent.yaml") -> None:
     # Pre-register channels from YAML config (must happen before on_start)
     load_channel_config(config, registry)
 
+    # Register PersistencePlugin after registry, before other plugins
+    from sherman.persistence import PersistencePlugin
+    persistence_plugin = PersistencePlugin(pm)
+    pm.register(persistence_plugin, name="persistence")
+
     # Register CoreToolsPlugin before AgentPlugin so tools are collected during on_start
     core_tools = CoreToolsPlugin()
     pm.register(core_tools, name="core_tools")

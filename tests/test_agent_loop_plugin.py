@@ -13,6 +13,7 @@ from sherman.conversation import ConversationLog, init_db
 from sherman.hooks import create_plugin_manager
 
 from sherman.agent import AgentPlugin
+from sherman.persistence import PersistencePlugin
 from sherman.task import TaskPlugin
 from sherman.thinking import ThinkingPlugin
 
@@ -101,6 +102,12 @@ async def _build_plugin_and_channel(agent_defaults=None, channel_config=None):
     pm.register(task_plugin, name="task")
     await task_plugin.on_start(config={})
 
+    # Register PersistencePlugin with injected in-memory DB
+    persistence = PersistencePlugin(pm)
+    persistence.db = db
+    persistence._registry = registry
+    pm.register(persistence, name="persistence")
+
     # Register ThinkingPlugin before AgentPlugin
     thinking_plugin = ThinkingPlugin(pm)
     pm.register(thinking_plugin, name="thinking")
@@ -108,8 +115,6 @@ async def _build_plugin_and_channel(agent_defaults=None, channel_config=None):
     plugin = AgentPlugin(pm)
     pm.register(plugin, name="agent_loop")
 
-    # Inject a pre-opened DB so we don't open a second connection inside on_start.
-    plugin.db = db
     # Inject the registry directly (tests bypass on_start where _registry is resolved).
     plugin._registry = registry
 
@@ -141,13 +146,24 @@ async def _drain(plugin, channel):
 
 
 class TestOnStart:
-    async def test_on_start_creates_client_and_db(self):
-        """on_start with valid config creates LLMClient and opens DB.
-        Verify client.start() is called."""
+    async def test_on_start_creates_client(self):
+        """on_start with valid config creates LLMClient. Verify client.start() is called."""
+        import aiosqlite
+        from sherman.conversation import init_db
+
         pm = create_plugin_manager()
-        pm.register(ChannelRegistry(AGENT_DEFAULTS), name="registry")
+        registry = ChannelRegistry(AGENT_DEFAULTS)
+        pm.register(registry, name="registry")
         pm.ahook.send_message = AsyncMock()
         pm.ahook.on_agent_response = AsyncMock()
+
+        # Register PersistencePlugin with injected in-memory DB
+        db = await aiosqlite.connect(":memory:")
+        await init_db(db)
+        persistence = PersistencePlugin(pm)
+        persistence.db = db
+        persistence._registry = registry
+        pm.register(persistence, name="persistence")
 
         plugin = AgentPlugin(pm)
         pm.register(plugin, name="agent_loop")
@@ -155,12 +171,7 @@ class TestOnStart:
         mock_client = MagicMock()
         mock_client.start = AsyncMock()
 
-        with patch("sherman.agent.LLMClient", return_value=mock_client) as mock_cls, \
-             patch("sherman.agent.aiosqlite.connect", new_callable=AsyncMock) as mock_connect, \
-             patch("sherman.agent.init_db", new_callable=AsyncMock):
-
-            mock_connect.return_value = MagicMock()
-
+        with patch("sherman.agent.LLMClient", return_value=mock_client) as mock_cls:
             await plugin.on_start(config=BASE_CONFIG)
 
         mock_cls.assert_called_once_with(
@@ -170,6 +181,7 @@ class TestOnStart:
             extra_body=None,
         )
         mock_client.start.assert_awaited_once()
+        await db.close()
 
     async def test_on_start_collects_tools(self):
         """Register a test plugin implementing register_tools. Verify tools
@@ -199,10 +211,7 @@ class TestOnStart:
         mock_client = MagicMock()
         mock_client.start = AsyncMock()
 
-        with patch("sherman.agent.LLMClient", return_value=mock_client), \
-             patch("sherman.agent.aiosqlite.connect", new_callable=AsyncMock) as mock_connect, \
-             patch("sherman.agent.init_db", new_callable=AsyncMock):
-            mock_connect.return_value = MagicMock()
+        with patch("sherman.agent.LLMClient", return_value=mock_client):
             await plugin.on_start(config=BASE_CONFIG)
 
         assert "my_test_tool" in plugin.tools
@@ -211,11 +220,22 @@ class TestOnStart:
         assert plugin.tool_schemas[0]["function"]["name"] == "my_test_tool"
 
     async def test_on_start_stores_base_dir_from_config(self):
-        """on_start reads config["_base_dir"] and stores it as plugin.base_dir."""
+        """on_start reads config["_base_dir"] and stores it as PersistencePlugin.base_dir."""
+        import aiosqlite
+        from sherman.conversation import init_db
+
         pm = create_plugin_manager()
-        pm.register(ChannelRegistry(AGENT_DEFAULTS), name="registry")
+        registry = ChannelRegistry(AGENT_DEFAULTS)
+        pm.register(registry, name="registry")
         pm.ahook.send_message = AsyncMock()
         pm.ahook.on_agent_response = AsyncMock()
+
+        db = await aiosqlite.connect(":memory:")
+        await init_db(db)
+        persistence = PersistencePlugin(pm)
+        persistence.db = db
+        persistence._registry = registry
+        pm.register(persistence, name="persistence")
 
         plugin = AgentPlugin(pm)
         pm.register(plugin, name="agent_loop")
@@ -226,20 +246,30 @@ class TestOnStart:
         config_with_base_dir = dict(BASE_CONFIG)
         config_with_base_dir["_base_dir"] = Path("/some/dir")
 
-        with patch("sherman.agent.LLMClient", return_value=mock_client), \
-             patch("sherman.agent.aiosqlite.connect", new_callable=AsyncMock) as mock_connect, \
-             patch("sherman.agent.init_db", new_callable=AsyncMock):
-            mock_connect.return_value = MagicMock()
+        with patch("sherman.agent.LLMClient", return_value=mock_client):
             await plugin.on_start(config=config_with_base_dir)
+        await persistence.on_start(config=config_with_base_dir)
 
-        assert plugin.base_dir == Path("/some/dir")
+        assert persistence.base_dir == Path("/some/dir")
+        await db.close()
 
     async def test_on_start_defaults_base_dir_to_cwd(self):
-        """on_start sets plugin.base_dir to Path(".") when _base_dir is absent."""
+        """on_start sets PersistencePlugin.base_dir to Path(".") when _base_dir is absent."""
+        import aiosqlite
+        from sherman.conversation import init_db
+
         pm = create_plugin_manager()
-        pm.register(ChannelRegistry(AGENT_DEFAULTS), name="registry")
+        registry = ChannelRegistry(AGENT_DEFAULTS)
+        pm.register(registry, name="registry")
         pm.ahook.send_message = AsyncMock()
         pm.ahook.on_agent_response = AsyncMock()
+
+        db = await aiosqlite.connect(":memory:")
+        await init_db(db)
+        persistence = PersistencePlugin(pm)
+        persistence.db = db
+        persistence._registry = registry
+        pm.register(persistence, name="persistence")
 
         plugin = AgentPlugin(pm)
         pm.register(plugin, name="agent_loop")
@@ -247,13 +277,12 @@ class TestOnStart:
         mock_client = MagicMock()
         mock_client.start = AsyncMock()
 
-        with patch("sherman.agent.LLMClient", return_value=mock_client), \
-             patch("sherman.agent.aiosqlite.connect", new_callable=AsyncMock) as mock_connect, \
-             patch("sherman.agent.init_db", new_callable=AsyncMock):
-            mock_connect.return_value = MagicMock()
+        with patch("sherman.agent.LLMClient", return_value=mock_client):
             await plugin.on_start(config=BASE_CONFIG)
+        await persistence.on_start(config=BASE_CONFIG)
 
-        assert plugin.base_dir == Path(".")
+        assert persistence.base_dir == Path(".")
+        await db.close()
 
     async def test_on_start_missing_llm_main_raises(self):
         """Config without llm.main raises a clear error (flat llm block is rejected)."""
@@ -300,10 +329,7 @@ class TestOnStart:
             "daemon": {"session_db": ":memory:"},
         }
 
-        with patch("sherman.agent.LLMClient", return_value=mock_main_client), \
-             patch("sherman.agent.aiosqlite.connect", new_callable=AsyncMock) as mock_connect, \
-             patch("sherman.agent.init_db", new_callable=AsyncMock):
-            mock_connect.return_value = MagicMock()
+        with patch("sherman.agent.LLMClient", return_value=mock_main_client):
             await plugin.on_start(config=config_with_bg)
 
         # AgentPlugin only creates the main client
@@ -481,10 +507,7 @@ class TestOnMessagePersistenceAndLoop:
         mock_client = MagicMock()
         mock_client.start = AsyncMock()
 
-        with patch("sherman.agent.LLMClient", return_value=mock_client) as mock_cls, \
-             patch("sherman.agent.aiosqlite.connect", new_callable=AsyncMock) as mock_connect, \
-             patch("sherman.agent.init_db", new_callable=AsyncMock):
-            mock_connect.return_value = MagicMock()
+        with patch("sherman.agent.LLMClient", return_value=mock_client) as mock_cls:
             await plugin.on_start(config)
 
         # Verify LLMClient was created with extra_body
@@ -516,10 +539,7 @@ class TestOnMessagePersistenceAndLoop:
         mock_client = MagicMock()
         mock_client.start = AsyncMock()
 
-        with patch("sherman.agent.LLMClient", return_value=mock_client) as mock_cls, \
-             patch("sherman.agent.aiosqlite.connect", new_callable=AsyncMock) as mock_connect, \
-             patch("sherman.agent.init_db", new_callable=AsyncMock):
-            mock_connect.return_value = MagicMock()
+        with patch("sherman.agent.LLMClient", return_value=mock_client) as mock_cls:
             await plugin.on_start(config)
 
         # Verify LLMClient was created with extra_body=None
@@ -551,10 +571,7 @@ class TestOnMessagePersistenceAndLoop:
         mock_client = MagicMock()
         mock_client.start = AsyncMock()
 
-        with patch("sherman.agent.LLMClient", return_value=mock_client) as mock_cls, \
-             patch("sherman.agent.aiosqlite.connect", new_callable=AsyncMock) as mock_connect, \
-             patch("sherman.agent.init_db", new_callable=AsyncMock):
-            mock_connect.return_value = MagicMock()
+        with patch("sherman.agent.LLMClient", return_value=mock_client) as mock_cls:
             await plugin.on_start(config)
 
         # Verify LLMClient was created with extra_body=None
@@ -586,10 +603,7 @@ class TestOnMessagePersistenceAndLoop:
         mock_client = MagicMock()
         mock_client.start = AsyncMock()
 
-        with patch("sherman.agent.LLMClient", return_value=mock_client) as mock_cls, \
-             patch("sherman.agent.aiosqlite.connect", new_callable=AsyncMock) as mock_connect, \
-             patch("sherman.agent.init_db", new_callable=AsyncMock):
-            mock_connect.return_value = MagicMock()
+        with patch("sherman.agent.LLMClient", return_value=mock_client) as mock_cls:
             await plugin.on_start(config)
 
         # Verify LLMClient was created with extra_body={}
@@ -819,9 +833,13 @@ class TestOnMessageCompactionAndConfig:
         pm.ahook.send_message = AsyncMock()
         pm.ahook.on_agent_response = AsyncMock()
 
+        persistence = PersistencePlugin(pm)
+        persistence.db = db
+        persistence._registry = registry
+        pm.register(persistence, name="persistence")
+
         plugin = AgentPlugin(pm)
         pm.register(plugin, name="agent_loop")
-        plugin.db = db
         plugin._registry = registry
 
         cfg_a = ChannelConfig(system_prompt="Channel A prompt.")
@@ -852,7 +870,7 @@ class TestOnMessageCompactionAndConfig:
 
 class TestOnStop:
     async def test_on_stop_cleans_up(self):
-        """on_stop closes the LLM client and the DB connection."""
+        """on_stop closes the LLM client."""
         pm = create_plugin_manager()
         pm.register(ChannelRegistry(AGENT_DEFAULTS), name="registry")
 
@@ -863,14 +881,9 @@ class TestOnStop:
         mock_client.stop = AsyncMock()
         plugin.client = mock_client
 
-        mock_db = MagicMock()
-        mock_db.close = AsyncMock()
-        plugin.db = mock_db
-
         await plugin.on_stop()
 
         mock_client.stop.assert_awaited_once()
-        mock_db.close.assert_awaited_once()
 
     async def test_on_stop_cancels_all_queues(self):
         """on_stop cancels all channel queue consumers."""
@@ -885,10 +898,6 @@ class TestOnStop:
         mock_client = MagicMock()
         mock_client.stop = AsyncMock()
         plugin.client = mock_client
-
-        mock_db = MagicMock()
-        mock_db.close = AsyncMock()
-        plugin.db = mock_db
 
         # Create a couple of channel queues on the plugin so we can verify they are stopped.
         from sherman.queue import SerialQueue, QueueItem
@@ -977,17 +986,17 @@ class TestOnMessageToolCallRoundTrip:
 
 
 # ---------------------------------------------------------------------------
-# Section 8 — system prompt resolution via _ensure_conversation (Phase 2.5)
+# Section 8 — system prompt resolution via ensure_conversation hook (Phase 2.5)
 # ---------------------------------------------------------------------------
 
 
 class TestEnsureConversationPromptResolution:
     async def test_ensure_conversation_resolves_file_list(self, tmp_path):
-        """_ensure_conversation resolves a list of prompt file paths into a
-        concatenated string and assigns it to conv.system_prompt.
+        """PersistencePlugin.ensure_conversation resolves a list of prompt file
+        paths into a concatenated string and assigns it to conv.system_prompt.
 
-        Setup: create temp files with known content, set plugin.base_dir to
-        tmp_path, then call on_message to trigger _ensure_conversation.
+        Setup: create temp files with known content, set persistence.base_dir
+        to tmp_path, then call on_message to trigger ensure_conversation.
         """
         soul = tmp_path / "soul.md"
         irc = tmp_path / "irc.md"
@@ -1002,7 +1011,7 @@ class TestEnsureConversationPromptResolution:
         plugin, channel, db = await _build_plugin_and_channel(
             agent_defaults=agent_defaults
         )
-        plugin.base_dir = tmp_path
+        plugin.pm.get_plugin("persistence").base_dir = tmp_path
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("ok"))
@@ -1017,7 +1026,7 @@ class TestEnsureConversationPromptResolution:
         await db.close()
 
     async def test_ensure_conversation_string_prompt_unchanged(self):
-        """String system_prompt passes through _ensure_conversation unchanged.
+        """String system_prompt passes through ensure_conversation unchanged.
 
         This is a regression test — existing string-based config must
         continue to work identically after Phase 2.5.
@@ -1039,7 +1048,7 @@ class TestEnsureConversationPromptResolution:
     async def test_mixed_config_agent_list_channel_string(self, tmp_path):
         """Agent-level list + channel string override: channel string wins.
 
-        resolve_config() gives the channel string; _ensure_conversation should
+        resolve_config() gives the channel string; ensure_conversation should
         pass it through as a string, not attempt file reads.
         """
         # Create a file that would be read if the agent list were used — it
@@ -1057,7 +1066,7 @@ class TestEnsureConversationPromptResolution:
             agent_defaults=agent_defaults,
             channel_config=channel_cfg,
         )
-        plugin.base_dir = tmp_path
+        plugin.pm.get_plugin("persistence").base_dir = tmp_path
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("ok"))
@@ -1074,7 +1083,7 @@ class TestEnsureConversationPromptResolution:
     async def test_mixed_config_agent_string_channel_list(self, tmp_path):
         """Agent-level string + channel list override: channel list wins.
 
-        _ensure_conversation should read the channel's file list and set
+        ensure_conversation should read the channel's file list and set
         conv.system_prompt to the concatenated content.
         """
         f = tmp_path / "channel.md"
@@ -1090,7 +1099,7 @@ class TestEnsureConversationPromptResolution:
             agent_defaults=agent_defaults,
             channel_config=channel_cfg,
         )
-        plugin.base_dir = tmp_path
+        plugin.pm.get_plugin("persistence").base_dir = tmp_path
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("ok"))
