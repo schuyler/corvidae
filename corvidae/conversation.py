@@ -38,6 +38,21 @@ class MessageType(str, enum.Enum):
     CONTEXT = "context"
 
 
+#: Default characters-per-token estimate for rough token counting.
+#: Used by ConversationLog, CompactionPlugin, and PersistencePlugin.
+DEFAULT_CHARS_PER_TOKEN: float = 3.5
+
+
+def _parse_message_rows(rows: list[tuple]) -> list[dict]:
+    """Parse (message_json, message_type) rows into tagged message dicts."""
+    result = []
+    for row in rows:
+        msg = json.loads(row[0])
+        msg["_message_type"] = MessageType(row[1])
+        result.append(msg)
+    return result
+
+
 class ConversationLog:
     """Per-channel conversation history with SQLite persistence and compaction.
 
@@ -54,7 +69,7 @@ class ConversationLog:
         system_prompt: The system prompt prepended by ``build_prompt``.
     """
 
-    def __init__(self, db: aiosqlite.Connection, channel_id: str, chars_per_token: float = 3.5):
+    def __init__(self, db: aiosqlite.Connection, channel_id: str, chars_per_token: float = DEFAULT_CHARS_PER_TOKEN):
         self.db = db
         self.channel_id = channel_id
         self.messages: list[dict] = []
@@ -89,11 +104,7 @@ class ConversationLog:
                 (self.channel_id,),
             ) as cursor:
                 rows = await cursor.fetchall()
-            loaded = []
-            for row in rows:
-                msg = json.loads(row[0])
-                msg["_message_type"] = MessageType(row[1])
-                loaded.append(msg)
+            loaded = _parse_message_rows(rows)
             self.messages = [summary_msg] + loaded
         else:
             async with self.db.execute(
@@ -103,12 +114,7 @@ class ConversationLog:
                 (self.channel_id,),
             ) as cursor:
                 rows = await cursor.fetchall()
-            loaded = []
-            for row in rows:
-                msg = json.loads(row[0])
-                msg["_message_type"] = MessageType(row[1])
-                loaded.append(msg)
-            self.messages = loaded
+            self.messages = _parse_message_rows(rows)
 
         logger.debug(
             "messages loaded from DB",

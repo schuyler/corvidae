@@ -18,7 +18,7 @@ from pathlib import Path
 import aiosqlite
 
 from corvidae.channel import ChannelRegistry, resolve_system_prompt
-from corvidae.conversation import ConversationLog, init_db
+from corvidae.conversation import DEFAULT_CHARS_PER_TOKEN, ConversationLog, init_db
 from corvidae.hooks import get_dependency, hookimpl
 
 logger = logging.getLogger(__name__)
@@ -43,14 +43,14 @@ class PersistencePlugin:
         self.db: aiosqlite.Connection | None = None
         self.base_dir: Path = Path(".")
         self._registry: ChannelRegistry | None = None
-        self._chars_per_token: float = 3.5
+        self._chars_per_token: float = DEFAULT_CHARS_PER_TOKEN
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
         self._registry = get_dependency(self.pm, "registry", ChannelRegistry)
         self.base_dir = config.get("_base_dir", Path("."))
         agent_config = config.get("agent", {})
-        self._chars_per_token = agent_config.get("chars_per_token", 3.5)
+        self._chars_per_token = agent_config.get("chars_per_token", DEFAULT_CHARS_PER_TOKEN)
 
         # Open SQLite database (only if not already injected for testing)
         if self.db is None:

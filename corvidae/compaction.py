@@ -18,6 +18,7 @@ Algorithm:
 import json
 import logging
 
+from corvidae.conversation import DEFAULT_CHARS_PER_TOKEN
 from corvidae.hooks import hookimpl
 
 logger = logging.getLogger(__name__)
@@ -30,8 +31,7 @@ class CompactionPlugin:
         self._compaction_threshold: float = 0.8
         self._compaction_retention: float = 0.5
         self._min_messages: int = 5
-        # chars_per_token: keep in sync with ConversationLog.chars_per_token default.
-        self._chars_per_token: float = 3.5
+        self._chars_per_token: float = DEFAULT_CHARS_PER_TOKEN
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
@@ -39,8 +39,7 @@ class CompactionPlugin:
         self._compaction_threshold = agent_config.get("compaction_threshold", 0.8)
         self._compaction_retention = agent_config.get("compaction_retention", 0.5)
         self._min_messages = agent_config.get("min_messages_to_compact", 5)
-        # chars_per_token: keep in sync with PersistencePlugin/ConversationLog.
-        self._chars_per_token = agent_config.get("chars_per_token", 3.5)
+        self._chars_per_token = agent_config.get("chars_per_token", DEFAULT_CHARS_PER_TOKEN)
 
     @hookimpl
     async def compact_conversation(self, conversation, client, max_tokens):

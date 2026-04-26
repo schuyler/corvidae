@@ -213,11 +213,8 @@ class TaskPlugin:
         completed_buffer = daemon_config.get("completed_task_buffer", 100)
         self.task_queue = TaskQueue(max_workers=max_workers, completed_buffer=completed_buffer)
 
-        async def _complete_wrapper(task: Task, result: str) -> None:
-            return await self._on_task_complete(task, result)
-
         self._worker_task = asyncio.create_task(
-            self.task_queue.run_worker(_complete_wrapper)
+            self.task_queue.run_worker(self._on_task_complete)
         )
         logger.debug("TaskPlugin started")
 

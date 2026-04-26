@@ -26,3 +26,4 @@ include = ["corvidae*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+pythonpath = ["tests"]
