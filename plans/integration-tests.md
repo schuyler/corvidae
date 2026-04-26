@@ -119,7 +119,7 @@ Mirrors `main.py` plugin registration order:
 4. FakeTransportPlugin (named "fake_transport") — replaces CLI + IRC
 5. TaskPlugin (named "task")
 6. SubagentPlugin (named "subagent")
-7. McpClientPlugin (named "mcp_client")
+7. McpClientPlugin (named "mcp")
 8. CompactionPlugin (named "compaction")
 9. ThinkingPlugin (named "thinking")
 10. AgentPlugin (named "agent_loop")
@@ -492,7 +492,7 @@ is non-deterministic. **Fixed in D1 description above.**
 - Add `pytestmark = pytest.mark.timeout(30)` at module level
 - Do NOT use git stash or any destructive git commands in subagents
 - When adding tools in B3/B4 tests, also add schemas to `agent.tool_schemas` for consistency
-- `drain_until_stable` requires 2 consecutive stable iterations; stability defined as no new sent_messages and `task_queue.is_idle()`; `max_iterations=20`
+- `drain_until_stable` requires 2 consecutive stable iterations; stability defined as no new sent_messages and `task_queue.is_idle` (property, not method); includes 5 extra `asyncio.sleep(0)` yields per iteration for event loop settling; `max_iterations=20`
 - D3 uses `max_context_tokens=140` with 56-character messages to calibrate compaction trigger reliably
 - C2 patches `CompactionPlugin._summarize` directly rather than threading summarization through `mock_client.side_effect`
 - `AgentPlugin.on_start` has no `@hookimpl` decorator — the harness calls it via `pm.ahook.on_start`, but the explicit call in `_build_harness` is the only invocation, matching the `main.py` pattern
