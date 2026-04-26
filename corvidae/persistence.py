@@ -6,7 +6,10 @@ agent loop processes its first message.
 
 Config:
     daemon:
-      session_db: sessions.db   # path to SQLite database
+      session_db: sessions.db       # path to SQLite database
+      sqlite_journal_mode: wal      # SQLite journal mode (default "wal");
+                                    # allowed values: delete, truncate, persist,
+                                    # memory, wal, off
 """
 
 import logging
@@ -19,6 +22,8 @@ from corvidae.conversation import ConversationLog, init_db
 from corvidae.hooks import get_dependency, hookimpl
 
 logger = logging.getLogger(__name__)
+
+_ALLOWED_JOURNAL_MODES = {"delete", "truncate", "persist", "memory", "wal", "off"}
 
 
 class PersistencePlugin:
@@ -52,6 +57,18 @@ class PersistencePlugin:
             db_path = config.get("daemon", {}).get("session_db", "sessions.db")
             self.db = await aiosqlite.connect(db_path)
             await init_db(self.db)
+
+        # Set journal mode (WAL by default for concurrent access)
+        journal_mode = config.get("daemon", {}).get("sqlite_journal_mode", "wal").lower()
+        if journal_mode not in _ALLOWED_JOURNAL_MODES:
+            raise ValueError(f"Invalid sqlite_journal_mode: {journal_mode!r}")
+        async with self.db.execute(f"PRAGMA journal_mode={journal_mode}") as cursor:
+            row = await cursor.fetchone()
+        actual_mode = row[0] if row else journal_mode
+        logger.info(
+            "SQLite journal mode set to %s", actual_mode,
+            extra={"journal_mode": actual_mode},
+        )
 
     @hookimpl
     async def on_stop(self) -> None:

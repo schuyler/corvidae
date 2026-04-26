@@ -9,8 +9,10 @@ import time
 import logging
 from unittest.mock import AsyncMock, MagicMock, NonCallableMagicMock, patch
 
+import aiosqlite
 import pytest
 
+from corvidae.conversation import init_db
 from corvidae.hooks import create_plugin_manager, hookimpl
 from corvidae.queue import SerialQueue
 
@@ -394,29 +396,35 @@ class TestIdleMonitorPlugin:
         mock_client.start = AsyncMock()
         mock_client.stop = AsyncMock()
 
-        with patch("corvidae.agent.LLMClient", return_value=mock_client), \
-             patch("corvidae.persistence.aiosqlite.connect", new_callable=AsyncMock) as mock_connect, \
-             patch("corvidae.persistence.init_db", new_callable=AsyncMock):
-            mock_connect.return_value = AsyncMock()
-            # Mirrors new main.py sequencing: broadcast first, then explicit agent start.
-            # AgentPlugin.on_start no longer has @hookimpl after the race-condition fix,
-            # so the broadcast alone is not sufficient to initialize the agent.
-            await pm.ahook.on_start(config=config)
-            await agent.on_start(config=config)
+        # Use a real in-memory DB pre-injected into persistence so the WAL PRAGMA
+        # in PersistencePlugin.on_start works correctly without mocking issues.
+        real_db = await aiosqlite.connect(":memory:")
+        await init_db(real_db)
+        persistence.db = real_db
 
         try:
-            assert idle_plugin._monitor is not None, (
-                "IdleMonitorPlugin._monitor must be set after on_start"
-            )
-            assert idle_plugin._monitor._task is not None, (
-                "IdleMonitor background task must be started after on_start"
-            )
-            assert not idle_plugin._monitor._task.done(), (
-                "IdleMonitor background task must still be running"
-            )
+            with patch("corvidae.agent.LLMClient", return_value=mock_client):
+                # Mirrors new main.py sequencing: broadcast first, then explicit agent start.
+                # AgentPlugin.on_start no longer has @hookimpl after the race-condition fix,
+                # so the broadcast alone is not sufficient to initialize the agent.
+                await pm.ahook.on_start(config=config)
+                await agent.on_start(config=config)
+
+            try:
+                assert idle_plugin._monitor is not None, (
+                    "IdleMonitorPlugin._monitor must be set after on_start"
+                )
+                assert idle_plugin._monitor._task is not None, (
+                    "IdleMonitor background task must be started after on_start"
+                )
+                assert not idle_plugin._monitor._task.done(), (
+                    "IdleMonitor background task must still be running"
+                )
+            finally:
+                if idle_plugin._monitor:
+                    await idle_plugin._monitor.stop()
         finally:
-            if idle_plugin._monitor:
-                await idle_plugin._monitor.stop()
+            await real_db.close()
 
     async def test_idle_monitor_plugin_on_stop_stops_monitor(self):
         """on_stop stops the IdleMonitor background task.
@@ -454,29 +462,35 @@ class TestIdleMonitorPlugin:
         mock_client.start = AsyncMock()
         mock_client.stop = AsyncMock()
 
-        with patch("corvidae.agent.LLMClient", return_value=mock_client), \
-             patch("corvidae.persistence.aiosqlite.connect", new_callable=AsyncMock) as mock_connect, \
-             patch("corvidae.persistence.init_db", new_callable=AsyncMock):
-            mock_connect.return_value = AsyncMock()
-            # New sequencing: broadcast first, then explicit agent start.
-            await pm.ahook.on_start(config=config)
-            await agent.on_start(config=config)
+        # Use a real in-memory DB pre-injected into persistence so the WAL PRAGMA
+        # in PersistencePlugin.on_start works correctly without mocking issues.
+        real_db = await aiosqlite.connect(":memory:")
+        await init_db(real_db)
+        persistence.db = real_db
 
-        monitor = idle_plugin._monitor
-        assert monitor is not None
-        task = monitor._task
-        assert task is not None
+        try:
+            with patch("corvidae.agent.LLMClient", return_value=mock_client):
+                # New sequencing: broadcast first, then explicit agent start.
+                await pm.ahook.on_start(config=config)
+                await agent.on_start(config=config)
 
-        # New shutdown sequencing: agent stops first, then broadcast.
-        await agent.on_stop()
-        await pm.ahook.on_stop()
+            monitor = idle_plugin._monitor
+            assert monitor is not None
+            task = monitor._task
+            assert task is not None
 
-        assert monitor._task is None, (
-            "IdleMonitor._task must be None after on_stop"
-        )
-        assert task.done(), (
-            "IdleMonitor background task must be done after on_stop"
-        )
+            # New shutdown sequencing: agent stops first, then broadcast.
+            await agent.on_stop()
+            await pm.ahook.on_stop()
+
+            assert monitor._task is None, (
+                "IdleMonitor._task must be None after on_stop"
+            )
+            assert task.done(), (
+                "IdleMonitor background task must be done after on_stop"
+            )
+        finally:
+            await real_db.close()
 
     async def test_idle_monitor_plugin_uses_agent_queues(self):
         """IdleMonitorPlugin passes the agent's queues dict reference to IdleMonitor.
@@ -514,22 +528,28 @@ class TestIdleMonitorPlugin:
         mock_client.start = AsyncMock()
         mock_client.stop = AsyncMock()
 
-        with patch("corvidae.agent.LLMClient", return_value=mock_client), \
-             patch("corvidae.persistence.aiosqlite.connect", new_callable=AsyncMock) as mock_connect, \
-             patch("corvidae.persistence.init_db", new_callable=AsyncMock):
-            mock_connect.return_value = AsyncMock()
-            # New sequencing: broadcast first, then explicit agent start.
-            await pm.ahook.on_start(config=config)
-            await agent.on_start(config=config)
+        # Use a real in-memory DB pre-injected into persistence so the WAL PRAGMA
+        # in PersistencePlugin.on_start works correctly without mocking issues.
+        real_db = await aiosqlite.connect(":memory:")
+        await init_db(real_db)
+        persistence.db = real_db
 
         try:
-            assert idle_plugin._monitor is not None
-            assert idle_plugin._monitor._queues is agent.queues, (
-                "IdleMonitor must hold a reference to agent.queues, not a copy"
-            )
+            with patch("corvidae.agent.LLMClient", return_value=mock_client):
+                # New sequencing: broadcast first, then explicit agent start.
+                await pm.ahook.on_start(config=config)
+                await agent.on_start(config=config)
+
+            try:
+                assert idle_plugin._monitor is not None
+                assert idle_plugin._monitor._queues is agent.queues, (
+                    "IdleMonitor must hold a reference to agent.queues, not a copy"
+                )
+            finally:
+                if idle_plugin._monitor:
+                    await idle_plugin._monitor.stop()
         finally:
-            if idle_plugin._monitor:
-                await idle_plugin._monitor.stop()
+            await real_db.close()
 
     async def test_idle_monitor_plugin_not_registered_no_crash(self):
         """When no IdleMonitorPlugin is registered, calling on_idle does not crash.
