@@ -960,14 +960,29 @@ class TestGroupDMultiChannel:
         - Channel B's tool call completed normally (conversation not corrupted)
         - Neither channel's ConversationLog references the other's data
         """
-        # Build a custom harness with small max_context_tokens to trigger compaction.
-        # 256 tokens * 0.8 threshold = ~204.8 token trigger point.
-        # With long_text of 200 chars: token estimate = 200 / 3.5 ≈ 57 tokens per message.
-        # After 5 round-trips (10 messages): ≈570 tokens >> 204.8 → compaction triggers.
+        # Build a custom harness with calibrated max_context_tokens to trigger
+        # compaction exactly at the 6th user message (phase 3), not before.
+        #
+        # Token math (token_estimate = int(total_chars / 3.5)):
+        #   system_prompt = "You are a test agent." = 21 chars
+        #   long_text = "a_msg_" + "x"*50 = 56 chars per user msg
+        #   assistant response = "a response" = 10 chars per assistant msg
+        #
+        #   After 5 round-trips (10 msgs):
+        #     total_chars = 21 + 5*56 + 5*10 = 351
+        #     tokens = int(351 / 3.5) = 100
+        #
+        #   After 6th user msg appended (11 msgs, phase 3):
+        #     total_chars = 21 + 6*56 + 5*10 = 407
+        #     tokens = int(407 / 3.5) = 116
+        #
+        #   With max_context_tokens=140, threshold = 0.8*140 = 112:
+        #     100 < 112 → no compaction after phase 1 ✓
+        #     116 > 112 AND len(msgs)=11 > 5 → compaction fires in phase 3 ✓
         config = make_config(extra={
             "agent": {
                 "system_prompt": "You are a test agent.",
-                "max_context_tokens": 256,
+                "max_context_tokens": 140,
             },
         })
         h = await _build_harness(config)
@@ -1025,7 +1040,7 @@ class TestGroupDMultiChannel:
         chat_side_effect.b_calls = 0
         h.mock_client.chat = chat_side_effect
 
-        long_text = "a_long_msg_" + ("x" * 200)
+        long_text = "a_msg_" + ("x" * 50)
 
         async def fake_summarize(self_inner, client, messages):
             return "channel A summary"
@@ -1033,7 +1048,8 @@ class TestGroupDMultiChannel:
         with patch.object(CompactionPlugin, "_summarize", fake_summarize):
             # Phase 1: Build up channel A's conversation history (5 round-trips).
             # After 5 user messages + 5 assistant responses, the token estimate
-            # will exceed 80% of 256 tokens, so the 6th message triggers compaction.
+            # is 100 tokens, which is below the 112-token threshold (80% of 140).
+            # The 6th message (phase 3) pushes it to 116 tokens and triggers compaction.
             for i in range(5):
                 await h.pm.ahook.on_message(
                     channel=chan_a, sender="user", text=long_text
@@ -1046,6 +1062,9 @@ class TestGroupDMultiChannel:
                 channel=chan_b, sender="user", text="b_msg trigger tool"
             )
             await channel_queue_drain(h, chan_b)
+            # Yield to the event loop so the task worker starts consuming the
+            # gated tool task before we move to phase 3.
+            await asyncio.sleep(0)
 
             # At this point: chan_b's gated_tool is in flight, gate not set.
             # Phase 3: Trigger compaction on channel A by sending a 6th message.
