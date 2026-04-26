@@ -62,7 +62,7 @@ class AgentSpec:
     async def on_stop(self) -> None
     async def on_message(self, channel: Channel, sender: str, text: str) -> None
     async def send_message(self, channel: Channel, text: str, latency_ms: float | None = None) -> None
-    def register_tools(self, tool_registry: ToolRegistry) -> None  # sync; use Tool.from_function(fn) to register
+    def register_tools(self, tool_registry: list) -> None  # sync; plugins append Tool instances or bare callables
     async def on_agent_response(self, channel: Channel, request_text: str, response_text: str) -> None
     async def on_notify(self, channel: Channel, source: str, text: str, tool_call_id: str | None, meta: dict | None) -> None
     async def should_process_message(self, channel: Channel, sender: str, text: str) -> bool | None
@@ -112,7 +112,7 @@ usual way.
 | `on_notify` | broadcast | inject a notification into a channel queue |
 | `should_process_message` | firstresult | `on_message`, before enqueue; False=reject, True=accept, None=no opinion |
 | `on_llm_error` | firstresult | `_process_queue_item`, after LLM exception; return error string or None for default |
-| `compact_conversation` | firstresult | `_process_queue_item`, step 5; return True=handled, None=run default |
+| `compact_conversation` | firstresult | `_process_queue_item`, step 5; return True=handled, None=no compaction this turn |
 | `process_tool_result` | firstresult | `run_agent_loop` (subagent path only, not interactive messages), after tool execution; return replacement string or None for default |
 | `before_agent_turn` | broadcast | `_process_queue_item`, before LLM call; plugins inject context into conversation log |
 | `after_persist_assistant` | broadcast | `_process_queue_item`, after assistant message is persisted; plugins may mutate the in-memory dict |
@@ -262,16 +262,21 @@ Tools that don't declare `_ctx` work without modification.
 **ConversationLog** — per-channel conversation with SQLite persistence:
 
 - `load()` — loads history from DB
-- `append(message)` — appends to in-memory list and persists to DB
+- `append(message, message_type=MessageType.MESSAGE)` — appends to in-memory list and persists to DB
 - `build_prompt()` — returns `[system_msg, *messages]`
 - `token_estimate()` — rough count via `chars / 3.5`
-- `compact_if_needed(client, max_tokens)` — when token estimate reaches
-  80% of limit, summarizes older messages via an LLM call. Retention
-  uses a token-budget backward walk: starting from the most recent
-  message, messages are kept until they would exceed 50% of
-  `max_tokens`; the rest are replaced by a summary. Compaction is
-  durable: summaries are persisted to the DB and summarized messages
-  are deleted, so the working set survives restarts.
+- `replace_with_summary(summary_msg, retain_count)` — replaces older
+  messages with a summary, retaining the `retain_count` most-recent
+  entries. Updates the in-memory list and the DB atomically. The
+  summary is stored as a `SUMMARY`-typed row; summarized messages are
+  deleted from the DB, so the working set survives restarts. Raises
+  `ValueError` if `retain_count` exceeds `len(messages)`.
+- `remove_by_type(message_type)` — removes all entries of the given
+  `MessageType` from both the in-memory list and the DB. Returns the
+  number of entries removed. Raises `ValueError` if called with
+  `MessageType.MESSAGE` or `MessageType.SUMMARY` — those types are
+  managed by compaction. Plugins use this to clean up previously
+  injected `CONTEXT` entries before re-injecting fresh ones.
 
 **Thinking token handling** — three layers:
 - Display: `ThinkingPlugin.transform_display_text` calls `strip_thinking()`
@@ -296,7 +301,7 @@ class MessageType(str, enum.Enum):
 
 `message_type` is a persistence category, orthogonal to conversational
 role (`user`, `assistant`, `tool`, `system`). It controls how compaction
-treats a row: `compact_if_needed` only summarizes `MESSAGE` entries;
+treats a row: `CompactionPlugin` only summarizes `MESSAGE` entries;
 `SUMMARY` and `CONTEXT` rows are retained through compaction.
 
 In-memory message dicts carry a `_message_type` metadata key (set during
@@ -355,8 +360,8 @@ per-channel `SerialQueue`. The queue's consumer calls
 2. Resets `turn_counter` to 0 on user messages
 3. Resolves channel config (including `max_turns`)
 4. Appends the inbound message to conversation log
-5. Calls `compact_conversation` hook (firstresult); falls back to
-   `conv.compact_if_needed()` if no plugin handles it
+5. Calls `compact_conversation` hook (firstresult); if no plugin returns
+   `True`, compaction does not run for this turn
 6. Calls `before_agent_turn` hook (broadcast)
 7. Calls `run_agent_turn` (single LLM invocation)
 8. Persists the assistant message
@@ -366,8 +371,10 @@ per-channel `SerialQueue`. The queue's consumer calls
     - **Tool calls, under limit** (`turn_counter < max_turns`):
       increment counter, dispatch tool calls as Tasks, return without
       sending a response
-    - **Tool calls, at limit**: send fallback text
-      `"(max tool-calling rounds reached)"`
+    - **Tool calls, at limit**: suppresses tool dispatch. Calls
+      `transform_display_text` hook (firstresult) on `result.text`. If the
+      resulting `display_response` is falsy (empty or `None`), sends
+      `"(max tool-calling rounds reached)"` as the response.
     - **No tool calls**: calls `transform_display_text` hook
       (firstresult; `ThinkingPlugin` uses this to strip `<think>` blocks),
       then increments counter, sends text response
@@ -519,6 +526,39 @@ Implements two hooks:
 **Graceful degradation:** without `ThinkingPlugin`, `<think>` blocks
 pass through to the channel and `reasoning_content` remains in the
 in-memory history regardless of `keep_thinking_in_history`.
+
+## CompactionPlugin
+
+`compaction.py` — implements the `compact_conversation` hook to keep
+conversation history within the configured token budget. Registered as
+`"compaction"` in `main.py` before `AgentPlugin`. Logger name:
+`sherman.compaction`.
+
+### compact_conversation
+
+Implements the `compact_conversation` firstresult hook. Returns `True`
+if compaction ran, `None` otherwise.
+
+**Algorithm:**
+
+1. If `conversation.token_estimate() < 80% of max_tokens`, return `None` (skip).
+2. If `len(conversation.messages) <= 5`, return `None` (skip — too few messages to compact).
+3. Backward walk: starting from the most recent message, accumulate messages
+   until their token estimate would exceed 50% of `max_tokens`. The count
+   of accumulated messages is `retain_count`.
+4. If `retain_count >= len(conversation.messages)`, return `None` (all messages fit — no-op).
+5. Filter the older (non-retained) messages to `MESSAGE` type only, excluding
+   any `SUMMARY` entries. Strip `_message_type` metadata before passing to LLM.
+6. Call `_summarize(client, older_clean)` — sends the older messages to the
+   LLM with a system prompt asking for a concise summary. This method is a
+   separate public method so tests can patch it via `patch.object`.
+7. Call `conversation.replace_with_summary(summary_msg, retain_count)`.
+8. Return `True`.
+
+**Graceful degradation:** without `CompactionPlugin`, the
+`compact_conversation` hook returns `None` on every turn and compaction
+does not run. The conversation history will grow without bound until the
+LLM context window is exceeded.
 
 ## Task System
 
