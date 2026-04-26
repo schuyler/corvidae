@@ -380,3 +380,111 @@ class TestGracefulDegradation:
 
         # LLM must NOT have been called
         mock_client.chat.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# TestWALMode
+# ---------------------------------------------------------------------------
+
+
+class TestWALMode:
+    """RED phase: WAL journal_mode tests.
+
+    These tests fail against the current code because on_start does not set
+    the journal_mode after init_db.  They will pass once the feature is
+    implemented.
+    """
+
+    async def test_on_start_sets_wal_journal_mode_by_default(self, tmp_path):
+        """After on_start, the SQLite connection must use WAL journal mode when
+        no daemon.sqlite_journal_mode config key is present."""
+        from corvidae.persistence import PersistencePlugin
+
+        pm = create_plugin_manager()
+        registry = _make_registry()
+        pm.register(registry, name="registry")
+
+        plugin = PersistencePlugin(pm)
+        assert plugin.db is None
+
+        db_path = str(tmp_path / "wal_default.db")
+        config = {"daemon": {"session_db": db_path}}
+
+        await plugin.on_start(config=config)
+
+        async with plugin.db.execute("PRAGMA journal_mode") as cursor:
+            row = await cursor.fetchone()
+        actual_mode = row[0]
+
+        await plugin.db.close()
+
+        assert actual_mode == "wal", (
+            f"Expected journal_mode 'wal' by default, got '{actual_mode}'"
+        )
+
+    async def test_on_start_respects_sqlite_journal_mode_config_override(
+        self, tmp_path
+    ):
+        """When daemon.sqlite_journal_mode is set in config, on_start must
+        apply that mode instead of the default WAL."""
+        from corvidae.persistence import PersistencePlugin
+
+        pm = create_plugin_manager()
+        registry = _make_registry()
+        pm.register(registry, name="registry")
+
+        plugin = PersistencePlugin(pm)
+        assert plugin.db is None
+
+        db_path = str(tmp_path / "delete_mode.db")
+        config = {
+            "daemon": {
+                "session_db": db_path,
+                "sqlite_journal_mode": "delete",
+            }
+        }
+
+        await plugin.on_start(config=config)
+
+        async with plugin.db.execute("PRAGMA journal_mode") as cursor:
+            row = await cursor.fetchone()
+        actual_mode = row[0]
+
+        await plugin.db.close()
+
+        assert actual_mode == "delete", (
+            f"Expected journal_mode 'delete' from config override, got '{actual_mode}'"
+        )
+
+    async def test_on_start_logs_journal_mode_at_info_level(
+        self, tmp_path, caplog
+    ):
+        """on_start must emit an INFO-level log record that includes the
+        resulting journal_mode string."""
+        from corvidae.persistence import PersistencePlugin
+
+        pm = create_plugin_manager()
+        registry = _make_registry()
+        pm.register(registry, name="registry")
+
+        plugin = PersistencePlugin(pm)
+        assert plugin.db is None
+
+        db_path = str(tmp_path / "wal_log.db")
+        config = {"daemon": {"session_db": db_path}}
+
+        with caplog.at_level(logging.INFO, logger="corvidae.persistence"):
+            await plugin.on_start(config=config)
+
+        await plugin.db.close()
+
+        info_records = [
+            r
+            for r in caplog.records
+            if r.levelno == logging.INFO
+            and r.name == "corvidae.persistence"
+            and "wal" in r.getMessage().lower()
+        ]
+        assert info_records, (
+            "Expected an INFO log record from corvidae.persistence mentioning 'wal'"
+        )
