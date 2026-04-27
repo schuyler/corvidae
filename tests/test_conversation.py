@@ -202,7 +202,12 @@ class TestReplaceWithSummary:
             await conv.replace_with_summary(summary_msg, retain_count=10)
 
     async def test_replace_with_summary_db_persistence(self, db):
-        """After replace_with_summary, DB has 1 summary row + correct retained rows."""
+        """After replace_with_summary, DB retains all rows (append-only).
+
+        All 5 original message rows remain in the DB — no rows are deleted.
+        A new summary row is inserted. load() on a fresh ConversationLog returns
+        only the summary + 2 retained messages (the working set).
+        """
         from corvidae.conversation import MessageType
 
         base_ts = time.time()
@@ -235,16 +240,27 @@ class TestReplaceWithSummary:
             row = await cursor.fetchone()
         assert row[0] == 1, f"Expected 1 summary row, got {row[0]}"
 
-        # DB: exactly 2 retained (message) rows remain
+        # DB: all 5 original message rows still exist (append-only — no deletion)
         async with db.execute(
             "SELECT COUNT(*) FROM message_log WHERE channel_id = ? AND message_type = 'message'",
             ("chan1",),
         ) as cursor:
             row = await cursor.fetchone()
-        assert row[0] == 2, f"Expected 2 retained message rows, got {row[0]}"
+        assert row[0] == 5, f"Expected 5 message rows (append-only, no deletion), got {row[0]}"
 
         # In-memory: 3 total (summary + 2 retained)
         assert len(conv.messages) == 3
+
+        # load() on a fresh instance returns working set: summary + 2 retained messages
+        conv2 = ConversationLog(db, channel_id="chan1")
+        await conv2.load()
+        assert len(conv2.messages) == 3, (
+            f"Expected load() to return 3 messages (summary + 2 retained), got {len(conv2.messages)}"
+        )
+        assert conv2.messages[0]["_message_type"] == MessageType.SUMMARY
+        assert all(
+            m["_message_type"] == MessageType.MESSAGE for m in conv2.messages[1:]
+        ), "Expected retained messages to be MESSAGE type"
 
 
 class TestMessageType:
@@ -426,11 +442,9 @@ class TestMessageTypeContext:
         )
 
     async def test_load_includes_context_entries(self, db):
-        """load() must return both MESSAGE and CONTEXT rows (not filter CONTEXT out).
-
-        Current code uses WHERE message_type = 'message', so CONTEXT rows are
-        silently dropped. This test will fail until the WHERE clause changes to
-        != 'summary'.
+        """Regression guard: load() returns both MESSAGE and CONTEXT rows when no
+        summary exists. Verifies the WHERE clause uses message_type != 'summary'
+        so CONTEXT entries are not silently dropped.
         """
         from corvidae.conversation import MessageType
 
@@ -463,11 +477,9 @@ class TestMessageTypeContext:
         )
 
     async def test_load_with_summary_includes_context(self, db):
-        """When a summary row exists, load() must load both MESSAGE and CONTEXT
-        rows with id > summary_id (not just MESSAGE rows).
-
-        This fails until the summary-branch WHERE clause changes from
-        message_type = 'message' to message_type != 'summary'.
+        """Regression guard: when a summary row exists, load() returns the summary
+        plus all MESSAGE and CONTEXT rows that follow it (not just MESSAGE rows).
+        Verifies the summary-branch WHERE clause uses message_type != 'summary'.
         """
         from corvidae.conversation import MessageType
 
@@ -517,12 +529,12 @@ class TestPersistSummaryWithContext:
 
     async def test_replace_with_summary_correct_offset_with_context(self, db):
         """When the retained set contains MESSAGE + CONTEXT entries interspersed,
-        replace_with_summary must use a unified boundary so that MESSAGE rows in the
-        older window are deleted but retained MESSAGE rows are not.
+        replace_with_summary must use a timestamp boundary so that no DB rows are
+        deleted (append-only). load() returns only the correct working set.
 
         Setup: older window = [MSG1, MSG2, MSG3, MSG4, MSG5]; retained window =
-        [CTX6, MSG7, MSG8] (3 non-summary entries). The oldest retained non-summary
-        row is CTX6 (id 6). All MESSAGE rows with id < 6 must be deleted.
+        [CTX6, MSG7, MSG8] (3 non-summary entries). All 7 MESSAGE rows and 1 CONTEXT
+        row remain in the DB. load() returns summary + CTX6 + MSG7 + MSG8.
         """
         from corvidae.conversation import MessageType
 
@@ -573,19 +585,18 @@ class TestPersistSummaryWithContext:
         # Call replace_with_summary with retain_count=3 (ctx + 2 retained msgs)
         await conv.replace_with_summary(summary_msg, retain_count=3)
 
-        # All 5 older MESSAGE rows must be deleted
+        # All 7 MESSAGE rows remain in DB (append-only — no deletion)
         async with db.execute(
             "SELECT COUNT(*) FROM message_log "
             "WHERE channel_id = ? AND message_type = 'message'",
             ("chan1",),
         ) as cursor:
             row = await cursor.fetchone()
-        assert row[0] == 2, (
-            f"Expected 2 retained MESSAGE rows, got {row[0]} "
-            f"(older MESSAGE rows should have been deleted)"
+        assert row[0] == 7, (
+            f"Expected 7 MESSAGE rows (append-only, no deletion), got {row[0]}"
         )
 
-        # The CONTEXT row must still exist (it's in the retained window)
+        # The CONTEXT row still exists (append-only)
         async with db.execute(
             "SELECT COUNT(*) FROM message_log "
             "WHERE channel_id = ? AND message_type = 'context'",
@@ -593,21 +604,32 @@ class TestPersistSummaryWithContext:
         ) as cursor:
             row = await cursor.fetchone()
         assert row[0] == 1, (
-            f"Expected 1 retained CONTEXT row, got {row[0]}"
+            f"Expected 1 CONTEXT row in DB (append-only), got {row[0]}"
         )
+
+        # load() on a fresh instance returns working set: summary + 3 retained entries
+        conv2 = ConversationLog(db, channel_id="chan1")
+        await conv2.load()
+        assert len(conv2.messages) == 4, (
+            f"Expected load() to return 4 messages (summary + 3 retained), got {len(conv2.messages)}"
+        )
+        assert conv2.messages[0]["_message_type"] == MessageType.SUMMARY
+        retained_types = {m["_message_type"] for m in conv2.messages[1:]}
+        assert MessageType.CONTEXT in retained_types, "CONTEXT entry missing from load() working set"
+        assert MessageType.MESSAGE in retained_types, "MESSAGE entry missing from load() working set"
 
     async def test_replace_with_summary_context_only_retained(self, db):
         """When retained set contains only CONTEXT entries (no MESSAGE),
-        replace_with_summary must delete all MESSAGE rows. The CONTEXT entry
-        in the retained window should survive.
+        all rows remain in the DB (append-only). load() returns summary + 1 CONTEXT.
 
-        Setup: retained = [CTX1] (1 non-summary, 0 MESSAGE).
+        Setup: older window = [MSG1..MSG5]; retained = [CTX6] (1 non-summary, 0 MESSAGE).
+        All 5 MESSAGE rows and 1 CONTEXT row remain in DB after compaction.
         """
         from corvidae.conversation import MessageType
 
         base_ts = time.time()
 
-        # Insert 5 MESSAGE rows (older window — all should be deleted)
+        # Insert 5 MESSAGE rows (older window)
         for i in range(5):
             msg = {"role": "user", "content": f"older {i}"}
             await db.execute(
@@ -640,18 +662,18 @@ class TestPersistSummaryWithContext:
         # retain_count=1 (only the CONTEXT entry)
         await conv.replace_with_summary(summary_msg, retain_count=1)
 
-        # All MESSAGE rows must be deleted
+        # All 5 MESSAGE rows still exist (append-only — no deletion)
         async with db.execute(
             "SELECT COUNT(*) FROM message_log "
             "WHERE channel_id = ? AND message_type = 'message'",
             ("chan1",),
         ) as cursor:
             row = await cursor.fetchone()
-        assert row[0] == 0, (
-            f"Expected 0 MESSAGE rows after context-only-retained compaction, got {row[0]}"
+        assert row[0] == 5, (
+            f"Expected 5 MESSAGE rows (append-only, no deletion), got {row[0]}"
         )
 
-        # CONTEXT row must still exist (it's in the retained window)
+        # CONTEXT row still exists (append-only)
         async with db.execute(
             "SELECT COUNT(*) FROM message_log "
             "WHERE channel_id = ? AND message_type = 'context'",
@@ -659,18 +681,32 @@ class TestPersistSummaryWithContext:
         ) as cursor:
             row = await cursor.fetchone()
         assert row[0] == 1, (
-            f"Expected 1 CONTEXT row after context-only-retained compaction, got {row[0]}"
+            f"Expected 1 CONTEXT row in DB (append-only), got {row[0]}"
         )
+
+        # load() on a fresh instance returns summary + 1 CONTEXT (the working set)
+        conv2 = ConversationLog(db, channel_id="chan1")
+        await conv2.load()
+        assert len(conv2.messages) == 2, (
+            f"Expected load() to return 2 messages (summary + 1 CONTEXT), got {len(conv2.messages)}"
+        )
+        assert conv2.messages[0]["_message_type"] == MessageType.SUMMARY
+        assert conv2.messages[1]["_message_type"] == MessageType.CONTEXT
 
     async def test_replace_with_summary_zero_retained(self, db):
         """When retain_count == 0 (retained set is completely empty),
-        replace_with_summary must delete all non-summary rows unconditionally.
+        all rows remain in the DB (append-only). load() returns only the summary.
+
+        The summary timestamp is set to time.time() so no existing rows pass the
+        timestamp > summary_ts filter until new messages arrive.
         """
         from corvidae.conversation import MessageType
 
-        base_ts = time.time()
+        # Use timestamps well in the past so time.time() in replace_with_summary
+        # (used as summary_ts when retain_count=0) is greater than all of them.
+        base_ts = time.time() - 100
 
-        # Insert 5 MESSAGE rows and 2 CONTEXT rows — all should be deleted
+        # Insert 5 MESSAGE rows and 2 CONTEXT rows — all remain in DB (append-only)
         for i in range(5):
             msg = {"role": "user", "content": f"older msg {i}"}
             await db.execute(
@@ -703,38 +739,47 @@ class TestPersistSummaryWithContext:
             ]
         )
 
-        # Must not raise any SQLite error (no OFFSET query at all)
+        # Must not raise any SQLite error
         await conv.replace_with_summary(summary_msg, retain_count=0)
 
-        # All MESSAGE rows must be deleted
+        # All 5 MESSAGE rows still exist in DB (append-only — no deletion)
         async with db.execute(
             "SELECT COUNT(*) FROM message_log "
             "WHERE channel_id = ? AND message_type = 'message'",
             ("chan1",),
         ) as cursor:
             row = await cursor.fetchone()
-        assert row[0] == 0, (
-            f"Expected 0 MESSAGE rows after zero-retained compaction, got {row[0]}"
+        assert row[0] == 5, (
+            f"Expected 5 MESSAGE rows (append-only, no deletion), got {row[0]}"
         )
 
-        # All CONTEXT rows must also be deleted
+        # Both CONTEXT rows still exist in DB (append-only)
         async with db.execute(
             "SELECT COUNT(*) FROM message_log "
             "WHERE channel_id = ? AND message_type = 'context'",
             ("chan1",),
         ) as cursor:
             row = await cursor.fetchone()
-        assert row[0] == 0, (
-            f"Expected 0 CONTEXT rows after zero-retained compaction, got {row[0]}"
+        assert row[0] == 2, (
+            f"Expected 2 CONTEXT rows (append-only, no deletion), got {row[0]}"
         )
+
+        # load() on a fresh instance returns only the summary (nothing passes
+        # the timestamp filter because summary_ts = time.time() > all old rows)
+        conv2 = ConversationLog(db, channel_id="chan1")
+        await conv2.load()
+        assert len(conv2.messages) == 1, (
+            f"Expected load() to return only 1 message (summary), got {len(conv2.messages)}"
+        )
+        assert conv2.messages[0]["_message_type"] == MessageType.SUMMARY
 
     async def test_replace_with_summary_correct_offset_four_args(self, db):
         """Verify replace_with_summary with a non-trivial retained set including
-        mixed types, ensuring the boundary query finds the correct oldest retained row.
+        mixed types. All rows remain in the DB (append-only); load() returns the
+        correct working set: summary + 2 retained CONTEXT entries.
 
-        This is adapted from the original TestPersistSummaryWithContext fourth test
-        which tested _persist_summary with num_retained_total=0. Here we use a
-        distinct scenario: 3 retained (context-only), verifying correct DB state.
+        Setup: older window = [MSG1..MSG4]; retained = [CTX5, CTX6].
+        All 4 MESSAGE rows and 2 CONTEXT rows remain in DB after compaction.
         """
         from corvidae.conversation import MessageType
 
@@ -779,18 +824,18 @@ class TestPersistSummaryWithContext:
         # retain_count=2 (the 2 CONTEXT entries)
         await conv.replace_with_summary(summary_msg, retain_count=2)
 
-        # All MESSAGE rows must be deleted
+        # All 4 MESSAGE rows still exist (append-only — no deletion)
         async with db.execute(
             "SELECT COUNT(*) FROM message_log "
             "WHERE channel_id = ? AND message_type = 'message'",
             ("chan1",),
         ) as cursor:
             row = await cursor.fetchone()
-        assert row[0] == 0, (
-            f"Expected 0 MESSAGE rows after compaction, got {row[0]}"
+        assert row[0] == 4, (
+            f"Expected 4 MESSAGE rows (append-only, no deletion), got {row[0]}"
         )
 
-        # Both CONTEXT rows must survive
+        # Both CONTEXT rows still exist (append-only)
         async with db.execute(
             "SELECT COUNT(*) FROM message_log "
             "WHERE channel_id = ? AND message_type = 'context'",
@@ -798,7 +843,7 @@ class TestPersistSummaryWithContext:
         ) as cursor:
             row = await cursor.fetchone()
         assert row[0] == 2, (
-            f"Expected 2 CONTEXT rows after compaction, got {row[0]}"
+            f"Expected 2 CONTEXT rows in DB (append-only), got {row[0]}"
         )
 
         # Exactly 1 summary row
@@ -812,6 +857,17 @@ class TestPersistSummaryWithContext:
             f"Expected 1 summary row after compaction, got {row[0]}"
         )
 
+        # load() on a fresh instance returns working set: summary + 2 retained CONTEXT entries
+        conv2 = ConversationLog(db, channel_id="chan1")
+        await conv2.load()
+        assert len(conv2.messages) == 3, (
+            f"Expected load() to return 3 messages (summary + 2 CONTEXT), got {len(conv2.messages)}"
+        )
+        assert conv2.messages[0]["_message_type"] == MessageType.SUMMARY
+        assert all(
+            m["_message_type"] == MessageType.CONTEXT for m in conv2.messages[1:]
+        ), "Expected retained entries to be CONTEXT type"
+
 
 class TestRemoveByType:
     """Tests for the new ConversationLog.remove_by_type() method (Phase 2).
@@ -820,12 +876,14 @@ class TestRemoveByType:
     """
 
     async def test_remove_by_type_removes_context(self, db):
-        """remove_by_type(CONTEXT) must remove all CONTEXT entries from both
-        in-memory messages and the DB, and return the count removed."""
+        """remove_by_type(CONTEXT) removes CONTEXT entries from in-memory state only.
+
+        The method no longer touches the DB (append-only). CONTEXT rows remain
+        in the DB after remove_by_type(); only the in-memory working set is updated.
+        """
         from corvidae.conversation import MessageType
 
         conv = ConversationLog(db, channel_id="chan1")
-        base_ts = time.time()
 
         # Append a MESSAGE and two CONTEXT entries
         msg = {"role": "user", "content": "hello"}
@@ -845,19 +903,19 @@ class TestRemoveByType:
 
         # In-memory: only the MESSAGE entry remains
         assert len(conv.messages) == 1, (
-            f"Expected 1 message remaining, got {len(conv.messages)}"
+            f"Expected 1 message remaining in memory, got {len(conv.messages)}"
         )
         assert conv.messages[0]["_message_type"] == MessageType.MESSAGE
 
-        # DB: no CONTEXT rows remain
+        # DB: both CONTEXT rows still exist (remove_by_type is in-memory only)
         async with db.execute(
             "SELECT COUNT(*) FROM message_log "
             "WHERE channel_id = ? AND message_type = 'context'",
             ("chan1",),
         ) as cursor:
             row = await cursor.fetchone()
-        assert row[0] == 0, (
-            f"Expected 0 CONTEXT rows in DB after remove_by_type, got {row[0]}"
+        assert row[0] == 2, (
+            f"Expected 2 CONTEXT rows still in DB (remove_by_type is in-memory only), got {row[0]}"
         )
 
         # DB: MESSAGE row still present
