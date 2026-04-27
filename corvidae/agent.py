@@ -319,22 +319,30 @@ class AgentPlugin:
                 "max_turns reached, suppressing tool calls",
                 extra={"channel": channel.id, "turn_counter": channel.turn_counter},
             )
-            results = await self.pm.ahook.transform_display_text(
-                channel=channel, text=result.text, result_message=result.message,
-            )
-            transformed = resolve_hook_results(
-                results, "transform_display_text", HookStrategy.VALUE_FIRST, pm=self.pm,
-            )
+            try:
+                results = await self.pm.ahook.transform_display_text(
+                    channel=channel, text=result.text, result_message=result.message,
+                )
+                transformed = resolve_hook_results(
+                    results, "transform_display_text", HookStrategy.VALUE_FIRST, pm=self.pm,
+                )
+            except Exception:
+                logger.warning("transform_display_text hook failed", exc_info=True, extra={"channel": channel.id})
+                transformed = None
             display_response = (transformed if transformed is not None else result.text) or MAX_TURNS_FALLBACK_MESSAGE
         else:
             # No tool calls — normal text response
             channel.turn_counter += 1
-            results = await self.pm.ahook.transform_display_text(
-                channel=channel, text=result.text, result_message=result.message,
-            )
-            transformed = resolve_hook_results(
-                results, "transform_display_text", HookStrategy.VALUE_FIRST, pm=self.pm,
-            )
+            try:
+                results = await self.pm.ahook.transform_display_text(
+                    channel=channel, text=result.text, result_message=result.message,
+                )
+                transformed = resolve_hook_results(
+                    results, "transform_display_text", HookStrategy.VALUE_FIRST, pm=self.pm,
+                )
+            except Exception:
+                logger.warning("transform_display_text hook failed", exc_info=True, extra={"channel": channel.id})
+                transformed = None
             display_response = transformed if transformed is not None else result.text
 
         logger.info(
