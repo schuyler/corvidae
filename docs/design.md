@@ -110,12 +110,12 @@ Pure broadcast hooks (e.g. `on_start`, `on_idle`) do not call
 | `on_agent_response` | broadcast | after agent loop produces a text response; no default implementation |
 | `on_notify` | broadcast | inject a notification into a channel queue |
 | `should_process_message` | broadcast / REJECT_WINS | `on_message`, before enqueue; no default implementation; None from empty broadcast allows all messages |
-| `on_llm_error` | broadcast / VALUE_FIRST | `_process_queue_item`, after LLM exception; return error string or None for default |
+| `on_llm_error` | broadcast / VALUE_FIRST | `_run_turn`, after LLM exception; return error string or None for default |
 | `compact_conversation` | broadcast | `_process_queue_item`, step 5; all implementations run for side effects |
 | `process_tool_result` | broadcast / VALUE_FIRST | `run_agent_loop` (subagent path only, not interactive messages), after tool execution; return replacement string or None for default |
 | `before_agent_turn` | broadcast | `_process_queue_item`, before LLM call; plugins inject context into conversation log |
 | `after_persist_assistant` | broadcast | `_process_queue_item`, after assistant message is persisted; plugins may mutate the in-memory dict |
-| `transform_display_text` | broadcast / VALUE_FIRST | `_process_queue_item`, before `send_message`; return transformed text or None to leave unchanged |
+| `transform_display_text` | broadcast / VALUE_FIRST | `_resolve_display_text`, before `send_message`; return transformed text or None to leave unchanged |
 | `on_idle` | broadcast | `IdleMonitor`, when all queues empty and cooldown elapsed |
 | `ensure_conversation` | broadcast / ACCEPT_WINS | `_process_queue_item`, before agent turn when `channel.conversation is None`; return True=initialized, None=defer |
 
@@ -369,38 +369,44 @@ is dropped. Any other result (`True` or `None`) proceeds to enqueue.
 
 `on_message` and `on_notify` both enqueue a `QueueItem` onto a
 per-channel `SerialQueue`. The queue's consumer calls
-`_process_queue_item`, which:
+`_process_queue_item`, which delegates to four helper methods:
 
-1. Broadcasts `ensure_conversation` when `channel.conversation is None`
+1. **`_build_conversation_message`** — converts a `QueueItem` into a
+   conversation message dict and `request_text`. Returns `None` on
+   unrecognized role (logged, item dropped).
+2. Broadcasts `ensure_conversation` when `channel.conversation is None`
    and resolves with `HookStrategy.ACCEPT_WINS`; if no plugin returns
    `True`, logs an error and drops the message
-2. Resets `turn_counter` to 0 on user messages
-3. Resolves channel config (including `max_turns`)
-4. Appends the inbound message to conversation log
-5. Broadcasts `compact_conversation`; all implementations run for side
+3. Resets `turn_counter` to 0 on user messages
+4. Resolves channel config (including `max_turns`)
+5. Appends the inbound message to conversation log
+6. Broadcasts `compact_conversation`; all implementations run for side
    effects; return values are not used
-6. Calls `before_agent_turn` hook (broadcast)
-7. Calls `run_agent_turn` (single LLM invocation)
-8. Persists the assistant message
-9. Calls `after_persist_assistant` hook (broadcast); `ThinkingPlugin`
-   uses this to strip `reasoning_content` from the in-memory copy
-10. Decision point:
+7. Calls `before_agent_turn` hook (broadcast)
+8. **`_run_turn`** — calls `run_agent_turn` (single LLM invocation).
+   On exception, broadcasts `on_llm_error` (resolved with
+   `HookStrategy.VALUE_FIRST`), sends the error message to the channel,
+   and returns `None` to abort processing.
+9. Persists the assistant message
+10. Calls `after_persist_assistant` hook (broadcast); `ThinkingPlugin`
+    uses this to strip `reasoning_content` from the in-memory copy
+11. **`_handle_response`** — decision point:
     - **Tool calls, under limit** (`turn_counter < max_turns`):
       increment counter, dispatch tool calls as Tasks, return without
       sending a response
-    - **Tool calls, at limit**: suppresses tool dispatch. Broadcasts
-      `transform_display_text` on `result.text` and resolves with
-      `HookStrategy.VALUE_FIRST`. If the resulting `display_response` is
-      falsy (empty or `None`), sends `"(max tool-calling rounds reached)"`
-      as the response.
-    - **No tool calls**: broadcasts `transform_display_text` and resolves
-      with `HookStrategy.VALUE_FIRST` (`ThinkingPlugin` uses this to strip
-      `<think>` blocks), then increments counter, sends text response
+    - **Tool calls, at limit**: suppresses tool dispatch. Calls
+      `_resolve_display_text` with `MAX_TURNS_FALLBACK_MESSAGE` as
+      fallback, fires `on_agent_response`, sends text response.
+    - **No tool calls**: increments counter, calls
+      `_resolve_display_text`, fires `on_agent_response`, sends text
+      response
 
-If `run_agent_turn` raises an exception, `on_llm_error` is broadcast and
-resolved with `HookStrategy.VALUE_FIRST`. Its return value is used as the
-error message sent to the channel. If no plugin returns a string, the
-default error message is sent.
+**`_resolve_display_text`** broadcasts `transform_display_text` and
+resolves with `HookStrategy.VALUE_FIRST`. If the hook returns a value,
+that value is used; otherwise falls back to `result.text`. When a
+`fallback` is provided and the resolved text is falsy, the fallback is
+returned instead. Hook exceptions are caught, logged, and the input text
+is returned.
 
 ### Tool call dispatch
 
@@ -424,9 +430,10 @@ loop-variable capture bug.
 
 When a tool task completes, `TaskPlugin` fires `on_notify` with the
 result and `tool_call_id`. `AgentPlugin.on_notify` enqueues a
-notification `QueueItem`. The next `_process_queue_item` call formats
-it as a `role: "tool"` message (if `tool_call_id` is set) or a system
-message, appends it to conversation, and calls `run_agent_turn` again.
+notification `QueueItem`. The next `_process_queue_item` call uses
+`_build_conversation_message` to format it as a `role: "tool"` message
+(if `tool_call_id` is set) or a system message, appends it to
+conversation, and calls `_run_turn` again.
 
 Multi-turn reasoning emerges from this cycle without blocking the
 channel queue.
@@ -469,7 +476,7 @@ is used to resolve relative system prompt file paths.
 ### ensure_conversation
 
 Implements the `ensure_conversation` broadcast hook (resolved with
-`HookStrategy.ACCEPT_WINS`). Called by `AgentPlugin._process_queue_item`
+`HookStrategy.ACCEPT_WINS`). Called by `AgentPlugin._process_queue_item` (step 2)
 when `channel.conversation is None`.
 
 Steps:
