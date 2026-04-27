@@ -277,6 +277,12 @@ class AgentSpec:
             channel: The Channel where the conversation occurred.
             request_text: The original user message that triggered the loop.
             response_text: The final text produced by the agent loop.
+
+        Note:
+            Extension point for observability plugins (logging, metrics,
+            analytics). No built-in plugin implements this hook.
+            Implementations receive the final response after tool dispatch
+            is complete.
         """
 
     @hookspec
@@ -316,6 +322,12 @@ class AgentSpec:
 
         Broadcast hook. All implementations run. Any False vetoes (reject-wins).
         Return False to reject, True to accept, None for no opinion.
+
+        Note:
+            Extension point for message filtering (rate limiting, blocklists,
+            channel muting). No built-in plugin implements this hook. Return
+            False to reject, True to force-accept, None for no opinion.
+            Resolved with REJECT_WINS.
         """
 
     @hookspec

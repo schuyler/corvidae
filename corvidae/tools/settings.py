@@ -39,6 +39,10 @@ class RuntimeSettingsPlugin:
             # Blocklist check runs first — before any mutations.
             blocked = [k for k in settings if k in plugin.blocklist]
             if blocked:
+                logger.warning(
+                    "set_settings: blocked keys rejected",
+                    extra={"blocked": sorted(blocked)},
+                )
                 return (
                     f"Error: the following settings are immutable and cannot be changed: "
                     f"{', '.join(sorted(blocked))}"
@@ -54,6 +58,14 @@ class RuntimeSettingsPlugin:
                     channel.runtime_overrides.pop(key, None)
                 else:
                     channel.runtime_overrides[key] = value
+
+            logger.info(
+                "set_settings: runtime overrides updated",
+                extra={
+                    "channel": channel.id,
+                    "overrides": dict(channel.runtime_overrides),
+                },
+            )
 
             if channel.runtime_overrides:
                 overrides_str = ", ".join(

@@ -595,3 +595,167 @@ class TestOnStart:
         assert plugin._llm_config is not None
         assert plugin._llm_config["model"] == "bg-model"
         assert plugin._llm_config["base_url"] == "http://localhost:8081"
+
+    async def test_on_start_does_not_set_max_tool_result_chars(self):
+        """on_start must NOT independently read max_tool_result_chars from config.
+
+        After the consolidation (item 3), SubagentPlugin.on_start only sets
+        _llm_config. The _max_tool_result_chars attribute is no longer set
+        by on_start — the value is read from AgentPlugin at _launch time.
+
+        This test will FAIL before the fix: currently on_start overwrites the
+        sentinel value with the config-read value.
+        """
+        pm, _ = _make_pm_with_tool_registry()
+        plugin = SubagentPlugin(pm)
+
+        # Force a sentinel value onto the instance AFTER __init__ so we can
+        # detect whether on_start overwrites it from config.
+        sentinel = 99_999
+        plugin._max_tool_result_chars = sentinel
+
+        config_with_custom_limit = {
+            **BASE_CONFIG,
+            "agent": {"max_tool_result_chars": 12_345},
+        }
+        await plugin.on_start(config=config_with_custom_limit)
+
+        # After the fix: on_start must NOT touch _max_tool_result_chars.
+        # The sentinel value must survive. Before the fix, on_start overwrites
+        # it with 12_345 from config, causing this assertion to fail.
+        assert plugin._max_tool_result_chars == sentinel, (
+            "on_start must not independently read max_tool_result_chars from config; "
+            f"expected sentinel {sentinel}, got {plugin._max_tool_result_chars}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# TestMaxToolResultCharsConsolidation
+# ---------------------------------------------------------------------------
+
+
+class TestMaxToolResultCharsConsolidation:
+    """Verify that _launch reads max_tool_result_chars from AgentPlugin, not from
+    SubagentPlugin's own attribute or from config.
+
+    These tests will FAIL before item 3 is implemented because the current
+    code passes plugin._max_tool_result_chars (SubagentPlugin's own copy)
+    to run_agent_loop instead of agent._max_tool_result_chars.
+    """
+
+    async def _launch_and_capture_max_result_chars(
+        self,
+        agent_max_result_chars: int,
+    ) -> int:
+        """Helper: configure AgentPlugin with a custom _max_tool_result_chars,
+        run _launch, and return the max_result_chars value seen by run_agent_loop.
+        """
+        pm, _ = _make_pm_with_tool_registry("shell", "subagent")
+        plugin = SubagentPlugin(pm)
+        await plugin.on_start(config=BASE_CONFIG)
+
+        # Override AgentPlugin's authoritative value directly.
+        agent_plugin = pm.get_plugin("agent_loop")
+        agent_plugin._max_tool_result_chars = agent_max_result_chars
+
+        channel = _make_channel()
+        task_queue = MagicMock(spec=TaskQueue)
+        task_queue.enqueue = AsyncMock()
+
+        ctx = ToolContext(
+            channel=channel,
+            tool_call_id="call-consolidation",
+            task_queue=task_queue,
+        )
+
+        captured = {}
+
+        mock_client = MagicMock()
+        mock_client.start = AsyncMock()
+        mock_client.stop = AsyncMock()
+
+        async def capture_run_agent_loop(client, messages, tools, tool_schemas, **kwargs):
+            captured["max_result_chars"] = kwargs.get("max_result_chars")
+            return "done"
+
+        with patch("corvidae.tools.subagent.LLMClient", return_value=mock_client), \
+             patch("corvidae.tools.subagent.run_agent_loop", side_effect=capture_run_agent_loop), \
+             patch("corvidae.tools.subagent.strip_thinking", side_effect=lambda x: x):
+            await plugin._launch("instructions", "desc", ctx)
+            enqueued_task = task_queue.enqueue.call_args[0][0]
+            await enqueued_task.work()
+
+        return captured["max_result_chars"]
+
+    async def test_launch_passes_agent_max_result_chars_to_run_agent_loop(self):
+        """_launch must pass AgentPlugin._max_tool_result_chars to run_agent_loop.
+
+        This test will FAIL before the fix: SubagentPlugin currently passes its
+        own _max_tool_result_chars (read independently from config at on_start)
+        rather than the value stored on AgentPlugin.
+        """
+        custom_value = 42_000
+        observed = await self._launch_and_capture_max_result_chars(custom_value)
+
+        assert observed == custom_value, (
+            f"run_agent_loop received max_result_chars={observed}, "
+            f"expected AgentPlugin's value {custom_value}. "
+            "SubagentPlugin._launch must read from AgentPlugin._max_tool_result_chars."
+        )
+
+    async def test_launch_uses_agent_value_not_independent_config_read(self):
+        """AgentPlugin's value must win over any independent config read.
+
+        Sets AgentPlugin._max_tool_result_chars to a value that differs from
+        the config default (100_000) and from the sentinel set by __init__.
+        If SubagentPlugin reads config independently it will see 100_000;
+        if it reads AgentPlugin it will see the custom value.
+
+        This test will FAIL before the fix because the current code reads from
+        SubagentPlugin's own attribute (which is set from config in on_start).
+        """
+        # A value that is neither 100_000 (config default) nor the __init__
+        # sentinel — unambiguously identifies the AgentPlugin as the source.
+        agent_authoritative_value = 75_555
+        observed = await self._launch_and_capture_max_result_chars(agent_authoritative_value)
+
+        assert observed == agent_authoritative_value, (
+            f"run_agent_loop received max_result_chars={observed}, "
+            f"expected {agent_authoritative_value} from AgentPlugin. "
+            "SubagentPlugin._launch must not read config independently."
+        )
+
+    async def test_subagent_does_not_have_independent_max_tool_result_chars_after_on_start(self):
+        """After on_start, SubagentPlugin must not carry _max_tool_result_chars
+        as an independently-read attribute.
+
+        Before the fix, on_start sets self._max_tool_result_chars from config.
+        After the fix, on_start does NOT set it — the attribute either does not
+        exist on the instance or retains only the __init__ default (100_000)
+        without any config-sourced update.
+
+        The definitive check: if AgentPlugin._max_tool_result_chars differs
+        from what config would produce, and _launch passes the AgentPlugin
+        value, then SubagentPlugin is not doing an independent read. This
+        structural test verifies the attribute is not set by on_start by
+        checking the attribute was not updated from config.
+        """
+        pm, _ = _make_pm_with_tool_registry("shell", "subagent")
+        plugin = SubagentPlugin(pm)
+
+        # Config carries a custom value; if on_start reads this, the attribute
+        # on SubagentPlugin will be 55_555 after on_start.
+        config_with_custom = {
+            **BASE_CONFIG,
+            "agent": {"max_tool_result_chars": 55_555},
+        }
+        await plugin.on_start(config=config_with_custom)
+
+        # After the fix, on_start must NOT have written 55_555 onto the
+        # SubagentPlugin instance. The attribute should not hold a config-read
+        # value (it should be absent or remain at the __init__ default).
+        # Before the fix this is 55_555, causing the assertion to fail.
+        assert getattr(plugin, "_max_tool_result_chars", None) != 55_555, (
+            "on_start must not independently read max_tool_result_chars from config; "
+            "found config-sourced value 55_555 on SubagentPlugin._max_tool_result_chars"
+        )
