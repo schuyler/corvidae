@@ -105,7 +105,7 @@ These values apply to all channels. Per-channel overrides in the `channels` sect
 | `agent.max_context_tokens` | integer | `24000` | Token budget for conversation history. `CompactionPlugin` compacts when the estimated token count exceeds `compaction_threshold` × this value. |
 | `agent.max_turns` | integer | `10` | Maximum consecutive tool-calling turns per user message before tool dispatch is suppressed. |
 | `agent.keep_thinking_in_history` | boolean | `false` | When `false`, `ThinkingPlugin` strips `reasoning_content` from in-memory assistant messages after they are persisted. Does not affect the DB record. |
-| `agent.max_tool_result_chars` | integer | `100000` | Maximum characters in a tool result string before truncation. Applies to both `AgentPlugin` and `SubagentPlugin`. Truncated results have `[truncated — N chars total]` appended. |
+| `agent.max_tool_result_chars` | integer | `100000` | Maximum characters in a tool result string before truncation. Read by `AgentPlugin`; `SubagentPlugin` retrieves the value from `AgentPlugin` at launch time. Truncated results have `[truncated — N chars total]` appended. |
 | `agent.compaction_threshold` | float | `0.8` | Compaction triggers when `token_estimate / max_context_tokens` exceeds this value. |
 | `agent.compaction_retention` | float | `0.5` | After compaction, retain messages that fit within `compaction_retention × max_context_tokens` tokens, counting from the most recent. |
 | `agent.min_messages_to_compact` | integer | `5` | Skip compaction if the conversation has this many messages or fewer. |

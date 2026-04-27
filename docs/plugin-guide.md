@@ -318,7 +318,7 @@ All tool results are truncated at `MAX_TOOL_RESULT_CHARS` (default 100,000 chara
 
 ```yaml
 agent:
-  max_tool_result_chars: 100000  # read by AgentPlugin and SubagentPlugin
+  max_tool_result_chars: 100000  # read by AgentPlugin; SubagentPlugin reads it from AgentPlugin at launch time
 ```
 
 ### CoreToolsPlugin tools
