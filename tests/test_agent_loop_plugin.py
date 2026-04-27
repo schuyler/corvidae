@@ -117,6 +117,10 @@ class TestOnStart:
             model="test-model",
             api_key=None,
             extra_body=None,
+            max_retries=3,
+            retry_base_delay=2.0,
+            retry_max_delay=60.0,
+            timeout=None,
         )
         mock_client.start.assert_awaited_once()
         await db.close()
@@ -454,6 +458,10 @@ class TestOnMessagePersistenceAndLoop:
             model="test-model",
             api_key=None,
             extra_body=extra_body_value,
+            max_retries=3,
+            retry_base_delay=2.0,
+            retry_max_delay=60.0,
+            timeout=None,
         )
 
         await db.close()
@@ -486,6 +494,10 @@ class TestOnMessagePersistenceAndLoop:
             model="test-model",
             api_key=None,
             extra_body=None,
+            max_retries=3,
+            retry_base_delay=2.0,
+            retry_max_delay=60.0,
+            timeout=None,
         )
 
         await db.close()
@@ -518,6 +530,10 @@ class TestOnMessagePersistenceAndLoop:
             model="test-model",
             api_key=None,
             extra_body=None,
+            max_retries=3,
+            retry_base_delay=2.0,
+            retry_max_delay=60.0,
+            timeout=None,
         )
 
         await db.close()
@@ -550,6 +566,10 @@ class TestOnMessagePersistenceAndLoop:
             model="test-model",
             api_key=None,
             extra_body={},
+            max_retries=3,
+            retry_base_delay=2.0,
+            retry_max_delay=60.0,
+            timeout=None,
         )
 
         await db.close()

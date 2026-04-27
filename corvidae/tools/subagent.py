@@ -81,6 +81,10 @@ class SubagentPlugin:
                 model=llm_cfg["model"],
                 api_key=llm_cfg.get("api_key"),
                 extra_body=llm_cfg.get("extra_body"),
+                max_retries=llm_cfg.get("max_retries", 3),
+                retry_base_delay=llm_cfg.get("retry_base_delay", 2.0),
+                retry_max_delay=llm_cfg.get("retry_max_delay", 60.0),
+                timeout=llm_cfg.get("timeout"),
             )
             await client.start()
             try:

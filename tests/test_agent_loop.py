@@ -894,6 +894,160 @@ async def test_tool_exception_error_message_includes_tool_name():
     )
 
 
+# ---------------------------------------------------------------------------
+# Fix 1: malformed JSON tool call arguments
+# ---------------------------------------------------------------------------
+
+
+def _make_tool_call_malformed_args(call_id: str, name: str, raw_args: str) -> dict:
+    """Build a tool call dict with raw (potentially invalid) JSON arguments."""
+    return {
+        "id": call_id,
+        "function": {
+            "name": name,
+            "arguments": raw_args,
+        },
+    }
+
+
+async def test_malformed_json_tool_args_returns_error():
+    """When the LLM returns a tool call with malformed JSON arguments:
+    - The tool function must NOT be called.
+    - An error tool result message must be appended with content containing
+      'Error: malformed arguments'.
+    - The loop must continue and return the final text response.
+
+    RED: fails until json.loads in agent_loop.py is wrapped in try/except.
+    """
+    tool_fn = AsyncMock(return_value="should not be called")
+    client = MagicMock()
+    client.chat = AsyncMock(
+        side_effect=[
+            _make_tool_call_response(
+                [_make_tool_call_malformed_args("call_bad", "my_tool", "{not valid json")]
+            ),
+            _make_text_response("recovered after error"),
+        ]
+    )
+
+    messages = [{"role": "user", "content": "do thing"}]
+    result = await run_agent_loop(
+        client,
+        messages,
+        tools={"my_tool": tool_fn},
+        tool_schemas=[],
+    )
+
+    # Tool must not be called when arguments are malformed
+    tool_fn.assert_not_awaited()
+
+    # An error tool result must be appended
+    tool_messages = [m for m in messages if m["role"] == "tool"]
+    assert len(tool_messages) == 1, f"Expected 1 tool result message, got {len(tool_messages)}"
+    assert "Error: malformed arguments" in tool_messages[0]["content"], (
+        f"Tool result must contain 'Error: malformed arguments', got: {tool_messages[0]['content']!r}"
+    )
+
+    # Loop must recover and return the final text response
+    assert result == "recovered after error", (
+        f"Expected 'recovered after error', got: {result!r}"
+    )
+
+
+async def test_malformed_json_does_not_skip_subsequent_calls():
+    """When two tool calls are in one turn and the first has malformed JSON:
+    - The first tool must NOT be called.
+    - The second tool MUST be called.
+    - Both tool result messages must be appended.
+
+    RED: fails until the malformed-JSON path uses `continue` to skip to the
+    next call rather than raising and aborting the loop body.
+    """
+    tool_a = AsyncMock(return_value="should not be called")
+    tool_b = AsyncMock(return_value="result_b")
+    client = MagicMock()
+    client.chat = AsyncMock(
+        side_effect=[
+            _make_tool_call_response(
+                [
+                    _make_tool_call_malformed_args("call_bad", "tool_a", "{not valid json"),
+                    _make_tool_call("call_good", "tool_b", {"n": 2}),
+                ]
+            ),
+            _make_text_response("done"),
+        ]
+    )
+
+    messages = [{"role": "user", "content": "run both"}]
+    result = await run_agent_loop(
+        client,
+        messages,
+        tools={"tool_a": tool_a, "tool_b": tool_b},
+        tool_schemas=[],
+    )
+
+    # First tool must not be called
+    tool_a.assert_not_awaited()
+
+    # Second tool must be called
+    tool_b.assert_awaited_once_with(n=2)
+
+    # Both tool result messages must be present
+    tool_messages = [m for m in messages if m["role"] == "tool"]
+    assert len(tool_messages) == 2, (
+        f"Expected 2 tool result messages, got {len(tool_messages)}"
+    )
+
+    # First result is the error for the malformed call
+    assert "Error: malformed arguments" in tool_messages[0]["content"], (
+        f"First tool result must contain 'Error: malformed arguments', got: {tool_messages[0]['content']!r}"
+    )
+
+    # Second result is the successful tool output
+    assert tool_messages[1]["content"] == "result_b", (
+        f"Second tool result must be 'result_b', got: {tool_messages[1]['content']!r}"
+    )
+
+    assert result == "done"
+
+
+async def test_malformed_json_logs_warning(caplog):
+    """When malformed JSON tool call arguments are encountered, a WARNING log
+    record with message 'malformed tool call arguments' must be emitted.
+
+    RED: fails until the warning logger.warning('malformed tool call arguments', ...)
+    call is added to agent_loop.py.
+    """
+    tool_fn = AsyncMock(return_value="irrelevant")
+    client = MagicMock()
+    client.chat = AsyncMock(
+        side_effect=[
+            _make_tool_call_response(
+                [_make_tool_call_malformed_args("call_bad", "my_tool", "{not valid json")]
+            ),
+            _make_text_response("done"),
+        ]
+    )
+
+    messages = [{"role": "user", "content": "go"}]
+    with caplog.at_level(logging.WARNING, logger="corvidae.agent_loop"):
+        await run_agent_loop(
+            client,
+            messages,
+            tools={"my_tool": tool_fn},
+            tool_schemas=[],
+        )
+
+    records = [r for r in caplog.records if r.name == "corvidae.agent_loop"]
+    warning_records = [
+        r for r in records
+        if r.levelno == logging.WARNING and r.getMessage() == "malformed tool call arguments"
+    ]
+    assert warning_records, (
+        "Expected WARNING record with message 'malformed tool call arguments'"
+    )
+
+
 # Case 11: exception from client.chat() → messages unchanged, exception propagates
 @_skip_no_agent_turn
 async def test_run_agent_turn_exception_leaves_messages_unchanged():

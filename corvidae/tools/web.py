@@ -60,10 +60,14 @@ async def web_fetch_with_session(
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=timeout)) as response:
             if response.status != 200:
                 return f"HTTP {response.status}"
-            text = await response.text()
-            if len(text) > max_response_bytes:
-                return text[:max_response_bytes] + TRUNCATION_INDICATOR
-            return text
+            try:
+                raw = await response.content.readexactly(max_response_bytes)
+                encoding = response.get_encoding()
+                text = raw.decode(encoding, errors="replace")
+                return text + TRUNCATION_INDICATOR
+            except asyncio.IncompleteReadError as e:
+                encoding = response.get_encoding()
+                return e.partial.decode(encoding, errors="replace")
     except asyncio.TimeoutError:
         return TIMEOUT_ERROR_TEMPLATE.format(timeout=timeout)
     except aiohttp.ClientError as exc:

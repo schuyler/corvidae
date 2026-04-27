@@ -94,7 +94,10 @@ class TestWebFetchMaxResponse:
 
         mock_response = AsyncMock()
         mock_response.status = 200
-        mock_response.text = AsyncMock(return_value=long_body)
+        # Mock the new API: content.readexactly() and get_encoding()
+        mock_response.content = AsyncMock()
+        mock_response.content.readexactly = AsyncMock(return_value=long_body[:100].encode())
+        mock_response.get_encoding = MagicMock(return_value="utf-8")
 
         mock_response_ctx = AsyncMock()
         mock_response_ctx.__aenter__ = AsyncMock(return_value=mock_response)

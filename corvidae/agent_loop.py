@@ -161,7 +161,22 @@ async def run_agent_loop(
         for call in tool_calls:
             call_id = call["id"]
             fn_name = call["function"]["name"]
-            args = json.loads(call["function"]["arguments"])
+            raw_args = call["function"]["arguments"]
+
+            try:
+                args = json.loads(raw_args)
+            except json.JSONDecodeError:
+                logger.warning(
+                    "malformed tool call arguments",
+                    extra={"tool": fn_name, "raw_args": _truncate(raw_args)},
+                )
+                content = f"Error: malformed arguments for tool '{fn_name}'"
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "content": content,
+                })
+                continue
 
             logger.info(
                 "tool call dispatched",
