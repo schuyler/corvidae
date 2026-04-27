@@ -267,15 +267,32 @@ Tools that don't declare `_ctx` work without modification.
 - `replace_with_summary(summary_msg, retain_count)` — replaces older
   messages with a summary, retaining the `retain_count` most-recent
   entries. Updates the in-memory list and the DB atomically. The
-  summary is stored as a `SUMMARY`-typed row; summarized messages are
-  deleted from the DB, so the working set survives restarts. Raises
+  summary is stored as a `SUMMARY`-typed row whose timestamp encodes
+  the compaction boundary; old rows remain in the DB but become
+  invisible to `load()` via the timestamp filter. Raises
   `ValueError` if `retain_count` exceeds `len(messages)`.
 - `remove_by_type(message_type)` — removes all entries of the given
-  `MessageType` from both the in-memory list and the DB. Returns the
+  `MessageType` from the in-memory list only. Returns the
   number of entries removed. Raises `ValueError` if called with
   `MessageType.MESSAGE` or `MessageType.SUMMARY` — those types are
   managed by compaction. Plugins use this to clean up previously
   injected `CONTEXT` entries before re-injecting fresh ones.
+
+### Append-only log
+
+The `message_log` table is append-only. No rows are ever deleted or
+updated. The DB serves as a complete, immutable audit log — including
+`reasoning_content`.
+
+Compaction (`replace_with_summary`) inserts a new summary row whose
+timestamp encodes the boundary: `oldest_retained_message.timestamp -
+1e-6`. `load()` filters with `WHERE timestamp > summary_ts`, returning
+only the summary plus retained and new messages. Old rows remain in the
+DB but are invisible to the working set.
+
+`remove_by_type()` operates on the in-memory message list only. Old
+CONTEXT rows remain in the DB but become invisible after the next
+compaction (their timestamps fall below the summary boundary).
 
 **Thinking token handling** — three layers:
 - Display: `ThinkingPlugin.transform_display_text` calls `strip_thinking()`

@@ -80,11 +80,12 @@ class ConversationLog:
         """Load messages from DB for this channel, ordered by id.
 
         If a summary row exists, loads only that summary plus non-summary rows
-        with a higher id. Otherwise loads all rows ordered by timestamp then id.
+        whose timestamp is after the summary boundary (timestamp > summary_ts).
+        Otherwise loads all rows ordered by timestamp then id.
         Logs the message count at DEBUG level.
         """
         async with self.db.execute(
-            "SELECT id, message FROM message_log "
+            "SELECT id, message, timestamp FROM message_log "
             "WHERE channel_id = ? AND message_type = 'summary' "
             "ORDER BY id DESC LIMIT 1",
             (self.channel_id,),
@@ -92,16 +93,15 @@ class ConversationLog:
             summary_row = await cursor.fetchone()
 
         if summary_row:
-            summary_id, summary_message = summary_row
+            _, summary_message, summary_ts = summary_row
             summary_msg = json.loads(summary_message)
             summary_msg["_message_type"] = MessageType.SUMMARY
-            # Load all non-summary rows — summarized messages are deleted
-            # during compaction, so only retained + new messages remain.
+            # Load non-summary rows — rows with timestamp <= summary_ts are excluded.
             async with self.db.execute(
                 "SELECT message, message_type FROM message_log "
                 "WHERE channel_id = ? AND message_type != 'summary' "
-                "ORDER BY id",
-                (self.channel_id,),
+                "AND timestamp > ? ORDER BY id",
+                (self.channel_id, summary_ts),
             ) as cursor:
                 rows = await cursor.fetchall()
             loaded = _parse_message_rows(rows)
@@ -193,57 +193,33 @@ class ConversationLog:
         # Set in-memory state BEFORE DB writes — DB logic reads len(self.messages) - 1.
         self.messages = [tagged] + retained
 
-        # --- DB persistence (inlined from _persist_summary) ---
+        # --- DB persistence ---
         # Count all non-summary entries in the retained set.
         # self.messages = [summary_msg] + retained after the assignment above.
-        # retained can include MESSAGE, CONTEXT, and any future non-summary types.
         num_retained_total = len(self.messages) - 1
 
-        if num_retained_total == 0:
-            # No non-summary entries retained — delete all non-summary rows unconditionally.
-            await self.db.execute(
-                "DELETE FROM message_log "
-                "WHERE channel_id = ? AND message_type != 'summary'",
-                (self.channel_id,),
-            )
-        else:
-            # Find the id of the oldest retained non-summary row.
-            # IDs are assigned in insertion order and self.messages is maintained
-            # in id order, so the oldest retained entry corresponds to OFFSET
-            # num_retained_total - 1 from the newest non-summary row.
+        if num_retained_total > 0:
+            # Find the timestamp of the oldest retained message.
             async with self.db.execute(
-                "SELECT id FROM message_log "
+                "SELECT timestamp FROM message_log "
                 "WHERE channel_id = ? AND message_type != 'summary' "
                 "ORDER BY id DESC LIMIT 1 OFFSET ?",
                 (self.channel_id, num_retained_total - 1),
             ) as cursor:
                 row = await cursor.fetchone()
-
             if row:
-                oldest_retained_id = row[0]
-                # Delete all non-summary rows before the retained window.
-                await self.db.execute(
-                    "DELETE FROM message_log "
-                    "WHERE channel_id = ? AND message_type != 'summary' AND id < ?",
-                    (self.channel_id, oldest_retained_id),
-                )
+                summary_ts = row[0] - 1e-6
             else:
-                logger.warning(
-                    "replace_with_summary: boundary query returned no row; "
-                    "skipping pre-retained deletion (possible SUMMARY-in-retained edge case)",
-                    extra={"channel_id": self.channel_id, "num_retained_total": num_retained_total},
-                )
+                summary_ts = time.time()
+        else:
+            # Everything compacted — summary timestamp = now, so nothing
+            # passes the filter until new messages arrive.
+            summary_ts = time.time()
 
-        # Delete old summary rows and insert the new one.
-        await self.db.execute(
-            "DELETE FROM message_log "
-            "WHERE channel_id = ? AND message_type = 'summary'",
-            (self.channel_id,),
-        )
         await self.db.execute(
             "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
             "VALUES (?, ?, ?, ?)",
-            (self.channel_id, json.dumps(summary_msg), time.time(), MessageType.SUMMARY),
+            (self.channel_id, json.dumps(summary_msg), summary_ts, MessageType.SUMMARY),
         )
         await self.db.commit()
 
@@ -272,11 +248,13 @@ class ConversationLog:
         return [{"role": "system", "content": self.system_prompt}] + cleaned
 
     async def remove_by_type(self, message_type: MessageType) -> int:
-        """Remove all entries of a given type from both memory and DB.
+        """Remove all entries of a given type from in-memory state only.
 
         Returns the number of entries removed. Plugins use this to clean up
         injected entries before re-injecting fresh ones, preventing
-        unbounded accumulation.
+        unbounded accumulation. Old rows remain in the DB but become
+        invisible after the next compaction (their timestamps fall below
+        the summary boundary).
 
         Raises ValueError if message_type is MESSAGE or SUMMARY — those types
         are managed by compaction, not by this method.
@@ -298,12 +276,6 @@ class ConversationLog:
             if m.get("_message_type") != message_type
         ]
         removed = before - len(self.messages)
-        await self.db.execute(
-            "DELETE FROM message_log "
-            "WHERE channel_id = ? AND message_type = ?",
-            (self.channel_id, message_type),
-        )
-        await self.db.commit()
         logger.debug(
             "removed entries by type",
             extra={

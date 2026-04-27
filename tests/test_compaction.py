@@ -353,12 +353,18 @@ class TestDurableCompaction:
             assert "message_type" in column_names
 
     async def test_compact_persists_summary_row(self, db):
-        """After compaction, exactly one message_type='summary' row exists; retained count matches token-walk."""
-        # Token math: 10 messages x 35 chars, max_tokens=50.
-        # token_estimate = int(350/3.5) = 100 ≥ 40 → triggers; len=10>5 → proceeds.
-        # retain_budget=25; each msg = 10 tokens.
-        # Walk: count=1(10), count=2(20), 30>25 AND count>0 → break. retain_count=2.
-        # After compaction: conv.messages = [summary, msgs[-2], msgs[-1]] → 3 messages.
+        """After compaction, 11 total rows (10 original + 1 summary); load() returns 3.
+
+        Append-only: original rows are NOT deleted. The summary row is added
+        alongside the originals. load() uses timestamp filtering to return only
+        the working set: summary + 2 retained.
+
+        Token math: 10 messages x 35 chars, max_tokens=50.
+        token_estimate = int(350/3.5) = 100 ≥ 40 → triggers; len=10>5 → proceeds.
+        retain_budget=25; each msg = 10 tokens.
+        Walk: count=1(10), count=2(20), 30>25 AND count>0 → break. retain_count=2.
+        After compaction: conv.messages = [summary, msgs[-2], msgs[-1]] → 3 messages.
+        """
         conv = ConversationLog(db, channel_id="chan1")
         conv.system_prompt = ""
         base_ts = time.time()
@@ -382,12 +388,19 @@ class TestDurableCompaction:
             conversation=conv, client=mock_client, max_tokens=50
         )
 
+        # Append-only: all 10 original rows + 1 summary = 11 total rows in DB
+        async with db.execute(
+            "SELECT COUNT(*) FROM message_log WHERE channel_id = ?",
+            ("chan1",),
+        ) as cursor:
+            row = await cursor.fetchone()
+        assert row[0] == 11, f"Expected 11 total rows (10 original + 1 summary), got {row[0]}"
+
         async with db.execute(
             "SELECT COUNT(*) FROM message_log WHERE channel_id = ? AND message_type = 'summary'",
             ("chan1",),
         ) as cursor:
             row = await cursor.fetchone()
-
         assert row[0] == 1, f"Expected 1 summary row, got {row[0]}"
 
         # Verify the persisted message content is the summary
@@ -401,37 +414,69 @@ class TestDurableCompaction:
             "content": "[Summary of earlier conversation]\nmock summary",
         }
 
-        # Verify retained count: token-based walk retains 2 messages (not 20)
+        # Verify in-memory state
         assert len(conv.messages) == 3, (
             f"Expected 3 messages (1 summary + 2 retained), got {len(conv.messages)}"
         )
 
-    async def test_load_returns_summary_plus_remaining_messages(self, db):
-        """load() must return the summary row + all non-summary rows.
+        # Verify load() on a fresh ConversationLog returns the correct 3 messages
+        conv2 = ConversationLog(db, channel_id="chan1")
+        await conv2.load()
+        assert len(conv2.messages) == 3, (
+            f"Expected load() to return 3 messages (summary + 2 retained), got {len(conv2.messages)}"
+        )
+        from corvidae.conversation import MessageType
+        assert conv2.messages[0]["_message_type"] == MessageType.SUMMARY
 
-        After compaction, replace_with_summary deletes summarized messages, so
-        only retained + new messages remain alongside the summary row.
+    async def test_load_returns_summary_plus_remaining_messages(self, db):
+        """load() must return summary + messages with timestamp > summary_ts.
+
+        Append-only: the summary's timestamp is set to oldest_retained.ts - 1e-6.
+        load() uses WHERE timestamp > summary_ts to filter. The retained message
+        has a timestamp GREATER than summary_ts so it passes the filter. An extra
+        "old" message below the summary boundary must be excluded.
+
+        Setup:
+          - old_msg at base_ts + 0.5  (below summary_ts → excluded)
+          - retained_msg at base_ts + 2.0  (timestamp > summary_ts → included)
+          - summary at summary_ts = base_ts + 2.0 - 1e-6  (i.e. base_ts + 1.999999)
+          - new_msg at base_ts + 3.0  (timestamp > summary_ts → included)
+
+        load() must return [summary, retained_msg, new_msg] — 3 items, NOT 4.
+        Current code (no timestamp filter) returns 4, making this test RED.
+        After implementation (timestamp filter), old_msg is excluded → passes.
         """
         base_ts = time.time()
 
         summary_msg = {"role": "assistant", "content": "[Summary of earlier conversation]\nthe summary"}
+        old_msg = {"role": "user", "content": "old message that should be excluded"}
         retained_msg = {"role": "user", "content": "retained message"}
         new_msg = {"role": "assistant", "content": "new message"}
 
-        # Retained message (lower id than summary — this is normal after compaction)
+        # In append-only, the summary timestamp = oldest_retained.ts - 1e-6.
+        # retained_msg is the oldest retained, so summary_ts < retained_msg timestamp.
+        retained_ts = base_ts + 2.0
+        summary_ts = retained_ts - 1e-6  # boundary: exactly one microsecond before retained
+
+        # Old message BELOW the summary boundary — must be excluded by timestamp filter
         await db.execute(
             "INSERT INTO message_log (channel_id, message, timestamp, message_type) VALUES (?, ?, ?, 'message')",
-            ("chan1", json.dumps(retained_msg), base_ts),
+            ("chan1", json.dumps(old_msg), base_ts + 0.5),
         )
-        # Summary row
+        # Retained message inserted before summary (lower id), but timestamp > summary_ts
+        await db.execute(
+            "INSERT INTO message_log (channel_id, message, timestamp, message_type) VALUES (?, ?, ?, 'message')",
+            ("chan1", json.dumps(retained_msg), retained_ts),
+        )
+        # Summary row with boundary timestamp
         await db.execute(
             "INSERT INTO message_log (channel_id, message, timestamp, message_type) VALUES (?, ?, ?, 'summary')",
-            ("chan1", json.dumps(summary_msg), base_ts + 1),
+            ("chan1", json.dumps(summary_msg), summary_ts),
         )
         # New message added after compaction
         await db.execute(
             "INSERT INTO message_log (channel_id, message, timestamp, message_type) VALUES (?, ?, ?, 'message')",
-            ("chan1", json.dumps(new_msg), base_ts + 2),
+            ("chan1", json.dumps(new_msg), base_ts + 3.0),
         )
         await db.commit()
 
@@ -439,11 +484,12 @@ class TestDurableCompaction:
         conv = ConversationLog(db, channel_id="chan1")
         await conv.load()
 
+        # Must return 3 (summary + retained + new), NOT 4 (current no-filter code returns 4).
         expected_summary = {**summary_msg, "_message_type": MessageType.SUMMARY}
         expected_retained = {**retained_msg, "_message_type": MessageType.MESSAGE}
         expected_new = {**new_msg, "_message_type": MessageType.MESSAGE}
         assert conv.messages == [expected_summary, expected_retained, expected_new], (
-            f"Expected [summary, retained, new], got: {conv.messages}"
+            f"Expected [summary, retained, new] (3 items, old_msg excluded), got: {conv.messages}"
         )
 
     async def test_load_without_summary_loads_all(self, db):
@@ -469,11 +515,11 @@ class TestDurableCompaction:
         assert conv.messages == expected
 
     async def test_repeated_compaction_load_correct(self, db):
-        """After two compactions, load() returns only the newest summary + its retained messages.
+        """After two compactions, both summary rows accumulate in DB; load() uses only the latest.
 
-        Simulates post-first-compaction DB state (summarized messages already
-        deleted by replace_with_summary), then triggers a second compaction and
-        verifies load() correctness.
+        Append-only: old summary rows are NOT deleted. Each compaction INSERTs a
+        new summary. load() selects the summary with the highest id (ORDER BY id DESC
+        LIMIT 1) and uses its timestamp as the filter boundary.
 
         Token math:
           - "a" * 35 → int(35/3.5) = 10 tokens each.
@@ -481,19 +527,21 @@ class TestDurableCompaction:
           - Walk: count=1(10), count=2(20), 30>25 AND count>0 → break. retain_count=2.
 
         Post-first-compaction DB (simulated):
-          - 2 retained messages (ids 1-2) + first_summary (id 3) + 4 extra messages (ids 4-7).
-          - load() returns [first_summary, retained[0], retained[1], extra[0..3]] = 7 msgs.
-          - token_estimate = int((48 + 6*35)/3.5) = 73 ≥ 40 → triggers; len=7>5.
+          - 2 retained messages at base_ts+0, base_ts+1
+          - first_summary at first_summary_ts = base_ts+0 - 1e-6 (boundary before retained[0])
+          - 4 extra messages at extra_base_ts+0 .. extra_base_ts+3
+          load() returns [first_summary, retained[0], retained[1], extra[0..3]] = 7 msgs.
+          token_estimate = int((48 + 6*35)/3.5) = 73 ≥ 40 → triggers; len=7>5.
 
         Second compaction:
           - Walk: extra[3](10), extra[2](20), extra[1](30>25) → break. retain_count=2.
-          - replace_with_summary deletes old rows, inserts second_summary.
-          - load() returns [second_summary, extra[2], extra[3]] = 3 msgs.
+          - Inserts second_summary (append-only, first_summary stays).
+          - load() uses second_summary's timestamp as boundary → returns [second_summary, extra[2], extra[3]] = 3 msgs.
         """
         base_ts = time.time()
 
         from corvidae.conversation import MessageType
-        # 2 retained messages from first compaction (simulating cleaned-up state)
+        # 2 retained messages from first compaction
         retained_messages = [
             {"role": "user", "content": "a" * 35}
             for _ in range(2)
@@ -504,17 +552,18 @@ class TestDurableCompaction:
                 ("chan1", json.dumps(msg), base_ts + i),
             )
 
-        # First summary row
+        # First summary row: boundary = oldest_retained.ts - 1e-6 = base_ts - 1e-6
         first_summary_msg = {
             "role": "assistant",
             "content": "[Summary of earlier conversation]\nfirst summary",
         }
+        first_summary_ts = base_ts - 1e-6
         await db.execute(
             "INSERT INTO message_log (channel_id, message, timestamp, message_type) VALUES (?, ?, ?, 'summary')",
-            ("chan1", json.dumps(first_summary_msg), base_ts + 5),
+            ("chan1", json.dumps(first_summary_msg), first_summary_ts),
         )
 
-        # 4 extra messages added after first compaction
+        # 4 extra messages added after first compaction (timestamps after retained)
         extra_messages = [
             {"role": "user", "content": "a" * 35}
             for _ in range(4)
@@ -532,6 +581,7 @@ class TestDurableCompaction:
         await conv.load()
 
         # load() returns: [first_summary] + [retained[0], retained[1], extra[0..3]] = 7 msgs
+        # (all have timestamp > first_summary_ts)
         assert len(conv.messages) == 7, (
             f"Expected 7 messages after load(), got {len(conv.messages)}"
         )
@@ -560,42 +610,69 @@ class TestDurableCompaction:
         assert conv.messages[1:] == expected_retained
         assert len(conv.messages) == 3
 
-        # Verify load() on a fresh ConversationLog
+        # Append-only: both summary rows now exist in DB
+        async with db.execute(
+            "SELECT COUNT(*) FROM message_log WHERE channel_id = ? AND message_type = 'summary'",
+            ("chan1",),
+        ) as cursor:
+            row = await cursor.fetchone()
+        assert row[0] == 2, (
+            f"Expected 2 summary rows in DB (append-only accumulation), got {row[0]}"
+        )
+
+        # Verify load() on a fresh ConversationLog uses only the latest summary
         conv2 = ConversationLog(db, channel_id="chan1")
         await conv2.load()
 
-        assert conv2.messages[0] == second_summary_msg_tagged
+        assert conv2.messages[0] == second_summary_msg_tagged, (
+            f"Expected latest summary as first message, got: {conv2.messages[0]}"
+        )
         assert len(conv2.messages) == 3, (
-            f"Expected 3 messages (1 summary + 2 retained), got: {len(conv2.messages)}"
+            f"Expected 3 messages (latest summary + 2 retained), got: {len(conv2.messages)}"
         )
         assert first_summary_msg_tagged not in conv2.messages
 
 
-class TestIdBasedSummaryOrdering:
-    async def test_load_uses_id_not_timestamp_for_summary_cutoff(self, db):
-        """load() must use id-based cutoff, not timestamp, when ordering after a summary.
+class TestTimestampBasedSummaryOrdering:
+    """Tests verifying that load() uses timestamp-based filtering for append-only compaction.
 
-        Insert messages with identical timestamps but different IDs. Insert a summary
-        row with the same timestamp as those messages. With the current timestamp-based
-        code, load() uses ``timestamp > summary_ts``, which means messages with
-        ``timestamp == summary_ts`` are excluded. The fix uses ``id > summary_id`` so
-        messages inserted after the summary are correctly included regardless of their
-        timestamp.
+    In the append-only design, the summary row's timestamp encodes the compaction
+    boundary: summary_ts = oldest_retained.timestamp - 1e-6. load() uses
+    WHERE timestamp > summary_ts to return the correct working set. Old rows
+    (timestamp <= summary_ts) remain in the DB but are excluded by the filter.
+    """
+
+    async def test_load_uses_timestamp_for_summary_cutoff(self, db):
+        """load() must use timestamp-based filtering (timestamp > summary_ts).
+
+        Setup: summary with timestamp = shared_ts - 1e-6; two messages with
+        timestamp = shared_ts (pass filter); one OLD message at shared_ts - 2e-6
+        (below summary boundary, must be excluded).
+
+        load() must return [summary, msg1, msg2] — 3 items, NOT 4.
+        Current code (no timestamp filter) returns 4, making this test RED.
+        After implementation (timestamp filter), old_msg is excluded → passes.
         """
-        shared_ts = 1_000_000.0  # fixed timestamp — all rows share it
+        shared_ts = 1_000_000.0
+        summary_ts = shared_ts - 1e-6
 
         summary_msg = {"role": "assistant", "content": "[Summary of earlier conversation]\nthe summary"}
+        old_msg = {"role": "user", "content": "old message below summary boundary"}
         msg_after_1 = {"role": "user", "content": "after summary 1"}
         msg_after_2 = {"role": "assistant", "content": "after summary 2"}
 
         from corvidae.conversation import MessageType
-        # Insert the summary row first so it gets a lower id
+        # Insert an old message BELOW the summary boundary — must be excluded by filter
+        await db.execute(
+            "INSERT INTO message_log (channel_id, message, timestamp, message_type) VALUES (?, ?, ?, 'message')",
+            ("chan1", json.dumps(old_msg), shared_ts - 2e-6),
+        )
+        # Insert the summary with boundary timestamp
         await db.execute(
             "INSERT INTO message_log (channel_id, message, timestamp, message_type) VALUES (?, ?, ?, 'summary')",
-            ("chan1", json.dumps(summary_msg), shared_ts),
+            ("chan1", json.dumps(summary_msg), summary_ts),
         )
-        # Insert two non-summary messages with the *same* timestamp as the summary.
-        # These have higher ids and should be returned by load() after the fix.
+        # Insert two messages with timestamp = shared_ts — these should pass the filter
         await db.execute(
             "INSERT INTO message_log (channel_id, message, timestamp, message_type) VALUES (?, ?, ?, 'message')",
             ("chan1", json.dumps(msg_after_1), shared_ts),
@@ -609,25 +686,24 @@ class TestIdBasedSummaryOrdering:
         conv = ConversationLog(db, channel_id="chan1")
         await conv.load()
 
-        # After the fix (id-based): [summary, msg_after_1, msg_after_2]
+        # Timestamp-based: old_msg (ts < summary_ts) excluded; both after-messages included.
+        # Must return 3 (summary + 2 messages), NOT 4 (which current no-filter code returns).
         expected = [
             {**summary_msg, "_message_type": MessageType.SUMMARY},
             {**msg_after_1, "_message_type": MessageType.MESSAGE},
             {**msg_after_2, "_message_type": MessageType.MESSAGE},
         ]
         assert conv.messages == expected, (
-            f"Expected [summary, msg_after_1, msg_after_2], got: {conv.messages}"
+            f"Expected [summary, msg_after_1, msg_after_2] (3 items, old_msg excluded), "
+            f"got: {conv.messages}"
         )
 
-    async def test_replace_with_summary_no_timestamp_arithmetic(self, db):
-        """replace_with_summary must not rely on row[0] - 0.001 timestamp arithmetic.
+    async def test_replace_with_summary_uses_timestamp_arithmetic(self, db):
+        """replace_with_summary must store the summary at oldest_retained.timestamp - 1e-6.
 
-        After compaction where all messages share the same timestamp, the summary row
-        stored by the current code has timestamp = shared_ts - 0.001. A fresh load()
-        then uses ``timestamp > shared_ts - 0.001``, which includes ALL original
-        messages because shared_ts > shared_ts - 0.001. The fix stores the summary
-        with its own auto-assigned id (no timestamp manipulation), and load() uses
-        ``id > summary_id`` so only the truly retained messages are returned.
+        After compaction where all messages share the same timestamp (shared_ts),
+        the summary row should be stored at shared_ts - 1e-6. This is the designed
+        boundary mechanism for timestamp-based filtering.
         """
         shared_ts = 1_000_000.0
 
@@ -657,8 +733,7 @@ class TestIdBasedSummaryOrdering:
             conversation=conv, client=mock_client, max_tokens=50
         )
 
-        # Verify the summary row: with the fix the timestamp should NOT be shared_ts - 0.001.
-        # The current code DOES write shared_ts - 0.001 — detecting this is the failure signal.
+        # Verify the summary row uses timestamp arithmetic: summary_ts = shared_ts - 1e-6
         async with db.execute(
             "SELECT timestamp FROM message_log WHERE channel_id = ? AND message_type = 'summary'",
             ("chan1",),
@@ -666,24 +741,20 @@ class TestIdBasedSummaryOrdering:
             summary_row = await cursor.fetchone()
 
         assert summary_row is not None, "Summary row must exist after compaction"
-        # With the fix: summary row's timestamp is NOT shared_ts - 0.001.
-        assert summary_row[0] != shared_ts - 0.001, (
-            f"Summary timestamp should not use timestamp arithmetic (row[0] - 0.001); "
-            f"got {summary_row[0]}, expected something other than {shared_ts - 0.001}"
+        # With the append-only design: summary_ts = oldest_retained.ts - 1e-6 = shared_ts - 1e-6
+        assert summary_row[0] == shared_ts - 1e-6, (
+            f"Summary timestamp should be oldest_retained.ts - 1e-6 = {shared_ts - 1e-6}; "
+            f"got {summary_row[0]}"
         )
 
     async def test_rapid_messages_with_same_timestamp(self, db):
-        """Compaction followed by load() must return correct messages when all messages
-        share the same timestamp.
+        """When all 10 messages share shared_ts and summary is at shared_ts - 1e-6,
+        load() returns ALL 10 messages + summary = 11 total.
 
-        This is the specific bug the fix addresses. With timestamp arithmetic, the
-        summary is stored at shared_ts - 0.001. When load() runs, it fetches non-summary
-        rows with ``timestamp > shared_ts - 0.001``. Because all 10 original messages
-        have timestamp == shared_ts > shared_ts - 0.001, ALL of them are returned —
-        even the ones that were supposed to be summarized. The loaded message list is
-        then 11 items (summary + 10) instead of the correct 3 (summary + 2 retained).
-
-        After the fix (id-based): only the 2 truly retained messages follow the summary.
+        This is the correct behavior for append-only: erring toward inclusion is
+        better than data loss. All 10 messages have timestamp = shared_ts >
+        shared_ts - 1e-6 = summary_ts, so they all pass the filter. The extra
+        8 messages are harmless redundant context that the LLM handles fine.
         """
         shared_ts = 1_000_000.0
 
@@ -720,11 +791,12 @@ class TestIdBasedSummaryOrdering:
             "content": "[Summary of earlier conversation]\nrapid summary",
             "_message_type": MessageType.SUMMARY,
         }
-        # In-memory state should be correct regardless of persistence
+        # In-memory state reflects only compacted view: summary + 2 retained
         assert conv.messages[0] == expected_summary_msg
-        assert len(conv.messages) == 3  # summary + 2 retained
+        assert len(conv.messages) == 3  # summary + 2 retained (in-memory)
 
-        # Now verify that a fresh load() returns the correct 3 messages, not 11.
+        # After load(): timestamp filter passes ALL 10 original messages (shared_ts > summary_ts).
+        # Correct behavior: 11 messages (summary + all 10). Extra messages are redundant context.
         conv2 = ConversationLog(db, channel_id="chan1")
         conv2.system_prompt = ""
         await conv2.load()
@@ -732,9 +804,10 @@ class TestIdBasedSummaryOrdering:
         assert conv2.messages[0] == expected_summary_msg, (
             f"First message after load() should be the summary, got: {conv2.messages[0]}"
         )
-        assert len(conv2.messages) == 3, (
-            f"Expected 3 messages (summary + 2 retained), got {len(conv2.messages)}. "
-            f"If this is 11, the timestamp arithmetic bug is confirmed."
+        assert len(conv2.messages) == 11, (
+            f"Expected 11 messages (summary + all 10 original) when all share shared_ts, "
+            f"got {len(conv2.messages)}. "
+            f"Timestamp filter summary_ts={shared_ts - 1e-6} passes all messages with ts={shared_ts}."
         )
 
 
@@ -811,7 +884,17 @@ class TestCompactionWithContext:
             "CONTEXT entry in retained window was not preserved after compaction"
         )
 
-        # DB: context row must still exist for the channel
+        # Append-only: all 10 original rows + 1 summary = 11 total rows in DB
+        async with db.execute(
+            "SELECT COUNT(*) FROM message_log WHERE channel_id = ?",
+            ("chan1",),
+        ) as cursor:
+            row = await cursor.fetchone()
+        assert row[0] == 11, (
+            f"Expected 11 total rows (10 original + 1 summary, append-only), got {row[0]}"
+        )
+
+        # DB: context row must still exist (not deleted)
         async with db.execute(
             "SELECT COUNT(*) FROM message_log "
             "WHERE channel_id = ? AND message_type = 'context'",
@@ -819,18 +902,32 @@ class TestCompactionWithContext:
         ) as cursor:
             row = await cursor.fetchone()
         assert row[0] >= 1, (
-            "CONTEXT row in retained window was deleted from DB during compaction"
+            "CONTEXT row was deleted from DB during compaction (should be append-only)"
         )
 
-    async def test_compact_deletes_older_context(self, db):
-        """CONTEXT entries in the older (summarized) window must be deleted from DB.
+        # Verify load() returns only summary + 2 retained (timestamp filter excludes older rows)
+        conv2 = ConversationLog(db, channel_id="chan1")
+        await conv2.load()
+        assert len(conv2.messages) == 3, (
+            f"Expected load() to return 3 messages (summary + 2 retained), got {len(conv2.messages)}"
+        )
+        from corvidae.conversation import MessageType
+        assert conv2.messages[0]["_message_type"] == MessageType.SUMMARY
 
-        After compaction, CONTEXT rows with id < oldest_retained_id must be gone.
+    async def test_compact_older_context_remains_in_db_excluded_by_load(self, db):
+        """CONTEXT entries in the older (summarized) window remain in DB (append-only).
 
-        Setup: 8 MESSAGE + 1 CONTEXT (older window) + 2 MESSAGE (retained).
+        Append-only: no rows are deleted. The CONTEXT row in the older window stays in DB
+        but becomes invisible to load() because its timestamp is below the summary boundary.
+
+        Setup: 7 MESSAGE + 1 CONTEXT (older window, base_ts+7) + 2 MESSAGE (retained, base_ts+8/9).
         retain_count=2 (last 2 message entries fit in token budget).
-        After compaction: only the 2 retained MESSAGE rows + summary row should remain.
-        The CONTEXT in the older window must be deleted.
+        Summary stored at oldest_retained.ts - 1e-6 = base_ts + 8 - 1e-6.
+        load() uses WHERE timestamp > base_ts + 8 - 1e-6:
+          - older 7 MESSAGE rows (base_ts+0..6): excluded
+          - CONTEXT row (base_ts+7): excluded (7 < 8 - 1e-6 is FALSE for ts=base_ts+7
+            since base_ts+7 < base_ts+8-1e-6) → excluded
+          - 2 retained MESSAGE rows (base_ts+8, base_ts+9): included
 
         Token math: 9 messages x 35 chars + 1 x 35 chars = 10 x 35 = 350 chars;
         int(350/3.5)=100 ≥ 40 → triggers; len=10>5.
@@ -855,7 +952,7 @@ class TestCompactionWithContext:
                 ("chan1", json.dumps(msg), base_ts + i),
             )
         # 1 CONTEXT entry (also in older window — position -3)
-        older_ctx = {"role": "system", "content": "old context that should be deleted"}
+        older_ctx = {"role": "system", "content": "old context that should be excluded by filter"}
         await db.execute(
             "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
             "VALUES (?, ?, ?, 'context')",
@@ -874,14 +971,14 @@ class TestCompactionWithContext:
         # Set up in-memory state to match DB (7 msg + 1 ctx + 2 msg = 10 total)
         conv.messages = (
             [{"role": "user", "content": "a" * 35, "_message_type": MessageType.MESSAGE}] * 7
-            + [{"role": "system", "content": "old context that should be deleted",
+            + [{"role": "system", "content": "old context that should be excluded by filter",
                 "_message_type": MessageType.CONTEXT}]
             + [{"role": "user", "content": "b" * 35, "_message_type": MessageType.MESSAGE}] * 2
         )
 
         mock_client = AsyncMock()
         mock_client.chat = AsyncMock(
-            return_value={"choices": [{"message": {"content": "summary with older ctx deleted"}}]}
+            return_value={"choices": [{"message": {"content": "summary with older ctx excluded"}}]}
         )
 
         from corvidae.compaction import CompactionPlugin
@@ -890,17 +987,156 @@ class TestCompactionWithContext:
             conversation=conv, client=mock_client, max_tokens=50
         )
 
-        # DB: context row in the older window must be gone
+        # Append-only: CONTEXT row must still exist in DB (not deleted)
         async with db.execute(
             "SELECT COUNT(*) FROM message_log "
             "WHERE channel_id = ? AND message_type = 'context'",
             ("chan1",),
         ) as cursor:
             row = await cursor.fetchone()
-        assert row[0] == 0, (
-            f"Expected 0 CONTEXT rows after compaction (older context should be deleted), "
-            f"got {row[0]}"
+        assert row[0] == 1, (
+            f"Expected CONTEXT row to remain in DB (append-only, no deletes), "
+            f"got {row[0]} rows"
         )
+
+        # Verify load() excludes the CONTEXT row via timestamp filter:
+        # summary_ts = base_ts+8-1e-6; CONTEXT ts = base_ts+7 < summary_ts → excluded.
+        conv2 = ConversationLog(db, channel_id="chan1")
+        await conv2.load()
+        assert len(conv2.messages) == 3, (
+            f"Expected load() to return 3 messages (summary + 2 retained, CONTEXT excluded "
+            f"by timestamp filter), got {len(conv2.messages)}"
+        )
+        for msg in conv2.messages[1:]:
+            assert msg.get("_message_type") != MessageType.CONTEXT, (
+                f"CONTEXT row should be excluded by timestamp filter, but found in load(): {msg}"
+            )
+
+
+class TestMultipleCompactionAccumulation:
+    """Tests verifying that multiple compactions accumulate summary rows (append-only)."""
+
+    async def test_multiple_compactions_accumulate_summaries(self, db):
+        """Running compaction twice accumulates 2 summary rows in DB; load() uses the latest.
+
+        Append-only: each compaction INSERTs a new summary row. Old summaries stay.
+        load() selects the summary with the highest id (ORDER BY id DESC LIMIT 1) and
+        uses its timestamp as the filter boundary.
+
+        Token math for each compaction: 10 messages x 35 chars → int(350/3.5)=100 ≥ 40 →
+        triggers; len=10>5. retain_budget=25; each msg=10 tokens.
+        Walk: count=1(10), count=2(20), 30>25 AND count>0 → break. retain_count=2.
+        """
+        from corvidae.conversation import MessageType
+        from corvidae.compaction import CompactionPlugin
+
+        base_ts = time.time()
+        plugin = CompactionPlugin()
+
+        # --- First compaction ---
+        conv = ConversationLog(db, channel_id="chan1")
+        conv.system_prompt = ""
+
+        # Insert 10 messages for first compaction
+        first_batch = [{"role": "user", "content": "a" * 35} for _ in range(10)]
+        for i, msg in enumerate(first_batch):
+            await db.execute(
+                "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
+                "VALUES (?, ?, ?, 'message')",
+                ("chan1", json.dumps(msg), base_ts + i),
+            )
+        await db.commit()
+        conv.messages = list(first_batch)
+
+        mock_client = AsyncMock()
+        mock_client.chat = AsyncMock(
+            return_value={"choices": [{"message": {"content": "first summary"}}]}
+        )
+        await plugin.compact_conversation(
+            conversation=conv, client=mock_client, max_tokens=50
+        )
+
+        # After first compaction: 1 summary row in DB
+        async with db.execute(
+            "SELECT COUNT(*) FROM message_log WHERE channel_id = ? AND message_type = 'summary'",
+            ("chan1",),
+        ) as cursor:
+            row = await cursor.fetchone()
+        assert row[0] == 1, f"Expected 1 summary after first compaction, got {row[0]}"
+
+        # Intermediate load check: fresh load after first compaction must return
+        # summary + 2 retained = 3 messages (timestamp filter excludes the 8 older rows).
+        conv_mid = ConversationLog(db, channel_id="chan1")
+        conv_mid.system_prompt = ""
+        await conv_mid.load()
+        assert len(conv_mid.messages) == 3, (
+            f"Expected 3 messages (summary + 2 retained) after first compaction load, "
+            f"got {len(conv_mid.messages)}"
+        )
+        assert conv_mid.messages[0]["_message_type"] == MessageType.SUMMARY, (
+            f"First message after first compaction load should be SUMMARY, "
+            f"got: {conv_mid.messages[0]}"
+        )
+
+        # --- Insert more messages after first compaction ---
+        second_base_ts = base_ts + 20
+        second_batch = [{"role": "user", "content": "b" * 35} for _ in range(10)]
+        for i, msg in enumerate(second_batch):
+            await db.execute(
+                "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
+                "VALUES (?, ?, ?, 'message')",
+                ("chan1", json.dumps(msg), second_base_ts + i),
+            )
+        await db.commit()
+
+        # Load into fresh conv for second compaction
+        conv2 = ConversationLog(db, channel_id="chan1")
+        conv2.system_prompt = ""
+        await conv2.load()
+
+        # --- Second compaction ---
+        mock_client2 = AsyncMock()
+        mock_client2.chat = AsyncMock(
+            return_value={"choices": [{"message": {"content": "second summary"}}]}
+        )
+        await plugin.compact_conversation(
+            conversation=conv2, client=mock_client2, max_tokens=50
+        )
+
+        # Append-only: both summary rows accumulate in DB
+        async with db.execute(
+            "SELECT COUNT(*) FROM message_log WHERE channel_id = ? AND message_type = 'summary'",
+            ("chan1",),
+        ) as cursor:
+            row = await cursor.fetchone()
+        assert row[0] == 2, (
+            f"Expected 2 summary rows in DB after two compactions (append-only), got {row[0]}"
+        )
+
+        # Verify load() uses only the latest summary
+        conv3 = ConversationLog(db, channel_id="chan1")
+        conv3.system_prompt = ""
+        await conv3.load()
+
+        assert conv3.messages[0]["_message_type"] == MessageType.SUMMARY, (
+            f"First message should be SUMMARY, got: {conv3.messages[0]}"
+        )
+        second_summary_content = "[Summary of earlier conversation]\nsecond summary"
+        assert conv3.messages[0]["content"] == second_summary_content, (
+            f"Expected latest (second) summary, got: {conv3.messages[0]['content']}"
+        )
+
+        # load() returns latest summary + 2 retained (from second compaction)
+        assert len(conv3.messages) == 3, (
+            f"Expected 3 messages (latest summary + 2 retained), got {len(conv3.messages)}"
+        )
+
+        # First summary must not appear in the loaded messages
+        first_summary_content = "[Summary of earlier conversation]\nfirst summary"
+        for msg in conv3.messages:
+            assert msg.get("content") != first_summary_content or msg.get("_message_type") != MessageType.SUMMARY, (
+                f"Old (first) summary should not appear in load() results: {msg}"
+            )
 
 
 class TestCompactFiltersNonMessage:
