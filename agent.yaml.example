@@ -42,6 +42,8 @@ agent:
   # compaction_retention: 0.5       # after compaction, retain this fraction of token budget
   # min_messages_to_compact: 5      # skip compaction with this many messages or fewer
   # chars_per_token: 3.5            # character-to-token ratio for token estimation
+  # immutable_settings:             # keys the agent cannot change via set_settings (system_prompt always blocked)
+  #   - max_turns                   # example: prevent the agent from extending its own turn limit
 
 # Built-in tool settings (optional)
 # tools:
