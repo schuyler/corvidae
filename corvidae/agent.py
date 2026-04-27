@@ -31,11 +31,11 @@ import asyncio
 import json
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields as dc_fields
 from enum import Enum
 
 from corvidae.agent_loop import run_agent_turn
-from corvidae.channel import Channel, ChannelRegistry
+from corvidae.channel import Channel, ChannelConfig, ChannelRegistry
 from corvidae.hooks import resolve_hook_results, HookStrategy, get_dependency, hookimpl
 from corvidae.llm import LLMClient
 from corvidae.queue import SerialQueue
@@ -43,6 +43,10 @@ from corvidae.task import Task
 from corvidae.tool import Tool, ToolContext, ToolRegistry, execute_tool_call
 
 logger = logging.getLogger("corvidae.agent")
+
+# Keys that belong to the framework config layer (ChannelConfig fields).
+# Derived at module load time so it stays in sync when new fields are added.
+FRAMEWORK_KEYS = {f.name for f in dc_fields(ChannelConfig)}
 
 DEFAULT_LLM_ERROR_MESSAGE = "Sorry, I encountered an error and could not process your message."
 # Note: same text as MAX_ROUNDS_REACHED_MESSAGE in agent_loop.py — kept in sync.
@@ -269,9 +273,10 @@ class AgentPlugin:
 
         # 7. Build prompt and call run_agent_turn (single LLM invocation)
         messages = conv.build_prompt()
+        llm_overrides = {k: v for k, v in channel.runtime_overrides.items() if k not in FRAMEWORK_KEYS}
 
         try:
-            result = await run_agent_turn(self.client, messages, self.tool_schemas)
+            result = await run_agent_turn(self.client, messages, self.tool_schemas, extra_body=llm_overrides or None)
         except Exception as exc:
             logger.exception("run_agent_turn failed for channel %s", channel.id)
             results = await self.pm.ahook.on_llm_error(channel=channel, error=exc)

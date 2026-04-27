@@ -37,12 +37,18 @@ class ChannelConfig:
     max_turns: int | None = None
     # Future: tool allowlist/denylist, response length, etc.
 
-    def resolve(self, agent_defaults: dict) -> dict:
+    def resolve(self, agent_defaults: dict, runtime_overrides: dict | None = None) -> dict:
         """Merge channel overrides with agent-level defaults.
 
         Channel config wins where set; agent defaults fill the gaps.
         Uses `is not None` for all fields so that falsy values (empty
         string, 0) are treated as intentional overrides.
+
+        Resolution order (last wins):
+        1. Built-in defaults
+        2. agent_defaults from YAML
+        3. ChannelConfig fields (per-channel YAML)
+        4. runtime_overrides (set by tool at runtime)
         """
         resolved = {
             "system_prompt": (
@@ -64,6 +70,9 @@ class ChannelConfig:
             ),
         }
 
+        if runtime_overrides:
+            resolved.update(runtime_overrides)
+
         logger.debug(
             "channel config resolved",
             extra={"channel_id": "(unknown)", "resolved": resolved},
@@ -83,6 +92,7 @@ class Channel:
     created_at: float = field(default_factory=time)
     last_active: float = field(default_factory=time)
     turn_counter: int = 0  # Consecutive LLM turns without user message. Lives on Channel
+    runtime_overrides: dict = field(default_factory=dict)  # Per-channel runtime overrides set by the set_settings tool.
     # (not on AgentPlugin) because the re-entrant agent loop design means tool
     # results re-enter via on_notify → serial queue → _process_queue_item.
     # The counter must be accessible across re-entries; Channel is the only
@@ -141,8 +151,8 @@ class ChannelRegistry:
         return self.channels.get(channel_id)
 
     def resolve_config(self, channel: Channel) -> dict:
-        """Resolve channel config with agent-level fallbacks."""
-        return channel.config.resolve(self.agent_defaults)
+        """Resolve channel config with agent-level fallbacks and runtime overrides."""
+        return channel.config.resolve(self.agent_defaults, runtime_overrides=channel.runtime_overrides)
 
     def all(self) -> list[Channel]:
         """Return all registered channels."""

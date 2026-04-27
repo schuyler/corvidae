@@ -60,6 +60,7 @@ async def run_agent_turn(
     client: LLMClient,
     messages: list[dict],
     tool_schemas: list[dict],
+    extra_body: dict | None = None,
 ) -> AgentTurnResult:
     """Single LLM invocation. Returns the response; does not execute tools.
 
@@ -73,12 +74,18 @@ async def run_agent_turn(
             in place.
         tool_schemas: Tool schemas for LLM function calling. Pass empty
             list for no tools (converted to None for the API call).
+        extra_body: Optional dict of extra fields to merge into the LLM
+            request body (e.g. inference params like temperature). Only
+            forwarded when not None.
 
     Returns:
         AgentTurnResult with the parsed response.
     """
     start = time.monotonic()
-    response = await client.chat(list(messages), tools=tool_schemas or None)  # Shallow copy: prevents mock assertion issues; client.chat() is read-only.
+    kwargs: dict = {"tools": tool_schemas or None}
+    if extra_body is not None:
+        kwargs["extra_body"] = extra_body
+    response = await client.chat(list(messages), **kwargs)  # Shallow copy: prevents mock assertion issues; client.chat() is read-only.
     latency_ms = round((time.monotonic() - start) * 1000, 1)
     msg = response["choices"][0]["message"]
     msg.setdefault("role", "assistant")

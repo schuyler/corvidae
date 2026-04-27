@@ -117,6 +117,12 @@ async def main(config_path: str = "agent.yaml") -> None:
     thinking_plugin = ThinkingPlugin(pm)
     pm.register(thinking_plugin, name="thinking")
 
+    # Register RuntimeSettingsPlugin before AgentPlugin (provides set_settings tool)
+    from corvidae.tools.settings import RuntimeSettingsPlugin
+    immutable_settings = set(agent_defaults.get("immutable_settings", []))
+    runtime_settings_plugin = RuntimeSettingsPlugin(immutable_settings=immutable_settings)
+    pm.register(runtime_settings_plugin, name="runtime_settings")
+
     # Register AgentPlugin after tool-providing and transport plugins.
     # AgentPlugin.on_start/on_stop are called explicitly (not via broadcast)
     # so that on_start runs after all plugins are ready and on_stop runs
