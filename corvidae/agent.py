@@ -34,7 +34,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, fields as dc_fields
 from enum import Enum
 
-from corvidae.agent_loop import run_agent_turn
+from corvidae.agent_loop import AgentTurnResult, run_agent_turn
 from corvidae.channel import Channel, ChannelConfig, ChannelRegistry
 from corvidae.hooks import resolve_hook_results, HookStrategy, get_dependency, hookimpl
 from corvidae.llm import LLMClient
@@ -180,6 +180,167 @@ class AgentPlugin:
             self.queues[channel_id] = q
         return self.queues[channel_id]
 
+    def _build_conversation_message(
+        self, item: QueueItem
+    ) -> tuple[dict, str] | None:
+        """Build the conversation message dict and request_text from a QueueItem.
+
+        Returns (conversation_message, request_text), or None if the item role
+        is unrecognized (logs an error in that case).
+        """
+        if item.role == QueueItemRole.USER:
+            conversation_message = {"role": "user", "content": item.content}
+            request_text = item.content
+        elif item.role == QueueItemRole.NOTIFICATION:
+            if item.tool_call_id:
+                conversation_message = {
+                    "role": "tool",
+                    "tool_call_id": item.tool_call_id,
+                    "content": item.content,
+                }
+            else:
+                conversation_message = {
+                    "role": "system",
+                    "content": f"[{item.source}]\n\n{item.content}",
+                }
+            request_text = item.content
+        else:
+            logger.error("_build_conversation_message: unknown item role %r", item.role)
+            return None
+        return conversation_message, request_text
+
+    async def _run_turn(
+        self,
+        channel: Channel,
+        messages: list[dict],
+        tool_schemas: list[dict],
+        llm_overrides: dict | None,
+    ) -> AgentTurnResult | None:
+        """Call run_agent_turn and handle LLM errors.
+
+        Returns the AgentTurnResult on success, or None on error (error message
+        already sent to the channel via send_message hook).
+        """
+        try:
+            return await run_agent_turn(self.client, messages, tool_schemas, extra_body=llm_overrides)
+        except Exception as exc:
+            logger.exception("run_agent_turn failed for channel %s", channel.id)
+            results = await self.pm.ahook.on_llm_error(channel=channel, error=exc)
+            error_msg = resolve_hook_results(
+                results, "on_llm_error", HookStrategy.VALUE_FIRST, pm=self.pm,
+            )
+            if error_msg is None:
+                error_msg = DEFAULT_LLM_ERROR_MESSAGE
+            try:
+                await self.pm.ahook.send_message(
+                    channel=channel,
+                    text=error_msg,
+                )
+            except Exception:
+                logger.warning(
+                    "send_message hook failed on error path",
+                    exc_info=True,
+                    extra={"channel": channel.id},
+                )
+            return None
+
+    async def _resolve_display_text(
+        self,
+        channel: Channel,
+        result: AgentTurnResult,
+        fallback: str | None,
+    ) -> str:
+        """Call transform_display_text hook and resolve the result.
+
+        Returns the transformed text if the hook returns a non-None value,
+        otherwise returns the hook input text. If fallback is not None,
+        uses fallback when the resolved text is falsy (empty string or None).
+        When fallback is None, an empty resolved text is returned as-is.
+        """
+        try:
+            results = await self.pm.ahook.transform_display_text(
+                channel=channel, text=result.text, result_message=result.message,
+            )
+            transformed = resolve_hook_results(
+                results, "transform_display_text", HookStrategy.VALUE_FIRST, pm=self.pm,
+            )
+        except Exception:
+            logger.warning(
+                "transform_display_text hook failed",
+                exc_info=True,
+                extra={"channel": channel.id},
+            )
+            transformed = None
+        resolved = transformed if transformed is not None else result.text
+        if fallback is not None:
+            return resolved or fallback
+        return resolved
+
+    async def _handle_response(
+        self,
+        result: AgentTurnResult,
+        channel: Channel,
+        max_turns_limit: int,
+        request_text: str,
+    ) -> None:
+        """Dispatch tool calls or send text response.
+
+        Implements the decision point at step 10 of _process_queue_item:
+        - Tool calls under limit: increment counter, dispatch, return.
+        - Tool calls at limit: NO counter increment, resolve display text
+          with MAX_TURNS_FALLBACK_MESSAGE, fire on_agent_response, send message.
+        - No tool calls: increment counter, resolve display text, fire
+          on_agent_response, send message.
+        """
+        if result.tool_calls and channel.turn_counter < max_turns_limit:
+            channel.turn_counter += 1
+            await self._dispatch_tool_calls(result.tool_calls, channel)
+            # Do NOT send text response; return and wait for tool results
+            return
+        elif result.tool_calls:
+            # Max turns reached — suppress tool dispatch, send fallback text
+            logger.warning(
+                "max_turns reached, suppressing tool calls",
+                extra={"channel": channel.id, "turn_counter": channel.turn_counter},
+            )
+            display_response = await self._resolve_display_text(
+                channel, result, fallback=MAX_TURNS_FALLBACK_MESSAGE
+            )
+        else:
+            # No tool calls — normal text response
+            channel.turn_counter += 1
+            display_response = await self._resolve_display_text(channel, result, fallback=None)
+
+        logger.info(
+            "agent response sent",
+            extra={"channel": channel.id, "latency_ms": result.latency_ms},
+        )
+
+        try:
+            await self.pm.ahook.on_agent_response(
+                channel=channel,
+                request_text=request_text,
+                response_text=display_response,
+            )
+        except Exception:
+            logger.warning(
+                "on_agent_response hook failed",
+                exc_info=True,
+                extra={"channel": channel.id},
+            )
+        try:
+            await self.pm.ahook.send_message(
+                channel=channel,
+                text=display_response,
+                latency_ms=result.latency_ms,
+            )
+        except Exception:
+            logger.error(
+                "send_message hook failed, response not delivered",
+                exc_info=True,
+                extra={"channel": channel.id},
+            )
+
     async def _process_queue_item(self, item: QueueItem) -> None:
         """Process one item from the channel queue.
 
@@ -211,25 +372,10 @@ class AgentPlugin:
         channel = item.channel
 
         # Build the conversation message based on item role
-        if item.role == QueueItemRole.USER:
-            conversation_message = {"role": "user", "content": item.content}
-            request_text = item.content
-        elif item.role == QueueItemRole.NOTIFICATION:
-            if item.tool_call_id:
-                conversation_message = {
-                    "role": "tool",
-                    "tool_call_id": item.tool_call_id,
-                    "content": item.content,
-                }
-            else:
-                conversation_message = {
-                    "role": "system",
-                    "content": f"[{item.source}]\n\n{item.content}",
-                }
-            request_text = item.content
-        else:
-            logger.error("_process_queue_item: unknown item role %r", item.role)
+        msg_result = self._build_conversation_message(item)
+        if msg_result is None:
             return
+        conversation_message, request_text = msg_result
 
         # 1. Lazy-initialize conversation on the channel
         if channel.conversation is None:
@@ -275,27 +421,8 @@ class AgentPlugin:
         messages = conv.build_prompt()
         llm_overrides = {k: v for k, v in channel.runtime_overrides.items() if k not in FRAMEWORK_KEYS}
 
-        try:
-            result = await run_agent_turn(self.client, messages, self.tool_schemas, extra_body=llm_overrides or None)
-        except Exception as exc:
-            logger.exception("run_agent_turn failed for channel %s", channel.id)
-            results = await self.pm.ahook.on_llm_error(channel=channel, error=exc)
-            error_msg = resolve_hook_results(
-                results, "on_llm_error", HookStrategy.VALUE_FIRST, pm=self.pm,
-            )
-            if error_msg is None:
-                error_msg = DEFAULT_LLM_ERROR_MESSAGE
-            try:
-                await self.pm.ahook.send_message(
-                    channel=channel,
-                    text=error_msg,
-                )
-            except Exception:
-                logger.warning(
-                    "send_message hook failed on error path",
-                    exc_info=True,
-                    extra={"channel": channel.id},
-                )
+        result = await self._run_turn(channel, messages, self.tool_schemas, llm_overrides or None)
+        if result is None:
             return
 
         # 8. Persist assistant message (run_agent_turn already appended to messages in place)
@@ -312,73 +439,7 @@ class AgentPlugin:
             )
 
         # 10. Dispatch tool calls or send text response
-        # Check-before-increment: turn_counter < max_turns_limit allows dispatch
-        if result.tool_calls and channel.turn_counter < max_turns_limit:
-            channel.turn_counter += 1
-            await self._dispatch_tool_calls(result.tool_calls, channel)
-            # Do NOT send text response; return and wait for tool results
-            return
-        elif result.tool_calls:
-            # Max turns reached — suppress tool dispatch, send fallback text
-            logger.warning(
-                "max_turns reached, suppressing tool calls",
-                extra={"channel": channel.id, "turn_counter": channel.turn_counter},
-            )
-            try:
-                results = await self.pm.ahook.transform_display_text(
-                    channel=channel, text=result.text, result_message=result.message,
-                )
-                transformed = resolve_hook_results(
-                    results, "transform_display_text", HookStrategy.VALUE_FIRST, pm=self.pm,
-                )
-            except Exception:
-                logger.warning("transform_display_text hook failed", exc_info=True, extra={"channel": channel.id})
-                transformed = None
-            display_response = (transformed if transformed is not None else result.text) or MAX_TURNS_FALLBACK_MESSAGE
-        else:
-            # No tool calls — normal text response
-            channel.turn_counter += 1
-            try:
-                results = await self.pm.ahook.transform_display_text(
-                    channel=channel, text=result.text, result_message=result.message,
-                )
-                transformed = resolve_hook_results(
-                    results, "transform_display_text", HookStrategy.VALUE_FIRST, pm=self.pm,
-                )
-            except Exception:
-                logger.warning("transform_display_text hook failed", exc_info=True, extra={"channel": channel.id})
-                transformed = None
-            display_response = transformed if transformed is not None else result.text
-
-        logger.info(
-            "agent response sent",
-            extra={"channel": channel.id, "latency_ms": result.latency_ms},
-        )
-
-        try:
-            await self.pm.ahook.on_agent_response(
-                channel=channel,
-                request_text=request_text,
-                response_text=display_response,
-            )
-        except Exception:
-            logger.warning(
-                "on_agent_response hook failed",
-                exc_info=True,
-                extra={"channel": channel.id},
-            )
-        try:
-            await self.pm.ahook.send_message(
-                channel=channel,
-                text=display_response,
-                latency_ms=result.latency_ms,
-            )
-        except Exception:
-            logger.error(
-                "send_message hook failed, response not delivered",
-                exc_info=True,
-                extra={"channel": channel.id},
-            )
+        await self._handle_response(result, channel, max_turns_limit, request_text)
 
     async def _dispatch_tool_calls(
         self, tool_calls: list[dict], channel: Channel

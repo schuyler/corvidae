@@ -580,8 +580,12 @@ class TestAgentPluginMaxToolResultChars:
 
 
 class TestSubagentPluginMaxToolResultChars:
-    async def test_subagent_plugin_reads_max_tool_result_chars(self):
-        """SubagentPlugin.on_start reads agent.max_tool_result_chars from config."""
+    async def test_subagent_plugin_does_not_read_max_tool_result_chars_from_config(self):
+        """SubagentPlugin.on_start no longer reads max_tool_result_chars from config.
+
+        After consolidation (Item 3), SubagentPlugin reads this value from
+        AgentPlugin at _launch time instead of independently from config.
+        """
         from corvidae.tools.subagent import SubagentPlugin
 
         pm_mock = MagicMock()
@@ -601,11 +605,9 @@ class TestSubagentPluginMaxToolResultChars:
 
         await plugin.on_start(config=config)
 
-        assert hasattr(plugin, "_max_tool_result_chars"), (
-            "SubagentPlugin must store _max_tool_result_chars after on_start"
-        )
-        assert plugin._max_tool_result_chars == 8888, (
-            f"Expected _max_tool_result_chars=8888 from config, got {plugin._max_tool_result_chars!r}"
+        assert not hasattr(plugin, "_max_tool_result_chars"), (
+            "SubagentPlugin should not store _max_tool_result_chars after on_start; "
+            "it now reads from AgentPlugin at _launch time"
         )
 
 

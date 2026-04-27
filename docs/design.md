@@ -67,7 +67,7 @@ class AgentSpec:
     async def on_notify(self, channel: Channel, source: str, text: str, tool_call_id: str | None, meta: dict | None) -> None
     async def should_process_message(self, channel: Channel, sender: str, text: str) -> bool | None
     async def on_llm_error(self, channel: Channel, error: Exception) -> str | None
-    async def compact_conversation(self, conversation: ConversationLog, client: LLMClient, max_tokens: int) -> bool | None
+    async def compact_conversation(self, conversation: ConversationLog, client: LLMClient, max_tokens: int) -> None
     async def process_tool_result(self, tool_name: str, result: str, channel: Channel | None) -> str | None
     async def before_agent_turn(self, channel: Channel) -> None
     async def after_persist_assistant(self, channel: Channel, message: dict) -> None
@@ -107,9 +107,9 @@ Pure broadcast hooks (e.g. `on_start`, `on_idle`) do not call
 | `on_message` | broadcast | inbound message from any transport |
 | `send_message` | broadcast | outbound message delivery |
 | `register_tools` | broadcast (sync) | startup tool collection |
-| `on_agent_response` | broadcast | after agent loop produces a response |
+| `on_agent_response` | broadcast | after agent loop produces a text response; no default implementation |
 | `on_notify` | broadcast | inject a notification into a channel queue |
-| `should_process_message` | broadcast / REJECT_WINS | `on_message`, before enqueue; False=reject, True=accept, None=no opinion |
+| `should_process_message` | broadcast / REJECT_WINS | `on_message`, before enqueue; no default implementation; None from empty broadcast allows all messages |
 | `on_llm_error` | broadcast / VALUE_FIRST | `_process_queue_item`, after LLM exception; return error string or None for default |
 | `compact_conversation` | broadcast | `_process_queue_item`, step 5; all implementations run for side effects |
 | `process_tool_result` | broadcast / VALUE_FIRST | `run_agent_loop` (subagent path only, not interactive messages), after tool execution; return replacement string or None for default |
@@ -200,6 +200,7 @@ async def run_agent_turn(
     client: LLMClient,
     messages: list[dict],
     tool_schemas: list[dict],
+    extra_body: dict | None = None,
 ) -> AgentTurnResult
 ```
 
@@ -627,8 +628,8 @@ if the task queue or channel context is unavailable.
 ### How it works
 
 1. At tool-call time (not `on_start`), retrieves `AgentPlugin` via
-   `get_dependency(self.pm, "agent_loop", AgentPlugin)` and accesses
-   its `tool_registry`.
+   `get_dependency(self.pm, "agent_loop", AgentPlugin)` and reads
+   `AgentPlugin._max_tool_result_chars` and `AgentPlugin.tool_registry`.
 2. Calls `registry.exclude("subagent")` to remove itself from the subagent's tool set.
 3. Builds a `messages` list (system prompt + user instructions) and a
    `work` coroutine that captures it, creates a fresh `LLMClient`, calls
@@ -650,6 +651,109 @@ at `on_start` time; subagent calls after startup use the value captured then.
 The `SUBAGENT_SYSTEM_PROMPT` constant (defined in `tools/subagent.py`) is
 used as the subagent's system message. It instructs the subagent to work
 step-by-step and summarize results on completion.
+
+## McpClientPlugin
+
+`mcp_client.py` — connects to external MCP servers during `on_start`, caches
+their tool lists, and exposes them to the agent loop via `register_tools`.
+
+### Lifecycle
+
+- `on_start` — reads the `mcp.servers` config block, iterates each server, and
+  calls `_connect_server` for each. Connections are entered into an
+  `AsyncExitStack` so sessions and transports stay alive for the daemon's
+  lifetime. After all connections, calls `_build_tool_list()` and caches the
+  result. Connection failures per server are caught, logged as warnings, and
+  skipped; a failed server does not abort startup.
+- `register_tools` — extends `tool_registry` with the cached `Tool` instances
+  (sync; called after `on_start` completes).
+- `on_stop` — closes all sessions and transports via `AsyncExitStack.aclose()`.
+
+### Tool naming
+
+Each tool is named `{tool_prefix}__{mcp_tool_name}`. `tool_prefix` defaults to
+the server name if not set. Example: server `files`, tool `read` →
+`files__read`.
+
+### Tool name collision
+
+`_build_tool_list` tracks seen prefixed names. If two servers expose a tool
+with the same prefixed name, the second is skipped and a warning is logged
+(first-wins).
+
+### Schema sanitization
+
+`_mcp_tool_to_schema` strips the keys `$schema`, `$id`, `$comment`, `$defs`,
+and `definitions` from the top level of `mcp_tool.inputSchema` before wrapping
+it in the OpenAI function-call envelope. Sanitization is shallow (top-level
+only); nested occurrences in `properties` are not removed.
+
+### Configuration
+
+```yaml
+mcp:
+  servers:
+    <name>:
+      transport: stdio | sse
+      command: <executable>   # stdio only
+      args: [...]             # stdio only
+      env: {...}              # stdio only, optional
+      url: <endpoint>         # sse only
+      tool_prefix: <prefix>   # optional; default: server name
+      timeout_seconds: 30     # optional; default: 30
+```
+
+**Graceful degradation:** without `McpClientPlugin`, no MCP tools are
+registered. The plugin declares no `depends_on`.
+
+## RuntimeSettingsPlugin
+
+`tools/settings.py` — registers the `set_settings` tool, which allows the
+agent to update per-channel LLM inference parameters and framework parameters
+at runtime via tool call.
+
+### Tool signature
+
+```python
+async def set_settings(settings: dict, _ctx: ToolContext) -> str
+```
+
+`_ctx` is system-injected (excluded from the LLM-visible schema).
+
+### Parameters
+
+The `settings` dict accepts:
+
+- LLM inference keys: `temperature`, `top_p`, `top_k`, `frequency_penalty`,
+  `presence_penalty`, `max_tokens`
+- Framework keys: `max_turns`, `max_context_tokens`, `keep_thinking_in_history`
+
+Pass `null` for a key to clear that override and revert to the static config value.
+
+### Return value
+
+On success: a confirmation string listing current overrides (or noting that all
+overrides have been cleared). On blocked keys: an error string naming the
+blocked keys.
+
+### Blocklist
+
+`system_prompt` is always blocked regardless of operator config. Additional
+keys are blocked via `agent.immutable_settings` in `agent.yaml`:
+
+```yaml
+agent:
+  immutable_settings:   # keys the agent must not change (system_prompt always added)
+    - max_turns
+```
+
+### Persistence
+
+Changes apply to `channel.runtime_overrides` in memory only. They are lost on
+daemon restart; no DB persistence.
+
+**Graceful degradation:** without `RuntimeSettingsPlugin`, the `set_settings`
+tool is not registered. The plugin declares no `depends_on`.
 
 ## Tools
 
@@ -739,15 +843,17 @@ Defined in `main.py`:
 
 1. `ChannelRegistry` — registered as a named plugin (`"registry"`) on the PM
 2. `PersistencePlugin` — DB lifecycle and conversation initialization (after registry, before everything else)
-3. CoreToolsPlugin — registers tools
-4. CLIPlugin — stdin/stdout transport
-5. IRCPlugin — IRC transport
-6. TaskPlugin — task queue
-7. SubagentPlugin — registers the subagent tool
-8. CompactionPlugin — provides default `compact_conversation` implementation
-9. ThinkingPlugin — handles `<think>` stripping and `reasoning_content` removal
-10. AgentPlugin — agent loop (after all tools, transports, and support plugins)
-11. IdleMonitorPlugin — idle monitor (after `AgentPlugin`, depends on `agent_loop`)
+3. `CoreToolsPlugin` — registers core tools
+4. `CLIPlugin` — stdin/stdout transport
+5. `IRCPlugin` — IRC transport
+6. `TaskPlugin` — task queue
+7. `SubagentPlugin` — registers the `subagent` tool
+8. `McpClientPlugin` — MCP server connections and tool forwarding
+9. `CompactionPlugin` — provides default `compact_conversation` implementation
+10. `ThinkingPlugin` — handles `<think>` stripping and `reasoning_content` removal
+11. `RuntimeSettingsPlugin` — registers the `set_settings` tool
+12. `AgentPlugin` — agent loop (after all tools, transports, and support plugins)
+13. `IdleMonitorPlugin` — idle monitor (after `AgentPlugin`, depends on `agent_loop`)
 
 After all registrations, `validate_dependencies(pm)` runs to verify that
 every plugin's `depends_on` set names a registered plugin. Startup aborts
@@ -782,6 +888,9 @@ SubagentPlugin      → "agent_loop"  (AgentPlugin)
 IdleMonitorPlugin   → "agent_loop"  (AgentPlugin)
 ```
 
+Plugins with no `depends_on` attribute declared: `CoreToolsPlugin`,
+`McpClientPlugin`, `CompactionPlugin`, `ThinkingPlugin`, `RuntimeSettingsPlugin`.
+
 Transport plugins use `get_dependency(pm, "registry", ChannelRegistry)` in
 `on_start` to retrieve the shared `ChannelRegistry`. `SubagentPlugin` calls
 `get_dependency(pm, "agent_loop", AgentPlugin)` at tool-call time (inside
@@ -810,6 +919,7 @@ corvidae/
 ├── thinking.py           # ThinkingPlugin
 ├── compaction.py         # CompactionPlugin
 ├── task.py               # Task, TaskQueue, TaskPlugin
+├── mcp_client.py         # McpClientPlugin (MCP server bridge)
 ├── main.py               # daemon entry point
 ├── channels/
 │   ├── cli.py            # CLIPlugin
@@ -819,7 +929,8 @@ corvidae/
     ├── shell.py
     ├── files.py
     ├── web.py
-    └── subagent.py       # SubagentPlugin, subagent tool
+    ├── subagent.py       # SubagentPlugin, subagent tool
+    └── settings.py       # RuntimeSettingsPlugin, set_settings tool
 ```
 
 ## Known Risks

@@ -578,3 +578,177 @@ class TestSetSettingsNullBlockedKey:
         # system_prompt is always blocked; passing None must still be rejected
         result = await set_settings(settings={"system_prompt": None}, _ctx=ctx)
         assert channel.runtime_overrides == {}
+
+
+# ---------------------------------------------------------------------------
+# Audit logging
+# ---------------------------------------------------------------------------
+
+
+class TestSetSettingsAuditLogging:
+    async def test_info_log_emitted_on_successful_change(self, caplog):
+        """set_settings must emit an INFO log when a setting is successfully changed."""
+        import logging
+        set_settings = _get_set_settings_fn()
+        channel = _make_channel()
+        ctx = _make_tool_context(channel)
+
+        with caplog.at_level(logging.INFO, logger="corvidae.tools.settings"):
+            await set_settings(settings={"temperature": 0.7}, _ctx=ctx)
+
+        info_records = [
+            r for r in caplog.records
+            if r.levelno == logging.INFO and r.name == "corvidae.tools.settings"
+        ]
+        assert info_records, (
+            "set_settings must emit at least one INFO log record on a successful change"
+        )
+
+    async def test_info_log_contains_channel_id(self, caplog):
+        """The INFO audit log must include the channel id in its extra fields."""
+        import logging
+        set_settings = _get_set_settings_fn()
+        channel = _make_channel()
+        ctx = _make_tool_context(channel)
+
+        with caplog.at_level(logging.INFO, logger="corvidae.tools.settings"):
+            await set_settings(settings={"temperature": 0.7}, _ctx=ctx)
+
+        info_records = [
+            r for r in caplog.records
+            if r.levelno == logging.INFO and r.name == "corvidae.tools.settings"
+        ]
+        assert info_records, "Expected at least one INFO record"
+        record = info_records[0]
+        assert hasattr(record, "channel"), (
+            f"INFO log record must have 'channel' in extras. Record.__dict__: {record.__dict__}"
+        )
+        assert record.channel == channel.id, (
+            f"INFO log 'channel' extra must equal channel.id ({channel.id!r}). "
+            f"Got: {record.channel!r}"
+        )
+
+    async def test_info_log_contains_overrides(self, caplog):
+        """The INFO audit log must include the current overrides in its extra fields."""
+        import logging
+        set_settings = _get_set_settings_fn()
+        channel = _make_channel()
+        ctx = _make_tool_context(channel)
+
+        with caplog.at_level(logging.INFO, logger="corvidae.tools.settings"):
+            await set_settings(settings={"temperature": 0.7}, _ctx=ctx)
+
+        info_records = [
+            r for r in caplog.records
+            if r.levelno == logging.INFO and r.name == "corvidae.tools.settings"
+        ]
+        assert info_records, "Expected at least one INFO record"
+        record = info_records[0]
+        assert hasattr(record, "overrides"), (
+            f"INFO log record must have 'overrides' in extras. Record.__dict__: {record.__dict__}"
+        )
+        assert record.overrides == {"temperature": 0.7}, (
+            f"INFO log 'overrides' extra must reflect current runtime_overrides. "
+            f"Got: {record.overrides!r}"
+        )
+
+    async def test_warning_log_emitted_on_blocked_key(self, caplog):
+        """set_settings must emit a WARNING log when a blocked key is rejected."""
+        import logging
+        set_settings = _get_set_settings_fn()
+        channel = _make_channel()
+        ctx = _make_tool_context(channel)
+
+        with caplog.at_level(logging.WARNING, logger="corvidae.tools.settings"):
+            await set_settings(settings={"system_prompt": "x"}, _ctx=ctx)
+
+        warning_records = [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING and r.name == "corvidae.tools.settings"
+        ]
+        assert warning_records, (
+            "set_settings must emit at least one WARNING log record when a blocked key is rejected"
+        )
+
+    async def test_warning_log_contains_blocked_keys(self, caplog):
+        """The WARNING audit log must include the rejected key names in its extra fields."""
+        import logging
+        set_settings = _get_set_settings_fn(immutable_settings={"max_turns"})
+        channel = _make_channel()
+        ctx = _make_tool_context(channel)
+
+        with caplog.at_level(logging.WARNING, logger="corvidae.tools.settings"):
+            await set_settings(settings={"system_prompt": "x", "max_turns": 99}, _ctx=ctx)
+
+        warning_records = [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING and r.name == "corvidae.tools.settings"
+        ]
+        assert warning_records, "Expected at least one WARNING record"
+        record = warning_records[0]
+        assert hasattr(record, "blocked"), (
+            f"WARNING log record must have 'blocked' in extras. Record.__dict__: {record.__dict__}"
+        )
+        assert "system_prompt" in record.blocked, (
+            f"'blocked' extra must contain 'system_prompt'. Got: {record.blocked!r}"
+        )
+        assert "max_turns" in record.blocked, (
+            f"'blocked' extra must contain 'max_turns'. Got: {record.blocked!r}"
+        )
+
+    async def test_warning_log_blocked_is_sorted(self, caplog):
+        """The 'blocked' extra in the WARNING log must be a sorted list."""
+        import logging
+        set_settings = _get_set_settings_fn(immutable_settings={"max_turns"})
+        channel = _make_channel()
+        ctx = _make_tool_context(channel)
+
+        with caplog.at_level(logging.WARNING, logger="corvidae.tools.settings"):
+            await set_settings(settings={"max_turns": 99, "system_prompt": "x"}, _ctx=ctx)
+
+        warning_records = [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING and r.name == "corvidae.tools.settings"
+        ]
+        assert warning_records, "Expected at least one WARNING record"
+        record = warning_records[0]
+        assert hasattr(record, "blocked"), "Expected 'blocked' in extras"
+        assert record.blocked == sorted(record.blocked), (
+            f"'blocked' extra must be sorted. Got: {record.blocked!r}"
+        )
+
+    async def test_no_warning_on_successful_change(self, caplog):
+        """set_settings must NOT emit a WARNING log when the call succeeds."""
+        import logging
+        set_settings = _get_set_settings_fn()
+        channel = _make_channel()
+        ctx = _make_tool_context(channel)
+
+        with caplog.at_level(logging.WARNING, logger="corvidae.tools.settings"):
+            await set_settings(settings={"temperature": 0.5}, _ctx=ctx)
+
+        warning_records = [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING and r.name == "corvidae.tools.settings"
+        ]
+        assert not warning_records, (
+            f"No WARNING must be emitted on a successful change. Got: {warning_records}"
+        )
+
+    async def test_no_info_on_blocked_key(self, caplog):
+        """set_settings must NOT emit an INFO audit log when the call is rejected."""
+        import logging
+        set_settings = _get_set_settings_fn()
+        channel = _make_channel()
+        ctx = _make_tool_context(channel)
+
+        with caplog.at_level(logging.INFO, logger="corvidae.tools.settings"):
+            await set_settings(settings={"system_prompt": "x"}, _ctx=ctx)
+
+        info_records = [
+            r for r in caplog.records
+            if r.levelno == logging.INFO and r.name == "corvidae.tools.settings"
+        ]
+        assert not info_records, (
+            f"No INFO must be emitted when the call is rejected. Got: {info_records}"
+        )

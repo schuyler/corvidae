@@ -20,19 +20,26 @@ SUBAGENT_SYSTEM_PROMPT = (
 
 
 class SubagentPlugin:
+    """Plugin that registers the subagent tool.
+
+    Launches background agents via run_agent_loop. Each subagent gets its own
+    LLMClient (using llm.background if configured, otherwise llm.main) and the
+    full tool set minus the subagent tool itself (to prevent recursion).
+
+    Depends on the "agent_loop" plugin (AgentPlugin) to read tool_registry
+    and _max_tool_result_chars at tool-call time.
+    """
+
     depends_on = {"agent_loop"}
 
     def __init__(self, pm) -> None:
         self.pm = pm
         self._llm_config: dict | None = None
-        self._max_tool_result_chars: int = 100_000
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
         llm_config = config.get("llm", {})
         self._llm_config = llm_config.get("background") or llm_config["main"]
-        agent_config = config.get("agent", {})
-        self._max_tool_result_chars = agent_config.get("max_tool_result_chars", 100_000)
         logger.debug("SubagentPlugin started")
 
     @hookimpl
@@ -52,6 +59,22 @@ class SubagentPlugin:
     async def _launch(
         self, instructions: str, description: str, ctx: ToolContext
     ) -> str:
+        """Build and enqueue a Task that runs a subagent loop.
+
+        Retrieves AgentPlugin to read tool_registry and _max_tool_result_chars,
+        excludes the subagent tool from the set, creates a fresh LLMClient inside
+        the work closure, and enqueues the task. Returns immediately; the result
+        is delivered via TaskPlugin -> on_notify -> AgentPlugin.
+
+        Args:
+            instructions: The user-provided instructions for the subagent.
+            description: Human-readable task description (used in Task.description).
+            ctx: Injected ToolContext providing channel and task_queue.
+
+        Returns:
+            Confirmation string with the enqueued task ID, or an error string
+            if the task queue or channel context is unavailable.
+        """
         task_queue = ctx.task_queue
         if task_queue is None:
             return "Error: task queue not available"
@@ -63,6 +86,11 @@ class SubagentPlugin:
         # Get tools, excluding subagent itself to prevent recursion
         from corvidae.agent import AgentPlugin
         agent = get_dependency(self.pm, "agent_loop", AgentPlugin)
+        # Read the authoritative runtime value from AgentPlugin. AgentPlugin._start_plugin
+        # sets this during on_start, which always completes before any tool call can be
+        # dispatched. SubagentPlugin.depends_on already declares {"agent_loop"}, so the
+        # dependency relationship is explicit.
+        max_result_chars = agent._max_tool_result_chars
         registry = agent.tool_registry.exclude("subagent")
         tools_dict = registry.as_dict()
         tool_schemas = registry.schemas()
@@ -92,7 +120,7 @@ class SubagentPlugin:
                     client, messages, tools_dict, tool_schemas,
                     channel=channel,
                     task_queue=task_queue,
-                    max_result_chars=plugin._max_tool_result_chars,
+                    max_result_chars=max_result_chars,
                 )
                 return strip_thinking(result)
             finally:
