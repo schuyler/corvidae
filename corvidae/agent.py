@@ -383,7 +383,14 @@ class AgentPlugin:
 
             async def make_work(fn_name=fn_name, raw_args=raw_args, call_id=call_id):
                 """Execute a single tool call. Captures fn_name, raw_args, call_id via defaults."""
-                args = json.loads(raw_args)
+                try:
+                    args = json.loads(raw_args)
+                except json.JSONDecodeError:
+                    logger.warning(
+                        "malformed tool call arguments",
+                        extra={"tool": fn_name, "raw_args": raw_args[:200]},
+                    )
+                    return f"Error: malformed arguments for tool '{fn_name}'"
                 if fn_name not in self.tools:
                     logger.warning("unknown tool called: %s", fn_name)
                     return f"Error: unknown tool '{fn_name}'"
@@ -434,6 +441,10 @@ class AgentPlugin:
             model=main_config["model"],
             api_key=main_config.get("api_key"),
             extra_body=main_config.get("extra_body"),
+            max_retries=main_config.get("max_retries", 3),
+            retry_base_delay=main_config.get("retry_base_delay", 2.0),
+            retry_max_delay=main_config.get("retry_max_delay", 60.0),
+            timeout=main_config.get("timeout"),
         )
         await self.client.start()
 

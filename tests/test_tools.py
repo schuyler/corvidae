@@ -110,11 +110,35 @@ class TestWriteFile:
 # ---------------------------------------------------------------------------
 
 
-def _make_mock_session(status: int, text: str) -> MagicMock:
-    """Build a mock aiohttp.ClientSession that returns the given status/text."""
-    mock_response = AsyncMock()
+def _make_mock_session(status: int, text: str, max_response_bytes: int = 50_000) -> MagicMock:
+    """Build a mock aiohttp.ClientSession that returns the given status/text.
+
+    Short responses (those that fit within max_response_bytes) are modelled by
+    having readexactly raise IncompleteReadError so the caller receives the
+    partial bytes without a truncation indicator.  Large responses are modelled
+    by returning exactly max_response_bytes bytes from readexactly so the caller
+    appends the truncation indicator — the caller never sees the remainder.
+
+    For simplicity this helper always encodes text as UTF-8 and sets the mock
+    encoding to "utf-8".
+    """
+    text_bytes = text.encode("utf-8")
+
+    mock_content = MagicMock()
+    if len(text_bytes) >= max_response_bytes:
+        # Simulate a full read: readexactly returns exactly max_response_bytes bytes,
+        # which causes the production code to append TRUNCATION_INDICATOR.
+        mock_content.readexactly = AsyncMock(return_value=text_bytes[:max_response_bytes])
+    else:
+        # Simulate a response shorter than the limit: readexactly raises
+        # IncompleteReadError carrying all the bytes.
+        incomplete_error = asyncio.IncompleteReadError(text_bytes, None)
+        mock_content.readexactly = AsyncMock(side_effect=incomplete_error)
+
+    mock_response = MagicMock()
     mock_response.status = status
-    mock_response.text = AsyncMock(return_value=text)
+    mock_response.content = mock_content
+    mock_response.get_encoding = MagicMock(return_value="utf-8")
 
     # Response is used as an async context manager: async with session.get(url) as resp
     mock_response_ctx = AsyncMock()
@@ -184,6 +208,110 @@ class TestWebFetch:
         with patch("aiohttp.ClientSession", return_value=mock_session_ctx):
             result = await web_fetch("http://example.com/broken")
         assert "error" in result.lower()
+
+
+# ---------------------------------------------------------------------------
+# TestWebFetchStreaming — Fix 2: stream-limit response body via readexactly
+# ---------------------------------------------------------------------------
+
+
+def _make_mock_session_streaming(
+    status: int,
+    *,
+    readexactly_return: bytes | None = None,
+    readexactly_error: asyncio.IncompleteReadError | None = None,
+    encoding: str = "utf-8",
+) -> MagicMock:
+    """Build a mock aiohttp.ClientSession using readexactly/get_encoding.
+
+    Pass exactly one of readexactly_return (bytes) or readexactly_error.
+    """
+    mock_content = MagicMock()
+    if readexactly_error is not None:
+        mock_content.readexactly = AsyncMock(side_effect=readexactly_error)
+    else:
+        mock_content.readexactly = AsyncMock(return_value=readexactly_return)
+
+    mock_response = MagicMock()
+    mock_response.status = status
+    mock_response.content = mock_content
+    mock_response.get_encoding = MagicMock(return_value=encoding)
+
+    mock_response_ctx = AsyncMock()
+    mock_response_ctx.__aenter__ = AsyncMock(return_value=mock_response)
+    mock_response_ctx.__aexit__ = AsyncMock(return_value=False)
+
+    mock_session = MagicMock()
+    mock_session.get = MagicMock(return_value=mock_response_ctx)
+
+    return mock_session
+
+
+class TestWebFetchStreaming:
+    """Tests for Fix 2: streaming response body with readexactly."""
+
+    async def test_web_fetch_uses_readexactly(self):
+        """web_fetch_with_session must call response.content.readexactly(max_response_bytes)."""
+        from corvidae.tools.web import web_fetch_with_session
+
+        partial_data = b"short response"
+        error = asyncio.IncompleteReadError(partial_data, None)
+        mock_session = _make_mock_session_streaming(
+            200, readexactly_error=error
+        )
+        await web_fetch_with_session(mock_session, "http://example.com", max_response_bytes=50_000)
+        mock_session.get.return_value.__aenter__.return_value.content.readexactly.assert_called_once_with(50_000)
+
+    async def test_web_fetch_truncation_on_full_read(self):
+        """When readexactly returns exactly max_response_bytes, result ends with TRUNCATION_INDICATOR."""
+        from corvidae.tools.web import TRUNCATION_INDICATOR, web_fetch_with_session
+
+        max_bytes = 100
+        full_data = b"a" * max_bytes
+        mock_session = _make_mock_session_streaming(
+            200, readexactly_return=full_data
+        )
+        result = await web_fetch_with_session(
+            mock_session, "http://example.com", max_response_bytes=max_bytes
+        )
+        assert result.endswith(TRUNCATION_INDICATOR), (
+            f"Expected result to end with {TRUNCATION_INDICATOR!r}, got: {result!r}"
+        )
+
+    async def test_web_fetch_no_truncation_on_short_response(self):
+        """When readexactly raises IncompleteReadError with partial data, no truncation indicator."""
+        from corvidae.tools.web import TRUNCATION_INDICATOR, web_fetch_with_session
+
+        partial_data = b"short response"
+        error = asyncio.IncompleteReadError(partial_data, None)
+        mock_session = _make_mock_session_streaming(
+            200, readexactly_error=error
+        )
+        result = await web_fetch_with_session(
+            mock_session, "http://example.com", max_response_bytes=50_000
+        )
+        assert TRUNCATION_INDICATOR not in result, (
+            f"Expected no truncation indicator for short response, got: {result!r}"
+        )
+        assert "short response" in result
+
+    async def test_web_fetch_decode_error_replaced(self):
+        """Incomplete UTF-8 sequence in partial data must not raise; replacement char present."""
+        from corvidae.tools.web import web_fetch_with_session
+
+        # b"\xe2\x82" is an incomplete 3-byte UTF-8 sequence (euro sign is \xe2\x82\xac)
+        incomplete_utf8 = b"hello " + b"\xe2\x82"
+        error = asyncio.IncompleteReadError(incomplete_utf8, None)
+        mock_session = _make_mock_session_streaming(
+            200, readexactly_error=error
+        )
+        # Must not raise UnicodeDecodeError
+        result = await web_fetch_with_session(
+            mock_session, "http://example.com", max_response_bytes=50_000
+        )
+        assert "\ufffd" in result, (
+            f"Expected Unicode replacement character in result, got: {result!r}"
+        )
 
 
 # ---------------------------------------------------------------------------

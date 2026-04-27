@@ -8,22 +8,47 @@ llm:
     # api_key: sk-...                 # omit for local servers
     # extra_body:                      # optional: provider-specific request payload extensions
     #   id_slot: 0                      # example: llama.cpp KV cache slot for parallelism
+    # max_retries: 3                   # max retry attempts on transient errors (429, 500, 502, 503, 504)
+    # retry_base_delay: 2.0            # base delay in seconds for exponential backoff
+    # retry_max_delay: 60.0            # maximum delay cap in seconds
+    # timeout: null                    # HTTP timeout in seconds per request (null uses aiohttp's 300s default)
   # background:                        # optional: separate LLM for background tasks
   #   base_url: http://localhost:8080   # all fields must be specified; no inheritance from llm.main
   #   model: llama3
   #   # api_key: sk-...                 # omit for local servers
   #   # extra_body:
   #   #   id_slot: 1
+  #   # max_retries: 3
+  #   # retry_base_delay: 2.0
+  #   # retry_max_delay: 60.0
+  #   # timeout: null
 
 # Daemon settings (optional)
 daemon:
   session_db: sessions.db           # SQLite path for conversation history
+  # max_task_workers: 4             # concurrent background task workers
+  # completed_task_buffer: 100      # completed tasks retained in memory
+  # idle_cooldown_seconds: 30       # minimum seconds between on_idle firings
+  # idle_poll_interval: 2           # seconds between idle-state checks
 
 # Agent-level defaults — apply to all channels unless overridden (optional)
 agent:
   system_prompt: "You are a helpful assistant."
   max_context_tokens: 24000
   keep_thinking_in_history: false
+  # max_turns: 10                   # max consecutive tool-calling turns per message
+  # max_tool_result_chars: 100000   # truncate tool results beyond this length
+  # compaction_threshold: 0.8       # compact when token estimate exceeds this × max_context_tokens
+  # compaction_retention: 0.5       # after compaction, retain this fraction of token budget
+  # min_messages_to_compact: 5      # skip compaction with this many messages or fewer
+  # chars_per_token: 3.5            # character-to-token ratio for token estimation
+
+# Built-in tool settings (optional)
+# tools:
+#   shell_timeout: 30               # seconds before shell command is killed
+#   web_fetch_timeout: 15           # seconds before HTTP request is aborted
+#   web_max_response_bytes: 50000   # max bytes of HTTP response body
+#   max_file_read_bytes: 1048576    # max file size for read_file (1 MB)
 
 # IRC transport connection settings (optional — omit to disable IRC)
 # irc:
@@ -31,6 +56,7 @@ agent:
 #   port: 6667                         # IRC server port
 #   nick: sherman                      # bot nickname
 #   tls: false                         # use TLS (set port to 6697 with tls: true)
+#   message_chunk_size: 400            # max UTF-8 bytes per outbound message
 #   channels:                          # channels to auto-join
 #     - "#general"
 #     - "#random"

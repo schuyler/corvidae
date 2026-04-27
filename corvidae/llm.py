@@ -14,10 +14,13 @@ Token usage is extracted from the response's `usage` field. If the API doesn't
 provide usage data, the fields are logged as `None`.
 """
 
+import asyncio
 import logging
 import time
 
 import aiohttp
+
+TRANSIENT_STATUS_CODES = {429, 500, 502, 503, 504}
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +44,10 @@ class LLMClient:
         model: str,
         api_key: str | None = None,
         extra_body: dict | None = None,
+        max_retries: int = 3,
+        retry_base_delay: float = 2.0,
+        retry_max_delay: float = 60.0,
+        timeout: float | None = None,
     ) -> None:
         """Initialize the LLM client.
 
@@ -52,12 +59,39 @@ class LLMClient:
                         chat request payload (instance-level defaults).
                         Call-level extra_body passed to chat() overrides
                         these when keys conflict.
+            max_retries: Max retry attempts on transient errors (default 3).
+                         Set to 0 to disable retries.
+            retry_base_delay: Base delay in seconds for exponential backoff.
+            retry_max_delay: Maximum delay cap in seconds.
+            timeout: Total HTTP timeout in seconds per LLM request.
+                     None uses aiohttp's session-level default (300s).
         """
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.api_key = api_key
         self.extra_body = extra_body
+        self.max_retries = max_retries
+        self.retry_base_delay = retry_base_delay
+        self.retry_max_delay = retry_max_delay
+        self.timeout = (
+            aiohttp.ClientTimeout(total=timeout) if timeout is not None else None
+        )
         self.session: aiohttp.ClientSession | None = None
+
+    def _retry_delay(
+        self, attempt: int, retry_after: str | None = None
+    ) -> float:
+        """Compute retry delay with exponential backoff.
+
+        Honors Retry-After header (integer/float seconds) when present.
+        Falls back to exponential backoff for unparseable values.
+        """
+        if retry_after is not None:
+            try:
+                return min(float(retry_after), self.retry_max_delay)
+            except ValueError:
+                pass
+        return min(self.retry_base_delay * (2 ** attempt), self.retry_max_delay)
 
     async def start(self) -> None:
         """Create the aiohttp session with optional auth header.
@@ -131,21 +165,59 @@ class LLMClient:
         if extra_body:
             payload.update(extra_body)  # call-level override wins
 
-        start = time.monotonic()
-        async with self.session.post(
-            f"{self.base_url}/v1/chat/completions",
-            json=payload,
-        ) as resp:
+        for attempt in range(1 + self.max_retries):
             try:
-                resp.raise_for_status()
-                response = await resp.json()
-            except aiohttp.ClientResponseError as e:
-                logger.error(
-                    "chat completion failed",
-                    extra={"status": resp.status},
-                )
+                start = time.monotonic()
+                async with self.session.post(
+                    f"{self.base_url}/v1/chat/completions",
+                    json=payload,
+                    timeout=self.timeout,
+                ) as resp:
+                    if (
+                        resp.status in TRANSIENT_STATUS_CODES
+                        and attempt < self.max_retries
+                    ):
+                        retry_after = resp.headers.get("Retry-After")
+                        delay = self._retry_delay(attempt, retry_after)
+                        logger.warning(
+                            "transient LLM error, retrying",
+                            extra={
+                                "status": resp.status,
+                                "attempt": attempt + 1,
+                                "delay": delay,
+                            },
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+
+                    try:
+                        resp.raise_for_status()
+                        response = await resp.json()
+                    except aiohttp.ClientResponseError:
+                        logger.error(
+                            "chat completion failed",
+                            extra={"status": resp.status},
+                        )
+                        raise
+
+            except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as exc:
+                if attempt < self.max_retries:
+                    delay = self._retry_delay(attempt)
+                    logger.warning(
+                        "transient LLM connection error, retrying",
+                        extra={
+                            "error": str(exc),
+                            "attempt": attempt + 1,
+                            "delay": delay,
+                        },
+                    )
+                    await asyncio.sleep(delay)
+                    continue
                 raise
-            elapsed = time.monotonic() - start
+
+            break  # success
+
+        elapsed = time.monotonic() - start
 
         usage = response.get("usage", {})
         logger.info(

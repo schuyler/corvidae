@@ -413,7 +413,7 @@ class TestLLMLogging:
         mock_session = AsyncMock()
         mock_session.post = MagicMock(return_value=mock_cm)
 
-        client = LLMClient(base_url="http://localhost:8080", model="test-model")
+        client = LLMClient(base_url="http://localhost:8080", model="test-model", max_retries=0)
         client.session = mock_session
 
         with caplog.at_level(logging.ERROR, logger="corvidae.llm"), \
