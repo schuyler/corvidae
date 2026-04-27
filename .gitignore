@@ -9,3 +9,4 @@ build/
 *.db
 agent.yaml
 *.swp
+uv.lock
