@@ -117,6 +117,11 @@ async def main(config_path: str = "agent.yaml") -> None:
     thinking_plugin = ThinkingPlugin(pm)
     pm.register(thinking_plugin, name="thinking")
 
+    # Register ContextCompactPlugin before AgentPlugin (KV cache-aware compaction with background blocks)
+    from corvidae.context_compact import ContextCompactPlugin
+    context_compact_plugin = ContextCompactPlugin()
+    pm.register(context_compact_plugin, name="context_compact")
+
     # Register RuntimeSettingsPlugin before AgentPlugin (provides set_settings tool)
     from corvidae.tools.settings import RuntimeSettingsPlugin
     immutable_settings = set(agent_defaults.get("immutable_settings", []))
