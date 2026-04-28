@@ -6,7 +6,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from corvidae.agent_loop import run_agent_loop, strip_thinking, tool_to_schema
+from corvidae.agent_loop import run_agent_loop, strip_thinking
+from corvidae.tool import tool_to_schema
 
 try:
     from corvidae.agent_loop import AgentTurnResult, run_agent_turn

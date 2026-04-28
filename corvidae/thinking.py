@@ -19,6 +19,8 @@ class ThinkingPlugin:
       response text before it is sent to the channel.
     """
 
+    depends_on = {"registry"}
+
     def __init__(self, pm) -> None:
         self.pm = pm
 

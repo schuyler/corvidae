@@ -95,7 +95,7 @@ class AgentPlugin:
         _registry: ChannelRegistry, resolved in on_start via get_dependency
     """
 
-    depends_on = {"registry"}
+    depends_on = {"registry", "task"}
 
     def __init__(self, pm) -> None:
         self.pm = pm

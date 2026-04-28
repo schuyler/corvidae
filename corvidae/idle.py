@@ -113,7 +113,7 @@ class IdleMonitorPlugin:
     initialized before IdleMonitor begins polling.
     """
 
-    depends_on = {"agent_loop"}
+    depends_on = {"agent_loop", "task"}
 
     def __init__(self, pm) -> None:
         self.pm = pm
