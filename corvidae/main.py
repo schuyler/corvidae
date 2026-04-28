@@ -114,7 +114,7 @@ async def main(config_path: str = "agent.yaml") -> None:
 
     # Register CompactionPlugin before AgentPlugin (provides default compaction strategy)
     from corvidae.compaction import CompactionPlugin
-    compaction_plugin = CompactionPlugin()
+    compaction_plugin = CompactionPlugin(pm=pm)
     pm.register(compaction_plugin, name="compaction")
 
     # Register ThinkingPlugin before AgentPlugin (handles <think> block stripping)

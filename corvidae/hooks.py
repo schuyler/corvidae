@@ -25,7 +25,7 @@ import apluggy as pluggy
 
 if TYPE_CHECKING:
     from corvidae.channel import Channel
-    from corvidae.conversation import ConversationLog
+    from corvidae.context import ContextWindow, MessageType
     from corvidae.llm import LLMClient
 
 T = TypeVar("T")
@@ -343,7 +343,7 @@ class AgentSpec:
 
     @hookspec
     async def compact_conversation(
-        self, conversation: "ConversationLog", client: "LLMClient", max_tokens: int
+        self, channel: "Channel", conversation: "ContextWindow", client: "LLMClient", max_tokens: int
     ) -> None:
         """Optionally replace the default compaction strategy.
 
@@ -373,14 +373,42 @@ class AgentSpec:
         """
 
     @hookspec
-    async def ensure_conversation(self, channel: "Channel") -> "bool | None":
-        """Lazy-initialize a ConversationLog on a channel.
+    async def load_conversation(self, channel: "Channel") -> "list[dict] | None":
+        """Load conversation history for a channel.
 
-        Broadcast hook. Return True if conversation was initialized (or was
-        already present). Any True means handled. Return None to defer.
+        VALUE_FIRST resolution. Return a list of tagged message dicts if this
+        plugin has stored history, or None to defer to another plugin.
 
         Args:
-            channel: The Channel that needs a ConversationLog.
+            channel: The Channel to load history for.
+        """
+
+    @hookspec
+    async def on_conversation_event(
+        self, channel: "Channel", message: dict, message_type: "MessageType"
+    ) -> None:
+        """Fired after a message is appended to the conversation.
+
+        Broadcast hook (side effects only). Called after every conv.append().
+
+        Args:
+            channel: The Channel where the event occurred.
+            message: The untagged message dict (no _message_type key).
+            message_type: The MessageType of the message.
+        """
+
+    @hookspec
+    async def on_compaction(
+        self, channel: "Channel", summary_msg: dict, retain_count: int
+    ) -> None:
+        """Fired after compaction replaces older messages with a summary.
+
+        Broadcast hook (side effects only). Called after replace_with_summary.
+
+        Args:
+            channel: The Channel where compaction occurred.
+            summary_msg: The untagged summary message dict.
+            retain_count: Number of messages retained alongside the summary.
         """
 
     @hookspec
@@ -398,7 +426,7 @@ class AgentSpec:
 
         Args:
             channel: The Channel being processed. Use ``channel.conversation``
-                to access the ConversationLog for appending context entries.
+                to access the ContextWindow for appending context entries.
         """
 
     @hookspec

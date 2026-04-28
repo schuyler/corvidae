@@ -18,7 +18,8 @@ import pytest
 import yaml
 
 from corvidae.channel import ChannelConfig, ChannelRegistry, load_channel_config
-from corvidae.conversation import ConversationLog, init_db
+from corvidae.context import ContextWindow
+from corvidae.persistence import init_db
 from corvidae.channel import resolve_system_prompt
 
 
@@ -55,11 +56,11 @@ class TestLoggerNamingConvention:
         assert hasattr(mod, "logger"), "llm.py must define module-level `logger`"
         assert mod.logger.name == "corvidae.llm"
 
-    def test_conversation_has_module_logger(self):
-        """corvidae.conversation must expose a module-level `logger` attribute."""
-        import corvidae.conversation as mod
-        assert hasattr(mod, "logger"), "conversation.py must define module-level `logger`"
-        assert mod.logger.name == "corvidae.conversation"
+    def test_context_has_module_logger(self):
+        """corvidae.context must expose a module-level `logger` attribute."""
+        import corvidae.context as mod
+        assert hasattr(mod, "logger"), "context.py must define module-level `logger`"
+        assert mod.logger.name == "corvidae.context"
 
     def test_channel_has_module_logger(self):
         """corvidae.channel must expose a module-level `logger` attribute."""
@@ -594,18 +595,18 @@ class TestAgentLoopLogging:
 
 
 # ---------------------------------------------------------------------------
-# Section 5: conversation.py — WARNING for compaction, INFO, DEBUG logs
+# Section 5: compaction.py — WARNING for compaction, INFO, DEBUG logs
 # ---------------------------------------------------------------------------
 
 
-class TestConversationLogging:
-    """CompactionPlugin must log WARNING before compaction; ConversationLog logs INFO after."""
+class TestCompactionLogging:
+    """CompactionPlugin must log WARNING before compaction."""
 
-    async def test_compaction_triggered_logs_warning(self, db, caplog):
+    async def test_compaction_triggered_logs_warning(self, caplog):
         """CompactionPlugin.compact_conversation must log WARNING when compaction is triggered."""
         from corvidae.compaction import CompactionPlugin
 
-        conv = ConversationLog(db, channel_id="test:chan1")
+        conv = ContextWindow("test:chan1")
         conv.system_prompt = ""
         # 25 messages × 100 chars = 2500 chars; token_estimate ~714; 80% of 100 = 80 → triggers
         conv.messages = [{"role": "user", "content": "x" * 100} for _ in range(25)]
@@ -615,82 +616,19 @@ class TestConversationLogging:
             return_value={"choices": [{"message": {"content": "summary"}}]}
         )
 
+        mock_channel = MagicMock()
+        mock_channel.id = "test:chan1"
+
         plugin = CompactionPlugin()
         with caplog.at_level(logging.WARNING, logger="corvidae.compaction"):
             await plugin.compact_conversation(
-                conversation=conv, client=mock_client, max_tokens=100
+                channel=mock_channel, conversation=conv, client=mock_client, max_tokens=100
             )
 
         records = [r for r in caplog.records if r.name == "corvidae.compaction"]
         warning_records = [r for r in records if r.levelno == logging.WARNING]
         assert warning_records, (
             "CompactionPlugin.compact_conversation must emit WARNING when compaction is triggered"
-        )
-
-    async def test_compaction_completed_logs_info(self, db, caplog):
-        """ConversationLog.replace_with_summary must log INFO after compaction with
-        messages_before and messages_after counts."""
-        from corvidae.compaction import CompactionPlugin
-
-        conv = ConversationLog(db, channel_id="test:chan1")
-        conv.system_prompt = ""
-        conv.messages = [{"role": "user", "content": "x" * 100} for _ in range(25)]
-
-        # Insert matching rows in DB so replace_with_summary can run boundary query
-        import time
-        import json
-        base_ts = time.time()
-        for i, msg in enumerate(conv.messages):
-            await db.execute(
-                "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
-                "VALUES (?, ?, ?, 'message')",
-                ("test:chan1", json.dumps({"role": msg["role"], "content": msg["content"]}), base_ts + i),
-            )
-        await db.commit()
-
-        mock_client = AsyncMock()
-        mock_client.chat = AsyncMock(
-            return_value={"choices": [{"message": {"content": "summary"}}]}
-        )
-
-        plugin = CompactionPlugin()
-        with caplog.at_level(logging.INFO, logger="corvidae.conversation"):
-            await plugin.compact_conversation(
-                conversation=conv, client=mock_client, max_tokens=100
-            )
-
-        records = [r for r in caplog.records if r.name == "corvidae.conversation"]
-        info_records = [r for r in records if r.levelno == logging.INFO]
-        assert info_records, (
-            "replace_with_summary must emit INFO when compaction completes"
-        )
-
-    async def test_load_debug_log(self, db, caplog):
-        """ConversationLog.load() must emit a DEBUG log with the count of
-        messages loaded."""
-        conv = ConversationLog(db, channel_id="test:chan1")
-
-        with caplog.at_level(logging.DEBUG, logger="corvidae.conversation"):
-            await conv.load()
-
-        records = [r for r in caplog.records if r.name == "corvidae.conversation"]
-        debug_records = [r for r in records if r.levelno == logging.DEBUG]
-        assert debug_records, (
-            "ConversationLog.load() must emit a DEBUG log with message count"
-        )
-
-    async def test_append_debug_log(self, db, caplog):
-        """ConversationLog.append() must emit a DEBUG log with role and content
-        length."""
-        conv = ConversationLog(db, channel_id="test:chan1")
-
-        with caplog.at_level(logging.DEBUG, logger="corvidae.conversation"):
-            await conv.append({"role": "user", "content": "hello"})
-
-        records = [r for r in caplog.records if r.name == "corvidae.conversation"]
-        debug_records = [r for r in records if r.levelno == logging.DEBUG]
-        assert debug_records, (
-            "ConversationLog.append() must emit a DEBUG log with role and content length"
         )
 
 
@@ -929,9 +867,11 @@ class TestAgentPluginLogging:
             "on_message must emit an INFO log with latency_ms structured field after response"
         )
 
-    async def test_ensure_conversation_logs_info(self, db, caplog):
-        """PersistencePlugin.ensure_conversation must emit an INFO log when initializing
-        a new conversation for a channel."""
+    async def test_load_conversation_logs_info(self, db, caplog):
+        """PersistencePlugin.load_conversation must emit an INFO log when loading
+        an existing conversation for a channel."""
+        import json
+        import time
         from corvidae.hooks import create_plugin_manager
         from corvidae.persistence import PersistencePlugin
 
@@ -946,13 +886,20 @@ class TestAgentPluginLogging:
         pm.register(persistence, name="persistence")
 
         channel = registry.get_or_create("test", "scope1")
-        assert channel.conversation is None
+
+        # Insert a row so load_conversation returns results and emits the INFO log
+        await db.execute(
+            "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
+            "VALUES (?, ?, ?, 'message')",
+            (channel.id, json.dumps({"role": "user", "content": "hi"}), time.time()),
+        )
+        await db.commit()
 
         with caplog.at_level(logging.INFO, logger="corvidae.persistence"):
-            await persistence.ensure_conversation(channel=channel)
+            await persistence.load_conversation(channel=channel)
 
         records = [r for r in caplog.records if r.name == "corvidae.persistence"]
         info_records = [r for r in records if r.levelno == logging.INFO]
         assert info_records, (
-            "PersistencePlugin.ensure_conversation must emit INFO log when initializing a new conversation"
+            "PersistencePlugin.load_conversation must emit INFO log when loading an existing conversation"
         )

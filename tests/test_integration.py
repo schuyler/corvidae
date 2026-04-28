@@ -855,7 +855,7 @@ class TestGroupDMultiChannel:
         assert chan_b is not None
         assert chan_a is not chan_b
 
-        # Each has its own ConversationLog
+        # Each has its own ContextWindow
         assert chan_a.conversation is not None
         assert chan_b.conversation is not None
         assert chan_a.conversation is not chan_b.conversation
@@ -958,7 +958,7 @@ class TestGroupDMultiChannel:
         B's gate, verify:
         - Channel A's compaction completed and a summary is present
         - Channel B's tool call completed normally (conversation not corrupted)
-        - Neither channel's ConversationLog references the other's data
+        - Neither channel's ContextWindow references the other's data
         """
         # Build a custom harness with calibrated max_context_tokens to trigger
         # compaction exactly at the 6th user message (phase 3), not before.

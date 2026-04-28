@@ -27,9 +27,8 @@ async def build_plugin_and_channel(
 
     from corvidae.agent import AgentPlugin
     from corvidae.channel import ChannelConfig, ChannelRegistry
-    from corvidae.conversation import init_db
+    from corvidae.persistence import PersistencePlugin, init_db
     from corvidae.hooks import create_plugin_manager
-    from corvidae.persistence import PersistencePlugin
     from corvidae.task import TaskPlugin
     from corvidae.thinking import ThinkingPlugin
 

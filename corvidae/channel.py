@@ -20,7 +20,7 @@ from time import time
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from corvidae.conversation import ConversationLog
+    from corvidae.context import ContextWindow
 
 logger = logging.getLogger(__name__)
 _prompt_logger = logging.getLogger("corvidae.prompt")
@@ -88,7 +88,7 @@ class Channel:
     transport: str          # "irc", "signal", "cli"
     scope: str              # "#lex", "+15551234567", "local"
     config: ChannelConfig = field(default_factory=ChannelConfig)
-    conversation: ConversationLog | None = None
+    conversation: "ContextWindow | None" = None
     created_at: float = field(default_factory=time)
     last_active: float = field(default_factory=time)
     turn_counter: int = 0  # Consecutive LLM turns without user message. Lives on Channel

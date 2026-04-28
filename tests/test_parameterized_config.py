@@ -302,26 +302,25 @@ class TestCompactionPlugin:
         )
 
 
-class TestConversationLogCharsPerToken:
-    def test_conversation_log_chars_per_token_default(self):
-        """ConversationLog uses 3.5 chars_per_token by default."""
-        from corvidae.conversation import ConversationLog
+class TestContextWindowCharsPerToken:
+    def test_context_window_chars_per_token_default(self):
+        """ContextWindow uses 3.5 chars_per_token by default."""
+        from corvidae.context import ContextWindow
 
-        sig = inspect.signature(ConversationLog.__init__)
+        sig = inspect.signature(ContextWindow.__init__)
         assert "chars_per_token" in sig.parameters, (
-            "ConversationLog.__init__ must accept 'chars_per_token' parameter"
+            "ContextWindow.__init__ must accept 'chars_per_token' parameter"
         )
         param = sig.parameters["chars_per_token"]
         assert param.default == 3.5, (
-            f"ConversationLog default chars_per_token must be 3.5, got {param.default!r}"
+            f"ContextWindow default chars_per_token must be 3.5, got {param.default!r}"
         )
 
-    def test_conversation_log_chars_per_token_override(self):
-        """ConversationLog(chars_per_token=4.0) uses 4.0 in token_estimate."""
-        from corvidae.conversation import ConversationLog
+    def test_context_window_chars_per_token_override(self):
+        """ContextWindow(chars_per_token=4.0) uses 4.0 in token_estimate."""
+        from corvidae.context import ContextWindow
 
-        db_mock = MagicMock()
-        conv = ConversationLog(db_mock, "chan1", chars_per_token=4.0)
+        conv = ContextWindow("chan1", chars_per_token=4.0)
 
         assert conv.chars_per_token == 4.0, (
             f"Expected chars_per_token=4.0, got {conv.chars_per_token!r}"
@@ -337,41 +336,6 @@ class TestConversationLogCharsPerToken:
             f"token_estimate with chars_per_token=4.0 and 40 chars should be 10, got {estimate}"
         )
 
-
-class TestPersistenceReadsCharsPerToken:
-    async def test_persistence_reads_chars_per_token(self):
-        """PersistencePlugin reads agent.chars_per_token from config."""
-        import aiosqlite as _aiosqlite
-        from corvidae.conversation import init_db as _init_db
-        from corvidae.persistence import PersistencePlugin
-
-        pm_mock = MagicMock()
-        # Return a mock ChannelRegistry from get_dependency.
-        from corvidae.channel import ChannelRegistry
-        registry_mock = MagicMock(spec=ChannelRegistry)
-        pm_mock.get_plugin.return_value = registry_mock
-
-        # Use a real in-memory DB so the WAL PRAGMA runs without mock issues.
-        async with _aiosqlite.connect(":memory:") as real_db:
-            await _init_db(real_db)
-
-            with patch("corvidae.persistence.get_dependency", return_value=registry_mock):
-                plugin = PersistencePlugin(pm_mock)
-                # Pre-inject the real DB so on_start skips the connect branch.
-                plugin.db = real_db
-
-                config = {
-                    "agent": {"chars_per_token": 4.5},
-                    "_base_dir": ".",
-                }
-                await plugin.on_start(config=config)
-
-        assert hasattr(plugin, "_chars_per_token"), (
-            "PersistencePlugin must store _chars_per_token after on_start"
-        )
-        assert plugin._chars_per_token == 4.5, (
-            f"Expected _chars_per_token=4.5, got {plugin._chars_per_token!r}"
-        )
 
 
 # ===========================================================================

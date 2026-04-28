@@ -17,7 +17,7 @@ import pytest
 from corvidae.agent import AgentPlugin
 from corvidae.agent_loop import AgentTurnResult, run_agent_turn  # noqa: F401 (used in comments/type checking)
 from corvidae.channel import ChannelConfig, ChannelRegistry
-from corvidae.conversation import init_db
+from corvidae.persistence import init_db
 from corvidae.hooks import create_plugin_manager
 from corvidae.persistence import PersistencePlugin
 from corvidae.task import Task, TaskPlugin, TaskQueue
@@ -720,11 +720,12 @@ class TestCompactionFailureResilience:
 
         plugin, channel, db = plugin_and_channel
 
-        # Pre-initialize the conversation so ensure_conversation short-circuits
-        # during on_message.  With broadcast dispatch every hook fires; without
-        # this the persistence plugin would try to load from the DB concurrently
-        # with the crashing compaction plugin.
-        await plugin.pm.ahook.ensure_conversation(channel=channel)
+        # Pre-initialize the conversation so the conversation init path is already
+        # done when on_message fires. Without this, the crashing compaction plugin
+        # could interfere with conversation init on the first message.
+        from corvidae.context import ContextWindow
+        channel.conversation = ContextWindow(channel.id)
+        channel.conversation.system_prompt = "You are a test assistant."
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("response after failed compaction"))

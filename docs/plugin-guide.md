@@ -110,10 +110,10 @@ These hooks are broadcast to all plugins. The caller uses `resolve_hook_results`
 |------|----------|---------|----------|
 | `should_process_message(channel, sender, text)` | `REJECT_WINS` | `bool \| None` | Any `False` vetoes the message; any `True` (with no `False`) accepts; `None` if all defer |
 | `on_llm_error(channel, error)` | `VALUE_FIRST` | `str \| None` | Non-None string replaces the default error message; multiple non-None → alphabetically-first plugin wins with a warning |
-| `compact_conversation(conversation, client, max_tokens)` | broadcast only | `None` | Called for side effects; return value is not used by the caller |
+| `compact_conversation(channel, conversation, client, max_tokens)` | broadcast only | `None` | Called for side effects; return value is not used by the caller |
 | `process_tool_result(tool_name, result, channel)` | `VALUE_FIRST` | `str \| None` | Non-None string replaces the tool result in the conversation; multiple non-None → alphabetically-first plugin wins with a warning |
 | `transform_display_text(channel, text, result_message)` | `VALUE_FIRST` | `str \| None` | Non-None string replaces the response text before it is sent to the channel; multiple non-None → alphabetically-first plugin wins with a warning |
-| `ensure_conversation(channel)` | `ACCEPT_WINS` | `bool \| None` | Any `True` means the conversation was initialized; `None` if none handled |
+| `load_conversation(channel)` | `VALUE_FIRST` | `list[dict] \| None` | Return tagged message dicts if this plugin has stored history; `None` to defer. Called once when a channel's conversation is first initialized. |
 
 `compact_conversation` — all registered implementations run. The return value is ignored by the caller. Use this hook for side effects (e.g., custom summarization that mutates the conversation in-place).
 
@@ -214,7 +214,7 @@ registry = agent.tool_registry
 `before_agent_turn` fires before every LLM call. Use it to inject contextual information (memory retrieval, current state, etc.) into the conversation:
 
 ```python
-from corvidae.conversation import MessageType
+from corvidae.context import MessageType
 
 class MemoryPlugin:
     @hookimpl
@@ -231,13 +231,13 @@ class MemoryPlugin:
 
 ## Channels
 
-A channel is a `transport:scope` pair like `irc:#general` or `cli:local`. Each channel has its own `ConversationLog` with SQLite persistence.
+A channel is a `transport:scope` pair like `irc:#general` or `cli:local`. Each channel has its own `ContextWindow` initialized on first message.
 
 ```python
 channel.id              # "irc:#general"
 channel.transport       # "irc"
 channel.scope           # "#general"
-channel.conversation    # ConversationLog
+channel.conversation    # ContextWindow | None
 channel.matches_transport("irc")  # True
 ```
 
@@ -435,8 +435,8 @@ Implements one hook:
   Returns `True` when compaction ran; `None` when the threshold was not met.
 
 Token estimation divides total character count by `chars_per_token`. The same
-`chars_per_token` value must be used when constructing `ConversationLog`
-instances (done by `PersistencePlugin`); configure both via `agent.chars_per_token`.
+`chars_per_token` value is used when constructing `ContextWindow` instances
+(done by `AgentPlugin`); configure via `agent.chars_per_token`.
 
 **Config:**
 ```yaml
@@ -452,9 +452,9 @@ receive an error from the API when the context limit is exceeded.
 
 ### PersistencePlugin (`corvidae/persistence.py`)
 
-Opens the SQLite database, runs schema migrations via `init_db`, and sets
-the journal mode. Registered as `"persistence"` before `agent_loop`.
-Implements `on_start`, `on_stop`, and `ensure_conversation`.
+Opens the SQLite database, runs schema migrations, and sets the journal mode.
+Registered as `"persistence"` before `agent_loop`. Implements `on_start`,
+`on_stop`, `load_conversation`, `on_conversation_event`, and `on_compaction`.
 
 **Config:**
 ```yaml
@@ -464,8 +464,8 @@ daemon:
                                 # allowed values: delete, truncate, persist, memory, wal, off
 ```
 
-**Without this plugin:** `ensure_conversation` is never fulfilled; `AgentPlugin`
-logs an error and drops every message.
+**Without this plugin:** `load_conversation` returns no history; conversation
+history is not persisted across restarts.
 
 ### TaskPlugin (`corvidae/task.py`)
 
