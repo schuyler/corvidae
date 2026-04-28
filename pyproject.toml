@@ -6,11 +6,14 @@ dependencies = [
     "aiohttp>=3.9",
     "aiosqlite>=0.19",
     "apluggy>=1.1.2",
+    "chromadb>=0.5",
     "ddgs>=9.0",
     "mcp>=1.0",
     "pydle>=0.9",
     "pydantic>=2.13.3",
     "pyyaml>=6.0.3",
+    "sentence-transformers>=3.0",
+    "tiktoken>=0.7",
 ]
 
 [project.optional-dependencies]
@@ -22,12 +25,12 @@ dev = [
 [project.scripts]
 corvidae = "corvidae.main:cli"
 
+[tool.setuptools.packages.find]
+include = ["corvidae*"]
+
 [build-system]
 requires = ["setuptools>=75"]
 build-backend = "setuptools.build_meta"
-
-[tool.setuptools.packages.find]
-include = ["corvidae*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
