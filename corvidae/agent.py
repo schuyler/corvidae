@@ -28,7 +28,6 @@ Logging:
 """
 
 import asyncio
-import json
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field, fields as dc_fields
@@ -41,7 +40,7 @@ from corvidae.hooks import resolve_hook_results, HookStrategy, get_dependency, h
 from corvidae.llm import LLMClient
 from corvidae.queue import SerialQueue
 from corvidae.task import Task
-from corvidae.tool import Tool, ToolContext, ToolRegistry, execute_tool_call
+from corvidae.tool import Tool, ToolContext, ToolRegistry, dispatch_tool_call
 
 logger = logging.getLogger("corvidae.agent")
 
@@ -480,7 +479,16 @@ class AgentPlugin:
     async def _dispatch_tool_calls(
         self, tool_calls: list[dict], channel: Channel
     ) -> None:
-        """Dispatch LLM tool calls as Tasks to the TaskQueue."""
+        """Enqueue each tool call as a Task on the TaskQueue.
+
+        Each task's work closure calls dispatch_tool_call(), which handles
+        JSON parsing, unknown-tool detection, invocation, error wrapping,
+        logging, and the process_tool_result hook. Returns the result
+        string; the TaskPlugin delivers it via on_notify.
+
+        Logs an error and returns without enqueuing if the TaskQueue is
+        unavailable (TaskPlugin not registered).
+        """
         task_queue = getattr(self.pm.get_plugin("task"), "task_queue", None)
         if task_queue is None:
             logger.error("tool calls requested but no TaskQueue available")
@@ -489,36 +497,17 @@ class AgentPlugin:
         for call in tool_calls:
             call_id = call["id"]
             fn_name = call["function"]["name"]
-            raw_args = call["function"]["arguments"]
 
-            async def make_work(fn_name=fn_name, raw_args=raw_args, call_id=call_id):
-                """Execute a single tool call. Captures fn_name, raw_args, call_id via defaults."""
-                try:
-                    args = json.loads(raw_args)
-                except json.JSONDecodeError:
-                    logger.warning(
-                        "malformed tool call arguments",
-                        extra={"tool": fn_name, "raw_args": raw_args[:200]},
-                    )
-                    return f"Error: malformed arguments for tool '{fn_name}'"
-                if fn_name not in self.tools:
-                    logger.warning("unknown tool called: %s", fn_name)
-                    return f"Error: unknown tool '{fn_name}'"
-                try:
-                    tool_fn = self.tools[fn_name]
-                    return await execute_tool_call(
-                        tool_fn,
-                        args,
-                        channel=channel,
-                        tool_call_id=call_id,
-                        task_queue=task_queue,
-                        max_result_chars=self._max_tool_result_chars,
-                    )
-                except Exception:
-                    logger.warning(
-                        "tool %s raised exception", fn_name, exc_info=True
-                    )
-                    return f"Error: tool '{fn_name}' failed"
+            async def make_work(call=call):
+                """Execute a single tool call via dispatch_tool_call."""
+                result = await dispatch_tool_call(
+                    call, self.tools,
+                    channel=channel,
+                    task_queue=task_queue,
+                    max_result_chars=self._max_tool_result_chars,
+                    pm=self.pm,
+                )
+                return result.content
 
             task = Task(
                 work=make_work,

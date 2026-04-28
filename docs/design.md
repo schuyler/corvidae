@@ -114,7 +114,7 @@ Pure broadcast hooks (e.g. `on_start`, `on_idle`) do not call
 | `should_process_message` | broadcast / REJECT_WINS | `on_message`, before enqueue; no default implementation; None from empty broadcast allows all messages |
 | `on_llm_error` | broadcast / VALUE_FIRST | `_run_turn`, after LLM exception; return error string or None for default |
 | `compact_conversation` | broadcast | `_process_queue_item`, step 5; all implementations run for side effects |
-| `process_tool_result` | broadcast / VALUE_FIRST | `run_agent_loop` (subagent path only, not interactive messages), after tool execution; return replacement string or None for default |
+| `process_tool_result` | broadcast / VALUE_FIRST | `dispatch_tool_call` (both subagent and main agent paths), after tool execution; return replacement string or None for default |
 | `before_agent_turn` | broadcast | `_process_queue_item`, before LLM call; plugins inject context into conversation log |
 | `after_persist_assistant` | broadcast | `_process_queue_item`, after assistant message is persisted; plugins may mutate the in-memory dict |
 | `transform_display_text` | broadcast / VALUE_FIRST | `_resolve_display_text`, before `send_message`; return transformed text or None to leave unchanged |
@@ -215,8 +215,9 @@ before returning. Callers should not append it again.
 execution. Calls the LLM, executes tool calls inline, repeats until a
 text response or max_turns. Injects `ToolContext` into tools that
 declare a `_ctx` parameter. Accepts an optional `pm` keyword argument;
-when provided, calls the `process_tool_result` hook after each tool
-execution. When `pm` is `None`, the hook is skipped.
+when provided, passes it to `dispatch_tool_call()`, which calls the
+`process_tool_result` hook after each tool execution. When `pm` is
+`None`, the hook is skipped.
 
 Also in `agent_loop.py`:
 - `strip_thinking(text)` — removes `<think>...</think>` blocks
@@ -284,8 +285,11 @@ update the DB boundary.
 
 ### Append-only log
 
-The `message_log` table in `PersistencePlugin` is append-only. No rows are deleted
-or updated. The DB is a complete audit log including `reasoning_content`.
+Conversation history is irreplaceable and must never be deleted. The
+`message_log` table in `PersistencePlugin` is strictly append-only — no
+rows are ever deleted or updated. The DB is a complete audit log
+including `reasoning_content`. This invariant applies to all persistence
+paths: SQLite, JSONL, and any future storage backends.
 
 `on_compaction` inserts a summary row whose timestamp encodes the boundary:
 `oldest_retained_message.timestamp - 1e-6`. `load_conversation` filters with
@@ -415,13 +419,11 @@ it on the `TaskQueue` (accessed via
 `getattr(pm.get_plugin("task"), "task_queue", None)`). `TaskPlugin` is
 intentionally not declared in `AgentPlugin.depends_on` — it is treated
 as optional, and tool dispatch degrades gracefully (logs an error) if
-the task queue is unavailable. Each task's `work` closure:
-
-- Parses the tool call arguments
-- Looks up the tool function in `self.tools`
-- Injects `ToolContext` for tools declaring `_ctx`
-- Calls the tool, returns the string result
-- On unknown tool or exception, returns an error string (no crash)
+the task queue is unavailable. Each task's `work` closure calls
+`dispatch_tool_call()` from `tool.py`, which handles JSON parsing,
+unknown-tool detection, invocation, error wrapping, logging, and the
+`process_tool_result` hook. The closure returns `result.content`; the
+TaskPlugin delivers it via `on_notify`.
 
 Closure capture uses default argument binding to avoid the
 loop-variable capture bug.

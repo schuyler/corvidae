@@ -372,10 +372,10 @@ async def test_tool_call_result_logs_info_with_latency_ms(caplog):
     )
 
     messages = [{"role": "user", "content": "go"}]
-    with caplog.at_level(logging.INFO, logger="corvidae.agent_loop"):
+    with caplog.at_level(logging.INFO, logger="corvidae.tool"):
         await run_agent_loop(client, messages, tools={"my_tool": tool_fn}, tool_schemas=[])
 
-    records = [r for r in caplog.records if r.name == "corvidae.agent_loop"]
+    records = [r for r in caplog.records if r.name == "corvidae.tool"]
     matching = [r for r in records if r.levelno == logging.INFO and r.getMessage() == "tool call result"]
     assert matching, "Expected INFO record with message 'tool call result'"
     assert hasattr(matching[0], "latency_ms"), "'tool call result' log must have latency_ms attribute"
@@ -397,10 +397,10 @@ async def test_tool_call_dispatched_logs_info(caplog):
     )
 
     messages = [{"role": "user", "content": "go"}]
-    with caplog.at_level(logging.INFO, logger="corvidae.agent_loop"):
+    with caplog.at_level(logging.INFO, logger="corvidae.tool"):
         await run_agent_loop(client, messages, tools={"my_tool": tool_fn}, tool_schemas=[])
 
-    records = [r for r in caplog.records if r.name == "corvidae.agent_loop"]
+    records = [r for r in caplog.records if r.name == "corvidae.tool"]
     matching = [r for r in records if r.levelno == logging.INFO and r.getMessage() == "tool call dispatched"]
     assert matching, "Expected INFO record with message 'tool call dispatched'"
 
@@ -418,10 +418,10 @@ async def test_tool_call_result_not_logged_for_unknown_tool(caplog):
     )
 
     messages = [{"role": "user", "content": "go"}]
-    with caplog.at_level(logging.INFO, logger="corvidae.agent_loop"):
+    with caplog.at_level(logging.INFO, logger="corvidae.tool"):
         await run_agent_loop(client, messages, tools={}, tool_schemas=[])
 
-    records = [r for r in caplog.records if r.name == "corvidae.agent_loop"]
+    records = [r for r in caplog.records if r.name == "corvidae.tool"]
     result_records = [r for r in records if r.levelno == logging.INFO and r.getMessage() == "tool call result"]
     assert not result_records, "'tool call result' INFO must NOT be emitted for unknown tool"
 
@@ -442,10 +442,10 @@ async def test_tool_call_result_not_logged_on_exception(caplog):
     )
 
     messages = [{"role": "user", "content": "go"}]
-    with caplog.at_level(logging.INFO, logger="corvidae.agent_loop"):
+    with caplog.at_level(logging.INFO, logger="corvidae.tool"):
         await run_agent_loop(client, messages, tools={"bad_tool": bad_tool}, tool_schemas=[])
 
-    records = [r for r in caplog.records if r.name == "corvidae.agent_loop"]
+    records = [r for r in caplog.records if r.name == "corvidae.tool"]
     result_records = [r for r in records if r.levelno == logging.INFO and r.getMessage() == "tool call result"]
     assert not result_records, "'tool call result' INFO must NOT be emitted when tool raises"
 
@@ -575,10 +575,10 @@ async def test_tool_call_arguments_debug_log(caplog):
     )
 
     messages = [{"role": "user", "content": "go"}]
-    with caplog.at_level(logging.DEBUG, logger="corvidae.agent_loop"):
+    with caplog.at_level(logging.DEBUG, logger="corvidae.tool"):
         await run_agent_loop(client, messages, tools={"my_tool": tool_fn}, tool_schemas=[])
 
-    records = [r for r in caplog.records if r.name == "corvidae.agent_loop"]
+    records = [r for r in caplog.records if r.name == "corvidae.tool"]
     matching = [
         r for r in records
         if r.levelno == logging.DEBUG and r.getMessage() == "tool call arguments"
@@ -610,10 +610,10 @@ async def test_tool_call_result_content_debug_log(caplog):
     )
 
     messages = [{"role": "user", "content": "go"}]
-    with caplog.at_level(logging.DEBUG, logger="corvidae.agent_loop"):
+    with caplog.at_level(logging.DEBUG, logger="corvidae.tool"):
         await run_agent_loop(client, messages, tools={"my_tool": tool_fn}, tool_schemas=[])
 
-    records = [r for r in caplog.records if r.name == "corvidae.agent_loop"]
+    records = [r for r in caplog.records if r.name == "corvidae.tool"]
     matching = [
         r for r in records
         if r.levelno == logging.DEBUG and r.getMessage() == "tool call result content"
@@ -646,10 +646,10 @@ async def test_tool_call_result_content_not_logged_on_exception(caplog):
     )
 
     messages = [{"role": "user", "content": "go"}]
-    with caplog.at_level(logging.DEBUG, logger="corvidae.agent_loop"):
+    with caplog.at_level(logging.DEBUG, logger="corvidae.tool"):
         await run_agent_loop(client, messages, tools={"bad_tool": bad_tool}, tool_schemas=[])
 
-    records = [r for r in caplog.records if r.name == "corvidae.agent_loop"]
+    records = [r for r in caplog.records if r.name == "corvidae.tool"]
     result_content_records = [
         r for r in records
         if r.levelno == logging.DEBUG and r.getMessage() == "tool call result content"
@@ -1030,7 +1030,7 @@ async def test_malformed_json_logs_warning(caplog):
     )
 
     messages = [{"role": "user", "content": "go"}]
-    with caplog.at_level(logging.WARNING, logger="corvidae.agent_loop"):
+    with caplog.at_level(logging.WARNING, logger="corvidae.tool"):
         await run_agent_loop(
             client,
             messages,
@@ -1038,7 +1038,7 @@ async def test_malformed_json_logs_warning(caplog):
             tool_schemas=[],
         )
 
-    records = [r for r in caplog.records if r.name == "corvidae.agent_loop"]
+    records = [r for r in caplog.records if r.name == "corvidae.tool"]
     warning_records = [
         r for r in records
         if r.levelno == logging.WARNING and r.getMessage() == "malformed tool call arguments"
