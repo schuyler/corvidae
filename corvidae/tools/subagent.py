@@ -86,12 +86,8 @@ class SubagentPlugin:
         # Get tools, excluding subagent itself to prevent recursion
         from corvidae.agent import AgentPlugin
         agent = get_dependency(self.pm, "agent_loop", AgentPlugin)
-        # Read the authoritative runtime value from AgentPlugin. AgentPlugin._start_plugin
-        # sets this during on_start, which always completes before any tool call can be
-        # dispatched. SubagentPlugin.depends_on already declares {"agent_loop"}, so the
-        # dependency relationship is explicit.
-        max_result_chars = agent._max_tool_result_chars
-        registry = agent.tool_registry.exclude("subagent")
+        tool_registry, max_result_chars = agent.get_tool_config()
+        registry = tool_registry.exclude("subagent")
         tools_dict = registry.as_dict()
         tool_schemas = registry.schemas()
 

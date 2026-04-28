@@ -25,10 +25,13 @@ def test_agent_plugin_depends_on_includes_task():
 # 2. IdleMonitorPlugin.depends_on must include "task"
 # ---------------------------------------------------------------------------
 
-def test_idle_monitor_plugin_depends_on_includes_task():
+def test_idle_monitor_plugin_depends_on_is_empty():
     from corvidae.idle import IdleMonitorPlugin
-    assert "task" in IdleMonitorPlugin.depends_on, (
-        "IdleMonitorPlugin.depends_on should include 'task' — see plans/declare-deps-clean-reexports.md §2.2"
+    assert "task" not in IdleMonitorPlugin.depends_on, (
+        "IdleMonitorPlugin.depends_on should not include 'task' — Part 2 made it a pure on_idle consumer"
+    )
+    assert "agent_loop" not in IdleMonitorPlugin.depends_on, (
+        "IdleMonitorPlugin.depends_on should not include 'agent_loop' — Part 2 made it a pure on_idle consumer"
     )
 
 
