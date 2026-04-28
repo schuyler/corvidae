@@ -63,6 +63,12 @@ class CoreToolsPlugin:
             return await web_search(query, max_results=max_results or plugin._web_search_max_results)
         _web_search.__name__ = "web_search"
 
+        from corvidae.tools.task_pipeline import TaskPipelinePlugin
+        from corvidae.tools.index import WorkspaceIndexerPlugin
+
+        task_plugin = TaskPipelinePlugin()
+        task_plugin.register_tools(tool_registry)
+
         tool_registry.extend([
             Tool.from_function(shell),
             Tool.from_function(read_file),

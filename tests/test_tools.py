@@ -320,11 +320,11 @@ class TestWebFetchStreaming:
 
 
 class TestCoreToolsPlugin:
-    def test_register_tools_adds_five_tools(self):
+    def test_register_tools_adds_six_tools(self):
         plugin = CoreToolsPlugin()
         registry = []
         plugin.register_tools(tool_registry=registry)
-        assert len(registry) == 5
+        assert len(registry) == 6
 
     def test_registered_tool_names(self):
         from corvidae.tool import Tool
@@ -332,7 +332,7 @@ class TestCoreToolsPlugin:
         registry = []
         plugin.register_tools(tool_registry=registry)
         names = {item.name if isinstance(item, Tool) else item.__name__ for item in registry}
-        assert names == {"shell", "read_file", "write_file", "web_fetch", "web_search"}
+        assert names == {"task_pipeline", "shell", "read_file", "write_file", "web_fetch", "web_search"}
 
     def test_web_search_max_results_config(self):
         plugin = CoreToolsPlugin()
