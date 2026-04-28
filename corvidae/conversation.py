@@ -75,6 +75,7 @@ class ConversationLog:
         self.messages: list[dict] = []
         self.system_prompt: str = ""
         self.chars_per_token: float = chars_per_token
+        self.observers: list = []
 
     async def load(self) -> None:
         """Load messages from DB for this channel, ordered by id.
@@ -138,7 +139,13 @@ class ConversationLog:
         tagged = dict(message)
         tagged["_message_type"] = message_type
         self.messages.append(tagged)
-        await self._persist(message, message_type)
+        ts = await self._persist(message, message_type)
+
+        for observer in self.observers:
+            try:
+                await observer(self.channel_id, message, message_type, ts)
+            except Exception:
+                logger.error("observer %r failed", observer, exc_info=True)
 
         logger.debug(
             "message appended",
@@ -223,6 +230,12 @@ class ConversationLog:
         )
         await self.db.commit()
 
+        for observer in self.observers:
+            try:
+                await observer(self.channel_id, summary_msg, MessageType.SUMMARY, summary_ts)
+            except Exception:
+                logger.error("observer %r failed during compaction", observer, exc_info=True)
+
         logger.info(
             "compaction completed",
             extra={
@@ -286,8 +299,8 @@ class ConversationLog:
         )
         return removed
 
-    async def _persist(self, message: dict, message_type: MessageType = MessageType.MESSAGE) -> None:
-        """INSERT a single row into message_log.
+    async def _persist(self, message: dict, message_type: MessageType = MessageType.MESSAGE) -> float:
+        """INSERT a single row into message_log and return the timestamp written.
 
         Args:
             message: The message dict to serialize. Must not contain
@@ -296,12 +309,15 @@ class ConversationLog:
                 Defaults to ``MessageType.MESSAGE``.
 
         Serializes ``message`` to JSON and stores it with the current timestamp.
+        Returns the float timestamp used for the INSERT.
         """
+        ts = time.time()
         await self.db.execute(
             "INSERT INTO message_log (channel_id, message, timestamp, message_type) VALUES (?, ?, ?, ?)",
-            (self.channel_id, json.dumps(message), time.time(), message_type),
+            (self.channel_id, json.dumps(message), ts, message_type),
         )
         await self.db.commit()
+        return ts
 
 
 async def init_db(db: aiosqlite.Connection) -> None:
