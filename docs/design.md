@@ -67,13 +67,15 @@ class AgentSpec:
     async def on_notify(self, channel: Channel, source: str, text: str, tool_call_id: str | None, meta: dict | None) -> None
     async def should_process_message(self, channel: Channel, sender: str, text: str) -> bool | None
     async def on_llm_error(self, channel: Channel, error: Exception) -> str | None
-    async def compact_conversation(self, conversation: ConversationLog, client: LLMClient, max_tokens: int) -> None
+    async def compact_conversation(self, channel: Channel, conversation: ContextWindow, client: LLMClient, max_tokens: int) -> None
     async def process_tool_result(self, tool_name: str, result: str, channel: Channel | None) -> str | None
     async def before_agent_turn(self, channel: Channel) -> None
     async def after_persist_assistant(self, channel: Channel, message: dict) -> None
     async def transform_display_text(self, channel: Channel, text: str, result_message: dict) -> str | None
     async def on_idle(self) -> None
-    async def ensure_conversation(self, channel: Channel) -> bool | None
+    async def load_conversation(self, channel: Channel) -> list[dict] | None
+    async def on_conversation_event(self, channel: Channel, message: dict, message_type: MessageType) -> None
+    async def on_compaction(self, channel: Channel, summary_msg: dict, retain_count: int) -> None
 ```
 
 `create_plugin_manager()` in `hooks.py` creates the manager and adds
@@ -117,7 +119,9 @@ Pure broadcast hooks (e.g. `on_start`, `on_idle`) do not call
 | `after_persist_assistant` | broadcast | `_process_queue_item`, after assistant message is persisted; plugins may mutate the in-memory dict |
 | `transform_display_text` | broadcast / VALUE_FIRST | `_resolve_display_text`, before `send_message`; return transformed text or None to leave unchanged |
 | `on_idle` | broadcast | `IdleMonitor`, when all queues empty and cooldown elapsed |
-| `ensure_conversation` | broadcast / ACCEPT_WINS | `_process_queue_item`, before agent turn when `channel.conversation is None`; return True=initialized, None=defer |
+| `load_conversation` | broadcast / VALUE_FIRST | `_process_queue_item`, when `channel.conversation is None`; return list of tagged message dicts or None to defer |
+| `on_conversation_event` | broadcast | `_process_queue_item`, after every `conv.append()`; side effects only (persistence, JSONL logging) |
+| `on_compaction` | broadcast | `CompactionPlugin`, after `replace_with_summary()`; side effects only (persistence) |
 
 ## Channel System
 
@@ -147,7 +151,7 @@ class Channel:
     transport: str
     scope: str
     config: ChannelConfig
-    conversation: ConversationLog | None = None
+    conversation: ContextWindow | None = None
     created_at: float
     last_active: float
     turn_counter: int = 0  # consecutive LLM turns without user message
@@ -257,55 +261,50 @@ Tools that don't declare `_ctx` work without modification.
 
 ## Conversation Management
 
-`conversation.py` provides persistence and prompt construction.
+`context.py` provides in-memory context management. `persistence.py` handles all SQLite I/O.
 
-**ConversationLog** — per-channel conversation with SQLite persistence:
+**ContextWindow** — per-channel in-memory conversation context (`corvidae/context.py`).
+All operations are synchronous; no database access:
 
-- `load()` — loads history from DB
-- `append(message, message_type=MessageType.MESSAGE)` — appends to in-memory list and persists to DB
-- `build_prompt()` — returns `[system_msg, *messages]`
-- `token_estimate()` — rough count via `chars / 3.5`
-- `replace_with_summary(summary_msg, retain_count)` — replaces older
-  messages with a summary, retaining the `retain_count` most-recent
-  entries. Updates the in-memory list and the DB atomically. The
-  summary is stored as a `SUMMARY`-typed row whose timestamp encodes
-  the compaction boundary; old rows remain in the DB but become
-  invisible to `load()` via the timestamp filter. Raises
-  `ValueError` if `retain_count` exceeds `len(messages)`.
-- `remove_by_type(message_type)` — removes all entries of the given
-  `MessageType` from the in-memory list only. Returns the
-  number of entries removed. Raises `ValueError` if called with
-  `MessageType.MESSAGE` or `MessageType.SUMMARY` — those types are
-  managed by compaction. Plugins use this to clean up previously
-  injected `CONTEXT` entries before re-injecting fresh ones.
+- `append(message, message_type=MessageType.MESSAGE)` — appends to in-memory list with `_message_type` tag
+- `build_prompt()` — returns `[system_msg, *messages]` with `_message_type` stripped
+- `token_estimate()` — rough count via `chars / chars_per_token`
+- `replace_with_summary(summary_msg, retain_count)` — replaces older messages
+  with a summary in-memory, retaining the `retain_count` most-recent entries.
+  Raises `ValueError` if `retain_count` exceeds `len(messages)`.
+- `remove_by_type(message_type)` — removes all entries of the given `MessageType`
+  from the in-memory list. Returns the number removed. Raises `ValueError` if called
+  with `MessageType.MESSAGE` or `MessageType.SUMMARY`. Plugins use this to clean up
+  previously injected `CONTEXT` entries before re-injecting fresh ones.
+
+After each `conv.append()`, `AgentPlugin` fires `on_conversation_event` (broadcast)
+so persistence plugins can write to their storage. After `replace_with_summary()`,
+`CompactionPlugin` fires `on_compaction` (broadcast) so persistence plugins can
+update the DB boundary.
 
 ### Append-only log
 
-The `message_log` table is append-only. No rows are ever deleted or
-updated. The DB serves as a complete, immutable audit log — including
-`reasoning_content`.
+The `message_log` table in `PersistencePlugin` is append-only. No rows are deleted
+or updated. The DB is a complete audit log including `reasoning_content`.
 
-Compaction (`replace_with_summary`) inserts a new summary row whose
-timestamp encodes the boundary: `oldest_retained_message.timestamp -
-1e-6`. `load()` filters with `WHERE timestamp > summary_ts`, returning
-only the summary plus retained and new messages. Old rows remain in the
-DB but are invisible to the working set.
+`on_compaction` inserts a summary row whose timestamp encodes the boundary:
+`oldest_retained_message.timestamp - 1e-6`. `load_conversation` filters with
+`WHERE timestamp > summary_ts`, returning only the summary plus retained and new
+messages. Old rows remain in the DB but are invisible to the working set.
 
-`remove_by_type()` operates on the in-memory message list only. Old
-CONTEXT rows remain in the DB but become invisible after the next
-compaction (their timestamps fall below the summary boundary).
+`remove_by_type()` operates on the in-memory list only. Old CONTEXT rows in the DB
+become invisible after the next compaction (their timestamps fall below the boundary).
 
 **Thinking token handling** — three layers:
 - Display: `ThinkingPlugin.transform_display_text` calls `strip_thinking()`
-  to remove `<think>` blocks before the text is sent to the channel
-- Persistent log: full message dict preserved (including
-  `reasoning_content`)
+  to remove `<think>` blocks before text is sent to the channel
+- Persistent log: full message dict preserved (including `reasoning_content`)
 - Active prompt: `ThinkingPlugin.after_persist_assistant` calls
   `strip_reasoning_content()` on the in-memory message when
   `keep_thinking_in_history=false`
 
-If `ThinkingPlugin` is not registered, `<think>` blocks pass through
-to the channel and `reasoning_content` remains in the in-memory history.
+If `ThinkingPlugin` is not registered, `<think>` blocks pass through to the channel
+and `reasoning_content` remains in the in-memory history.
 
 ### Message types
 
@@ -316,19 +315,16 @@ class MessageType(str, enum.Enum):
     CONTEXT = "context"    # plugin-injected context (memory, notes, etc.)
 ```
 
-`message_type` is a persistence category, orthogonal to conversational
-role (`user`, `assistant`, `tool`, `system`). It controls how compaction
-treats a row: `CompactionPlugin` only summarizes `MESSAGE` entries;
-`SUMMARY` and `CONTEXT` rows are retained through compaction.
+`message_type` is a persistence category, orthogonal to conversational role
+(`user`, `assistant`, `tool`, `system`). `CompactionPlugin` only summarizes `MESSAGE`
+entries; `SUMMARY` and `CONTEXT` rows survive compaction.
 
-In-memory message dicts carry a `_message_type` metadata key (set during
-`load()` and `append()`). `build_prompt()` strips it before returning
-messages to the LLM. `append()` accepts an optional `message_type`
-parameter (default `MessageType.MESSAGE`), allowing plugins to inject
-non-message entries directly into the conversation log.
+In-memory message dicts carry a `_message_type` metadata key (set by `append()`).
+`build_prompt()` strips it before returning messages to the LLM.
 
-The `before_agent_turn` hook gives plugins a chance to inject entries
-(e.g., `CONTEXT` rows) into the conversation log before each LLM call.
+The `before_agent_turn` hook gives plugins a chance to inject entries (e.g., `CONTEXT`
+rows) into the conversation before each LLM call. `AgentPlugin` fires
+`on_conversation_event` for each injected message after the hook returns.
 
 ### Database schema
 
@@ -351,9 +347,11 @@ CREATE INDEX idx_log_channel ON message_log(channel_id, timestamp);
 startup. Retrieves `ChannelRegistry` during `on_start` via
 `get_dependency(pm, "registry", ChannelRegistry)` from `hooks.py`.
 
-DB lifecycle (open/close) and conversation initialization are delegated to
-`PersistencePlugin` via the `ensure_conversation` hook. AgentPlugin does not
-manage a database connection or a `base_dir`.
+DB lifecycle (open/close) is delegated to `PersistencePlugin`. Conversation
+initialization is handled directly in `AgentPlugin._process_queue_item`: a
+`ContextWindow` is created, then `load_conversation` (VALUE_FIRST) is called
+so persistence plugins can populate history. `AgentPlugin` reads `_chars_per_token`
+and `_base_dir` from config in `_start_plugin`.
 
 `AgentPlugin.queues` is a public `dict[str, SerialQueue]` (keyed by
 channel ID). `IdleMonitorPlugin` holds a reference to this dict; queues
@@ -374,20 +372,22 @@ per-channel `SerialQueue`. The queue's consumer calls
 1. **`_build_conversation_message`** — converts a `QueueItem` into a
    conversation message dict and `request_text`. Returns `None` on
    unrecognized role (logged, item dropped).
-2. Broadcasts `ensure_conversation` when `channel.conversation is None`
-   and resolves with `HookStrategy.ACCEPT_WINS`; if no plugin returns
-   `True`, logs an error and drops the message
+2. When `channel.conversation is None`, creates a `ContextWindow`, calls
+   `load_conversation` (VALUE_FIRST) to populate history, and assigns
+   `channel.conversation`
 3. Resets `turn_counter` to 0 on user messages
 4. Resolves channel config (including `max_turns`)
-5. Appends the inbound message to conversation log
+5. Appends the inbound message to conversation; fires `on_conversation_event`
+   (broadcast, side effects only — persistence plugins write to storage)
 6. Broadcasts `compact_conversation`; all implementations run for side
    effects; return values are not used
-7. Calls `before_agent_turn` hook (broadcast)
+7. Calls `before_agent_turn` hook (broadcast); fires `on_conversation_event`
+   for any messages injected by the hook
 8. **`_run_turn`** — calls `run_agent_turn` (single LLM invocation).
    On exception, broadcasts `on_llm_error` (resolved with
    `HookStrategy.VALUE_FIRST`), sends the error message to the channel,
    and returns `None` to abort processing.
-9. Persists the assistant message
+9. Appends the assistant message to conversation; fires `on_conversation_event`
 10. Calls `after_persist_assistant` hook (broadcast); `ThinkingPlugin`
     uses this to strip `reasoning_content` from the in-memory copy
 11. **`_handle_response`** — decision point:
@@ -458,42 +458,67 @@ class QueueItem:
 
 ## PersistencePlugin
 
-`persistence.py` — manages the SQLite database lifecycle and
-per-channel conversation initialization. Registered as `"persistence"` in
-`main.py`, immediately after `ChannelRegistry`.
+`persistence.py` — manages the SQLite database lifecycle and conversation
+persistence. Registered as `"persistence"` in `main.py`, immediately after
+`ChannelRegistry`.
 
 `PersistencePlugin` depends on `"registry"`. Its `on_start` retrieves
 `ChannelRegistry` via `get_dependency(pm, "registry", ChannelRegistry)`,
 reads `daemon.session_db` from config (default `"sessions.db"`), opens the
-database with `aiosqlite.connect`, and calls `init_db` to create the schema.
-`on_stop` closes the connection.
+database with `aiosqlite.connect`, and runs schema creation. `on_stop` closes
+the connection.
 
 `PersistencePlugin.db` is public for test injection: setting `persistence.db`
 before `on_start` causes the `if self.db is None:` guard to skip the open.
-`PersistencePlugin.base_dir` holds the directory containing `agent.yaml` and
-is used to resolve relative system prompt file paths.
 
-### ensure_conversation
+### load_conversation
 
-Implements the `ensure_conversation` broadcast hook (resolved with
-`HookStrategy.ACCEPT_WINS`). Called by `AgentPlugin._process_queue_item` (step 2)
-when `channel.conversation is None`.
+Implements `load_conversation` (VALUE_FIRST). Called by `AgentPlugin` when
+`channel.conversation is None`. Queries `message_log` for the channel, applying
+the timestamp filter so only the compaction boundary and newer rows are returned.
+Returns a list of tagged message dicts (with `_message_type` set). Logs an INFO
+event when history is loaded.
 
-Steps:
-1. If `channel.conversation` is already set, returns `True` immediately
-2. Creates a `ConversationLog` bound to the plugin's DB connection and
-   the channel ID
-3. Resolves the channel config via `ChannelRegistry.resolve_config` and
-   calls `resolve_system_prompt` with `self.base_dir`; assigns
-   `conv.system_prompt` (**must** happen before `load()`)
-4. Calls `conv.load()` to populate history from the DB
-5. Assigns `channel.conversation = conv`
-6. Returns `True`
+### on_conversation_event
 
-Initialization events log to `corvidae.persistence`.
+Implements `on_conversation_event` (broadcast). Called after every `conv.append()`.
+Strips `_message_type` from the message dict before inserting into `message_log`.
 
-**Graceful degradation:** without `PersistencePlugin`, the `ensure_conversation`
-hook returns `None`. `AgentPlugin` logs an error and drops the message; no crash.
+### on_compaction
+
+Implements `on_compaction` (broadcast). Called after `replace_with_summary()`.
+Determines the timestamp boundary from the most-recent non-retained row, inserts
+the summary row with `timestamp = boundary - 1e-6`, and commits.
+
+**Graceful degradation:** without `PersistencePlugin`, `load_conversation` returns
+no history and conversation events are not persisted.
+
+## JsonlLogPlugin
+
+`jsonl_log.py` — writes an append-only JSONL log alongside the SQLite
+conversation store. Registered as `"jsonl_log"` in `main.py`.
+
+Configured via `daemon.jsonl_log_dir` in `agent.yaml`. If the key is
+absent, the plugin is a complete no-op — all hookimpls return early.
+When configured, `on_start` resolves the directory relative to
+`_base_dir` and creates it if necessary.
+
+### on_conversation_event
+
+Implements `on_conversation_event` (broadcast). Strips `_message_type`
+from the message dict and writes a JSON line with `ts`, `channel`,
+`type`, and `message` fields to a per-channel `.jsonl` file.
+
+### on_compaction
+
+Implements `on_compaction` (broadcast). Writes the compaction summary as
+a JSON line with `type: "summary"`.
+
+### File handles
+
+Per-channel file handles are opened lazily in `_get_handle` and held
+open for the plugin lifetime. Channel IDs are sanitized (`/` and `:` →
+`_`) for filenames. All handles are flushed and closed in `on_stop`.
 
 ## IdleMonitorPlugin
 
@@ -579,7 +604,9 @@ for side effects; its return value is not used by the caller.
    LLM with a system prompt asking for a concise summary. This method is a
    separate public method so tests can patch it via `patch.object`.
 7. Call `conversation.replace_with_summary(summary_msg, retain_count)`.
-8. Return `True`.
+8. Fire `on_compaction(channel, summary_msg, retain_count)` (broadcast) so
+   persistence plugins can update the DB.
+9. Return `True`.
 
 **Graceful degradation:** without `CompactionPlugin`, the
 `compact_conversation` hook returns `None` on every turn and compaction
@@ -849,18 +876,19 @@ Relative paths resolve against the directory containing `agent.yaml`.
 Defined in `main.py`:
 
 1. `ChannelRegistry` — registered as a named plugin (`"registry"`) on the PM
-2. `PersistencePlugin` — DB lifecycle and conversation initialization (after registry, before everything else)
-3. `CoreToolsPlugin` — registers core tools
-4. `CLIPlugin` — stdin/stdout transport
-5. `IRCPlugin` — IRC transport
-6. `TaskPlugin` — task queue
-7. `SubagentPlugin` — registers the `subagent` tool
-8. `McpClientPlugin` — MCP server connections and tool forwarding
-9. `CompactionPlugin` — provides default `compact_conversation` implementation
-10. `ThinkingPlugin` — handles `<think>` stripping and `reasoning_content` removal
-11. `RuntimeSettingsPlugin` — registers the `set_settings` tool
-12. `AgentPlugin` — agent loop (after all tools, transports, and support plugins)
-13. `IdleMonitorPlugin` — idle monitor (after `AgentPlugin`, depends on `agent_loop`)
+2. `PersistencePlugin` — DB lifecycle and conversation persistence (after registry, before everything else)
+3. `JsonlLogPlugin` — JSONL conversation logging (peer persistence hook consumer)
+4. `CoreToolsPlugin` — registers core tools
+5. `CLIPlugin` — stdin/stdout transport
+6. `IRCPlugin` — IRC transport
+7. `TaskPlugin` — task queue
+8. `SubagentPlugin` — registers the `subagent` tool
+9. `McpClientPlugin` — MCP server connections and tool forwarding
+10. `CompactionPlugin` — provides default `compact_conversation` implementation
+11. `ThinkingPlugin` — handles `<think>` stripping and `reasoning_content` removal
+12. `RuntimeSettingsPlugin` — registers the `set_settings` tool
+13. `AgentPlugin` — agent loop (after all tools, transports, and support plugins)
+14. `IdleMonitorPlugin` — idle monitor (after `AgentPlugin`, depends on `agent_loop`)
 
 After all registrations, `validate_dependencies(pm)` runs to verify that
 every plugin's `depends_on` set names a registered plugin. Startup aborts
@@ -918,7 +946,8 @@ corvidae/
 ├── queue.py              # SerialQueue (is_empty property)
 ├── llm.py                # LLMClient
 ├── agent_loop.py         # run_agent_turn(), run_agent_loop(), strip_thinking
-├── conversation.py       # ConversationLog, init_db
+├── context.py            # ContextWindow, MessageType, DEFAULT_CHARS_PER_TOKEN
+├── jsonl_log.py          # JsonlLogPlugin (on_conversation_event, on_compaction)
 ├── logging.py            # StructuredFormatter, _DEFAULT_LOGGING
 ├── agent.py              # AgentPlugin (single-turn dispatch)
 ├── persistence.py        # PersistencePlugin (DB lifecycle, conversation init)

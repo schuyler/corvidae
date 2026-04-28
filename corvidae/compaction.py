@@ -1,6 +1,6 @@
 """CompactionPlugin — token-budget conversation compaction.
 
-Extracts compaction logic from ConversationLog into a standalone plugin that
+Extracts compaction logic from ContextWindow into a standalone plugin that
 implements the compact_conversation hookspec. Registers in main.py before
 AgentPlugin so it runs as the default compaction strategy.
 
@@ -11,14 +11,15 @@ Algorithm:
     4. Skip if all messages fit (retain_count >= len(messages)).
     5. Filter older messages to MESSAGE type, strip _message_type metadata.
     6. Summarize via LLM (_summarize method, patchable in tests).
-    7. Call conversation.replace_with_summary(summary_msg, retain_count).
-    8. Return True.
+    7. Call conversation.replace_with_summary(summary_msg, retain_count) (sync).
+    8. Fire on_compaction hook if pm is set.
+    9. Return True.
 """
 
 import json
 import logging
 
-from corvidae.conversation import DEFAULT_CHARS_PER_TOKEN
+from corvidae.context import DEFAULT_CHARS_PER_TOKEN, MessageType
 from corvidae.hooks import hookimpl
 
 logger = logging.getLogger(__name__)
@@ -27,7 +28,8 @@ logger = logging.getLogger(__name__)
 class CompactionPlugin:
     """Plugin that implements default token-budget conversation compaction."""
 
-    def __init__(self) -> None:
+    def __init__(self, pm=None) -> None:
+        self.pm = pm
         self._compaction_threshold: float = 0.8
         self._compaction_retention: float = 0.5
         self._min_messages: int = 5
@@ -42,13 +44,11 @@ class CompactionPlugin:
         self._chars_per_token = agent_config.get("chars_per_token", DEFAULT_CHARS_PER_TOKEN)
 
     @hookimpl
-    async def compact_conversation(self, conversation, client, max_tokens):
+    async def compact_conversation(self, channel, conversation, client, max_tokens):
         """Compact the conversation if it exceeds 80% of max_tokens.
 
         Returns True if compaction was performed, None otherwise.
         """
-        from corvidae.conversation import MessageType
-
         if conversation.token_estimate() < self._compaction_threshold * max_tokens:
             return None
 
@@ -90,7 +90,18 @@ class CompactionPlugin:
             "content": f"[Summary of earlier conversation]\n{summary_text}",
         }
 
-        await conversation.replace_with_summary(summary_msg, retain_count)
+        conversation.replace_with_summary(summary_msg, retain_count)
+
+        if self.pm is not None:
+            try:
+                await self.pm.ahook.on_compaction(
+                    channel=channel,
+                    summary_msg=summary_msg,
+                    retain_count=retain_count,
+                )
+            except Exception:
+                logger.warning("on_compaction hook failed", exc_info=True)
+
         return True
 
     async def _summarize(self, client, messages: list[dict]) -> str:

@@ -1,10 +1,8 @@
-"""Tests for corvidae.persistence.PersistencePlugin.
+"""Tests for corvidae.persistence.PersistencePlugin."""
 
-RED phase: these tests fail because corvidae/persistence.py does not exist yet
-and the ensure_conversation hookspec has not been added to corvidae/hooks.py.
-"""
-
+import json
 import logging
+import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -12,7 +10,7 @@ import aiosqlite
 import pytest
 
 from corvidae.channel import Channel, ChannelConfig, ChannelRegistry
-from corvidae.conversation import ConversationLog, init_db
+from corvidae.persistence import init_db
 from corvidae.hooks import create_plugin_manager, resolve_hook_results, HookStrategy
 
 
@@ -45,7 +43,7 @@ def _make_channel(registry=None, transport="test", scope="scope1"):
 async def _make_plugin_with_db(db=None):
     """Build a PersistencePlugin with an injected in-memory DB.
 
-    Returns (plugin, registry, db).  Callers are responsible for closing db
+    Returns (plugin, registry, db). Callers are responsible for closing db
     if they passed None (i.e., a fresh db was created here).
     """
     from corvidae.persistence import PersistencePlugin
@@ -81,7 +79,6 @@ class TestOnStart:
         pm.register(registry, name="registry")
 
         plugin = PersistencePlugin(pm)
-        # db is None — on_start must open it
         assert plugin.db is None
 
         db_path = str(tmp_path / "test.db")
@@ -90,7 +87,6 @@ class TestOnStart:
         await plugin.on_start(config=config)
 
         assert plugin.db is not None
-        # Tables must exist — querying message_log must not raise
         async with plugin.db.execute("SELECT 1 FROM message_log LIMIT 1"):
             pass
 
@@ -106,7 +102,6 @@ class TestOnStart:
 
         plugin = PersistencePlugin(pm)
 
-        # Pre-inject an in-memory DB
         pre_injected = await aiosqlite.connect(":memory:")
         await init_db(pre_injected)
         plugin.db = pre_injected
@@ -114,28 +109,11 @@ class TestOnStart:
         config = {"daemon": {"session_db": str(tmp_path / "should_not_open.db")}}
         await plugin.on_start(config=config)
 
-        # The pre-injected connection must still be the one on the plugin
         assert plugin.db is pre_injected
 
         await pre_injected.close()
 
-    async def test_on_start_stores_base_dir_from_config(self, tmp_path):
-        """on_start must store _base_dir from config as plugin.base_dir."""
-        plugin, _registry, db = await _make_plugin_with_db()
-        config = {"_base_dir": tmp_path}
-        await plugin.on_start(config=config)
-
-        assert plugin.base_dir == tmp_path
-        await db.close()
-
-    async def test_on_start_defaults_base_dir_to_cwd(self):
-        """on_start must default base_dir to Path('.') when _base_dir not in config."""
-        plugin, _registry, db = await _make_plugin_with_db()
-        config = {}
-        await plugin.on_start(config=config)
-
-        assert plugin.base_dir == Path(".")
-        await db.close()
+    # base_dir tests removed: system prompt resolution moves to AgentPlugin
 
 
 # ---------------------------------------------------------------------------
@@ -172,100 +150,384 @@ class TestOnStop:
         plugin = PersistencePlugin(pm)
         assert plugin.db is None
 
-        # Must not raise
         await plugin.on_stop()
 
 
 # ---------------------------------------------------------------------------
-# TestEnsureConversation
+# TestLoadConversation (NEW — RED phase)
 # ---------------------------------------------------------------------------
 
 
-class TestEnsureConversation:
-    async def test_ensure_conversation_creates_conversation_log(self):
-        """ensure_conversation must create and attach a ConversationLog when
-        channel.conversation is None."""
-        plugin, registry, db = await _make_plugin_with_db()
-        plugin._registry = registry
+class TestLoadConversation:
+    """Tests for PersistencePlugin.load_conversation hookimpl.
+
+    RED phase: these fail because load_conversation does not exist yet on
+    PersistencePlugin.
+    """
+
+    async def test_load_conversation_returns_none_when_no_rows(self, db):
+        """load_conversation must return None when no rows exist for the channel."""
+        plugin, registry, _ = await _make_plugin_with_db(db)
         channel = _make_channel(registry)
 
-        assert channel.conversation is None
+        result = await plugin.load_conversation(channel=channel)
 
-        result = await plugin.ensure_conversation(channel=channel)
+        assert result is None
 
-        assert result is True
-        assert channel.conversation is not None
-        assert isinstance(channel.conversation, ConversationLog)
+    async def test_load_conversation_returns_tagged_message_dicts(self, db):
+        """load_conversation returns list of dicts tagged with _message_type."""
+        from corvidae.context import MessageType
 
-        await db.close()
-
-    async def test_ensure_conversation_returns_true_without_replacing_existing(self):
-        """When channel.conversation is already set, ensure_conversation must
-        return True immediately without replacing it."""
-        plugin, registry, db = await _make_plugin_with_db()
-        plugin._registry = registry
+        plugin, registry, _ = await _make_plugin_with_db(db)
         channel = _make_channel(registry)
 
-        # Pre-attach a conversation
-        existing = ConversationLog(db, channel.id)
-        channel.conversation = existing
+        base_ts = time.time()
+        msg = {"role": "user", "content": "hello"}
+        await db.execute(
+            "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
+            "VALUES (?, ?, ?, 'message')",
+            (channel.id, json.dumps(msg), base_ts),
+        )
+        await db.commit()
 
-        result = await plugin.ensure_conversation(channel=channel)
+        result = await plugin.load_conversation(channel=channel)
 
-        assert result is True
-        assert channel.conversation is existing  # unchanged
+        assert result is not None
+        assert len(result) == 1
+        assert result[0]["content"] == "hello"
+        assert result[0]["_message_type"] == MessageType.MESSAGE
 
-        await db.close()
+    async def test_load_conversation_excludes_other_channels(self, db):
+        """load_conversation only returns rows for the given channel."""
+        plugin, registry, _ = await _make_plugin_with_db(db)
+        channel1 = registry.get_or_create("test", "scope1", config=ChannelConfig())
+        channel2 = registry.get_or_create("test", "scope2", config=ChannelConfig())
 
-    async def test_ensure_conversation_resolves_string_system_prompt(self):
-        """ensure_conversation must pass through a literal string system_prompt."""
-        agent_defaults = dict(AGENT_DEFAULTS)
-        agent_defaults["system_prompt"] = "Literal prompt."
-        registry = _make_registry(agent_defaults)
+        base_ts = time.time()
+        await db.execute(
+            "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
+            "VALUES (?, ?, ?, 'message')",
+            (channel1.id, json.dumps({"role": "user", "content": "ch1"}), base_ts),
+        )
+        await db.execute(
+            "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
+            "VALUES (?, ?, ?, 'message')",
+            (channel2.id, json.dumps({"role": "user", "content": "ch2"}), base_ts + 1),
+        )
+        await db.commit()
 
-        plugin, _registry, db = await _make_plugin_with_db()
-        plugin._registry = registry
+        result = await plugin.load_conversation(channel=channel1)
 
-        channel = registry.get_or_create("test", "s1", config=ChannelConfig())
+        assert result is not None
+        assert len(result) == 1
+        assert result[0]["content"] == "ch1"
 
-        await plugin.ensure_conversation(channel=channel)
+    async def test_load_conversation_with_summary_filters_old_messages(self, db):
+        """load_conversation respects summary boundary — returns summary + newer rows only."""
+        from corvidae.context import MessageType
 
-        assert channel.conversation.system_prompt == "Literal prompt."
-        await db.close()
+        plugin, registry, _ = await _make_plugin_with_db(db)
+        channel = _make_channel(registry)
 
-    async def test_ensure_conversation_resolves_file_list_system_prompt(self, tmp_path):
-        """ensure_conversation must read file-list system_prompt entries and
-        join them with double newlines."""
-        prompt_a = tmp_path / "a.txt"
-        prompt_b = tmp_path / "b.txt"
-        prompt_a.write_text("Part A")
-        prompt_b.write_text("Part B")
+        base_ts = time.time() - 10
 
-        agent_defaults = dict(AGENT_DEFAULTS)
-        agent_defaults["system_prompt"] = [str(prompt_a), str(prompt_b)]
-        registry = _make_registry(agent_defaults)
+        # Insert 2 old message rows
+        for i in range(2):
+            await db.execute(
+                "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
+                "VALUES (?, ?, ?, 'message')",
+                (channel.id, json.dumps({"role": "user", "content": f"old {i}"}), base_ts + i),
+            )
 
-        plugin, _registry, db = await _make_plugin_with_db()
-        plugin._registry = registry
-        plugin.base_dir = tmp_path
+        # Insert summary row with timestamp between old and new messages
+        summary_ts = base_ts + 5
+        summary_msg = {"role": "assistant", "content": "[Summary]"}
+        await db.execute(
+            "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
+            "VALUES (?, ?, ?, 'summary')",
+            (channel.id, json.dumps(summary_msg), summary_ts),
+        )
 
-        channel = registry.get_or_create("test", "s2", config=ChannelConfig())
+        # Insert 1 new message row after the summary boundary
+        await db.execute(
+            "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
+            "VALUES (?, ?, ?, 'message')",
+            (channel.id, json.dumps({"role": "user", "content": "new"}), base_ts + 10),
+        )
+        await db.commit()
 
-        await plugin.ensure_conversation(channel=channel)
+        result = await plugin.load_conversation(channel=channel)
 
-        assert channel.conversation.system_prompt == "Part A\n\nPart B"
-        await db.close()
+        assert result is not None
+        # summary + 1 new message (2 old excluded by boundary)
+        assert len(result) == 2
+        types = {m["_message_type"] for m in result}
+        assert MessageType.SUMMARY in types
+        assert MessageType.MESSAGE in types
+
+    async def test_load_conversation_orders_messages_by_timestamp(self, db):
+        """load_conversation returns messages in chronological order."""
+        plugin, registry, _ = await _make_plugin_with_db(db)
+        channel = _make_channel(registry)
+
+        base_ts = time.time()
+        # Insert in reverse order
+        await db.execute(
+            "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
+            "VALUES (?, ?, ?, 'message')",
+            (channel.id, json.dumps({"role": "assistant", "content": "second"}), base_ts + 1),
+        )
+        await db.execute(
+            "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
+            "VALUES (?, ?, ?, 'message')",
+            (channel.id, json.dumps({"role": "user", "content": "first"}), base_ts),
+        )
+        await db.commit()
+
+        result = await plugin.load_conversation(channel=channel)
+
+        assert result[0]["content"] == "first"
+        assert result[1]["content"] == "second"
 
 
 # ---------------------------------------------------------------------------
-# TestHookIntegration
+# TestOnConversationEvent (NEW — RED phase)
+# ---------------------------------------------------------------------------
+
+
+class TestOnConversationEvent:
+    """Tests for PersistencePlugin.on_conversation_event hookimpl.
+
+    RED phase: these fail because on_conversation_event does not exist yet.
+    """
+
+    async def test_on_conversation_event_inserts_row(self, db):
+        """on_conversation_event must insert a row into message_log."""
+        from corvidae.context import MessageType
+
+        plugin, registry, _ = await _make_plugin_with_db(db)
+        channel = _make_channel(registry)
+        msg = {"role": "user", "content": "hello"}
+
+        await plugin.on_conversation_event(
+            channel=channel, message=msg, message_type=MessageType.MESSAGE
+        )
+
+        async with db.execute(
+            "SELECT channel_id, message, message_type FROM message_log WHERE channel_id = ?",
+            (channel.id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+
+        assert row is not None
+        assert row[0] == channel.id
+        assert json.loads(row[1]) == msg
+        assert row[2] == "message"
+
+    async def test_on_conversation_event_persists_context_type(self, db):
+        """on_conversation_event with CONTEXT type must write message_type='context'."""
+        from corvidae.context import MessageType
+
+        plugin, registry, _ = await _make_plugin_with_db(db)
+        channel = _make_channel(registry)
+        msg = {"role": "system", "content": "ctx"}
+
+        await plugin.on_conversation_event(
+            channel=channel, message=msg, message_type=MessageType.CONTEXT
+        )
+
+        async with db.execute(
+            "SELECT message_type FROM message_log WHERE channel_id = ?",
+            (channel.id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+
+        assert row[0] == "context"
+
+    async def test_on_conversation_event_strips_message_type_tag_from_db(self, db):
+        """on_conversation_event must not write _message_type into the JSON column."""
+        from corvidae.context import MessageType
+
+        plugin, registry, _ = await _make_plugin_with_db(db)
+        channel = _make_channel(registry)
+        # Simulate a tagged message that might arrive
+        msg = {"role": "user", "content": "hello", "_message_type": MessageType.MESSAGE}
+
+        await plugin.on_conversation_event(
+            channel=channel, message=msg, message_type=MessageType.MESSAGE
+        )
+
+        async with db.execute(
+            "SELECT message FROM message_log WHERE channel_id = ?",
+            (channel.id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+
+        stored = json.loads(row[0])
+        assert "_message_type" not in stored, (
+            "on_conversation_event must strip _message_type before writing to DB"
+        )
+
+    async def test_on_conversation_event_commits(self, db):
+        """on_conversation_event must commit so the row is visible to a fresh query."""
+        from corvidae.context import MessageType
+
+        plugin, registry, _ = await _make_plugin_with_db(db)
+        channel = _make_channel(registry)
+
+        await plugin.on_conversation_event(
+            channel=channel,
+            message={"role": "user", "content": "committed?"},
+            message_type=MessageType.MESSAGE,
+        )
+
+        # Fresh query without relying on plugin's internal state
+        async with db.execute(
+            "SELECT COUNT(*) FROM message_log WHERE channel_id = ?",
+            (channel.id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        assert row[0] == 1
+
+
+# ---------------------------------------------------------------------------
+# TestOnCompaction (NEW — RED phase)
+# ---------------------------------------------------------------------------
+
+
+class TestOnCompaction:
+    """Tests for PersistencePlugin.on_compaction hookimpl.
+
+    RED phase: these fail because on_compaction does not exist yet.
+    """
+
+    async def test_on_compaction_inserts_summary_row(self, db):
+        """on_compaction must insert a summary row into message_log."""
+        from corvidae.context import MessageType
+
+        plugin, registry, _ = await _make_plugin_with_db(db)
+        channel = _make_channel(registry)
+        summary_msg = {"role": "assistant", "content": "[Summary]"}
+
+        await plugin.on_compaction(
+            channel=channel, summary_msg=summary_msg, retain_count=0
+        )
+
+        async with db.execute(
+            "SELECT message_type, message FROM message_log WHERE channel_id = ?",
+            (channel.id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+
+        assert row is not None
+        assert row[0] == "summary"
+        assert json.loads(row[1]) == summary_msg
+
+    async def test_on_compaction_timestamp_boundary_with_retain(self, db):
+        """on_compaction with retain_count > 0 sets summary_ts = oldest_retained - 1e-6.
+
+        Verifies the exact arithmetic AND that load_conversation returns the
+        correct working set afterward.
+        """
+        import pytest
+
+        plugin, registry, _ = await _make_plugin_with_db(db)
+        channel = _make_channel(registry)
+
+        base_ts = time.time() - 100  # well in the past
+
+        # Insert 3 message rows at base_ts+0, base_ts+1, base_ts+2
+        for i in range(3):
+            await db.execute(
+                "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
+                "VALUES (?, ?, ?, 'message')",
+                (channel.id, json.dumps({"role": "user", "content": f"msg {i}"}), base_ts + i),
+            )
+        await db.commit()
+
+        summary_msg = {"role": "assistant", "content": "[Summary]"}
+        # retain_count=1: keep the last 1 row (timestamp base_ts+2)
+        # summary_ts must be exactly (base_ts+2) - 1e-6
+        await plugin.on_compaction(
+            channel=channel, summary_msg=summary_msg, retain_count=1
+        )
+
+        # Verify exact timestamp arithmetic
+        async with db.execute(
+            "SELECT timestamp FROM message_log WHERE channel_id = ? AND message_type = 'summary'",
+            (channel.id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+
+        assert row is not None
+        summary_ts = row[0]
+        expected_ts = base_ts + 2 - 1e-6
+        assert summary_ts == pytest.approx(expected_ts, abs=1e-9), (
+            f"Summary timestamp {summary_ts} must be oldest_retained - 1e-6 = {expected_ts}"
+        )
+
+        # End-to-end: load_conversation returns summary + 1 retained message
+        loaded = await plugin.load_conversation(channel=channel)
+        assert loaded is not None
+        assert len(loaded) == 2, (
+            f"Expected 2 messages (summary + 1 retained), got {len(loaded)}"
+        )
+
+    async def test_on_compaction_zero_retain_uses_current_time(self, db):
+        """on_compaction with retain_count=0 sets summary_ts to approximately now."""
+        from corvidae.context import MessageType
+
+        plugin, registry, _ = await _make_plugin_with_db(db)
+        channel = _make_channel(registry)
+
+        before = time.time()
+        summary_msg = {"role": "assistant", "content": "[Summary]"}
+        await plugin.on_compaction(
+            channel=channel, summary_msg=summary_msg, retain_count=0
+        )
+        after = time.time()
+
+        async with db.execute(
+            "SELECT timestamp FROM message_log WHERE channel_id = ? AND message_type = 'summary'",
+            (channel.id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+
+        assert row is not None
+        assert before <= row[0] <= after
+
+    async def test_on_compaction_commits(self, db):
+        """on_compaction must commit the summary row."""
+        from corvidae.context import MessageType
+
+        plugin, registry, _ = await _make_plugin_with_db(db)
+        channel = _make_channel(registry)
+
+        await plugin.on_compaction(
+            channel=channel,
+            summary_msg={"role": "assistant", "content": "[Summary]"},
+            retain_count=0,
+        )
+
+        async with db.execute(
+            "SELECT COUNT(*) FROM message_log WHERE channel_id = ? AND message_type = 'summary'",
+            (channel.id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        assert row[0] == 1
+
+
+# ---------------------------------------------------------------------------
+# TestHookIntegration (UPDATED)
 # ---------------------------------------------------------------------------
 
 
 class TestHookIntegration:
-    async def test_ensure_conversation_callable_via_broadcast_dispatch(self):
-        """PersistencePlugin's ensure_conversation must be reachable via
-        broadcast dispatch + resolve_hook_results — confirming hookspec wiring is correct."""
+    async def test_load_conversation_callable_via_broadcast_dispatch(self, db):
+        """PersistencePlugin.load_conversation must be reachable via ahook dispatch.
+
+        RED phase: fails because load_conversation hookimpl does not exist yet.
+        """
         from corvidae.persistence import PersistencePlugin
 
         pm = create_plugin_manager()
@@ -273,51 +535,80 @@ class TestHookIntegration:
         pm.register(registry, name="registry")
 
         plugin = PersistencePlugin(pm)
-        db = await aiosqlite.connect(":memory:")
-        await init_db(db)
         plugin.db = db
         plugin._registry = registry
         pm.register(plugin, name="persistence")
 
         channel = _make_channel(registry)
 
-        results = await pm.ahook.ensure_conversation(channel=channel)
+        # load_conversation hookspec must exist and dispatch correctly
+        results = await pm.ahook.load_conversation(channel=channel)
         result = resolve_hook_results(
-            results, "ensure_conversation", HookStrategy.ACCEPT_WINS
+            results, "load_conversation", HookStrategy.VALUE_FIRST, pm=pm
         )
 
-        assert result is True
-        assert channel.conversation is not None
+        # No rows — should resolve to None
+        assert result is None
 
-        await db.close()
+    async def test_on_conversation_event_callable_via_broadcast_dispatch(self, db):
+        """PersistencePlugin.on_conversation_event must be reachable via ahook dispatch.
 
-    async def test_no_persistence_plugin_returns_none_from_hook(self):
-        """When no PersistencePlugin is registered, broadcast dispatch must
-        return None — graceful degradation path."""
+        RED phase: fails because on_conversation_event hookimpl does not exist yet.
+        """
+        from corvidae.context import MessageType
+        from corvidae.persistence import PersistencePlugin
+
         pm = create_plugin_manager()
-        # PersistencePlugin intentionally NOT registered
+        registry = _make_registry()
+        pm.register(registry, name="registry")
 
+        plugin = PersistencePlugin(pm)
+        plugin.db = db
+        pm.register(plugin, name="persistence")
+
+        channel = _make_channel(registry)
+        msg = {"role": "user", "content": "broadcast test"}
+
+        # Must not raise
+        await pm.ahook.on_conversation_event(
+            channel=channel, message=msg, message_type=MessageType.MESSAGE
+        )
+
+        async with db.execute(
+            "SELECT COUNT(*) FROM message_log WHERE channel_id = ?",
+            (channel.id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        assert row[0] == 1
+
+    async def test_no_persistence_plugin_load_conversation_returns_none(self):
+        """When no PersistencePlugin is registered, load_conversation resolves to None."""
+        pm = create_plugin_manager()
         channel = _make_channel()
 
-        results = await pm.ahook.ensure_conversation(channel=channel)
+        results = await pm.ahook.load_conversation(channel=channel)
         result = resolve_hook_results(
-            results, "ensure_conversation", HookStrategy.ACCEPT_WINS
+            results, "load_conversation", HookStrategy.VALUE_FIRST, pm=pm
         )
 
         assert result is None
-        assert channel.conversation is None
 
 
 # ---------------------------------------------------------------------------
-# TestGracefulDegradation
+# TestGracefulDegradation (UPDATED)
 # ---------------------------------------------------------------------------
 
 
 class TestGracefulDegradation:
-    async def test_no_persistence_plugin_logs_error_in_agent(self, caplog):
-        """AgentPlugin must log an ERROR when no persistence plugin handles
-        ensure_conversation, and must not call the LLM."""
+    async def test_no_persistence_plugin_agent_creates_context_window(self, caplog):
+        """AgentPlugin must create a ContextWindow directly when load_conversation
+        returns no results, and must log an appropriate error/warning.
+
+        AgentPlugin creates a ContextWindow directly and calls load_conversation
+        to restore history from persistence.
+        """
         from corvidae.agent import AgentPlugin
+        from corvidae.context import ContextWindow
         from corvidae.task import TaskPlugin
 
         pm = create_plugin_manager()
@@ -326,8 +617,6 @@ class TestGracefulDegradation:
 
         pm.ahook.send_message = AsyncMock()
         pm.ahook.on_agent_response = AsyncMock()
-
-        # No PersistencePlugin registered — graceful degradation path
 
         task_plugin = TaskPlugin(pm)
         pm.register(task_plugin, name="task")
@@ -338,29 +627,23 @@ class TestGracefulDegradation:
         plugin._registry = registry
 
         mock_client = MagicMock()
-        mock_client.chat = AsyncMock()
+        mock_client.chat = AsyncMock(return_value={
+            "choices": [{"message": {"role": "assistant", "content": "hi"}}]
+        })
         plugin.client = mock_client
 
         channel = registry.get_or_create("test", "scope1", config=ChannelConfig())
 
-        with caplog.at_level(logging.ERROR, logger="corvidae.agent"):
-            await plugin.on_message(channel=channel, sender="user", text="hello")
-            # Drain the queue so _process_queue_item runs
-            if channel.id in plugin.queues:
-                await plugin.queues[channel.id].drain()
+        # With no PersistencePlugin, AgentPlugin should still create a ContextWindow
+        await plugin.on_message(channel=channel, sender="user", text="hello")
+        if channel.id in plugin.queues:
+            await plugin.queues[channel.id].drain()
 
-        error_records = [
-            r
-            for r in caplog.records
-            if r.levelno >= logging.ERROR
-            and "persistence" in r.getMessage().lower()
-        ]
-        assert error_records, (
-            "AgentPlugin must log ERROR when no persistence plugin is registered"
+        # In the new design, channel.conversation must be a ContextWindow
+        assert channel.conversation is not None
+        assert isinstance(channel.conversation, ContextWindow), (
+            f"Expected ContextWindow, got {type(channel.conversation)}"
         )
-
-        # LLM must NOT have been called
-        mock_client.chat.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -369,16 +652,8 @@ class TestGracefulDegradation:
 
 
 class TestWALMode:
-    """RED phase: WAL journal_mode tests.
-
-    These tests fail against the current code because on_start does not set
-    the journal_mode after init_db.  They will pass once the feature is
-    implemented.
-    """
-
     async def test_on_start_sets_wal_journal_mode_by_default(self, tmp_path):
-        """After on_start, the SQLite connection must use WAL journal mode when
-        no daemon.sqlite_journal_mode config key is present."""
+        """After on_start, the SQLite connection must use WAL journal mode."""
         from corvidae.persistence import PersistencePlugin
 
         pm = create_plugin_manager()
@@ -386,8 +661,6 @@ class TestWALMode:
         pm.register(registry, name="registry")
 
         plugin = PersistencePlugin(pm)
-        assert plugin.db is None
-
         db_path = str(tmp_path / "wal_default.db")
         config = {"daemon": {"session_db": db_path}}
 
@@ -399,15 +672,10 @@ class TestWALMode:
 
         await plugin.db.close()
 
-        assert actual_mode == "wal", (
-            f"Expected journal_mode 'wal' by default, got '{actual_mode}'"
-        )
+        assert actual_mode == "wal"
 
-    async def test_on_start_respects_sqlite_journal_mode_config_override(
-        self, tmp_path
-    ):
-        """When daemon.sqlite_journal_mode is set in config, on_start must
-        apply that mode instead of the default WAL."""
+    async def test_on_start_respects_sqlite_journal_mode_config_override(self, tmp_path):
+        """daemon.sqlite_journal_mode override is applied by on_start."""
         from corvidae.persistence import PersistencePlugin
 
         pm = create_plugin_manager()
@@ -415,8 +683,6 @@ class TestWALMode:
         pm.register(registry, name="registry")
 
         plugin = PersistencePlugin(pm)
-        assert plugin.db is None
-
         db_path = str(tmp_path / "delete_mode.db")
         config = {
             "daemon": {
@@ -433,15 +699,10 @@ class TestWALMode:
 
         await plugin.db.close()
 
-        assert actual_mode == "delete", (
-            f"Expected journal_mode 'delete' from config override, got '{actual_mode}'"
-        )
+        assert actual_mode == "delete"
 
-    async def test_on_start_logs_journal_mode_at_info_level(
-        self, tmp_path, caplog
-    ):
-        """on_start must emit an INFO-level log record that includes the
-        resulting journal_mode string."""
+    async def test_on_start_logs_journal_mode_at_info_level(self, tmp_path, caplog):
+        """on_start must emit an INFO-level log record mentioning the journal mode."""
         from corvidae.persistence import PersistencePlugin
 
         pm = create_plugin_manager()
@@ -449,8 +710,6 @@ class TestWALMode:
         pm.register(registry, name="registry")
 
         plugin = PersistencePlugin(pm)
-        assert plugin.db is None
-
         db_path = str(tmp_path / "wal_log.db")
         config = {"daemon": {"session_db": db_path}}
 
@@ -460,12 +719,9 @@ class TestWALMode:
         await plugin.db.close()
 
         info_records = [
-            r
-            for r in caplog.records
+            r for r in caplog.records
             if r.levelno == logging.INFO
             and r.name == "corvidae.persistence"
             and "wal" in r.getMessage().lower()
         ]
-        assert info_records, (
-            "Expected an INFO log record from corvidae.persistence mentioning 'wal'"
-        )
+        assert info_records

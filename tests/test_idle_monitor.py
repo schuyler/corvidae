@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, NonCallableMagicMock, patch
 import aiosqlite
 import pytest
 
-from corvidae.conversation import init_db
+from corvidae.persistence import init_db
 from corvidae.hooks import create_plugin_manager, hookimpl
 from corvidae.queue import SerialQueue
 

@@ -9,8 +9,10 @@ import aiosqlite
 import pytest
 
 from corvidae.channel import ChannelConfig, ChannelRegistry
-from corvidae.conversation import ConversationLog, init_db
+from corvidae.context import ContextWindow, MessageType as ContextMessageType
+from corvidae.persistence import init_db
 from corvidae.hooks import create_plugin_manager
+from corvidae.persistence import init_db as persistence_init_db
 
 from corvidae.agent import AgentPlugin
 from corvidae.persistence import PersistencePlugin
@@ -87,7 +89,7 @@ class TestOnStart:
     async def test_on_start_creates_client(self):
         """on_start with valid config creates LLMClient. Verify client.start() is called."""
         import aiosqlite
-        from corvidae.conversation import init_db
+        from corvidae.persistence import init_db
 
         pm = create_plugin_manager()
         registry = ChannelRegistry(AGENT_DEFAULTS)
@@ -162,9 +164,9 @@ class TestOnStart:
         assert plugin.tool_schemas[0]["function"]["name"] == "my_test_tool"
 
     async def test_on_start_stores_base_dir_from_config(self):
-        """on_start reads config["_base_dir"] and stores it as PersistencePlugin.base_dir."""
+        """on_start reads config["_base_dir"] and stores it as AgentPlugin._base_dir."""
         import aiosqlite
-        from corvidae.conversation import init_db
+        from corvidae.persistence import init_db
 
         pm = create_plugin_manager()
         registry = ChannelRegistry(AGENT_DEFAULTS)
@@ -190,15 +192,14 @@ class TestOnStart:
 
         with patch("corvidae.agent.LLMClient", return_value=mock_client):
             await plugin.on_start(config=config_with_base_dir)
-        await persistence.on_start(config=config_with_base_dir)
 
-        assert persistence.base_dir == Path("/some/dir")
+        assert plugin._base_dir == Path("/some/dir")
         await db.close()
 
     async def test_on_start_defaults_base_dir_to_cwd(self):
-        """on_start sets PersistencePlugin.base_dir to Path(".") when _base_dir is absent."""
+        """on_start sets AgentPlugin._base_dir to Path(".") when _base_dir is absent."""
         import aiosqlite
-        from corvidae.conversation import init_db
+        from corvidae.persistence import init_db
 
         pm = create_plugin_manager()
         registry = ChannelRegistry(AGENT_DEFAULTS)
@@ -221,9 +222,8 @@ class TestOnStart:
 
         with patch("corvidae.agent.LLMClient", return_value=mock_client):
             await plugin.on_start(config=BASE_CONFIG)
-        await persistence.on_start(config=BASE_CONFIG)
 
-        assert persistence.base_dir == Path(".")
+        assert plugin._base_dir == Path(".")
         await db.close()
 
     async def test_on_start_missing_llm_main_raises(self):
@@ -286,7 +286,7 @@ class TestOnStart:
 
 class TestOnMessageConversationInit:
     async def test_on_message_initializes_conversation(self):
-        """First message on a channel creates ConversationLog, sets
+        """First message on a channel creates ContextWindow, sets
         system_prompt from resolved config, calls load()."""
         plugin, channel, db = await build_plugin_and_channel()
 
@@ -300,13 +300,13 @@ class TestOnMessageConversationInit:
         await drain(plugin, channel)
 
         assert channel.conversation is not None
-        assert isinstance(channel.conversation, ConversationLog)
+        assert isinstance(channel.conversation, ContextWindow)
         assert channel.conversation.system_prompt == "You are a test assistant."
 
         await db.close()
 
     async def test_on_message_reuses_existing_conversation(self):
-        """Second message on the same channel reuses the ConversationLog."""
+        """Second message on the same channel reuses the ContextWindow."""
         plugin, channel, db = await build_plugin_and_channel()
 
         mock_client = MagicMock()
@@ -613,7 +613,7 @@ class TestOnMessageThinkingTokens:
         prior_msg = {"role": "assistant", "content": "prior", "reasoning_content": "prior thinking"}
 
         # Inject a pre-existing conversation state
-        conv = ConversationLog(db, channel.id)
+        conv = ContextWindow(channel.id)
         conv.system_prompt = "You are a test assistant."
         conv.messages = [prior_msg]
         channel.conversation = conv
@@ -944,17 +944,17 @@ class TestOnMessageToolCallRoundTrip:
 
 
 # ---------------------------------------------------------------------------
-# Section 8 — system prompt resolution via ensure_conversation hook (Phase 2.5)
+# Section 8 — system prompt resolution during conversation init
 # ---------------------------------------------------------------------------
 
 
-class TestEnsureConversationPromptResolution:
-    async def test_ensure_conversation_resolves_file_list(self, tmp_path):
-        """PersistencePlugin.ensure_conversation resolves a list of prompt file
-        paths into a concatenated string and assigns it to conv.system_prompt.
+class TestConversationInitPromptResolution:
+    async def test_conversation_init_resolves_file_list(self, tmp_path):
+        """AgentPlugin resolves a list of prompt file paths into a concatenated
+        string and assigns it to conv.system_prompt during ContextWindow init.
 
-        Setup: create temp files with known content, set persistence.base_dir
-        to tmp_path, then call on_message to trigger ensure_conversation.
+        Setup: create temp files with known content, set plugin._base_dir
+        to tmp_path, then call on_message to trigger conversation init.
         """
         soul = tmp_path / "soul.md"
         irc = tmp_path / "irc.md"
@@ -969,7 +969,7 @@ class TestEnsureConversationPromptResolution:
         plugin, channel, db = await build_plugin_and_channel(
             agent_defaults=agent_defaults
         )
-        plugin.pm.get_plugin("persistence").base_dir = tmp_path
+        plugin._base_dir = tmp_path
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("ok"))
@@ -983,11 +983,11 @@ class TestEnsureConversationPromptResolution:
 
         await db.close()
 
-    async def test_ensure_conversation_string_prompt_unchanged(self):
-        """String system_prompt passes through ensure_conversation unchanged.
+    async def test_conversation_init_string_prompt_unchanged(self):
+        """String system_prompt passes through conversation init unchanged.
 
-        This is a regression test — existing string-based config must
-        continue to work identically after Phase 2.5.
+        Regression test — existing string-based config must continue to
+        work identically.
         """
         plugin, channel, db = await build_plugin_and_channel()
 
@@ -1006,7 +1006,7 @@ class TestEnsureConversationPromptResolution:
     async def test_mixed_config_agent_list_channel_string(self, tmp_path):
         """Agent-level list + channel string override: channel string wins.
 
-        resolve_config() gives the channel string; ensure_conversation should
+        resolve_config() gives the channel string; AgentPlugin should
         pass it through as a string, not attempt file reads.
         """
         # Create a file that would be read if the agent list were used — it
@@ -1024,7 +1024,7 @@ class TestEnsureConversationPromptResolution:
             agent_defaults=agent_defaults,
             channel_config=channel_cfg,
         )
-        plugin.pm.get_plugin("persistence").base_dir = tmp_path
+        plugin._base_dir = tmp_path
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("ok"))
@@ -1041,7 +1041,7 @@ class TestEnsureConversationPromptResolution:
     async def test_mixed_config_agent_string_channel_list(self, tmp_path):
         """Agent-level string + channel list override: channel list wins.
 
-        ensure_conversation should read the channel's file list and set
+        AgentPlugin should read the channel's file list and set
         conv.system_prompt to the concatenated content.
         """
         f = tmp_path / "channel.md"
@@ -1057,7 +1057,7 @@ class TestEnsureConversationPromptResolution:
             agent_defaults=agent_defaults,
             channel_config=channel_cfg,
         )
-        plugin.pm.get_plugin("persistence").base_dir = tmp_path
+        plugin._base_dir = tmp_path
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("ok"))
@@ -1833,7 +1833,7 @@ class TestBeforeAgentTurn:
         compaction and build_prompt.
         """
         from corvidae.hooks import hookimpl
-        from corvidae.conversation import MessageType
+        from corvidae.context import MessageType
 
         plugin, channel, db = await build_plugin_and_channel()
 
@@ -1843,7 +1843,7 @@ class TestBeforeAgentTurn:
         class InjectPlugin:
             @hookimpl
             async def before_agent_turn(self, channel):
-                await channel.conversation.append(
+                channel.conversation.append(
                     {"role": "system", "content": context_content},
                     message_type=MessageType.CONTEXT,
                 )

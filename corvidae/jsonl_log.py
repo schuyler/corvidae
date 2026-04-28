@@ -11,10 +11,10 @@ Config:
 
 import json
 import logging
+import time
 from pathlib import Path
 from typing import IO
 
-from corvidae.conversation import MessageType
 from corvidae.hooks import hookimpl
 
 logger = logging.getLogger(__name__)
@@ -23,14 +23,12 @@ logger = logging.getLogger(__name__)
 class JsonlLogPlugin:
     """Plugin that writes conversation events to per-channel JSONL files.
 
-    Registers an observer on each channel's ConversationLog after
-    PersistencePlugin creates it. Each append and compaction summary
-    produces one JSON line in the log file for that channel.
+    Implements on_conversation_event and on_compaction hookimpls. Each
+    append and compaction summary produces one JSON line in the log file
+    for that channel.
 
     If ``jsonl_log_dir`` is not configured, the plugin is a complete no-op.
     """
-
-    depends_on = {"persistence"}
 
     def __init__(self):
         self._log_dir: Path | None = None
@@ -46,25 +44,37 @@ class JsonlLogPlugin:
         self._log_dir.mkdir(parents=True, exist_ok=True)
         logger.info("JSONL log directory: %s", self._log_dir)
 
-    @hookimpl(trylast=True)
-    async def ensure_conversation(self, channel) -> bool | None:
+    @hookimpl
+    async def on_conversation_event(self, channel, message: dict, message_type) -> None:
+        """Write a JSONL record for a conversation message event."""
         if self._log_dir is None:
-            return None
-        if channel.conversation is None:
-            return None
-        # Register observer if not already registered
-        if self._observer not in channel.conversation.observers:
-            channel.conversation.observers.append(self._observer)
-        return None  # Don't claim we handled initialization
-
-    async def _observer(self, channel_id: str, message: dict, message_type: MessageType, ts: float) -> None:
+            return
+        # Strip _message_type tag if present
+        clean = {k: v for k, v in message.items() if k != "_message_type"}
         record = {
-            "ts": ts,
-            "channel": channel_id,
-            "type": message_type.value,
-            "message": message,
+            "ts": time.time(),
+            "channel": channel.id,
+            "type": str(message_type.value) if hasattr(message_type, "value") else str(message_type),
+            "message": clean,
         }
-        fh = self._get_handle(channel_id)
+        fh = self._get_handle(channel.id)
+        fh.write(json.dumps(record) + "\n")
+        fh.flush()
+
+    @hookimpl
+    async def on_compaction(self, channel, summary_msg: dict, retain_count: int) -> None:
+        """Write a JSONL record for a compaction summary event."""
+        if self._log_dir is None:
+            return
+        # Strip _message_type tag if present
+        clean = {k: v for k, v in summary_msg.items() if k != "_message_type"}
+        record = {
+            "ts": time.time(),
+            "channel": channel.id,
+            "type": "summary",
+            "message": clean,
+        }
+        fh = self._get_handle(channel.id)
         fh.write(json.dumps(record) + "\n")
         fh.flush()
 

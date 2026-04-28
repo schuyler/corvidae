@@ -35,7 +35,8 @@ from dataclasses import dataclass, field, fields as dc_fields
 from enum import Enum
 
 from corvidae.agent_loop import AgentTurnResult, run_agent_turn
-from corvidae.channel import Channel, ChannelConfig, ChannelRegistry
+from corvidae.channel import Channel, ChannelConfig, ChannelRegistry, resolve_system_prompt
+from corvidae.context import ContextWindow, MessageType, DEFAULT_CHARS_PER_TOKEN
 from corvidae.hooks import resolve_hook_results, HookStrategy, get_dependency, hookimpl
 from corvidae.llm import LLMClient
 from corvidae.queue import SerialQueue
@@ -105,6 +106,8 @@ class AgentPlugin:
         self.queues: dict[str, SerialQueue] = {}
         self._registry: ChannelRegistry | None = None
         self._max_tool_result_chars: int = 100_000
+        self._chars_per_token: float = DEFAULT_CHARS_PER_TOKEN
+        self._base_dir = None
 
     async def on_start(self, config: dict) -> None:
         await self._start_plugin(config)
@@ -379,14 +382,20 @@ class AgentPlugin:
 
         # 1. Lazy-initialize conversation on the channel
         if channel.conversation is None:
-            results = await self.pm.ahook.ensure_conversation(channel=channel)
-            result = resolve_hook_results(results, "ensure_conversation", HookStrategy.ACCEPT_WINS)
-            if result is None:
-                logger.error(
-                    "no persistence plugin initialized conversation for %s",
-                    channel.id,
-                )
-                return
+            resolved_cfg = self._registry.resolve_config(channel)
+            conv = ContextWindow(channel.id, chars_per_token=self._chars_per_token)
+            base_dir = self._base_dir
+            from pathlib import Path
+            if base_dir is None:
+                base_dir = Path(".")
+            conv.system_prompt = resolve_system_prompt(resolved_cfg["system_prompt"], base_dir)
+            results = await self.pm.ahook.load_conversation(channel=channel)
+            history = resolve_hook_results(
+                results, "load_conversation", HookStrategy.VALUE_FIRST, pm=self.pm
+            )
+            if history:
+                conv.messages = history
+            channel.conversation = conv
         conv = channel.conversation
 
         # 2. Reset turn_counter on user messages
@@ -397,25 +406,44 @@ class AgentPlugin:
         resolved = self._registry.resolve_config(channel)
         max_turns_limit = resolved["max_turns"]
 
-        # 4. Append message to conversation log (persisted)
-        await conv.append(conversation_message)
+        # 4. Append message to conversation log and fire persistence event
+        conv.append(conversation_message)
+        try:
+            await self.pm.ahook.on_conversation_event(
+                channel=channel,
+                message=conversation_message,
+                message_type=MessageType.MESSAGE,
+            )
+        except Exception:
+            logger.warning("on_conversation_event hook failed", exc_info=True)
 
         # 5. Compact if approaching context limit
         try:
             await self.pm.ahook.compact_conversation(
-                conversation=conv, client=self.client,
+                channel=channel, conversation=conv, client=self.client,
                 max_tokens=resolved["max_context_tokens"],
             )
         except Exception:
             logger.warning("compaction failed, skipping", exc_info=True)
 
         # 6. Let plugins inject context before the LLM call
+        msg_count_before = len(conv.messages)
         try:
             await self.pm.ahook.before_agent_turn(channel=channel)
         except Exception:
             logger.warning(
                 "before_agent_turn hook failed, skipping", exc_info=True
             )
+        # Fire on_conversation_event for any messages injected by before_agent_turn
+        for msg in conv.messages[msg_count_before:]:
+            mt = msg.get("_message_type", MessageType.MESSAGE)
+            clean = {k: v for k, v in msg.items() if k != "_message_type"}
+            try:
+                await self.pm.ahook.on_conversation_event(
+                    channel=channel, message=clean, message_type=mt,
+                )
+            except Exception:
+                logger.warning("on_conversation_event hook failed", exc_info=True)
 
         # 7. Build prompt and call run_agent_turn (single LLM invocation)
         messages = conv.build_prompt()
@@ -425,8 +453,16 @@ class AgentPlugin:
         if result is None:
             return
 
-        # 8. Persist assistant message (run_agent_turn already appended to messages in place)
-        await conv.append(result.message)
+        # 8. Append assistant message and fire persistence event
+        conv.append(result.message)
+        try:
+            await self.pm.ahook.on_conversation_event(
+                channel=channel,
+                message=result.message,
+                message_type=MessageType.MESSAGE,
+            )
+        except Exception:
+            logger.warning("on_conversation_event hook failed", exc_info=True)
 
         # 9. Let plugins post-process the in-memory assistant message (e.g., strip reasoning_content)
         try:
@@ -501,12 +537,15 @@ class AgentPlugin:
 
     async def _start_plugin(self, config: dict) -> None:
         """Initialize LLM client and tools."""
+        from pathlib import Path
         self._registry = get_dependency(self.pm, "registry", ChannelRegistry)
         self.tools = {}
         self.tool_schemas = []
         llm_config = config.get("llm", {})
         agent_config = config.get("agent", {})
         self._max_tool_result_chars = agent_config.get("max_tool_result_chars", 100_000)
+        self._chars_per_token = agent_config.get("chars_per_token", DEFAULT_CHARS_PER_TOKEN)
+        self._base_dir = config.get("_base_dir", Path("."))
 
         # Breaking change: llm.main is required.
         main_config = llm_config["main"]

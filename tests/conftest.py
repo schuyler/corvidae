@@ -9,7 +9,7 @@ import aiosqlite
 
 @pytest_asyncio.fixture
 async def db():
-    from corvidae.conversation import init_db
+    from corvidae.persistence import init_db
     async with aiosqlite.connect(":memory:") as conn:
         await init_db(conn)
         yield conn

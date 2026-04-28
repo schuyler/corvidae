@@ -300,7 +300,7 @@ class TestChannelConfigListSystemPrompt:
         """ChannelConfig with a list system_prompt preserves the list through resolve().
 
         The list is NOT resolved to a string at this layer — that happens later
-        in PersistencePlugin.ensure_conversation via resolve_system_prompt().
+        in AgentPlugin._process_queue_item via resolve_system_prompt().
         """
         cfg = ChannelConfig(system_prompt=["a.md", "b.md"])
         result = cfg.resolve({})
@@ -348,13 +348,17 @@ class TestResolveSystemPromptInChannel:
         result = resolve_system_prompt("You are a helpful assistant.", Path("/tmp"))
         assert result == "You are a helpful assistant."
 
-    def test_resolve_system_prompt_not_in_conversation(self):
-        """resolve_system_prompt must be removed from corvidae.conversation after relocation."""
-        import corvidae.conversation as mod
-
-        assert not hasattr(mod, "resolve_system_prompt"), (
-            "resolve_system_prompt should be removed from corvidae.conversation"
-        )
+    def test_conversation_module_removed(self):
+        """corvidae.conversation must not exist after the context/persistence split."""
+        import importlib
+        import sys
+        # Remove cached reference if present
+        sys.modules.pop("corvidae.conversation", None)
+        try:
+            importlib.import_module("corvidae.conversation")
+            assert False, "corvidae.conversation should not be importable after deletion"
+        except ModuleNotFoundError:
+            pass  # expected
 
     def test_prompt_logger_in_channel(self):
         """_prompt_logger must live in corvidae.channel after relocation."""
