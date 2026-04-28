@@ -326,11 +326,11 @@ class TestGroupALifecycle:
         agent = harness.agent
 
         # Tool set matches CoreToolsPlugin + SubagentPlugin + TaskPlugin
-        expected_tools = {"shell", "read_file", "write_file", "web_fetch", "subagent", "task_status"}
+        expected_tools = {"shell", "read_file", "write_file", "web_fetch", "web_search", "subagent", "task_status"}
         assert set(agent.tools.keys()) == expected_tools
 
-        # 6 schemas, each with type="function"
-        assert len(agent.tool_schemas) == 6
+        # 7 schemas, each with type="function"
+        assert len(agent.tool_schemas) == 7
         for schema in agent.tool_schemas:
             assert schema["type"] == "function"
 
@@ -1295,7 +1295,7 @@ class TestGroupFToolCollection:
 
     async def test_f1_all_expected_tools_registered(self, harness):
         """F1. After on_start with full plugin graph, expected tool set is exact."""
-        expected = {"shell", "read_file", "write_file", "web_fetch", "subagent", "task_status"}
+        expected = {"shell", "read_file", "write_file", "web_fetch", "web_search", "subagent", "task_status"}
         assert set(harness.agent.tools.keys()) == expected
 
     async def test_f2_tool_schemas_structurally_valid(self, harness):
