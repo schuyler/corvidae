@@ -1,8 +1,9 @@
-"""Web fetch tool."""
+"""Web fetch and search tools."""
 
 import asyncio
 
 import aiohttp
+from ddgs import DDGS
 
 # Appended to response text when it exceeds max_response_bytes.
 TRUNCATION_INDICATOR = "[truncated]"
@@ -72,3 +73,43 @@ async def web_fetch_with_session(
         return TIMEOUT_ERROR_TEMPLATE.format(timeout=timeout)
     except aiohttp.ClientError as exc:
         return f"Error: {exc}"
+
+
+RESULTS_PER_PAGE = 8
+
+
+async def web_search(
+    query: str,
+    max_results: int | None = RESULTS_PER_PAGE,
+) -> str:
+    """Search the web via DuckDuckGo and return formatted results.
+
+    Each result includes a title, URL, and snippet (summary).
+    Results are separated by dividers for readability.
+
+    Args:
+        query: The search query string.
+        max_results: Maximum number of results to return (default 8).
+
+    Returns:
+        Formatted string of search results, or an error message on failure.
+    """
+    try:
+        results = []
+        with DDGS() as ddgs:
+            for r in ddgs.text(query, max_results=max_results):
+                title = r.get("title", "")
+                url = r.get("href", "")
+                snippet = r.get("body", "")
+                if not url:
+                    continue
+                results.append(f"- {title}\n  {url}\n  {snippet}")
+
+        if not results:
+            return "No results found."
+
+        separator = "\n\n" + "=" * 60 + "\n\n"
+        return f"Search results for '{query}':\n\n" + separator.join(results)
+
+    except Exception as exc:
+        return f"Error searching the web: {exc}"

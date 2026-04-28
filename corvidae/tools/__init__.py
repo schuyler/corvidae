@@ -7,7 +7,7 @@ from corvidae.tool import Tool
 
 from corvidae.tools.shell import shell
 from corvidae.tools.files import read_file, write_file
-from corvidae.tools.web import web_fetch, web_fetch_with_session
+from corvidae.tools.web import web_fetch, web_fetch_with_session, web_search
 
 
 class CoreToolsPlugin:
@@ -61,4 +61,5 @@ class CoreToolsPlugin:
             Tool.from_function(read_file),
             Tool.from_function(write_file),
             Tool.from_function(web_fetch),
+            Tool.from_function(web_search),
         ])
