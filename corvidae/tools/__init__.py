@@ -17,6 +17,7 @@ class CoreToolsPlugin:
         self._web_fetch_timeout: int = 15
         self._web_max_response_bytes: int = 50_000
         self._max_file_read_bytes: int = 1024 * 1024
+        self._web_search_max_results: int = 8
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
@@ -25,6 +26,7 @@ class CoreToolsPlugin:
         self._web_fetch_timeout = tools_config.get("web_fetch_timeout", 15)
         self._web_max_response_bytes = tools_config.get("web_max_response_bytes", 50_000)
         self._max_file_read_bytes = tools_config.get("max_file_read_bytes", 1024 * 1024)
+        self._web_search_max_results = tools_config.get("web_search_max_results", 8)
         self._session = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=self._web_fetch_timeout)
         )
@@ -56,10 +58,14 @@ class CoreToolsPlugin:
                 timeout=plugin._web_fetch_timeout,
             )
 
+        async def _web_search(query: str, max_results: int | None = None) -> str:
+            """Search the web via DuckDuckGo."""
+            return await web_search(query, max_results=max_results or plugin._web_search_max_results)
+
         tool_registry.extend([
             Tool.from_function(shell),
             Tool.from_function(read_file),
             Tool.from_function(write_file),
             Tool.from_function(web_fetch),
-            Tool.from_function(web_search),
+            Tool.from_function(_web_search),
         ])

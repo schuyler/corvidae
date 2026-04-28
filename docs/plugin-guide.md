@@ -337,9 +337,10 @@ Registered by `CoreToolsPlugin` (registered as `core_tools` in `main.py`).
 
 ```yaml
 tools:
-  shell_timeout: 30              # seconds before shell command is killed
-  web_fetch_timeout: 15          # seconds before web request is aborted
-  web_max_response_bytes: 50000  # response body truncation limit
+  shell_timeout: 30                  # seconds before shell command is killed
+  web_fetch_timeout: 15              # seconds before web request is aborted
+  web_max_response_bytes: 50000      # response body truncation limit
+  web_search_max_results: 8          # max results returned per search query
   max_file_read_bytes: 1048576   # file size limit (1 MB)
 ```
 
