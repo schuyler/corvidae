@@ -61,6 +61,7 @@ class CoreToolsPlugin:
         async def _web_search(query: str, max_results: int | None = None) -> str:
             """Search the web via DuckDuckGo."""
             return await web_search(query, max_results=max_results or plugin._web_search_max_results)
+        _web_search.__name__ = "web_search"
 
         tool_registry.extend([
             Tool.from_function(shell),
