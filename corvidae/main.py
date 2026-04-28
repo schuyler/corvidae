@@ -80,6 +80,11 @@ async def main(config_path: str = "agent.yaml") -> None:
     persistence_plugin = PersistencePlugin(pm)
     pm.register(persistence_plugin, name="persistence")
 
+    # Register JsonlLogPlugin after PersistencePlugin (observes conversation events)
+    from corvidae.jsonl_log import JsonlLogPlugin
+    jsonl_log_plugin = JsonlLogPlugin()
+    pm.register(jsonl_log_plugin, name="jsonl_log")
+
     # Register CoreToolsPlugin before AgentPlugin so tools are collected during on_start
     core_tools = CoreToolsPlugin()
     pm.register(core_tools, name="core_tools")
