@@ -5,23 +5,22 @@ and tool execution. The loop continues until the LLM responds without tool
 calls or max_turns is reached.
 
 Logging:
-    - DEBUG: LLM response content (truncated), tool call arguments (truncated JSON),
-      tool call result content (truncated)
-    - INFO: LLM response (role, tool_calls count, latency_ms), tool call dispatched,
-      tool call result
-    - WARNING: max rounds reached, unknown tool called, tool exception
+    - DEBUG: LLM response content (truncated)
+    - INFO: LLM response (role, tool_calls count, latency_ms)
+    - WARNING: max rounds reached
+
+Tool dispatch logging (dispatched, arguments, result, errors) is handled by
+corvidae.tool.dispatch_tool_call.
 """
 
-import json
 import logging
 import re
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable
 
-from corvidae.hooks import resolve_hook_results, HookStrategy
 from corvidae.llm import LLMClient
-from corvidae.tool import MAX_TOOL_RESULT_CHARS, ToolContext, execute_tool_call, tool_to_schema  # noqa: F401 — re-exported for backward compat
+from corvidae.tool import MAX_TOOL_RESULT_CHARS, ToolContext, dispatch_tool_call, execute_tool_call, tool_to_schema  # noqa: F401 — re-exported for backward compat
 
 if TYPE_CHECKING:
     from corvidae.channel import Channel
@@ -166,87 +165,17 @@ async def run_agent_loop(
             return result.text
 
         for call in tool_calls:
-            call_id = call["id"]
-            fn_name = call["function"]["name"]
-            raw_args = call["function"]["arguments"]
-
-            try:
-                args = json.loads(raw_args)
-            except json.JSONDecodeError:
-                logger.warning(
-                    "malformed tool call arguments",
-                    extra={"tool": fn_name, "raw_args": _truncate(raw_args)},
-                )
-                content = f"Error: malformed arguments for tool '{fn_name}'"
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": call_id,
-                    "content": content,
-                })
-                continue
-
-            logger.info(
-                "tool call dispatched",
-                extra={"tool": fn_name, "arg_keys": list(args.keys())},
+            result = await dispatch_tool_call(
+                call, tools,
+                channel=channel,
+                task_queue=task_queue,
+                max_result_chars=max_result_chars,
+                pm=pm,
             )
-            logger.debug(
-                "tool call arguments",
-                extra={
-                    "tool": fn_name,
-                    "arguments": _truncate(json.dumps(args)),
-                },
-            )
-
-            if fn_name not in tools:
-                logger.warning("unknown tool called: %s", fn_name)
-                content = f"Error: unknown tool '{fn_name}'"
-            else:
-                try:
-                    tool_start = time.monotonic()
-                    tool_fn = tools[fn_name]
-                    content = await execute_tool_call(
-                        tool_fn,
-                        args,
-                        channel=channel,
-                        tool_call_id=call_id,
-                        task_queue=task_queue,
-                        max_result_chars=max_result_chars,
-                    )
-                    tool_latency_ms = round((time.monotonic() - tool_start) * 1000, 1)
-                    logger.info(
-                        "tool call result",
-                        extra={"tool": fn_name, "result_length": len(str(content)), "latency_ms": tool_latency_ms},
-                    )
-                    logger.debug(
-                        "tool call result content",
-                        extra={
-                            "tool": fn_name,
-                            "content": _truncate(str(content)),
-                        },
-                    )
-                except Exception:
-                    logger.warning(
-                        "tool %s raised exception", fn_name, exc_info=True
-                    )
-                    content = f"Error: tool '{fn_name}' raised an exception"
-
-            # Hook: process_tool_result (broadcast, value-first)
-            # Fires after logging so metrics reflect original content.
-            # Fires before messages.append so the transformed value enters the conversation.
-            if pm is not None:
-                results = await pm.ahook.process_tool_result(
-                    tool_name=fn_name, result=content, channel=channel,
-                )
-                hook_result = resolve_hook_results(
-                    results, "process_tool_result", HookStrategy.VALUE_FIRST, pm=pm,
-                )
-                if hook_result is not None:
-                    content = hook_result
-
             messages.append({
                 "role": "tool",
-                "tool_call_id": call_id,
-                "content": str(content),
+                "tool_call_id": result.tool_call_id,
+                "content": result.content,
             })
 
     logger.warning("max tool-calling rounds reached")

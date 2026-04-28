@@ -360,8 +360,9 @@ class AgentSpec:
         Broadcast hook. Return a replacement string or None to keep the
         original. If multiple plugins return non-None, the alphabetically-first
         plugin's result is used and a warning is logged.
-        Note: This hook only fires during subagent execution (run_agent_loop),
-        not during interactive message processing via AgentPlugin.
+
+        Fires when execute_tool_call was invoked (success or exception).
+        Pre-dispatch errors (JSON parse failure, unknown tool) skip this hook.
         """
 
     @hookspec

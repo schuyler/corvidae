@@ -515,7 +515,7 @@ class TestAgentLoopLogging:
             ]
         )
 
-        with caplog.at_level(logging.WARNING, logger="corvidae.agent_loop"):
+        with caplog.at_level(logging.WARNING, logger="corvidae.tool"):
             await run_agent_loop(
                 client,
                 [{"role": "user", "content": "go"}],
@@ -523,7 +523,7 @@ class TestAgentLoopLogging:
                 tool_schemas=[],
             )
 
-        records = [r for r in caplog.records if r.name == "corvidae.agent_loop"]
+        records = [r for r in caplog.records if r.name == "corvidae.tool"]
         warning_records = [r for r in records if r.levelno == logging.WARNING]
         assert warning_records, (
             "run_agent_loop must emit a WARNING when an unknown tool is called"
@@ -550,7 +550,7 @@ class TestAgentLoopLogging:
             ]
         )
 
-        with caplog.at_level(logging.WARNING, logger="corvidae.agent_loop"):
+        with caplog.at_level(logging.WARNING, logger="corvidae.tool"):
             await run_agent_loop(
                 client,
                 [{"role": "user", "content": "go"}],
@@ -558,7 +558,7 @@ class TestAgentLoopLogging:
                 tool_schemas=[],
             )
 
-        records = [r for r in caplog.records if r.name == "corvidae.agent_loop"]
+        records = [r for r in caplog.records if r.name == "corvidae.tool"]
         warning_records = [r for r in records if r.levelno == logging.WARNING]
         assert warning_records, (
             "run_agent_loop must emit a WARNING when a tool raises an exception"
