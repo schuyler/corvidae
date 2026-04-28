@@ -29,6 +29,7 @@ Logging:
 
 import asyncio
 import logging
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field, fields as dc_fields
 from enum import Enum
@@ -102,11 +103,41 @@ class AgentPlugin:
         self.client: LLMClient | None = None
         self.tools: dict[str, Callable] = {}
         self.tool_schemas: list[dict] = []
+        self.tool_registry: ToolRegistry | None = None
         self.queues: dict[str, SerialQueue] = {}
         self._registry: ChannelRegistry | None = None
         self._max_tool_result_chars: int = 100_000
         self._chars_per_token: float = DEFAULT_CHARS_PER_TOKEN
         self._base_dir = None
+        self._idle_cooldown: float = 30.0
+        self._last_idle_fire: float = 0.0
+
+    def get_tool_config(self) -> tuple["ToolRegistry", int]:
+        """Return (tool_registry, max_tool_result_chars) for subagent use.
+
+        Only valid after on_start has completed. If called before on_start,
+        tool_registry will be None.
+        """
+        return self.tool_registry, self._max_tool_result_chars
+
+    async def _maybe_fire_idle(self) -> None:
+        """Fire on_idle if all queues are empty and cooldown has elapsed."""
+        for q in self.queues.values():
+            if not q.is_empty:
+                return
+        # Check task queue
+        task_plugin = self.pm.get_plugin("task")
+        if task_plugin is not None:
+            tq = getattr(task_plugin, "task_queue", None)
+            if tq is not None and not tq.is_idle:
+                return
+        if time.monotonic() - self._last_idle_fire < self._idle_cooldown:
+            return
+        self._last_idle_fire = time.monotonic()  # UPDATE BEFORE AWAIT
+        try:
+            await self.pm.ahook.on_idle()
+        except Exception:
+            logger.warning("on_idle hook raised exception", exc_info=True)
 
     async def on_start(self, config: dict) -> None:
         await self._start_plugin(config)
@@ -476,6 +507,9 @@ class AgentPlugin:
         # 10. Dispatch tool calls or send text response
         await self._handle_response(result, channel, max_turns_limit, request_text)
 
+        # 11. Push-based idle detection: check if the system became idle
+        await self._maybe_fire_idle()
+
     async def _dispatch_tool_calls(
         self, tool_calls: list[dict], channel: Channel
     ) -> None:
@@ -535,6 +569,8 @@ class AgentPlugin:
         self._max_tool_result_chars = agent_config.get("max_tool_result_chars", 100_000)
         self._chars_per_token = agent_config.get("chars_per_token", DEFAULT_CHARS_PER_TOKEN)
         self._base_dir = config.get("_base_dir", Path("."))
+        daemon_config = config.get("daemon", {})
+        self._idle_cooldown = daemon_config.get("idle_cooldown_seconds", 30.0)
 
         # Breaking change: llm.main is required.
         main_config = llm_config["main"]

@@ -350,8 +350,6 @@ class TestGroupALifecycle:
         await harness.inject_message("test:scope", "user", "hi")
         await harness.drain_all()
 
-        idle_monitor = harness.pm.get_plugin("idle_monitor")
-
         tasks_before = set(asyncio.all_tasks())
         await harness.agent.on_stop()
         await harness.pm.ahook.on_stop()
@@ -363,8 +361,7 @@ class TestGroupALifecycle:
         # TaskPlugin worker stopped
         assert harness.task_plugin._worker_task is None or harness.task_plugin._worker_task.done()
 
-        # IdleMonitorPlugin monitor task cancelled/done
-        assert idle_monitor._monitor is None or idle_monitor._monitor._task is None or idle_monitor._monitor._task.done()
+        # IdleMonitorPlugin is now a pure on_idle consumer (no polling task)
 
         # LLM client stop() was called
         harness.mock_client.stop.assert_called_once()

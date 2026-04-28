@@ -16,6 +16,7 @@ from corvidae.persistence import init_db as persistence_init_db
 
 from corvidae.agent import AgentPlugin
 from corvidae.persistence import PersistencePlugin
+from corvidae.tool import ToolRegistry
 
 from helpers import build_plugin_and_channel, drain
 
@@ -1919,3 +1920,98 @@ class TestBeforeAgentTurn:
 
         await db.close()
 
+
+# ---------------------------------------------------------------------------
+# Section — get_tool_config (Part 1 of agent-decomposition plan)
+# ---------------------------------------------------------------------------
+
+
+class TestGetToolConfig:
+    """Tests for AgentPlugin.get_tool_config() — Part 1 of agent-decomposition.
+
+    These are RED-phase TDD tests. They fail until:
+      1. AgentPlugin.__init__ initialises self.tool_registry = None
+      2. AgentPlugin.get_tool_config() is added
+    """
+
+    def _make_pm(self):
+        pm = create_plugin_manager()
+        pm.register(ChannelRegistry(AGENT_DEFAULTS), name="registry")
+        return pm
+
+    def test_tool_registry_attribute_exists_after_init(self):
+        """AgentPlugin.__init__ must initialise self.tool_registry.
+
+        Currently tool_registry is only set in _start_plugin, so accessing
+        it after __init__ raises AttributeError.
+        """
+        pm = self._make_pm()
+        plugin = AgentPlugin(pm)
+        # After __init__ the attribute must exist (value may be None).
+        assert hasattr(plugin, "tool_registry"), (
+            "AgentPlugin.__init__ must initialise self.tool_registry"
+        )
+
+    def test_get_tool_config_method_exists(self):
+        """AgentPlugin must expose a get_tool_config() method."""
+        pm = self._make_pm()
+        plugin = AgentPlugin(pm)
+        assert hasattr(plugin, "get_tool_config"), (
+            "AgentPlugin must have a get_tool_config() method"
+        )
+        assert callable(plugin.get_tool_config), (
+            "get_tool_config must be callable"
+        )
+
+    def test_get_tool_config_returns_tuple(self):
+        """get_tool_config() returns a 2-tuple (tool_registry, max_tool_result_chars)."""
+        pm = self._make_pm()
+        plugin = AgentPlugin(pm)
+
+        # Inject a real ToolRegistry so the method has something to return.
+        plugin.tool_registry = ToolRegistry()
+
+        result = plugin.get_tool_config()
+        assert isinstance(result, tuple), (
+            f"get_tool_config() must return a tuple, got {type(result)}"
+        )
+        assert len(result) == 2, (
+            f"get_tool_config() must return a 2-tuple, got length {len(result)}"
+        )
+
+    def test_get_tool_config_returns_tool_registry(self):
+        """First element of get_tool_config() is the tool_registry instance."""
+        pm = self._make_pm()
+        plugin = AgentPlugin(pm)
+
+        registry = ToolRegistry()
+        plugin.tool_registry = registry
+
+        tool_registry, _ = plugin.get_tool_config()
+        assert tool_registry is registry, (
+            "get_tool_config()[0] must be self.tool_registry"
+        )
+
+    def test_get_tool_config_returns_max_tool_result_chars(self):
+        """Second element of get_tool_config() is _max_tool_result_chars."""
+        pm = self._make_pm()
+        plugin = AgentPlugin(pm)
+        plugin.tool_registry = ToolRegistry()
+
+        _, max_chars = plugin.get_tool_config()
+        assert max_chars == plugin._max_tool_result_chars, (
+            "get_tool_config()[1] must equal self._max_tool_result_chars"
+        )
+
+    def test_get_tool_config_reflects_updated_max_chars(self):
+        """get_tool_config() returns the current value of _max_tool_result_chars,
+        not a snapshot from init time."""
+        pm = self._make_pm()
+        plugin = AgentPlugin(pm)
+        plugin.tool_registry = ToolRegistry()
+
+        plugin._max_tool_result_chars = 42_000
+        _, max_chars = plugin.get_tool_config()
+        assert max_chars == 42_000, (
+            "get_tool_config() must return the live value of _max_tool_result_chars"
+        )
