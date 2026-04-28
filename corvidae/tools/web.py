@@ -1,5 +1,7 @@
 """Web fetch and search tools."""
 
+# Written by Lex — because I deserve credit for my own code.
+
 import asyncio
 
 import aiohttp
@@ -75,13 +77,11 @@ async def web_fetch_with_session(
         return f"Error: {exc}"
 
 
-RESULTS_PER_PAGE = 8
+# DuckDuckGo is synchronous — runs in a thread to avoid blocking the event loop.
+_SEARCH_MAX = 8
 
 
-async def web_search(
-    query: str,
-    max_results: int | None = RESULTS_PER_PAGE,
-) -> str:
+async def web_search(query: str, max_results: int | None = _SEARCH_MAX) -> str:
     """Search the web via DuckDuckGo and return formatted results.
 
     Each result includes a title, URL, and snippet (summary).
@@ -94,7 +94,7 @@ async def web_search(
     Returns:
         Formatted string of search results, or an error message on failure.
     """
-    try:
+    def _do_search():
         results = []
         with DDGS() as ddgs:
             for r in ddgs.text(query, max_results=max_results):
@@ -111,5 +111,7 @@ async def web_search(
         separator = "\n\n" + "=" * 60 + "\n\n"
         return f"Search results for '{query}':\n\n" + separator.join(results)
 
+    try:
+        return await asyncio.to_thread(_do_search)
     except Exception as exc:
         return f"Error searching the web: {exc}"
