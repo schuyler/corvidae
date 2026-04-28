@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 # The import under test — will raise ImportError until the file exists.
-from corvidae.tools import CoreToolsPlugin, read_file, shell, web_fetch, write_file
+from corvidae.tools import CoreToolsPlugin, read_file, shell, web_fetch, write_file, web_search
 
 
 # ---------------------------------------------------------------------------
@@ -320,20 +320,31 @@ class TestWebFetchStreaming:
 
 
 class TestCoreToolsPlugin:
-    def test_register_tools_adds_four_tools(self):
+    def test_register_tools_adds_five_tools(self):
         plugin = CoreToolsPlugin()
         registry = []
         plugin.register_tools(tool_registry=registry)
-        assert len(registry) == 4
+        assert len(registry) == 5
 
     def test_registered_tool_names(self):
         from corvidae.tool import Tool
         plugin = CoreToolsPlugin()
         registry = []
         plugin.register_tools(tool_registry=registry)
-        # Items are Tool instances after Step 4
         names = {item.name if isinstance(item, Tool) else item.__name__ for item in registry}
-        assert names == {"shell", "read_file", "write_file", "web_fetch"}
+        assert names == {"shell", "read_file", "write_file", "web_fetch", "web_search"}
+
+    def test_web_search_max_results_config(self):
+        plugin = CoreToolsPlugin()
+        assert plugin._web_search_max_results == 8
+
+        plugin2 = CoreToolsPlugin()
+        import asyncio
+        asyncio.run(plugin2.on_start(config={"tools": {"web_search_max_results": 15}}))
+        try:
+            assert plugin2._web_search_max_results == 15
+        finally:
+            asyncio.run(plugin2.on_stop())
 
 
 # ---------------------------------------------------------------------------
@@ -389,3 +400,106 @@ class TestFileToolsAsyncIO:
         with patch("asyncio.to_thread", wraps=asyncio.to_thread) as mock_to_thread:
             await write_file(str(target), "data")
         mock_to_thread.assert_called()
+
+
+# ---------------------------------------------------------------------------
+# TestWebSearch — Mocked DuckDuckGo integration
+# ---------------------------------------------------------------------------
+
+
+def _make_ddgs_mock(search_results):
+    """Return a MagicMock that mimics DDGS().text() yielding the given results.
+
+    search_results should be an iterable of dicts with optional keys:
+      title (str), href (str), body (str)
+    """
+    mock_ddgs = MagicMock()
+    mock_ctx = MagicMock()
+    mock_ddgs.text.return_value = search_results
+    mock_ctx.__enter__ = MagicMock(return_value=mock_ddgs)
+    mock_ctx.__exit__ = MagicMock(return_value=False)
+    return mock_ctx
+
+
+class TestWebSearch:
+    async def test_web_search_returns_formatted_results(self):
+        results = [
+            {"title": "First Result", "href": "http://example.com/1", "body": "snippet one"},
+            {"title": "Second Result", "href": "http://example.com/2", "body": "snippet two"},
+        ]
+        mock_ctx = _make_ddgs_mock(results)
+        with patch("corvidae.tools.web.DDGS", return_value=mock_ctx):
+            output = await web_search("test query")
+        assert "test query" in output
+        assert "First Result" in output
+        assert "http://example.com/1" in output
+        assert "snippet one" in output
+        assert "Second Result" in output
+
+    async def test_web_search_skips_results_without_url(self):
+        results = [
+            {"title": "Bad Entry", "href": "", "body": "no url"},
+            {"title": "Good Entry", "href": "http://good.com", "body": "has url"},
+        ]
+        mock_ctx = _make_ddgs_mock(results)
+        with patch("corvidae.tools.web.DDGS", return_value=mock_ctx):
+            output = await web_search("test")
+        assert "Bad Entry" not in output
+        assert "Good Entry" in output
+
+    async def test_web_search_no_results(self):
+        mock_ctx = _make_ddgs_mock([])
+        with patch("corvidae.tools.web.DDGS", return_value=mock_ctx):
+            output = await web_search("zxcvbnmqwerty no results ever")
+        assert "No results found." in output
+
+    async def test_web_search_custom_max_results(self):
+        # The web_search function passes max_results to ddgs.text(). We verify
+        # the count by checking the output only contains 3 result blocks when
+        # the mock yields more than 3 results total.
+        all_results = [
+            {"title": f"Result {i}", "href": f"http://example.com/{i}", "body": f"snippet {i}"}
+            for i in range(20)
+        ]
+        mock_ddgs = MagicMock()
+        # ddgs.text(query, max_results=3) should only return the first 3 items
+        mock_ddgs.text.return_value = all_results[:3]
+        mock_ctx = MagicMock()
+        mock_ddgs.text.return_value = all_results[:3]
+        mock_ctx.__enter__ = MagicMock(return_value=mock_ddgs)
+        mock_ctx.__exit__ = MagicMock(return_value=False)
+
+        async def _mock_to_thread(fn):
+            return fn()
+
+        with patch("corvidae.tools.web.DDGS", return_value=mock_ctx):
+            with patch("asyncio.to_thread", new=_mock_to_thread):
+                output = await web_search("test", max_results=3)
+        # Count how many separator blocks appear (3 results = 2 separators)
+        assert output.count("=" * 60) == 2, f"Expected 2 separators for 3 results, got {output[:200]}"
+
+    async def test_web_search_error_handling(self):
+        mock_ctx = MagicMock()
+        mock_ctx.__enter__ = MagicMock(side_effect=RuntimeError("network down"))
+        mock_ctx.__exit__ = MagicMock(return_value=False)
+        with patch("corvidae.tools.web.DDGS", return_value=mock_ctx):
+            output = await web_search("error test")
+        assert "Error searching the web" in output
+
+    async def test_web_search_separator(self):
+        results = [
+            {"title": "R1", "href": "http://a.com", "body": "s1"},
+            {"title": "R2", "href": "http://b.com", "body": "s2"},
+        ]
+        mock_ctx = _make_ddgs_mock(results)
+        with patch("corvidae.tools.web.DDGS", return_value=mock_ctx):
+            output = await web_search("sep test")
+        assert "=" * 60 in output
+
+    async def test_web_search_uses_asyncio_to_thread(self, tmp_path):
+        """web_search must run ddgs via asyncio.to_thread to avoid blocking."""
+        with patch("asyncio.to_thread", wraps=asyncio.to_thread) as mock_to_thread:
+            mock_ctx = _make_ddgs_mock([])
+            with patch("corvidae.tools.web.DDGS", return_value=mock_ctx):
+                await web_search("to thread test")
+        mock_to_thread.assert_called_once()
