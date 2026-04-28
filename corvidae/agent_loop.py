@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable
 
 from corvidae.llm import LLMClient
-from corvidae.tool import MAX_TOOL_RESULT_CHARS, ToolContext, dispatch_tool_call, execute_tool_call, tool_to_schema  # noqa: F401 — re-exported for backward compat
+from corvidae.tool import MAX_TOOL_RESULT_CHARS, dispatch_tool_call
 
 if TYPE_CHECKING:
     from corvidae.channel import Channel

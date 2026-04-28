@@ -900,7 +900,7 @@ class TestOnMessageToolCallRoundTrip:
             return "tool output"
 
         plugin.tools = {"my_plugin_tool": my_plugin_tool}
-        from corvidae.agent_loop import tool_to_schema
+        from corvidae.tool import tool_to_schema
         plugin.tool_schemas = [tool_to_schema(my_plugin_tool)]
 
         mock_client = MagicMock()
@@ -1185,7 +1185,7 @@ class TestOnNotify:
 class TestToolSchema:
     def test_underscore_params_excluded_from_schema(self):
         """Any parameter whose name starts with _ is excluded from the schema."""
-        from corvidae.agent_loop import tool_to_schema
+        from corvidae.tool import tool_to_schema
 
         async def my_tool(x: str, _injected: str = None, y: int = 0) -> str:
             """A tool with injected params."""

@@ -207,10 +207,11 @@ which plugin reads them first. A config validation pass before
 2. **AgentPlugin decomposition** — the god object makes every other
    refactor harder. Untangling it unblocks cleaner solutions for
    several items below.
-3. **TaskPlugin undeclared dependency** — quick fix, low risk, removes
-   a silent failure mode.
-4. **agent_loop.py re-exports** — quick cleanup, removes confusion
-   about canonical import paths.
+3. ~~**TaskPlugin undeclared dependency**~~ — completed. `depends_on`
+   entries added to `AgentPlugin`, `IdleMonitorPlugin`, and `ThinkingPlugin`.
+4. ~~**agent_loop.py re-exports**~~ — completed. `ToolContext`,
+   `execute_tool_call`, and `tool_to_schema` removed from `agent_loop.py`;
+   callers import from `corvidae.tool` directly.
 5. **SubagentPlugin coupling** — address when touching SubagentPlugin
    or AgentPlugin internals.
 6. **Config validation** — address when config grows or errors become
@@ -262,3 +263,66 @@ package for an external tool plugin. Should produce:
 Goal: lower the barrier to writing a tool plugin to "run one command,
 fill in the function body." See `docs/plugin-guide.md` for the patterns
 the scaffold should follow.
+
+## Defend against blocking tool functions
+
+All tools run on the main asyncio event loop in a single thread. A tool
+that performs synchronous blocking I/O (e.g., `requests.get`,
+`time.sleep`, `open().read()` on a slow path) stalls the entire process
+— main agent, all task queue workers, all channel queues.
+
+Existing built-in tools are async-safe (file tools use
+`asyncio.to_thread`, shell uses `create_subprocess_shell`, web uses
+`aiohttp`). The risk is third-party tools registered via
+`register_tools` — there's no enforcement or defense.
+
+Three changes:
+
+1. **Hard-fail at registration**: `Tool.from_function()` should raise if
+   the function is not a coroutine function
+   (`asyncio.iscoroutinefunction`). This is an enforced invariant —
+   tools must be async. This won't catch every case (an async function
+   can still call blocking code internally), but it puts up the
+   appropriate guardrail at the API boundary.
+
+2. **Defensive wrap as fallback**: For tools registered directly as
+   `Tool` instances (bypassing `from_function`), `execute_tool_call`
+   should detect sync callables and wrap them in
+   `asyncio.to_thread()`. This is the safety net, not the normal path.
+   Log a warning when it fires.
+
+3. **Documentation**: `docs/plugin-guide.md` should call out the async
+   requirement explicitly, with examples of `asyncio.to_thread()` for
+   wrapping blocking library calls (the file tools are the model).
+
+Minor related finding: `JsonlLogPlugin` does synchronous `fh.write()`
+and `fh.flush()` inside async hook handlers. Impact is low (~1-5ms per
+write) but should be moved to `asyncio.to_thread()` for consistency.
+
+## Move run_agent_loop into SubagentPlugin
+
+`run_agent_loop` in `agent_loop.py` is only called by
+`SubagentPlugin`. `run_agent_turn` (single LLM call, no tool execution)
+is the shared primitive that `AgentPlugin` uses. The two functions are
+in the same module for historical reasons — `run_agent_turn` was
+extracted from `run_agent_loop` — but the dependency now points the
+wrong way.
+
+Proposed:
+- Move `run_agent_loop` into `corvidae/tools/subagent.py`.
+- `agent_loop.py` retains only `run_agent_turn`, `AgentTurnResult`,
+  `strip_thinking`, and `strip_reasoning_content`. Could be collapsed
+  into `agent.py` at that point, or renamed to `llm_turn.py` to reflect
+  what it actually contains.
+
+This also opens the door to wrapping the subagent's `run_agent_loop`
+call in `asyncio.to_thread()` for thread-level isolation from the main
+event loop, without affecting the shared `run_agent_turn` code path.
+
+Full process isolation (subprocess) would give stronger guarantees —
+own event loop, resource limits, kill-on-timeout — but requires solving
+tool serialization across the process boundary. Tools are in-memory
+callables that can't be pickled; the subprocess would need to either
+re-register tools (duplicating startup) or proxy tool calls back to the
+parent via IPC. Worth revisiting if subagents become untrusted or
+resource-constrained, but `to_thread` is the 80% solution for now.
