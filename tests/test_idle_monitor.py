@@ -234,6 +234,61 @@ class TestPushBasedIdle:
         )
 
     # -----------------------------------------------------------------------
+    # _maybe_fire_idle — race condition / concurrent calls
+    # -----------------------------------------------------------------------
+
+    async def test_maybe_fire_idle_concurrent_calls_fire_once(self):
+        """Two concurrent _maybe_fire_idle calls only fire on_idle once."""
+        from corvidae.agent import Agent
+
+        pm = create_plugin_manager()
+        agent = Agent(pm)
+
+        fired = asyncio.Event()
+        resume = asyncio.Event()
+
+        async def slow_on_idle():
+            fired.set()
+            await resume.wait()
+
+        pm.ahook.on_idle = AsyncMock(side_effect=slow_on_idle)
+
+        agent._idle_cooldown = 0.0
+        agent._last_idle_fire = 0.0
+
+        t1 = asyncio.create_task(agent._maybe_fire_idle())
+        await fired.wait()  # ensure first call is inside on_idle
+        t2 = asyncio.create_task(agent._maybe_fire_idle())
+        await asyncio.sleep(0)  # yield to let t2 run and bail
+        resume.set()  # release t1
+        await asyncio.gather(t1, t2)
+
+        assert pm.ahook.on_idle.await_count == 1
+
+    async def test_maybe_fire_idle_clears_flag_on_exception_and_retries(self):
+        """_idle_firing flag is cleared and timestamp not updated on exception; retry fires."""
+        from corvidae.agent import Agent
+
+        pm = create_plugin_manager()
+        pm.ahook.on_idle = AsyncMock(side_effect=RuntimeError("boom"))
+        agent = Agent(pm)
+
+        agent._idle_cooldown = 0.0
+        agent._last_idle_fire = 0.0
+        original_ts = agent._last_idle_fire
+
+        await agent._maybe_fire_idle()
+
+        assert not agent._idle_firing, "_idle_firing must be cleared after exception"
+        assert agent._last_idle_fire == original_ts, "_last_idle_fire must not advance on failure"
+        assert pm.ahook.on_idle.await_count == 1
+
+        # Retry should fire again since timestamp was not updated
+        pm.ahook.on_idle.side_effect = None
+        await agent._maybe_fire_idle()
+        assert pm.ahook.on_idle.await_count == 2, "on_idle should fire on retry after exception"
+
+    # -----------------------------------------------------------------------
     # IdleMonitorPlugin.depends_on — should be empty after Part 2
     # -----------------------------------------------------------------------
 

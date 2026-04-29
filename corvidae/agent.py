@@ -104,6 +104,7 @@ class Agent:
         self._base_dir = None
         self._idle_cooldown: float = 30.0
         self._last_idle_fire: float = 0.0
+        self._idle_firing: bool = False
 
     @property
     def tools(self) -> dict[str, Callable]:
@@ -116,7 +117,15 @@ class Agent:
         return self._tool_schemas
 
     async def _maybe_fire_idle(self) -> None:
-        """Fire on_idle if all queues are empty and cooldown has elapsed."""
+        """Fire on_idle if all queues are empty and cooldown has elapsed.
+
+        Uses a boolean guard (_idle_firing) rather than a lock. This works
+        because asyncio is single-threaded: there is no await between the
+        flag check and the flag set, so no other task can interleave and
+        pass the check before the flag is raised.
+        """
+        if self._idle_firing:
+            return
         for q in self.queues.values():
             if not q.is_empty:
                 return
@@ -128,11 +137,14 @@ class Agent:
                 return
         if time.monotonic() - self._last_idle_fire < self._idle_cooldown:
             return
-        self._last_idle_fire = time.monotonic()  # UPDATE BEFORE AWAIT
+        self._idle_firing = True
         try:
             await self.pm.ahook.on_idle()
+            self._last_idle_fire = time.monotonic()
         except Exception:
             logger.warning("on_idle hook raised exception", exc_info=True)
+        finally:
+            self._idle_firing = False
 
     async def on_start(self, config: dict) -> None:
         await self._start_plugin(config)
