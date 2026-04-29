@@ -344,11 +344,11 @@ class TestGroupALifecycle:
 
         # Tool set matches CoreToolsPlugin + SubagentPlugin + TaskPlugin
         expected_tools = {"shell", "read_file", "write_file", "web_fetch", "web_search", "subagent", "task_status", "task_pipeline"}
-        assert set(agent._tools.keys()) == expected_tools
+        assert set(agent.tools.keys()) == expected_tools
 
         # 8 schemas, each with type="function"
-        assert len(agent._tool_schemas) == 8
-        for schema in agent._tool_schemas:
+        assert len(agent.tool_schemas) == 8
+        for schema in agent.tool_schemas:
             assert schema["type"] == "function"
 
         # Client is the mock (borrowed from LLMPlugin)
@@ -1317,13 +1317,13 @@ class TestGroupFToolCollection:
     async def test_f1_all_expected_tools_registered(self, harness):
         """F1. After on_start with full plugin graph, expected tool set is exact."""
         expected = {"shell", "read_file", "write_file", "web_fetch", "web_search", "subagent", "task_status", "task_pipeline"}
-        assert set(harness.agent._tools.keys()) == expected
+  assert set(harness.agent.tools.keys()) == expected
 
     async def test_f2_tool_schemas_structurally_valid(self, harness):
         """F2. Each tool schema has correct structure and no _ctx in parameters."""
-        tool_names = set(harness.agent._tools.keys())
+        tool_names = set(harness.agent.tools.keys())
 
-        for schema in harness.agent._tool_schemas:
+        for schema in harness.agent.tool_schemas:
             assert schema["type"] == "function", f"Schema missing type=function: {schema}"
             fn = schema["function"]
             assert "name" in fn, f"Schema missing function.name: {schema}"

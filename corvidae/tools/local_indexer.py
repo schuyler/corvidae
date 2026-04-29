@@ -168,10 +168,10 @@ class LocalIndexer:
             )
         """)
 
-        # FTS5 virtual table for full-text search
+        # FTS5 virtual table for full-text search (separate from chunks)
         await self._db.execute("""
             CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts
-            USING fts5(content, file_path, chunk_index, content=chunks)
+            USING fts5(content, file_path, chunk_index)
         """)
 
         await self._db.execute("""
@@ -222,23 +222,25 @@ class LocalIndexer:
 
         for idx, chunk in enumerate(chunks):
             sh = simhash(chunk)
-            await self._db.execute(
+            cursor = await self._db.execute(
                 "INSERT OR REPLACE INTO chunks (file_path, chunk_index, content, simhash_hex) "
                 "VALUES (?, ?, ?, ?)",
                 (file_path, idx, chunk, format(sh, '016x')),
             )
-            # Also update FTS index
+            rowid = cursor.lastrowid or 1
+            # Insert into FTS table with same rowid for join compatibility
             await self._db.execute(
-                "INSERT OR REPLACE INTO chunks_fts (rowid, file_path, chunk_index, content) "
-                "VALUES ((SELECT id FROM chunks WHERE file_path=? AND chunk_index=?), ?, ?)",
-                (file_path, idx, idx, chunk),
+                "INSERT OR REPLACE INTO chunks_fts (rowid, content, file_path, chunk_index) "
+                "VALUES (?, ?, ?, ?)",
+                (rowid, chunk, file_path, idx),
             )
             count += 1
 
         # Update mtime tracking
-        stored = await self._db.execute(
+        cursor = await self._db.execute(
             "SELECT value FROM metadata WHERE key=?", (f"mtime:{file_path}",)
-        ).fetchone()
+        )
+        stored = await cursor.fetchone()
         if stored:
             await self._db.execute(
                 "UPDATE metadata SET value=? WHERE key=?", (str(mtime), f"mtime:{file_path}")
@@ -288,7 +290,7 @@ class LocalIndexer:
     async def _remove_file(self, file_path: str) -> None:
         """Remove all chunks for a deleted file."""
         await self._db.execute("DELETE FROM chunks WHERE file_path=?", (file_path,))
-        # FTS5 deletion is handled by content=chunks sync
+        await self._db.execute("DELETE FROM chunks_fts WHERE file_path=?", (file_path,))
         await self._db.commit()
 
     async def search_text(self, query: str, limit: int = 10) -> list[SearchResult]:

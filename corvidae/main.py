@@ -143,11 +143,17 @@ async def main(config_path: str = "agent.yaml") -> None:
     local_indexer_plugin = WorkspaceIndexerPlugin(pm)
     pm.register(local_indexer_plugin, name="local_indexer")
 
-    # Register ToolCollectionPlugin after all tool-providing plugins (its on_start
+   # Register ToolCollectionPlugin after all tool-providing plugins (its on_start
     # uses trylast=True so it fires after all other on_start hooks have run).
     from corvidae.tool_collection import ToolCollectionPlugin
     tool_collection_plugin = ToolCollectionPlugin(pm)
     pm.register(tool_collection_plugin, name="tools")
+
+    # Register DreamPlugin for background memory consolidation
+    from corvidae.tools.dream import DreamPlugin
+    workspace_root = Path(config_path).parent
+    dream_plugin = DreamPlugin(workspace_root=workspace_root)
+    pm.register(dream_plugin, name="dream")
 
     # Register Agent after tool-providing and transport plugins.
     # Agent.on_start/on_stop are called explicitly (not via broadcast)

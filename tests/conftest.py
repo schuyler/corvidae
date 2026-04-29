@@ -1,10 +1,16 @@
 """Shared test fixtures."""
 
 import logging
+import warnings
 
 import pytest
 import pytest_asyncio
 import aiosqlite
+
+# Safety net: suppress chromadb deprecation warning that triggers SIGINT in pytest async runner
+# The pytest filterwarnings config also handles this, but conftest-level suppression
+# ensures the filter is active before any test module imports happen.
+warnings.filterwarnings("ignore", message=".*iscoroutinefunction.*deprecated.*")
 
 
 @pytest_asyncio.fixture
