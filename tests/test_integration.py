@@ -543,11 +543,11 @@ class TestGroupBRoundTrip:
         call_ids = {t.tool_call_id for t in enqueued_tasks}
         assert call_ids == {"c1", "c2", "c3"}
 
-        # LLM called 4 times (1 initial + 3 continuations)
-        assert harness.mock_client.chat.call_count == 4
+        # LLM called 2 times: 1 initial + 1 after all tool results are batched
+        assert harness.mock_client.chat.call_count == 2
 
-        # 3 text responses sent (one per continuation)
-        assert len(harness.sent_messages) == 3
+        # 1 text response sent (after batched results)
+        assert len(harness.sent_messages) == 1
 
     async def test_b4_max_turns_enforcement(self, harness):
         """B4. max_turns=2 → third LLM tool call suppressed, fallback sent."""

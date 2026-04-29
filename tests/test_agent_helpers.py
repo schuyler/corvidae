@@ -435,7 +435,7 @@ class TestHandleResponse:
             """A tool."""
             return "done"
 
-        plugin.tools = {"my_tool": my_tool}
+        plugin._tools = {"my_tool": my_tool}
 
         await plugin._handle_response(
             result=result,
@@ -463,7 +463,7 @@ class TestHandleResponse:
             """A tool."""
             return "done"
 
-        plugin.tools = {"my_tool": my_tool}
+        plugin._tools = {"my_tool": my_tool}
 
         await plugin._handle_response(
             result=result,
