@@ -70,6 +70,7 @@ async def test_tool_collection_plugin_reads_tools_max_result_chars():
     pm.hook.register_tools = MagicMock(return_value=[])
     plugin = ToolCollectionPlugin(pm)
     config = {"tools": {"max_result_chars": 50_000}}
+    await plugin.on_init(pm=pm, config=config)
     await plugin.on_start(config=config)
     assert plugin.max_result_chars == 50_000
 
@@ -86,6 +87,7 @@ async def test_tool_collection_plugin_falls_back_to_agent_max_tool_result_chars(
     pm.hook.register_tools = MagicMock(return_value=[])
     plugin = ToolCollectionPlugin(pm)
     config = {"agent": {"max_tool_result_chars": 75_000}}
+    await plugin.on_init(pm=pm, config=config)
     await plugin.on_start(config=config)
     assert plugin.max_result_chars == 75_000
 

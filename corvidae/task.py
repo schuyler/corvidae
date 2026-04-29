@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from corvidae.channel import Channel
 
-from corvidae.hooks import hookimpl
+from corvidae.hooks import CorvidaePlugin, hookimpl
 from corvidae.tool import Tool
 
 logger = logging.getLogger(__name__)
@@ -186,15 +186,25 @@ class TaskQueue:
         return "\n".join(parts)
 
 
-class TaskPlugin:
+class TaskPlugin(CorvidaePlugin):
     """Plugin owning the TaskQueue and task_status tool."""
 
-    depends_on = set()
+    depends_on = frozenset()
 
-    def __init__(self, pm) -> None:
-        self.pm = pm
+    def __init__(self, pm=None) -> None:
+        if pm is not None:
+            self.pm = pm
         self.task_queue: TaskQueue | None = None
         self._worker_task: asyncio.Task | None = None
+        self._max_workers: int = 4
+        self._completed_buffer: int = 100
+
+    @hookimpl
+    async def on_init(self, pm, config: dict) -> None:
+        await super().on_init(pm, config)
+        daemon_config = config.get("daemon", {})
+        self._max_workers = daemon_config.get("max_task_workers", 4)
+        self._completed_buffer = daemon_config.get("completed_task_buffer", 100)
 
     @hookimpl
     def register_tools(self, tool_registry: list) -> None:
@@ -210,10 +220,10 @@ class TaskPlugin:
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
-        daemon_config = config.get("daemon", {})
-        max_workers = daemon_config.get("max_task_workers", 4)
-        completed_buffer = daemon_config.get("completed_task_buffer", 100)
-        self.task_queue = TaskQueue(max_workers=max_workers, completed_buffer=completed_buffer)
+        self.task_queue = TaskQueue(
+            max_workers=self._max_workers,
+            completed_buffer=self._completed_buffer,
+        )
 
         self._worker_task = asyncio.create_task(
             self.task_queue.run_worker(self._on_task_complete)

@@ -2,7 +2,7 @@
 
 import aiohttp
 
-from corvidae.hooks import hookimpl
+from corvidae.hooks import CorvidaePlugin, hookimpl
 from corvidae.tool import Tool
 
 from corvidae.tools.shell import shell
@@ -10,11 +10,11 @@ from corvidae.tools.files import read_file, write_file
 from corvidae.tools.web import web_fetch, web_fetch_with_session, web_search
 
 
-class CoreToolsPlugin:
-    depends_on = set()
+class CoreToolsPlugin(CorvidaePlugin):
+    depends_on = frozenset()
 
-    def __init__(self, pm) -> None:
-        self.pm = pm
+    def __init__(self, pm=None) -> None:
+        self.pm = pm  # May be None; on_init will set it via CorvidaePlugin.on_init
         self._session: aiohttp.ClientSession | None = None
         self._shell_timeout: int = 30
         self._web_fetch_timeout: int = 15
@@ -23,13 +23,17 @@ class CoreToolsPlugin:
         self._web_search_max_results: int = 8
 
     @hookimpl
-    async def on_start(self, config: dict) -> None:
+    async def on_init(self, pm, config: dict) -> None:
+        await super().on_init(pm, config)
         tools_config = config.get("tools", {})
         self._shell_timeout = tools_config.get("shell_timeout", 30)
         self._web_fetch_timeout = tools_config.get("web_fetch_timeout", 15)
         self._web_max_response_bytes = tools_config.get("web_max_response_bytes", 50_000)
         self._max_file_read_bytes = tools_config.get("max_file_read_bytes", 1024 * 1024)
         self._web_search_max_results = tools_config.get("web_search_max_results", 8)
+
+    @hookimpl
+    async def on_start(self, config: dict) -> None:
         self._session = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=self._web_fetch_timeout)
         )

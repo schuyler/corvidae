@@ -167,20 +167,21 @@ async def test_llm_plugin_on_start_creates_and_starts_main_client():
     """on_start must create main_client and call client.start()."""
     from corvidae.llm_plugin import LLMPlugin
 
-    plugin = LLMPlugin(pm=None)
+    plugin = LLMPlugin()
+    config = {
+        "llm": {
+            "main": {
+                "base_url": "http://localhost:8080",
+                "model": "test-model",
+            }
+        }
+    }
+    await plugin.on_init(pm=MagicMock(), config=config)
 
     mock_client = MagicMock()
     mock_client.start = AsyncMock()
 
     with patch.object(LLMPlugin, "_create_client", return_value=mock_client) as mock_create:
-        config = {
-            "llm": {
-                "main": {
-                    "base_url": "http://localhost:8080",
-                    "model": "test-model",
-                }
-            }
-        }
         await plugin.on_start(config=config)
 
     mock_create.assert_called_once_with(config["llm"]["main"])
@@ -202,13 +203,15 @@ async def test_llm_plugin_on_start_creates_background_client_when_configured():
 
     clients = [main_mock, bg_mock]
 
-    with patch.object(LLMPlugin, "_create_client", side_effect=clients):
-        config = {
-            "llm": {
-                "main": {"base_url": "http://localhost:8080", "model": "main-model"},
-                "background": {"base_url": "http://localhost:9090", "model": "bg-model"},
-            }
+    config = {
+        "llm": {
+            "main": {"base_url": "http://localhost:8080", "model": "main-model"},
+            "background": {"base_url": "http://localhost:9090", "model": "bg-model"},
         }
+    }
+    await plugin.on_init(pm=None, config=config)
+
+    with patch.object(LLMPlugin, "_create_client", side_effect=clients):
         await plugin.on_start(config=config)
 
     main_mock.start.assert_awaited_once()

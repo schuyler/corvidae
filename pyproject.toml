@@ -25,12 +25,35 @@ dev = [
 [project.scripts]
 corvidae = "corvidae.main:cli"
 
+[project.entry-points.corvidae]
+persistence = "corvidae.persistence:PersistencePlugin"
+jsonl_log = "corvidae.jsonl_log:JsonlLogPlugin"
+core_tools = "corvidae.tools:CoreToolsPlugin"
+cli = "corvidae.channels.cli:CLIPlugin"
+irc = "corvidae.channels.irc:IRCPlugin"
+task = "corvidae.task:TaskPlugin"
+subagent = "corvidae.tools.subagent:SubagentPlugin"
+mcp = "corvidae.mcp_client:McpClientPlugin"
+llm = "corvidae.llm_plugin:LLMPlugin"
+compaction = "corvidae.compaction:CompactionPlugin"
+thinking = "corvidae.thinking:ThinkingPlugin"
+runtime_settings = "corvidae.tools.settings:RuntimeSettingsPlugin"
+tools = "corvidae.tool_collection:ToolCollectionPlugin"
+dream = "corvidae.tools.dream:DreamPlugin"
+agent = "corvidae.agent:Agent"
+idle_monitor = "corvidae.idle:IdleMonitorPlugin"
+
 [tool.setuptools.packages.find]
 include = ["corvidae*"]
 
 [build-system]
 requires = ["setuptools>=75"]
 build-backend = "setuptools.build_meta"
+
+[dependency-groups]
+dev = [
+    "pytest-timeout>=2.4.0",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

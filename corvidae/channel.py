@@ -116,13 +116,14 @@ class Channel:
 class ChannelRegistry:
     """Manages the lifecycle of channels."""
 
-    def __init__(self, agent_defaults: dict) -> None:
+    def __init__(self, agent_defaults: dict | None = None) -> None:
         """
         Args:
             agent_defaults: Agent-level config dict used as fallback when
-                resolving per-channel configuration overrides.
+                resolving per-channel configuration overrides. Defaults to {}
+                when not provided (no-arg construction for entry-point loading).
         """
-        self.agent_defaults = agent_defaults
+        self.agent_defaults = agent_defaults if agent_defaults is not None else {}
         self.channels: dict[str, Channel] = {}
 
     def get_or_create(
