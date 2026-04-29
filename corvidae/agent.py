@@ -525,6 +525,14 @@ class Agent:
         except Exception:
             logger.warning("on_conversation_event hook failed", exc_info=True)
 
+        # 8b. Fire send_thinking if the LLM produced reasoning_content
+        reasoning_text = result.message.get("reasoning_content")
+        if reasoning_text:
+            try:
+                await self.pm.ahook.send_thinking(channel=channel, text=reasoning_text)
+            except Exception:
+                logger.warning("send_thinking hook failed", exc_info=True, extra={"channel": channel.id})
+
         # 9. Let plugins post-process the in-memory assistant message (e.g., strip reasoning_content)
         try:
             await self.pm.ahook.after_persist_assistant(channel=channel, message=conv.messages[-1])
@@ -592,6 +600,17 @@ class Agent:
                     pm=self.pm,
                 )
                 return result.content
+
+            # Notify transports that a tool call has been dispatched
+            try:
+                await self.pm.ahook.send_tool_status(
+                    channel=channel,
+                    tool_name=fn_name,
+                    status="dispatched",
+                    args_summary=call["function"].get("arguments", "")[:200],
+                )
+            except Exception:
+                logger.warning("send_tool_status hook failed", exc_info=True, extra={"channel": channel.id})
 
             task = Task(
                 work=make_work,

@@ -256,6 +256,34 @@ class AgentSpec:
                         Transport plugins may use this to display timing to the user.
         """
 
+
+    @hookspec
+    async def send_thinking(self, channel: Channel, text: str) -> None:
+        """Called to display reasoning/thinking content from the LLM.
+
+        Transport plugins may render this differently from the main response
+        (e.g., in a dim or distinct color). Only fires when the LLM returns
+        reasoning_content in its response.
+
+        Args:
+            channel: The Channel the thinking is associated with.
+            text: The reasoning/thinking content from the LLM.
+        """
+
+    @hookspec
+    async def send_tool_status(self, channel: Channel, tool_name: str, status: str, args_summary: str | None = None, result_summary: str | None = None) -> None:
+        """Called to display tool call lifecycle events.
+
+        Transport plugins may render tool activity as inline status
+        indicators. Fires when a tool is dispatched and when it completes.
+
+        Args:
+            channel: The Channel the tool call is associated with.
+            tool_name: Name of the tool being called.
+            status: One of "dispatched" or "completed".
+            args_summary: Short summary of arguments (for "dispatched"), or None.
+            result_summary: Short summary of result (for "completed"), or None.
+        """
     @hookspec
     def register_tools(self, tool_registry: list) -> None:
         """Called during startup so plugins can add tools to the agent loop.
