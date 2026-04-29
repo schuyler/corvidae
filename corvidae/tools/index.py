@@ -251,7 +251,10 @@ class WorkspaceIndexer:
 class WorkspaceIndexerPlugin:
     """Plugin that provides the workspace_search tool."""
 
-    def __init__(self) -> None:
+    depends_on = set()
+
+    def __init__(self, pm) -> None:
+        self.pm = pm
         self._indexer: WorkspaceIndexer | None = None
         self._workspace_root: Path = Path.cwd()
 

@@ -131,7 +131,7 @@ class TestOnStart:
     async def test_on_start_collects_tools(self):
         """Register a test plugin implementing register_tools. Verify tools
         are collected via ToolCollectionPlugin and available on Agent."""
-        def my_test_tool(x: str) -> str:
+        async def my_test_tool(x: str) -> str:
             """A test tool."""
             return f"result: {x}"
 

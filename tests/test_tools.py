@@ -321,24 +321,24 @@ class TestWebFetchStreaming:
 
 class TestCoreToolsPlugin:
     def test_register_tools_adds_six_tools(self):
-        plugin = CoreToolsPlugin()
+        plugin = CoreToolsPlugin(None)
         registry = []
         plugin.register_tools(tool_registry=registry)
         assert len(registry) == 6
 
     def test_registered_tool_names(self):
         from corvidae.tool import Tool
-        plugin = CoreToolsPlugin()
+        plugin = CoreToolsPlugin(None)
         registry = []
         plugin.register_tools(tool_registry=registry)
         names = {item.name if isinstance(item, Tool) else item.__name__ for item in registry}
         assert names == {"task_pipeline", "shell", "read_file", "write_file", "web_fetch", "web_search"}
 
     def test_web_search_max_results_config(self):
-        plugin = CoreToolsPlugin()
+        plugin = CoreToolsPlugin(None)
         assert plugin._web_search_max_results == 8
 
-        plugin2 = CoreToolsPlugin()
+        plugin2 = CoreToolsPlugin(None)
         import asyncio
         asyncio.run(plugin2.on_start(config={"tools": {"web_search_max_results": 15}}))
         try:
@@ -354,18 +354,18 @@ class TestCoreToolsPlugin:
 
 class TestWebFetchSessionReuse:
     def test_core_tools_plugin_has_on_start(self):
-        plugin = CoreToolsPlugin()
+        plugin = CoreToolsPlugin(None)
         assert hasattr(plugin, "on_start"), "CoreToolsPlugin must have an on_start method"
         assert callable(plugin.on_start)
 
     def test_core_tools_plugin_has_on_stop(self):
-        plugin = CoreToolsPlugin()
+        plugin = CoreToolsPlugin(None)
         assert hasattr(plugin, "on_stop"), "CoreToolsPlugin must have an on_stop method"
         assert callable(plugin.on_stop)
 
     async def test_session_created_on_start(self):
         import aiohttp
-        plugin = CoreToolsPlugin()
+        plugin = CoreToolsPlugin(None)
         await plugin.on_start(config={})
         try:
             assert hasattr(plugin, "_session"), "CoreToolsPlugin must have a _session attribute after on_start"
@@ -375,7 +375,7 @@ class TestWebFetchSessionReuse:
                 await plugin._session.close()
 
     async def test_session_closed_on_stop(self):
-        plugin = CoreToolsPlugin()
+        plugin = CoreToolsPlugin(None)
         await plugin.on_start(config={})
         session = plugin._session
         await plugin.on_stop()

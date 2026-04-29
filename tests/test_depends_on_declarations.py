@@ -8,6 +8,7 @@ tests here FAIL until the declare-deps plan is applied.
 """
 
 import importlib
+import inspect
 
 import pytest
 
@@ -210,4 +211,67 @@ def test_subagent_plugin_depends_on_includes_tools():
     assert "tools" in SubagentPlugin.depends_on, (
         "SubagentPlugin.depends_on should include 'tools' — "
         "see plans/agent-decomposition-parts-3-4.md §Part 4"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 9. All registered plugins have depends_on and accept pm as first positional arg
+# ---------------------------------------------------------------------------
+
+_REGISTERED_PLUGIN_CLASSES = [
+    "corvidae.persistence.PersistencePlugin",
+    "corvidae.jsonl_log.JsonlLogPlugin",
+    "corvidae.tools.CoreToolsPlugin",
+    "corvidae.channels.cli.CLIPlugin",
+    "corvidae.channels.irc.IRCPlugin",
+    "corvidae.task.TaskPlugin",
+    "corvidae.tools.subagent.SubagentPlugin",
+    "corvidae.mcp_client.McpClientPlugin",
+    "corvidae.llm_plugin.LLMPlugin",
+    "corvidae.compaction.CompactionPlugin",
+    "corvidae.thinking.ThinkingPlugin",
+    "corvidae.context_compact.ContextCompactPlugin",
+    "corvidae.tools.settings.RuntimeSettingsPlugin",
+    "corvidae.tools.index.WorkspaceIndexerPlugin",
+    "corvidae.tool_collection.ToolCollectionPlugin",
+    "corvidae.agent.Agent",
+    "corvidae.idle.IdleMonitorPlugin",
+]
+
+
+@pytest.mark.parametrize("dotted_name", _REGISTERED_PLUGIN_CLASSES)
+def test_plugin_has_depends_on(dotted_name):
+    """Every plugin registered in main.py must have a depends_on class attribute."""
+    module_path, class_name = dotted_name.rsplit(".", 1)
+    module = importlib.import_module(module_path)
+    cls = getattr(module, class_name)
+    assert hasattr(cls, "depends_on"), (
+        f"{dotted_name} must have a 'depends_on' class attribute — "
+        "see plans/four-cleanups-design.md §2"
+    )
+
+
+@pytest.mark.parametrize("dotted_name", _REGISTERED_PLUGIN_CLASSES)
+def test_plugin_init_accepts_pm_as_first_positional_arg(dotted_name):
+    """Every plugin registered in main.py must accept pm as the first positional arg."""
+    module_path, class_name = dotted_name.rsplit(".", 1)
+    module = importlib.import_module(module_path)
+    cls = getattr(module, class_name)
+    sig = inspect.signature(cls.__init__)
+    params = list(sig.parameters.values())
+    # params[0] is always 'self'; params[1] should be 'pm'
+    assert len(params) >= 2, (
+        f"{dotted_name}.__init__ must have at least one argument besides self"
+    )
+    assert params[1].name == "pm", (
+        f"{dotted_name}.__init__ first non-self parameter must be 'pm', "
+        f"got {params[1].name!r} — see plans/four-cleanups-design.md §2"
+    )
+    # pm must be positional (POSITIONAL_ONLY or POSITIONAL_OR_KEYWORD), not keyword-only
+    assert params[1].kind in (
+        inspect.Parameter.POSITIONAL_ONLY,
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+    ), (
+        f"{dotted_name}.__init__ 'pm' must be a positional parameter, "
+        f"got kind={params[1].kind.name!r}"
     )

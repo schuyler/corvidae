@@ -198,7 +198,7 @@ class TestCoreToolsReadsConfig:
         """CoreToolsPlugin.on_start reads tools config section."""
         from corvidae.tools import CoreToolsPlugin
 
-        plugin = CoreToolsPlugin()
+        plugin = CoreToolsPlugin(None)
 
         config = {
             "tools": {
@@ -242,7 +242,7 @@ class TestCompactionPlugin:
         """CompactionPlugin() sets default attrs."""
         from corvidae.compaction import CompactionPlugin
 
-        plugin = CompactionPlugin()
+        plugin = CompactionPlugin(None)
 
         assert hasattr(plugin, "_compaction_threshold"), (
             "CompactionPlugin must have _compaction_threshold after __init__"
@@ -276,7 +276,7 @@ class TestCompactionPlugin:
         """CompactionPlugin.on_start reads agent config."""
         from corvidae.compaction import CompactionPlugin
 
-        plugin = CompactionPlugin()
+        plugin = CompactionPlugin(None)
         config = {
             "agent": {
                 "compaction_threshold": 0.9,

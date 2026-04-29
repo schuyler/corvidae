@@ -619,7 +619,7 @@ class TestCompactionLogging:
         mock_channel = MagicMock()
         mock_channel.id = "test:chan1"
 
-        plugin = CompactionPlugin()
+        plugin = CompactionPlugin(None)
         plugin._llm_client = mock_client
         with caplog.at_level(logging.WARNING, logger="corvidae.compaction"):
             await plugin.compact_conversation(

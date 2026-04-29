@@ -116,7 +116,7 @@ class TestWorkspaceIndexerPlugin:
         from corvidae.tools.index import WorkspaceIndexerPlugin
         from corvidae.tool import Tool
 
-        plugin = WorkspaceIndexerPlugin()
+        plugin = WorkspaceIndexerPlugin(None)
         registry = []
         plugin.register_tools(registry)
 
@@ -132,7 +132,7 @@ class TestWorkspaceIndexerPlugin:
             "Python is a great programming language. " * 10
         )
 
-        plugin = WorkspaceIndexerPlugin()
+        plugin = WorkspaceIndexerPlugin(None)
         plugin._workspace_root = tmp_path.resolve()
         plugin._get_indexer().build()
 
@@ -144,7 +144,7 @@ class TestWorkspaceIndexerPlugin:
     async def test_workspace_search_no_results(self, tmp_path):
         from corvidae.tools.index import WorkspaceIndexerPlugin
 
-        plugin = WorkspaceIndexerPlugin()
+        plugin = WorkspaceIndexerPlugin(None)
         plugin._workspace_root = tmp_path.resolve()
         # No files indexed
 
@@ -156,7 +156,7 @@ class TestWorkspaceIndexerPlugin:
 
         (tmp_path / "stats.txt").write_text("Stats test content here. " * 10)
 
-        plugin = WorkspaceIndexerPlugin()
+        plugin = WorkspaceIndexerPlugin(None)
         plugin._workspace_root = tmp_path.resolve()
 
         result = await plugin.build_index()
@@ -176,7 +176,7 @@ class TestWorkspaceSearchTool:
 
         (tmp_path / "tool_test.txt").write_text("Tool testing is important. " * 10)
 
-        plugin = WorkspaceIndexerPlugin()
+        plugin = WorkspaceIndexerPlugin(None)
         plugin._workspace_root = tmp_path.resolve()
         plugin._get_indexer().build()
 

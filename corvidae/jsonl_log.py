@@ -9,6 +9,7 @@ Config:
       jsonl_log_dir: logs/   # directory for JSONL files; omit to disable
 """
 
+import asyncio
 import json
 import logging
 import time
@@ -30,7 +31,10 @@ class JsonlLogPlugin:
     If ``jsonl_log_dir`` is not configured, the plugin is a complete no-op.
     """
 
-    def __init__(self):
+    depends_on = set()
+
+    def __init__(self, pm) -> None:
+        self.pm = pm
         self._log_dir: Path | None = None
         self._handles: dict[str, IO] = {}  # channel_id -> open file handle
 
@@ -41,7 +45,7 @@ class JsonlLogPlugin:
             return
         base_dir = config.get("_base_dir", Path("."))
         self._log_dir = Path(base_dir) / log_dir
-        self._log_dir.mkdir(parents=True, exist_ok=True)
+        await asyncio.to_thread(self._log_dir.mkdir, parents=True, exist_ok=True)
         logger.info("JSONL log directory: %s", self._log_dir)
 
     @hookimpl
@@ -57,9 +61,7 @@ class JsonlLogPlugin:
             "type": str(message_type.value) if hasattr(message_type, "value") else str(message_type),
             "message": clean,
         }
-        fh = self._get_handle(channel.id)
-        fh.write(json.dumps(record) + "\n")
-        fh.flush()
+        await asyncio.to_thread(self._write_record, channel.id, record)
 
     @hookimpl
     async def on_compaction(self, channel, summary_msg: dict, retain_count: int) -> None:
@@ -74,9 +76,20 @@ class JsonlLogPlugin:
             "type": "summary",
             "message": clean,
         }
-        fh = self._get_handle(channel.id)
+        await asyncio.to_thread(self._write_record, channel.id, record)
+
+    def _write_record(self, channel_id: str, record: dict) -> None:
+        """Write a single JSON record to the channel's log file (sync, for use with to_thread)."""
+        fh = self._get_handle(channel_id)
         fh.write(json.dumps(record) + "\n")
         fh.flush()
+
+    def _close_all_handles(self) -> None:
+        """Flush and close all open file handles (sync, for use with to_thread)."""
+        for fh in self._handles.values():
+            fh.flush()
+            fh.close()
+        self._handles.clear()
 
     def _sanitize_channel_id(self, channel_id: str) -> str:
         return channel_id.replace("/", "_").replace(":", "_")
@@ -90,7 +103,4 @@ class JsonlLogPlugin:
 
     @hookimpl
     async def on_stop(self) -> None:
-        for fh in self._handles.values():
-            fh.flush()
-            fh.close()
-        self._handles.clear()
+        await asyncio.to_thread(self._close_all_handles)

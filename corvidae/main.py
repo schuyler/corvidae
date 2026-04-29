@@ -82,11 +82,11 @@ async def main(config_path: str = "agent.yaml") -> None:
 
     # Register JsonlLogPlugin after PersistencePlugin (observes conversation events)
     from corvidae.jsonl_log import JsonlLogPlugin
-    jsonl_log_plugin = JsonlLogPlugin()
+    jsonl_log_plugin = JsonlLogPlugin(pm)
     pm.register(jsonl_log_plugin, name="jsonl_log")
 
     # Register CoreToolsPlugin before Agent so tools are collected during on_start
-    core_tools = CoreToolsPlugin()
+    core_tools = CoreToolsPlugin(pm)
     pm.register(core_tools, name="core_tools")
 
     # Register CLIPlugin before Agent (transport plugins first)
@@ -109,7 +109,7 @@ async def main(config_path: str = "agent.yaml") -> None:
 
     # Register McpClientPlugin before Agent (provides MCP server tools)
     from corvidae.mcp_client import McpClientPlugin
-    mcp_plugin = McpClientPlugin()
+    mcp_plugin = McpClientPlugin(pm)
     pm.register(mcp_plugin, name="mcp")
 
     # Register LLMPlugin before CompactionPlugin and Agent (owns LLM client lifecycle)
@@ -119,7 +119,7 @@ async def main(config_path: str = "agent.yaml") -> None:
 
     # Register CompactionPlugin before Agent (provides default compaction strategy)
     from corvidae.compaction import CompactionPlugin
-    compaction_plugin = CompactionPlugin(pm=pm)
+    compaction_plugin = CompactionPlugin(pm)
     pm.register(compaction_plugin, name="compaction")
 
     # Register ThinkingPlugin before Agent (handles <think> block stripping)
@@ -135,12 +135,12 @@ async def main(config_path: str = "agent.yaml") -> None:
     # Register RuntimeSettingsPlugin before Agent (provides set_settings tool)
     from corvidae.tools.settings import RuntimeSettingsPlugin
     immutable_settings = set(agent_defaults.get("immutable_settings", []))
-    runtime_settings_plugin = RuntimeSettingsPlugin(immutable_settings=immutable_settings)
+    runtime_settings_plugin = RuntimeSettingsPlugin(pm, immutable_settings=immutable_settings)
     pm.register(runtime_settings_plugin, name="runtime_settings")
 
     # Register WorkspaceIndexerPlugin before Agent (provides workspace_search tool)
     from corvidae.tools.index import WorkspaceIndexerPlugin
-    local_indexer_plugin = WorkspaceIndexerPlugin()
+    local_indexer_plugin = WorkspaceIndexerPlugin(pm)
     pm.register(local_indexer_plugin, name="local_indexer")
 
     # Register ToolCollectionPlugin after all tool-providing plugins (its on_start

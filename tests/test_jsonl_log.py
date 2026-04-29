@@ -35,7 +35,7 @@ class TestJsonlPluginNoOp:
         from corvidae.jsonl_log import JsonlLogPlugin
         from corvidae.context import MessageType
 
-        plugin = JsonlLogPlugin()
+        plugin = JsonlLogPlugin(None)
         config = {"daemon": {}}
         await plugin.on_start(config=config)
 
@@ -60,7 +60,7 @@ class TestJsonlPluginNoOp:
     async def test_no_depends_on_attribute(self):
         """JsonlLogPlugin must not declare depends_on (no longer needs persistence first)."""
         from corvidae.jsonl_log import JsonlLogPlugin
-        plugin = JsonlLogPlugin()
+        plugin = JsonlLogPlugin(None)
         # depends_on should be absent or empty — it no longer relies on persistence
         depends_on = getattr(plugin, "depends_on", None)
         assert not depends_on, (
@@ -70,7 +70,7 @@ class TestJsonlPluginNoOp:
     async def test_no_ensure_conversation_method(self):
         """JsonlLogPlugin must not implement ensure_conversation (observer model removed)."""
         from corvidae.jsonl_log import JsonlLogPlugin
-        plugin = JsonlLogPlugin()
+        plugin = JsonlLogPlugin(None)
         assert not hasattr(plugin, "ensure_conversation"), (
             "JsonlLogPlugin must not implement ensure_conversation after refactor"
         )
@@ -88,7 +88,7 @@ class TestJsonlPluginCreatesDirectory:
         log_dir = tmp_path / "jsonl_logs"
         assert not log_dir.exists()
 
-        plugin = JsonlLogPlugin()
+        plugin = JsonlLogPlugin(None)
         config = {"daemon": {"jsonl_log_dir": str(log_dir)}}
         await plugin.on_start(config=config)
 
@@ -112,7 +112,7 @@ class TestOnConversationEvent:
         from corvidae.context import MessageType
 
         log_dir = tmp_path / "logs"
-        plugin = JsonlLogPlugin()
+        plugin = JsonlLogPlugin(None)
         config = {"daemon": {"jsonl_log_dir": str(log_dir)}}
         await plugin.on_start(config=config)
 
@@ -143,7 +143,7 @@ class TestOnConversationEvent:
         from corvidae.context import MessageType
 
         log_dir = tmp_path / "logs"
-        plugin = JsonlLogPlugin()
+        plugin = JsonlLogPlugin(None)
         config = {"daemon": {"jsonl_log_dir": str(log_dir)}}
         await plugin.on_start(config=config)
 
@@ -165,7 +165,7 @@ class TestOnConversationEvent:
         from corvidae.context import MessageType
 
         log_dir = tmp_path / "logs"
-        plugin = JsonlLogPlugin()
+        plugin = JsonlLogPlugin(None)
         config = {"daemon": {"jsonl_log_dir": str(log_dir)}}
         await plugin.on_start(config=config)
 
@@ -194,7 +194,7 @@ class TestOnConversationEvent:
         from corvidae.jsonl_log import JsonlLogPlugin
         from corvidae.context import MessageType
 
-        plugin = JsonlLogPlugin()
+        plugin = JsonlLogPlugin(None)
         config = {"daemon": {}}  # no jsonl_log_dir
         await plugin.on_start(config=config)
 
@@ -215,7 +215,7 @@ class TestOnConversationEvent:
         from corvidae.context import MessageType
 
         log_dir = tmp_path / "logs"
-        plugin = JsonlLogPlugin()
+        plugin = JsonlLogPlugin(None)
         config = {"daemon": {"jsonl_log_dir": str(log_dir)}}
         await plugin.on_start(config=config)
 
@@ -251,7 +251,7 @@ class TestOnCompaction:
         from corvidae.context import MessageType
 
         log_dir = tmp_path / "logs"
-        plugin = JsonlLogPlugin()
+        plugin = JsonlLogPlugin(None)
         config = {"daemon": {"jsonl_log_dir": str(log_dir)}}
         await plugin.on_start(config=config)
 
@@ -281,7 +281,7 @@ class TestOnCompaction:
         """on_compaction must be a no-op when log_dir is not configured."""
         from corvidae.jsonl_log import JsonlLogPlugin
 
-        plugin = JsonlLogPlugin()
+        plugin = JsonlLogPlugin(None)
         config = {"daemon": {}}
         await plugin.on_start(config=config)
 
@@ -308,7 +308,7 @@ class TestJsonlPluginSanitizesChannelId:
         from corvidae.context import MessageType
 
         log_dir = tmp_path / "logs"
-        plugin = JsonlLogPlugin()
+        plugin = JsonlLogPlugin(None)
         config = {"daemon": {"jsonl_log_dir": str(log_dir)}}
         await plugin.on_start(config=config)
 
@@ -328,7 +328,7 @@ class TestJsonlPluginSanitizesChannelId:
         from corvidae.context import MessageType
 
         log_dir = tmp_path / "logs"
-        plugin = JsonlLogPlugin()
+        plugin = JsonlLogPlugin(None)
         config = {"daemon": {"jsonl_log_dir": str(log_dir)}}
         await plugin.on_start(config=config)
 
@@ -357,7 +357,7 @@ class TestJsonlPluginStop:
         from corvidae.context import MessageType
 
         log_dir = tmp_path / "logs"
-        plugin = JsonlLogPlugin()
+        plugin = JsonlLogPlugin(None)
         config = {"daemon": {"jsonl_log_dir": str(log_dir)}}
         await plugin.on_start(config=config)
 
@@ -387,7 +387,7 @@ class TestJsonlPluginValidJson:
         from corvidae.context import MessageType
 
         log_dir = tmp_path / "logs"
-        plugin = JsonlLogPlugin()
+        plugin = JsonlLogPlugin(None)
         config = {"daemon": {"jsonl_log_dir": str(log_dir)}}
         await plugin.on_start(config=config)
 
@@ -418,7 +418,7 @@ class TestJsonlPluginValidJson:
         from corvidae.context import MessageType
 
         log_dir = tmp_path / "logs"
-        plugin = JsonlLogPlugin()
+        plugin = JsonlLogPlugin(None)
         config = {"daemon": {"jsonl_log_dir": str(log_dir)}}
         await plugin.on_start(config=config)
 

@@ -22,7 +22,10 @@ class RuntimeSettingsPlugin:
             allowed to change. "system_prompt" is always added to this set.
     """
 
-    def __init__(self, immutable_settings: set) -> None:
+    depends_on = set()
+
+    def __init__(self, pm, *, immutable_settings: set) -> None:
+        self.pm = pm
         self.blocklist: set = {"system_prompt"} | set(immutable_settings)
 
     @hookimpl
