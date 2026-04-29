@@ -412,7 +412,7 @@ class TestOnNotifyInTaskCompleteSafety:
                 """A simple test tool."""
                 return f"result:{x}"
 
-            plugin.tools = {"my_tool": my_tool}
+            plugin._tools = {"my_tool": my_tool}
 
             mock_client = MagicMock()
             mock_client.chat = AsyncMock(

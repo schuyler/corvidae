@@ -105,6 +105,16 @@ class Agent:
         self._idle_cooldown: float = 30.0
         self._last_idle_fire: float = 0.0
 
+    @property
+    def tools(self) -> dict[str, Callable]:
+        """Public read-only access to the tool dict."""
+        return self._tools
+
+    @property
+    def tool_schemas(self) -> list[dict]:
+        """Public read-only access to tool schemas."""
+        return self._tool_schemas
+
     async def _maybe_fire_idle(self) -> None:
         """Fire on_idle if all queues are empty and cooldown has elapsed."""
         for q in self.queues.values():

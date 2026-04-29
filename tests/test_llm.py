@@ -93,7 +93,7 @@ class TestLLMClientChat:
         assert result == MOCK_COMPLETION
         client.session.post.assert_called_once()
         call_args = client.session.post.call_args
-        assert call_args[0][0] == f"{BASE_URL}/v1/chat/completions"
+        assert call_args[0][0] == f"{BASE_URL}/chat/completions"
         payload = call_args[1]["json"]
         assert payload["model"] == MODEL
         assert payload["messages"] == MESSAGES
