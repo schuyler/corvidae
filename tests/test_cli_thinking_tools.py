@@ -68,17 +68,15 @@ class TestSendThinking:
         captured = capsys.readouterr()
         assert captured.out == ""
 
-    async def test_long_thinking_truncated(self, capsys):
-        """send_thinking truncates text longer than 500 chars with '...'."""
+    async def test_long_thinking_not_truncated(self, capsys):
+        """send_thinking displays full reasoning content without truncation."""
         plugin, channel = _make_cli_plugin()
-        long_text = "x" * 600
+        long_text = "x" * 2000
         await plugin.send_thinking(channel=channel, text=long_text)
         captured = capsys.readouterr()
-        assert "xxx..." in captured.out
-        # Should not contain the full 600 chars
-        assert "x" * 600 not in captured.out
-        # Should contain first 500 chars worth of content
-        assert "x" * 497 in captured.out  # 500 - 3 for "..."
+        # Full content must appear — no truncation
+        assert long_text in captured.out
+        assert "..." not in captured.out
 
 
 # ---------------------------------------------------------------------------
