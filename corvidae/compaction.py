@@ -62,6 +62,42 @@ class CompactionPlugin:
         self._chars_per_token = agent_config.get("chars_per_token", DEFAULT_CHARS_PER_TOKEN)
         self._summary_prompt = agent_config.get("compaction_prompt", self.DEFAULT_SUMMARY_PROMPT)
 
+        self._validate_config()
+
+    def _validate_config(self) -> None:
+        """Warn if compaction config values are likely ineffective.
+
+        Two checks:
+        1. If compaction_threshold <= compaction_retention, compaction is a
+           no-op: the backward walk retains all messages within the retention
+           budget, which equals or exceeds the trigger threshold.
+        2. If the gap between threshold and retention is < 0.1, compaction
+           will only summarize a tiny fraction of messages and may actually
+           grow the context.
+        """
+        threshold = self._compaction_threshold
+        retention = self._compaction_retention
+        gap = threshold - retention
+
+        if threshold <= retention:
+            logger.warning(
+                "compaction_threshold (%s) <= compaction_retention (%s): "
+                "compaction will be ineffective (retains as many tokens as "
+                "it triggers on). Increase compaction_threshold or decrease "
+                "compaction_retention so that threshold > retention.",
+                threshold, retention,
+            )
+        elif gap < 0.1:
+            logger.warning(
+                "compaction config has a very small gap between "
+                "compaction_threshold (%s) and compaction_retention (%s) "
+                "(gap=%.2f). Compaction will be fragile — it may summarize "
+                "very few messages and could grow the context. "
+                "A gap of at least 0.1 is recommended (e.g., threshold=0.8, "
+                "retention=0.5).",
+                threshold, retention, gap,
+            )
+
     @hookimpl
     async def compact_conversation(self, channel, conversation, max_tokens):
         """Compact the conversation if it exceeds 80% of max_tokens.
