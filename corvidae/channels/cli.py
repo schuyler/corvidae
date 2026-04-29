@@ -127,6 +127,14 @@ class CLIPlugin:
         sys.stdout.flush()
 
     @hookimpl
+    async def send_progress(self, channel, text: str) -> None:
+        """Display intermediate assistant text in grey before tool dispatch."""
+        if not channel.matches_transport("cli"):
+            return
+        print(f"\033[90m{text}\033[0m")
+        sys.stdout.flush()
+
+    @hookimpl
     async def on_stop(self) -> None:
         """Cancel the read loop and await its cancellation."""
         if self._task is None:
