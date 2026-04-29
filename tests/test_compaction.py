@@ -12,17 +12,19 @@ def _make_channel(channel_id: str = "test:scope1") -> object:
     return channel
 
 
-class TestCompactFiltersNonMessage:
-    """Tests for compaction filtering behavior from TestMessageType."""
+class TestCompactCarriesForwardSummaries:
+    """Tests for compaction handling of prior summaries in the older portion."""
 
-    async def test_compact_filters_non_message_from_older(self):
-        """compact_conversation must exclude SUMMARY-typed entries from the older
-        portion passed to the summarizer.
+    async def test_compact_carries_forward_prior_summaries(self):
+        """compact_conversation must carry forward existing SUMMARY entries
+        from the older portion into the new summary.
+
+        This prevents the "death spiral" where repeated compaction of
+        tool-only messages loses all accumulated user context.
 
         Setup: 10 messages that trigger compaction, with the first message
         (index 0, which ends up in 'older') typed as SUMMARY. The summarizer
-        must only receive MESSAGE-typed entries, so the SUMMARY-typed dict
-        must not appear in the messages list sent to the LLM.
+        must receive the SUMMARY content as prior context.
         """
         conv = ContextWindow("chan1")
         conv.system_prompt = ""
@@ -31,7 +33,7 @@ class TestCompactFiltersNonMessage:
         # pre-existing summary entry in the older portion.
         # Token math: 10 msgs x 35 chars → int(350/3.5)=100 ≥ 40 → triggers; len=10>5.
         # retain_count=2 → older = messages[0:8], retained = messages[-2:].
-        # The SUMMARY-typed message at index 0 falls in older and must be filtered out.
+        # The SUMMARY-typed message at index 0 falls in older and must be carried forward.
         conv.messages = [
             {"role": "assistant", "content": "a" * 35, "_message_type": MessageType.SUMMARY},
         ] + [
@@ -39,36 +41,74 @@ class TestCompactFiltersNonMessage:
             for _ in range(9)
         ]
 
-        captured_older = []
+        captured_new = []
+        captured_prior = []
 
-        async def capture_summarize(messages):
-            captured_older.extend(messages)
-            return "filtered summary"
-
-        mock_client = AsyncMock()
-        mock_client.chat = AsyncMock(
-            return_value={"choices": [{"message": {"content": "filtered summary"}}]}
-        )
+        async def capture_summarize(messages, prior_summaries=None):
+            captured_new.extend(messages)
+            if prior_summaries:
+                captured_prior.extend(prior_summaries)
+            return "carried forward summary"
 
         from corvidae.compaction import CompactionPlugin
         plugin = CompactionPlugin(pm=None)
         channel = _make_channel()
 
-        # Patch the plugin's _summarize to capture what older list is passed in
         with patch.object(plugin, "_summarize", side_effect=capture_summarize):
             await plugin.compact_conversation(
                 channel=channel, conversation=conv, max_tokens=50
             )
 
-        # The SUMMARY-typed dict (index 0) must not appear in older passed to summarizer
-        for msg in captured_older:
-            assert msg.get("_message_type") != MessageType.SUMMARY, (
-                f"SUMMARY-typed message must be filtered from older before summarization: {msg!r}"
-            )
-            # _message_type must also be stripped before LLM serialization
+        # The SUMMARY-typed dict must be passed as prior_summaries
+        assert len(captured_prior) == 1, (
+            f"Expected 1 prior summary, got {len(captured_prior)}"
+        )
+        # Prior summary content should be preserved
+        assert captured_prior[0]["content"] == "a" * 35
+        # _message_type must be stripped from both new messages and prior summaries
+        for msg in captured_new + captured_prior:
             assert "_message_type" not in msg, (
-                f"_message_type key must be stripped before passing to _summarize: {msg!r}"
+                f"_message_type key must be stripped: {msg!r}"
             )
+
+    async def test_compact_filters_non_message_non_summary_from_older(self):
+        """compact_conversation must exclude CONTEXT-typed entries from both
+        the new messages and prior summaries passed to the summarizer.
+        """
+        conv = ContextWindow("chan1")
+        conv.system_prompt = ""
+
+        conv.messages = [
+            {"role": "user", "content": "a" * 35, "_message_type": MessageType.CONTEXT},
+            {"role": "user", "content": "a" * 35, "_message_type": MessageType.MESSAGE},
+        ] + [
+            {"role": "user", "content": "a" * 35, "_message_type": MessageType.MESSAGE}
+            for _ in range(8)
+        ]
+
+        captured_new = []
+        captured_prior = []
+
+        async def capture_summarize(messages, prior_summaries=None):
+            captured_new.extend(messages)
+            if prior_summaries:
+                captured_prior.extend(prior_summaries)
+            return "filtered summary"
+
+        from corvidae.compaction import CompactionPlugin
+        plugin = CompactionPlugin(pm=None)
+        channel = _make_channel()
+
+        with patch.object(plugin, "_summarize", side_effect=capture_summarize):
+            await plugin.compact_conversation(
+                channel=channel, conversation=conv, max_tokens=50
+            )
+
+        # CONTEXT-typed messages should be filtered out
+        for msg in captured_new:
+            assert msg["content"] == "a" * 35  # all should be MESSAGE-type content
+        # No prior summaries (the CONTEXT entry shouldn't appear as one)
+        assert len(captured_prior) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -190,6 +230,155 @@ class TestCompactionPluginPart3:
             "CompactionPlugin.depends_on must include 'llm' — "
             "see plans/agent-decomposition-parts-3-4.md §Part 3"
         )
+
+class TestDeathSpiralPrevention:
+    """Tests that repeated compaction carries forward accumulated context.
+
+    The "death spiral" occurs when:
+    1. First compaction produces a good summary with user instructions.
+    2. Second compaction only has tool outputs to summarize (no user messages).
+    3. The second summary says "no user instructions" because it can't see
+       the user messages that were in the first summary.
+
+    The fix: pass prior summaries to the summarizer so accumulated context
+    is carried forward.
+    """
+
+    async def test_tool_only_compaction_carries_forward_prior_summary(self):
+        """When compacting only tool outputs, the prior summary must be
+        passed to the summarizer so user context is preserved.
+
+        Simulates the death spiral: [SUMMARY, tool, tool, tool, tool, tool, ...retained]
+        where the second compaction only sees tool outputs as new messages.
+        """
+        conv = ContextWindow("chan1")
+        conv.system_prompt = ""
+
+        # Build: 1 SUMMARY (from prior compaction) + 5 tool outputs + 4 recent messages
+        # Token math: each msg ~35 chars, 10 msgs total → ~100 tokens → triggers at 80%
+        # of max_tokens=50. retain_count will be ~2-3.
+        conv.messages = [
+            # Prior summary with user context
+            {
+                "role": "assistant",
+                "content": "[Summary] User asked to investigate duplicate LLM responses bug. Branch: yozlet/first-fixes.",
+                "_message_type": MessageType.SUMMARY,
+            },
+            # Tool outputs (no user messages in here!)
+            {
+                "role": "tool",
+                "content": "[Task abc123] file contents of agent_loop.py",
+                "_message_type": MessageType.MESSAGE,
+            },
+            {
+                "role": "tool",
+                "content": "[Task def456] file contents of cli.py",
+                "_message_type": MessageType.MESSAGE,
+            },
+            {
+                "role": "tool",
+                "content": "[Task ghi789] file contents of channel.py",
+                "_message_type": MessageType.MESSAGE,
+            },
+            {
+                "role": "tool",
+                "content": "[Task jkl012] file contents of agent_loop.py again",
+                "_message_type": MessageType.MESSAGE,
+            },
+            {
+                "role": "tool",
+                "content": "[Task mno345] file contents of channel.py again",
+                "_message_type": MessageType.MESSAGE,
+            },
+            # Recent messages (retained)
+            {
+                "role": "assistant",
+                "content": "b" * 35,
+                "_message_type": MessageType.MESSAGE,
+            },
+            {
+                "role": "tool",
+                "content": "c" * 35,
+                "_message_type": MessageType.MESSAGE,
+            },
+            {
+                "role": "assistant",
+                "content": "d" * 35,
+                "_message_type": MessageType.MESSAGE,
+            },
+            {
+                "role": "user",
+                "content": "e" * 35,
+                "_message_type": MessageType.MESSAGE,
+            },
+        ]
+
+        captured_new = []
+        captured_prior = []
+
+        async def capture_summarize(messages, prior_summaries=None):
+            captured_new.extend(messages)
+            if prior_summaries:
+                captured_prior.extend(prior_summaries)
+            return "User asked to investigate duplicate responses. Reading source files."
+
+        from corvidae.compaction import CompactionPlugin
+        plugin = CompactionPlugin(pm=None)
+        channel = _make_channel()
+
+        with patch.object(plugin, "_summarize", side_effect=capture_summarize):
+            result = await plugin.compact_conversation(
+                channel=channel, conversation=conv, max_tokens=50
+            )
+
+        assert result is True, "Compaction should have been performed"
+
+        # The prior SUMMARY must be passed to the summarizer
+        assert len(captured_prior) == 1, (
+            f"Expected 1 prior summary (the earlier compaction result), "
+            f"got {len(captured_prior)}"
+        )
+        assert "duplicate LLM responses" in captured_prior[0]["content"], (
+            "Prior summary content must include the user context about the bug investigation"
+        )
+
+        # New messages should not include the SUMMARY (it was separated to prior_summaries)
+        for msg in captured_new:
+            assert msg.get("content", "") != captured_prior[0]["content"], (
+                "SUMMARY content should not be duplicated in new messages"
+            )
+
+    async def test_no_prior_summaries_passes_none(self):
+        """First compaction (no prior summaries) should pass None for prior_summaries."""
+        conv = ContextWindow("chan1")
+        conv.system_prompt = ""
+
+        # All MESSAGE type, no summaries
+        conv.messages = [
+            {"role": "user", "content": "a" * 35, "_message_type": MessageType.MESSAGE}
+            for _ in range(10)
+        ]
+
+        captured_prior = None
+
+        async def capture_summarize(messages, prior_summaries=None):
+            nonlocal captured_prior
+            captured_prior = prior_summaries
+            return "first summary"
+
+        from corvidae.compaction import CompactionPlugin
+        plugin = CompactionPlugin(pm=None)
+        channel = _make_channel()
+
+        with patch.object(plugin, "_summarize", side_effect=capture_summarize):
+            await plugin.compact_conversation(
+                channel=channel, conversation=conv, max_tokens=50
+            )
+
+        assert captured_prior == [], (
+            f"First compaction should have empty prior_summaries, got {captured_prior}"
+        )
+
 
 class TestSummarizeTruncation:
     """Tests for _summarize message truncation when input is large."""
