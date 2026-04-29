@@ -1317,7 +1317,7 @@ class TestGroupFToolCollection:
     async def test_f1_all_expected_tools_registered(self, harness):
         """F1. After on_start with full plugin graph, expected tool set is exact."""
         expected = {"shell", "read_file", "write_file", "web_fetch", "web_search", "subagent", "task_status", "task_pipeline"}
-  assert set(harness.agent.tools.keys()) == expected
+        assert set(harness.agent.tools.keys()) == expected
 
     async def test_f2_tool_schemas_structurally_valid(self, harness):
         """F2. Each tool schema has correct structure and no _ctx in parameters."""
