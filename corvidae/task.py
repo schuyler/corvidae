@@ -240,6 +240,18 @@ class TaskPlugin:
                 "result_length": len(result),
             },
         )
+        # Notify transports that a tool call has completed
+        if task.tool_call_id:
+            try:
+                await self.pm.ahook.send_tool_status(
+                    channel=task.channel,
+                    tool_name=task.description.split(":", 1)[-1] if task.description and task.description.startswith("tool:") else "unknown",
+                    status="completed",
+                    result_summary=result[:200] if result else None,
+                )
+            except Exception:
+                logger.warning("send_tool_status hook failed", exc_info=True, extra={"channel": task.channel.id})
+
         try:
             await self.pm.ahook.on_notify(
                 channel=task.channel,

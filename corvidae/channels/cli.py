@@ -94,6 +94,39 @@ class CLIPlugin:
         sys.stdout.flush()
 
     @hookimpl
+    async def send_thinking(self, channel, text: str) -> None:
+        """Display reasoning/thinking content in dim cyan."""
+        if not channel.matches_transport("cli"):
+            return
+        # Truncate for display if very long
+        display = text if len(text) <= 500 else text[:500] + "..."
+        print(f"\033[36m\033[2m{display}\033[0m")
+        sys.stdout.flush()
+
+    @hookimpl
+    async def send_tool_status(self, channel, tool_name: str, status: str, args_summary: str | None = None, result_summary: str | None = None) -> None:
+        """Display tool call status in dim yellow."""
+        if not channel.matches_transport("cli"):
+            return
+        if status == "dispatched":
+            args_display = ""
+            if args_summary:
+                # Try to pretty-print JSON args, truncate
+                try:
+                    import json
+                    parsed = json.loads(args_summary)
+                    args_display = " " + json.dumps(parsed, ensure_ascii=False)[:120]
+                except (json.JSONDecodeError, ValueError):
+                    args_display = " " + args_summary[:120]
+            print(f"\033[33m\033[2m⚙ {tool_name}{args_display}\033[0m")
+        elif status == "completed":
+            result_display = ""
+            if result_summary:
+                result_display = f" → {result_summary[:80]}"
+            print(f"\033[33m\033[2m✓ {tool_name}{result_display}\033[0m")
+        sys.stdout.flush()
+
+    @hookimpl
     async def on_stop(self) -> None:
         """Cancel the read loop and await its cancellation."""
         if self._task is None:
