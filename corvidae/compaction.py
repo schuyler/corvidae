@@ -40,15 +40,11 @@ class CompactionPlugin:
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
-        from corvidae.llm_plugin import LLMPlugin
         agent_config = config.get("agent", {})
         self._compaction_threshold = agent_config.get("compaction_threshold", 0.8)
         self._compaction_retention = agent_config.get("compaction_retention", 0.5)
         self._min_messages = agent_config.get("min_messages_to_compact", 5)
         self._chars_per_token = agent_config.get("chars_per_token", DEFAULT_CHARS_PER_TOKEN)
-        if self.pm is not None:
-            llm = get_dependency(self.pm, "llm", LLMPlugin)
-            self._llm_client = llm.main_client
 
     @hookimpl
     async def compact_conversation(self, channel, conversation, max_tokens):
@@ -126,6 +122,18 @@ class CompactionPlugin:
         Returns:
             Summary text string from the LLM.
         """
+        # Resolve the LLM client lazily — on_start hooks run in LIFO order
+        # (last registered = first called), so CompactionPlugin.on_start fires
+        # before LLMPlugin.on_start. The client is not available until all
+        # on_start hooks have completed, so we resolve it here at compaction
+        # time instead.
+        if self._llm_client is None and self.pm is not None:
+            from corvidae.llm_plugin import LLMPlugin
+            llm = get_dependency(self.pm, "llm", LLMPlugin)
+            self._llm_client = llm.main_client
+        if self._llm_client is None:
+            raise RuntimeError("LLM client not available for compaction")
+
         response = await self._llm_client.chat([
             {
                 "role": "system",
