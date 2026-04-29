@@ -341,7 +341,13 @@ class Agent:
 
         logger.info(
             "agent response sent",
-            extra={"channel": channel.id, "latency_ms": result.latency_ms},
+            extra={
+                "channel": channel.id,
+                "latency_ms": result.latency_ms,
+                "tool_calls_count": len(result.tool_calls) if result.tool_calls else 0,
+                "turn_counter": channel.turn_counter,
+                "pending_tools": len(channel.pending_tool_call_ids),
+            },
         )
 
         try:
@@ -388,6 +394,10 @@ class Agent:
         loop (as run_agent_loop uses for subagents) would block the queue
         for the entire tool-calling sequence.
         """
+        import time as _time
+        _t0 = _time.monotonic()
+        _phases: dict[str, float] = {}
+
         logger.debug(
             "processing queue item",
             extra={
@@ -404,6 +414,8 @@ class Agent:
         if msg_result is None:
             return
         conversation_message, request_text = msg_result
+
+        _t_conv_init_start = _time.monotonic()
 
         # 1. Lazy-initialize conversation on the channel
         if channel.conversation is None:
@@ -422,6 +434,7 @@ class Agent:
                 conv.messages = history
             channel.conversation = conv
         conv = channel.conversation
+        _phases["conv_init"] = _time.monotonic() - _t_conv_init_start
 
         # 2. Reset turn_counter on user messages
         if item.role == QueueItemRole.USER:
@@ -432,6 +445,7 @@ class Agent:
         max_turns_limit = resolved["max_turns"]
 
         # 4. Append message to conversation log and fire persistence event
+        _t_persist_start = _time.monotonic()
         conv.append(conversation_message)
         try:
             await self.pm.ahook.on_conversation_event(
@@ -441,6 +455,7 @@ class Agent:
             )
         except Exception:
             logger.warning("on_conversation_event hook failed", exc_info=True)
+        _phases["persist"] = _time.monotonic() - _t_persist_start
 
         # 4b. Batch tool results: if this is a tool-result notification and
         # there are still pending tool calls from the current batch, skip the
@@ -459,6 +474,7 @@ class Agent:
                 return
 
         # 5. Compact if approaching context limit
+        _t_compact_start = _time.monotonic()
         try:
             await self.pm.ahook.compact_conversation(
                 channel=channel, conversation=conv,
@@ -466,8 +482,10 @@ class Agent:
             )
         except Exception:
             logger.warning("compaction failed, skipping", exc_info=True)
+        _phases["compact"] = _time.monotonic() - _t_compact_start
 
         # 6. Let plugins inject context before the LLM call
+        _t_before_turn_start = _time.monotonic()
         msg_count_before = len(conv.messages)
         try:
             await self.pm.ahook.before_agent_turn(channel=channel)
@@ -485,8 +503,10 @@ class Agent:
                 )
             except Exception:
                 logger.warning("on_conversation_event hook failed", exc_info=True)
+        _phases["before_turn"] = _time.monotonic() - _t_before_turn_start
 
         # 7. Build prompt and call run_agent_turn (single LLM invocation)
+        _t_llm_start = _time.monotonic()
         messages = conv.build_prompt()
         llm_overrides = {k: v for k, v in channel.runtime_overrides.items() if k not in FRAMEWORK_KEYS}
 
@@ -514,12 +534,28 @@ class Agent:
                 exc_info=True,
                 extra={"channel": channel.id},
             )
+        _phases["llm"] = _time.monotonic() - _t_llm_start
 
         # 10. Dispatch tool calls or send text response
         await self._handle_response(result, channel, max_turns_limit, request_text)
 
         # 11. Push-based idle detection: check if the system became idle
         await self._maybe_fire_idle()
+
+        # 12. Log phase timing breakdown
+        _total = _time.monotonic() - _t0
+        _phases["other"] = max(0, _total - sum(_phases.values()))
+        logger.info(
+            "queue item timing",
+            extra={
+                "channel": item.channel.id,
+                "role": item.role.value,
+                "total_ms": round(_total * 1000),
+                **{f"{k}_ms": round(v * 1000) for k, v in _phases.items()},
+                "prompt_tokens": result.message.get("usage", {}).get("prompt_tokens") if hasattr(result, "message") and isinstance(result.message, dict) else None,
+                "message_count": len(conv.messages) if conv else 0,
+            },
+        )
 
     async def _dispatch_tool_calls(
         self, tool_calls: list[dict], channel: Channel
