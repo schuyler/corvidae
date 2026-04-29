@@ -237,10 +237,10 @@ class LocalIndexer:
             count += 1
 
         # Update mtime tracking
-        cursor = await self._db.execute(
+        async with self._db.execute(
             "SELECT value FROM metadata WHERE key=?", (f"mtime:{file_path}",)
-        )
-        stored = await cursor.fetchone()
+        ) as cursor:
+            stored = await cursor.fetchone()
         if stored:
             await self._db.execute(
                 "UPDATE metadata SET value=? WHERE key=?", (str(mtime), f"mtime:{file_path}")
@@ -295,7 +295,7 @@ class LocalIndexer:
 
     async def search_text(self, query: str, limit: int = 10) -> list[SearchResult]:
         """Full-text search using FTS5. Returns ranked results."""
-        cursor = await self._db.execute("""
+        async with self._db.execute("""
             SELECT c.file_path, c.chunk_index, c.content, c.simhash_hex,
                    rank as fts_score
             FROM chunks_fts f
@@ -303,9 +303,8 @@ class LocalIndexer:
             WHERE chunks_fts MATCH ?
             ORDER BY fts_score ASC
             LIMIT ?
-        """, (query, limit))
-
-        rows = await cursor.fetchall()
+        """, (query, limit)) as cursor:
+            rows = await cursor.fetchall()
         results = []
         for row in rows:
             # Normalize FTS score (lower is better)
@@ -323,8 +322,8 @@ class LocalIndexer:
         """Similarity search using simhash hamming distance."""
         query_sh = simhash(query)
 
-        cursor = await self._db.execute("SELECT * FROM chunks")
-        rows = await cursor.fetchall()
+        async with self._db.execute("SELECT * FROM chunks") as cursor:
+            rows = await cursor.fetchall()
 
         scored = []
         for row in rows:

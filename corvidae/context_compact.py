@@ -184,7 +184,7 @@ class ContextCompactPlugin:
             "role": "user",
             "content": f"[Background Context]\n{block_text}",
         }
-        await conversation.append(
+        conversation.append(
             block_entry, message_type=MessageType.CONTEXT
         )
         self._last_block_ts[channel_id] = time()
@@ -238,7 +238,7 @@ class ContextCompactPlugin:
             return None
 
         if block_msg is not None:
-            await conv.append(block_msg, message_type=MessageType.CONTEXT)
+            conv.append(block_msg, message_type=MessageType.CONTEXT)
 
     @hookimpl
     async def on_agent_response(
