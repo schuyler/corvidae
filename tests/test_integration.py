@@ -801,7 +801,7 @@ class TestGroupCPersistence:
         # Patch _summarize to return a canned summary without making an LLM call.
         # This keeps the side_effect list deterministic: one response per user message,
         # no ordering dependency on when compaction happens to trigger.
-        async def fake_summarize(self, messages):
+        async def fake_summarize(self, messages, prior_summaries=None):
             return "test summary"
 
         # We need >5 messages to trigger compaction.
@@ -1056,7 +1056,7 @@ class TestGroupDMultiChannel:
 
         long_text = "a_msg_" + ("x" * 50)
 
-        async def fake_summarize(self_inner, messages):
+        async def fake_summarize(self_inner, messages, prior_summaries=None):
             return "channel A summary"
 
         with patch.object(CompactionPlugin, "_summarize", fake_summarize):
