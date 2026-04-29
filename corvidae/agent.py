@@ -334,6 +334,12 @@ class Agent:
         """
         if result.tool_calls and channel.turn_counter < max_turns_limit:
             channel.turn_counter += 1
+            # Show intermediate text (e.g. "Let me look that up...") before dispatching tools
+            if result.text:
+                try:
+                    await self.pm.ahook.send_progress(channel=channel, text=result.text)
+                except Exception:
+                    logger.warning("send_progress hook failed", exc_info=True, extra={"channel": channel.id})
             await self._dispatch_tool_calls(result.tool_calls, channel)
             # Do NOT send text response; return and wait for tool results
             return
