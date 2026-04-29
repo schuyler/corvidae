@@ -18,8 +18,12 @@ Shutdown:
 import asyncio
 import logging
 import logging.config
+import os
 import signal
+import sys
 from pathlib import Path
+
+import pluggy
 
 import yaml
 
@@ -175,13 +179,42 @@ async def main(config_path: str = "agent.yaml") -> None:
 
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
+    _shutdown_requested = False
+
+    def _handle_stop_signal() -> None:
+        nonlocal _shutdown_requested
+        if _shutdown_requested:
+            sys.stderr.write("second interrupt received, force-exiting\n")
+            sys.stderr.flush()
+            os._exit(1)
+        _shutdown_requested = True
+        stop_event.set()
+
     for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, stop_event.set)
+        loop.add_signal_handler(sig, _handle_stop_signal)
 
     await stop_event.wait()
 
     logger.info("shutdown signal received, stopping")
 
+    try:
+        await asyncio.wait_for(
+            _run_shutdown(agent, pm),
+            timeout=3.0,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("graceful shutdown timed out after 3s, force-exiting")
+        logging.shutdown()
+        os._exit(1)
+
+
+async def _run_shutdown(agent: Agent, pm: pluggy.PluginManager) -> None:
+    """Run agent and plugin shutdown in order. Called under a timeout in main().
+
+    On timeout cancellation, pm.ahook.on_stop() may not execute if
+    agent.on_stop() is the one hanging. This is intentional — the process
+    is force-exiting anyway.
+    """
     await agent.on_stop()
     await pm.ahook.on_stop()
 

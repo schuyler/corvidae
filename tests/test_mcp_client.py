@@ -459,6 +459,27 @@ class TestOnStop:
         # Must not raise.
         await plugin.on_stop()
 
+    async def test_on_stop_exit_stack_raises_logs_and_clears(self, caplog):
+        """If aclose() raises, on_stop logs the exception and clears _exit_stack anyway."""
+        plugin = McpClientPlugin(None)
+        mock_stack = AsyncMock()
+        mock_stack.aclose = AsyncMock(side_effect=RuntimeError("transport closed unexpectedly"))
+        plugin._exit_stack = mock_stack
+
+        with caplog.at_level(logging.WARNING, logger="corvidae.mcp_client"):
+            # Must NOT raise — exception should be caught and logged.
+            await plugin.on_stop()
+
+        # _exit_stack must be cleared even when aclose() raised.
+        assert plugin._exit_stack is None, (
+            "on_stop must clear _exit_stack even when aclose() raises"
+        )
+
+        # The exception must be logged (not silently swallowed).
+        assert any(
+            record.levelno >= logging.WARNING for record in caplog.records
+        ), "on_stop must log a warning when aclose() raises"
+
 
 # ---------------------------------------------------------------------------
 # TestToolNaming
