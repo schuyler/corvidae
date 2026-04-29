@@ -9,8 +9,8 @@ Algorithm:
     2. Skip if len(messages) <= 5.
     3. Backward walk retaining messages within 50% of max_tokens.
     4. Skip if all messages fit (retain_count >= len(messages)).
-    5. Filter older messages to MESSAGE type, strip _message_type metadata.
-    6. Summarize via LLM (_summarize method, patchable in tests).
+    5. Extract existing summaries from older, then filter remaining to MESSAGE type.
+    6. Summarize via LLM: pass existing summaries as context + new messages.
     7. Call conversation.replace_with_summary(summary_msg, retain_count) (sync).
     8. Fire on_compaction hook if pm is set.
     9. Return True.
@@ -82,12 +82,30 @@ class CompactionPlugin:
 
         older = conversation.messages[:-retain_count]
 
-        # Filter older to MESSAGE type only; exclude SUMMARY entries from summarizer input.
-        older = [m for m in older if m.get("_message_type", MessageType.MESSAGE) == MessageType.MESSAGE]
-        # Strip _message_type before passing to LLM to avoid serializing internal metadata.
-        older_clean = [{k: v for k, v in m.items() if k != "_message_type"} for m in older]
+        # Separate existing summaries from new messages.
+        # Summaries are carried forward as context so that repeated compaction
+        # doesn't lose accumulated knowledge (the "death spiral" where
+        # compacting tool-only messages with no user input produces a summary
+        # saying "no user instructions").
+        prior_summaries = [
+            m for m in older
+            if m.get("_message_type", MessageType.MESSAGE) == MessageType.SUMMARY
+        ]
+        new_messages = [
+            m for m in older
+            if m.get("_message_type", MessageType.MESSAGE) == MessageType.MESSAGE
+        ]
+        # Strip _message_type before passing to LLM.
+        prior_summaries_clean = [
+            {k: v for k, v in m.items() if k != "_message_type"}
+            for m in prior_summaries
+        ]
+        new_messages_clean = [
+            {k: v for k, v in m.items() if k != "_message_type"}
+            for m in new_messages
+        ]
 
-        summary_text = await self._summarize(older_clean)
+        summary_text = await self._summarize(new_messages_clean, prior_summaries_clean)
         summary_msg = {
             "role": "assistant",
             "content": f"[Summary of earlier conversation]\n{summary_text}",
@@ -107,17 +125,23 @@ class CompactionPlugin:
 
         return True
 
-    async def _summarize(self, messages: list[dict]) -> str:
+    async def _summarize(self, messages: list[dict], prior_summaries: list[dict] | None = None) -> str:
         """Ask the LLM to summarize a list of messages.
 
         Sends the messages to the LLM with a system prompt asking for a
         concise summary that preserves key facts, decisions, and context.
+
+        If prior_summaries is provided, they are prepended as context so
+        the new summary can build on accumulated knowledge rather than
+        producing an independent (and potentially contradictory) summary.
 
         This is a separate method so tests can patch it via
         patch.object(plugin, "_summarize", ...).
 
         Args:
             messages: List of message dicts (role/content, no _message_type).
+            prior_summaries: Optional list of prior summary message dicts to
+                carry forward.
 
         Returns:
             Summary text string from the LLM.
@@ -148,15 +172,30 @@ class CompactionPlugin:
             }
             messages = head + [truncated_marker] + tail
 
+        # Build system prompt — if there are prior summaries, instruct the LLM
+        # to incorporate their content into the new summary.
+        if prior_summaries:
+            system_content = (
+                "You are summarizing a conversation for an AI agent that will continue it. "
+                "Below are PRIOR SUMMARIES from earlier compaction rounds, followed by "
+                "NEW MESSAGES that need to be incorporated. Your summary MUST preserve "
+                "ALL key information from the prior summaries AND add any new facts, "
+                "decisions, discoveries, or user instructions from the new messages. "
+                "Do NOT discard information from the prior summaries — carry it forward.\n\n"
+                "PRIOR SUMMARIES:\n"
+                + "\n".join(
+                    s.get("content", "") for s in prior_summaries
+                )
+            )
+        else:
+            system_content = (
+                "Summarize the following conversation concisely, "
+                "preserving key facts, decisions, and context that "
+                "would be needed to continue the conversation."
+            )
+
         response = await self._llm_client.chat([
-            {
-                "role": "system",
-                "content": (
-                    "Summarize the following conversation concisely, "
-                    "preserving key facts, decisions, and context that "
-                    "would be needed to continue the conversation."
-                ),
-            },
+            {"role": "system", "content": system_content},
             {"role": "user", "content": json.dumps(messages)},
         ])
         return response["choices"][0]["message"]["content"]
