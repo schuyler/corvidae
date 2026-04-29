@@ -70,14 +70,12 @@ class ContextCompactPlugin:
     """
 
     DEFAULT_BG_BLOCK_PROMPT = (
-        "Generate a concise background context block from this "
-        "conversation history. Focus on:\n"
-        "- Key facts and decisions\n"
-        "- Current state and ongoing work\n"
-        "- Open questions or pending items\n"
-        "- Any constraints or preferences mentioned\n\n"
-        "Keep it under 2048 characters. Omit conversational filler; "
-        "preserve only information needed for future context."
+        "Summarize this conversation segment as a background context block. "
+        "The summary will be injected before future conversation turns to provide context.\n\n"
+        "Include a high-level explanation of what the agent was working on or attempting to achieve. "
+        "Preserve specific details: file paths, variable names, error messages, discoveries made, "
+        "and the current state of any ongoing work.\n\n"
+        "In 500 words or less. Omit conversational filler."
     )
 
     depends_on = {"compaction", "llm"}
