@@ -113,7 +113,7 @@ class TestOnStart:
 
         await pre_injected.close()
 
-    # base_dir tests removed: system prompt resolution moves to AgentPlugin
+    # base_dir tests removed: system prompt resolution moves to Agent
 
 
 # ---------------------------------------------------------------------------
@@ -601,13 +601,13 @@ class TestHookIntegration:
 
 class TestGracefulDegradation:
     async def test_no_persistence_plugin_agent_creates_context_window(self, caplog):
-        """AgentPlugin must create a ContextWindow directly when load_conversation
+        """Agent must create a ContextWindow directly when load_conversation
         returns no results, and must log an appropriate error/warning.
 
-        AgentPlugin creates a ContextWindow directly and calls load_conversation
+        Agent creates a ContextWindow directly and calls load_conversation
         to restore history from persistence.
         """
-        from corvidae.agent import AgentPlugin
+        from corvidae.agent import Agent
         from corvidae.context import ContextWindow
         from corvidae.task import TaskPlugin
 
@@ -622,8 +622,8 @@ class TestGracefulDegradation:
         pm.register(task_plugin, name="task")
         await task_plugin.on_start(config={})
 
-        plugin = AgentPlugin(pm)
-        pm.register(plugin, name="agent_loop")
+        plugin = Agent(pm)
+        pm.register(plugin, name="agent")
         plugin._registry = registry
 
         mock_client = MagicMock()
@@ -634,7 +634,7 @@ class TestGracefulDegradation:
 
         channel = registry.get_or_create("test", "scope1", config=ChannelConfig())
 
-        # With no PersistencePlugin, AgentPlugin should still create a ContextWindow
+        # With no PersistencePlugin, Agent should still create a ContextWindow
         await plugin.on_message(channel=channel, sender="user", text="hello")
         if channel.id in plugin.queues:
             await plugin.queues[channel.id].drain()

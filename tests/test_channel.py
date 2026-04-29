@@ -300,7 +300,7 @@ class TestChannelConfigListSystemPrompt:
         """ChannelConfig with a list system_prompt preserves the list through resolve().
 
         The list is NOT resolved to a string at this layer — that happens later
-        in AgentPlugin._process_queue_item via resolve_system_prompt().
+        in Agent._process_queue_item via resolve_system_prompt().
         """
         cfg = ChannelConfig(system_prompt=["a.md", "b.md"])
         result = cfg.resolve({})

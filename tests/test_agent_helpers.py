@@ -1,7 +1,7 @@
-"""Failing tests for extracted helper methods in AgentPlugin (Red TDD).
+"""Failing tests for extracted helper methods in Agent (Red TDD).
 
 These tests specify the interface contracts of four methods that do not yet
-exist on AgentPlugin:
+exist on Agent:
 
     _build_conversation_message(self, item) -> tuple[dict, str] | None
     _run_turn(self, channel, messages, tool_schemas, llm_overrides) -> AgentTurnResult | None
@@ -16,7 +16,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from corvidae.agent import (
-    AgentPlugin,
+    Agent,
     MAX_TURNS_FALLBACK_MESSAGE,
     QueueItem,
     QueueItemRole,

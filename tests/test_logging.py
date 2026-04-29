@@ -81,7 +81,7 @@ class TestLoggerNamingConvention:
         assert mod.logger.name == "corvidae.main"
 
     def test_agent_loop_plugin_has_module_logger(self):
-        """AgentPlugin logs under 'corvidae.agent' (canonical: corvidae.agent)."""
+        """Agent logs under 'corvidae.agent' (canonical: corvidae.agent)."""
         import corvidae.agent as mod
         assert hasattr(mod, "logger")
         assert mod.logger.name == "corvidae.agent"
@@ -145,7 +145,7 @@ class TestMainLogging:
 
             with patch("logging.config.dictConfig") as mock_dictconfig, \
                  patch("corvidae.main.create_plugin_manager") as mock_pm_factory, \
-                 patch("corvidae.main.AgentPlugin") as mock_agent_cls:
+                 patch("corvidae.main.Agent") as mock_agent_cls:
                 mock_pm = MagicMock()
                 mock_pm.ahook.on_start = AsyncMock(return_value=[])
                 mock_pm.ahook.on_stop = AsyncMock(return_value=[])
@@ -199,7 +199,7 @@ class TestMainLogging:
 
             with patch("logging.config.dictConfig") as mock_dictconfig, \
                  patch("corvidae.main.create_plugin_manager") as mock_pm_factory, \
-                 patch("corvidae.main.AgentPlugin") as mock_agent_cls:
+                 patch("corvidae.main.Agent") as mock_agent_cls:
                 mock_pm = MagicMock()
                 mock_pm.ahook.on_start = AsyncMock(return_value=[])
                 mock_pm.ahook.on_stop = AsyncMock(return_value=[])
@@ -243,7 +243,7 @@ class TestMainLogging:
             with caplog.at_level(logging.INFO, logger="corvidae.main"), \
                  patch("logging.config.dictConfig"), \
                  patch("corvidae.main.create_plugin_manager") as mock_pm_factory, \
-                 patch("corvidae.main.AgentPlugin") as mock_agent_cls:
+                 patch("corvidae.main.Agent") as mock_agent_cls:
                 mock_pm = MagicMock()
                 mock_pm.ahook.on_start = AsyncMock(return_value=[])
                 mock_pm.ahook.on_stop = AsyncMock(return_value=[])
@@ -287,7 +287,7 @@ class TestMainLogging:
             with caplog.at_level(logging.INFO, logger="corvidae.main"), \
                  patch("logging.config.dictConfig"), \
                  patch("corvidae.main.create_plugin_manager") as mock_pm_factory, \
-                 patch("corvidae.main.AgentPlugin") as mock_agent_cls:
+                 patch("corvidae.main.Agent") as mock_agent_cls:
                 mock_pm = MagicMock()
                 mock_pm.ahook.on_start = AsyncMock(return_value=[])
                 mock_pm.ahook.on_stop = AsyncMock(return_value=[])
@@ -767,13 +767,13 @@ class TestPluginManagerLogging:
 # ---------------------------------------------------------------------------
 
 
-class TestAgentPluginLogging:
-    """AgentPlugin must log INFO on_start (tool count, channel count) and
+class TestAgentLogging:
+    """Agent must log INFO on_start (tool count, channel count) and
     on_message (channel, sender, latency)."""
 
     async def test_on_start_logs_info_tool_and_channel_count(self, caplog):
         """on_start must emit an INFO log with tool_count and channel_count."""
-        from corvidae.agent import AgentPlugin
+        from corvidae.agent import Agent
         from corvidae.hooks import create_plugin_manager
 
         pm = create_plugin_manager()
@@ -793,8 +793,8 @@ class TestAgentPluginLogging:
         tools_plugin.registry = ToolRegistry()
         pm.register(tools_plugin, name="tools")
 
-        plugin = AgentPlugin(pm)
-        pm.register(plugin, name="agent_loop")
+        plugin = Agent(pm)
+        pm.register(plugin, name="agent")
 
         with caplog.at_level(logging.INFO, logger="corvidae.agent"):
             await plugin.on_start(config={
@@ -814,7 +814,7 @@ class TestAgentPluginLogging:
 
     async def _make_on_message_plugin(self, db):
         """Shared setup for on_message tests: returns (plugin, channel)."""
-        from corvidae.agent import AgentPlugin
+        from corvidae.agent import Agent
         from corvidae.hooks import create_plugin_manager
         from corvidae.persistence import PersistencePlugin
 
@@ -831,8 +831,8 @@ class TestAgentPluginLogging:
         persistence._registry = registry
         pm.register(persistence, name="persistence")
 
-        plugin = AgentPlugin(pm)
-        pm.register(plugin, name="agent_loop")
+        plugin = Agent(pm)
+        pm.register(plugin, name="agent")
         plugin._registry = registry
 
         mock_client = MagicMock()

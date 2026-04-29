@@ -2,7 +2,7 @@
 
 Extracts compaction logic from ContextWindow into a standalone plugin that
 implements the compact_conversation hookspec. Registers in main.py before
-AgentPlugin so it runs as the default compaction strategy.
+Agent so it runs as the default compaction strategy.
 
 Algorithm:
     1. Skip if token_estimate < 80% of max_tokens.

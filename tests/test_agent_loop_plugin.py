@@ -1,4 +1,4 @@
-"""Tests for corvidae.agent.AgentPlugin."""
+"""Tests for corvidae.agent.Agent."""
 
 import json
 from pathlib import Path
@@ -14,7 +14,7 @@ from corvidae.persistence import init_db
 from corvidae.hooks import create_plugin_manager
 from corvidae.persistence import init_db as persistence_init_db
 
-from corvidae.agent import AgentPlugin
+from corvidae.agent import Agent
 from corvidae.persistence import PersistencePlugin
 from corvidae.tool import ToolRegistry
 
@@ -109,7 +109,7 @@ class TestOnStart:
         persistence._registry = registry
         pm.register(persistence, name="persistence")
 
-        # Register a mock LLMPlugin so AgentPlugin can borrow the client from it
+        # Register a mock LLMPlugin so Agent can borrow the client from it
         mock_client = MagicMock()
         mock_llm = LLMPlugin(pm)
         mock_llm.main_client = mock_client
@@ -120,8 +120,8 @@ class TestOnStart:
         tools_plugin.registry = ToolRegistry()
         pm.register(tools_plugin, name="tools")
 
-        plugin = AgentPlugin(pm)
-        pm.register(plugin, name="agent_loop")
+        plugin = Agent(pm)
+        pm.register(plugin, name="agent")
 
         await plugin.on_start(config=BASE_CONFIG)
 
@@ -130,7 +130,7 @@ class TestOnStart:
 
     async def test_on_start_collects_tools(self):
         """Register a test plugin implementing register_tools. Verify tools
-        are collected via ToolCollectionPlugin and available on AgentPlugin."""
+        are collected via ToolCollectionPlugin and available on Agent."""
         def my_test_tool(x: str) -> str:
             """A test tool."""
             return f"result: {x}"
@@ -160,8 +160,8 @@ class TestOnStart:
         pm.register(tools_plugin, name="tools")
         await tools_plugin.on_start(config=BASE_CONFIG)
 
-        plugin = AgentPlugin(pm)
-        pm.register(plugin, name="agent_loop")
+        plugin = Agent(pm)
+        pm.register(plugin, name="agent")
 
         await plugin.on_start(config=BASE_CONFIG)
 
@@ -171,7 +171,7 @@ class TestOnStart:
         assert plugin._tool_schemas[0]["function"]["name"] == "my_test_tool"
 
     async def test_on_start_stores_base_dir_from_config(self):
-        """on_start reads config["_base_dir"] and stores it as AgentPlugin._base_dir."""
+        """on_start reads config["_base_dir"] and stores it as Agent._base_dir."""
         import aiosqlite
         from corvidae.persistence import init_db
         from corvidae.llm_plugin import LLMPlugin
@@ -199,8 +199,8 @@ class TestOnStart:
         tools_plugin.registry = ToolRegistry()
         pm.register(tools_plugin, name="tools")
 
-        plugin = AgentPlugin(pm)
-        pm.register(plugin, name="agent_loop")
+        plugin = Agent(pm)
+        pm.register(plugin, name="agent")
 
         config_with_base_dir = dict(BASE_CONFIG)
         config_with_base_dir["_base_dir"] = Path("/some/dir")
@@ -211,7 +211,7 @@ class TestOnStart:
         await db.close()
 
     async def test_on_start_defaults_base_dir_to_cwd(self):
-        """on_start sets AgentPlugin._base_dir to Path(".") when _base_dir is absent."""
+        """on_start sets Agent._base_dir to Path(".") when _base_dir is absent."""
         import aiosqlite
         from corvidae.persistence import init_db
         from corvidae.llm_plugin import LLMPlugin
@@ -239,8 +239,8 @@ class TestOnStart:
         tools_plugin.registry = ToolRegistry()
         pm.register(tools_plugin, name="tools")
 
-        plugin = AgentPlugin(pm)
-        pm.register(plugin, name="agent_loop")
+        plugin = Agent(pm)
+        pm.register(plugin, name="agent")
 
         await plugin.on_start(config=BASE_CONFIG)
 
@@ -290,8 +290,8 @@ class TestOnStart:
         tools_plugin.registry = ToolRegistry()
         pm.register(tools_plugin, name="tools")
 
-        plugin = AgentPlugin(pm)
-        pm.register(plugin, name="agent_loop")
+        plugin = Agent(pm)
+        pm.register(plugin, name="agent")
 
         config_with_bg = {
             "llm": {
@@ -309,7 +309,7 @@ class TestOnStart:
 
         await plugin.on_start(config=config_with_bg)
 
-        # AgentPlugin borrows the main client from LLMPlugin
+        # Agent borrows the main client from LLMPlugin
         assert plugin._client is mock_main_client
 
 
@@ -841,8 +841,8 @@ class TestOnMessageCompactionAndConfig:
         persistence._registry = registry
         pm.register(persistence, name="persistence")
 
-        plugin = AgentPlugin(pm)
-        pm.register(plugin, name="agent_loop")
+        plugin = Agent(pm)
+        pm.register(plugin, name="agent")
         plugin._registry = registry
 
         cfg_a = ChannelConfig(system_prompt="Channel A prompt.")
@@ -877,15 +877,15 @@ class TestOnStop:
         pm = create_plugin_manager()
         pm.register(ChannelRegistry(AGENT_DEFAULTS), name="registry")
 
-        plugin = AgentPlugin(pm)
-        pm.register(plugin, name="agent_loop")
+        plugin = Agent(pm)
+        pm.register(plugin, name="agent")
 
         mock_client = MagicMock()
         plugin._client = mock_client
 
         await plugin.on_stop()
 
-        # After on_stop, AgentPlugin releases the borrowed reference
+        # After on_stop, Agent releases the borrowed reference
         assert plugin._client is None
 
     async def test_on_stop_cancels_all_queues(self):
@@ -895,8 +895,8 @@ class TestOnStop:
         pm.ahook.send_message = AsyncMock()
         pm.ahook.on_agent_response = AsyncMock()
 
-        plugin = AgentPlugin(pm)
-        pm.register(plugin, name="agent_loop")
+        plugin = Agent(pm)
+        pm.register(plugin, name="agent")
 
         mock_client = MagicMock()
         mock_client.stop = AsyncMock()
@@ -995,7 +995,7 @@ class TestOnMessageToolCallRoundTrip:
 
 class TestConversationInitPromptResolution:
     async def test_conversation_init_resolves_file_list(self, tmp_path):
-        """AgentPlugin resolves a list of prompt file paths into a concatenated
+        """Agent resolves a list of prompt file paths into a concatenated
         string and assigns it to conv.system_prompt during ContextWindow init.
 
         Setup: create temp files with known content, set plugin._base_dir
@@ -1051,7 +1051,7 @@ class TestConversationInitPromptResolution:
     async def test_mixed_config_agent_list_channel_string(self, tmp_path):
         """Agent-level list + channel string override: channel string wins.
 
-        resolve_config() gives the channel string; AgentPlugin should
+        resolve_config() gives the channel string; Agent should
         pass it through as a string, not attempt file reads.
         """
         # Create a file that would be read if the agent list were used — it
@@ -1086,7 +1086,7 @@ class TestConversationInitPromptResolution:
     async def test_mixed_config_agent_string_channel_list(self, tmp_path):
         """Agent-level string + channel list override: channel list wins.
 
-        AgentPlugin should read the channel's file list and set
+        Agent should read the channel's file list and set
         conv.system_prompt to the concatenated content.
         """
         f = tmp_path / "channel.md"
@@ -1969,46 +1969,46 @@ class TestBeforeAgentTurn:
 
 
 # ---------------------------------------------------------------------------
-# Section 20 — Part 4 red phase: AgentPlugin interface removals
+# Section 20 — Part 4 red phase: Agent interface removals
 # ---------------------------------------------------------------------------
 
 
-class TestAgentPluginPart4Interfaces:
+class TestAgentPart4Interfaces:
     """Tests for Part 4 of the agent decomposition refactor.
 
     All tests here fail until:
-    - AgentPlugin.depends_on includes "tools"
-    - AgentPlugin.get_tool_config() method is removed (moved to ToolCollectionPlugin)
-    - AgentPlugin.tool_registry attribute is removed (moved to ToolCollectionPlugin)
+    - Agent.depends_on includes "tools"
+    - Agent.get_tool_config() method is removed (moved to ToolCollectionPlugin)
+    - Agent.tool_registry attribute is removed (moved to ToolCollectionPlugin)
 
     See plans/agent-decomposition-parts-3-4.md §Part 4.
     """
 
     def test_agent_plugin_depends_on_includes_tools(self):
-        """AgentPlugin.depends_on must include 'tools' after Part 4."""
-        assert "tools" in AgentPlugin.depends_on, (
-            "AgentPlugin.depends_on should include 'tools' — see plans/agent-decomposition-parts-3-4.md §Part 4"
+        """Agent.depends_on must include 'tools' after Part 4."""
+        assert "tools" in Agent.depends_on, (
+            "Agent.depends_on should include 'tools' — see plans/agent-decomposition-parts-3-4.md §Part 4"
         )
 
     def test_agent_plugin_does_not_have_get_tool_config(self):
-        """AgentPlugin.get_tool_config() must be removed after Part 4.
+        """Agent.get_tool_config() must be removed after Part 4.
 
         SubagentPlugin now gets tool config directly from ToolCollectionPlugin.
         """
-        assert not hasattr(AgentPlugin, "get_tool_config"), (
-            "AgentPlugin.get_tool_config() should be removed — superseded by ToolCollectionPlugin"
+        assert not hasattr(Agent, "get_tool_config"), (
+            "Agent.get_tool_config() should be removed — superseded by ToolCollectionPlugin"
         )
 
     def test_agent_plugin_does_not_have_tool_registry_attribute(self):
-        """AgentPlugin must not have a public tool_registry attribute after Part 4.
+        """Agent must not have a public tool_registry attribute after Part 4.
 
         Tool registry ownership moves to ToolCollectionPlugin.
         """
         pm = create_plugin_manager()
         pm.register(ChannelRegistry(AGENT_DEFAULTS), name="registry")
-        plugin = AgentPlugin(pm)
+        plugin = Agent(pm)
         assert not hasattr(plugin, "tool_registry"), (
-            "AgentPlugin should not have a 'tool_registry' attribute — moved to ToolCollectionPlugin"
+            "Agent should not have a 'tool_registry' attribute — moved to ToolCollectionPlugin"
         )
 
 # ---------------------------------------------------------------------------
@@ -2016,8 +2016,8 @@ class TestAgentPluginPart4Interfaces:
 # ---------------------------------------------------------------------------
 
 
-class TestAgentPluginLLMDependency:
-    """Tests for AgentPlugin interface changes required by Part 3.
+class TestAgentLLMDependency:
+    """Tests for Agent interface changes required by Part 3.
 
     These are RED-phase TDD tests. They fail until Part 3 of the
     agent-decomposition refactor is implemented.
@@ -2031,26 +2031,26 @@ class TestAgentPluginLLMDependency:
         return pm
 
     def test_agent_plugin_depends_on_includes_llm(self):
-        """AgentPlugin.depends_on must include 'llm' after Part 3.
+        """Agent.depends_on must include 'llm' after Part 3.
 
         Currently depends_on = {'registry', 'task'}, which does not
         include 'llm'. This test fails until 'llm' is added.
         """
-        assert "llm" in AgentPlugin.depends_on, (
-            "AgentPlugin.depends_on should include 'llm' — "
+        assert "llm" in Agent.depends_on, (
+            "Agent.depends_on should include 'llm' — "
             "see plans/agent-decomposition-parts-3-4.md §Part 3"
         )
 
     def test_agent_plugin_no_public_client_attribute_after_init(self):
-        """AgentPlugin.__init__ must NOT set a public 'client' attribute.
+        """Agent.__init__ must NOT set a public 'client' attribute.
 
-        After Part 3, LLM client ownership moves to LLMPlugin. AgentPlugin
+        After Part 3, LLM client ownership moves to LLMPlugin. Agent
         may cache it as '_client' (private), but '.client' (public) must
         not be present immediately after init.
         """
         pm = self._make_pm()
-        plugin = AgentPlugin(pm)
+        plugin = Agent(pm)
         assert not hasattr(plugin, "client"), (
-            "AgentPlugin must not expose a public 'client' attribute after init — "
+            "Agent must not expose a public 'client' attribute after init — "
             "LLM client ownership moves to LLMPlugin in Part 3"
         )

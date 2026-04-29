@@ -1,9 +1,9 @@
-"""AgentPlugin — wires the agent loop into the hook system.
+"""Agent — wires the agent loop into the hook system.
 
 Merged from orchestrator.py, lifecycle.py, and processing.py.
 File boundaries now match domain responsibility rather than execution phase.
 
-AgentPlugin is the central plugin that:
+Agent is the central plugin that:
   - Manages per-channel serial queues
   - Borrows the LLM client from LLMPlugin on startup
   - Borrows the tool registry and max_result_chars from ToolCollectionPlugin on startup
@@ -77,7 +77,7 @@ class QueueItem:
     meta: dict = field(default_factory=dict)
 
 
-class AgentPlugin:
+class Agent:
     """Plugin that wires the agent loop into the hook system.
 
     Attributes:
@@ -577,3 +577,7 @@ class AgentPlugin:
     async def _stop_plugin(self) -> None:
         """Release LLM client reference (lifecycle owned by LLMPlugin)."""
         self._client = None
+
+
+# Backward-compatible alias; will be deprecated in a future release.
+AgentPlugin = Agent

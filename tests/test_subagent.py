@@ -570,7 +570,7 @@ class TestMaxToolResultCharsConsolidation:
     SubagentPlugin's own attribute or from config.
 
     After Part 4, SubagentPlugin reads max_result_chars from ToolCollectionPlugin
-    directly rather than from AgentPlugin.
+    directly rather than from Agent.
     """
 
     async def _launch_and_capture_max_result_chars(
@@ -656,8 +656,8 @@ class TestMaxToolResultCharsConsolidation:
         exist on the instance or retains only the __init__ default (100_000)
         without any config-sourced update.
 
-        The definitive check: if AgentPlugin._max_tool_result_chars differs
-        from what config would produce, and _launch passes the AgentPlugin
+        The definitive check: if Agent._max_tool_result_chars differs
+        from what config would produce, and _launch passes the Agent
         value, then SubagentPlugin is not doing an independent read. This
         structural test verifies the attribute is not set by on_start by
         checking the attribute was not updated from config.

@@ -52,13 +52,13 @@ class TestMainLoadsConfigAndCreatesPM:
 
         try:
             with patch("corvidae.main.create_plugin_manager") as mock_create, \
-                 patch("corvidae.main.AgentPlugin") as mock_agent_cls:
+                 patch("corvidae.main.Agent") as mock_agent_cls:
                 # Return a minimal object that satisfies pm.ahook.on_start / on_stop
                 mock_pm = MagicMock()
                 mock_pm.ahook.on_start = AsyncMock(return_value=[])
                 mock_pm.ahook.on_stop = AsyncMock(return_value=[])
                 mock_create.return_value = mock_pm
-                # AgentPlugin instance returned by the constructor must support
+                # Agent instance returned by the constructor must support
                 # the explicit on_start / on_stop calls that main() makes after
                 # the broadcast.
                 mock_agent = MagicMock()
@@ -74,11 +74,11 @@ class TestMainLoadsConfigAndCreatesPM:
             os.unlink(config_path)
 
 
-class TestAgentPluginLifecycleOrdering:
+class TestAgentLifecycleOrdering:
     async def test_agent_on_start_called_after_broadcast(self):
         """main() must call agent_loop.on_start() explicitly AFTER pm.ahook.on_start().
 
-        After the race-condition fix, AgentPlugin.on_start no longer participates
+        After the race-condition fix, Agent.on_start no longer participates
         in the broadcast.  main() calls pm.ahook.on_start() first (all other plugins
         init), then calls agent_loop.on_start() explicitly so that tool-providing
         plugins (e.g. McpClientPlugin) are ready before tools are collected.
@@ -97,7 +97,7 @@ class TestAgentPluginLifecycleOrdering:
 
         try:
             with patch("corvidae.main.create_plugin_manager") as mock_create, \
-                 patch("corvidae.main.AgentPlugin") as mock_agent_cls:
+                 patch("corvidae.main.Agent") as mock_agent_cls:
                 mock_pm = MagicMock()
 
                 async def broadcast_on_start(**kwargs):

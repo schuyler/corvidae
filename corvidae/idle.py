@@ -1,7 +1,7 @@
 """IdleMonitorPlugin — pure consumer of the on_idle hook.
 
 Implements idle behaviors that run when the agent system becomes idle.
-Idle detection is now push-based: AgentPlugin calls _maybe_fire_idle()
+Idle detection is now push-based: Agent calls _maybe_fire_idle()
 after each queue item completes and broadcasts the on_idle hook when
 all queues are empty and the cooldown has elapsed.
 """

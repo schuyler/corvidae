@@ -71,13 +71,13 @@ Cost: three plugin registrations in `main.py` instead of one. Minor.
 `on_start` and stores it as `self._registry`, but never reads it. This
 was needed when `PersistencePlugin` owned `ensure_conversation` (which
 resolved channel config); after the context window refactor, that
-responsibility moved to `AgentPlugin`. Remove `_registry`, the
+responsibility moved to `Agent`. Remove `_registry`, the
 `get_dependency` call, and the `ChannelRegistry` import.
 
 ## Standardize plugin constructor signature
 
 Plugins inconsistently accept `pm` in `__init__`. Some take it (e.g.,
-`AgentPlugin`, `CompactionPlugin`, `SubagentPlugin`), some don't (e.g.,
+`Agent`, `CompactionPlugin`, `SubagentPlugin`), some don't (e.g.,
 `CoreToolsPlugin`, `McpClientPlugin`). Plugins that don't take `pm`
 can't use `get_dependency` outside of hook calls, which leads to
 workarounds like inline imports or deferred lookups.
@@ -114,8 +114,8 @@ cause problems as the codebase grows.
 ### ChannelRegistry serves two unrelated roles
 
 It's a channel factory (`get_or_create`, used by transports) and a
-config resolver (`resolve_config`, used by AgentPlugin). Transports
-never call `resolve_config`; AgentPlugin never calls `get_or_create`.
+config resolver (`resolve_config`, used by Agent). Transports
+never call `resolve_config`; Agent never calls `get_or_create`.
 They're bundled because both involve channels, but the interfaces are
 disjoint. If ChannelRegistry grows, splitting factory from config
 resolution would give each dependent a narrower interface.
@@ -140,13 +140,13 @@ most likely to produce a bug when adding a third transport.
 
 A transport registry that routes `send_message` to the right transport
 by `channel.transport` would eliminate the pattern. Could be a thin
-wrapper around the hook call in AgentPlugin, or a new hookspec that
+wrapper around the hook call in Agent, or a new hookspec that
 takes `transport` as a discriminator.
 
 ### Config resolution is scattered
 
 `_base_dir`, `chars_per_token`, `max_tool_result_chars` are read from
-the config dict in `AgentPlugin._start_plugin`. LLM config is read
+the config dict in `Agent._start_plugin`. LLM config is read
 there too. Tool config in `CoreToolsPlugin.on_start`. Channel config in
 `ChannelRegistry.resolve_config`. No single place parses or validates
 the full config — each plugin grabs what it needs from the raw dict.
@@ -157,8 +157,8 @@ which plugin reads them first. A config validation pass before
 ### Priority
 
 1. ~~**Duplicated tool dispatch**~~ — completed.
-2. **AgentPlugin decomposition** — Parts 1–4 done, Part 5 (rename)
-   remaining. See `plans/agent-decomposition.md`.
+2. **Agent decomposition** — Parts 1–5 done (rename complete).
+   See `plans/agent-decomposition.md`.
 3. ~~**TaskPlugin undeclared dependency**~~ — completed.
 4. ~~**agent_loop.py re-exports**~~ — completed.
 5. ~~**SubagentPlugin coupling**~~ — completed (Parts 3–4).
@@ -226,7 +226,7 @@ write) but should be moved to `asyncio.to_thread()` for consistency.
 
 `run_agent_loop` in `agent_loop.py` is only called by
 `SubagentPlugin`. `run_agent_turn` (single LLM call, no tool execution)
-is the shared primitive that `AgentPlugin` uses. The two functions are
+is the shared primitive that `Agent` uses. The two functions are
 in the same module for historical reasons — `run_agent_turn` was
 extracted from `run_agent_loop` — but the dependency now points the
 wrong way.

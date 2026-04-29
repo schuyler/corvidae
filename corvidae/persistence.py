@@ -63,7 +63,7 @@ class PersistencePlugin:
     Attributes:
         pm: Plugin manager instance.
         db: aiosqlite.Connection, opened in on_start, closed in on_stop.
-            Public for test injection (same pattern as former AgentPlugin.db).
+            Public for test injection (same pattern as former Agent.db).
     """
 
     def __init__(self, pm) -> None:
