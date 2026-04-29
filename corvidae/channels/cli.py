@@ -95,12 +95,10 @@ class CLIPlugin:
 
     @hookimpl
     async def send_thinking(self, channel, text: str) -> None:
-        """Display reasoning/thinking content in dim cyan."""
+        """Display reasoning/thinking content in bright blue."""
         if not channel.matches_transport("cli"):
             return
-        # Truncate for display if very long
-        display = text if len(text) <= 500 else text[:500] + "..."
-        print(f"\033[94m{display}\033[0m")
+        print(f"[94m{text}[0m")
         sys.stdout.flush()
 
     @hookimpl
