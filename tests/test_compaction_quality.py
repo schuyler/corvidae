@@ -272,3 +272,28 @@ class TestConfigurablePrompts:
         """Sanity check: the default bg block prompt is substantive."""
         from corvidae.context_compact import ContextCompactPlugin
         assert len(ContextCompactPlugin.DEFAULT_BG_BLOCK_PROMPT) > 50
+
+
+class TestDefaultPromptDesign:
+    """Tests that the default prompts follow the Schuyler-style design principles."""
+
+    def test_default_prompt_mentions_flow_into_retained(self):
+        """Default prompt should instruct the LLM that its summary flows into retained context."""
+        prompt = CompactionPlugin.DEFAULT_SUMMARY_PROMPT.lower()
+        assert "second half" in prompt or "flows naturally" in prompt or "verbatim" in prompt
+
+    def test_default_prompt_has_word_limit(self):
+        """Default prompt should include a word/length limit."""
+        prompt = CompactionPlugin.DEFAULT_SUMMARY_PROMPT.lower()
+        assert "words" in prompt or "characters" in prompt or "limit" in prompt
+
+    def test_default_prompt_mentions_specific_details(self):
+        """Default prompt should instruct preservation of specific details."""
+        prompt = CompactionPlugin.DEFAULT_SUMMARY_PROMPT.lower()
+        assert "file path" in prompt or "variable" in prompt or "error" in prompt
+
+    def test_bg_block_prompt_has_word_limit(self):
+        """Background block prompt should include a word/length limit."""
+        from corvidae.context_compact import ContextCompactPlugin
+        prompt = ContextCompactPlugin.DEFAULT_BG_BLOCK_PROMPT.lower()
+        assert "words" in prompt or "characters" in prompt or "limit" in prompt
