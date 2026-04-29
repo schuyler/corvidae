@@ -32,9 +32,12 @@ class CompactionPlugin:
     depends_on = {"llm"}
 
     DEFAULT_SUMMARY_PROMPT = (
-        "Summarize the following conversation concisely, "
-        "preserving key facts, decisions, and context that "
-        "would be needed to continue the conversation."
+        "Please summarize the first half of this conversation, so that the second half "
+        "flows naturally verbatim. The summary should include a high-level explanation of "
+        "what the agent was working on or attempting to achieve. The agent's next prompt "
+        "will contain your summary followed by the second half of the conversation to this point.\n\n"
+        "In 1000 words or less. Preserve specific details: file paths, variable names, "
+        "error messages, discoveries made, and the current line of investigation."
     )
 
     def __init__(self, pm) -> None:
