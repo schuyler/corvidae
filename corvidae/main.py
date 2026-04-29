@@ -138,10 +138,10 @@ async def main(config_path: str = "agent.yaml") -> None:
     runtime_settings_plugin = RuntimeSettingsPlugin(pm, immutable_settings=immutable_settings)
     pm.register(runtime_settings_plugin, name="runtime_settings")
 
-    # Register WorkspaceIndexerPlugin before Agent (provides workspace_search tool)
-    from corvidae.tools.index import WorkspaceIndexerPlugin
-    local_indexer_plugin = WorkspaceIndexerPlugin(pm)
-    pm.register(local_indexer_plugin, name="local_indexer")
+    # Disabled per operator request — re-enable when ready.
+    # from corvidae.tools.index import WorkspaceIndexerPlugin
+    # local_indexer_plugin = WorkspaceIndexerPlugin(pm)
+    # pm.register(local_indexer_plugin, name="local_indexer")
 
    # Register ToolCollectionPlugin after all tool-providing plugins (its on_start
     # uses trylast=True so it fires after all other on_start hooks have run).
