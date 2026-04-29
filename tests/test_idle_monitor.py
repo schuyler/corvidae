@@ -1,7 +1,7 @@
 """Tests for idle monitoring.
 
-Part 2 of AgentPlugin decomposition: push-based idle detection.
-IdleMonitor polling class has been removed. AgentPlugin now detects
+Part 2 of Agent decomposition: push-based idle detection.
+IdleMonitor polling class has been removed. Agent now detects
 idle state and broadcasts on_idle after each queue item completes.
 """
 
@@ -32,9 +32,9 @@ class TestIdleMonitorPlugin:
         from corvidae.idle import IdleMonitorPlugin  # noqa: F401
 
         pm = create_plugin_manager()
-        from corvidae.agent import AgentPlugin
-        agent = AgentPlugin(pm)
-        pm.register(agent, name="agent_loop")
+        from corvidae.agent import Agent
+        agent = Agent(pm)
+        pm.register(agent, name="agent")
         # IdleMonitorPlugin is intentionally NOT registered.
 
         # Should not raise even with no on_idle implementations.
@@ -45,8 +45,8 @@ class TestIdleMonitorPlugin:
 # TestPushBasedIdle — tests for the new push-based idle detection in Part 2
 #
 # These tests exercise:
-#   - AgentPlugin._maybe_fire_idle() (new private method)
-#   - AgentPlugin._idle_cooldown / _last_idle_fire (new state)
+#   - Agent._maybe_fire_idle() (new private method)
+#   - Agent._idle_cooldown / _last_idle_fire (new state)
 #   - IdleMonitorPlugin.depends_on no longer containing agent_loop/task
 #
 # All tests are expected to FAIL (red phase) until Part 2 is implemented.
@@ -54,46 +54,46 @@ class TestIdleMonitorPlugin:
 
 
 class TestPushBasedIdle:
-    """Tests for push-based idle detection (Part 2 of AgentPlugin decomposition)."""
+    """Tests for push-based idle detection (Part 2 of Agent decomposition)."""
 
     # -----------------------------------------------------------------------
     # _maybe_fire_idle — basic attribute presence
     # -----------------------------------------------------------------------
 
     def test_agent_plugin_has_maybe_fire_idle(self):
-        """AgentPlugin must have a _maybe_fire_idle method after Part 2."""
-        from corvidae.agent import AgentPlugin
+        """Agent must have a _maybe_fire_idle method after Part 2."""
+        from corvidae.agent import Agent
 
         pm = create_plugin_manager()
-        agent = AgentPlugin(pm)
+        agent = Agent(pm)
         assert hasattr(agent, "_maybe_fire_idle"), (
-            "AgentPlugin must have _maybe_fire_idle after Part 2 implementation"
+            "Agent must have _maybe_fire_idle after Part 2 implementation"
         )
         assert callable(agent._maybe_fire_idle), (
             "_maybe_fire_idle must be callable"
         )
 
     def test_agent_plugin_has_idle_cooldown_attribute(self):
-        """AgentPlugin must initialise _idle_cooldown in __init__."""
-        from corvidae.agent import AgentPlugin
+        """Agent must initialise _idle_cooldown in __init__."""
+        from corvidae.agent import Agent
 
         pm = create_plugin_manager()
-        agent = AgentPlugin(pm)
+        agent = Agent(pm)
         assert hasattr(agent, "_idle_cooldown"), (
-            "AgentPlugin must have _idle_cooldown attribute"
+            "Agent must have _idle_cooldown attribute"
         )
         assert agent._idle_cooldown == 30.0, (
             "_idle_cooldown default must be 30.0 seconds"
         )
 
     def test_agent_plugin_has_last_idle_fire_attribute(self):
-        """AgentPlugin must initialise _last_idle_fire to 0.0 in __init__."""
-        from corvidae.agent import AgentPlugin
+        """Agent must initialise _last_idle_fire to 0.0 in __init__."""
+        from corvidae.agent import Agent
 
         pm = create_plugin_manager()
-        agent = AgentPlugin(pm)
+        agent = Agent(pm)
         assert hasattr(agent, "_last_idle_fire"), (
-            "AgentPlugin must have _last_idle_fire attribute"
+            "Agent must have _last_idle_fire attribute"
         )
         assert agent._last_idle_fire == 0.0, (
             "_last_idle_fire must initialise to 0.0"
@@ -105,12 +105,12 @@ class TestPushBasedIdle:
 
     async def test_maybe_fire_idle_fires_when_queues_empty_and_cooldown_elapsed(self):
         """_maybe_fire_idle fires on_idle when all queues empty and cooldown elapsed."""
-        from corvidae.agent import AgentPlugin
+        from corvidae.agent import Agent
 
         pm = create_plugin_manager()
         pm.ahook.on_idle = AsyncMock()
 
-        agent = AgentPlugin(pm)
+        agent = Agent(pm)
         # No queues at all — all (zero) queues are empty
         agent._idle_cooldown = 0.0
         agent._last_idle_fire = 0.0
@@ -121,12 +121,12 @@ class TestPushBasedIdle:
 
     async def test_maybe_fire_idle_does_not_fire_when_queue_has_items(self):
         """_maybe_fire_idle does NOT fire on_idle when a queue has pending items."""
-        from corvidae.agent import AgentPlugin
+        from corvidae.agent import Agent
 
         pm = create_plugin_manager()
         pm.ahook.on_idle = AsyncMock()
 
-        agent = AgentPlugin(pm)
+        agent = Agent(pm)
         agent._idle_cooldown = 0.0
         agent._last_idle_fire = 0.0
 
@@ -141,12 +141,12 @@ class TestPushBasedIdle:
 
     async def test_maybe_fire_idle_does_not_fire_during_cooldown(self):
         """_maybe_fire_idle does NOT fire on_idle when cooldown has not elapsed."""
-        from corvidae.agent import AgentPlugin
+        from corvidae.agent import Agent
 
         pm = create_plugin_manager()
         pm.ahook.on_idle = AsyncMock()
 
-        agent = AgentPlugin(pm)
+        agent = Agent(pm)
         agent._idle_cooldown = 3600.0       # very long cooldown
         agent._last_idle_fire = time.monotonic()  # just fired
 
@@ -156,12 +156,12 @@ class TestPushBasedIdle:
 
     async def test_maybe_fire_idle_does_not_fire_when_task_queue_not_idle(self):
         """_maybe_fire_idle does NOT fire on_idle when the task queue is not idle."""
-        from corvidae.agent import AgentPlugin
+        from corvidae.agent import Agent
 
         pm = create_plugin_manager()
         pm.ahook.on_idle = AsyncMock()
 
-        agent = AgentPlugin(pm)
+        agent = Agent(pm)
         agent._idle_cooldown = 0.0
         agent._last_idle_fire = 0.0
 
@@ -178,12 +178,12 @@ class TestPushBasedIdle:
 
     async def test_maybe_fire_idle_updates_last_idle_fire_after_firing(self):
         """_last_idle_fire is updated to current time after on_idle fires."""
-        from corvidae.agent import AgentPlugin
+        from corvidae.agent import Agent
 
         pm = create_plugin_manager()
         pm.ahook.on_idle = AsyncMock()
 
-        agent = AgentPlugin(pm)
+        agent = Agent(pm)
         agent._idle_cooldown = 0.0
         agent._last_idle_fire = 0.0
 
@@ -196,12 +196,12 @@ class TestPushBasedIdle:
 
     async def test_maybe_fire_idle_does_not_update_last_fired_when_not_firing(self):
         """_last_idle_fire is NOT updated when _maybe_fire_idle does not fire."""
-        from corvidae.agent import AgentPlugin
+        from corvidae.agent import Agent
 
         pm = create_plugin_manager()
         pm.ahook.on_idle = AsyncMock()
 
-        agent = AgentPlugin(pm)
+        agent = Agent(pm)
         agent._idle_cooldown = 3600.0
         saved = time.monotonic()
         agent._last_idle_fire = saved  # just fired — cooldown active
@@ -214,12 +214,12 @@ class TestPushBasedIdle:
 
     async def test_maybe_fire_idle_fires_once_then_respects_cooldown(self):
         """After firing, a second call within cooldown does not fire again."""
-        from corvidae.agent import AgentPlugin
+        from corvidae.agent import Agent
 
         pm = create_plugin_manager()
         pm.ahook.on_idle = AsyncMock()
 
-        agent = AgentPlugin(pm)
+        agent = Agent(pm)
         agent._idle_cooldown = 3600.0  # long cooldown
         agent._last_idle_fire = 0.0
 
@@ -241,7 +241,7 @@ class TestPushBasedIdle:
         """After Part 2, IdleMonitorPlugin.depends_on must not include agent_loop or task.
 
         IdleMonitorPlugin becomes a pure on_idle consumer; it no longer needs
-        to access AgentPlugin.queues directly.
+        to access Agent.queues directly.
         """
         from corvidae.idle import IdleMonitorPlugin
 
@@ -249,8 +249,8 @@ class TestPushBasedIdle:
         plugin = IdleMonitorPlugin(pm)
 
         depends_on = getattr(plugin, "depends_on", set())
-        assert "agent_loop" not in depends_on, (
-            "IdleMonitorPlugin must not depend on agent_loop after Part 2"
+        assert "agent" not in depends_on, (
+            "IdleMonitorPlugin must not depend on agent after Part 2"
         )
         assert "task" not in depends_on, (
             "IdleMonitorPlugin must not depend on task after Part 2"

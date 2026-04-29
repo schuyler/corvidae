@@ -1,8 +1,8 @@
-"""Tests for Phase 3 AgentPlugin behavior: single-turn dispatch via run_agent_turn.
+"""Tests for Phase 3 Agent behavior: single-turn dispatch via run_agent_turn.
 
 These tests specify behavior that doesn't exist yet (Red TDD). They fail because:
-- AgentPlugin still calls run_agent_loop instead of run_agent_turn
-- AgentPlugin doesn't dispatch tool calls as Tasks
+- Agent still calls run_agent_loop instead of run_agent_turn
+- Agent doesn't dispatch tool calls as Tasks
 - Channel doesn't have turn_counter
 - ChannelConfig doesn't have max_turns
 """
@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 import aiosqlite
 import pytest
 
-from corvidae.agent import AgentPlugin
+from corvidae.agent import Agent
 from corvidae.agent_loop import AgentTurnResult, run_agent_turn  # noqa: F401 (used in comments/type checking)
 from corvidae.channel import ChannelConfig, ChannelRegistry
 from corvidae.persistence import init_db
@@ -134,7 +134,7 @@ class TestToolCallDispatchesTask:
         await plugin.on_message(channel=channel, sender="user", text="hello")
         await drain(plugin, channel)
 
-        # Phase 3: AgentPlugin._dispatch_tool_calls enqueues exactly one Task
+        # Phase 3: Agent._dispatch_tool_calls enqueues exactly one Task
         assert len(enqueued_tasks) == 1
         task = enqueued_tasks[0]
         assert task.tool_call_id == "call-001"
@@ -574,8 +574,8 @@ class TestNoTaskQueueLogsError:
         persistence._registry = registry
         pm.register(persistence, name="persistence")
 
-        plugin = AgentPlugin(pm)
-        pm.register(plugin, name="agent_loop")
+        plugin = Agent(pm)
+        pm.register(plugin, name="agent")
         plugin._registry = registry
 
         async def my_tool(x: str) -> str:

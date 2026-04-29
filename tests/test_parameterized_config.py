@@ -499,14 +499,14 @@ class TestIRCMessageChunkSizeFromConfig:
         )
 
 
-class TestAgentPluginMaxToolResultChars:
+class TestAgentMaxToolResultChars:
     async def test_agent_plugin_reads_max_tool_result_chars(self):
-        """AgentPlugin._start_plugin reads max_result_chars from ToolCollectionPlugin.
+        """Agent._start_plugin reads max_result_chars from ToolCollectionPlugin.
 
-        After Part 4, AgentPlugin borrows _max_tool_result_chars from
+        After Part 4, Agent borrows _max_tool_result_chars from
         ToolCollectionPlugin rather than reading agent.max_tool_result_chars directly.
         """
-        from corvidae.agent import AgentPlugin
+        from corvidae.agent import Agent
         from corvidae.channel import ChannelRegistry
         from corvidae.hooks import create_plugin_manager
         from corvidae.tool_collection import ToolCollectionPlugin
@@ -531,8 +531,8 @@ class TestAgentPluginMaxToolResultChars:
         tools_plugin.max_result_chars = 9999
         pm.register(tools_plugin, name="tools")
 
-        plugin = AgentPlugin(pm)
-        pm.register(plugin, name="agent_loop")
+        plugin = Agent(pm)
+        pm.register(plugin, name="agent")
 
         config = {
             "llm": {
@@ -546,7 +546,7 @@ class TestAgentPluginMaxToolResultChars:
         await plugin._start_plugin(config)
 
         assert hasattr(plugin, "_max_tool_result_chars"), (
-            "AgentPlugin must store _max_tool_result_chars after _start_plugin"
+            "Agent must store _max_tool_result_chars after _start_plugin"
         )
         assert plugin._max_tool_result_chars == 9999, (
             f"Expected _max_tool_result_chars=9999 from ToolCollectionPlugin, got {plugin._max_tool_result_chars!r}"
@@ -558,7 +558,7 @@ class TestSubagentPluginMaxToolResultChars:
         """SubagentPlugin.on_start no longer reads max_tool_result_chars from config.
 
         After consolidation (Item 3), SubagentPlugin reads this value from
-        AgentPlugin at _launch time instead of independently from config.
+        Agent at _launch time instead of independently from config.
         """
         from corvidae.tools.subagent import SubagentPlugin
 
@@ -581,7 +581,7 @@ class TestSubagentPluginMaxToolResultChars:
 
         assert not hasattr(plugin, "_max_tool_result_chars"), (
             "SubagentPlugin should not store _max_tool_result_chars after on_start; "
-            "it now reads from AgentPlugin at _launch time"
+            "it now reads from Agent at _launch time"
         )
 
 

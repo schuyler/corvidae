@@ -44,7 +44,7 @@ pm.register(my_plugin, name="my_plugin")
 validate_dependencies(pm)
 ```
 
-Registration order matters: tool-providing and transport plugins must be registered before `agent_loop` so their tools are collected during `on_start`.
+Registration order matters: tool-providing and transport plugins must be registered before `agent` so their tools are collected during `on_start`.
 
 ### External (setuptools entry points)
 
@@ -191,7 +191,7 @@ Declare `depends_on` as a class attribute (a set of plugin names). `validate_dep
 
 ```python
 class MyPlugin:
-    depends_on = {"agent_loop", "task"}
+    depends_on = {"agent", "task"}
 
     def __init__(self, pm) -> None:
         self.pm = pm
@@ -201,9 +201,9 @@ To get a typed reference to a dependency:
 
 ```python
 from corvidae.hooks import get_dependency
-from corvidae.agent import AgentPlugin
+from corvidae.agent import Agent
 
-agent = get_dependency(self.pm, "agent_loop", AgentPlugin)
+agent = get_dependency(self.pm, "agent", Agent)
 registry = agent.tool_registry
 ```
 
@@ -277,21 +277,21 @@ subagent       (SubagentPlugin)
 mcp            (McpClientPlugin)
 compaction     (CompactionPlugin)
 thinking       (ThinkingPlugin)
-agent_loop     (AgentPlugin)
+agent          (Agent)
 idle_monitor   (IdleMonitorPlugin)
 ```
 
-Tool-providing plugins and transport plugins register before `agent_loop`. The `agent_loop` plugin collects tools during `on_start`, so anything appending to `tool_registry` must be registered first.
+Tool-providing plugins and transport plugins register before `agent`. The `agent` plugin collects tools during `on_start`, so anything appending to `tool_registry` must be registered first.
 
-**Startup order:** `main.py` calls `pm.ahook.on_start(config=config)` first, which runs all plugins' `on_start` hooks concurrently via `asyncio.gather`. Then it calls `agent_loop.on_start(config=config)` explicitly. This guarantees that all plugins (including `McpClientPlugin`) have completed initialization before `AgentPlugin` collects tools via `register_tools`. `AgentPlugin.on_start` does not have `@hookimpl` — it is called only by `main.py`.
+**Startup order:** `main.py` calls `pm.ahook.on_start(config=config)` first, which runs all plugins' `on_start` hooks concurrently via `asyncio.gather`. Then it calls `agent.on_start(config=config)` explicitly. This guarantees that all plugins (including `McpClientPlugin`) have completed initialization before `Agent` collects tools via `register_tools`. `Agent.on_start` does not have `@hookimpl` — it is called only by `main.py`.
 
-**Shutdown order:** `main.py` calls `agent_loop.on_stop()` first (drains queues, closes LLM client), then `pm.ahook.on_stop()` to tear down all other plugins.
+**Shutdown order:** `main.py` calls `agent.on_stop()` first (drains queues, closes LLM client), then `pm.ahook.on_stop()` to tear down all other plugins.
 
-`idle_monitor` registers after `agent_loop` because it depends on `"agent_loop"`. Its `on_start` uses `@hookimpl(trylast=True)` to run late in the broadcast. Because `AgentPlugin.on_start` is called after the broadcast completes, `idle_monitor` is always initialized before `AgentPlugin` starts.
+`idle_monitor` registers after `agent` because it depends on `"agent"`. Its `on_start` uses `@hookimpl(trylast=True)` to run late in the broadcast. Because `Agent.on_start` is called after the broadcast completes, `idle_monitor` is always initialized before `Agent` starts.
 
 ## Hook exception safety
 
-Broadcast hook calls from `AgentPlugin` are wrapped in `try/except`. If a plugin raises an exception from `before_agent_turn`, `after_persist_assistant`, `on_agent_response`, or `send_message`, the exception is logged at WARNING or ERROR level and processing continues. Plugins do not need to catch their own exceptions to protect the queue consumer.
+Broadcast hook calls from `Agent` are wrapped in `try/except`. If a plugin raises an exception from `before_agent_turn`, `after_persist_assistant`, `on_agent_response`, or `send_message`, the exception is logged at WARNING or ERROR level and processing continues. Plugins do not need to catch their own exceptions to protect the queue consumer.
 
 Hooks using `resolve_hook_results` are not wrapped — exceptions propagate to the call site. The exception is `compact_conversation`, whose broadcast invocation is wrapped: a compaction failure is logged at WARNING and the turn continues without compaction.
 
@@ -318,7 +318,7 @@ All tool results are truncated at `MAX_TOOL_RESULT_CHARS` (default 100,000 chara
 
 ```yaml
 agent:
-  max_tool_result_chars: 100000  # read by AgentPlugin; SubagentPlugin reads it from AgentPlugin at launch time
+  max_tool_result_chars: 100000  # read by Agent; SubagentPlugin reads it from Agent at launch time
 ```
 
 ### CoreToolsPlugin tools
@@ -364,13 +364,13 @@ functionality; each degrades gracefully when absent.
 
 Connects to external [MCP](https://modelcontextprotocol.io/) servers and
 exposes their tools to the agent loop. Registered as `"mcp"` before
-`agent_loop`.
+`agent`.
 
 Implements three hooks:
 
 - `on_start` — connects to all servers listed under `mcp.servers`
   in `agent.yaml`, fetches their tool lists, and builds cached `Tool` instances.
-  Runs in the broadcast; completes before `AgentPlugin.on_start` calls
+  Runs in the broadcast; completes before `Agent.on_start` calls
   `register_tools`.
 - `register_tools` — appends the cached tools to `tool_registry`.
 - `on_stop` — closes all MCP sessions and transports via `AsyncExitStack`.
@@ -405,7 +405,7 @@ if the `mcp:` config key is absent — the plugin no-ops.
 ### ThinkingPlugin (`corvidae/thinking.py`)
 
 Strips `<think>...</think>` blocks and `reasoning_content` from LLM
-output. Registered as `"thinking"` before `agent_loop`.
+output. Registered as `"thinking"` before `agent`.
 
 Implements two hooks:
 
@@ -424,7 +424,7 @@ regardless of the `keep_thinking_in_history` config value.
 ### CompactionPlugin (`corvidae/compaction.py`)
 
 Compacts conversation history when it approaches the channel's
-`max_context_tokens` limit. Registered as `"compaction"` before `agent_loop`.
+`max_context_tokens` limit. Registered as `"compaction"` before `agent`.
 
 Implements one hook:
 
@@ -436,7 +436,7 @@ Implements one hook:
 
 Token estimation divides total character count by `chars_per_token`. The same
 `chars_per_token` value is used when constructing `ContextWindow` instances
-(done by `AgentPlugin`); configure via `agent.chars_per_token`.
+(done by `Agent`); configure via `agent.chars_per_token`.
 
 **Config:**
 ```yaml
@@ -453,7 +453,7 @@ receive an error from the API when the context limit is exceeded.
 ### PersistencePlugin (`corvidae/persistence.py`)
 
 Opens the SQLite database, runs schema migrations, and sets the journal mode.
-Registered as `"persistence"` before `agent_loop`. Implements `on_start`,
+Registered as `"persistence"` before `agent`. Implements `on_start`,
 `on_stop`, `load_conversation`, `on_conversation_event`, and `on_compaction`.
 
 **Config:**
@@ -470,7 +470,7 @@ history is not persisted across restarts.
 ### TaskPlugin (`corvidae/task.py`)
 
 Owns the `TaskQueue` and delivers task results via the `on_notify` hook.
-Registered as `"task"` before `agent_loop`.
+Registered as `"task"` before `agent`.
 
 **Config:**
 ```yaml
@@ -480,19 +480,19 @@ daemon:
 ```
 
 **Without this plugin:** tool calls that return asynchronously (e.g., `subagent`)
-cannot complete. `AgentPlugin` logs an error when tool dispatch is attempted
+cannot complete. `Agent` logs an error when tool dispatch is attempted
 without a `TaskQueue`.
 
 ### IdleMonitorPlugin (`corvidae/idle.py`)
 
 Fires the `on_idle` broadcast hook when all queues are quiescent.
-Registered as `"idle_monitor"` after `agent_loop`.
+Registered as `"idle_monitor"` after `agent`.
 
-Depends on `"agent_loop"`. Its `on_start` uses `@hookimpl(trylast=True)`
-to run late in the broadcast. `AgentPlugin.on_start` is called by
+Depends on `"agent"`. Its `on_start` uses `@hookimpl(trylast=True)`
+to run late in the broadcast. `Agent.on_start` is called by
 `main.py` after the broadcast completes, so the idle monitor is always
 initialized before the agent starts. It
-retrieves `AgentPlugin.queues` (a `dict[str, SerialQueue]`) by reference,
+retrieves `Agent.queues` (a `dict[str, SerialQueue]`) by reference,
 so queues created after `IdleMonitorPlugin.on_start` are included
 automatically.
 

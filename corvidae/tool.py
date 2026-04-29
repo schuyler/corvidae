@@ -186,7 +186,7 @@ async def execute_tool_call(
     task_queue and injects it. Otherwise, calls with args only.
 
     Does **not** catch exceptions — callers are responsible for error handling
-    since the two call sites (AgentPlugin and run_agent_loop) have different
+    since the two call sites (Agent and run_agent_loop) have different
     error-reporting requirements.
 
     Args:

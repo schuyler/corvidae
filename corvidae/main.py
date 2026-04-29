@@ -23,7 +23,7 @@ from pathlib import Path
 
 import yaml
 
-from corvidae.agent import AgentPlugin
+from corvidae.agent import Agent
 from corvidae.channel import ChannelRegistry, load_channel_config
 from corvidae.channels.cli import CLIPlugin
 from corvidae.channels.irc import IRCPlugin
@@ -85,60 +85,60 @@ async def main(config_path: str = "agent.yaml") -> None:
     jsonl_log_plugin = JsonlLogPlugin()
     pm.register(jsonl_log_plugin, name="jsonl_log")
 
-    # Register CoreToolsPlugin before AgentPlugin so tools are collected during on_start
+    # Register CoreToolsPlugin before Agent so tools are collected during on_start
     core_tools = CoreToolsPlugin()
     pm.register(core_tools, name="core_tools")
 
-    # Register CLIPlugin before AgentPlugin (transport plugins first)
+    # Register CLIPlugin before Agent (transport plugins first)
     cli_plugin = CLIPlugin(pm)
     pm.register(cli_plugin, name="cli")
 
-    # Register IRCPlugin before AgentPlugin (transport plugins first)
+    # Register IRCPlugin before Agent (transport plugins first)
     irc_plugin = IRCPlugin(pm)
     pm.register(irc_plugin, name="irc")
 
-    # Register TaskPlugin before AgentPlugin (provides task queue)
+    # Register TaskPlugin before Agent (provides task queue)
     from corvidae.task import TaskPlugin
     task_plugin = TaskPlugin(pm)
     pm.register(task_plugin, name="task")
 
-    # Register SubagentPlugin after TaskPlugin, before AgentPlugin
+    # Register SubagentPlugin after TaskPlugin, before Agent
     from corvidae.tools.subagent import SubagentPlugin
     subagent_plugin = SubagentPlugin(pm)
     pm.register(subagent_plugin, name="subagent")
 
-    # Register McpClientPlugin before AgentPlugin (provides MCP server tools)
+    # Register McpClientPlugin before Agent (provides MCP server tools)
     from corvidae.mcp_client import McpClientPlugin
     mcp_plugin = McpClientPlugin()
     pm.register(mcp_plugin, name="mcp")
 
-    # Register LLMPlugin before CompactionPlugin and AgentPlugin (owns LLM client lifecycle)
+    # Register LLMPlugin before CompactionPlugin and Agent (owns LLM client lifecycle)
     from corvidae.llm_plugin import LLMPlugin
     llm_plugin = LLMPlugin(pm)
     pm.register(llm_plugin, name="llm")
 
-    # Register CompactionPlugin before AgentPlugin (provides default compaction strategy)
+    # Register CompactionPlugin before Agent (provides default compaction strategy)
     from corvidae.compaction import CompactionPlugin
     compaction_plugin = CompactionPlugin(pm=pm)
     pm.register(compaction_plugin, name="compaction")
 
-    # Register ThinkingPlugin before AgentPlugin (handles <think> block stripping)
+    # Register ThinkingPlugin before Agent (handles <think> block stripping)
     from corvidae.thinking import ThinkingPlugin
     thinking_plugin = ThinkingPlugin(pm)
     pm.register(thinking_plugin, name="thinking")
 
-    # Register ContextCompactPlugin before AgentPlugin (KV cache-aware compaction with background blocks)
+    # Register ContextCompactPlugin before Agent (KV cache-aware compaction with background blocks)
     from corvidae.context_compact import ContextCompactPlugin
     context_compact_plugin = ContextCompactPlugin(pm)
     pm.register(context_compact_plugin, name="context_compact")
 
-    # Register RuntimeSettingsPlugin before AgentPlugin (provides set_settings tool)
+    # Register RuntimeSettingsPlugin before Agent (provides set_settings tool)
     from corvidae.tools.settings import RuntimeSettingsPlugin
     immutable_settings = set(agent_defaults.get("immutable_settings", []))
     runtime_settings_plugin = RuntimeSettingsPlugin(immutable_settings=immutable_settings)
     pm.register(runtime_settings_plugin, name="runtime_settings")
 
-    # Register WorkspaceIndexerPlugin before AgentPlugin (provides workspace_search tool)
+    # Register WorkspaceIndexerPlugin before Agent (provides workspace_search tool)
     from corvidae.tools.index import WorkspaceIndexerPlugin
     local_indexer_plugin = WorkspaceIndexerPlugin()
     pm.register(local_indexer_plugin, name="local_indexer")
@@ -149,14 +149,14 @@ async def main(config_path: str = "agent.yaml") -> None:
     tool_collection_plugin = ToolCollectionPlugin(pm)
     pm.register(tool_collection_plugin, name="tools")
 
-    # Register AgentPlugin after tool-providing and transport plugins.
-    # AgentPlugin.on_start/on_stop are called explicitly (not via broadcast)
+    # Register Agent after tool-providing and transport plugins.
+    # Agent.on_start/on_stop are called explicitly (not via broadcast)
     # so that on_start runs after all plugins are ready and on_stop runs
     # before other plugins tear down resources.
-    agent_loop = AgentPlugin(pm)
-    pm.register(agent_loop, name="agent_loop")
+    agent = Agent(pm)
+    pm.register(agent, name="agent")
 
-    # Register IdleMonitorPlugin after AgentPlugin (depends on agent_loop)
+    # Register IdleMonitorPlugin after Agent (depends on agent)
     from corvidae.idle import IdleMonitorPlugin
     idle_monitor_plugin = IdleMonitorPlugin(pm)
     pm.register(idle_monitor_plugin, name="idle_monitor")
@@ -164,7 +164,7 @@ async def main(config_path: str = "agent.yaml") -> None:
     validate_dependencies(pm)
 
     await pm.ahook.on_start(config=config)
-    await agent_loop.on_start(config=config)
+    await agent.on_start(config=config)
 
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -175,7 +175,7 @@ async def main(config_path: str = "agent.yaml") -> None:
 
     logger.info("shutdown signal received, stopping")
 
-    await agent_loop.on_stop()
+    await agent.on_stop()
     await pm.ahook.on_stop()
 
 

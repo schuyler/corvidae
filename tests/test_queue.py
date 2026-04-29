@@ -261,7 +261,7 @@ class TestQueueItemRole:
 
     async def test_on_message_creates_item_with_user_role(self):
         """QueueItem created via on_message must use QueueItemRole.USER."""
-        from corvidae.agent import AgentPlugin, QueueItemRole
+        from corvidae.agent import Agent, QueueItemRole
         from corvidae.hooks import create_plugin_manager
         from corvidae.channel import ChannelRegistry, Channel, ChannelConfig
         from corvidae.queue import SerialQueue
@@ -269,7 +269,7 @@ class TestQueueItemRole:
         pm = create_plugin_manager()
         registry = ChannelRegistry({"system_prompt": "", "max_context_tokens": 8000, "keep_thinking_in_history": False})
         pm.register(registry, name="registry")
-        plugin = AgentPlugin.__new__(AgentPlugin)
+        plugin = Agent.__new__(Agent)
         plugin.pm = pm
         plugin._client = object()  # non-None so on_message proceeds
         plugin.queues = {}
@@ -294,7 +294,7 @@ class TestQueueItemRole:
 
     async def test_on_notify_creates_item_with_notification_role(self):
         """QueueItem created via on_notify must use QueueItemRole.NOTIFICATION."""
-        from corvidae.agent import AgentPlugin, QueueItemRole
+        from corvidae.agent import Agent, QueueItemRole
         from corvidae.hooks import create_plugin_manager
         from corvidae.channel import ChannelRegistry, Channel, ChannelConfig
         from corvidae.queue import SerialQueue
@@ -302,7 +302,7 @@ class TestQueueItemRole:
         pm = create_plugin_manager()
         registry = ChannelRegistry({"system_prompt": "", "max_context_tokens": 8000, "keep_thinking_in_history": False})
         pm.register(registry, name="registry")
-        plugin = AgentPlugin.__new__(AgentPlugin)
+        plugin = Agent.__new__(Agent)
         plugin.pm = pm
         plugin._client = object()
         plugin.queues = {}

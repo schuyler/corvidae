@@ -52,7 +52,7 @@ class McpClientPlugin:
         register_tools — extends tool_registry with cached Tool instances (sync)
         on_stop   — closes all sessions and transports via AsyncExitStack.aclose()
 
-    Ordering: main.py calls AgentPlugin.on_start explicitly after the
+    Ordering: main.py calls Agent.on_start explicitly after the
     broadcast, so MCP connections are guaranteed to complete before
     register_tools fires.
     """

@@ -13,13 +13,13 @@ import pytest
 
 
 # ---------------------------------------------------------------------------
-# 1. AgentPlugin.depends_on must include "task"
+# 1. Agent.depends_on must include "task"
 # ---------------------------------------------------------------------------
 
 def test_agent_plugin_depends_on_includes_task():
-    from corvidae.agent import AgentPlugin
-    assert "task" in AgentPlugin.depends_on, (
-        "AgentPlugin.depends_on should include 'task' — see plans/declare-deps-clean-reexports.md §2.1"
+    from corvidae.agent import Agent
+    assert "task" in Agent.depends_on, (
+        "Agent.depends_on should include 'task' — see plans/declare-deps-clean-reexports.md §2.1"
     )
 
 
@@ -32,8 +32,8 @@ def test_idle_monitor_plugin_depends_on_is_empty():
     assert "task" not in IdleMonitorPlugin.depends_on, (
         "IdleMonitorPlugin.depends_on should not include 'task' — Part 2 made it a pure on_idle consumer"
     )
-    assert "agent_loop" not in IdleMonitorPlugin.depends_on, (
-        "IdleMonitorPlugin.depends_on should not include 'agent_loop' — Part 2 made it a pure on_idle consumer"
+    assert "agent" not in IdleMonitorPlugin.depends_on, (
+        "IdleMonitorPlugin.depends_on should not include 'agent' — Part 2 made it a pure on_idle consumer"
     )
 
 
@@ -97,20 +97,20 @@ def test_agent_loop_still_exports_dispatch_tool_call(agent_loop_module):
 
 
 # ---------------------------------------------------------------------------
-# 5. AgentPlugin.depends_on must include "llm" (Part 3 red phase)
+# 5. Agent.depends_on must include "llm" (Part 3 red phase)
 # ---------------------------------------------------------------------------
 
 
 def test_agent_plugin_depends_on_includes_llm():
-    """AgentPlugin.depends_on must include 'llm' after Part 3 of the
+    """Agent.depends_on must include 'llm' after Part 3 of the
     agent-decomposition refactor.
 
     See plans/agent-decomposition-parts-3-4.md §Part 3.
     """
-    from corvidae.agent import AgentPlugin
+    from corvidae.agent import Agent
 
-    assert "llm" in AgentPlugin.depends_on, (
-        "AgentPlugin.depends_on should include 'llm' — "
+    assert "llm" in Agent.depends_on, (
+        "Agent.depends_on should include 'llm' — "
         "see plans/agent-decomposition-parts-3-4.md §Part 3"
     )
 
@@ -191,8 +191,8 @@ def test_subagent_plugin_depends_on_excludes_agent_loop():
     """
     from corvidae.tools.subagent import SubagentPlugin
 
-    assert "agent_loop" not in SubagentPlugin.depends_on, (
-        "SubagentPlugin.depends_on should not include 'agent_loop' after Part 4 — "
+    assert "agent" not in SubagentPlugin.depends_on, (
+        "SubagentPlugin.depends_on should not include 'agent' after Part 4 — "
         "see plans/agent-decomposition-parts-3-4.md §Part 4"
     )
 

@@ -188,7 +188,7 @@ class LLMClient:
 
 `agent_loop.py` contains two functions:
 
-**`run_agent_turn`** — single LLM invocation. Used by AgentPlugin for
+**`run_agent_turn`** — single LLM invocation. Used by Agent for
 interactive message processing. Returns an `AgentTurnResult` with the
 assistant message, any tool calls, text content, and latency.
 
@@ -278,7 +278,7 @@ All operations are synchronous; no database access:
   with `MessageType.MESSAGE` or `MessageType.SUMMARY`. Plugins use this to clean up
   previously injected `CONTEXT` entries before re-injecting fresh ones.
 
-After each `conv.append()`, `AgentPlugin` fires `on_conversation_event` (broadcast)
+After each `conv.append()`, `Agent` fires `on_conversation_event` (broadcast)
 so persistence plugins can write to their storage. After `replace_with_summary()`,
 `CompactionPlugin` fires `on_compaction` (broadcast) so persistence plugins can
 update the DB boundary.
@@ -327,7 +327,7 @@ In-memory message dicts carry a `_message_type` metadata key (set by `append()`)
 `build_prompt()` strips it before returning messages to the LLM.
 
 The `before_agent_turn` hook gives plugins a chance to inject entries (e.g., `CONTEXT`
-rows) into the conversation before each LLM call. `AgentPlugin` fires
+rows) into the conversation before each LLM call. `Agent` fires
 `on_conversation_event` for each injected message after the hook returns.
 
 ### Database schema
@@ -343,7 +343,7 @@ CREATE TABLE message_log (
 CREATE INDEX idx_log_channel ON message_log(channel_id, timestamp);
 ```
 
-## AgentPlugin
+## Agent
 
 `agent.py` — the central plugin. Implements `on_start`, `on_message`,
 `on_notify`, `on_stop`. Declares `depends_on = {"registry"}` so
@@ -352,12 +352,12 @@ startup. Retrieves `ChannelRegistry` during `on_start` via
 `get_dependency(pm, "registry", ChannelRegistry)` from `hooks.py`.
 
 DB lifecycle (open/close) is delegated to `PersistencePlugin`. Conversation
-initialization is handled directly in `AgentPlugin._process_queue_item`: a
+initialization is handled directly in `Agent._process_queue_item`: a
 `ContextWindow` is created, then `load_conversation` (VALUE_FIRST) is called
-so persistence plugins can populate history. `AgentPlugin` reads `_chars_per_token`
+so persistence plugins can populate history. `Agent` reads `_chars_per_token`
 and `_base_dir` from config in `_start_plugin`.
 
-`AgentPlugin.queues` is a public `dict[str, SerialQueue]` (keyed by
+`Agent.queues` is a public `dict[str, SerialQueue]` (keyed by
 channel ID). `IdleMonitorPlugin` holds a reference to this dict; queues
 added after `IdleMonitorPlugin.on_start` are included automatically
 because the reference is live.
@@ -417,7 +417,7 @@ is returned.
 `_dispatch_tool_calls` creates a `Task` for each tool call and enqueues
 it on the `TaskQueue` (accessed via
 `getattr(pm.get_plugin("task"), "task_queue", None)`). `TaskPlugin` is
-intentionally not declared in `AgentPlugin.depends_on` — it is treated
+intentionally not declared in `Agent.depends_on` — it is treated
 as optional, and tool dispatch degrades gracefully (logs an error) if
 the task queue is unavailable. Each task's `work` closure calls
 `dispatch_tool_call()` from `tool.py`, which handles JSON parsing,
@@ -431,7 +431,7 @@ loop-variable capture bug.
 ### Notification-driven continuation
 
 When a tool task completes, `TaskPlugin` fires `on_notify` with the
-result and `tool_call_id`. `AgentPlugin.on_notify` enqueues a
+result and `tool_call_id`. `Agent.on_notify` enqueues a
 notification `QueueItem`. The next `_process_queue_item` call uses
 `_build_conversation_message` to format it as a `role: "tool"` message
 (if `tool_call_id` is set) or a system message, appends it to
@@ -475,7 +475,7 @@ before `on_start` causes the `if self.db is None:` guard to skip the open.
 
 ### load_conversation
 
-Implements `load_conversation` (VALUE_FIRST). Called by `AgentPlugin` when
+Implements `load_conversation` (VALUE_FIRST). Called by `Agent` when
 `channel.conversation is None`. Queries `message_log` for the channel, applying
 the timestamp filter so only the compaction boundary and newer rows are returned.
 Returns a list of tagged message dicts (with `_message_type` set). Logs an INFO
@@ -527,12 +527,12 @@ open for the plugin lifetime. Channel IDs are sanitized (`/` and `:` →
 `idle.py` — monitors system idle state and fires `on_idle` when all
 queues are quiescent. Registered as `"idle_monitor"` in `main.py`.
 
-`IdleMonitorPlugin` depends on `"agent_loop"`. Its `on_start` is
+`IdleMonitorPlugin` depends on `"agent"`. Its `on_start` is
 decorated with `@hookimpl(trylast=True)` so it runs after
-`AgentPlugin.on_start` has fully initialized.
+`Agent.on_start` has fully initialized.
 
-`IdleMonitorPlugin.on_start` calls `get_dependency(pm, "agent_loop",
-AgentPlugin)` to retrieve a reference to `AgentPlugin.queues`, then
+`IdleMonitorPlugin.on_start` calls `get_dependency(pm, "agent",
+Agent)` to retrieve a reference to `Agent.queues`, then
 creates and starts an `IdleMonitor`.
 
 `IdleMonitorPlugin.on_stop` cancels the monitor before queue teardown.
@@ -545,7 +545,7 @@ hook is never fired.
 `IdleMonitor` (`idle.py`) is a background asyncio task that polls for
 idle state and fires `on_idle` when conditions are met.
 
-**Idle condition:** all `SerialQueue` instances in `AgentPlugin.queues`
+**Idle condition:** all `SerialQueue` instances in `Agent.queues`
 have `is_empty=True`, `TaskQueue.is_idle` is `True` (no queued or
 active tasks; skipped if `TaskPlugin` is not registered), and at least
 `idle_cooldown_seconds` have elapsed since the last `on_idle` firing.
@@ -564,7 +564,7 @@ daemon:
 ## ThinkingPlugin
 
 `thinking.py` — strips `<think>` blocks and `reasoning_content` for
-display. Registered as `"thinking"` in `main.py` before `agent_loop`.
+display. Registered as `"thinking"` in `main.py` before `agent`.
 
 Implements two hooks:
 
@@ -584,7 +584,7 @@ in-memory history regardless of `keep_thinking_in_history`.
 
 `compaction.py` — implements the `compact_conversation` hook to keep
 conversation history within the configured token budget. Registered as
-`"compaction"` in `main.py` before `AgentPlugin`. Logger name:
+`"compaction"` in `main.py` before `Agent`. Logger name:
 `corvidae.compaction`.
 
 ### compact_conversation
@@ -663,9 +663,9 @@ if the task queue or channel context is unavailable.
 
 ### How it works
 
-1. At tool-call time (not `on_start`), retrieves `AgentPlugin` via
-   `get_dependency(self.pm, "agent_loop", AgentPlugin)` and reads
-   `AgentPlugin._max_tool_result_chars` and `AgentPlugin.tool_registry`.
+1. At tool-call time (not `on_start`), retrieves `Agent` via
+   `get_dependency(self.pm, "agent", Agent)` and reads
+   `Agent._max_tool_result_chars` and `Agent.tool_registry`.
 2. Calls `registry.exclude("subagent")` to remove itself from the subagent's tool set.
 3. Builds a `messages` list (system prompt + user instructions) and a
    `work` coroutine that captures it, creates a fresh `LLMClient`, calls
@@ -675,7 +675,7 @@ if the task queue or channel context is unavailable.
 4. Wraps `work` in a `Task` with `tool_call_id` from `_ctx`, enqueues it on
    `ctx.task_queue`.
 5. Returns immediately; result is delivered via `TaskPlugin → on_notify →
-   AgentPlugin` (same path as all other tasks).
+   Agent` (same path as all other tasks).
 
 ### LLM configuration
 
@@ -889,8 +889,8 @@ Defined in `main.py`:
 10. `CompactionPlugin` — provides default `compact_conversation` implementation
 11. `ThinkingPlugin` — handles `<think>` stripping and `reasoning_content` removal
 12. `RuntimeSettingsPlugin` — registers the `set_settings` tool
-13. `AgentPlugin` — agent loop (after all tools, transports, and support plugins)
-14. `IdleMonitorPlugin` — idle monitor (after `AgentPlugin`, depends on `agent_loop`)
+13. `Agent` — agent loop (after all tools, transports, and support plugins)
+14. `IdleMonitorPlugin` — idle monitor (after `Agent`, depends on `"agent"`)
 
 After all registrations, `validate_dependencies(pm)` runs to verify that
 every plugin's `depends_on` set names a registered plugin. Startup aborts
@@ -917,12 +917,12 @@ dependency and the plugin that declared it. Runs once at startup.
 ### Current dependency graph
 
 ```
-AgentPlugin         → "registry"    (ChannelRegistry)
+Agent               → "registry"    (ChannelRegistry)
 CLIPlugin           → "registry"    (ChannelRegistry)
 IRCPlugin           → "registry"    (ChannelRegistry)
 PersistencePlugin   → "registry"    (ChannelRegistry)
-SubagentPlugin      → "agent_loop"  (AgentPlugin)
-IdleMonitorPlugin   → "agent_loop"  (AgentPlugin)
+SubagentPlugin      → "agent"       (Agent)
+IdleMonitorPlugin   → "agent"       (Agent)
 ```
 
 Plugins with no `depends_on` attribute declared: `CoreToolsPlugin`,
@@ -930,10 +930,10 @@ Plugins with no `depends_on` attribute declared: `CoreToolsPlugin`,
 
 Transport plugins use `get_dependency(pm, "registry", ChannelRegistry)` in
 `on_start` to retrieve the shared `ChannelRegistry`. `SubagentPlugin` calls
-`get_dependency(pm, "agent_loop", AgentPlugin)` at tool-call time (inside
-`_launch`) to access `AgentPlugin.tool_registry`.
+`get_dependency(pm, "agent", Agent)` at tool-call time (inside
+`_launch`) to access `Agent.tool_registry`.
 
-`AgentPlugin` also accesses `TaskPlugin` via `pm.get_plugin("task")`, but
+`Agent` also accesses `TaskPlugin` via `pm.get_plugin("task")`, but
 this is intentionally not declared in `depends_on` — `TaskPlugin` is
 treated as optional, and `_dispatch_tool_calls` degrades gracefully
 (logs an error and returns) when the task queue is unavailable.
@@ -951,7 +951,7 @@ corvidae/
 ├── context.py            # ContextWindow, MessageType, DEFAULT_CHARS_PER_TOKEN
 ├── jsonl_log.py          # JsonlLogPlugin (on_conversation_event, on_compaction)
 ├── logging.py            # StructuredFormatter, _DEFAULT_LOGGING
-├── agent.py              # AgentPlugin (single-turn dispatch)
+├── agent.py              # Agent (single-turn dispatch)
 ├── persistence.py        # PersistencePlugin (DB lifecycle, conversation init)
 ├── idle.py               # IdleMonitor, IdleMonitorPlugin
 ├── thinking.py           # ThinkingPlugin

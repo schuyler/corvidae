@@ -25,7 +25,7 @@ async def build_plugin_and_channel(
     """
     from unittest.mock import AsyncMock
 
-    from corvidae.agent import AgentPlugin
+    from corvidae.agent import Agent
     from corvidae.channel import ChannelConfig, ChannelRegistry
     from corvidae.persistence import PersistencePlugin, init_db
     from corvidae.hooks import create_plugin_manager
@@ -65,8 +65,8 @@ async def build_plugin_and_channel(
     thinking_plugin = ThinkingPlugin(pm)
     pm.register(thinking_plugin, name="thinking")
 
-    plugin = AgentPlugin(pm)
-    pm.register(plugin, name="agent_loop")
+    plugin = Agent(pm)
+    pm.register(plugin, name="agent")
     plugin._registry = registry
 
     channel = registry.get_or_create(

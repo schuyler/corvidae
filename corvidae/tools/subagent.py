@@ -62,7 +62,7 @@ class SubagentPlugin:
         Retrieves ToolCollectionPlugin to read tool_registry and max_result_chars,
         excludes the subagent tool from the set, uses the shared background client
         from LLMPlugin, and enqueues the task. Returns immediately; the result
-        is delivered via TaskPlugin -> on_notify -> AgentPlugin.
+        is delivered via TaskPlugin -> on_notify -> Agent.
 
         Args:
             instructions: The user-provided instructions for the subagent.

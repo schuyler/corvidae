@@ -19,7 +19,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import aiohttp
 import pytest
 
-from corvidae.agent import AgentPlugin
+from corvidae.agent import Agent
 from corvidae.channel import Channel, ChannelConfig, ChannelRegistry
 from corvidae.compaction import CompactionPlugin
 from corvidae.hooks import create_plugin_manager, hookimpl, validate_dependencies
@@ -134,7 +134,7 @@ def make_config(*, db_path: str = ":memory:", extra: dict | None = None) -> dict
 @dataclass
 class IntegrationHarness:
     pm: object
-    agent: AgentPlugin
+    agent: Agent
     task_plugin: TaskPlugin
     registry: ChannelRegistry
     transport: FakeTransportPlugin
@@ -251,8 +251,8 @@ async def _build_harness(config: dict) -> IntegrationHarness:
     tool_collection_plugin = ToolCollectionPlugin(pm)
     pm.register(tool_collection_plugin, name="tools")
 
-    agent_loop = AgentPlugin(pm)
-    pm.register(agent_loop, name="agent_loop")
+    agent_loop = Agent(pm)
+    pm.register(agent_loop, name="agent")
 
     idle_monitor_plugin = IdleMonitorPlugin(pm)
     pm.register(idle_monitor_plugin, name="idle_monitor")
@@ -329,8 +329,8 @@ class TestGroupALifecycle:
         tool_collection_plugin = ToolCollectionPlugin(pm)
         pm.register(tool_collection_plugin, name="tools")
 
-        agent_loop = AgentPlugin(pm)
-        pm.register(agent_loop, name="agent_loop")
+        agent_loop = Agent(pm)
+        pm.register(agent_loop, name="agent")
 
         idle_monitor_plugin = IdleMonitorPlugin(pm)
         pm.register(idle_monitor_plugin, name="idle_monitor")
@@ -1261,8 +1261,8 @@ class TestGroupEErrorHandling:
         tool_collection_plugin = ToolCollectionPlugin(pm)
         pm.register(tool_collection_plugin, name="tools")
 
-        agent_loop = AgentPlugin(pm)
-        pm.register(agent_loop, name="agent_loop")
+        agent_loop = Agent(pm)
+        pm.register(agent_loop, name="agent")
 
         async def tool_raiser(x: str) -> str:
             """Raises."""

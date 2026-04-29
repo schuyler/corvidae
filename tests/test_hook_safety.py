@@ -1,4 +1,4 @@
-"""Tests for hook call safety in AgentPlugin and TaskPlugin.
+"""Tests for hook call safety in Agent and TaskPlugin.
 
 These are RED TDD tests — they fail because the hooks listed below do not
 currently wrap exceptions in try/except blocks:
