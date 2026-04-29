@@ -340,7 +340,10 @@ class TestCoreToolsPlugin:
 
         plugin2 = CoreToolsPlugin(None)
         import asyncio
-        asyncio.run(plugin2.on_start(config={"tools": {"web_search_max_results": 15}}))
+        from unittest.mock import MagicMock
+        config = {"tools": {"web_search_max_results": 15}}
+        asyncio.run(plugin2.on_init(pm=MagicMock(), config=config))
+        asyncio.run(plugin2.on_start(config=config))
         try:
             assert plugin2._web_search_max_results == 15
         finally:

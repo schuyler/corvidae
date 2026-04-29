@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 
 from corvidae.agent_loop import run_agent_loop, strip_thinking
-from corvidae.hooks import get_dependency, hookimpl
+from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 from corvidae.task import Task
 from corvidae.tool import ToolContext
 
@@ -18,7 +18,7 @@ SUBAGENT_SYSTEM_PROMPT = (
 )
 
 
-class SubagentPlugin:
+class SubagentPlugin(CorvidaePlugin):
     """Plugin that registers the subagent tool.
 
     Launches background agents via run_agent_loop. All subagents share the
@@ -31,10 +31,11 @@ class SubagentPlugin:
     max_result_chars at tool-call time.
     """
 
-    depends_on = {"llm", "tools"}
+    depends_on = frozenset({"llm", "tools"})
 
-    def __init__(self, pm) -> None:
-        self.pm = pm
+    def __init__(self, pm=None) -> None:
+        if pm is not None:
+            self.pm = pm
 
     @hookimpl
     async def on_start(self, config: dict) -> None:

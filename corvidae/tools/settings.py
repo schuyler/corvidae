@@ -8,25 +8,38 @@ sensitive keys. "system_prompt" is always blocked regardless of operator config.
 
 import logging
 
-from corvidae.hooks import hookimpl
+from corvidae.hooks import CorvidaePlugin, hookimpl
 from corvidae.tool import Tool, tool_to_schema
 
 logger = logging.getLogger(__name__)
 
 
-class RuntimeSettingsPlugin:
+class RuntimeSettingsPlugin(CorvidaePlugin):
     """Plugin that registers the set_settings tool.
 
-    Args:
-        immutable_settings: Set of key names that the agent must not be
-            allowed to change. "system_prompt" is always added to this set.
+    The default blocklist always includes "system_prompt". Additional
+    immutable settings are read from config in on_init.
+
+    Legacy usage: RuntimeSettingsPlugin(pm, immutable_settings=...) is still
+    accepted for backward compatibility with existing tests.
     """
 
-    depends_on = set()
+    depends_on = frozenset()
 
-    def __init__(self, pm, *, immutable_settings: set) -> None:
-        self.pm = pm
-        self.blocklist: set = {"system_prompt"} | set(immutable_settings)
+    def __init__(self, pm=None, *, immutable_settings: set | None = None) -> None:
+        # Backward-compatible: accept optional pm positional arg and
+        # immutable_settings keyword arg so existing test code still works.
+        if pm is not None:
+            self.pm = pm
+        self.blocklist: set = {"system_prompt"}
+        if immutable_settings is not None:
+            self.blocklist |= set(immutable_settings)
+
+    @hookimpl
+    async def on_init(self, pm, config: dict) -> None:
+        await super().on_init(pm, config)
+        immutable = config.get("agent", {}).get("immutable_settings", [])
+        self.blocklist |= set(immutable)
 
     @hookimpl
     def register_tools(self, tool_registry: list) -> None:

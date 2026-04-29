@@ -7,22 +7,23 @@ import signal
 import sys
 
 from corvidae.channel import ChannelRegistry
-from corvidae.hooks import get_dependency, hookimpl
+from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 
 logger = logging.getLogger(__name__)
 
 
-class CLIPlugin:
+class CLIPlugin(CorvidaePlugin):
     """Transport plugin for stdin/stdout interaction.
 
     Implements on_start, send_message, and on_stop hooks. Only active when
     at least one cli channel is configured.
     """
 
-    depends_on = {"registry"}
+    depends_on = frozenset({"registry"})
 
-    def __init__(self, pm) -> None:
-        self.pm = pm
+    def __init__(self, pm=None) -> None:
+        if pm is not None:
+            self.pm = pm
         self._task: asyncio.Task | None = None
         self._registry: ChannelRegistry | None = None
 

@@ -29,10 +29,12 @@ from typing import Any
 
 import aiosqlite
 
+from corvidae.hooks import CorvidaePlugin, hookimpl
+
 logger = logging.getLogger(__name__)
 
 
-class DreamPlugin:
+class DreamPlugin(CorvidaePlugin):
     """Periodically reviews recent conversation history and updates MEMORY.md."""
 
     # How many raw rows to load per channel (buffer for non-assistant messages).
@@ -44,22 +46,38 @@ class DreamPlugin:
     # Minimum seconds between dream cycles (configurable).
     DEFAULT_INTERVAL = 300
 
-    def __init__(self, workspace_root: str | Path) -> None:
-        self.workspace_root = Path(workspace_root).resolve()
+    depends_on = frozenset()
+
+    def __init__(self, workspace_root: str | Path | None = None) -> None:
+        if workspace_root is not None:
+            self.workspace_root = Path(workspace_root).resolve()
+        else:
+            self.workspace_root = None
         self.interval_seconds: int = self.DEFAULT_INTERVAL
         self._last_dream_time: float = 0.0
         self._db_path: Path | None = None
+
+    @hookimpl
+    async def on_init(self, pm, config: dict) -> None:
+        """Read workspace root from config."""
+        await super().on_init(pm, config)
+        base_dir = config.get("_base_dir")
+        if base_dir is not None:
+            self.workspace_root = Path(base_dir).resolve()
 
     # ------------------------------------------------------------------
     # Lifecycle hooks
     # ------------------------------------------------------------------
 
+    @hookimpl
     async def on_start(self, config: dict) -> None:
         """Read dream config and locate the SQLite DB."""
         dream_cfg = config.get("dream", {})
         self.interval_seconds = dream_cfg.get("interval_seconds", self.DEFAULT_INTERVAL)
-        self._db_path = self._locate_db()
+        if self.workspace_root is not None:
+            self._db_path = self._locate_db()
 
+    @hookimpl
     async def on_idle(self) -> None:
         """Trigger a dream cycle if enough time has elapsed and DB is ready."""
         now = time.time()

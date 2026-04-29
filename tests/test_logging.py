@@ -197,8 +197,13 @@ def _make_minimal_config(tmp_path, extra=None):
 
 def _make_mock_pm():
     mock_pm = MagicMock()
+    mock_pm.ahook.on_init = AsyncMock(return_value=[])
     mock_pm.ahook.on_start = AsyncMock(return_value=[])
     mock_pm.ahook.on_stop = AsyncMock(return_value=[])
+    mock_agent = MagicMock()
+    mock_agent.on_start = AsyncMock()
+    mock_agent.on_stop = AsyncMock()
+    mock_pm.get_plugin.return_value = mock_agent
     return mock_pm
 
 
@@ -218,10 +223,8 @@ class TestMainLoggingConfiguration:
         import signal
 
         with patch("corvidae.main.configure_logging") as mock_configure, \
-             patch("corvidae.main.create_plugin_manager") as mock_pm_factory, \
-             patch("corvidae.main.Agent") as mock_agent_cls:
+             patch("corvidae.main.create_plugin_manager") as mock_pm_factory:
             mock_pm_factory.return_value = _make_mock_pm()
-            mock_agent_cls.return_value = _make_mock_agent()
 
             async def run():
                 asyncio.get_running_loop().call_later(
@@ -305,10 +308,8 @@ class TestMainLoggingConfiguration:
 
         with caplog.at_level(logging.INFO, logger="corvidae.main"), \
              patch("corvidae.main.configure_logging"), \
-             patch("corvidae.main.create_plugin_manager") as mock_pm_factory, \
-             patch("corvidae.main.Agent") as mock_agent_cls:
+             patch("corvidae.main.create_plugin_manager") as mock_pm_factory:
             mock_pm_factory.return_value = _make_mock_pm()
-            mock_agent_cls.return_value = _make_mock_agent()
 
             async def run():
                 asyncio.get_running_loop().call_later(
@@ -334,10 +335,8 @@ class TestMainLoggingConfiguration:
 
         with caplog.at_level(logging.INFO, logger="corvidae.main"), \
              patch("corvidae.main.configure_logging"), \
-             patch("corvidae.main.create_plugin_manager") as mock_pm_factory, \
-             patch("corvidae.main.Agent") as mock_agent_cls:
+             patch("corvidae.main.create_plugin_manager") as mock_pm_factory:
             mock_pm_factory.return_value = _make_mock_pm()
-            mock_agent_cls.return_value = _make_mock_agent()
 
             async def run():
                 asyncio.get_running_loop().call_later(

@@ -8,18 +8,19 @@ all queues are empty and the cooldown has elapsed.
 
 import logging
 
-from corvidae.hooks import hookimpl
+from corvidae.hooks import CorvidaePlugin, hookimpl
 
 logger = logging.getLogger(__name__)
 
 
-class IdleMonitorPlugin:
+class IdleMonitorPlugin(CorvidaePlugin):
     """Pure consumer of the on_idle hook. Implements idle behaviors."""
 
-    depends_on = set()
+    depends_on = frozenset()
 
-    def __init__(self, pm) -> None:
-        self.pm = pm
+    def __init__(self, pm=None) -> None:
+        if pm is not None:
+            self.pm = pm
 
     @hookimpl
     async def on_idle(self) -> None:

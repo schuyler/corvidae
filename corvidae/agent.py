@@ -32,7 +32,7 @@ from enum import Enum
 from corvidae.agent_loop import AgentTurnResult, run_agent_turn
 from corvidae.channel import Channel, ChannelConfig, ChannelRegistry, resolve_system_prompt
 from corvidae.context import ContextWindow, MessageType, DEFAULT_CHARS_PER_TOKEN
-from corvidae.hooks import resolve_hook_results, HookStrategy, get_dependency, hookimpl
+from corvidae.hooks import CorvidaePlugin, resolve_hook_results, HookStrategy, get_dependency, hookimpl
 from corvidae.queue import SerialQueue
 from corvidae.task import Task
 from corvidae.tool import dispatch_tool_call
@@ -77,7 +77,7 @@ class QueueItem:
     meta: dict = field(default_factory=dict)
 
 
-class Agent:
+class Agent(CorvidaePlugin):
     """Plugin that wires the agent loop into the hook system.
 
     Attributes:
@@ -90,10 +90,11 @@ class Agent:
         _registry: ChannelRegistry, resolved in on_start via get_dependency
     """
 
-    depends_on = {"registry", "task", "llm", "tools"}
+    depends_on = frozenset({"registry", "task", "llm", "tools"})
 
-    def __init__(self, pm) -> None:
-        self.pm = pm
+    def __init__(self, pm=None) -> None:
+        if pm is not None:
+            self.pm = pm
         self._client = None
         self._tools: dict[str, Callable] = {}
         self._tool_schemas: list[dict] = []
@@ -145,6 +146,14 @@ class Agent:
             logger.warning("on_idle hook raised exception", exc_info=True)
         finally:
             self._idle_firing = False
+
+    @hookimpl
+    async def on_init(self, pm, config: dict) -> None:
+        await super().on_init(pm, config)
+        agent_config = config.get("agent", {})
+        self._chars_per_token = agent_config.get("chars_per_token", DEFAULT_CHARS_PER_TOKEN)
+        daemon_config = config.get("daemon", {})
+        self._idle_cooldown = daemon_config.get("idle_cooldown_seconds", 30.0)
 
     async def on_start(self, config: dict) -> None:
         await self._start_plugin(config)
@@ -647,11 +656,7 @@ class Agent:
         self._registry = get_dependency(self.pm, "registry", ChannelRegistry)
         self._tools = {}
         self._tool_schemas = []
-        agent_config = config.get("agent", {})
-        self._chars_per_token = agent_config.get("chars_per_token", DEFAULT_CHARS_PER_TOKEN)
         self._base_dir = config.get("_base_dir", Path("."))
-        daemon_config = config.get("daemon", {})
-        self._idle_cooldown = daemon_config.get("idle_cooldown_seconds", 30.0)
 
         # Get the LLM client from LLMPlugin (which owns the lifecycle).
         llm = get_dependency(self.pm, "llm", LLMPlugin)

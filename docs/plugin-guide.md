@@ -1,31 +1,36 @@
 # Corvidae Plugin Guide
 
-Corvidae plugins extend the agent daemon using [apluggy](https://pypi.org/project/apluggy/) (async pluggy). A plugin is a class with `@hookimpl`-decorated methods corresponding to the hooks it wants to handle.
+Corvidae plugins extend the agent daemon using [apluggy](https://pypi.org/project/apluggy/) (async pluggy). A plugin subclasses `CorvidaePlugin` and decorates methods with `@hookimpl` for each hook it handles.
 
 ```python
-from corvidae.hooks import hookimpl
+from corvidae.hooks import CorvidaePlugin, hookimpl
 
-class GreetPlugin:
-    def __init__(self, pm) -> None:
-        self.pm = pm
-
+class GreetPlugin(CorvidaePlugin):
     @hookimpl
     async def on_message(self, channel, sender: str, text: str) -> None:
         if text.strip().lower() == "hello":
             await self.pm.ahook.send_message(channel=channel, text=f"Hello, {sender}!")
 ```
 
+`CorvidaePlugin.on_init` stores `pm` and `config` as instance attributes. Subclasses that need extra initialization override `on_init` and call `super().on_init(pm, config)` first.
+
 ## Plugin anatomy
 
-A plugin is a plain Python class. It only needs to implement the hooks it cares about — all hooks are optional. The `@hookimpl` decorator marks each implementation.
+A plugin subclasses `CorvidaePlugin` from `corvidae.hooks`. It only needs to implement the hooks it cares about — all hooks are optional. The `@hookimpl` decorator marks each implementation. Plugins use no-argument constructors; `pm` and `config` are received via the `on_init` hook.
 
 ```python
-from corvidae.hooks import hookimpl
+from corvidae.hooks import CorvidaePlugin, hookimpl
 
-class MyPlugin:
+class MyPlugin(CorvidaePlugin):
+    @hookimpl
+    async def on_init(self, pm, config: dict) -> None:
+        await super().on_init(pm, config)
+        self.setting = config.get("my_plugin", {}).get("setting", "default")
+
     @hookimpl
     async def on_start(self, config: dict) -> None:
-        self.setting = config.get("my_plugin", {}).get("setting", "default")
+        # open runtime resources (connections, file handles, asyncio tasks)
+        pass
 
     @hookimpl
     async def on_stop(self) -> None:
@@ -35,30 +40,18 @@ class MyPlugin:
 
 ## Registering a plugin
 
-### Built-in (in main.py)
-
-Add a `pm.register()` call before `validate_dependencies()`:
-
-```python
-# corvidae/main.py
-my_plugin = MyPlugin(pm)
-pm.register(my_plugin, name="my_plugin")
-
-validate_dependencies(pm)
-```
-
-Registration order matters: tool-providing plugins must be registered before `tools` (ToolCollectionPlugin) so their tools are collected when `ToolCollectionPlugin.on_start` runs. Transport plugins must be registered before `agent`.
-
-### External (setuptools entry points)
-
-External plugins are loaded automatically via `pm.load_setuptools_entrypoints("corvidae")`. Declare them in `pyproject.toml`:
+Plugins are loaded via setuptools entry points. Declare them in `pyproject.toml`:
 
 ```toml
 [project.entry-points.corvidae]
 my_plugin = "my_package:MyPlugin"
 ```
 
-The entry point value must be importable and callable by pluggy's loader (a class or factory function). Internal plugins all accept `pm` as their first constructor argument; external plugins loaded via entry points are instantiated by pluggy without arguments, so they must provide a no-argument constructor or use a factory function.
+`main.py` calls `pm.load_setuptools_entrypoints("corvidae")`, which instantiates each entry point class with no arguments and registers it. `validate_dependencies(pm)` runs next, then `pm.ahook.on_init(pm=pm, config=config)` broadcasts to all registered plugins.
+
+All plugin classes must be instantiable with no arguments. `pm` and `config` are delivered via `on_init`.
+
+**ChannelRegistry** is the exception: it is not an entry-point plugin. It is a plain class with no `@hookimpl` decorators, constructed explicitly in `main.py` and populated from config before the entry point plugins are loaded.
 
 ## Available hooks
 
@@ -66,10 +59,13 @@ The entry point value must be importable and callable by pluggy's loader (a clas
 
 | Hook | Type | When |
 |------|------|------|
-| `on_start(config: dict)` | async broadcast | Once at startup, after config is loaded |
+| `on_init(pm, config: dict)` | async broadcast | After all plugins are registered, before `on_start`. Use to store `pm`, read config values, and resolve references to other plugins. Do not create runtime resources here. |
+| `on_start(config: dict)` | async broadcast | Once at startup, after `on_init`. Use to open runtime resources: DB connections, network clients, file handles, asyncio tasks. |
 | `on_stop()` | async broadcast | On SIGINT/SIGTERM, before process exits |
 
 `config` is the full parsed `agent.yaml` dict. The key `_base_dir` (a `Path`) is injected by `main.py` pointing to the config file's directory.
+
+`CorvidaePlugin.on_init` stores `pm` and `config` as instance attributes. Subclasses that override `on_init` must call `await super().on_init(pm, config)` to preserve this behavior.
 
 ### Messaging
 
@@ -197,11 +193,8 @@ class MyPlugin:
 Declare `depends_on` as a class attribute (a set of plugin names). `validate_dependencies()` raises `RuntimeError` at startup if any declared dependency is not registered, or if the dependency graph contains a cycle. The error message includes the full cycle path, e.g. `Dependency cycle detected: a -> b -> a`.
 
 ```python
-class MyPlugin:
+class MyPlugin(CorvidaePlugin):
     depends_on = {"agent", "task"}
-
-    def __init__(self, pm) -> None:
-        self.pm = pm
 ```
 
 To get a typed reference to a dependency:
@@ -222,8 +215,9 @@ registry = tools_plugin.get_registry()
 
 ```python
 from corvidae.context import MessageType
+from corvidae.hooks import CorvidaePlugin, hookimpl
 
-class MemoryPlugin:
+class MemoryPlugin(CorvidaePlugin):
     @hookimpl
     async def before_agent_turn(self, channel) -> None:
         notes = await self.fetch_relevant_notes(channel.id)
@@ -271,35 +265,37 @@ irc:
 
 ## Registration order
 
-The current registration sequence in `main.py`:
+Plugins are loaded via `pm.load_setuptools_entrypoints("corvidae")`. The entry point loading order is non-deterministic — it is not guaranteed to match any specific sequence. The following plugins are registered:
 
 ```
-registry          (ChannelRegistry)
-persistence       (PersistencePlugin)
-jsonl_log         (JsonlLogPlugin)
-core_tools        (CoreToolsPlugin)
-cli               (CLIPlugin)
-irc               (IRCPlugin)
-task              (TaskPlugin)
-subagent          (SubagentPlugin)
-mcp               (McpClientPlugin)
-llm               (LLMPlugin)
-compaction        (CompactionPlugin)
-thinking          (ThinkingPlugin)
-runtime_settings  (RuntimeSettingsPlugin)
-tools             (ToolCollectionPlugin)
-dream             (DreamPlugin)
-agent             (Agent)
-idle_monitor      (IdleMonitorPlugin)
+registry          (ChannelRegistry)     — explicit, before entry points load
+persistence       (PersistencePlugin)   — entry point
+jsonl_log         (JsonlLogPlugin)      — entry point
+core_tools        (CoreToolsPlugin)     — entry point
+cli               (CLIPlugin)           — entry point
+irc               (IRCPlugin)           — entry point
+task              (TaskPlugin)          — entry point
+subagent          (SubagentPlugin)      — entry point
+mcp               (McpClientPlugin)     — entry point
+llm               (LLMPlugin)           — entry point
+compaction        (CompactionPlugin)    — entry point
+thinking          (ThinkingPlugin)      — entry point
+runtime_settings  (RuntimeSettingsPlugin) — entry point
+tools             (ToolCollectionPlugin) — entry point
+dream             (DreamPlugin)         — entry point
+agent             (Agent)               — entry point
+idle_monitor      (IdleMonitorPlugin)   — entry point
 ```
 
-Tool-providing plugins and transport plugins register before `tools` (ToolCollectionPlugin). `ToolCollectionPlugin.on_start` uses `@hookimpl(trylast=True)` so it fires after all other `on_start` hooks; at that point it calls `register_tools` to collect tools from every registered plugin. `Agent._start_plugin` then calls `get_dependency(pm, "tools", ToolCollectionPlugin)` to retrieve the fully populated registry.
+`ChannelRegistry` is constructed and registered explicitly before entry points load. Its `agent_defaults` attribute and channel config are populated from config before the `on_init` broadcast runs.
 
-**Startup order:** `main.py` calls `pm.ahook.on_start(config=config)` first, which runs all plugins' `on_start` hooks. `ToolCollectionPlugin.on_start` runs last (trylast) to ensure all tool providers have initialized. Then `main.py` calls `agent.on_start(config=config)` explicitly. `Agent.on_start` does not have `@hookimpl` — it is called only by `main.py`.
+**Tool collection:** `ToolCollectionPlugin.on_start` uses `@hookimpl(trylast=True)` so it fires after all other `on_start` hooks, then calls `register_tools` to collect tools from every registered plugin. The non-deterministic loading order does not affect tool collection because `trylast=True` ensures `ToolCollectionPlugin.on_start` always runs last in the broadcast.
+
+**Startup order:** `main.py` broadcasts `on_init`, then `on_start`. `ToolCollectionPlugin.on_start` runs last (trylast) to collect tools. `main.py` then calls `agent.on_start(config=config)` explicitly after the broadcast completes. `Agent.on_start` does not have `@hookimpl` — it is called only by `main.py`. Adding `@hookimpl` to `Agent.on_start` would cause double initialization.
 
 **Shutdown order:** `main.py` calls `agent.on_stop()` first (drains queues), then `pm.ahook.on_stop()` to tear down all other plugins.
 
-`idle_monitor` registers after `agent` because it depends on `"agent"`. Its `on_start` uses `@hookimpl(trylast=True)` to run late in the broadcast. Because `Agent.on_start` is called after the broadcast completes, `idle_monitor` is always initialized before `Agent` starts.
+`idle_monitor` depends on `"agent"`. Its `on_start` uses `@hookimpl(trylast=True)` to run late in the broadcast. Because `Agent.on_start` is called after the broadcast completes, `idle_monitor` is always initialized before `Agent` starts.
 
 ## Hook exception safety
 
@@ -337,7 +333,7 @@ The legacy key `agent.max_tool_result_chars` is still accepted but deprecated; a
 
 ### CoreToolsPlugin tools
 
-Registered by `CoreToolsPlugin` (registered as `core_tools` in `main.py`).
+Registered by `CoreToolsPlugin` (entry point name: `core_tools`).
 
 | Tool | Parameters | What it does |
 |------|------------|--------------|
@@ -361,7 +357,7 @@ tools:
 
 ### SubagentPlugin tools
 
-Registered by `SubagentPlugin` (registered as `subagent` in `main.py`).
+Registered by `SubagentPlugin` (entry point name: `subagent`).
 
 | Tool | Parameters | What it does |
 |------|------------|--------------|
@@ -371,7 +367,7 @@ Registered by `SubagentPlugin` (registered as `subagent` in `main.py`).
 
 ### RuntimeSettingsPlugin tools
 
-Registered by `RuntimeSettingsPlugin` (registered as `"runtime_settings"` in `main.py`).
+Registered by `RuntimeSettingsPlugin` (entry point name: `runtime_settings`).
 
 | Tool | Parameters | What it does |
 |------|------------|--------------|
@@ -379,15 +375,12 @@ Registered by `RuntimeSettingsPlugin` (registered as `"runtime_settings"` in `ma
 
 ## Bundled plugins
 
-These plugins are registered by `main.py` and are part of the default
-daemon. They can be omitted if the application does not need their
-functionality; each degrades gracefully when absent.
+These plugins ship with Corvidae and are registered via entry points as part of the default daemon. They can be omitted if the application does not need their functionality; each degrades gracefully when absent.
 
 ### McpClientPlugin (`corvidae/mcp_client.py`)
 
 Connects to external [MCP](https://modelcontextprotocol.io/) servers and
-exposes their tools to the agent loop. Registered as `"mcp"` before
-`agent`.
+exposes their tools to the agent loop. Entry point name: `"mcp"`.
 
 Implements three hooks:
 
@@ -428,7 +421,7 @@ if the `mcp:` config key is absent — the plugin no-ops.
 ### ThinkingPlugin (`corvidae/thinking.py`)
 
 Strips `<think>...</think>` blocks and `reasoning_content` from LLM
-output. Registered as `"thinking"` before `agent`.
+output. Entry point name: `"thinking"`.
 
 Implements two hooks:
 
@@ -447,7 +440,7 @@ regardless of the `keep_thinking_in_history` config value.
 ### CompactionPlugin (`corvidae/compaction.py`)
 
 Compacts conversation history when it approaches the channel's
-`max_context_tokens` limit. Registered as `"compaction"` before `agent`.
+`max_context_tokens` limit. Entry point name: `"compaction"`.
 
 Implements one hook:
 
@@ -476,7 +469,7 @@ receive an error from the API when the context limit is exceeded.
 ### PersistencePlugin (`corvidae/persistence.py`)
 
 Opens the SQLite database, runs schema migrations, and sets the journal mode.
-Registered as `"persistence"` before `agent`. Implements `on_start`,
+Entry point name: `"persistence"`. Implements `on_start`,
 `on_stop`, `load_conversation`, `on_conversation_event`, and `on_compaction`.
 
 **Config:**
@@ -494,8 +487,7 @@ history is not persisted across restarts.
 
 Writes an append-only JSONL log of conversation events alongside the SQLite
 store. Each `on_conversation_event` and `on_compaction` call produces one
-JSON line in a per-channel file. Registered as `"jsonl_log"` after
-`persistence`.
+JSON line in a per-channel file. Entry point name: `"jsonl_log"`.
 
 Implements three hooks:
 
@@ -520,8 +512,7 @@ still persisted in SQLite by `PersistencePlugin`.
 
 ### LLMPlugin (`corvidae/llm_plugin.py`)
 
-Owns the `LLMClient` instance lifecycle. Registered as `"llm"` before
-`compaction` and `agent`. Other plugins retrieve clients via
+Owns the `LLMClient` instance lifecycle. Entry point name: `"llm"`. Other plugins retrieve clients via
 `get_dependency(pm, "llm", LLMPlugin)`.
 
 Implements two hooks:
@@ -557,7 +548,7 @@ clients and will raise `RuntimeError` during startup.
 ### TaskPlugin (`corvidae/task.py`)
 
 Owns the `TaskQueue` and delivers task results via the `on_notify` hook.
-Registered as `"task"` before `agent`.
+Entry point name: `"task"`.
 
 **Config:**
 ```yaml
@@ -573,8 +564,7 @@ without a `TaskQueue`.
 ### RuntimeSettingsPlugin (`corvidae/tools/settings.py`)
 
 Registers the `set_settings` tool, which lets the agent update per-channel
-LLM inference parameters and framework settings at runtime. Registered as
-`"runtime_settings"` before `tools`.
+LLM inference parameters and framework settings at runtime. Entry point name: `"runtime_settings"`.
 
 Implements one hook:
 
@@ -600,7 +590,7 @@ settings can only be configured statically in `agent.yaml`.
 ### ToolCollectionPlugin (`corvidae/tool_collection.py`)
 
 Collects tools from all registered plugins and owns the `ToolRegistry`.
-Registered as `"tools"` after all tool-providing plugins.
+Entry point name: `"tools"`.
 
 Implements one hook:
 
@@ -610,7 +600,7 @@ Implements one hook:
   `agent.max_tool_result_chars`) to configure the per-call result truncation
   limit.
 
-`Agent._start_plugin` retrieves the registry via
+`Agent` retrieves the registry via
 `get_dependency(pm, "tools", ToolCollectionPlugin)`. The `trylast=True`
 marker guarantees all tool providers have fully initialized before collection
 runs.
@@ -631,13 +621,11 @@ tools_dict, schemas = tools_plugin.get_tools()
 ### DreamPlugin (`corvidae/tools/dream.py`)
 
 Periodically reviews recent conversation history and appends extracted facts
-to `MEMORY.md`. Registered as `"dream"` before `agent`.
+to `MEMORY.md`. Entry point name: `"dream"`.
 
-Implements two hooks (not decorated with `@hookimpl` — registered as a
-plain plugin object):
+Implements two hooks:
 
-- `on_start` — reads `dream.interval_seconds` (default 300) and locates
-  `sessions.db` within the workspace tree.
+- `on_start` — locates `sessions.db` within the workspace tree.
 - `on_idle` — runs a dream cycle if `interval_seconds` have elapsed since
   the last cycle. Queries the last 40 rows from `message_log`, filters for
   assistant messages, strips `<think>` blocks, and appends new sentences to
@@ -657,15 +645,13 @@ dream:
 ### IdleMonitorPlugin (`corvidae/idle.py`)
 
 Fires the `on_idle` broadcast hook when all queues are quiescent.
-Registered as `"idle_monitor"` after `agent`.
+Entry point name: `"idle_monitor"`.
 
-Depends on `"agent"`. Its `on_start` uses `@hookimpl(trylast=True)`
-to run late in the broadcast. `Agent.on_start` is called by
-`main.py` after the broadcast completes, so the idle monitor is always
-initialized before the agent starts. It
-retrieves `Agent.queues` (a `dict[str, SerialQueue]`) by reference,
-so queues created after `IdleMonitorPlugin.on_start` are included
-automatically.
+Currently a stub — implements `on_idle` as a no-op. The idle
+detection logic itself lives in `Agent._maybe_fire_idle`, which
+checks queue quiescence and fires the `on_idle` broadcast.
+Plugins that implement `on_idle` (such as `DreamPlugin`) receive
+those calls.
 
 **Idle condition:** all `SerialQueue` instances have `is_empty=True`,
 `TaskQueue.is_idle` is `True` (skipped if `TaskPlugin` is not
@@ -678,4 +664,4 @@ daemon:
   idle_cooldown_seconds: 30   # minimum seconds between on_idle firings (default 30)
 ```
 
-**Without this plugin:** the `on_idle` hook is never fired.
+**Without this plugin:** the `on_idle` hook is never fired. Plugins that implement `on_idle` (such as `DreamPlugin`) will not receive calls.
