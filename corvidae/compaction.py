@@ -134,6 +134,20 @@ class CompactionPlugin:
         if self._llm_client is None:
             raise RuntimeError("LLM client not available for compaction")
 
+        # Cap the summarization input to avoid sending hundreds of thousands
+        # of tokens to the LLM. Take the first 50 messages (early context)
+        # and the last 50 messages (recent context), with a truncation marker.
+        max_messages = 100
+        if len(messages) > max_messages:
+            head = messages[:50]
+            tail = messages[-50:]
+            truncated_count = len(messages) - max_messages
+            truncated_marker = {
+                "role": "user",
+                "content": f"[...{truncated_count} messages omitted...]",
+            }
+            messages = head + [truncated_marker] + tail
+
         response = await self._llm_client.chat([
             {
                 "role": "system",

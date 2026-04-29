@@ -127,10 +127,11 @@ async def main(config_path: str = "agent.yaml") -> None:
     thinking_plugin = ThinkingPlugin(pm)
     pm.register(thinking_plugin, name="thinking")
 
-    # Register ContextCompactPlugin before Agent (KV cache-aware compaction with background blocks)
-    from corvidae.context_compact import ContextCompactPlugin
-    context_compact_plugin = ContextCompactPlugin(pm)
-    pm.register(context_compact_plugin, name="context_compact")
+    # Disabled — ContextCompactPlugin fights with CompactionPlugin over the same
+    # conversation. Re-enable when the two are coordinated or merged.
+    # from corvidae.context_compact import ContextCompactPlugin
+    # context_compact_plugin = ContextCompactPlugin(pm)
+    # pm.register(context_compact_plugin, name="context_compact")
 
     # Register RuntimeSettingsPlugin before Agent (provides set_settings tool)
     from corvidae.tools.settings import RuntimeSettingsPlugin
