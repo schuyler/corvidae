@@ -730,3 +730,57 @@ Estimated total: 5 Standard-tier tasks, each with its own red/green/review cycle
 
 **Failure mode:** 1 test fails with `AssertionError` (`tool_registry` not initialised in `__init__`); 5 tests fail with `AttributeError` (`'AgentPlugin' object has no attribute 'get_tool_config'`). All 6 fail as expected.
 **Proceed:** yes
+
+---
+
+## Part 3 Completion Report
+
+**Status:** COMPLETE — all tests pass
+**Baseline test count:** 746
+
+**What was done:**
+- Created `corvidae/llm_plugin.py` with `LLMPlugin` class
+  - Owns `main_client` and `background_client` (`LLMClient` instances)
+  - Parses `llm.main` (required) and `llm.background` (optional) config
+  - Manages aiohttp session lifecycle (`on_start` / `on_stop`)
+  - `get_client(role)` returns background client with fallback to main
+- Removed LLM config parsing and client creation from `AgentPlugin._start_plugin`
+- `AgentPlugin` now borrows `main_client` from `LLMPlugin` at startup via `get_dependency`
+- `AgentPlugin.depends_on` updated: added `"llm"`
+- `compact_conversation` hookspec updated: removed `client` parameter
+  - `CompactionPlugin` updated to get client from `LLMPlugin` in its `on_start`
+  - `CompactionPlugin.depends_on` updated: added `"llm"`
+- `SubagentPlugin` updated: removed per-task ephemeral `LLMClient` creation
+  - Uses `LLMPlugin.get_client("background")` for the shared background client
+  - `SubagentPlugin.depends_on` updated: added `"llm"`
+
+**Tests added:** tests covering `LLMPlugin` startup, client access, `on_stop` cleanup,
+`compact_conversation` hookspec without `client`, and `SubagentPlugin` client sharing.
+
+**Proceed:** yes
+
+---
+
+## Part 4 Completion Report
+
+**Status:** COMPLETE — all tests pass
+**Final test count:** 775 (baseline was 746, net +29)
+
+**What was done:**
+- Created `corvidae/tool_collection.py` with `ToolCollectionPlugin` class
+  - Uses `@hookimpl(trylast=True)` on `on_start` to run after all tool providers
+  - Calls `register_tools` broadcast, builds `ToolRegistry`
+  - Exposes `get_tools()` → `(tools_dict, tool_schemas)` and `get_registry()` → `ToolRegistry`
+  - Reads `tools.max_result_chars` config (with fallback to `agent.max_tool_result_chars`)
+- `AgentPlugin`:
+  - Removed `register_tools` call and direct tool attributes (`self.tools`, `self.tool_schemas`, `self.tool_registry`)
+  - Now reads `_tools`, `_tool_schemas`, `_max_tool_result_chars` from `ToolCollectionPlugin` at startup
+  - `get_tool_config()` method removed (superseded by `ToolCollectionPlugin`)
+  - `depends_on` updated: added `"tools"`
+- `SubagentPlugin`:
+  - Removed dependency on `"agent_loop"` for tool access
+  - Uses `ToolCollectionPlugin.get_registry().exclude("subagent")` and `tools_plugin.max_result_chars`
+  - `depends_on` is now `{"llm", "tools"}` (no longer includes `"agent_loop"`)
+
+**Config key migration:** `agent.max_tool_result_chars` is superseded by `tools.max_result_chars`.
+Both keys are read during transition; `tools.max_result_chars` takes precedence.

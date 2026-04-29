@@ -88,9 +88,12 @@ def _make_tool_call(call_id: str, name: str, args: dict) -> dict:
 
 class TestOnStart:
     async def test_on_start_creates_client(self):
-        """on_start with valid config creates LLMClient. Verify client.start() is called."""
+        """on_start borrows the LLM client from LLMPlugin and stores it as _client."""
         import aiosqlite
         from corvidae.persistence import init_db
+        from corvidae.llm_plugin import LLMPlugin
+        from corvidae.tool_collection import ToolCollectionPlugin
+        from corvidae.tool import ToolRegistry
 
         pm = create_plugin_manager()
         registry = ChannelRegistry(AGENT_DEFAULTS)
@@ -106,36 +109,35 @@ class TestOnStart:
         persistence._registry = registry
         pm.register(persistence, name="persistence")
 
+        # Register a mock LLMPlugin so AgentPlugin can borrow the client from it
+        mock_client = MagicMock()
+        mock_llm = LLMPlugin(pm)
+        mock_llm.main_client = mock_client
+        pm.register(mock_llm, name="llm")
+
+        # Register ToolCollectionPlugin with an empty registry
+        tools_plugin = ToolCollectionPlugin(pm)
+        tools_plugin.registry = ToolRegistry()
+        pm.register(tools_plugin, name="tools")
+
         plugin = AgentPlugin(pm)
         pm.register(plugin, name="agent_loop")
 
-        mock_client = MagicMock()
-        mock_client.start = AsyncMock()
+        await plugin.on_start(config=BASE_CONFIG)
 
-        with patch("corvidae.agent.LLMClient", return_value=mock_client) as mock_cls:
-            await plugin.on_start(config=BASE_CONFIG)
-
-        mock_cls.assert_called_once_with(
-            base_url="http://localhost:8080",
-            model="test-model",
-            api_key=None,
-            extra_body=None,
-            max_retries=3,
-            retry_base_delay=2.0,
-            retry_max_delay=60.0,
-            timeout=None,
-        )
-        mock_client.start.assert_awaited_once()
+        assert plugin._client is mock_client
         await db.close()
 
     async def test_on_start_collects_tools(self):
         """Register a test plugin implementing register_tools. Verify tools
-        are collected in the AgentPlugin and schemas generated."""
+        are collected via ToolCollectionPlugin and available on AgentPlugin."""
         def my_test_tool(x: str) -> str:
             """A test tool."""
             return f"result: {x}"
 
         from corvidae.hooks import hookimpl
+        from corvidae.llm_plugin import LLMPlugin
+        from corvidae.tool_collection import ToolCollectionPlugin
 
         class ToolPlugin:
             @hookimpl
@@ -150,24 +152,31 @@ class TestOnStart:
         tool_plugin = ToolPlugin()
         pm.register(tool_plugin, name="tool_plugin")
 
+        mock_llm = LLMPlugin(pm)
+        mock_llm.main_client = MagicMock()
+        pm.register(mock_llm, name="llm")
+
+        tools_plugin = ToolCollectionPlugin(pm)
+        pm.register(tools_plugin, name="tools")
+        await tools_plugin.on_start(config=BASE_CONFIG)
+
         plugin = AgentPlugin(pm)
         pm.register(plugin, name="agent_loop")
 
-        mock_client = MagicMock()
-        mock_client.start = AsyncMock()
+        await plugin.on_start(config=BASE_CONFIG)
 
-        with patch("corvidae.agent.LLMClient", return_value=mock_client):
-            await plugin.on_start(config=BASE_CONFIG)
-
-        assert "my_test_tool" in plugin.tools
-        assert plugin.tools["my_test_tool"] is my_test_tool
-        assert len(plugin.tool_schemas) >= 1
-        assert plugin.tool_schemas[0]["function"]["name"] == "my_test_tool"
+        assert "my_test_tool" in plugin._tools
+        assert plugin._tools["my_test_tool"] is my_test_tool
+        assert len(plugin._tool_schemas) >= 1
+        assert plugin._tool_schemas[0]["function"]["name"] == "my_test_tool"
 
     async def test_on_start_stores_base_dir_from_config(self):
         """on_start reads config["_base_dir"] and stores it as AgentPlugin._base_dir."""
         import aiosqlite
         from corvidae.persistence import init_db
+        from corvidae.llm_plugin import LLMPlugin
+        from corvidae.tool_collection import ToolCollectionPlugin
+        from corvidae.tool import ToolRegistry
 
         pm = create_plugin_manager()
         registry = ChannelRegistry(AGENT_DEFAULTS)
@@ -182,17 +191,21 @@ class TestOnStart:
         persistence._registry = registry
         pm.register(persistence, name="persistence")
 
+        mock_llm = LLMPlugin(pm)
+        mock_llm.main_client = MagicMock()
+        pm.register(mock_llm, name="llm")
+
+        tools_plugin = ToolCollectionPlugin(pm)
+        tools_plugin.registry = ToolRegistry()
+        pm.register(tools_plugin, name="tools")
+
         plugin = AgentPlugin(pm)
         pm.register(plugin, name="agent_loop")
-
-        mock_client = MagicMock()
-        mock_client.start = AsyncMock()
 
         config_with_base_dir = dict(BASE_CONFIG)
         config_with_base_dir["_base_dir"] = Path("/some/dir")
 
-        with patch("corvidae.agent.LLMClient", return_value=mock_client):
-            await plugin.on_start(config=config_with_base_dir)
+        await plugin.on_start(config=config_with_base_dir)
 
         assert plugin._base_dir == Path("/some/dir")
         await db.close()
@@ -201,6 +214,9 @@ class TestOnStart:
         """on_start sets AgentPlugin._base_dir to Path(".") when _base_dir is absent."""
         import aiosqlite
         from corvidae.persistence import init_db
+        from corvidae.llm_plugin import LLMPlugin
+        from corvidae.tool_collection import ToolCollectionPlugin
+        from corvidae.tool import ToolRegistry
 
         pm = create_plugin_manager()
         registry = ChannelRegistry(AGENT_DEFAULTS)
@@ -215,26 +231,35 @@ class TestOnStart:
         persistence._registry = registry
         pm.register(persistence, name="persistence")
 
+        mock_llm = LLMPlugin(pm)
+        mock_llm.main_client = MagicMock()
+        pm.register(mock_llm, name="llm")
+
+        tools_plugin = ToolCollectionPlugin(pm)
+        tools_plugin.registry = ToolRegistry()
+        pm.register(tools_plugin, name="tools")
+
         plugin = AgentPlugin(pm)
         pm.register(plugin, name="agent_loop")
 
-        mock_client = MagicMock()
-        mock_client.start = AsyncMock()
-
-        with patch("corvidae.agent.LLMClient", return_value=mock_client):
-            await plugin.on_start(config=BASE_CONFIG)
+        await plugin.on_start(config=BASE_CONFIG)
 
         assert plugin._base_dir == Path(".")
         await db.close()
 
     async def test_on_start_missing_llm_main_raises(self):
-        """Config without llm.main raises a clear error (flat llm block is rejected)."""
+        """Config without llm.main raises a clear error (flat llm block is rejected).
+
+        After Part 3, this error comes from LLMPlugin (which owns LLM config parsing).
+        """
+        from corvidae.llm_plugin import LLMPlugin
+
         pm = create_plugin_manager()
         pm.register(ChannelRegistry(AGENT_DEFAULTS), name="registry")
-        plugin = AgentPlugin(pm)
-        pm.register(plugin, name="agent_loop")
+        llm_plugin = LLMPlugin(pm)
+        pm.register(llm_plugin, name="llm")
 
-        # Old flat config — must be rejected with a clear error
+        # Old flat config — must be rejected with a clear error from LLMPlugin
         bad_config = {
             "llm": {
                 "base_url": "http://localhost:8080",
@@ -243,20 +268,30 @@ class TestOnStart:
         }
 
         with pytest.raises((KeyError, ValueError)):
-            await plugin.on_start(config=bad_config)
+            await llm_plugin.on_start(config=bad_config)
 
     async def test_on_start_config_parses_llm_main(self):
-        """on_start with llm.main creates self.client."""
+        """on_start borrows self._client from LLMPlugin.main_client."""
+        from corvidae.llm_plugin import LLMPlugin
+        from corvidae.tool_collection import ToolCollectionPlugin
+        from corvidae.tool import ToolRegistry
+
         pm = create_plugin_manager()
         pm.register(ChannelRegistry(AGENT_DEFAULTS), name="registry")
         pm.ahook.send_message = AsyncMock()
         pm.ahook.on_agent_response = AsyncMock()
 
+        mock_main_client = MagicMock()
+        mock_llm = LLMPlugin(pm)
+        mock_llm.main_client = mock_main_client
+        pm.register(mock_llm, name="llm")
+
+        tools_plugin = ToolCollectionPlugin(pm)
+        tools_plugin.registry = ToolRegistry()
+        pm.register(tools_plugin, name="tools")
+
         plugin = AgentPlugin(pm)
         pm.register(plugin, name="agent_loop")
-
-        mock_main_client = MagicMock()
-        mock_main_client.start = AsyncMock()
 
         config_with_bg = {
             "llm": {
@@ -272,12 +307,10 @@ class TestOnStart:
             "daemon": {"session_db": ":memory:"},
         }
 
-        with patch("corvidae.agent.LLMClient", return_value=mock_main_client):
-            await plugin.on_start(config=config_with_bg)
+        await plugin.on_start(config=config_with_bg)
 
-        # AgentPlugin only creates the main client
-        assert plugin.client is mock_main_client
-        mock_main_client.start.assert_awaited()
+        # AgentPlugin borrows the main client from LLMPlugin
+        assert plugin._client is mock_main_client
 
 
 # ---------------------------------------------------------------------------
@@ -293,7 +326,7 @@ class TestOnMessageConversationInit:
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("hello"))
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         assert channel.conversation is None
 
@@ -312,7 +345,7 @@ class TestOnMessageConversationInit:
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("hello"))
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="first")
         await drain(plugin, channel)
@@ -340,7 +373,7 @@ class TestOnMessagePersistenceAndLoop:
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("response"))
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         await plugin.on_message(channel=channel, sender="alice", text="test message")
         await drain(plugin, channel)
@@ -359,7 +392,7 @@ class TestOnMessagePersistenceAndLoop:
         plugin, channel, db = await build_plugin_and_channel()
 
         mock_client = MagicMock()
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         turn_result = AgentTurnResult(
             message={"role": "assistant", "content": "answer"},
@@ -382,7 +415,7 @@ class TestOnMessagePersistenceAndLoop:
         assert messages_arg[0]["role"] == "system"
         assert any(m.get("content") == "query" for m in messages_arg)
         # Third positional arg is tool_schemas
-        assert call_args[0][2] is plugin.tool_schemas
+        assert call_args[0][2] is plugin._tool_schemas
 
         await db.close()
 
@@ -393,7 +426,7 @@ class TestOnMessagePersistenceAndLoop:
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("agent reply"))
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="hello")
         await drain(plugin, channel)
@@ -412,7 +445,7 @@ class TestOnMessagePersistenceAndLoop:
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("my answer"))
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="question")
         await drain(plugin, channel)
@@ -431,7 +464,9 @@ class TestOnMessagePersistenceAndLoop:
         await db.close()
 
     async def test_on_message_with_extra_body_from_config(self):
-        """Plugin should read extra_body from llm.main config and pass it to LLMClient."""
+        """LLMPlugin should read extra_body from llm.main config and pass it to LLMClient."""
+        from corvidae.llm_plugin import LLMPlugin
+
         extra_body_value = {"id_slot": 1, "cache_prompt": True}
         config = {
             "llm": {
@@ -441,17 +476,18 @@ class TestOnMessagePersistenceAndLoop:
                     "extra_body": extra_body_value,
                 },
             },
-            "daemon": {"session_db": ":memory:"},
-            "_base_dir": Path(".")
         }
 
-        plugin, channel, db = await build_plugin_and_channel()
+        _, _, db = await build_plugin_and_channel()
+
+        pm = create_plugin_manager()
+        llm_plugin = LLMPlugin(pm)
 
         mock_client = MagicMock()
         mock_client.start = AsyncMock()
 
-        with patch("corvidae.agent.LLMClient", return_value=mock_client) as mock_cls:
-            await plugin.on_start(config)
+        with patch("corvidae.llm_plugin.LLMClient", return_value=mock_client) as mock_cls:
+            await llm_plugin.on_start(config=config)
 
         # Verify LLMClient was created with extra_body
         mock_cls.assert_called_once_with(
@@ -469,6 +505,8 @@ class TestOnMessagePersistenceAndLoop:
 
     async def test_on_message_without_extra_body_config(self):
         """Missing extra_body in config should create LLMClient with extra_body=None."""
+        from corvidae.llm_plugin import LLMPlugin
+
         config = {
             "llm": {
                 "main": {
@@ -477,17 +515,18 @@ class TestOnMessagePersistenceAndLoop:
                     # Note: no extra_body key
                 },
             },
-            "daemon": {"session_db": ":memory:"},
-            "_base_dir": Path(".")
         }
 
-        plugin, channel, db = await build_plugin_and_channel()
+        _, _, db = await build_plugin_and_channel()
+
+        pm = create_plugin_manager()
+        llm_plugin = LLMPlugin(pm)
 
         mock_client = MagicMock()
         mock_client.start = AsyncMock()
 
-        with patch("corvidae.agent.LLMClient", return_value=mock_client) as mock_cls:
-            await plugin.on_start(config)
+        with patch("corvidae.llm_plugin.LLMClient", return_value=mock_client) as mock_cls:
+            await llm_plugin.on_start(config=config)
 
         # Verify LLMClient was created with extra_body=None
         mock_cls.assert_called_once_with(
@@ -505,6 +544,8 @@ class TestOnMessagePersistenceAndLoop:
 
     async def test_on_message_with_extra_body_none(self):
         """extra_body=None in config should create LLMClient with extra_body=None."""
+        from corvidae.llm_plugin import LLMPlugin
+
         config = {
             "llm": {
                 "main": {
@@ -513,17 +554,18 @@ class TestOnMessagePersistenceAndLoop:
                     "extra_body": None,
                 },
             },
-            "daemon": {"session_db": ":memory:"},
-            "_base_dir": Path(".")
         }
 
-        plugin, channel, db = await build_plugin_and_channel()
+        _, _, db = await build_plugin_and_channel()
+
+        pm = create_plugin_manager()
+        llm_plugin = LLMPlugin(pm)
 
         mock_client = MagicMock()
         mock_client.start = AsyncMock()
 
-        with patch("corvidae.agent.LLMClient", return_value=mock_client) as mock_cls:
-            await plugin.on_start(config)
+        with patch("corvidae.llm_plugin.LLMClient", return_value=mock_client) as mock_cls:
+            await llm_plugin.on_start(config=config)
 
         # Verify LLMClient was created with extra_body=None
         mock_cls.assert_called_once_with(
@@ -541,6 +583,8 @@ class TestOnMessagePersistenceAndLoop:
 
     async def test_on_message_with_extra_body_empty(self):
         """extra_body={} in config should create LLMClient with extra_body={}."""
+        from corvidae.llm_plugin import LLMPlugin
+
         config = {
             "llm": {
                 "main": {
@@ -549,17 +593,18 @@ class TestOnMessagePersistenceAndLoop:
                     "extra_body": {},
                 },
             },
-            "daemon": {"session_db": ":memory:"},
-            "_base_dir": Path(".")
         }
 
-        plugin, channel, db = await build_plugin_and_channel()
+        _, _, db = await build_plugin_and_channel()
+
+        pm = create_plugin_manager()
+        llm_plugin = LLMPlugin(pm)
 
         mock_client = MagicMock()
         mock_client.start = AsyncMock()
 
-        with patch("corvidae.agent.LLMClient", return_value=mock_client) as mock_cls:
-            await plugin.on_start(config)
+        with patch("corvidae.llm_plugin.LLMClient", return_value=mock_client) as mock_cls:
+            await llm_plugin.on_start(config=config)
 
         # Verify LLMClient was created with extra_body={}
         mock_cls.assert_called_once_with(
@@ -590,7 +635,7 @@ class TestOnMessageThinkingTokens:
         raw = "<think>internal reasoning</think>clean answer"
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response(raw))
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="hi")
         await drain(plugin, channel)
@@ -629,7 +674,7 @@ class TestOnMessageThinkingTokens:
         mock_client.chat = AsyncMock(
             return_value={"choices": [{"message": response_msg}]}
         )
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="query")
         await drain(plugin, channel)
@@ -665,7 +710,7 @@ class TestOnMessageThinkingTokens:
         mock_client.chat = AsyncMock(
             return_value={"choices": [{"message": response_msg}]}
         )
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="query")
         await drain(plugin, channel)
@@ -695,7 +740,7 @@ class TestOnMessageThinkingTokens:
         mock_client.chat = AsyncMock(
             return_value={"choices": [{"message": response_msg}]}
         )
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="query")
         await drain(plugin, channel)
@@ -734,7 +779,7 @@ class TestOnMessageCompactionAndConfig:
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("answer"))
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="hi")
         await drain(plugin, channel)
@@ -745,8 +790,8 @@ class TestOnMessageCompactionAndConfig:
 
         class TrackingCompactPlugin:
             @hookimpl
-            async def compact_conversation(self, conversation, client, max_tokens):
-                compact_calls.append((client, max_tokens))
+            async def compact_conversation(self, conversation, max_tokens):
+                compact_calls.append((max_tokens,))
                 call_order.append("compact")
                 return None  # defer — no actual compaction needed in this test
 
@@ -770,8 +815,7 @@ class TestOnMessageCompactionAndConfig:
             await drain(plugin, channel)
 
         assert len(compact_calls) == 1
-        assert compact_calls[0][0] is mock_client
-        assert compact_calls[0][1] == 8000  # max_context_tokens from AGENT_DEFAULTS
+        assert compact_calls[0][0] == 8000  # max_context_tokens from AGENT_DEFAULTS
         assert call_order == ["compact", "turn"]
 
         await db.close()
@@ -809,7 +853,7 @@ class TestOnMessageCompactionAndConfig:
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("ok"))
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         await plugin.on_message(channel=channel_a, sender="user", text="hello")
         await plugin.on_message(channel=channel_b, sender="user", text="hello")
@@ -829,7 +873,7 @@ class TestOnMessageCompactionAndConfig:
 
 class TestOnStop:
     async def test_on_stop_cleans_up(self):
-        """on_stop closes the LLM client."""
+        """on_stop releases the _client reference (lifecycle owned by LLMPlugin)."""
         pm = create_plugin_manager()
         pm.register(ChannelRegistry(AGENT_DEFAULTS), name="registry")
 
@@ -837,12 +881,12 @@ class TestOnStop:
         pm.register(plugin, name="agent_loop")
 
         mock_client = MagicMock()
-        mock_client.stop = AsyncMock()
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         await plugin.on_stop()
 
-        mock_client.stop.assert_awaited_once()
+        # After on_stop, AgentPlugin releases the borrowed reference
+        assert plugin._client is None
 
     async def test_on_stop_cancels_all_queues(self):
         """on_stop cancels all channel queue consumers."""
@@ -856,7 +900,7 @@ class TestOnStop:
 
         mock_client = MagicMock()
         mock_client.stop = AsyncMock()
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         # Create a couple of channel queues on the plugin so we can verify they are stopped.
         from corvidae.queue import SerialQueue, QueueItem
@@ -900,9 +944,9 @@ class TestOnMessageToolCallRoundTrip:
             tool_result_store["called_with"] = query
             return "tool output"
 
-        plugin.tools = {"my_plugin_tool": my_plugin_tool}
+        plugin._tools = {"my_plugin_tool": my_plugin_tool}
         from corvidae.tool import tool_to_schema
-        plugin.tool_schemas = [tool_to_schema(my_plugin_tool)]
+        plugin._tool_schemas = [tool_to_schema(my_plugin_tool)]
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(
@@ -915,7 +959,7 @@ class TestOnMessageToolCallRoundTrip:
                 _make_text_response("final response after tool"),
             ]
         )
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         import asyncio
 
@@ -974,7 +1018,7 @@ class TestConversationInitPromptResolution:
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("ok"))
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="hello")
         await drain(plugin, channel)
@@ -994,7 +1038,7 @@ class TestConversationInitPromptResolution:
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("ok"))
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="hello")
         await drain(plugin, channel)
@@ -1029,7 +1073,7 @@ class TestConversationInitPromptResolution:
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("ok"))
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="hello")
         await drain(plugin, channel)
@@ -1062,7 +1106,7 @@ class TestConversationInitPromptResolution:
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("ok"))
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="hello")
         await drain(plugin, channel)
@@ -1091,7 +1135,7 @@ class TestOnMessageErrorHandling:
         mock_client = MagicMock()
         # chat raises to simulate run_agent_turn failure
         mock_client.chat = AsyncMock(side_effect=RuntimeError("LLM exploded"))
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         # Should not raise
         await plugin.on_message(channel=channel, sender="user", text="trigger error")
@@ -1129,7 +1173,7 @@ class TestOnNotify:
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("notified response"))
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         await plugin.pm.ahook.on_notify(
             channel=channel, source="test", text="background event happened",
@@ -1152,7 +1196,7 @@ class TestOnNotify:
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("tool result acknowledged"))
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         await plugin.pm.ahook.on_notify(
             channel=channel,
@@ -1216,7 +1260,7 @@ class TestShouldProcessMessage:
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("should not reach"))
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         class RejectPlugin:
             @hookimpl
@@ -1241,7 +1285,7 @@ class TestShouldProcessMessage:
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("accepted response"))
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         class AcceptPlugin:
             @hookimpl
@@ -1266,7 +1310,7 @@ class TestShouldProcessMessage:
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("default accept"))
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         class NeutralPlugin:
             @hookimpl
@@ -1289,7 +1333,7 @@ class TestShouldProcessMessage:
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("no filter"))
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="hi")
         await drain(plugin, channel)
@@ -1307,7 +1351,7 @@ class TestShouldProcessMessage:
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("not rejected"))
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         class FalsyPlugin:
             @hookimpl
@@ -1339,7 +1383,7 @@ class TestOnLlmError:
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(side_effect=RuntimeError("LLM failed"))
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         class ErrorPlugin:
             @hookimpl
@@ -1365,7 +1409,7 @@ class TestOnLlmError:
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(side_effect=RuntimeError("LLM failed"))
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         class NullErrorPlugin:
             @hookimpl
@@ -1390,7 +1434,7 @@ class TestOnLlmError:
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(side_effect=RuntimeError("LLM failed"))
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="trigger error")
         await drain(plugin, channel)
@@ -1411,7 +1455,7 @@ class TestOnLlmError:
         original_exc = RuntimeError("specific error message")
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(side_effect=original_exc)
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         received_error = {}
 
@@ -1448,7 +1492,7 @@ class TestCompactConversation:
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("answer"))
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         # Trigger conversation init
         await plugin.on_message(channel=channel, sender="user", text="hi")
@@ -1458,7 +1502,7 @@ class TestCompactConversation:
 
         class CompactPlugin:
             @hookimpl
-            async def compact_conversation(self, conversation, client, max_tokens):
+            async def compact_conversation(self, conversation, max_tokens):
                 compact_called.append(True)
                 return True  # handled
 
@@ -1491,12 +1535,12 @@ class TestCompactConversation:
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("answer"))
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         # Register a plugin that returns None (defers)
         class DeferPlugin:
             @hookimpl
-            async def compact_conversation(self, conversation, client, max_tokens):
+            async def compact_conversation(self, conversation, max_tokens):
                 return None
 
         plugin.pm.register(DeferPlugin(), name="defer_plugin")
@@ -1528,7 +1572,7 @@ class TestCompactConversation:
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("answer"))
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         # Trigger conversation init
         await plugin.on_message(channel=channel, sender="user", text="hi")
@@ -1536,7 +1580,7 @@ class TestCompactConversation:
 
         class ExplodingPlugin:
             @hookimpl
-            async def compact_conversation(self, conversation, client, max_tokens):
+            async def compact_conversation(self, conversation, max_tokens):
                 raise RuntimeError("compaction plugin exploded")
 
         plugin.pm.register(ExplodingPlugin(), name="exploding_plugin")
@@ -1566,7 +1610,7 @@ class TestCompactConversation:
         await db.close()
 
     async def test_compaction_hook_receives_correct_args(self):
-        """compact_conversation is called with conversation, client, and max_tokens
+        """compact_conversation is called with conversation and max_tokens
         matching the channel's resolved config."""
         from corvidae.hooks import hookimpl
         from corvidae.agent_loop import AgentTurnResult
@@ -1575,7 +1619,7 @@ class TestCompactConversation:
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("answer"))
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         # Trigger conversation init
         await plugin.on_message(channel=channel, sender="user", text="hi")
@@ -1585,9 +1629,8 @@ class TestCompactConversation:
 
         class CapturingPlugin:
             @hookimpl
-            async def compact_conversation(self, conversation, client, max_tokens):
+            async def compact_conversation(self, conversation, max_tokens):
                 captured["conversation"] = conversation
-                captured["client"] = client
                 captured["max_tokens"] = max_tokens
                 return None
 
@@ -1604,7 +1647,6 @@ class TestCompactConversation:
             await plugin.on_message(channel=channel, sender="user", text="second")
             await drain(plugin, channel)
 
-        assert captured.get("client") is mock_client
         assert captured.get("max_tokens") == 8000  # from AGENT_DEFAULTS
         assert captured.get("conversation") is channel.conversation
 
@@ -1800,7 +1842,7 @@ class TestBeforeAgentTurn:
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("answer"))
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         hook_calls = []
 
@@ -1860,7 +1902,7 @@ class TestBeforeAgentTurn:
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(side_effect=capture_chat)
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="hello")
         await drain(plugin, channel)
@@ -1890,7 +1932,7 @@ class TestBeforeAgentTurn:
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("tool result acknowledged"))
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         hook_call_channels = []
 
@@ -1926,12 +1968,61 @@ class TestBeforeAgentTurn:
 # ---------------------------------------------------------------------------
 
 
-class TestGetToolConfig:
-    """Tests for AgentPlugin.get_tool_config() — Part 1 of agent-decomposition.
+# ---------------------------------------------------------------------------
+# Section 20 — Part 4 red phase: AgentPlugin interface removals
+# ---------------------------------------------------------------------------
 
-    These are RED-phase TDD tests. They fail until:
-      1. AgentPlugin.__init__ initialises self.tool_registry = None
-      2. AgentPlugin.get_tool_config() is added
+
+class TestAgentPluginPart4Interfaces:
+    """Tests for Part 4 of the agent decomposition refactor.
+
+    All tests here fail until:
+    - AgentPlugin.depends_on includes "tools"
+    - AgentPlugin.get_tool_config() method is removed (moved to ToolCollectionPlugin)
+    - AgentPlugin.tool_registry attribute is removed (moved to ToolCollectionPlugin)
+
+    See plans/agent-decomposition-parts-3-4.md §Part 4.
+    """
+
+    def test_agent_plugin_depends_on_includes_tools(self):
+        """AgentPlugin.depends_on must include 'tools' after Part 4."""
+        assert "tools" in AgentPlugin.depends_on, (
+            "AgentPlugin.depends_on should include 'tools' — see plans/agent-decomposition-parts-3-4.md §Part 4"
+        )
+
+    def test_agent_plugin_does_not_have_get_tool_config(self):
+        """AgentPlugin.get_tool_config() must be removed after Part 4.
+
+        SubagentPlugin now gets tool config directly from ToolCollectionPlugin.
+        """
+        assert not hasattr(AgentPlugin, "get_tool_config"), (
+            "AgentPlugin.get_tool_config() should be removed — superseded by ToolCollectionPlugin"
+        )
+
+    def test_agent_plugin_does_not_have_tool_registry_attribute(self):
+        """AgentPlugin must not have a public tool_registry attribute after Part 4.
+
+        Tool registry ownership moves to ToolCollectionPlugin.
+        """
+        pm = create_plugin_manager()
+        pm.register(ChannelRegistry(AGENT_DEFAULTS), name="registry")
+        plugin = AgentPlugin(pm)
+        assert not hasattr(plugin, "tool_registry"), (
+            "AgentPlugin should not have a 'tool_registry' attribute — moved to ToolCollectionPlugin"
+        )
+
+# ---------------------------------------------------------------------------
+# Section — Part 3 LLMPlugin integration (red phase)
+# ---------------------------------------------------------------------------
+
+
+class TestAgentPluginLLMDependency:
+    """Tests for AgentPlugin interface changes required by Part 3.
+
+    These are RED-phase TDD tests. They fail until Part 3 of the
+    agent-decomposition refactor is implemented.
+
+    See plans/agent-decomposition-parts-3-4.md §Part 3.
     """
 
     def _make_pm(self):
@@ -1939,79 +2030,27 @@ class TestGetToolConfig:
         pm.register(ChannelRegistry(AGENT_DEFAULTS), name="registry")
         return pm
 
-    def test_tool_registry_attribute_exists_after_init(self):
-        """AgentPlugin.__init__ must initialise self.tool_registry.
+    def test_agent_plugin_depends_on_includes_llm(self):
+        """AgentPlugin.depends_on must include 'llm' after Part 3.
 
-        Currently tool_registry is only set in _start_plugin, so accessing
-        it after __init__ raises AttributeError.
+        Currently depends_on = {'registry', 'task'}, which does not
+        include 'llm'. This test fails until 'llm' is added.
+        """
+        assert "llm" in AgentPlugin.depends_on, (
+            "AgentPlugin.depends_on should include 'llm' — "
+            "see plans/agent-decomposition-parts-3-4.md §Part 3"
+        )
+
+    def test_agent_plugin_no_public_client_attribute_after_init(self):
+        """AgentPlugin.__init__ must NOT set a public 'client' attribute.
+
+        After Part 3, LLM client ownership moves to LLMPlugin. AgentPlugin
+        may cache it as '_client' (private), but '.client' (public) must
+        not be present immediately after init.
         """
         pm = self._make_pm()
         plugin = AgentPlugin(pm)
-        # After __init__ the attribute must exist (value may be None).
-        assert hasattr(plugin, "tool_registry"), (
-            "AgentPlugin.__init__ must initialise self.tool_registry"
-        )
-
-    def test_get_tool_config_method_exists(self):
-        """AgentPlugin must expose a get_tool_config() method."""
-        pm = self._make_pm()
-        plugin = AgentPlugin(pm)
-        assert hasattr(plugin, "get_tool_config"), (
-            "AgentPlugin must have a get_tool_config() method"
-        )
-        assert callable(plugin.get_tool_config), (
-            "get_tool_config must be callable"
-        )
-
-    def test_get_tool_config_returns_tuple(self):
-        """get_tool_config() returns a 2-tuple (tool_registry, max_tool_result_chars)."""
-        pm = self._make_pm()
-        plugin = AgentPlugin(pm)
-
-        # Inject a real ToolRegistry so the method has something to return.
-        plugin.tool_registry = ToolRegistry()
-
-        result = plugin.get_tool_config()
-        assert isinstance(result, tuple), (
-            f"get_tool_config() must return a tuple, got {type(result)}"
-        )
-        assert len(result) == 2, (
-            f"get_tool_config() must return a 2-tuple, got length {len(result)}"
-        )
-
-    def test_get_tool_config_returns_tool_registry(self):
-        """First element of get_tool_config() is the tool_registry instance."""
-        pm = self._make_pm()
-        plugin = AgentPlugin(pm)
-
-        registry = ToolRegistry()
-        plugin.tool_registry = registry
-
-        tool_registry, _ = plugin.get_tool_config()
-        assert tool_registry is registry, (
-            "get_tool_config()[0] must be self.tool_registry"
-        )
-
-    def test_get_tool_config_returns_max_tool_result_chars(self):
-        """Second element of get_tool_config() is _max_tool_result_chars."""
-        pm = self._make_pm()
-        plugin = AgentPlugin(pm)
-        plugin.tool_registry = ToolRegistry()
-
-        _, max_chars = plugin.get_tool_config()
-        assert max_chars == plugin._max_tool_result_chars, (
-            "get_tool_config()[1] must equal self._max_tool_result_chars"
-        )
-
-    def test_get_tool_config_reflects_updated_max_chars(self):
-        """get_tool_config() returns the current value of _max_tool_result_chars,
-        not a snapshot from init time."""
-        pm = self._make_pm()
-        plugin = AgentPlugin(pm)
-        plugin.tool_registry = ToolRegistry()
-
-        plugin._max_tool_result_chars = 42_000
-        _, max_chars = plugin.get_tool_config()
-        assert max_chars == 42_000, (
-            "get_tool_config() must return the live value of _max_tool_result_chars"
+        assert not hasattr(plugin, "client"), (
+            "AgentPlugin must not expose a public 'client' attribute after init — "
+            "LLM client ownership moves to LLMPlugin in Part 3"
         )

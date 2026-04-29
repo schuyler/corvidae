@@ -271,7 +271,7 @@ class TestQueueItemRole:
         pm.register(registry, name="registry")
         plugin = AgentPlugin.__new__(AgentPlugin)
         plugin.pm = pm
-        plugin.client = object()  # non-None so on_message proceeds
+        plugin._client = object()  # non-None so on_message proceeds
         plugin.queues = {}
         plugin._registry = registry
 
@@ -304,7 +304,7 @@ class TestQueueItemRole:
         pm.register(registry, name="registry")
         plugin = AgentPlugin.__new__(AgentPlugin)
         plugin.pm = pm
-        plugin.client = object()
+        plugin._client = object()
         plugin.queues = {}
         plugin._registry = registry
 

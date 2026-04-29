@@ -112,6 +112,11 @@ async def main(config_path: str = "agent.yaml") -> None:
     mcp_plugin = McpClientPlugin()
     pm.register(mcp_plugin, name="mcp")
 
+    # Register LLMPlugin before CompactionPlugin and AgentPlugin (owns LLM client lifecycle)
+    from corvidae.llm_plugin import LLMPlugin
+    llm_plugin = LLMPlugin(pm)
+    pm.register(llm_plugin, name="llm")
+
     # Register CompactionPlugin before AgentPlugin (provides default compaction strategy)
     from corvidae.compaction import CompactionPlugin
     compaction_plugin = CompactionPlugin(pm=pm)
@@ -124,7 +129,7 @@ async def main(config_path: str = "agent.yaml") -> None:
 
     # Register ContextCompactPlugin before AgentPlugin (KV cache-aware compaction with background blocks)
     from corvidae.context_compact import ContextCompactPlugin
-    context_compact_plugin = ContextCompactPlugin()
+    context_compact_plugin = ContextCompactPlugin(pm)
     pm.register(context_compact_plugin, name="context_compact")
 
     # Register RuntimeSettingsPlugin before AgentPlugin (provides set_settings tool)
@@ -137,6 +142,12 @@ async def main(config_path: str = "agent.yaml") -> None:
     from corvidae.tools.index import WorkspaceIndexerPlugin
     local_indexer_plugin = WorkspaceIndexerPlugin()
     pm.register(local_indexer_plugin, name="local_indexer")
+
+    # Register ToolCollectionPlugin after all tool-providing plugins (its on_start
+    # uses trylast=True so it fires after all other on_start hooks have run).
+    from corvidae.tool_collection import ToolCollectionPlugin
+    tool_collection_plugin = ToolCollectionPlugin(pm)
+    pm.register(tool_collection_plugin, name="tools")
 
     # Register AgentPlugin after tool-providing and transport plugins.
     # AgentPlugin.on_start/on_stop are called explicitly (not via broadcast)

@@ -630,7 +630,7 @@ class TestGracefulDegradation:
         mock_client.chat = AsyncMock(return_value={
             "choices": [{"message": {"role": "assistant", "content": "hi"}}]
         })
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         channel = registry.get_or_create("test", "scope1", config=ChannelConfig())
 

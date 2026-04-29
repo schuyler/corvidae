@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from corvidae.conversation import ConversationLog, init_db, MessageType
+from corvidae.context import MessageType
 
 
 @pytest.fixture

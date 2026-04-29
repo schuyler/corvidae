@@ -197,7 +197,7 @@ class TestMainCallsOnStartAndOnStop:
                 "corvidae.main.create_plugin_manager",
                 side_effect=patched_create_plugin_manager,
             ), patch(
-                "corvidae.agent.LLMClient",
+                "corvidae.llm_plugin.LLMClient",
                 return_value=mock_client,
             ), patch(
                 "corvidae.persistence.aiosqlite.connect",
@@ -271,7 +271,7 @@ class TestRegistryPopulatedBeforeOnStart:
                 "corvidae.main.create_plugin_manager",
                 side_effect=patched_create_plugin_manager,
             ), patch(
-                "corvidae.agent.LLMClient",
+                "corvidae.llm_plugin.LLMClient",
                 return_value=mock_client,
             ), patch(
                 "corvidae.persistence.aiosqlite.connect",

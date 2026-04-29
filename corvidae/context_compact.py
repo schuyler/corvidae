@@ -39,8 +39,9 @@ import logging
 from dataclasses import dataclass, field
 from time import time
 
-from corvidae.conversation import DEFAULT_CHARS_PER_TOKEN, MessageType
-from corvidae.hooks import hookimpl
+from corvidae.context import DEFAULT_CHARS_PER_TOKEN, MessageType
+from corvidae.hooks import get_dependency, hookimpl
+from corvidae.llm_plugin import LLMPlugin
 from corvidae.tool import Tool, ToolContext
 
 logger = logging.getLogger(__name__)
@@ -68,9 +69,10 @@ class ContextCompactPlugin:
     knowledge.
     """
 
-    depends_on = {"compaction"}
+    depends_on = {"compaction", "llm"}
 
-    def __init__(self) -> None:
+    def __init__(self, pm=None) -> None:
+        self.pm = pm
         self._enabled: bool = True
         self._bg_block_threshold: int = 20
         self._bg_compaction_threshold: float = 0.75
@@ -123,7 +125,7 @@ class ContextCompactPlugin:
         tool_registry.append(Tool.from_function(context_stats))
 
     @hookimpl
-    async def compact_conversation(self, conversation, client, max_tokens):
+    async def compact_conversation(self, conversation, max_tokens):
         """Run background block generation when compaction is triggered.
 
         This hook fires alongside CompactionPlugin's compaction. When the
@@ -131,8 +133,7 @@ class ContextCompactPlugin:
         a background block summarizing segments older than the last stored block.
 
         Args:
-            conversation: The ConversationLog being compacted.
-            client: LLMClient for generating summaries.
+            conversation: The ContextWindow being compacted.
             max_tokens: Channel's max_context_tokens limit.
 
         Returns:
@@ -166,6 +167,8 @@ class ContextCompactPlugin:
             return None
 
         # Generate background block summary.
+        llm = get_dependency(self.pm, "llm", LLMPlugin)
+        client = llm.main_client
         try:
             block_text = await self._generate_block(client, older_messages)
         except Exception as exc:

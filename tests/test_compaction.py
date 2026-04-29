@@ -41,7 +41,7 @@ class TestCompactFiltersNonMessage:
 
         captured_older = []
 
-        async def capture_summarize(client, messages):
+        async def capture_summarize(messages):
             captured_older.extend(messages)
             return "filtered summary"
 
@@ -57,7 +57,7 @@ class TestCompactFiltersNonMessage:
         # Patch the plugin's _summarize to capture what older list is passed in
         with patch.object(plugin, "_summarize", side_effect=capture_summarize):
             await plugin.compact_conversation(
-                channel=channel, conversation=conv, client=mock_client, max_tokens=50
+                channel=channel, conversation=conv, max_tokens=50
             )
 
         # The SUMMARY-typed dict (index 0) must not appear in older passed to summarizer
@@ -101,9 +101,10 @@ class TestOnCompactionHookFired:
         mock_client.chat = AsyncMock(
             return_value={"choices": [{"message": {"content": "hook test summary"}}]}
         )
+        plugin._llm_client = mock_client
 
         await plugin.compact_conversation(
-            channel=channel, conversation=conv, client=mock_client, max_tokens=50
+            channel=channel, conversation=conv, max_tokens=50
         )
 
         mock_pm.ahook.on_compaction.assert_awaited_once()
@@ -128,10 +129,8 @@ class TestOnCompactionHookFired:
         # Small messages — will not trigger compaction
         conv.messages = [{"role": "user", "content": "hi"} for _ in range(5)]
 
-        mock_client = AsyncMock()
-
         await plugin.compact_conversation(
-            channel=channel, conversation=conv, client=mock_client, max_tokens=10000
+            channel=channel, conversation=conv, max_tokens=10000
         )
 
         mock_pm.ahook.on_compaction.assert_not_awaited()
@@ -150,3 +149,63 @@ class TestOnCompactionHookFired:
         mock_pm = MagicMock()
         plugin = CompactionPlugin(pm=mock_pm)
         assert plugin.pm is mock_pm
+
+
+# ---------------------------------------------------------------------------
+# TestCompactionPluginPart3 — Part 3 red-phase tests
+# ---------------------------------------------------------------------------
+
+
+class TestCompactionPluginPart3:
+    """RED-phase tests for Part 3 of the agent-decomposition refactor.
+
+    These tests verify the new interface for CompactionPlugin after
+    LLMPlugin extraction. They fail until Part 3 is implemented.
+
+    See plans/agent-decomposition-parts-3-4.md §Part 3.
+    """
+
+    def test_compaction_plugin_has_depends_on(self):
+        """CompactionPlugin must have a 'depends_on' class attribute.
+
+        Currently CompactionPlugin has no depends_on attribute at all.
+        This test fails until the attribute is added.
+        """
+        from corvidae.compaction import CompactionPlugin
+
+        assert hasattr(CompactionPlugin, "depends_on"), (
+            "CompactionPlugin must have a 'depends_on' class attribute — "
+            "see plans/agent-decomposition-parts-3-4.md §Part 3"
+        )
+
+    def test_compaction_plugin_depends_on_includes_llm(self):
+        """CompactionPlugin.depends_on must include 'llm'.
+
+        Currently CompactionPlugin has no depends_on at all.
+        This test fails until depends_on = {'llm'} is added.
+        """
+        from corvidae.compaction import CompactionPlugin
+
+        assert "llm" in CompactionPlugin.depends_on, (
+            "CompactionPlugin.depends_on must include 'llm' — "
+            "see plans/agent-decomposition-parts-3-4.md §Part 3"
+        )
+
+    def test_compact_conversation_hookimpl_has_no_client_parameter(self):
+        """compact_conversation hookimpl must NOT have a 'client' parameter.
+
+        After Part 3, client is obtained from LLMPlugin internally, so the
+        hook signature drops the 'client' parameter. This test inspects the
+        actual method signature.
+        """
+        import inspect
+        from corvidae.compaction import CompactionPlugin
+
+        method = CompactionPlugin.compact_conversation
+        sig = inspect.signature(method)
+        param_names = list(sig.parameters.keys())
+
+        assert "client" not in param_names, (
+            f"compact_conversation hookimpl must not have a 'client' parameter "
+            f"after Part 3. Current parameters: {param_names}"
+        )

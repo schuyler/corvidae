@@ -20,7 +20,7 @@ import json
 import logging
 
 from corvidae.context import DEFAULT_CHARS_PER_TOKEN, MessageType
-from corvidae.hooks import hookimpl
+from corvidae.hooks import get_dependency, hookimpl
 
 logger = logging.getLogger(__name__)
 
@@ -28,23 +28,30 @@ logger = logging.getLogger(__name__)
 class CompactionPlugin:
     """Plugin that implements default token-budget conversation compaction."""
 
+    depends_on = {"llm"}
+
     def __init__(self, pm=None) -> None:
         self.pm = pm
         self._compaction_threshold: float = 0.8
         self._compaction_retention: float = 0.5
         self._min_messages: int = 5
         self._chars_per_token: float = DEFAULT_CHARS_PER_TOKEN
+        self._llm_client = None
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
+        from corvidae.llm_plugin import LLMPlugin
         agent_config = config.get("agent", {})
         self._compaction_threshold = agent_config.get("compaction_threshold", 0.8)
         self._compaction_retention = agent_config.get("compaction_retention", 0.5)
         self._min_messages = agent_config.get("min_messages_to_compact", 5)
         self._chars_per_token = agent_config.get("chars_per_token", DEFAULT_CHARS_PER_TOKEN)
+        if self.pm is not None:
+            llm = get_dependency(self.pm, "llm", LLMPlugin)
+            self._llm_client = llm.main_client
 
     @hookimpl
-    async def compact_conversation(self, channel, conversation, client, max_tokens):
+    async def compact_conversation(self, channel, conversation, max_tokens):
         """Compact the conversation if it exceeds 80% of max_tokens.
 
         Returns True if compaction was performed, None otherwise.
@@ -84,7 +91,7 @@ class CompactionPlugin:
         # Strip _message_type before passing to LLM to avoid serializing internal metadata.
         older_clean = [{k: v for k, v in m.items() if k != "_message_type"} for m in older]
 
-        summary_text = await self._summarize(client, older_clean)
+        summary_text = await self._summarize(older_clean)
         summary_msg = {
             "role": "assistant",
             "content": f"[Summary of earlier conversation]\n{summary_text}",
@@ -104,7 +111,7 @@ class CompactionPlugin:
 
         return True
 
-    async def _summarize(self, client, messages: list[dict]) -> str:
+    async def _summarize(self, messages: list[dict]) -> str:
         """Ask the LLM to summarize a list of messages.
 
         Sends the messages to the LLM with a system prompt asking for a
@@ -114,13 +121,12 @@ class CompactionPlugin:
         patch.object(plugin, "_summarize", ...).
 
         Args:
-            client: LLMClient instance.
             messages: List of message dicts (role/content, no _message_type).
 
         Returns:
             Summary text string from the LLM.
         """
-        response = await client.chat([
+        response = await self._llm_client.chat([
             {
                 "role": "system",
                 "content": (

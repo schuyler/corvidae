@@ -187,7 +187,7 @@ class TestRunTurn:
         plugin, channel, db = plugin_and_channel
 
         # Provide a mock client so the plugin doesn't blow up before the call
-        plugin.client = MagicMock()
+        plugin._client = MagicMock()
 
         with patch(
             "corvidae.agent.run_agent_turn",
@@ -205,7 +205,7 @@ class TestRunTurn:
     async def test_llm_error_sends_error_message(self, plugin_and_channel):
         """run_agent_turn raises -> error message sent to channel via send_message hook."""
         plugin, channel, db = plugin_and_channel
-        plugin.client = MagicMock()
+        plugin._client = MagicMock()
 
         with patch(
             "corvidae.agent.run_agent_turn",
@@ -228,7 +228,7 @@ class TestRunTurn:
     async def test_llm_error_fires_on_llm_error_hook(self, plugin_and_channel):
         """run_agent_turn raises -> on_llm_error hook is called with channel and error."""
         plugin, channel, db = plugin_and_channel
-        plugin.client = MagicMock()
+        plugin._client = MagicMock()
         plugin.pm.ahook.on_llm_error = AsyncMock(return_value=[])
 
         exc = RuntimeError("bad model")

@@ -125,7 +125,7 @@ class TestAfterPersistAssistantHookSafety:
             mock_client.chat = AsyncMock(
                 return_value=_make_text_response("hello from agent")
             )
-            plugin.client = mock_client
+            plugin._client = mock_client
 
             with caplog.at_level(logging.WARNING, logger="corvidae.agent"):
                 await plugin.on_message(channel=channel, sender="user", text="hi")
@@ -198,7 +198,7 @@ class TestOnAgentResponseHookSafety:
             mock_client.chat = AsyncMock(
                 return_value=_make_text_response("response text")
             )
-            plugin.client = mock_client
+            plugin._client = mock_client
 
             with caplog.at_level(logging.WARNING, logger="corvidae.agent"):
                 await plugin.on_message(channel=channel, sender="user", text="hello")
@@ -263,7 +263,7 @@ class TestSendMessageNormalPathHookSafety:
             mock_client.chat = AsyncMock(
                 return_value=_make_text_response("a response")
             )
-            plugin.client = mock_client
+            plugin._client = mock_client
 
             with caplog.at_level(logging.ERROR, logger="corvidae.agent"):
                 await plugin.on_message(channel=channel, sender="user", text="hi")
@@ -333,7 +333,7 @@ class TestSendMessageErrorPathHookSafety:
             mock_client = MagicMock()
             # Make run_agent_turn itself fail to trigger the error path
             mock_client.chat = AsyncMock(side_effect=RuntimeError("LLM unavailable"))
-            plugin.client = mock_client
+            plugin._client = mock_client
 
             with caplog.at_level(logging.WARNING, logger="corvidae.agent"):
                 await plugin.on_message(channel=channel, sender="user", text="hi")
@@ -442,7 +442,7 @@ class TestOnNotifyInTaskCompleteSafety:
                     _make_text_response("tool done"),
                 ]
             )
-            plugin.client = mock_client
+            plugin._client = mock_client
 
             with caplog.at_level(logging.WARNING, logger="corvidae"):
                 await plugin.on_message(channel=channel, sender="user", text="use tool")
