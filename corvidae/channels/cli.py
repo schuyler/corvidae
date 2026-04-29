@@ -2,6 +2,8 @@
 
 import asyncio
 import logging
+import os
+import signal
 import sys
 
 from corvidae.channel import ChannelRegistry
@@ -55,8 +57,12 @@ class CLIPlugin:
             except asyncio.CancelledError:
                 raise
             if not line:
-                # EOF (Ctrl-D or closed pipe)
-                break
+                # EOF (Ctrl-D or closed pipe) — trigger graceful shutdown
+                # by sending SIGINT to ourselves, reusing the signal handler
+                # in main().
+                logger.info("EOF received, initiating shutdown")
+                os.kill(os.getpid(), signal.SIGINT)
+                return
             text = line.strip()
             if not text:
                 sys.stdout.write("> ")
