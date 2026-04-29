@@ -67,7 +67,7 @@ class AgentSpec:
     async def on_notify(self, channel: Channel, source: str, text: str, tool_call_id: str | None, meta: dict | None) -> None
     async def should_process_message(self, channel: Channel, sender: str, text: str) -> bool | None
     async def on_llm_error(self, channel: Channel, error: Exception) -> str | None
-    async def compact_conversation(self, channel: Channel, conversation: ContextWindow, client: LLMClient, max_tokens: int) -> None
+    async def compact_conversation(self, channel: Channel, conversation: ContextWindow, max_tokens: int) -> None
     async def process_tool_result(self, tool_name: str, result: str, channel: Channel | None) -> str | None
     async def before_agent_turn(self, channel: Channel) -> None
     async def after_persist_assistant(self, channel: Channel, message: dict) -> None
@@ -138,8 +138,9 @@ class ChannelConfig:
     max_turns: int | None = None
 ```
 
-`resolve(agent_defaults)` returns a dict with all values resolved
-(channel value if set, else agent default, else hardcoded fallback).
+`resolve(agent_defaults, runtime_overrides=None)` returns a dict with all
+values resolved. Resolution order: built-in defaults → agent-level YAML →
+per-channel YAML → runtime overrides (set by `set_settings` tool).
 Defaults: `max_context_tokens=24000`, `keep_thinking_in_history=False`,
 `max_turns=10`.
 
@@ -154,14 +155,18 @@ class Channel:
     conversation: ContextWindow | None = None
     created_at: float
     last_active: float
-    turn_counter: int = 0  # consecutive LLM turns without user message
+    turn_counter: int = 0                   # consecutive LLM turns without user message
+    pending_tool_call_ids: set = set()      # tool call IDs awaiting results; cleared when all results collected
+    runtime_overrides: dict = {}            # per-channel runtime overrides set by set_settings tool
 ```
 
 `channel.id` returns `"{transport}:{scope}"`.
 
 **ChannelRegistry** — lifecycle management. `get_or_create(transport,
 scope, config)` returns an existing channel or creates one.
-`resolve_config(channel)` calls `channel.config.resolve(agent_defaults)`.
+`resolve_config(channel)` calls `channel.config.resolve(agent_defaults,
+runtime_overrides=channel.runtime_overrides)` so runtime overrides are
+factored into every resolution.
 
 `load_channel_config(config, registry)` pre-registers channels from
 YAML before `on_start`.
@@ -178,11 +183,27 @@ time, so editing prompt files takes effect on the next new conversation.
 
 ```python
 class LLMClient:
-    def __init__(self, base_url: str, model: str, api_key: str | None = None, extra_body: dict | None = None)
+    def __init__(
+        self,
+        base_url: str,
+        model: str,
+        api_key: str | None = None,
+        extra_body: dict | None = None,
+        max_retries: int = 3,
+        retry_base_delay: float = 2.0,
+        retry_max_delay: float = 60.0,
+        timeout: float | None = None,
+    )
     async def start(self)
     async def stop(self)
-    async def chat(self, messages: list[dict], tools: list[dict] | None = None) -> dict
+    async def chat(self, messages: list[dict], tools: list[dict] | None = None, extra_body: dict | None = None) -> dict
 ```
+
+Retry parameters: `max_retries` (default 3, set to 0 to disable), `retry_base_delay`
+(base exponential backoff delay in seconds), `retry_max_delay` (cap on backoff delay).
+Retries apply to transient HTTP status codes (429, 500, 502, 503, 504) and connection
+errors. Honors `Retry-After` response headers. `timeout` is the total HTTP timeout per
+request in seconds; `None` uses aiohttp's session default (300s).
 
 ## Agent Loop
 
@@ -346,9 +367,9 @@ CREATE INDEX idx_log_channel ON message_log(channel_id, timestamp);
 ## Agent
 
 `agent.py` — the central plugin. Implements `on_start`, `on_message`,
-`on_notify`, `on_stop`. Declares `depends_on = {"registry"}` so
-`validate_dependencies(pm)` can verify its dependency is registered at
-startup. Retrieves `ChannelRegistry` during `on_start` via
+`on_notify`, `on_stop`. Declares `depends_on = {"registry", "task", "llm", "tools"}`
+so `validate_dependencies(pm)` verifies those dependencies are registered at startup.
+Retrieves `ChannelRegistry` during `on_start` via
 `get_dependency(pm, "registry", ChannelRegistry)` from `hooks.py`.
 
 DB lifecycle (open/close) is delegated to `PersistencePlugin`. Conversation
@@ -357,10 +378,14 @@ initialization is handled directly in `Agent._process_queue_item`: a
 so persistence plugins can populate history. `Agent` reads `_chars_per_token`
 and `_base_dir` from config in `_start_plugin`.
 
-`Agent.queues` is a public `dict[str, SerialQueue]` (keyed by
-channel ID). `IdleMonitorPlugin` holds a reference to this dict; queues
-added after `IdleMonitorPlugin.on_start` are included automatically
-because the reference is live.
+The LLM client is borrowed from `LLMPlugin` (`get_dependency(pm, "llm", LLMPlugin)`)
+in `_start_plugin`. The tool registry and `max_result_chars` are borrowed from
+`ToolCollectionPlugin` (`get_dependency(pm, "tools", ToolCollectionPlugin)`).
+Agent does not own either lifecycle.
+
+`Agent.queues` is a public `dict[str, SerialQueue]` (keyed by channel ID).
+Queues added after startup are visible to other plugins that hold a reference
+to this dict because the reference is live.
 
 ### Message processing
 
@@ -383,6 +408,12 @@ per-channel `SerialQueue`. The queue's consumer calls
 4. Resolves channel config (including `max_turns`)
 5. Appends the inbound message to conversation; fires `on_conversation_event`
    (broadcast, side effects only — persistence plugins write to storage)
+5b. **Tool result batching** — if the item is a tool-result notification
+    (`role=NOTIFICATION` with `tool_call_id` set), removes the ID from
+    `channel.pending_tool_call_ids`. If the set is non-empty after the
+    removal, returns immediately (more results still pending). The LLM call
+    is deferred until the last result clears the set. User messages can
+    interleave during this window — they don't clear the pending set.
 6. Broadcasts `compact_conversation`; all implementations run for side
    effects; return values are not used
 7. Calls `before_agent_turn` hook (broadcast); fires `on_conversation_event`
@@ -405,6 +436,15 @@ per-channel `SerialQueue`. The queue's consumer calls
       `_resolve_display_text`, fires `on_agent_response`, sends text
       response
 
+After `_handle_response` completes, `_process_queue_item` calls
+`_maybe_fire_idle()`. This is the push-based idle detection mechanism:
+after each queue item finishes, `Agent` checks whether all `SerialQueue`
+instances in `self.queues` are empty and `TaskQueue.is_idle` is `True`
+(skipped if `TaskPlugin` is not registered). If so, and if at least
+`idle_cooldown_seconds` have elapsed since the last `on_idle` firing,
+it broadcasts the `on_idle` hook. This replaces the former polling-based
+`IdleMonitor` background task.
+
 **`_resolve_display_text`** broadcasts `transform_display_text` and
 resolves with `HookStrategy.VALUE_FIRST`. If the hook returns a value,
 that value is used; otherwise falls back to `result.text`. When a
@@ -414,16 +454,17 @@ is returned.
 
 ### Tool call dispatch
 
-`_dispatch_tool_calls` creates a `Task` for each tool call and enqueues
-it on the `TaskQueue` (accessed via
-`getattr(pm.get_plugin("task"), "task_queue", None)`). `TaskPlugin` is
-intentionally not declared in `Agent.depends_on` — it is treated
-as optional, and tool dispatch degrades gracefully (logs an error) if
-the task queue is unavailable. Each task's `work` closure calls
-`dispatch_tool_call()` from `tool.py`, which handles JSON parsing,
-unknown-tool detection, invocation, error wrapping, logging, and the
-`process_tool_result` hook. The closure returns `result.content`; the
+`_dispatch_tool_calls` records all tool call IDs in
+`channel.pending_tool_call_ids`, then creates a `Task` for each tool call
+and enqueues it on the `TaskQueue` (accessed via
+`getattr(pm.get_plugin("task"), "task_queue", None)`). Each task's `work`
+closure calls `dispatch_tool_call()` from `tool.py`, which handles JSON
+parsing, unknown-tool detection, invocation, error wrapping, logging, and
+the `process_tool_result` hook. The closure returns `result.content`; the
 TaskPlugin delivers it via `on_notify`.
+
+`TaskPlugin` is declared in `Agent.depends_on`. Tool dispatch logs an error
+and returns without enqueuing if the task queue is unavailable.
 
 Closure capture uses default argument binding to avoid the
 loop-variable capture bug.
@@ -462,13 +503,11 @@ class QueueItem:
 
 `persistence.py` — manages the SQLite database lifecycle and conversation
 persistence. Registered as `"persistence"` in `main.py`, immediately after
-`ChannelRegistry`.
+`ChannelRegistry`. Declares `depends_on = set()`.
 
-`PersistencePlugin` depends on `"registry"`. Its `on_start` retrieves
-`ChannelRegistry` via `get_dependency(pm, "registry", ChannelRegistry)`,
-reads `daemon.session_db` from config (default `"sessions.db"`), opens the
-database with `aiosqlite.connect`, and runs schema creation. `on_stop` closes
-the connection.
+`PersistencePlugin.on_start` reads `daemon.session_db` from config (default
+`"sessions.db"`), opens the database with `aiosqlite.connect`, and runs schema
+creation. `on_stop` closes the connection.
 
 `PersistencePlugin.db` is public for test injection: setting `persistence.db`
 before `on_start` causes the `if self.db is None:` guard to skip the open.
@@ -524,41 +563,27 @@ open for the plugin lifetime. Channel IDs are sanitized (`/` and `:` →
 
 ## IdleMonitorPlugin
 
-`idle.py` — monitors system idle state and fires `on_idle` when all
-queues are quiescent. Registered as `"idle_monitor"` in `main.py`.
+`idle.py` — a no-op stub that declares `depends_on = set()`. It implements
+the `on_idle` hook with a pass-through body. Registered as `"idle_monitor"`
+in `main.py` after `Agent`.
 
-`IdleMonitorPlugin` depends on `"agent"`. Its `on_start` is
-decorated with `@hookimpl(trylast=True)` so it runs after
-`Agent.on_start` has fully initialized.
+Idle detection is push-based, not polling-based. After each queue item
+finishes, `Agent._maybe_fire_idle()` checks whether all queues are empty and
+the cooldown has elapsed, then broadcasts `on_idle` directly. See the Agent
+section for the full idle detection logic.
 
-`IdleMonitorPlugin.on_start` calls `get_dependency(pm, "agent",
-Agent)` to retrieve a reference to `Agent.queues`, then
-creates and starts an `IdleMonitor`.
+`IdleMonitorPlugin` exists as a registration point for future idle-triggered
+behavior. Other plugins that want to react to idle events implement the
+`on_idle` hook directly.
 
-`IdleMonitorPlugin.on_stop` cancels the monitor before queue teardown.
-
-**Graceful degradation:** without `IdleMonitorPlugin`, the `on_idle`
-hook is never fired.
-
-### IdleMonitor
-
-`IdleMonitor` (`idle.py`) is a background asyncio task that polls for
-idle state and fires `on_idle` when conditions are met.
-
-**Idle condition:** all `SerialQueue` instances in `Agent.queues`
-have `is_empty=True`, `TaskQueue.is_idle` is `True` (no queued or
-active tasks; skipped if `TaskPlugin` is not registered), and at least
-`idle_cooldown_seconds` have elapsed since the last `on_idle` firing.
-
-**Polling:** checks the idle condition every `idle_poll_interval`
-seconds. Exceptions from `on_idle` implementations are caught and
-logged as warnings; the monitor continues running.
+**Graceful degradation:** without `IdleMonitorPlugin`, the `on_idle` hook
+may still fire if other plugins implement it, since `Agent._maybe_fire_idle()`
+broadcasts to all registered `on_idle` implementations regardless.
 
 **Config:**
 ```yaml
 daemon:
   idle_cooldown_seconds: 30   # minimum seconds between on_idle firings (default 30)
-  idle_poll_interval: 2       # seconds between idle checks (default 2)
 ```
 
 ## ThinkingPlugin
@@ -584,8 +609,12 @@ in-memory history regardless of `keep_thinking_in_history`.
 
 `compaction.py` — implements the `compact_conversation` hook to keep
 conversation history within the configured token budget. Registered as
-`"compaction"` in `main.py` before `Agent`. Logger name:
-`corvidae.compaction`.
+`"compaction"` in `main.py` before `Agent`. Declares `depends_on = {"llm"}`.
+Logger name: `corvidae.compaction`.
+
+**ContextCompactPlugin** (`context_compact.py`) is an alternative compaction
+strategy that is currently disabled in `main.py`. It is commented out because
+it conflicts with `CompactionPlugin` when both operate on the same conversation.
 
 ### compact_conversation
 
@@ -602,9 +631,14 @@ for side effects; its return value is not used by the caller.
 4. If `retain_count >= len(conversation.messages)`, return `None` (all messages fit — no-op).
 5. Filter the older (non-retained) messages to `MESSAGE` type only, excluding
    any `SUMMARY` entries. Strip `_message_type` metadata before passing to LLM.
-6. Call `_summarize(client, older_clean)` — sends the older messages to the
-   LLM with a system prompt asking for a concise summary. This method is a
-   separate public method so tests can patch it via `patch.object`.
+6. Call `_summarize(older_clean)` — sends the older messages to the LLM
+   with a system prompt asking for a concise summary. Resolves the LLM
+   client lazily via `get_dependency(pm, "llm", LLMPlugin)` on first call
+   (not in `on_start`, because `on_start` hooks run in LIFO order and
+   `CompactionPlugin.on_start` fires before `LLMPlugin.on_start`). Caps
+   input to 100 messages (first 50 + last 50 with a truncation marker).
+   This method is a separate public method so tests can patch it via
+   `patch.object`.
 7. Call `conversation.replace_with_summary(summary_msg, retain_count)`.
 8. Fire `on_compaction(channel, summary_msg, retain_count)` (broadcast) so
    persistence plugins can update the DB.
@@ -642,14 +676,125 @@ Tracks active tasks and completed results (bounded deque, last 100).
 and no tasks are currently executing.
 
 **TaskPlugin** — hookimpl that owns the TaskQueue. Reads
-`daemon.max_task_workers` from config (default 4) to set concurrency.
-Starts/stops the worker on lifecycle hooks. Registers the `task_status`
-tool. On task completion, fires `on_notify`.
+`daemon.max_task_workers` from config (default 4) to set concurrency, and
+`daemon.completed_task_buffer` (default 100) to set the completed-result
+history bound. Starts/stops the worker on lifecycle hooks. Registers the
+`task_status` tool. On task completion, fires `on_notify`.
+
+## LLMPlugin
+
+`llm_plugin.py` — owns `LLMClient` instance lifecycle. Registered as `"llm"`
+in `main.py` after `McpClientPlugin`. Declares `depends_on = set()`.
+
+### Lifecycle
+
+- `on_start` — reads `llm.main` (required) and `llm.background` (optional)
+  from config. Creates `LLMClient` instances for each and calls `start()` on
+  them.
+- `on_stop` — calls `stop()` on all clients.
+
+### Client access
+
+`LLMPlugin.get_client(role="main")` — returns the client for the given role.
+`"background"` falls back to `main_client` if no background client is
+configured. Other plugins retrieve the plugin via
+`get_dependency(pm, "llm", LLMPlugin)` and call `get_client()`.
+
+### Configuration
+
+```yaml
+llm:
+  main:
+    base_url: "http://host:8080"
+    model: "model-name"
+    api_key: "optional"
+    extra_body: {}
+    max_retries: 3
+    retry_base_delay: 2.0
+    retry_max_delay: 60.0
+    timeout: null             # optional; aiohttp default (300s) if absent
+  background:                 # optional; absent means use llm.main
+    base_url: "..."
+    model: "..."
+    # same keys as main
+```
+
+**Graceful degradation:** `llm.main` is required — `on_start` raises `KeyError`
+if absent.
+
+## ToolCollectionPlugin
+
+`tool_collection.py` — collects tools from all plugins at startup. Registered as
+`"tools"` in `main.py`. Declares `depends_on = set()`. Its `on_start` is decorated
+with `@hookimpl(trylast=True)` so it fires after all other `on_start` hooks have
+run, ensuring every tool-providing plugin has had a chance to finish setup.
+
+### Lifecycle
+
+- `on_start` — reads `tools.max_result_chars` from config (default 100,000).
+  Falls back to `agent.max_tool_result_chars` with a deprecation warning.
+  Calls `pm.hook.register_tools(tool_registry=collected)` (sync broadcast) to
+  collect tools from all plugins, then builds a `ToolRegistry`.
+
+### Tool access
+
+`ToolCollectionPlugin.get_tools()` returns `(tools_dict, tool_schemas)` for the
+agent loop. `ToolCollectionPlugin.get_registry()` returns the full `ToolRegistry`
+for inspection or filtering (e.g., `exclude("subagent")`).
+
+`ToolCollectionPlugin.max_result_chars` is a public attribute read by `Agent` and
+`SubagentPlugin`.
+
+### Configuration
+
+```yaml
+tools:
+  max_result_chars: 100000   # truncation limit for tool result strings (default 100_000)
+
+# Legacy (deprecated):
+agent:
+  max_tool_result_chars: 100000   # use tools.max_result_chars instead
+```
+
+**Graceful degradation:** without `ToolCollectionPlugin`, `Agent.depends_on`
+validation fails at startup.
+
+## DreamPlugin
+
+`tools/dream.py` — background memory consolidation. Registered as `"dream"` in
+`main.py` after `ToolCollectionPlugin`. Does not use `hookimpl` decorators —
+its `on_start` and `on_idle` are plain async methods registered via the standard
+`pm.register()` path.
+
+### What it does
+
+On each `on_idle` firing, if `interval_seconds` have elapsed since the last
+dream cycle, queries `sessions.db` for recent assistant messages (up to 40
+rows, filtered to `role=assistant`, capped at 20 per channel), extracts
+sentences from the content, deduplicates against the existing `## Long-term
+Memory` section of `MEMORY.md`, and appends new facts (up to 20 per cycle).
+
+### DB discovery
+
+Searches for `sessions.db` in the workspace root at startup, checking
+`workspace/corvidae/sessions.db` and `workspace/sessions.db` first, then
+recursively up to depth 3. If not found, the dream cycle is a no-op.
+
+### Configuration
+
+```yaml
+dream:
+  interval_seconds: 300   # minimum seconds between dream cycles (default 300)
+```
+
+**Graceful degradation:** if `sessions.db` is not found, or if `MEMORY.md`
+is absent, the plugin skips the cycle without error.
 
 ## Subagent Tool
 
 `tools/subagent.py` — `SubagentPlugin` registers the `subagent` tool, which
-launches a background agent with its own LLM session and the full tool set.
+launches a background agent using the shared LLM client from `LLMPlugin` and
+the full tool set minus `subagent` itself.
 
 ### Tool signature
 
@@ -663,24 +808,29 @@ if the task queue or channel context is unavailable.
 
 ### How it works
 
-1. At tool-call time (not `on_start`), retrieves `Agent` via
-   `get_dependency(self.pm, "agent", Agent)` and reads
-   `Agent._max_tool_result_chars` and `Agent.tool_registry`.
+Declares `depends_on = {"llm", "tools"}`.
+
+1. At tool-call time (not `on_start`), retrieves `ToolCollectionPlugin` via
+   `get_dependency(self.pm, "tools", ToolCollectionPlugin)` and reads
+   `max_result_chars` and the tool registry from it.
 2. Calls `registry.exclude("subagent")` to remove itself from the subagent's tool set.
-3. Builds a `messages` list (system prompt + user instructions) and a
-   `work` coroutine that captures it, creates a fresh `LLMClient`, calls
-   `run_agent_loop` with `channel` and `task_queue` from `_ctx` (enabling
-   the subagent to enqueue nested tasks), strips thinking from the result,
-   then shuts the client down.
-4. Wraps `work` in a `Task` with `tool_call_id` from `_ctx`, enqueues it on
+3. Retrieves the shared background `LLMClient` from `LLMPlugin` via
+   `get_dependency(self.pm, "llm", LLMPlugin).get_client("background")`. The
+   subagent does NOT start or stop this client — lifecycle is owned by `LLMPlugin`.
+4. Builds a `messages` list (system prompt + user instructions) and a
+   `work` coroutine that calls `run_agent_loop` with `channel` and `task_queue`
+   from `_ctx` (enabling the subagent to enqueue nested tasks), then strips
+   thinking from the result.
+5. Wraps `work` in a `Task` with `tool_call_id` from `_ctx`, enqueues it on
    `ctx.task_queue`.
-5. Returns immediately; result is delivered via `TaskPlugin → on_notify →
+6. Returns immediately; result is delivered via `TaskPlugin → on_notify →
    Agent` (same path as all other tasks).
 
 ### LLM configuration
 
-Uses `llm.background` if present in config, otherwise `llm.main`. Configured
-at `on_start` time; subagent calls after startup use the value captured then.
+Uses the shared background `LLMClient` from `LLMPlugin` (`llm.background` if
+configured, otherwise `llm.main`). The client is retrieved at tool-call time, not
+captured at `on_start`.
 
 ### System prompt
 
@@ -797,18 +947,29 @@ Registered via `CoreToolsPlugin` in `tools/__init__.py`:
 
 | Tool | File | Purpose |
 |------|------|---------|
-| `shell(command)` | `tools/shell.py` | Execute shell command, 30s timeout |
-| `read_file(path)` | `tools/files.py` | Read file (<1MB) |
+| `shell(command)` | `tools/shell.py` | Execute shell command, 30s timeout (configurable) |
+| `read_file(path)` | `tools/files.py` | Read file (1MB limit, configurable) |
 | `write_file(path, content)` | `tools/files.py` | Write file, creates parent dirs |
-| `web_fetch(url)` | `tools/web.py` | Fetch URL, 15s timeout, 50KB truncation |
+| `web_fetch(url)` | `tools/web.py` | Fetch URL, 15s timeout, 50KB truncation (configurable) |
+| `web_search(query, max_results)` | `tools/web.py` | Search via DuckDuckGo, default 8 results (configurable) |
+| `task_pipeline(definition)` | `tools/task_pipeline.py` | Execute YAML/JSON task DAG with dependency resolution |
 
 Additionally, `SubagentPlugin` registers `subagent` and `TaskPlugin`
 registers `task_status` as tool closures during `on_start`.
 
 | Tool | File | Purpose |
 |------|------|---------|
-| `subagent(instructions, description)` | `tools/subagent.py` | Launch background subagent with own LLM session |
+| `subagent(instructions, description)` | `tools/subagent.py` | Launch background subagent using shared LLM client |
 | `task_status()` | `task.py` | Report task queue status |
+
+The following tool files exist but are not registered in the current `main.py`:
+
+| File | Status |
+|------|--------|
+| `tools/goal_tracker.py` | Experimental; not registered |
+| `tools/perf_mon.py` | Experimental; not registered |
+| `tools/local_indexer.py` | Experimental; not registered |
+| `tools/index.py` | Disabled via commented-out registration in `main.py` |
 
 ## Transports
 
@@ -832,7 +993,6 @@ boundaries.
 daemon:
   session_db: sessions.db
   idle_cooldown_seconds: 30   # minimum seconds between on_idle firings (default 30)
-  idle_poll_interval: 2       # seconds between idle checks (default 2)
 
 llm:
   main:
@@ -840,15 +1000,33 @@ llm:
     model: "model-name"
     api_key: "optional"
     extra_body: {}              # optional, passed through to LLM
+    max_retries: 3              # retry attempts on transient errors (default 3)
+    retry_base_delay: 2.0       # base exponential backoff delay in seconds
+    retry_max_delay: 60.0       # maximum retry delay cap in seconds
+    timeout: null               # HTTP timeout per request; null = aiohttp default (300s)
   background:                   # optional separate LLM for subagent tasks
     base_url: "..."
     model: "..."
+    # same keys as main
 
 agent:
   system_prompt: "..."          # string or list of file paths
   max_context_tokens: 24000
   keep_thinking_in_history: false
   max_turns: 10
+  immutable_settings:           # keys the agent must not change (system_prompt always added)
+    - max_turns
+
+tools:
+  max_result_chars: 100000      # truncation limit for tool result strings (default 100_000)
+  shell_timeout: 30             # shell tool timeout in seconds (default 30)
+  web_fetch_timeout: 15         # web_fetch timeout in seconds (default 15)
+  web_max_response_bytes: 50000 # web_fetch response truncation (default 50_000)
+  max_file_read_bytes: 1048576  # read_file size limit in bytes (default 1MB)
+  web_search_max_results: 8     # web_search result count (default 8)
+
+dream:
+  interval_seconds: 300         # minimum seconds between dream cycles (default 300)
 
 channels:
   "irc:#channel":
@@ -878,19 +1056,22 @@ Relative paths resolve against the directory containing `agent.yaml`.
 Defined in `main.py`:
 
 1. `ChannelRegistry` — registered as a named plugin (`"registry"`) on the PM
-2. `PersistencePlugin` — DB lifecycle and conversation persistence (after registry, before everything else)
+2. `PersistencePlugin` — DB lifecycle and conversation persistence (after registry)
 3. `JsonlLogPlugin` — JSONL conversation logging (peer persistence hook consumer)
-4. `CoreToolsPlugin` — registers core tools
+4. `CoreToolsPlugin` — registers core tools (shell, read_file, write_file, web_fetch, web_search, task_pipeline)
 5. `CLIPlugin` — stdin/stdout transport
 6. `IRCPlugin` — IRC transport
 7. `TaskPlugin` — task queue
 8. `SubagentPlugin` — registers the `subagent` tool
 9. `McpClientPlugin` — MCP server connections and tool forwarding
-10. `CompactionPlugin` — provides default `compact_conversation` implementation
-11. `ThinkingPlugin` — handles `<think>` stripping and `reasoning_content` removal
-12. `RuntimeSettingsPlugin` — registers the `set_settings` tool
-13. `Agent` — agent loop (after all tools, transports, and support plugins)
-14. `IdleMonitorPlugin` — idle monitor (after `Agent`, depends on `"agent"`)
+10. `LLMPlugin` — owns LLM client lifecycle (after mcp, before compaction and agent)
+11. `CompactionPlugin` — provides default `compact_conversation` implementation
+12. `ThinkingPlugin` — handles `<think>` stripping and `reasoning_content` removal
+13. `RuntimeSettingsPlugin` — registers the `set_settings` tool
+14. `ToolCollectionPlugin` — collects tools from all plugins via `register_tools` hook; `on_start` is `trylast=True` so it fires after all other `on_start` hooks
+15. `DreamPlugin` — background memory consolidation via `on_idle`
+16. `Agent` — agent loop (after all tools, transports, and support plugins)
+17. `IdleMonitorPlugin` — no-op stub; registered after `Agent`
 
 After all registrations, `validate_dependencies(pm)` runs to verify that
 every plugin's `depends_on` set names a registered plugin. Startup aborts
@@ -917,26 +1098,23 @@ dependency and the plugin that declared it. Runs once at startup.
 ### Current dependency graph
 
 ```
-Agent               → "registry"    (ChannelRegistry)
+Agent               → "registry", "task", "llm", "tools"
 CLIPlugin           → "registry"    (ChannelRegistry)
 IRCPlugin           → "registry"    (ChannelRegistry)
-PersistencePlugin   → "registry"    (ChannelRegistry)
-SubagentPlugin      → "agent"       (Agent)
-IdleMonitorPlugin   → "agent"       (Agent)
+SubagentPlugin      → "llm", "tools"
+CompactionPlugin    → "llm"         (LLMPlugin)
+ThinkingPlugin      → "registry"    (ChannelRegistry)
 ```
 
-Plugins with no `depends_on` attribute declared: `CoreToolsPlugin`,
-`McpClientPlugin`, `CompactionPlugin`, `ThinkingPlugin`, `RuntimeSettingsPlugin`.
+Plugins with `depends_on = set()` (declared but empty):
+`LLMPlugin`, `ToolCollectionPlugin`, `PersistencePlugin`, `IdleMonitorPlugin`,
+`CoreToolsPlugin`, `McpClientPlugin`, `RuntimeSettingsPlugin`, `JsonlLogPlugin`,
+`TaskPlugin`.
 
 Transport plugins use `get_dependency(pm, "registry", ChannelRegistry)` in
 `on_start` to retrieve the shared `ChannelRegistry`. `SubagentPlugin` calls
-`get_dependency(pm, "agent", Agent)` at tool-call time (inside
-`_launch`) to access `Agent.tool_registry`.
-
-`Agent` also accesses `TaskPlugin` via `pm.get_plugin("task")`, but
-this is intentionally not declared in `depends_on` — `TaskPlugin` is
-treated as optional, and `_dispatch_tool_calls` degrades gracefully
-(logs an error and returns) when the task queue is unavailable.
+`get_dependency(pm, "tools", ToolCollectionPlugin)` and
+`get_dependency(pm, "llm", LLMPlugin)` at tool-call time inside `_launch`.
 
 ## Directory Layout
 
@@ -944,16 +1122,19 @@ treated as optional, and `_dispatch_tool_calls` degrades gracefully
 corvidae/
 ├── hooks.py              # AgentSpec, hookimpl, create_plugin_manager
 ├── tool.py               # Tool, ToolRegistry, tool_to_schema, ToolContext
+├── tool_collection.py    # ToolCollectionPlugin (collects tools at startup)
 ├── channel.py            # Channel, ChannelConfig, ChannelRegistry, resolve_system_prompt
 ├── queue.py              # SerialQueue (is_empty property)
 ├── llm.py                # LLMClient
+├── llm_plugin.py         # LLMPlugin (LLM client lifecycle)
 ├── agent_loop.py         # run_agent_turn(), run_agent_loop(), strip_thinking
 ├── context.py            # ContextWindow, MessageType, DEFAULT_CHARS_PER_TOKEN
+├── context_compact.py    # ContextCompactPlugin (disabled — conflicts with CompactionPlugin)
 ├── jsonl_log.py          # JsonlLogPlugin (on_conversation_event, on_compaction)
 ├── logging.py            # StructuredFormatter, _DEFAULT_LOGGING
 ├── agent.py              # Agent (single-turn dispatch)
 ├── persistence.py        # PersistencePlugin (DB lifecycle, conversation init)
-├── idle.py               # IdleMonitor, IdleMonitorPlugin
+├── idle.py               # IdleMonitorPlugin (no-op stub; idle detection is push-based in Agent)
 ├── thinking.py           # ThinkingPlugin
 ├── compaction.py         # CompactionPlugin
 ├── task.py               # Task, TaskQueue, TaskPlugin
@@ -966,22 +1147,27 @@ corvidae/
     ├── __init__.py       # CoreToolsPlugin
     ├── shell.py
     ├── files.py
-    ├── web.py
+    ├── web.py            # web_fetch, web_search
     ├── subagent.py       # SubagentPlugin, subagent tool
-    └── settings.py       # RuntimeSettingsPlugin, set_settings tool
+    ├── settings.py       # RuntimeSettingsPlugin, set_settings tool
+    ├── task_pipeline.py  # TaskPipelinePlugin, task_pipeline tool
+    ├── dream.py          # DreamPlugin (background memory consolidation)
+    ├── goal_tracker.py   # experimental; not registered
+    ├── perf_mon.py       # experimental; not registered
+    ├── local_indexer.py  # experimental; not registered
+    └── index.py          # WorkspaceIndexerPlugin (disabled in main.py)
 ```
 
 ## Known Risks
 
 **Tool result ordering.** When the LLM requests multiple tool calls,
-each completes independently and triggers a separate agent turn. The
-LLM sees results one at a time, not batched. This may cause chattier
-behavior or premature responses. Batching is intentionally not
-implemented: it adds timeout and partial-failure complexity (what
-happens when one tool in a batch hangs or errors?) that is not worth
-the cost for a personal daemon where correctness and simplicity matter
-more than throughput. Can be revisited if chattiness becomes a real
-problem.
+results arrive independently as task completions. Tool results are
+batched via `channel.pending_tool_call_ids`: each result is appended
+to the conversation as it arrives, but the LLM call is deferred until
+the last pending result clears the set. This means the LLM sees all
+results from a batch in a single turn. Partial failure (one tool errors)
+still delivers all results; the failed tool returns an error string.
+User messages can interleave mid-batch without disrupting the pending set.
 
 **User message interleaving.** If a user sends a new message while tool
 results are still pending, the conversation may interleave user

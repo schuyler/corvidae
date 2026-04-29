@@ -17,14 +17,12 @@ daemon:
   max_task_workers: 4
   completed_task_buffer: 100
   idle_cooldown_seconds: 30
-  idle_poll_interval: 2
 
 agent:
   system_prompt: "You are a helpful assistant."
   max_context_tokens: 24000
   max_turns: 10
   keep_thinking_in_history: false
-  max_tool_result_chars: 100000
   compaction_threshold: 0.8
   compaction_retention: 0.5
   min_messages_to_compact: 5
@@ -35,6 +33,7 @@ tools:
   web_fetch_timeout: 15
   web_max_response_bytes: 50000
   max_file_read_bytes: 1048576
+  max_result_chars: 100000
 
 irc:
   host: irc.libera.chat
@@ -77,7 +76,7 @@ The `llm.main` block is required. `llm.background` is optional; when absent, sub
 | `llm.background.retry_max_delay` | float | `60.0` | Maximum delay cap in seconds for background LLM retries. |
 | `llm.background.timeout` | float | `null` | HTTP timeout in seconds for background LLM requests. |
 
-`llm.background` is read by `SubagentPlugin`. If the key is absent, `SubagentPlugin` falls back to `llm.main` for all subagent calls.
+`llm.background` is parsed by `LLMPlugin`. If the key is absent, `LLMPlugin.get_client("background")` returns the main client, so all callers (including `SubagentPlugin`) fall back to `llm.main`.
 
 Retry behavior applies to transient status codes (429, 500, 502, 503, 504) and connection errors. The `Retry-After` header (429 responses) is honored when present; otherwise exponential backoff is used. Retries do not apply to client errors (4xx) other than 429.
 
@@ -90,8 +89,9 @@ Retry behavior applies to transient status codes (429, 500, 502, 503, 504) and c
 | `daemon.session_db` | string | `sessions.db` | Path to the SQLite database file for conversation history. Relative paths are resolved from the working directory. |
 | `daemon.max_task_workers` | integer | `4` | Number of concurrent background task workers in `TaskQueue`. |
 | `daemon.completed_task_buffer` | integer | `100` | Number of completed task records retained in memory for `task_status` output. |
-| `daemon.idle_cooldown_seconds` | number | `30` | Minimum seconds between consecutive `on_idle` hook firings. |
-| `daemon.idle_poll_interval` | number | `2` | Seconds between idle-state checks by `IdleMonitorPlugin`. |
+| `daemon.idle_cooldown_seconds` | number | `30` | Minimum seconds between consecutive `on_idle` hook firings. Idle detection is push-based (`Agent._maybe_fire_idle`); this value governs the cooldown between successive firings. |
+| `daemon.sqlite_journal_mode` | string | `wal` | SQLite journal mode for the session database. Allowed values: `delete`, `truncate`, `persist`, `memory`, `wal`, `off`. Read by `PersistencePlugin`. |
+| `daemon.jsonl_log_dir` | string | — | Directory for per-channel JSONL conversation logs. When set, `JsonlLogPlugin` appends one JSON line per conversation event to `<dir>/<channel_id>.jsonl`. Relative paths are resolved against `_base_dir`. Omit to disable JSONL logging. |
 
 ---
 
@@ -105,25 +105,48 @@ These values apply to all channels. Per-channel overrides in the `channels` sect
 | `agent.max_context_tokens` | integer | `24000` | Token budget for conversation history. `CompactionPlugin` compacts when the estimated token count exceeds `compaction_threshold` × this value. |
 | `agent.max_turns` | integer | `10` | Maximum consecutive tool-calling turns per user message before tool dispatch is suppressed. |
 | `agent.keep_thinking_in_history` | boolean | `false` | When `false`, `ThinkingPlugin` strips `reasoning_content` from in-memory assistant messages after they are persisted. Does not affect the DB record. |
-| `agent.max_tool_result_chars` | integer | `100000` | Maximum characters in a tool result string before truncation. Read by `Agent`; `SubagentPlugin` retrieves the value from `Agent` at launch time. Truncated results have `[truncated — N chars total]` appended. |
 | `agent.compaction_threshold` | float | `0.8` | Compaction triggers when `token_estimate / max_context_tokens` exceeds this value. |
 | `agent.compaction_retention` | float | `0.5` | After compaction, retain messages that fit within `compaction_retention × max_context_tokens` tokens, counting from the most recent. |
 | `agent.min_messages_to_compact` | integer | `5` | Skip compaction if the conversation has this many messages or fewer. |
 | `agent.chars_per_token` | float | `3.5` | Character-to-token ratio used by `token_estimate()`. Must match across `CompactionPlugin` and `PersistencePlugin`; configure once here. |
 | `agent.immutable_settings` | list of strings | `[]` | Keys the agent is blocked from changing via the `set_settings` tool. `system_prompt` is always blocked regardless of this list. |
 
+### `agent.context_compact` — background compaction (disabled)
+
+`ContextCompactPlugin` is registered but currently disabled in `main.py`. The configuration keys are accepted but have no effect until the plugin is re-enabled.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `agent.context_compact.enabled` | boolean | `true` | Enable background block management when the plugin is active. |
+| `agent.context_compact.bg_block_threshold` | integer | `20` | Number of conversation turns after which a background block is generated. |
+| `agent.context_compact.bg_compaction_threshold` | float | `0.75` | Token-budget fraction at which background compaction is triggered. |
+| `agent.context_compact.min_background_blocks` | integer | `1` | Minimum number of background blocks to retain in prompt context. |
+| `agent.context_compact.max_background_block_chars` | integer | `2048` | Maximum characters per generated background block. |
+
+---
+
+## `dream` — background memory consolidation
+
+`DreamPlugin` runs on the `on_idle` hook and reviews recent conversation history to update `MEMORY.md`.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `dream.interval_seconds` | integer | `300` | Minimum seconds between dream cycles. A cycle is skipped if less than this time has elapsed since the last run. |
+
 ---
 
 ## `tools` — built-in tool settings
 
-Configured by `CoreToolsPlugin`.
+Configured by `CoreToolsPlugin`. `tools.max_result_chars` is read by `ToolCollectionPlugin`.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
+| `tools.max_result_chars` | integer | `100000` | Maximum characters in a tool result string before truncation. Read by `ToolCollectionPlugin`. Truncated results have `[truncated — N chars total]` appended. The legacy key `agent.max_tool_result_chars` is accepted but deprecated; use `tools.max_result_chars` instead. |
 | `tools.shell_timeout` | integer | `30` | Seconds before a `shell` command is killed. |
 | `tools.web_fetch_timeout` | integer | `15` | Seconds before a `web_fetch` HTTP request is aborted. |
-| `tools.web_max_response_bytes` | integer | `50000` | Maximum bytes of HTTP response body returned by `web_fetch`. Content beyond this limit is truncated with `[truncated]`. This limit is independent of `agent.max_tool_result_chars`. |
+| `tools.web_max_response_bytes` | integer | `50000` | Maximum bytes of HTTP response body returned by `web_fetch`. Content beyond this limit is truncated with `[truncated]`. This limit is independent of `tools.max_result_chars`. |
 | `tools.max_file_read_bytes` | integer | `1048576` | Maximum file size in bytes that `read_file` will return. Files larger than this limit return an error string. Default is 1 MB (1,048,576 bytes). |
+| `tools.web_search_max_results` | integer | `8` | Maximum number of DuckDuckGo results returned by the `web_search` tool. |
 
 ---
 
@@ -173,17 +196,27 @@ channels:
 
 Configured by `McpClientPlugin`. The `mcp` section is optional; if absent, no MCP servers are connected. See the [Plugin Guide](plugin-guide.md#mcpclientplugin-corvidae-mcp_clientpy) for full details.
 
+For `transport: stdio`, the required keys are `command` and optionally `args` and `env`. For `transport: sse`, the required key is `url`; `command`, `args`, and `env` are not used.
+
 ```yaml
 mcp:
   servers:
-    my_server:
-      transport: stdio         # "stdio" or "sse"
-      command: npx             # command to launch (stdio only)
+    # stdio transport example
+    my_fs_server:
+      transport: stdio
+      command: npx
       args: ["-y", "@modelcontextprotocol/server-filesystem", "/path"]
       env:                     # optional environment variables (stdio only)
         NODE_ENV: production
       tool_prefix: "fs"        # optional; defaults to server name
       timeout_seconds: 30      # optional; default 30
+
+    # sse transport example
+    my_sse_server:
+      transport: sse
+      url: http://localhost:9000/sse   # required for sse transport
+      tool_prefix: "remote"            # optional; defaults to server name
+      timeout_seconds: 30              # optional; default 30
 ```
 
 ---
