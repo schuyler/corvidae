@@ -3,7 +3,7 @@
 # tasks use llm.main.
 llm:
   main:
-    base_url: http://localhost:8080   # llama-server, vLLM, OpenAI, etc.
+    base_url: http://localhost:8080/v1   # llama-server, vLLM, OpenAI, etc.
     model: llama3                     # model name as the backend expects it
     # api_key: sk-...                 # omit for local servers
     # extra_body:                      # optional: provider-specific request payload extensions

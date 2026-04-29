@@ -169,7 +169,7 @@ class LLMClient:
             try:
                 start = time.monotonic()
                 async with self.session.post(
-                    f"{self.base_url}/v1/chat/completions",
+                    f"{self.base_url}/chat/completions",
                     json=payload,
                     timeout=self.timeout,
                 ) as resp:

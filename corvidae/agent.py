@@ -432,6 +432,22 @@ class Agent:
         except Exception:
             logger.warning("on_conversation_event hook failed", exc_info=True)
 
+        # 4b. Batch tool results: if this is a tool-result notification and
+        # there are still pending tool calls from the current batch, skip the
+        # LLM call. The serial queue ensures results arrive one at a time; the
+        # last result to arrive clears pending_tool_call_ids and triggers the
+        # LLM call. User messages can interleave — they don't clear the pending
+        # set, so the agent remains responsive while tools run.
+        if item.role == QueueItemRole.NOTIFICATION and item.tool_call_id:
+            channel.pending_tool_call_ids.discard(item.tool_call_id)
+            if channel.pending_tool_call_ids:
+                logger.debug(
+                    "tool result buffered, pending: %d",
+                    len(channel.pending_tool_call_ids),
+                    extra={"channel": channel.id, "tool_call_id": item.tool_call_id},
+                )
+                return
+
         # 5. Compact if approaching context limit
         try:
             await self.pm.ahook.compact_conversation(
@@ -512,6 +528,9 @@ class Agent:
         if task_queue is None:
             logger.error("tool calls requested but no TaskQueue available")
             return
+
+        # Record all call IDs so we can wait for every result before the next LLM call.
+        channel.pending_tool_call_ids = {call["id"] for call in tool_calls}
 
         for call in tool_calls:
             call_id = call["id"]
