@@ -34,12 +34,15 @@ daemon:
 # Agent-level defaults — apply to all channels unless overridden (optional)
 agent:
   system_prompt: "You are a helpful assistant."
-  max_context_tokens: 24000
+  max_context_tokens: 64000
   keep_thinking_in_history: false
   # max_turns: 10                   # max consecutive tool-calling turns per message
   # max_tool_result_chars: 100000   # truncate tool results beyond this length
   # compaction_threshold: 0.8       # compact when token estimate exceeds this × max_context_tokens
   # compaction_retention: 0.5       # after compaction, retain this fraction of token budget
+  #                                    ⚠ Must be significantly less than compaction_threshold.
+  #                                    If retention ≥ threshold, compaction is a no-op and the agent
+  #                                    will re-compact every few messages without reducing context.
   # min_messages_to_compact: 5      # skip compaction with this many messages or fewer
   # chars_per_token: 3.5            # character-to-token ratio for token estimation
   # immutable_settings:             # keys the agent cannot change via set_settings (system_prompt always blocked)
