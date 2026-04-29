@@ -74,15 +74,37 @@ resolved channel config); after the context window refactor, that
 responsibility moved to `AgentPlugin`. Remove `_registry`, the
 `get_dependency` call, and the `ChannelRegistry` import.
 
-## Rename AgentPlugin to Agent
+## Standardize plugin constructor signature
 
-`AgentPlugin` isn't really a plugin — it doesn't implement hookimpls
-(its `on_start` is called explicitly by `main.py`, not via broadcast)
-and it orchestrates the entire agent loop. The "Plugin" suffix is
-misleading. Rename to `Agent` to reflect what it actually is.
+Plugins inconsistently accept `pm` in `__init__`. Some take it (e.g.,
+`AgentPlugin`, `CompactionPlugin`, `SubagentPlugin`), some don't (e.g.,
+`CoreToolsPlugin`, `McpClientPlugin`). Plugins that don't take `pm`
+can't use `get_dependency` outside of hook calls, which leads to
+workarounds like inline imports or deferred lookups.
 
-Similarly, `ChannelRegistry` is already named correctly — it's
-registered as a named object on the PM, not as a hookimpl provider.
+Proposed: define a `Plugin` protocol (or ABC) that requires `pm` as a
+constructor argument and exposes it as a typed attribute:
+
+```python
+from typing import Protocol, runtime_checkable
+
+@runtime_checkable
+class Plugin(Protocol):
+    pm: PluginManager
+    depends_on: set[str]
+
+    def __init__(self, pm: PluginManager) -> None: ...
+```
+
+Benefits:
+- Type checkers catch plugins that forget `pm` or `depends_on`.
+- `get_dependency` can return a `Plugin`-typed result with `pm`
+  guaranteed present.
+- `main.py` registration becomes uniform: every plugin gets `pm`.
+
+Cost: updating ~5 plugins that currently take no args or different args.
+Mechanical change, no behavioral impact. Could be folded into Part 5
+of the agent decomposition or done independently.
 
 ## Plugin coupling concerns
 
@@ -121,74 +143,6 @@ by `channel.transport` would eliminate the pattern. Could be a thin
 wrapper around the hook call in AgentPlugin, or a new hookspec that
 takes `transport` as a discriminator.
 
-### SubagentPlugin reaches into AgentPlugin internals
-
-It accesses `agent.tool_registry` and `agent._max_tool_result_chars` (a
-private attribute). If AgentPlugin restructures how it stores tool
-config, SubagentPlugin breaks silently. Should go through a public
-interface — e.g., a method that returns the tool set and config needed
-to launch a subagent.
-
-### IdleMonitorPlugin reaches into AgentPlugin.queues
-
-Same pattern — needs the queue dict to poll for emptiness. Less fragile
-since `queues` is a simpler data structure, but still an internal.
-Could be replaced by a method like `agent.is_idle() -> bool` or
-`agent.queue_snapshot() -> dict`.
-
-### Two agent loops with duplicated tool dispatch [COMPLETED]
-
-Resolved. `dispatch_tool_call()` in `corvidae/tool.py` now contains the
-unified implementation: JSON parsing, unknown-tool detection, invocation,
-error wrapping, logging, latency tracking, and the `process_tool_result`
-hook. Both `run_agent_loop` (subagent path) and `_dispatch_tool_calls`
-(main agent path) call `dispatch_tool_call` instead of duplicating that
-logic. The `process_tool_result` hook now fires in both paths; previously
-it only fired in the subagent path.
-
-### AgentPlugin is a god object
-
-It handles: queue management, conversation lifecycle, config resolution,
-LLM client lifecycle, tool collection and schema building, message
-building, the 10-step orchestration loop, tool dispatch to TaskQueue,
-and response handling (text vs tool calls, turn counting, max-turns).
-
-Once renamed to `Agent` (see separate todo), the question becomes what
-cohesive pieces it should decompose into. Candidates for extraction:
-- Conversation init (ContextWindow creation, load_conversation, system
-  prompt resolution)
-- Tool collection and schema building
-- LLM client lifecycle
-- The serial queue routing layer
-
-As part of this decomposition, document the public API of each resulting
-piece — the attributes and methods that other plugins are allowed to
-use. Currently plugins couple to AgentPlugin internals (SubagentPlugin
-reads `_max_tool_result_chars`, IdleMonitor reads `queues`) because
-there's no visible public/private boundary. Smaller pieces with
-documented public surfaces make the contracts obvious and violations
-easy to spot during review. All cross-plugin access should go through
-`get_dependency` so the coupling is explicit and type-checked.
-
-### TaskPlugin ↔ AgentPlugin undeclared dependency
-
-AgentPlugin reaches into TaskPlugin via
-`self.pm.get_plugin("task").task_queue` with a `getattr` None fallback.
-TaskPlugin delivers results back via `on_notify`. The dependency is real
-but AgentPlugin doesn't declare `depends_on = {"task"}`. If TaskPlugin
-isn't registered, tool calls silently fail with an error log rather than
-a clear startup failure.
-
-### agent_loop.py re-exports from tool.py
-
-Line 23: `from corvidae.tool import MAX_TOOL_RESULT_CHARS, ToolContext,
-dispatch_tool_call, execute_tool_call, tool_to_schema  # noqa: F401 —
-re-exported for backward compat`. `dispatch_tool_call` is used directly by `run_agent_loop` in the same
-module, so it is not a pure re-export. The remaining four symbols
-(`MAX_TOOL_RESULT_CHARS`, `ToolContext`, `execute_tool_call`,
-`tool_to_schema`) are re-exported for backward compat only. Should be
-cleaned up — callers should import from `tool.py` directly.
-
 ### Config resolution is scattered
 
 `_base_dir`, `chars_per_token`, `max_tool_result_chars` are read from
@@ -202,51 +156,20 @@ which plugin reads them first. A config validation pass before
 
 ### Priority
 
-1. ~~**Duplicated tool dispatch**~~ — completed. `dispatch_tool_call`
-   in `tool.py` is now the single implementation.
-2. **AgentPlugin decomposition** — the god object makes every other
-   refactor harder. Untangling it unblocks cleaner solutions for
-   several items below.
-3. ~~**TaskPlugin undeclared dependency**~~ — completed. `depends_on`
-   entries added to `AgentPlugin`, `IdleMonitorPlugin`, and `ThinkingPlugin`.
-4. ~~**agent_loop.py re-exports**~~ — completed. `ToolContext`,
-   `execute_tool_call`, and `tool_to_schema` removed from `agent_loop.py`;
-   callers import from `corvidae.tool` directly.
-5. **SubagentPlugin coupling** — address when touching SubagentPlugin
-   or AgentPlugin internals.
-6. **Config validation** — address when config grows or errors become
+1. ~~**Duplicated tool dispatch**~~ — completed.
+2. **AgentPlugin decomposition** — Parts 1–4 done, Part 5 (rename)
+   remaining. See `plans/agent-decomposition.md`.
+3. ~~**TaskPlugin undeclared dependency**~~ — completed.
+4. ~~**agent_loop.py re-exports**~~ — completed.
+5. ~~**SubagentPlugin coupling**~~ — completed (Parts 3–4).
+   SubagentPlugin now depends on `"llm"` and `"tools"` directly.
+6. ~~**Idle detection inversion**~~ — completed (Part 2). Agent fires
+   `on_idle` push-based; IdleMonitorPlugin is a pure consumer.
+7. **Config validation** — address when config grows or errors become
    a problem.
-7. **Broadcast-filter** — only matters when adding a third transport.
-8. **ChannelRegistry split** — address if the class starts growing.
-9. **Channel identity** — revisit when adding a non-IRC/CLI transport.
-10. **ChannelRegistry split** and **Channel identity** — when needed.
-
-### Invert idle detection: Agent fires on_idle, IdleMonitor just consumes
-
-`IdleMonitorPlugin` currently polls `AgentPlugin.queues` to detect when
-all queues are empty. This is backwards — Agent owns the queues and
-knows when items complete. After `task_done()` in `_process_queue_item`,
-Agent can check `all(q.empty() for q in self.queues.values())` and fire
-`on_idle` directly. This eliminates:
-- IdleMonitor's `get_dependency("agent_loop")` and internal access
-- The polling loop and its `_CONNECTION_POLL_INTERVAL`
-- The `trylast=True` ordering constraint on `on_start`
-
-IdleMonitorPlugin becomes a pure `on_idle` consumer (e.g., fires idle
-behaviors) rather than the detector.
-
-**Throttling:** Without a guard, `on_idle` would fire after every single
-queue drain — potentially many times per second during bursts of short
-messages. Options:
-- Minimum interval: only fire if `time.monotonic() - last_idle_fire >
-  threshold` (e.g., 5s). Simple, predictable.
-- Debounce: start a timer on first drain, cancel if new work arrives,
-  fire if timer expires. More precise but more complex.
-- Config: `daemon.idle_throttle_seconds` with a sensible default.
-
-Minimum interval is probably sufficient. The idle hook's purpose is to
-trigger background behaviors (e.g., memory consolidation, status
-updates), not to be a precise event stream.
+8. **Broadcast-filter** — only matters when adding a third transport.
+9. **ChannelRegistry split** — address if the class starts growing.
+10. **Channel identity** — revisit when adding a non-IRC/CLI transport.
 
 ## Tool plugin scaffolding script
 
