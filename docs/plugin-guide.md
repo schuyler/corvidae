@@ -6,6 +6,9 @@ Corvidae plugins extend the agent daemon using [apluggy](https://pypi.org/projec
 from corvidae.hooks import hookimpl
 
 class GreetPlugin:
+    def __init__(self, pm) -> None:
+        self.pm = pm
+
     @hookimpl
     async def on_message(self, channel, sender: str, text: str) -> None:
         if text.strip().lower() == "hello":
@@ -44,7 +47,7 @@ pm.register(my_plugin, name="my_plugin")
 validate_dependencies(pm)
 ```
 
-Registration order matters: tool-providing and transport plugins must be registered before `agent` so their tools are collected during `on_start`.
+Registration order matters: tool-providing plugins must be registered before `tools` (ToolCollectionPlugin) so their tools are collected when `ToolCollectionPlugin.on_start` runs. Transport plugins must be registered before `agent`.
 
 ### External (setuptools entry points)
 
@@ -55,7 +58,7 @@ External plugins are loaded automatically via `pm.load_setuptools_entrypoints("c
 my_plugin = "my_package:MyPlugin"
 ```
 
-The entry point value must be importable and instantiable without arguments, or be a factory function returning the plugin instance.
+The entry point value must be importable and callable by pluggy's loader (a class or factory function). Internal plugins all accept `pm` as their first constructor argument; external plugins loaded via entry points are instantiated by pluggy without arguments, so they must provide a no-argument constructor or use a factory function.
 
 ## Available hooks
 
@@ -96,11 +99,15 @@ async def send_message(self, channel, text: str) -> None:
 | `on_agent_response(channel, request_text: str, response_text: str)` | async broadcast | After agent produces a response |
 | `before_agent_turn(channel)` | async broadcast | Before each LLM invocation |
 | `after_persist_assistant(channel, message: dict)` | async broadcast | After assistant message is written to DB; plugins may mutate the in-memory dict |
-| `on_idle()` | async broadcast | All queues empty and cooldown elapsed |
+| `on_conversation_event(channel, message: dict, message_type: MessageType)` | async broadcast | After every `conv.append()` call; message is the untagged dict (no `_message_type` key) |
+| `on_compaction(channel, summary_msg: dict, retain_count: int)` | async broadcast | After compaction replaces older messages with a summary; `summary_msg` is the untagged summary dict |
+| `on_idle()` | async broadcast | All queues empty and cooldown elapsed; only fires when `IdleMonitorPlugin` is registered |
 
 `after_persist_assistant` — the DB row is already written when this
 hook fires. Mutations to `message` affect in-memory prompt construction
 only; they do not update the persisted record.
+
+`before_agent_turn` — messages injected via `channel.conversation.append()` inside this hook are passed through `on_conversation_event` and persisted to the DB.
 
 ### Hook result resolution
 
@@ -110,14 +117,14 @@ These hooks are broadcast to all plugins. The caller uses `resolve_hook_results`
 |------|----------|---------|----------|
 | `should_process_message(channel, sender, text)` | `REJECT_WINS` | `bool \| None` | Any `False` vetoes the message; any `True` (with no `False`) accepts; `None` if all defer |
 | `on_llm_error(channel, error)` | `VALUE_FIRST` | `str \| None` | Non-None string replaces the default error message; multiple non-None → alphabetically-first plugin wins with a warning |
-| `compact_conversation(channel, conversation, client, max_tokens)` | broadcast only | `None` | Called for side effects; return value is not used by the caller |
+| `compact_conversation(channel, conversation, max_tokens)` | broadcast only | `None` | Called for side effects; return value is not used by the caller |
 | `process_tool_result(tool_name, result, channel)` | `VALUE_FIRST` | `str \| None` | Non-None string replaces the tool result in the conversation; multiple non-None → alphabetically-first plugin wins with a warning |
 | `transform_display_text(channel, text, result_message)` | `VALUE_FIRST` | `str \| None` | Non-None string replaces the response text before it is sent to the channel; multiple non-None → alphabetically-first plugin wins with a warning |
 | `load_conversation(channel)` | `VALUE_FIRST` | `list[dict] \| None` | Return tagged message dicts if this plugin has stored history; `None` to defer. Called once when a channel's conversation is first initialized. |
 
-`compact_conversation` — all registered implementations run. The return value is ignored by the caller. Use this hook for side effects (e.g., custom summarization that mutates the conversation in-place).
+`compact_conversation` — all registered implementations run. The return value is ignored by the caller; this hook is not processed through `resolve_hook_results`. Use it for side effects (e.g., custom summarization that mutates the conversation in-place).
 
-`process_tool_result` only fires during subagent execution (`run_agent_loop`), not during interactive message processing.
+`process_tool_result` fires for all tool calls — it is invoked from `dispatch_tool_call` in `corvidae/tool.py`, which is used by both the main agent loop and background subagent loops. It does not fire for pre-dispatch errors (JSON parse failure or unknown tool name).
 
 `transform_display_text` — `result_message` is the raw assistant message dict from the LLM response. It may contain `reasoning_content` if the model produces thinking tokens. `text` is the string content extracted from that message. Return `None` to leave `text` unchanged.
 
@@ -201,10 +208,10 @@ To get a typed reference to a dependency:
 
 ```python
 from corvidae.hooks import get_dependency
-from corvidae.agent import Agent
+from corvidae.tool_collection import ToolCollectionPlugin
 
-agent = get_dependency(self.pm, "agent", Agent)
-registry = agent.tool_registry
+tools_plugin = get_dependency(self.pm, "tools", ToolCollectionPlugin)
+registry = tools_plugin.get_registry()
 ```
 
 `get_dependency` raises `RuntimeError` if the plugin is not found and `TypeError` if it is the wrong type.
@@ -250,7 +257,7 @@ channels:
     max_context_tokens: 16000
 ```
 
-**IRC transport config:**
+The `irc` transport is provided by `IRCPlugin` (registered as `"irc"` in `main.py`). Its config block:
 
 ```yaml
 irc:
@@ -267,25 +274,30 @@ irc:
 The current registration sequence in `main.py`:
 
 ```
-registry       (ChannelRegistry)
-persistence    (PersistencePlugin)
-core_tools     (CoreToolsPlugin)
-cli            (CLIPlugin)
-irc            (IRCPlugin)
-task           (TaskPlugin)
-subagent       (SubagentPlugin)
-mcp            (McpClientPlugin)
-compaction     (CompactionPlugin)
-thinking       (ThinkingPlugin)
-agent          (Agent)
-idle_monitor   (IdleMonitorPlugin)
+registry          (ChannelRegistry)
+persistence       (PersistencePlugin)
+jsonl_log         (JsonlLogPlugin)
+core_tools        (CoreToolsPlugin)
+cli               (CLIPlugin)
+irc               (IRCPlugin)
+task              (TaskPlugin)
+subagent          (SubagentPlugin)
+mcp               (McpClientPlugin)
+llm               (LLMPlugin)
+compaction        (CompactionPlugin)
+thinking          (ThinkingPlugin)
+runtime_settings  (RuntimeSettingsPlugin)
+tools             (ToolCollectionPlugin)
+dream             (DreamPlugin)
+agent             (Agent)
+idle_monitor      (IdleMonitorPlugin)
 ```
 
-Tool-providing plugins and transport plugins register before `agent`. The `agent` plugin collects tools during `on_start`, so anything appending to `tool_registry` must be registered first.
+Tool-providing plugins and transport plugins register before `tools` (ToolCollectionPlugin). `ToolCollectionPlugin.on_start` uses `@hookimpl(trylast=True)` so it fires after all other `on_start` hooks; at that point it calls `register_tools` to collect tools from every registered plugin. `Agent._start_plugin` then calls `get_dependency(pm, "tools", ToolCollectionPlugin)` to retrieve the fully populated registry.
 
-**Startup order:** `main.py` calls `pm.ahook.on_start(config=config)` first, which runs all plugins' `on_start` hooks concurrently via `asyncio.gather`. Then it calls `agent.on_start(config=config)` explicitly. This guarantees that all plugins (including `McpClientPlugin`) have completed initialization before `Agent` collects tools via `register_tools`. `Agent.on_start` does not have `@hookimpl` — it is called only by `main.py`.
+**Startup order:** `main.py` calls `pm.ahook.on_start(config=config)` first, which runs all plugins' `on_start` hooks. `ToolCollectionPlugin.on_start` runs last (trylast) to ensure all tool providers have initialized. Then `main.py` calls `agent.on_start(config=config)` explicitly. `Agent.on_start` does not have `@hookimpl` — it is called only by `main.py`.
 
-**Shutdown order:** `main.py` calls `agent.on_stop()` first (drains queues, closes LLM client), then `pm.ahook.on_stop()` to tear down all other plugins.
+**Shutdown order:** `main.py` calls `agent.on_stop()` first (drains queues), then `pm.ahook.on_stop()` to tear down all other plugins.
 
 `idle_monitor` registers after `agent` because it depends on `"agent"`. Its `on_start` uses `@hookimpl(trylast=True)` to run late in the broadcast. Because `Agent.on_start` is called after the broadcast completes, `idle_monitor` is always initialized before `Agent` starts.
 
@@ -317,9 +329,11 @@ These tools are registered by built-in plugins. They are available to the LLM in
 All tool results are truncated at `MAX_TOOL_RESULT_CHARS` (default 100,000 characters) by `execute_tool_call` in `corvidae/tool.py`. The truncation appends `[truncated — N chars total]` so the LLM knows output was cut. Override via config:
 
 ```yaml
-agent:
-  max_tool_result_chars: 100000  # read by Agent; SubagentPlugin reads it from Agent at launch time
+tools:
+  max_result_chars: 100000  # read by ToolCollectionPlugin during on_start
 ```
+
+The legacy key `agent.max_tool_result_chars` is still accepted but deprecated; a warning is logged at startup when it is present.
 
 ### CoreToolsPlugin tools
 
@@ -332,6 +346,7 @@ Registered by `CoreToolsPlugin` (registered as `core_tools` in `main.py`).
 | `write_file` | `path: str`, `content: str` | Writes `content` to `path`, creating parent directories as needed. Returns a confirmation with the byte count, or an error string on failure. |
 | `web_fetch` | `url: str` | Fetches a URL via HTTP GET and returns the response body as text. Times out after `tools.web_fetch_timeout` seconds (default 15). Truncates responses at `tools.web_max_response_bytes` characters (default 50,000, independent of `MAX_TOOL_RESULT_CHARS`). |
 | `web_search` | `query: str`, `max_results: int` (optional) | Searches the web via DuckDuckGo and returns formatted results with titles, URLs, and snippets. Defaults to 8 results per page. |
+| `task_pipeline` | `definition: str` | Executes a task graph defined in YAML or JSON. The definition must contain a `tasks` key with a list of objects, each having `name`, `command`, and optionally `depends_on`. Tasks run in topological order; failed tasks block their dependents. Returns a status summary. |
 
 **CoreToolsPlugin config:**
 
@@ -354,6 +369,14 @@ Registered by `SubagentPlugin` (registered as `subagent` in `main.py`).
 
 `subagent` requires `ToolContext` (injected automatically — not an LLM parameter). It excludes itself from the subagent's tool registry to prevent recursion. The subagent uses the `llm.background` config block if present, falling back to `llm.main`.
 
+### RuntimeSettingsPlugin tools
+
+Registered by `RuntimeSettingsPlugin` (registered as `"runtime_settings"` in `main.py`).
+
+| Tool | Parameters | What it does |
+|------|------------|--------------|
+| `set_settings` | `settings: dict` | Updates per-channel runtime settings. Accepts LLM inference parameters and framework parameters. Pass `null` for a key to revert it to the static config value. Returns the current overrides after the update. |
+
 ## Bundled plugins
 
 These plugins are registered by `main.py` and are part of the default
@@ -370,8 +393,8 @@ Implements three hooks:
 
 - `on_start` — connects to all servers listed under `mcp.servers`
   in `agent.yaml`, fetches their tool lists, and builds cached `Tool` instances.
-  Runs in the broadcast; completes before `Agent.on_start` calls
-  `register_tools`.
+  Runs in the broadcast; completes before `ToolCollectionPlugin.on_start`
+  (trylast) calls `register_tools`.
 - `register_tools` — appends the cached tools to `tool_registry`.
 - `on_stop` — closes all MCP sessions and transports via `AsyncExitStack`.
 
@@ -432,7 +455,7 @@ Implements one hook:
   token estimate exceeds `compaction_threshold * max_tokens`. If so, and if
   the conversation has more than `min_messages_to_compact` messages,
   summarizes older messages to fit within `compaction_retention * max_tokens`.
-  Returns `True` when compaction ran; `None` when the threshold was not met.
+  The hook return value is not used by the caller.
 
 Token estimation divides total character count by `chars_per_token`. The same
 `chars_per_token` value is used when constructing `ContextWindow` instances
@@ -467,6 +490,70 @@ daemon:
 **Without this plugin:** `load_conversation` returns no history; conversation
 history is not persisted across restarts.
 
+### JsonlLogPlugin (`corvidae/jsonl_log.py`)
+
+Writes an append-only JSONL log of conversation events alongside the SQLite
+store. Each `on_conversation_event` and `on_compaction` call produces one
+JSON line in a per-channel file. Registered as `"jsonl_log"` after
+`persistence`.
+
+Implements three hooks:
+
+- `on_start` — reads `daemon.jsonl_log_dir` and creates the directory.
+  If the key is absent the plugin is a no-op for the rest of its lifetime.
+- `on_conversation_event` — writes a record with fields `ts`, `channel`,
+  `type` (message type string), and `message` (the untagged message dict).
+- `on_compaction` — writes a record with `type: "summary"` and the untagged
+  summary dict.
+
+File names are derived from the channel ID with `/` and `:` replaced by `_`.
+File handles are opened in append mode and kept open until `on_stop`.
+
+**Config:**
+```yaml
+daemon:
+  jsonl_log_dir: logs/   # path relative to the config file; omit to disable
+```
+
+**Without this plugin:** no JSONL log is written. Conversation history is
+still persisted in SQLite by `PersistencePlugin`.
+
+### LLMPlugin (`corvidae/llm_plugin.py`)
+
+Owns the `LLMClient` instance lifecycle. Registered as `"llm"` before
+`compaction` and `agent`. Other plugins retrieve clients via
+`get_dependency(pm, "llm", LLMPlugin)`.
+
+Implements two hooks:
+
+- `on_start` — reads `llm.main` (required) and `llm.background` (optional),
+  creates `LLMClient` instances, and starts their aiohttp sessions.
+- `on_stop` — closes all aiohttp sessions.
+
+`get_client(role)` returns the client for `"main"` or `"background"`. If no
+background client is configured, `get_client("background")` falls back to
+the main client.
+
+**Config:**
+```yaml
+llm:
+  main:                        # required
+    base_url: https://api.openai.com/v1
+    model: gpt-4o
+    api_key: sk-...            # optional; can also use environment variable
+    extra_body: {}             # optional: extra fields merged into request body
+    max_retries: 3             # optional (default 3)
+    retry_base_delay: 2.0      # optional (default 2.0)
+    retry_max_delay: 60.0      # optional (default 60.0)
+    timeout: 120               # optional: request timeout in seconds
+  background:                  # optional — absent means use llm.main
+    base_url: https://api.openai.com/v1
+    model: gpt-4o-mini
+```
+
+**Without this plugin:** `Agent` and `CompactionPlugin` cannot create LLM
+clients and will raise `RuntimeError` during startup.
+
 ### TaskPlugin (`corvidae/task.py`)
 
 Owns the `TaskQueue` and delivers task results via the `on_notify` hook.
@@ -482,6 +569,90 @@ daemon:
 **Without this plugin:** tool calls that return asynchronously (e.g., `subagent`)
 cannot complete. `Agent` logs an error when tool dispatch is attempted
 without a `TaskQueue`.
+
+### RuntimeSettingsPlugin (`corvidae/tools/settings.py`)
+
+Registers the `set_settings` tool, which lets the agent update per-channel
+LLM inference parameters and framework settings at runtime. Registered as
+`"runtime_settings"` before `tools`.
+
+Implements one hook:
+
+- `register_tools` — appends the `set_settings` tool to `tool_registry`.
+
+The `set_settings` tool accepts a `settings` dict. Supported keys include
+LLM inference parameters (`temperature`, `top_p`, `top_k`,
+`frequency_penalty`, `presence_penalty`, `max_tokens`) and framework
+parameters (`max_turns`, `max_context_tokens`, `keep_thinking_in_history`).
+Pass `null` for a key to clear the override and revert to the static config
+value. `system_prompt` is always blocked. Additional keys can be blocked via
+`agent.immutable_settings` in `agent.yaml`.
+
+**Config:**
+```yaml
+agent:
+  immutable_settings: [temperature]   # keys the agent cannot change at runtime
+```
+
+**Without this plugin:** the `set_settings` tool is not available. Channel
+settings can only be configured statically in `agent.yaml`.
+
+### ToolCollectionPlugin (`corvidae/tool_collection.py`)
+
+Collects tools from all registered plugins and owns the `ToolRegistry`.
+Registered as `"tools"` after all tool-providing plugins.
+
+Implements one hook:
+
+- `on_start` (trylast=True) — calls the sync `register_tools` broadcast after
+  all other `on_start` hooks have completed. Builds a `ToolRegistry` from the
+  collected items. Reads `tools.max_result_chars` (or the deprecated
+  `agent.max_tool_result_chars`) to configure the per-call result truncation
+  limit.
+
+`Agent._start_plugin` retrieves the registry via
+`get_dependency(pm, "tools", ToolCollectionPlugin)`. The `trylast=True`
+marker guarantees all tool providers have fully initialized before collection
+runs.
+
+Other plugins can access the registry:
+```python
+from corvidae.hooks import get_dependency
+from corvidae.tool_collection import ToolCollectionPlugin
+
+tools_plugin = get_dependency(self.pm, "tools", ToolCollectionPlugin)
+registry = tools_plugin.get_registry()
+tools_dict, schemas = tools_plugin.get_tools()
+```
+
+**Without this plugin:** `Agent` cannot retrieve tools and will raise
+`RuntimeError` during startup.
+
+### DreamPlugin (`corvidae/tools/dream.py`)
+
+Periodically reviews recent conversation history and appends extracted facts
+to `MEMORY.md`. Registered as `"dream"` before `agent`.
+
+Implements two hooks (not decorated with `@hookimpl` — registered as a
+plain plugin object):
+
+- `on_start` — reads `dream.interval_seconds` (default 300) and locates
+  `sessions.db` within the workspace tree.
+- `on_idle` — runs a dream cycle if `interval_seconds` have elapsed since
+  the last cycle. Queries the last 40 rows from `message_log`, filters for
+  assistant messages, strips `<think>` blocks, and appends new sentences to
+  the `## Long-term Memory` section of `MEMORY.md`. Skips sentences already
+  present (deduplication by normalized text). No-ops if `sessions.db` is not
+  found.
+
+**Config:**
+```yaml
+dream:
+  interval_seconds: 300   # minimum seconds between dream cycles (default 300)
+```
+
+**Without this plugin:** `MEMORY.md` is not updated automatically. The
+`on_idle` hook fires for other listeners regardless.
 
 ### IdleMonitorPlugin (`corvidae/idle.py`)
 
@@ -505,7 +676,6 @@ the last firing.
 ```yaml
 daemon:
   idle_cooldown_seconds: 30   # minimum seconds between on_idle firings (default 30)
-  idle_poll_interval: 2       # seconds between idle checks (default 2)
 ```
 
 **Without this plugin:** the `on_idle` hook is never fired.
