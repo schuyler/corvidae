@@ -100,7 +100,7 @@ class CLIPlugin:
             return
         # Truncate for display if very long
         display = text if len(text) <= 500 else text[:500] + "..."
-        print(f"\033[36m\033[2m{display}\033[0m")
+        print(f"\033[94m{display}\033[0m")
         sys.stdout.flush()
 
     @hookimpl
@@ -118,12 +118,12 @@ class CLIPlugin:
                     args_display = " " + json.dumps(parsed, ensure_ascii=False)[:120]
                 except (json.JSONDecodeError, ValueError):
                     args_display = " " + args_summary[:120]
-            print(f"\033[33m\033[2m⚙ {tool_name}{args_display}\033[0m")
+            print(f"\033[95m⚙ {tool_name}{args_display}\033[0m")
         elif status == "completed":
             result_display = ""
             if result_summary:
                 result_display = f" → {result_summary[:80]}"
-            print(f"\033[33m\033[2m✓ {tool_name}{result_display}\033[0m")
+            print(f"\033[95m✓ {tool_name}{result_display}\033[0m")
         sys.stdout.flush()
 
     @hookimpl
