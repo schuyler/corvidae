@@ -16,12 +16,12 @@ import time
 from pathlib import Path
 from typing import IO
 
-from corvidae.hooks import hookimpl
+from corvidae.hooks import CorvidaePlugin, hookimpl
 
 logger = logging.getLogger(__name__)
 
 
-class JsonlLogPlugin:
+class JsonlLogPlugin(CorvidaePlugin):
     """Plugin that writes conversation events to per-channel JSONL files.
 
     Implements on_conversation_event and on_compaction hookimpls. Each
@@ -31,20 +31,27 @@ class JsonlLogPlugin:
     If ``jsonl_log_dir`` is not configured, the plugin is a complete no-op.
     """
 
-    depends_on = set()
+    depends_on = frozenset()
 
-    def __init__(self, pm) -> None:
-        self.pm = pm
+    def __init__(self, pm=None) -> None:
+        if pm is not None:
+            self.pm = pm
         self._log_dir: Path | None = None
         self._handles: dict[str, IO] = {}  # channel_id -> open file handle
 
     @hookimpl
-    async def on_start(self, config: dict) -> None:
+    async def on_init(self, pm, config: dict) -> None:
+        await super().on_init(pm, config)
         log_dir = config.get("daemon", {}).get("jsonl_log_dir")
         if log_dir is None:
             return
         base_dir = config.get("_base_dir", Path("."))
         self._log_dir = Path(base_dir) / log_dir
+
+    @hookimpl
+    async def on_start(self, config: dict) -> None:
+        if self._log_dir is None:
+            return
         await asyncio.to_thread(self._log_dir.mkdir, parents=True, exist_ok=True)
         logger.info("JSONL log directory: %s", self._log_dir)
 

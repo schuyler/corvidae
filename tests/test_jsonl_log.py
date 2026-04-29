@@ -37,6 +37,7 @@ class TestJsonlPluginNoOp:
 
         plugin = JsonlLogPlugin(None)
         config = {"daemon": {}}
+        await plugin.on_init(pm=None, config=config)
         await plugin.on_start(config=config)
 
         channel = _make_channel("cli:default")
@@ -90,6 +91,7 @@ class TestJsonlPluginCreatesDirectory:
 
         plugin = JsonlLogPlugin(None)
         config = {"daemon": {"jsonl_log_dir": str(log_dir)}}
+        await plugin.on_init(pm=None, config=config)
         await plugin.on_start(config=config)
 
         assert log_dir.exists()
@@ -114,6 +116,7 @@ class TestOnConversationEvent:
         log_dir = tmp_path / "logs"
         plugin = JsonlLogPlugin(None)
         config = {"daemon": {"jsonl_log_dir": str(log_dir)}}
+        await plugin.on_init(pm=None, config=config)
         await plugin.on_start(config=config)
 
         channel = _make_channel("cli:default")
@@ -145,6 +148,7 @@ class TestOnConversationEvent:
         log_dir = tmp_path / "logs"
         plugin = JsonlLogPlugin(None)
         config = {"daemon": {"jsonl_log_dir": str(log_dir)}}
+        await plugin.on_init(pm=None, config=config)
         await plugin.on_start(config=config)
 
         channel = _make_channel("cli:default")
@@ -167,6 +171,7 @@ class TestOnConversationEvent:
         log_dir = tmp_path / "logs"
         plugin = JsonlLogPlugin(None)
         config = {"daemon": {"jsonl_log_dir": str(log_dir)}}
+        await plugin.on_init(pm=None, config=config)
         await plugin.on_start(config=config)
 
         channel = _make_channel("cli:default")
@@ -196,6 +201,7 @@ class TestOnConversationEvent:
 
         plugin = JsonlLogPlugin(None)
         config = {"daemon": {}}  # no jsonl_log_dir
+        await plugin.on_init(pm=None, config=config)
         await plugin.on_start(config=config)
 
         channel = _make_channel("cli:default")
@@ -217,6 +223,7 @@ class TestOnConversationEvent:
         log_dir = tmp_path / "logs"
         plugin = JsonlLogPlugin(None)
         config = {"daemon": {"jsonl_log_dir": str(log_dir)}}
+        await plugin.on_init(pm=None, config=config)
         await plugin.on_start(config=config)
 
         channel = _make_channel("cli:default")
@@ -253,6 +260,7 @@ class TestOnCompaction:
         log_dir = tmp_path / "logs"
         plugin = JsonlLogPlugin(None)
         config = {"daemon": {"jsonl_log_dir": str(log_dir)}}
+        await plugin.on_init(pm=None, config=config)
         await plugin.on_start(config=config)
 
         channel = _make_channel("cli:default")
@@ -283,6 +291,7 @@ class TestOnCompaction:
 
         plugin = JsonlLogPlugin(None)
         config = {"daemon": {}}
+        await plugin.on_init(pm=None, config=config)
         await plugin.on_start(config=config)
 
         channel = _make_channel("cli:default")
@@ -310,6 +319,7 @@ class TestJsonlPluginSanitizesChannelId:
         log_dir = tmp_path / "logs"
         plugin = JsonlLogPlugin(None)
         config = {"daemon": {"jsonl_log_dir": str(log_dir)}}
+        await plugin.on_init(pm=None, config=config)
         await plugin.on_start(config=config)
 
         channel = _make_channel("cli:default")
@@ -330,6 +340,7 @@ class TestJsonlPluginSanitizesChannelId:
         log_dir = tmp_path / "logs"
         plugin = JsonlLogPlugin(None)
         config = {"daemon": {"jsonl_log_dir": str(log_dir)}}
+        await plugin.on_init(pm=None, config=config)
         await plugin.on_start(config=config)
 
         channel = _make_channel("irc:#general/topic")
@@ -359,6 +370,7 @@ class TestJsonlPluginStop:
         log_dir = tmp_path / "logs"
         plugin = JsonlLogPlugin(None)
         config = {"daemon": {"jsonl_log_dir": str(log_dir)}}
+        await plugin.on_init(pm=None, config=config)
         await plugin.on_start(config=config)
 
         channel = _make_channel("cli:default")
@@ -389,6 +401,7 @@ class TestJsonlPluginValidJson:
         log_dir = tmp_path / "logs"
         plugin = JsonlLogPlugin(None)
         config = {"daemon": {"jsonl_log_dir": str(log_dir)}}
+        await plugin.on_init(pm=None, config=config)
         await plugin.on_start(config=config)
 
         channel = _make_channel("cli:default")
@@ -420,6 +433,7 @@ class TestJsonlPluginValidJson:
         log_dir = tmp_path / "logs"
         plugin = JsonlLogPlugin(None)
         config = {"daemon": {"jsonl_log_dir": str(log_dir)}}
+        await plugin.on_init(pm=None, config=config)
         await plugin.on_start(config=config)
 
         channel = _make_channel("cli:default")

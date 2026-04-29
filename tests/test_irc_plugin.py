@@ -122,6 +122,8 @@ class TestOnStart:
         plugin = IRCPlugin(pm)
         pm.register(plugin, name="irc")
 
+        # on_init now reads channel config; must be called before on_start
+        await plugin.on_init(pm=pm, config=IRC_CONFIG)
         # The real connect_with_retry will call the mocked connect (which blocks forever)
         await plugin.on_start(config=IRC_CONFIG)
 

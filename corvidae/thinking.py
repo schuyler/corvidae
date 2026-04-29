@@ -6,10 +6,10 @@ into a standalone plugin that can be unregistered without crashing the system.
 from __future__ import annotations
 
 from corvidae.agent_loop import strip_reasoning_content, strip_thinking
-from corvidae.hooks import hookimpl
+from corvidae.hooks import CorvidaePlugin, hookimpl
 
 
-class ThinkingPlugin:
+class ThinkingPlugin(CorvidaePlugin):
     """Plugin that handles <think> block and reasoning_content stripping.
 
     Implements two hooks:
@@ -19,10 +19,11 @@ class ThinkingPlugin:
       response text before it is sent to the channel.
     """
 
-    depends_on = {"registry"}
+    depends_on = frozenset({"registry"})
 
-    def __init__(self, pm) -> None:
-        self.pm = pm
+    def __init__(self, pm=None) -> None:
+        if pm is not None:
+            self.pm = pm
 
     @hookimpl
     async def after_persist_assistant(self, channel, message) -> None:

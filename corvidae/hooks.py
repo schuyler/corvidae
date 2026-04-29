@@ -203,6 +203,28 @@ def create_plugin_manager() -> pluggy.PluginManager:
     return pm
 
 
+class CorvidaePlugin:
+    """Optional base class for corvidae plugins.
+
+    Stores pm and config as instance attributes in on_init, making them
+    available before on_start is called. Plugins that need extra init
+    should override on_init and call ``await super().on_init(pm, config)``
+    first.
+
+    Class attribute:
+        depends_on: frozenset of plugin names this plugin requires to be
+            registered. Checked by validate_dependencies at startup.
+            Override as a class-level assignment, not by mutation.
+    """
+
+    depends_on: frozenset[str] = frozenset()
+
+    @hookimpl
+    async def on_init(self, pm, config: dict) -> None:
+        """Store pm and config. Called after all plugins are registered."""
+        self.pm = pm
+        self.config = config
+
 
 class AgentSpec:
     """Hook specifications for the agent daemon.
@@ -212,6 +234,18 @@ class AgentSpec:
     the agent loop. All hooks are optional; a plugin only needs to
     implement the hooks it cares about.
     """
+
+    @hookspec
+    async def on_init(self, pm, config: dict) -> None:
+        """Called after all plugins are registered, before on_start.
+
+        Use for storing pm, reading config values, and resolving references
+        to other plugins. Do not create runtime resources here — use on_start.
+
+        Args:
+            pm: The plugin manager.
+            config: The full parsed YAML config dict.
+        """
 
     @hookspec
     async def on_start(self, config: dict) -> None:

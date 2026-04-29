@@ -26,7 +26,7 @@ import logging
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 
-from corvidae.hooks import hookimpl
+from corvidae.hooks import CorvidaePlugin, hookimpl
 from corvidae.tool import Tool
 
 logger = logging.getLogger(__name__)
@@ -43,7 +43,7 @@ class _McpServerState:
     mcp_tools: list          # list[mcp.types.Tool]
 
 
-class McpClientPlugin:
+class McpClientPlugin(CorvidaePlugin):
     """Plugin that connects to MCP servers and exposes their tools to Corvidae.
 
     Lifecycle:
@@ -57,18 +57,25 @@ class McpClientPlugin:
     register_tools fires.
     """
 
-    depends_on = set()
+    depends_on = frozenset()
 
-    def __init__(self, pm) -> None:
-        self.pm = pm
+    def __init__(self, pm=None) -> None:
+        if pm is not None:
+            self.pm = pm
         self._servers: list[_McpServerState] = []
         self._cached_tools: list[Tool] = []
         self._exit_stack: AsyncExitStack | None = None
+        self._servers_config: dict = {}
+
+    @hookimpl
+    async def on_init(self, pm, config: dict) -> None:
+        await super().on_init(pm, config)
+        self._servers_config = config.get("mcp", {}).get("servers", {})
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
         """Connect to MCP servers and build tool list."""
-        servers_config = config.get("mcp", {}).get("servers", {})
+        servers_config = self._servers_config
         if not servers_config:
             logger.debug("McpClientPlugin: no servers configured")
             return

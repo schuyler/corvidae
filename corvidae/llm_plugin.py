@@ -20,30 +20,44 @@ Config:
 """
 import logging
 
-from corvidae.hooks import hookimpl
+from corvidae.hooks import CorvidaePlugin, hookimpl
 from corvidae.llm import LLMClient
 
 logger = logging.getLogger(__name__)
 
 
-class LLMPlugin:
+class LLMPlugin(CorvidaePlugin):
     """Plugin that owns LLM client instances and their lifecycle."""
 
-    depends_on = set()
+    depends_on = frozenset()
 
-    def __init__(self, pm) -> None:
-        self.pm = pm
+    def __init__(self, pm=None) -> None:
+        if pm is not None:
+            self.pm = pm
         self.main_client: LLMClient | None = None
         self.background_client: LLMClient | None = None
+        self._main_config: dict | None = None
+        self._bg_config: dict | None = None
+
+    @hookimpl
+    async def on_init(self, pm, config: dict) -> None:
+        await super().on_init(pm, config)
+        llm_config = config.get("llm", {})
+        self._main_config = llm_config.get("main")
+        self._bg_config = llm_config.get("background")
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
-        llm_config = config.get("llm", {})
-        main_config = llm_config["main"]  # required
+        main_config = self._main_config
+        if main_config is None:
+            # Backward compat: read from config if on_init was not called
+            main_config = config.get("llm", {}).get("main")
+        if main_config is None:
+            raise KeyError("llm.main config is required")
         self.main_client = self._create_client(main_config)
         await self.main_client.start()
 
-        bg_config = llm_config.get("background")
+        bg_config = self._bg_config
         if bg_config:
             self.background_client = self._create_client(bg_config)
             await self.background_client.start()

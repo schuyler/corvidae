@@ -209,6 +209,7 @@ class TestCoreToolsReadsConfig:
             }
         }
 
+        await plugin.on_init(pm=MagicMock(), config=config)
         # Patch aiohttp.ClientSession to avoid a real HTTP connection.
         mock_session = MagicMock()
         mock_session.close = AsyncMock()
@@ -273,10 +274,10 @@ class TestCompactionPlugin:
         )
 
     async def test_compaction_plugin_reads_config(self):
-        """CompactionPlugin.on_start reads agent config."""
+        """CompactionPlugin.on_init reads agent config."""
         from corvidae.compaction import CompactionPlugin
 
-        plugin = CompactionPlugin(None)
+        plugin = CompactionPlugin()
         config = {
             "agent": {
                 "compaction_threshold": 0.9,
@@ -286,7 +287,7 @@ class TestCompactionPlugin:
             }
         }
 
-        await plugin.on_start(config=config)
+        await plugin.on_init(pm=MagicMock(), config=config)
 
         assert plugin._compaction_threshold == 0.9, (
             f"Expected _compaction_threshold=0.9, got {plugin._compaction_threshold!r}"
@@ -470,7 +471,7 @@ class TestTaskConstants:
 
 class TestIRCMessageChunkSizeFromConfig:
     async def test_irc_message_chunk_size_from_config(self):
-        """IRCPlugin reads irc.message_chunk_size in on_start."""
+        """IRCPlugin reads irc.message_chunk_size in on_init."""
         # Import IRCPlugin here so corvidae.channels.irc is cached in sys.modules
         # before any patching; this ensures patch("corvidae.channels.irc.get_dependency")
         # targets the same module instance that IRCPlugin closes over.
@@ -480,16 +481,19 @@ class TestIRCMessageChunkSizeFromConfig:
         pm_mock = MagicMock()
         registry_mock = MagicMock(spec=ChannelRegistry)
 
+        config = {
+            "irc": {
+                "host": "localhost",
+                "nick": "bot",
+                "message_chunk_size": 200,
+            }
+        }
+
         with patch("corvidae.channels.irc.get_dependency", return_value=registry_mock), \
              patch("asyncio.create_task"):
             plugin = IRCPlugin(pm_mock)
-            await plugin.on_start(config={
-                "irc": {
-                    "host": "localhost",
-                    "nick": "bot",
-                    "message_chunk_size": 200,
-                }
-            })
+            await plugin.on_init(pm=pm_mock, config=config)
+            await plugin.on_start(config=config)
 
         assert hasattr(plugin, "_message_chunk_size"), (
             "IRCPlugin must store _message_chunk_size after on_start"
@@ -593,8 +597,10 @@ class TestTaskPluginCompletedBuffer:
         pm_mock = MagicMock()
         plugin = TaskPlugin(pm_mock)
 
+        config = {"daemon": {"completed_task_buffer": 42}}
+        await plugin.on_init(pm=pm_mock, config=config)
         with patch("asyncio.create_task"):
-            await plugin.on_start(config={"daemon": {"completed_task_buffer": 42}})
+            await plugin.on_start(config=config)
 
         assert plugin.task_queue is not None, "TaskPlugin.task_queue must be set after on_start"
         assert plugin.task_queue.completed.maxlen == 42, (
