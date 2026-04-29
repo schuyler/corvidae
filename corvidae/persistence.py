@@ -17,7 +17,7 @@ import logging
 import time
 import aiosqlite
 
-from corvidae.hooks import hookimpl
+from corvidae.hooks import CorvidaePlugin, hookimpl
 
 logger = logging.getLogger(__name__)
 
@@ -56,19 +56,20 @@ def _parse_message_rows(rows: list[tuple]) -> list[dict]:
     return result
 
 
-class PersistencePlugin:
+class PersistencePlugin(CorvidaePlugin):
     """Plugin that manages SQLite database lifecycle and conversation persistence.
 
     Attributes:
-        pm: Plugin manager instance.
+        pm: Plugin manager instance (set in on_init via CorvidaePlugin).
         db: aiosqlite.Connection, opened in on_start, closed in on_stop.
             Public for test injection (same pattern as former Agent.db).
     """
 
-    depends_on = set()
+    depends_on = frozenset()
 
-    def __init__(self, pm) -> None:
-        self.pm = pm
+    def __init__(self, pm=None) -> None:
+        if pm is not None:
+            self.pm = pm
         self.db: aiosqlite.Connection | None = None
 
     @hookimpl

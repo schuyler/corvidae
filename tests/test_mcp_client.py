@@ -161,6 +161,7 @@ class TestOnStartWithStdioServer:
             }
         }
 
+        await plugin.on_init(pm=MagicMock(), config=config)
         with (
             patch("mcp.client.stdio.stdio_client", return_value=mock_stdio_cm),
             patch("mcp.client.stdio.StdioServerParameters"),
@@ -201,6 +202,7 @@ class TestOnStartWithStdioServer:
             }
         }
 
+        await plugin.on_init(pm=MagicMock(), config=config)
         with (
             patch("mcp.client.stdio.stdio_client", return_value=mock_stdio_cm),
             patch("mcp.client.stdio.StdioServerParameters"),
@@ -243,6 +245,7 @@ class TestOnStartWithStdioServer:
             }
         }
 
+        await plugin.on_init(pm=MagicMock(), config=config)
         with (
             patch("mcp.client.stdio.stdio_client", return_value=mock_stdio_cm),
             patch("mcp.client.stdio.StdioServerParameters"),
@@ -322,6 +325,7 @@ class TestOnStartWithSseServer:
             }
         }
 
+        await plugin.on_init(pm=MagicMock(), config=config)
         with (
             patch("mcp.client.sse.sse_client", return_value=mock_sse_cm),
             patch("mcp.ClientSession", return_value=mock_client_session_cm),
@@ -356,6 +360,7 @@ class TestOnStartUnknownTransport:
             }
         }
 
+        await plugin.on_init(pm=MagicMock(), config=config)
         with caplog.at_level(logging.WARNING, logger="corvidae.mcp_client"):
             # Should not raise.
             await plugin.on_start(config=config)

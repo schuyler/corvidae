@@ -982,6 +982,7 @@ class TestTaskPluginConfig:
         plugin = TaskPlugin(pm)
 
         config = {"daemon": {"max_task_workers": 3}}
+        await plugin.on_init(pm=pm, config=config)
         await plugin.on_start(config=config)
 
         assert plugin.task_queue is not None

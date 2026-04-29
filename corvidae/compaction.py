@@ -21,15 +21,15 @@ import logging
 import time
 
 from corvidae.context import DEFAULT_CHARS_PER_TOKEN, MessageType
-from corvidae.hooks import get_dependency, hookimpl
+from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 
 logger = logging.getLogger(__name__)
 
 
-class CompactionPlugin:
+class CompactionPlugin(CorvidaePlugin):
     """Plugin that implements default token-budget conversation compaction."""
 
-    depends_on = {"llm"}
+    depends_on = frozenset({"llm"})
 
     DEFAULT_SUMMARY_PROMPT = (
         "Please summarize the first half of this conversation, so that the second half "
@@ -40,8 +40,8 @@ class CompactionPlugin:
         "error messages, discoveries made, and the current line of investigation."
     )
 
-    def __init__(self, pm) -> None:
-        self.pm = pm
+    def __init__(self, pm=None) -> None:
+        self.pm = pm  # May be None; on_init will set it via CorvidaePlugin.on_init
         self._compaction_threshold: float = 0.8
         self._compaction_retention: float = 0.5
         self._min_messages: int = 5
@@ -54,7 +54,8 @@ class CompactionPlugin:
         self._last_failed_compaction: dict[str, float] = {}  # channel_id -> timestamp
 
     @hookimpl
-    async def on_start(self, config: dict) -> None:
+    async def on_init(self, pm, config: dict) -> None:
+        await super().on_init(pm, config)
         agent_config = config.get("agent", {})
         self._compaction_threshold = agent_config.get("compaction_threshold", 0.8)
         self._compaction_retention = agent_config.get("compaction_retention", 0.5)

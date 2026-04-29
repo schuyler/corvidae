@@ -46,14 +46,21 @@ def test_agent_has_expected_attributes():
 # ---------------------------------------------------------------------------
 
 def test_main_registers_as_agent_not_agent_loop():
-    """main.py must register the agent plugin with name='agent', not 'agent_loop'."""
-    import corvidae.main as main_module
-    source = inspect.getsource(main_module)
-    assert 'name="agent"' in source, (
-        'main.py must contain name="agent" registration'
+    """Agent must be registered under name 'agent' (via entry point), not 'agent_loop'."""
+    from importlib.metadata import entry_points
+    from corvidae.agent import Agent
+
+    # Verify the entry point registers Agent under name 'agent'
+    eps = {ep.name: ep for ep in entry_points(group="corvidae")}
+    assert "agent" in eps, (
+        "Entry point group 'corvidae' must have an 'agent' entry"
     )
-    assert 'name="agent_loop"' not in source, (
-        'main.py must not use name="agent_loop" after the rename'
+    assert "agent_loop" not in eps, (
+        "Entry point group 'corvidae' must not have an 'agent_loop' entry"
+    )
+    loaded = eps["agent"].load()
+    assert loaded is Agent, (
+        f"Entry point 'agent' must load corvidae.agent.Agent, got {loaded!r}"
     )
 
 

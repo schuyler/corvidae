@@ -45,7 +45,8 @@ async def build_plugin_and_channel(
     await init_db(db)
 
     pm = create_plugin_manager()
-    registry = ChannelRegistry(agent_defaults)
+    registry = ChannelRegistry()
+    registry.agent_defaults = agent_defaults
     pm.register(registry, name="registry")
 
     if mock_send_message:
@@ -53,20 +54,23 @@ async def build_plugin_and_channel(
     if mock_on_agent_response:
         pm.ahook.on_agent_response = AsyncMock()
 
-    task_plugin = TaskPlugin(pm)
+    task_plugin = TaskPlugin()
     pm.register(task_plugin, name="task")
+    await task_plugin.on_init(pm=pm, config={})
     await task_plugin.on_start(config={})
 
-    persistence = PersistencePlugin(pm)
+    persistence = PersistencePlugin()
     persistence.db = db
     persistence._registry = registry
     pm.register(persistence, name="persistence")
 
-    thinking_plugin = ThinkingPlugin(pm)
+    thinking_plugin = ThinkingPlugin()
     pm.register(thinking_plugin, name="thinking")
+    await thinking_plugin.on_init(pm=pm, config={})
 
-    plugin = Agent(pm)
+    plugin = Agent()
     pm.register(plugin, name="agent")
+    plugin.pm = pm
     plugin._registry = registry
 
     channel = registry.get_or_create(

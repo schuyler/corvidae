@@ -51,21 +51,8 @@ class TestMainLoadsConfigAndCreatesPM:
             config_path = f.name
 
         try:
-            with patch("corvidae.main.create_plugin_manager") as mock_create, \
-                 patch("corvidae.main.Agent") as mock_agent_cls:
-                # Return a minimal object that satisfies pm.ahook.on_start / on_stop
-                mock_pm = MagicMock()
-                mock_pm.ahook.on_start = AsyncMock(return_value=[])
-                mock_pm.ahook.on_stop = AsyncMock(return_value=[])
-                mock_create.return_value = mock_pm
-                # Agent instance returned by the constructor must support
-                # the explicit on_start / on_stop calls that main() makes after
-                # the broadcast.
-                mock_agent = MagicMock()
-                mock_agent.on_start = AsyncMock()
-                mock_agent.on_stop = AsyncMock()
-                mock_agent_cls.return_value = mock_agent
-
+            mock_pm, mock_agent = _make_mock_pm_and_agent()
+            with patch("corvidae.main.create_plugin_manager", return_value=mock_pm) as mock_create:
                 _schedule_sigint()
                 await main(config_path)
 
@@ -96,34 +83,36 @@ class TestAgentLifecycleOrdering:
         call_order: list[str] = []
 
         try:
-            with patch("corvidae.main.create_plugin_manager") as mock_create, \
-                 patch("corvidae.main.Agent") as mock_agent_cls:
-                mock_pm = MagicMock()
+            mock_pm = MagicMock()
+            mock_agent = MagicMock()
 
-                async def broadcast_on_start(**kwargs):
-                    call_order.append("broadcast_on_start")
-                    return []
+            async def broadcast_on_init(**kwargs):
+                call_order.append("broadcast_on_init")
+                return []
 
-                async def broadcast_on_stop(**kwargs):
-                    call_order.append("broadcast_on_stop")
-                    return []
+            async def broadcast_on_start(**kwargs):
+                call_order.append("broadcast_on_start")
+                return []
 
-                mock_pm.ahook.on_start = AsyncMock(side_effect=broadcast_on_start)
-                mock_pm.ahook.on_stop = AsyncMock(side_effect=broadcast_on_stop)
-                mock_create.return_value = mock_pm
+            async def broadcast_on_stop(**kwargs):
+                call_order.append("broadcast_on_stop")
+                return []
 
-                mock_agent = MagicMock()
+            mock_pm.ahook.on_init = AsyncMock(side_effect=broadcast_on_init)
+            mock_pm.ahook.on_start = AsyncMock(side_effect=broadcast_on_start)
+            mock_pm.ahook.on_stop = AsyncMock(side_effect=broadcast_on_stop)
+            mock_pm.get_plugin.return_value = mock_agent
 
-                async def agent_on_start(**kwargs):
-                    call_order.append("agent_on_start")
+            async def agent_on_start(**kwargs):
+                call_order.append("agent_on_start")
 
-                async def agent_on_stop(**kwargs):
-                    call_order.append("agent_on_stop")
+            async def agent_on_stop(**kwargs):
+                call_order.append("agent_on_stop")
 
-                mock_agent.on_start = AsyncMock(side_effect=agent_on_start)
-                mock_agent.on_stop = AsyncMock(side_effect=agent_on_stop)
-                mock_agent_cls.return_value = mock_agent
+            mock_agent.on_start = AsyncMock(side_effect=agent_on_start)
+            mock_agent.on_stop = AsyncMock(side_effect=agent_on_stop)
 
+            with patch("corvidae.main.create_plugin_manager", return_value=mock_pm):
                 _schedule_sigint()
                 await main(config_path)
 
@@ -178,9 +167,23 @@ class TestMainCallsOnStartAndOnStop:
             async def on_stop(self):
                 await on_stop_mock()
 
+        class _MockAgent:
+            async def on_start(self, config):
+                pass
+
+            async def on_stop(self):
+                pass
+
+        mock_agent = _MockAgent()
+
         def patched_create_plugin_manager():
             pm = create_plugin_manager()
             pm.register(MockPlugin())
+            # Suppress real entry-point loading and register a mock agent so
+            # main() can find pm.get_plugin("agent") without loading the full
+            # plugin stack (which requires mocking LLM, DB, aiohttp, etc.).
+            pm.load_setuptools_entrypoints = lambda *a, **kw: None
+            pm.register(mock_agent, name="agent")
             return pm
 
         with tempfile.NamedTemporaryFile(
@@ -190,25 +193,12 @@ class TestMainCallsOnStartAndOnStop:
             config_path = f.name
 
         try:
-            mock_client = MagicMock()
-            mock_client.start = AsyncMock()
-            mock_client.stop = AsyncMock()
             with patch(
                 "corvidae.main.create_plugin_manager",
                 side_effect=patched_create_plugin_manager,
             ), patch(
-                "corvidae.llm_plugin.LLMClient",
-                return_value=mock_client,
-            ), patch(
-                "corvidae.persistence.aiosqlite.connect",
-                new_callable=AsyncMock,
-            ) as mock_connect, patch(
-                "corvidae.persistence.init_db",
-                new_callable=AsyncMock,
+                "corvidae.main.validate_dependencies",
             ):
-                mock_db = MagicMock()
-                mock_db.close = AsyncMock()
-                mock_connect.return_value = mock_db
                 _schedule_sigint()
                 await main(config_path)
 
@@ -235,10 +225,24 @@ class TestRegistryPopulatedBeforeOnStart:
 
         inspector = InspectorPlugin()
 
+        class _MockAgent:
+            async def on_start(self, config):
+                pass
+
+            async def on_stop(self):
+                pass
+
+        mock_agent = _MockAgent()
+
         def patched_create_plugin_manager():
             nonlocal pm
             pm = create_plugin_manager()
             pm.register(inspector)
+            # Suppress real entry-point loading and register a mock agent so
+            # main() can find pm.get_plugin("agent") without loading the full
+            # plugin stack.
+            pm.load_setuptools_entrypoints = lambda *a, **kw: None
+            pm.register(mock_agent, name="agent")
             return pm
 
         pm = None
@@ -264,25 +268,12 @@ class TestRegistryPopulatedBeforeOnStart:
             config_path = f.name
 
         try:
-            mock_client = MagicMock()
-            mock_client.start = AsyncMock()
-            mock_client.stop = AsyncMock()
             with patch(
                 "corvidae.main.create_plugin_manager",
                 side_effect=patched_create_plugin_manager,
             ), patch(
-                "corvidae.llm_plugin.LLMClient",
-                return_value=mock_client,
-            ), patch(
-                "corvidae.persistence.aiosqlite.connect",
-                new_callable=AsyncMock,
-            ) as mock_connect, patch(
-                "corvidae.persistence.init_db",
-                new_callable=AsyncMock,
+                "corvidae.main.validate_dependencies",
             ):
-                mock_db = MagicMock()
-                mock_db.close = AsyncMock()
-                mock_connect.return_value = mock_db
                 _schedule_sigint()
                 await main(config_path)
         finally:
@@ -311,12 +302,14 @@ class TestMainMissingConfig:
 def _make_mock_pm_and_agent():
     """Return a (mock_pm, mock_agent) pair suitable for main() patches."""
     mock_pm = MagicMock()
+    mock_pm.ahook.on_init = AsyncMock(return_value=[])
     mock_pm.ahook.on_start = AsyncMock(return_value=[])
     mock_pm.ahook.on_stop = AsyncMock(return_value=[])
 
     mock_agent = MagicMock()
     mock_agent.on_start = AsyncMock()
     mock_agent.on_stop = AsyncMock()
+    mock_pm.get_plugin.return_value = mock_agent
     return mock_pm, mock_agent
 
 
@@ -355,7 +348,6 @@ class TestDoubleSignalForceExit:
 
             with (
                 patch("corvidae.main.create_plugin_manager", return_value=mock_pm),
-                patch("corvidae.main.Agent", return_value=mock_agent),
                 patch("os._exit") as mock_os_exit,
             ):
                 loop = asyncio.get_running_loop()
@@ -403,7 +395,6 @@ class TestDoubleSignalForceExit:
 
             with (
                 patch("corvidae.main.create_plugin_manager", return_value=mock_pm),
-                patch("corvidae.main.Agent", return_value=mock_agent),
                 patch("os._exit") as mock_os_exit,
             ):
                 loop = asyncio.get_running_loop()
@@ -451,7 +442,6 @@ class TestShutdownTimeout:
 
             with (
                 patch("corvidae.main.create_plugin_manager", return_value=mock_pm),
-                patch("corvidae.main.Agent", return_value=mock_agent),
                 patch("os._exit") as mock_os_exit,
                 patch("corvidae.main.asyncio.wait_for", side_effect=_patched_wait_for),
             ):

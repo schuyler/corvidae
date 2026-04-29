@@ -10,7 +10,7 @@ import pydle
 logger = logging.getLogger("corvidae.irc_plugin")
 
 from corvidae.channel import Channel, ChannelRegistry
-from corvidae.hooks import get_dependency, hookimpl
+from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 
 
 class IRCClient(pydle.Client):
@@ -83,18 +83,36 @@ class IRCClient(pydle.Client):
             raise
 
 
-class IRCPlugin:
+class IRCPlugin(CorvidaePlugin):
     """IRC transport plugin following CLIPlugin pattern."""
 
-    depends_on = {"registry"}
+    depends_on = frozenset({"registry"})
 
-    def __init__(self, pm):
-        self.pm = pm
+    def __init__(self, pm=None):
+        if pm is not None:
+            self.pm = pm
         self.client: Optional[IRCClient] = None
         self._connect_task: Optional[asyncio.Task] = None
         self.channels: list[str] = []
         self._registry: Optional[ChannelRegistry] = None
         self._message_chunk_size: int = 400
+        self._irc_server: str = "irc.libera.chat"
+        self._irc_port: int = 6667
+        self._irc_nick: str = "corvidae"
+        self._irc_tls: bool = False
+
+    @hookimpl
+    async def on_init(self, pm, config: dict) -> None:
+        await super().on_init(pm, config)
+        irc_config = config.get("irc")
+        if irc_config is None:
+            return
+        self._irc_server = irc_config.get("host", "irc.libera.chat")
+        self._irc_port = irc_config.get("port", 6667)
+        self._irc_nick = irc_config.get("nick", "corvidae")
+        self.channels = irc_config.get("channels", [])
+        self._irc_tls = irc_config.get("tls", False)
+        self._message_chunk_size = irc_config.get("message_chunk_size", 400)
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
@@ -103,14 +121,10 @@ class IRCPlugin:
         if irc_config is None:
             return
 
-        server = irc_config.get("host", "irc.libera.chat")
-        port = irc_config.get("port", 6667)
-        nick = irc_config.get("nick", "corvidae")
-        self.channels = irc_config.get("channels", [])
-        tls = irc_config.get("tls", False)
-        self._message_chunk_size = irc_config.get("message_chunk_size", 400)
-
-        self.client = IRCClient(self, nick, server=server, port=port, tls=tls)
+        self.client = IRCClient(
+            self, self._irc_nick,
+            server=self._irc_server, port=self._irc_port, tls=self._irc_tls,
+        )
         self._connect_task = asyncio.create_task(self.client.connect_with_retry())
 
     async def on_channel_message(self, target, by, message):

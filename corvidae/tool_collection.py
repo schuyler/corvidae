@@ -13,24 +13,26 @@ Config:
       max_tool_result_chars: 100000  # migrated to tools.max_result_chars
 """
 import logging
-from corvidae.hooks import hookimpl
+from corvidae.hooks import CorvidaePlugin, hookimpl
 from corvidae.tool import Tool, ToolRegistry
 
 logger = logging.getLogger(__name__)
 
 
-class ToolCollectionPlugin:
+class ToolCollectionPlugin(CorvidaePlugin):
     """Plugin that collects and owns the tool registry."""
 
-    depends_on = set()
+    depends_on = frozenset()
 
-    def __init__(self, pm):
-        self.pm = pm
+    def __init__(self, pm=None):
+        if pm is not None:
+            self.pm = pm
         self.registry: ToolRegistry | None = None
         self.max_result_chars: int = 100_000
 
-    @hookimpl(trylast=True)
-    async def on_start(self, config: dict) -> None:
+    @hookimpl
+    async def on_init(self, pm, config: dict) -> None:
+        await super().on_init(pm, config)
         tools_config = config.get("tools", {})
         fallback = config.get("agent", {}).get("max_tool_result_chars")
         if "max_result_chars" in tools_config:
@@ -44,6 +46,8 @@ class ToolCollectionPlugin:
         else:
             self.max_result_chars = 100_000
 
+    @hookimpl(trylast=True)
+    async def on_start(self, config: dict) -> None:
         # Collect tools from all plugins via register_tools hook (sync).
         collected: list = []
         self.pm.hook.register_tools(tool_registry=collected)
