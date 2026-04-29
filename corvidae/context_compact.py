@@ -69,6 +69,17 @@ class ContextCompactPlugin:
     knowledge.
     """
 
+    DEFAULT_BG_BLOCK_PROMPT = (
+        "Generate a concise background context block from this "
+        "conversation history. Focus on:\n"
+        "- Key facts and decisions\n"
+        "- Current state and ongoing work\n"
+        "- Open questions or pending items\n"
+        "- Any constraints or preferences mentioned\n\n"
+        "Keep it under 2048 characters. Omit conversational filler; "
+        "preserve only information needed for future context."
+    )
+
     depends_on = {"compaction", "llm"}
 
     def __init__(self, pm) -> None:
@@ -81,6 +92,7 @@ class ContextCompactPlugin:
         self._chars_per_token: float = DEFAULT_CHARS_PER_TOKEN
         self._turn_counter: dict[str, int] = {}  # channel_id -> turn count
         self._last_block_ts: dict[str, float] = {}  # channel_id -> timestamp of last block
+        self._bg_block_prompt: str = self.DEFAULT_BG_BLOCK_PROMPT
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
@@ -97,6 +109,9 @@ class ContextCompactPlugin:
         )
         self._chars_per_token = config.get("agent", {}).get(
             "chars_per_token", DEFAULT_CHARS_PER_TOKEN
+        )
+        self._bg_block_prompt = cc_config.get(
+            "bg_block_prompt", self.DEFAULT_BG_BLOCK_PROMPT
         )
 
     @hookimpl
@@ -176,6 +191,14 @@ class ContextCompactPlugin:
                 "background block generation failed",
                 extra={"channel_id": channel_id},
                 exc_info=True,
+            )
+            return None
+
+        # Reject empty blocks — they provide no value.
+        if not block_text or not block_text.strip():
+            logger.warning(
+                "background block was empty, skipping",
+                extra={"channel_id": channel_id},
             )
             return None
 
@@ -276,16 +299,7 @@ class ContextCompactPlugin:
         response = await client.chat([
             {
                 "role": "system",
-                "content": (
-                    "Generate a concise background context block from this "
-                    "conversation history. Focus on:\n"
-                    "- Key facts and decisions\n"
-                    "- Current state and ongoing work\n"
-                    "- Open questions or pending items\n"
-                    "- Any constraints or preferences mentioned\n\n"
-                    "Keep it under 2048 characters. Omit conversational filler; "
-                    "preserve only information needed for future context."
-                ),
+                "content": self._bg_block_prompt,
             },
             {"role": "user", "content": serialized},
         ])

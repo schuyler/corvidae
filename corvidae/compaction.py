@@ -18,6 +18,7 @@ Algorithm:
 
 import json
 import logging
+import time
 
 from corvidae.context import DEFAULT_CHARS_PER_TOKEN, MessageType
 from corvidae.hooks import get_dependency, hookimpl
@@ -30,6 +31,12 @@ class CompactionPlugin:
 
     depends_on = {"llm"}
 
+    DEFAULT_SUMMARY_PROMPT = (
+        "Summarize the following conversation concisely, "
+        "preserving key facts, decisions, and context that "
+        "would be needed to continue the conversation."
+    )
+
     def __init__(self, pm) -> None:
         self.pm = pm
         self._compaction_threshold: float = 0.8
@@ -37,6 +44,11 @@ class CompactionPlugin:
         self._min_messages: int = 5
         self._chars_per_token: float = DEFAULT_CHARS_PER_TOKEN
         self._llm_client = None
+        self._summary_prompt: str = self.DEFAULT_SUMMARY_PROMPT
+        self._min_messages_between_compactions: int = 6
+        self._last_compaction_msg_count: dict[str, int] = {}  # channel_id -> message_count at last compaction
+        self._failed_compaction_cooldown: float = 30.0  # seconds
+        self._last_failed_compaction: dict[str, float] = {}  # channel_id -> timestamp
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
@@ -45,6 +57,7 @@ class CompactionPlugin:
         self._compaction_retention = agent_config.get("compaction_retention", 0.5)
         self._min_messages = agent_config.get("min_messages_to_compact", 5)
         self._chars_per_token = agent_config.get("chars_per_token", DEFAULT_CHARS_PER_TOKEN)
+        self._summary_prompt = agent_config.get("compaction_prompt", self.DEFAULT_SUMMARY_PROMPT)
 
     @hookimpl
     async def compact_conversation(self, channel, conversation, max_tokens):
@@ -52,15 +65,36 @@ class CompactionPlugin:
 
         Returns True if compaction was performed, None otherwise.
         """
+        channel_id = conversation.channel_id
+
         if conversation.token_estimate() < self._compaction_threshold * max_tokens:
             return None
 
         if len(conversation.messages) <= self._min_messages:
             return None
 
+        # Cooldown after a failed compaction: don't retry immediately.
+        last_fail = self._last_failed_compaction.get(channel_id, 0)
+        if time.monotonic() - last_fail < self._failed_compaction_cooldown:
+            logger.debug(
+                "compaction skipped (cooldown after recent failure)",
+                extra={"channel_id": channel_id},
+            )
+            return None
+
+        # Minimum messages between compactions: don't re-compact too aggressively.
+        last_msg_count = self._last_compaction_msg_count.get(channel_id, 0)
+        messages_since = len(conversation.messages) - last_msg_count
+        if last_msg_count > 0 and messages_since < self._min_messages_between_compactions:
+            logger.debug(
+                "compaction skipped (too soon since last compaction)",
+                extra={"channel_id": channel_id, "messages_since": messages_since},
+            )
+            return None
+
         logger.warning(
             "compaction triggered (approaching context limit)",
-            extra={"channel_id": conversation.channel_id},
+            extra={"channel_id": channel_id},
         )
 
         retain_budget = int(max_tokens * self._compaction_retention)
@@ -87,13 +121,34 @@ class CompactionPlugin:
         # Strip _message_type before passing to LLM to avoid serializing internal metadata.
         older_clean = [{k: v for k, v in m.items() if k != "_message_type"} for m in older]
 
-        summary_text = await self._summarize(older_clean)
+        try:
+            summary_text = await self._summarize(older_clean)
+        except Exception:
+            # Record failure time for cooldown
+            self._last_failed_compaction[channel_id] = time.monotonic()
+            raise
+
+        # Reject blank/empty summaries — they're worse than no summary
+        # because they erase context without preserving any information.
+        if not summary_text or not summary_text.strip():
+            logger.warning(
+                "compaction produced empty summary, aborting",
+                extra={"channel_id": channel_id},
+            )
+            self._last_failed_compaction[channel_id] = time.monotonic()
+            return None
+
         summary_msg = {
             "role": "assistant",
             "content": f"[Summary of earlier conversation]\n{summary_text}",
         }
 
         conversation.replace_with_summary(summary_msg, retain_count)
+
+        # Record successful compaction for cooldown tracking.
+        self._last_compaction_msg_count[channel_id] = len(conversation.messages)
+        # Clear any previous failure cooldown.
+        self._last_failed_compaction.pop(channel_id, None)
 
         if self.pm is not None:
             try:
@@ -151,11 +206,7 @@ class CompactionPlugin:
         response = await self._llm_client.chat([
             {
                 "role": "system",
-                "content": (
-                    "Summarize the following conversation concisely, "
-                    "preserving key facts, decisions, and context that "
-                    "would be needed to continue the conversation."
-                ),
+                "content": self._summary_prompt,
             },
             {"role": "user", "content": json.dumps(messages)},
         ])
