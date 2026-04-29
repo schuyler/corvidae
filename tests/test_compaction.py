@@ -191,6 +191,61 @@ class TestCompactionPluginPart3:
             "see plans/agent-decomposition-parts-3-4.md §Part 3"
         )
 
+class TestSummarizeTruncation:
+    """Tests for _summarize message truncation when input is large."""
+
+    async def test_summarize_truncates_large_input(self):
+        """_summarize must truncate to head + marker + tail when given >100 messages."""
+        from corvidae.compaction import CompactionPlugin
+
+        plugin = CompactionPlugin(pm=None)
+        plugin._llm_client = AsyncMock()
+
+        # Build 200 messages so truncation kicks in.
+        messages = [{"role": "user", "content": f"msg {i}"} for i in range(200)]
+
+        captured_payload = {}
+
+        async def fake_chat(payload):
+            captured_payload["payload"] = payload
+            return {"choices": [{"message": {"content": "summary"}}]}
+
+        plugin._llm_client.chat = fake_chat
+        await plugin._summarize(messages)
+
+        user_msg = captured_payload["payload"][1]  # index 0 is system prompt
+        import json
+        sent = json.loads(user_msg["content"])
+
+        # head (50) + marker (1) + tail (50) = 101 entries
+        assert len(sent) == 101
+        assert sent[50]["content"] == "[...100 messages omitted...]"
+        assert sent[0]["content"] == "msg 0"
+        assert sent[-1]["content"] == "msg 199"
+
+    async def test_summarize_does_not_truncate_small_input(self):
+        """_summarize must not truncate when given ≤100 messages."""
+        from corvidae.compaction import CompactionPlugin
+
+        plugin = CompactionPlugin(pm=None)
+        plugin._llm_client = AsyncMock()
+
+        messages = [{"role": "user", "content": f"msg {i}"} for i in range(50)]
+
+        captured_payload = {}
+
+        async def fake_chat(payload):
+            captured_payload["payload"] = payload
+            return {"choices": [{"message": {"content": "summary"}}]}
+
+        plugin._llm_client.chat = fake_chat
+        await plugin._summarize(messages)
+
+        import json
+        sent = json.loads(captured_payload["payload"][1]["content"])
+        assert len(sent) == 50
+        assert all("messages omitted" not in m.get("content", "") for m in sent)
+
     def test_compact_conversation_hookimpl_has_no_client_parameter(self):
         """compact_conversation hookimpl must NOT have a 'client' parameter.
 
