@@ -120,7 +120,8 @@ class TestReadLoop:
 
         with patch.object(loop, "run_in_executor", side_effect=fake_executor), \
              patch("sys.stdin") as mock_stdin, \
-             patch("sys.stdout"):
+             patch("sys.stdout"), \
+             patch("corvidae.channels.cli.os.kill") as mock_kill:
             mock_stdin.readline = fake_readline
             # Run the read loop directly (not via create_task) so we can await it.
             await plugin._read_loop()
@@ -131,6 +132,36 @@ class TestReadLoop:
             sender="user",
             text="hello world",
         )
+        # EOF triggers SIGINT to self for graceful shutdown
+        mock_kill.assert_called_once()
+
+    async def test_read_loop_eof_sends_sigint(self):
+        """EOF (Ctrl-D) sends SIGINT to self to trigger graceful shutdown."""
+        pm, registry = _make_pm_with_registry(transport="cli")
+        plugin = CLIPlugin(pm)
+        pm.register(plugin, name="cli")
+        plugin._registry = registry
+
+        lines = iter([""])
+
+        def fake_readline():
+            return next(lines)
+
+        loop = asyncio.get_running_loop()
+
+        async def fake_executor(executor, fn, *args):
+            return fn(*args)
+
+        with patch.object(loop, "run_in_executor", side_effect=fake_executor), \
+             patch("sys.stdin") as mock_stdin, \
+             patch("sys.stdout"), \
+             patch("corvidae.channels.cli.os.kill") as mock_kill:
+            mock_stdin.readline = fake_readline
+            await plugin._read_loop()
+
+        import os
+        import signal
+        mock_kill.assert_called_once_with(os.getpid(), signal.SIGINT)
 
     async def test_read_loop_skips_blank_lines(self):
         """readline returns a blank line then "".
@@ -154,7 +185,8 @@ class TestReadLoop:
 
         with patch.object(loop, "run_in_executor", side_effect=fake_executor), \
              patch("sys.stdin") as mock_stdin, \
-             patch("sys.stdout"):
+             patch("sys.stdout"), \
+             patch("corvidae.channels.cli.os.kill"):
             mock_stdin.readline = fake_readline
             await plugin._read_loop()
 
