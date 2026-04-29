@@ -65,7 +65,7 @@ Key sections:
 - `irc` — omit entirely to disable IRC
 - `channels` — per-channel overrides keyed by `transport:scope` (e.g., `irc:#general`, `cli:local`)
 - `mcp` — MCP server connections (optional)
-- `logging` — passed directly to `logging.config.dictConfig`
+- `logging` — simplified options (`level`, `file`); see docs/configuration.md
 
 ## Features
 

@@ -221,26 +221,13 @@ mcp:
 
 ---
 
-## `logging` — Python logging configuration
+## `logging` — Logging configuration
 
-The `logging` section is passed directly to `logging.config.dictConfig`. Any valid Python logging dict-config schema is accepted. Corvidae uses structured logging with extra fields; the `StructuredFormatter` in `corvidae.main` appends them to the log line.
+The `logging` section is optional. Omitting it applies defaults (INFO level; file output in CLI mode, stderr in programmatic use).
 
-```yaml
-logging:
-  version: 1
-  disable_existing_loggers: false
-  formatters:
-    standard:
-      (): corvidae.main.StructuredFormatter
-      format: "%(asctime)s %(levelname)s %(name)s %(message)s"
-  handlers:
-    console:
-      class: logging.StreamHandler
-      formatter: standard
-      stream: ext://sys.stderr
-  loggers:
-    corvidae:
-      level: INFO
-      handlers: [console]
-      propagate: false
-```
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `logging.level` | string | `INFO` | Minimum log level. One of `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`. Case-insensitive. |
+| `logging.file` | string | none (CLI: `corvidae.log`) | Path to a rotating log file (10 MB, 5 backups). When set, logs go to this file. When absent, logs go to stderr. In CLI mode, defaults to `corvidae.log`. |
+
+When `logging.file` is set in YAML, logs go to that rotating file regardless of mode. When `logging.file` is absent, logs go to stderr — except in CLI mode, where the default is `corvidae.log` to avoid polluting the chat interface.

@@ -63,6 +63,11 @@ agent:
 #     - "#general"
 #     - "#random"
 
+# Logging (optional)
+# logging:
+#   level: INFO                # DEBUG | INFO | WARNING | ERROR | CRITICAL
+#   file: corvidae.log         # log to file; omit for stderr (CLI defaults to file)
+
 # Per-channel config (optional)
 # Keys must be "transport:scope". Overrides agent defaults where set.
 channels:
