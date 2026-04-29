@@ -1,15 +1,16 @@
 """Structured logging utilities for Corvidae.
 
-This module provides the StructuredFormatter and default logging configuration
+This module provides the StructuredFormatter and configure_logging() function
 used by the Corvidae daemon.
 
 Logging Configuration:
-    The `logging` key in agent.yaml is passed to `logging.config.dictConfig()`.
-    If omitted, built-in defaults apply: INFO level to stderr, standard format.
-    See `_DEFAULT_LOGGING` for the default configuration schema.
+    Call `configure_logging()` to apply logging configuration from simplified
+    options (level, file). Used by `main.py` during startup.
 """
 
 import logging
+import logging.config
+import logging.handlers
 
 
 _BUILTIN_LOG_ATTRS = {
@@ -29,12 +30,8 @@ class StructuredFormatter(logging.Formatter):
         logger.debug("tool call arguments", extra={"tool": "shell", "arguments": "ls"})
         # → "2026-04-23 12:00:00 DEBUG    corvidae.agent_loop: tool call arguments  tool='shell' arguments='ls'"
 
-    Reference this class in a YAML logging config with::
-
-        formatters:
-          structured:
-            (): corvidae.logging.StructuredFormatter
-            format: "%(asctime)s %(levelname)-8s %(name)s: %(message)s"
+    This formatter is applied automatically by ``configure_logging()``. It does
+    not need to be referenced in YAML configuration.
     """
 
     def format(self, record: logging.LogRecord) -> str:
@@ -58,42 +55,69 @@ class StructuredFormatter(logging.Formatter):
         return s
 
 
-# Default logging configuration applied when no `logging` section exists in
-# agent.yaml. Passed directly to logging.config.dictConfig(). Key choices:
-#   - Output to stderr (stdout reserved for structured output if needed)
-#   - Corvidae loggers at INFO (production operational level)
-#   - Root logger at WARNING (suppresses noisy library debug output)
-#   - disable_existing_loggers: False preserves loggers created at import time
-#   - propagate: False on corvidae logger prevents double-output through root
-#
-# Users can override by providing a `logging` section in agent.yaml that
-# follows the same schema (log levels, file handlers, JSON formatters, etc.).
-_DEFAULT_LOGGING = {
-    "version": 1,
-    "disable_existing_loggers": False,
-    "formatters": {
-        "standard": {
-            "()": StructuredFormatter,
-            "format": "%(asctime)s %(levelname)-8s %(name)s: %(message)s",
-            "datefmt": "%Y-%m-%d %H:%M:%S",
-        },
-    },
-    "handlers": {
-        "console": {
+_VALID_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+
+
+def configure_logging(
+    *,
+    level: str = "INFO",
+    file: str | None = None,
+) -> None:
+    """Build and apply logging configuration from simplified options.
+
+    Args:
+        level: Minimum log level for the corvidae logger.
+               One of DEBUG, INFO, WARNING, ERROR, CRITICAL.
+               Case-insensitive.
+        file: Path to the rotating log file. If set, logs go to that file
+              via RotatingFileHandler. If None, logs go to stderr via
+              StreamHandler. Relative paths resolve from the process working
+              directory.
+
+    Raises:
+        ValueError: If level is not a recognized value.
+    """
+    level = level.upper()
+    if level not in _VALID_LEVELS:
+        raise ValueError(f"Invalid log level {level!r}. Must be one of {sorted(_VALID_LEVELS)}")
+
+    if file is not None:
+        handler_cfg = {
+            "class": "logging.handlers.RotatingFileHandler",
+            "formatter": "structured",
+            "filename": file,
+            "maxBytes": 10_485_760,   # 10 MB
+            "backupCount": 5,
+            "encoding": "utf-8",
+        }
+    else:
+        handler_cfg = {
             "class": "logging.StreamHandler",
-            "formatter": "standard",
+            "formatter": "structured",
             "stream": "ext://sys.stderr",
+        }
+
+    config = {
+        "version": 1,
+        "disable_existing_loggers": False,
+        "formatters": {
+            "structured": {
+                "()": StructuredFormatter,
+                "format": "%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+                "datefmt": "%Y-%m-%d %H:%M:%S",
+            },
         },
-    },
-    "loggers": {
-        "corvidae": {
-            "level": "INFO",
-            "handlers": ["console"],
-            "propagate": False,
+        "handlers": {"main": handler_cfg},
+        "loggers": {
+            "corvidae": {
+                "level": level,
+                "handlers": ["main"],
+                "propagate": False,
+            },
         },
-    },
-    "root": {
-        "level": "WARNING",
-        "handlers": ["console"],
-    },
-}
+        "root": {
+            "level": "WARNING",
+            "handlers": ["main"],
+        },
+    }
+    logging.config.dictConfig(config)

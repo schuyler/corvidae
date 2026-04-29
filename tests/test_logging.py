@@ -10,6 +10,7 @@ Convention: Use `caplog` (pytest's built-in fixture) to assert on log records.
 import logging
 import logging.config
 import os
+import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -94,223 +95,264 @@ class TestLoggerNamingConvention:
 
 
 # ---------------------------------------------------------------------------
-# Section 2: main.py — _DEFAULT_LOGGING and dictConfig
+# Section 2: configure_logging() — unit tests
 # ---------------------------------------------------------------------------
 
 
-class TestMainLogging:
-    """main.py must define _DEFAULT_LOGGING and call dictConfig on startup."""
+class TestConfigureLogging:
+    """Unit tests for the configure_logging() function in corvidae.logging."""
 
-    def test_default_logging_constant_exists(self):
-        """main.py must define _DEFAULT_LOGGING as a module-level constant."""
-        import corvidae.main as mod
-        assert hasattr(mod, "_DEFAULT_LOGGING"), "main.py must define _DEFAULT_LOGGING"
+    def test_defaults_to_stderr(self):
+        """configure_logging() with no args installs a StreamHandler on stderr."""
+        from corvidae.logging import configure_logging
 
-    def test_default_logging_constant_has_required_keys(self):
-        """_DEFAULT_LOGGING must have version, formatters, handlers, loggers, root."""
-        import corvidae.main as mod
-        d = mod._DEFAULT_LOGGING
-        assert d.get("version") == 1
-        assert "formatters" in d
-        assert "handlers" in d
-        assert "loggers" in d
-        assert "root" in d
+        configure_logging()
+        corvidae_logger = logging.getLogger("corvidae")
+        handlers = corvidae_logger.handlers
+        assert handlers, "corvidae logger must have at least one handler"
+        assert any(
+            isinstance(h, logging.StreamHandler)
+            and getattr(h, "stream", None) is not None
+            and h.stream is sys.stderr
+            for h in handlers
+        ), f"Expected a StreamHandler on stderr, got: {handlers}"
 
-    def test_default_logging_corvidae_level_is_info(self):
-        """_DEFAULT_LOGGING must configure corvidae logger at INFO."""
-        import corvidae.main as mod
-        corvidae_cfg = mod._DEFAULT_LOGGING["loggers"].get("corvidae", {})
-        assert corvidae_cfg.get("level") == "INFO"
+    def test_file_creates_rotating_handler(self, tmp_path):
+        """configure_logging(file=...) installs a RotatingFileHandler."""
+        import logging.handlers
+        from corvidae.logging import configure_logging
 
-    def test_default_logging_disable_existing_is_false(self):
-        """_DEFAULT_LOGGING must set disable_existing_loggers to False."""
-        import corvidae.main as mod
-        assert mod._DEFAULT_LOGGING.get("disable_existing_loggers") is False
+        log_file = str(tmp_path / "test.log")
+        configure_logging(file=log_file)
+        corvidae_logger = logging.getLogger("corvidae")
+        handlers = corvidae_logger.handlers
+        assert any(
+            isinstance(h, logging.handlers.RotatingFileHandler)
+            for h in handlers
+        ), f"Expected a RotatingFileHandler, got: {handlers}"
 
-    async def test_main_calls_dictconfig_with_defaults(self):
-        """When no 'logging' key in config, main() must call dictConfig with
-        _DEFAULT_LOGGING."""
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".yaml", delete=False
-        ) as f:
-            yaml.dump(
-                {"llm": {"base_url": "http://localhost:8080", "model": "test"}},
-                f,
-            )
-            config_path = f.name
+    def test_level_applied(self):
+        """configure_logging(level='DEBUG') sets corvidae logger to DEBUG."""
+        from corvidae.logging import configure_logging
 
-        try:
-            import asyncio
-            import signal
+        configure_logging(level="DEBUG")
+        corvidae_logger = logging.getLogger("corvidae")
+        assert corvidae_logger.level == logging.DEBUG, (
+            f"Expected DEBUG ({logging.DEBUG}), got {corvidae_logger.level}"
+        )
 
-            with patch("logging.config.dictConfig") as mock_dictconfig, \
-                 patch("corvidae.main.create_plugin_manager") as mock_pm_factory, \
-                 patch("corvidae.main.Agent") as mock_agent_cls:
-                mock_pm = MagicMock()
-                mock_pm.ahook.on_start = AsyncMock(return_value=[])
-                mock_pm.ahook.on_stop = AsyncMock(return_value=[])
-                mock_pm_factory.return_value = mock_pm
-                mock_agent = MagicMock()
-                mock_agent.on_start = AsyncMock()
-                mock_agent.on_stop = AsyncMock()
-                mock_agent_cls.return_value = mock_agent
+    def test_invalid_level_raises(self):
+        """configure_logging with an unrecognized level raises ValueError."""
+        from corvidae.logging import configure_logging
 
-                async def run():
-                    asyncio.get_running_loop().call_later(0.05, os.kill, os.getpid(), signal.SIGINT)
-                    from corvidae.main import main
-                    await main(config_path)
+        with pytest.raises(ValueError, match="Invalid log level"):
+            configure_logging(level="VERBOSE")
 
-                await run()
+    def test_structured_formatter_used(self):
+        """The handler installed by configure_logging uses StructuredFormatter."""
+        from corvidae.logging import configure_logging, StructuredFormatter
 
-            mock_dictconfig.assert_called()
-            from corvidae.main import _DEFAULT_LOGGING
-            first_call_arg = mock_dictconfig.call_args_list[0][0][0]
-            assert first_call_arg == _DEFAULT_LOGGING, (
-                "dictConfig should be called with _DEFAULT_LOGGING when no logging key in config"
-            )
-        finally:
-            os.unlink(config_path)
+        configure_logging()
+        corvidae_logger = logging.getLogger("corvidae")
+        formatters = [h.formatter for h in corvidae_logger.handlers if h.formatter]
+        assert any(
+            isinstance(f, StructuredFormatter) for f in formatters
+        ), f"Expected StructuredFormatter on at least one handler, got: {formatters}"
 
-    async def test_main_calls_dictconfig_with_yaml_logging(self):
-        """When 'logging' key is present in config, main() must call dictConfig
-        with that config (not _DEFAULT_LOGGING)."""
-        custom_logging = {
-            "version": 1,
-            "disable_existing_loggers": False,
-            "handlers": {"null": {"class": "logging.NullHandler"}},
-            "loggers": {"corvidae": {"level": "DEBUG", "handlers": ["null"], "propagate": False}},
-            "root": {"level": "ERROR", "handlers": ["null"]},
-        }
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".yaml", delete=False
-        ) as f:
-            yaml.dump(
-                {
-                    "llm": {"base_url": "http://localhost:8080", "model": "test"},
-                    "logging": custom_logging,
-                },
-                f,
-            )
-            config_path = f.name
+    def test_root_logger_at_warning(self):
+        """configure_logging() leaves the root logger at WARNING."""
+        from corvidae.logging import configure_logging
 
-        try:
-            import asyncio
-            import signal
+        configure_logging()
+        root = logging.getLogger()
+        assert root.level == logging.WARNING, (
+            f"Expected root logger at WARNING ({logging.WARNING}), got {root.level}"
+        )
 
-            with patch("logging.config.dictConfig") as mock_dictconfig, \
-                 patch("corvidae.main.create_plugin_manager") as mock_pm_factory, \
-                 patch("corvidae.main.Agent") as mock_agent_cls:
-                mock_pm = MagicMock()
-                mock_pm.ahook.on_start = AsyncMock(return_value=[])
-                mock_pm.ahook.on_stop = AsyncMock(return_value=[])
-                mock_pm_factory.return_value = mock_pm
-                mock_agent = MagicMock()
-                mock_agent.on_start = AsyncMock()
-                mock_agent.on_stop = AsyncMock()
-                mock_agent_cls.return_value = mock_agent
+    def test_level_case_insensitive(self):
+        """configure_logging(level='debug') is normalized via .upper() and works."""
+        from corvidae.logging import configure_logging
 
-                async def run():
-                    asyncio.get_running_loop().call_later(0.05, os.kill, os.getpid(), signal.SIGINT)
-                    from corvidae.main import main
-                    await main(config_path)
+        configure_logging(level="debug")
+        corvidae_logger = logging.getLogger("corvidae")
+        assert corvidae_logger.level == logging.DEBUG, (
+            f"Expected DEBUG ({logging.DEBUG}) after level='debug', got {corvidae_logger.level}"
+        )
 
-                await run()
 
-            mock_dictconfig.assert_called()
-            first_call_arg = mock_dictconfig.call_args_list[0][0][0]
-            assert first_call_arg == custom_logging, (
-                "dictConfig should be called with YAML logging config when present"
-            )
-        finally:
-            os.unlink(config_path)
+# ---------------------------------------------------------------------------
+# Section 3: main() integration — logging configuration
+# ---------------------------------------------------------------------------
 
-    async def test_main_logs_startup_info(self, caplog):
-        """main() must emit an INFO log for 'logging configured' and 'daemon starting'
-        (or similar startup message)."""
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".yaml", delete=False
-        ) as f:
-            yaml.dump(
-                {"llm": {"base_url": "http://localhost:8080", "model": "test"}},
-                f,
-            )
-            config_path = f.name
 
-        try:
-            import asyncio
-            import signal
+def _make_minimal_config(tmp_path, extra=None):
+    """Write a minimal agent.yaml for integration tests and return its path."""
+    data = {"llm": {"base_url": "http://localhost:8080", "model": "test"}}
+    if extra:
+        data.update(extra)
+    config_file = tmp_path / "agent.yaml"
+    config_file.write_text(yaml.dump(data))
+    return str(config_file)
 
-            with caplog.at_level(logging.INFO, logger="corvidae.main"), \
-                 patch("logging.config.dictConfig"), \
-                 patch("corvidae.main.create_plugin_manager") as mock_pm_factory, \
-                 patch("corvidae.main.Agent") as mock_agent_cls:
-                mock_pm = MagicMock()
-                mock_pm.ahook.on_start = AsyncMock(return_value=[])
-                mock_pm.ahook.on_stop = AsyncMock(return_value=[])
-                mock_pm_factory.return_value = mock_pm
-                mock_agent = MagicMock()
-                mock_agent.on_start = AsyncMock()
-                mock_agent.on_stop = AsyncMock()
-                mock_agent_cls.return_value = mock_agent
 
-                async def run():
-                    asyncio.get_running_loop().call_later(0.05, os.kill, os.getpid(), signal.SIGINT)
-                    from corvidae.main import main
-                    await main(config_path)
+def _make_mock_pm():
+    mock_pm = MagicMock()
+    mock_pm.ahook.on_start = AsyncMock(return_value=[])
+    mock_pm.ahook.on_stop = AsyncMock(return_value=[])
+    return mock_pm
 
-                await run()
 
-            log_messages = [r.message for r in caplog.records if r.name == "corvidae.main"]
-            assert any("logging" in m.lower() or "starting" in m.lower() or "configured" in m.lower()
-                       for m in log_messages), (
-                f"Expected startup INFO log in corvidae.main, got: {log_messages}"
-            )
-        finally:
-            os.unlink(config_path)
+def _make_mock_agent():
+    mock_agent = MagicMock()
+    mock_agent.on_start = AsyncMock()
+    mock_agent.on_stop = AsyncMock()
+    return mock_agent
 
-    async def test_main_logs_shutdown_info(self, caplog):
-        """main() must emit an INFO log after stop_event.wait() returns when
-        shutdown signal is received (e.g., 'shutdown signal received, stopping')."""
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".yaml", delete=False
-        ) as f:
-            yaml.dump(
-                {"llm": {"base_url": "http://localhost:8080", "model": "test"}},
-                f,
-            )
-            config_path = f.name
 
-        try:
-            import asyncio
-            import signal
+class TestMainLoggingConfiguration:
+    """Integration tests for main()'s logging configuration via configure_logging()."""
 
-            with caplog.at_level(logging.INFO, logger="corvidae.main"), \
-                 patch("logging.config.dictConfig"), \
-                 patch("corvidae.main.create_plugin_manager") as mock_pm_factory, \
-                 patch("corvidae.main.Agent") as mock_agent_cls:
-                mock_pm = MagicMock()
-                mock_pm.ahook.on_start = AsyncMock(return_value=[])
-                mock_pm.ahook.on_stop = AsyncMock(return_value=[])
-                mock_pm_factory.return_value = mock_pm
-                mock_agent = MagicMock()
-                mock_agent.on_start = AsyncMock()
-                mock_agent.on_stop = AsyncMock()
-                mock_agent_cls.return_value = mock_agent
+    async def _run_main(self, config_path, **main_kwargs):
+        """Run main() with a SIGINT scheduled after 50ms and the standard plugin mocks."""
+        import asyncio
+        import signal
 
-                async def run():
-                    asyncio.get_running_loop().call_later(0.05, os.kill, os.getpid(), signal.SIGINT)
-                    from corvidae.main import main
-                    await main(config_path)
+        with patch("corvidae.main.configure_logging") as mock_configure, \
+             patch("corvidae.main.create_plugin_manager") as mock_pm_factory, \
+             patch("corvidae.main.Agent") as mock_agent_cls:
+            mock_pm_factory.return_value = _make_mock_pm()
+            mock_agent_cls.return_value = _make_mock_agent()
 
-                await run()
+            async def run():
+                asyncio.get_running_loop().call_later(
+                    0.05, os.kill, os.getpid(), signal.SIGINT
+                )
+                from corvidae.main import main
+                await main(config_path, **main_kwargs)
 
-            log_messages = [r.message for r in caplog.records if r.name == "corvidae.main"]
-            assert any("shutdown" in m.lower() or "stopping" in m.lower() or "signal" in m.lower()
-                       for m in log_messages), (
-                f"Expected shutdown INFO log in corvidae.main, got: {log_messages}"
-            )
-        finally:
-            os.unlink(config_path)
+            await run()
+
+        return mock_configure
+
+    async def test_programmatic_default_is_stderr(self, tmp_path):
+        """main() without cli_mode calls configure_logging with file=None (stderr)."""
+        config_path = _make_minimal_config(tmp_path)
+        mock_configure = await self._run_main(config_path)
+
+        mock_configure.assert_called_once()
+        _, kwargs = mock_configure.call_args
+        assert kwargs.get("file") is None, (
+            f"Expected file=None in programmatic mode, got: {kwargs}"
+        )
+
+    async def test_cli_mode_default_is_file(self, tmp_path):
+        """main(cli_mode=True) defaults file to 'corvidae.log'."""
+        config_path = _make_minimal_config(tmp_path)
+        mock_configure = await self._run_main(config_path, cli_mode=True)
+
+        mock_configure.assert_called_once()
+        _, kwargs = mock_configure.call_args
+        assert kwargs.get("file") == "corvidae.log", (
+            f"Expected file='corvidae.log' in cli_mode, got: {kwargs}"
+        )
+
+    async def test_yaml_file_overrides_cli_default(self, tmp_path):
+        """YAML logging.file='custom.log' overrides the cli_mode default of 'corvidae.log'."""
+        config_path = _make_minimal_config(
+            tmp_path, extra={"logging": {"file": "custom.log"}}
+        )
+        mock_configure = await self._run_main(config_path, cli_mode=True)
+
+        mock_configure.assert_called_once()
+        _, kwargs = mock_configure.call_args
+        assert kwargs.get("file") == "custom.log", (
+            f"Expected file='custom.log' from YAML override, got: {kwargs}"
+        )
+
+    async def test_yaml_level_passed_through(self, tmp_path):
+        """YAML logging.level='DEBUG' is forwarded to configure_logging."""
+        config_path = _make_minimal_config(
+            tmp_path, extra={"logging": {"level": "DEBUG"}}
+        )
+        mock_configure = await self._run_main(config_path)
+
+        mock_configure.assert_called_once()
+        _, kwargs = mock_configure.call_args
+        assert kwargs.get("level") == "DEBUG", (
+            f"Expected level='DEBUG' from YAML, got: {kwargs}"
+        )
+
+    async def test_yaml_file_passed_through(self, tmp_path):
+        """YAML logging.file is forwarded as the file kwarg to configure_logging."""
+        log_file = str(tmp_path / "custom.log")
+        config_path = _make_minimal_config(
+            tmp_path, extra={"logging": {"file": log_file}}
+        )
+        mock_configure = await self._run_main(config_path)
+
+        mock_configure.assert_called_once()
+        _, kwargs = mock_configure.call_args
+        assert kwargs.get("file") == log_file, (
+            f"Expected file={log_file!r} from YAML, got: {kwargs}"
+        )
+
+    async def test_main_logs_startup_info(self, tmp_path, caplog):
+        """main() must emit an INFO log for 'logging configured' (startup message)."""
+        config_path = _make_minimal_config(tmp_path)
+
+        import asyncio
+        import signal
+
+        with caplog.at_level(logging.INFO, logger="corvidae.main"), \
+             patch("corvidae.main.configure_logging"), \
+             patch("corvidae.main.create_plugin_manager") as mock_pm_factory, \
+             patch("corvidae.main.Agent") as mock_agent_cls:
+            mock_pm_factory.return_value = _make_mock_pm()
+            mock_agent_cls.return_value = _make_mock_agent()
+
+            async def run():
+                asyncio.get_running_loop().call_later(
+                    0.05, os.kill, os.getpid(), signal.SIGINT
+                )
+                from corvidae.main import main
+                await main(config_path)
+
+            await run()
+
+        log_messages = [r.message for r in caplog.records if r.name == "corvidae.main"]
+        assert any(
+            "logging" in m.lower() or "starting" in m.lower() or "configured" in m.lower()
+            for m in log_messages
+        ), f"Expected startup INFO log in corvidae.main, got: {log_messages}"
+
+    async def test_main_logs_shutdown_info(self, tmp_path, caplog):
+        """main() must emit an INFO log when shutdown signal is received."""
+        config_path = _make_minimal_config(tmp_path)
+
+        import asyncio
+        import signal
+
+        with caplog.at_level(logging.INFO, logger="corvidae.main"), \
+             patch("corvidae.main.configure_logging"), \
+             patch("corvidae.main.create_plugin_manager") as mock_pm_factory, \
+             patch("corvidae.main.Agent") as mock_agent_cls:
+            mock_pm_factory.return_value = _make_mock_pm()
+            mock_agent_cls.return_value = _make_mock_agent()
+
+            async def run():
+                asyncio.get_running_loop().call_later(
+                    0.05, os.kill, os.getpid(), signal.SIGINT
+                )
+                from corvidae.main import main
+                await main(config_path)
+
+            await run()
+
+        log_messages = [r.message for r in caplog.records if r.name == "corvidae.main"]
+        assert any(
+            "shutdown" in m.lower() or "stopping" in m.lower() or "signal" in m.lower()
+            for m in log_messages
+        ), f"Expected shutdown INFO log in corvidae.main, got: {log_messages}"
 
 
 # ---------------------------------------------------------------------------
