@@ -1044,8 +1044,8 @@ irc:
     - "#channel"
 
 logging:                        # optional, falls back to defaults
-  version: 1
-  ...
+  level: INFO                   # DEBUG | INFO | WARNING | ERROR | CRITICAL
+  file: corvidae.log            # omit for stderr; CLI mode defaults to corvidae.log
 ```
 
 When `system_prompt` is a list, each path is read and concatenated.
@@ -1131,7 +1131,7 @@ corvidae/
 ├── context.py            # ContextWindow, MessageType, DEFAULT_CHARS_PER_TOKEN
 ├── context_compact.py    # ContextCompactPlugin (disabled — conflicts with CompactionPlugin)
 ├── jsonl_log.py          # JsonlLogPlugin (on_conversation_event, on_compaction)
-├── logging.py            # StructuredFormatter, _DEFAULT_LOGGING
+├── logging.py            # StructuredFormatter, configure_logging()
 ├── agent.py              # Agent (single-turn dispatch)
 ├── persistence.py        # PersistencePlugin (DB lifecycle, conversation init)
 ├── idle.py               # IdleMonitorPlugin (no-op stub; idle detection is push-based in Agent)
