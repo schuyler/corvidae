@@ -620,9 +620,10 @@ class TestCompactionLogging:
         mock_channel.id = "test:chan1"
 
         plugin = CompactionPlugin()
+        plugin._llm_client = mock_client
         with caplog.at_level(logging.WARNING, logger="corvidae.compaction"):
             await plugin.compact_conversation(
-                channel=mock_channel, conversation=conv, client=mock_client, max_tokens=100
+                channel=mock_channel, conversation=conv, max_tokens=100
             )
 
         records = [r for r in caplog.records if r.name == "corvidae.compaction"]
@@ -781,14 +782,21 @@ class TestAgentPluginLogging:
         pm.ahook.send_message = AsyncMock()
         pm.ahook.on_agent_response = AsyncMock()
 
+        from corvidae.llm_plugin import LLMPlugin
+        from corvidae.tool_collection import ToolCollectionPlugin
+        from corvidae.tool import ToolRegistry
+        mock_llm = LLMPlugin(pm)
+        mock_llm.main_client = MagicMock()
+        pm.register(mock_llm, name="llm")
+
+        tools_plugin = ToolCollectionPlugin(pm)
+        tools_plugin.registry = ToolRegistry()
+        pm.register(tools_plugin, name="tools")
+
         plugin = AgentPlugin(pm)
         pm.register(plugin, name="agent_loop")
 
-        mock_client = MagicMock()
-        mock_client.start = AsyncMock()
-
-        with caplog.at_level(logging.INFO, logger="corvidae.agent"), \
-             patch("corvidae.agent.LLMClient", return_value=mock_client):
+        with caplog.at_level(logging.INFO, logger="corvidae.agent"):
             await plugin.on_start(config={
                 "llm": {"main": {"base_url": "http://localhost:8080", "model": "test"}},
                 "daemon": {"session_db": ":memory:"},
@@ -831,7 +839,7 @@ class TestAgentPluginLogging:
         mock_client.chat = AsyncMock(
             return_value={"choices": [{"message": {"role": "assistant", "content": "hi"}}]}
         )
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         channel = registry.get_or_create("test", "scope1")
         return plugin, channel

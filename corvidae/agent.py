@@ -5,21 +5,16 @@ File boundaries now match domain responsibility rather than execution phase.
 
 AgentPlugin is the central plugin that:
   - Manages per-channel serial queues
-  - Initializes LLM clients and tools on startup
+  - Borrows the LLM client from LLMPlugin on startup
+  - Borrows the tool registry and max_result_chars from ToolCollectionPlugin on startup
   - Processes inbound messages and notifications through the agent loop
 
 Config:
-    llm:
-      main:           # required
-        base_url: ...
-        model: ...
-        extra_body: ...  # optional
-      background:     # optional — absent means use llm.main
-        base_url: ...
-        model: ...
-        extra_body: ...
     agent:
-      max_tool_result_chars: 100000  # optional — tool result truncation limit
+      chars_per_token: 4.0  # optional — used for ContextWindow token estimation
+
+LLM client configuration is owned by LLMPlugin (llm: main:, llm: background:).
+Tool result truncation configuration is owned by ToolCollectionPlugin (tools: max_result_chars:).
 
 Logging:
     - INFO: on_start complete, on_message received, agent response sent
@@ -38,10 +33,9 @@ from corvidae.agent_loop import AgentTurnResult, run_agent_turn
 from corvidae.channel import Channel, ChannelConfig, ChannelRegistry, resolve_system_prompt
 from corvidae.context import ContextWindow, MessageType, DEFAULT_CHARS_PER_TOKEN
 from corvidae.hooks import resolve_hook_results, HookStrategy, get_dependency, hookimpl
-from corvidae.llm import LLMClient
 from corvidae.queue import SerialQueue
 from corvidae.task import Task
-from corvidae.tool import Tool, ToolContext, ToolRegistry, dispatch_tool_call
+from corvidae.tool import dispatch_tool_call
 
 logger = logging.getLogger("corvidae.agent")
 
@@ -88,22 +82,21 @@ class AgentPlugin:
 
     Attributes:
         pm: Plugin manager instance (untyped due to pluggy limitations)
-        client: LLM client for chat completions (main)
-        tools: Dict mapping tool names to async callable functions
-        tool_schemas: List of tool schemas for LLM function calling
+        _client: LLM client for chat completions (borrowed from LLMPlugin)
+        _tools: Dict mapping tool names to async callable functions (from ToolCollectionPlugin)
+        _tool_schemas: List of tool schemas for LLM function calling (from ToolCollectionPlugin)
         queues: Per-channel serial queues (dict[channel_id, SerialQueue]).
             Public attribute; IdleMonitorPlugin references this dict directly.
         _registry: ChannelRegistry, resolved in on_start via get_dependency
     """
 
-    depends_on = {"registry", "task"}
+    depends_on = {"registry", "task", "llm", "tools"}
 
     def __init__(self, pm) -> None:
         self.pm = pm
-        self.client: LLMClient | None = None
-        self.tools: dict[str, Callable] = {}
-        self.tool_schemas: list[dict] = []
-        self.tool_registry: ToolRegistry | None = None
+        self._client = None
+        self._tools: dict[str, Callable] = {}
+        self._tool_schemas: list[dict] = []
         self.queues: dict[str, SerialQueue] = {}
         self._registry: ChannelRegistry | None = None
         self._max_tool_result_chars: int = 100_000
@@ -111,14 +104,6 @@ class AgentPlugin:
         self._base_dir = None
         self._idle_cooldown: float = 30.0
         self._last_idle_fire: float = 0.0
-
-    def get_tool_config(self) -> tuple["ToolRegistry", int]:
-        """Return (tool_registry, max_tool_result_chars) for subagent use.
-
-        Only valid after on_start has completed. If called before on_start,
-        tool_registry will be None.
-        """
-        return self.tool_registry, self._max_tool_result_chars
 
     async def _maybe_fire_idle(self) -> None:
         """Fire on_idle if all queues are empty and cooldown has elapsed."""
@@ -144,7 +129,7 @@ class AgentPlugin:
 
     @hookimpl
     async def on_message(self, channel, sender: str, text: str) -> None:
-        if not self.client:
+        if not self._client:
             logger.error("on_message: LLM client not initialized")
             return
 
@@ -255,7 +240,7 @@ class AgentPlugin:
         already sent to the channel via send_message hook).
         """
         try:
-            return await run_agent_turn(self.client, messages, tool_schemas, extra_body=llm_overrides)
+            return await run_agent_turn(self._client, messages, tool_schemas, extra_body=llm_overrides)
         except Exception as exc:
             logger.exception("run_agent_turn failed for channel %s", channel.id)
             results = await self.pm.ahook.on_llm_error(channel=channel, error=exc)
@@ -450,7 +435,7 @@ class AgentPlugin:
         # 5. Compact if approaching context limit
         try:
             await self.pm.ahook.compact_conversation(
-                channel=channel, conversation=conv, client=self.client,
+                channel=channel, conversation=conv,
                 max_tokens=resolved["max_context_tokens"],
             )
         except Exception:
@@ -479,7 +464,7 @@ class AgentPlugin:
         messages = conv.build_prompt()
         llm_overrides = {k: v for k, v in channel.runtime_overrides.items() if k not in FRAMEWORK_KEYS}
 
-        result = await self._run_turn(channel, messages, self.tool_schemas, llm_overrides or None)
+        result = await self._run_turn(channel, messages, self._tool_schemas, llm_overrides or None)
         if result is None:
             return
 
@@ -535,7 +520,7 @@ class AgentPlugin:
             async def make_work(call=call):
                 """Execute a single tool call via dispatch_tool_call."""
                 result = await dispatch_tool_call(
-                    call, self.tools,
+                    call, self._tools,
                     channel=channel,
                     task_queue=task_queue,
                     max_result_chars=self._max_tool_result_chars,
@@ -561,53 +546,34 @@ class AgentPlugin:
     async def _start_plugin(self, config: dict) -> None:
         """Initialize LLM client and tools."""
         from pathlib import Path
+        from corvidae.llm_plugin import LLMPlugin
+        from corvidae.tool_collection import ToolCollectionPlugin
         self._registry = get_dependency(self.pm, "registry", ChannelRegistry)
-        self.tools = {}
-        self.tool_schemas = []
-        llm_config = config.get("llm", {})
+        self._tools = {}
+        self._tool_schemas = []
         agent_config = config.get("agent", {})
-        self._max_tool_result_chars = agent_config.get("max_tool_result_chars", 100_000)
         self._chars_per_token = agent_config.get("chars_per_token", DEFAULT_CHARS_PER_TOKEN)
         self._base_dir = config.get("_base_dir", Path("."))
         daemon_config = config.get("daemon", {})
         self._idle_cooldown = daemon_config.get("idle_cooldown_seconds", 30.0)
 
-        # Breaking change: llm.main is required.
-        main_config = llm_config["main"]
-        self.client = LLMClient(
-            base_url=main_config["base_url"],
-            model=main_config["model"],
-            api_key=main_config.get("api_key"),
-            extra_body=main_config.get("extra_body"),
-            max_retries=main_config.get("max_retries", 3),
-            retry_base_delay=main_config.get("retry_base_delay", 2.0),
-            retry_max_delay=main_config.get("retry_max_delay", 60.0),
-            timeout=main_config.get("timeout"),
-        )
-        await self.client.start()
+        # Get the LLM client from LLMPlugin (which owns the lifecycle).
+        llm = get_dependency(self.pm, "llm", LLMPlugin)
+        self._client = llm.main_client
 
-        # Collect tools from all plugins via register_tools hook (sync).
-        collected: list = []
-        self.pm.hook.register_tools(tool_registry=collected)
-        tool_registry = ToolRegistry()
-        for item in collected:
-            if isinstance(item, Tool):
-                tool_registry.add(item)
-            else:
-                tool_registry.add(Tool.from_function(item))
-        self.tool_registry = tool_registry
-        self.tools = tool_registry.as_dict()
-        self.tool_schemas = tool_registry.schemas()
+        # Get tool registry and config from ToolCollectionPlugin.
+        tools_plugin = get_dependency(self.pm, "tools", ToolCollectionPlugin)
+        self._tools, self._tool_schemas = tools_plugin.get_tools()
+        self._max_tool_result_chars = tools_plugin.max_result_chars
 
         logger.info(
             "on_start complete",
             extra={
-                "tool_count": len(self.tools),
+                "tool_count": len(self._tools),
                 "channel_count": len(self._registry.all()),
             },
         )
 
     async def _stop_plugin(self) -> None:
-        """Close LLM client."""
-        if self.client:
-            await self.client.stop()
+        """Release LLM client reference (lifecycle owned by LLMPlugin)."""
+        self._client = None

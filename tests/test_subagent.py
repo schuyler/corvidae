@@ -8,12 +8,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from corvidae.agent import AgentPlugin
 from corvidae.channel import Channel, ChannelConfig, ChannelRegistry
 from corvidae.hooks import create_plugin_manager
 from corvidae.task import Task, TaskQueue
 from corvidae.tool import Tool, ToolContext, ToolRegistry
 
+from corvidae.llm_plugin import LLMPlugin
 from corvidae.tools.subagent import SubagentPlugin  # ImportError until implemented
 
 
@@ -50,12 +50,20 @@ def _make_channel(transport="test", scope="scope1") -> Channel:
 
 
 def _make_pm_with_tool_registry(*tool_names: str):
-    """Build a minimal plugin manager with an AgentPlugin that has a
+    """Build a minimal plugin manager with a ToolCollectionPlugin that has a
     ToolRegistry containing named placeholder tools."""
+    from corvidae.tool_collection import ToolCollectionPlugin
+
     pm = create_plugin_manager()
 
-    # Register a minimal ChannelRegistry so AgentPlugin can be created.
+    # Register a minimal ChannelRegistry.
     pm.register(ChannelRegistry({}), name="registry")
+
+    # Register a mock LLMPlugin so SubagentPlugin._launch can get a client.
+    mock_llm = LLMPlugin(pm)
+    mock_llm.main_client = MagicMock()
+    mock_llm.background_client = None
+    pm.register(mock_llm, name="llm")
 
     tool_registry = ToolRegistry()
     for name in tool_names:
@@ -65,11 +73,11 @@ def _make_pm_with_tool_registry(*tool_names: str):
         _placeholder.__name__ = name
         tool_registry.add(Tool(name=name, fn=_placeholder, schema={}))
 
-    # Use a real AgentPlugin with tool_registry set directly to avoid
-    # calling on_start (which requires a live LLM client and DB).
-    agent_plugin = AgentPlugin(pm)
-    agent_plugin.tool_registry = tool_registry
-    pm.register(agent_plugin, name="agent_loop")
+    # Use a ToolCollectionPlugin with registry set directly to avoid
+    # calling on_start (which would rebuild the registry from hooks).
+    tools_plugin = ToolCollectionPlugin(pm)
+    tools_plugin.registry = tool_registry
+    pm.register(tools_plugin, name="tools")
 
     return pm, tool_registry
 
@@ -261,9 +269,15 @@ class TestLaunchWithMockedDependencies:
 
 
 class TestLLMClientLifecycle:
-    async def test_work_calls_client_start_before_run_agent_loop(self):
-        """work() calls client.start() before run_agent_loop."""
+    """After Part 3, SubagentPlugin uses the shared background client from LLMPlugin.
+    No ephemeral client is created — start/stop are not called on the shared client.
+    """
+
+    async def test_work_uses_shared_client_from_llm_plugin(self):
+        """work() uses the shared background client from LLMPlugin, not an ephemeral one."""
         plugin = await _make_started_plugin()
+        llm_plugin = plugin.pm.get_plugin("llm")
+        shared_client = llm_plugin.get_client("background")
 
         channel = _make_channel()
         task_queue = MagicMock(spec=TaskQueue)
@@ -275,38 +289,28 @@ class TestLLMClientLifecycle:
             task_queue=task_queue,
         )
 
-        call_order = []
-
-        mock_client = MagicMock()
-
-        async def mock_start():
-            call_order.append("start")
-
-        async def mock_stop():
-            call_order.append("stop")
-
-        mock_client.start = mock_start
-        mock_client.stop = mock_stop
+        captured_client = {}
 
         async def fake_run_agent_loop(client, messages, tools, tool_schemas, **kwargs):
-            call_order.append("run_agent_loop")
+            captured_client["client"] = client
             return "done"
 
-        with patch("corvidae.tools.subagent.LLMClient", return_value=mock_client), \
-             patch("corvidae.tools.subagent.run_agent_loop", side_effect=fake_run_agent_loop), \
+        with patch("corvidae.tools.subagent.run_agent_loop", side_effect=fake_run_agent_loop), \
              patch("corvidae.tools.subagent.strip_thinking", side_effect=lambda x: x):
             await plugin._launch("instructions", "desc", ctx)
-
-            # Extract the work() coroutine from the enqueued Task and run it
             enqueued_task = task_queue.enqueue.call_args[0][0]
             await enqueued_task.work()
 
-        assert call_order.index("start") < call_order.index("run_agent_loop"), \
-            "client.start() must be called before run_agent_loop"
+        assert captured_client.get("client") is shared_client, \
+            "work() must pass the shared LLMPlugin background client to run_agent_loop"
 
-    async def test_work_calls_client_stop_after_run_agent_loop(self):
-        """work() calls client.stop() after run_agent_loop, even on success."""
+    async def test_work_does_not_call_start_or_stop_on_shared_client(self):
+        """work() must NOT call start() or stop() on the shared background client."""
         plugin = await _make_started_plugin()
+        llm_plugin = plugin.pm.get_plugin("llm")
+        shared_client = llm_plugin.get_client("background")
+        shared_client.start = AsyncMock()
+        shared_client.stop = AsyncMock()
 
         channel = _make_channel()
         task_queue = MagicMock(spec=TaskQueue)
@@ -318,36 +322,24 @@ class TestLLMClientLifecycle:
             task_queue=task_queue,
         )
 
-        call_order = []
-
-        mock_client = MagicMock()
-
-        async def mock_start():
-            call_order.append("start")
-
-        async def mock_stop():
-            call_order.append("stop")
-
-        mock_client.start = mock_start
-        mock_client.stop = mock_stop
-
         async def fake_run_agent_loop(client, messages, tools, tool_schemas, **kwargs):
-            call_order.append("run_agent_loop")
             return "done"
 
-        with patch("corvidae.tools.subagent.LLMClient", return_value=mock_client), \
-             patch("corvidae.tools.subagent.run_agent_loop", side_effect=fake_run_agent_loop), \
+        with patch("corvidae.tools.subagent.run_agent_loop", side_effect=fake_run_agent_loop), \
              patch("corvidae.tools.subagent.strip_thinking", side_effect=lambda x: x):
             await plugin._launch("instructions", "desc", ctx)
             enqueued_task = task_queue.enqueue.call_args[0][0]
             await enqueued_task.work()
 
-        assert call_order.index("stop") > call_order.index("run_agent_loop"), \
-            "client.stop() must be called after run_agent_loop"
+        shared_client.start.assert_not_awaited()
+        shared_client.stop.assert_not_awaited()
 
-    async def test_work_calls_client_stop_even_when_run_agent_loop_raises(self):
-        """work() calls client.stop() in the finally block even when run_agent_loop raises."""
+    async def test_work_propagates_run_agent_loop_exception_without_stopping_client(self):
+        """work() propagates exceptions from run_agent_loop without stopping shared client."""
         plugin = await _make_started_plugin()
+        llm_plugin = plugin.pm.get_plugin("llm")
+        shared_client = llm_plugin.get_client("background")
+        shared_client.stop = AsyncMock()
 
         channel = _make_channel()
         task_queue = MagicMock(spec=TaskQueue)
@@ -359,34 +351,18 @@ class TestLLMClientLifecycle:
             task_queue=task_queue,
         )
 
-        stop_called = []
-
-        mock_client = MagicMock()
-
-        async def mock_start():
-            pass
-
-        async def mock_stop():
-            stop_called.append(True)
-
-        mock_client.start = mock_start
-        mock_client.stop = mock_stop
-
         async def raising_run_agent_loop(client, messages, tools, tool_schemas, **kwargs):
             raise RuntimeError("LLM connection failed")
 
-        # strip_thinking is not patched here because it is never reached
-        # when run_agent_loop raises — the exception exits work() before
-        # strip_thinking is called.
-        with patch("corvidae.tools.subagent.LLMClient", return_value=mock_client), \
-             patch("corvidae.tools.subagent.run_agent_loop", side_effect=raising_run_agent_loop):
+        with patch("corvidae.tools.subagent.run_agent_loop", side_effect=raising_run_agent_loop):
             await plugin._launch("instructions", "desc", ctx)
             enqueued_task = task_queue.enqueue.call_args[0][0]
 
             with pytest.raises(RuntimeError, match="LLM connection failed"):
                 await enqueued_task.work()
 
-        assert stop_called, "client.stop() must be called even when run_agent_loop raises"
+        # Shared client must NOT be stopped — it's owned by LLMPlugin
+        shared_client.stop.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
@@ -411,16 +387,11 @@ class TestToolExclusionVerification:
 
         captured_tools = {}
 
-        mock_client = MagicMock()
-        mock_client.start = AsyncMock()
-        mock_client.stop = AsyncMock()
-
         async def capture_run_agent_loop(client, messages, tools, tool_schemas, **kwargs):
             captured_tools.update(tools)
             return "done"
 
-        with patch("corvidae.tools.subagent.LLMClient", return_value=mock_client), \
-             patch("corvidae.tools.subagent.run_agent_loop", side_effect=capture_run_agent_loop), \
+        with patch("corvidae.tools.subagent.run_agent_loop", side_effect=capture_run_agent_loop), \
              patch("corvidae.tools.subagent.strip_thinking", side_effect=lambda x: x):
             await plugin._launch("instructions", "desc", ctx)
             enqueued_task = task_queue.enqueue.call_args[0][0]
@@ -445,16 +416,11 @@ class TestToolExclusionVerification:
 
         captured_kwargs = {}
 
-        mock_client = MagicMock()
-        mock_client.start = AsyncMock()
-        mock_client.stop = AsyncMock()
-
         async def capture_run_agent_loop(client, messages, tools, tool_schemas, **kwargs):
             captured_kwargs.update(kwargs)
             return "done"
 
-        with patch("corvidae.tools.subagent.LLMClient", return_value=mock_client), \
-             patch("corvidae.tools.subagent.run_agent_loop", side_effect=capture_run_agent_loop), \
+        with patch("corvidae.tools.subagent.run_agent_loop", side_effect=capture_run_agent_loop), \
              patch("corvidae.tools.subagent.strip_thinking", side_effect=lambda x: x):
             await plugin._launch("instructions", "desc", ctx)
             enqueued_task = task_queue.enqueue.call_args[0][0]
@@ -484,16 +450,11 @@ class TestToolExclusionVerification:
 
         captured_tools = {}
 
-        mock_client = MagicMock()
-        mock_client.start = AsyncMock()
-        mock_client.stop = AsyncMock()
-
         async def capture_run_agent_loop(client, messages, tools, tool_schemas, **kwargs):
             captured_tools.update(tools)
             return "done"
 
-        with patch("corvidae.tools.subagent.LLMClient", return_value=mock_client), \
-             patch("corvidae.tools.subagent.run_agent_loop", side_effect=capture_run_agent_loop), \
+        with patch("corvidae.tools.subagent.run_agent_loop", side_effect=capture_run_agent_loop), \
              patch("corvidae.tools.subagent.strip_thinking", side_effect=lambda x: x):
             await plugin._launch("instructions", "desc", ctx)
             enqueued_task = task_queue.enqueue.call_args[0][0]
@@ -523,15 +484,10 @@ class TestErrorPaths:
             task_queue=task_queue,
         )
 
-        mock_client = MagicMock()
-        mock_client.start = AsyncMock()
-        mock_client.stop = AsyncMock()
-
         async def raising_run_agent_loop(client, messages, tools, tool_schemas, **kwargs):
             raise ConnectionError("cannot reach LLM")
 
-        with patch("corvidae.tools.subagent.LLMClient", return_value=mock_client), \
-             patch("corvidae.tools.subagent.run_agent_loop", side_effect=raising_run_agent_loop):
+        with patch("corvidae.tools.subagent.run_agent_loop", side_effect=raising_run_agent_loop):
             await plugin._launch("instructions", "desc", ctx)
             enqueued_task = task_queue.enqueue.call_args[0][0]
 
@@ -577,55 +533,30 @@ class TestErrorPaths:
 
 
 class TestOnStart:
-    async def test_on_start_captures_main_llm_config(self):
-        """on_start captures the main LLM config when no background config exists."""
+    async def test_on_start_completes_without_error(self):
+        """on_start must complete without raising, even without LLM config.
+
+        After Part 3, SubagentPlugin.on_start does not parse LLM config
+        directly — that is now LLMPlugin's responsibility.
+        """
+        pm, _ = _make_pm_with_tool_registry()
+        plugin = SubagentPlugin(pm)
+        # on_start should not raise
+        await plugin.on_start(config=BASE_CONFIG)
+
+    async def test_on_start_does_not_set_llm_config(self):
+        """on_start must NOT set _llm_config — that attribute no longer exists.
+
+        After Part 3, LLM client config is owned by LLMPlugin. SubagentPlugin
+        reads the client from LLMPlugin at _launch time.
+        """
         pm, _ = _make_pm_with_tool_registry()
         plugin = SubagentPlugin(pm)
         await plugin.on_start(config=BASE_CONFIG)
 
-        assert plugin._llm_config is not None
-        assert plugin._llm_config["model"] == "test-model"
-
-    async def test_on_start_prefers_background_llm_config(self):
-        """on_start uses llm.background config when present."""
-        pm, _ = _make_pm_with_tool_registry()
-        plugin = SubagentPlugin(pm)
-        await plugin.on_start(config=BACKGROUND_CONFIG)
-
-        assert plugin._llm_config is not None
-        assert plugin._llm_config["model"] == "bg-model"
-        assert plugin._llm_config["base_url"] == "http://localhost:8081"
-
-    async def test_on_start_does_not_set_max_tool_result_chars(self):
-        """on_start must NOT independently read max_tool_result_chars from config.
-
-        After the consolidation (item 3), SubagentPlugin.on_start only sets
-        _llm_config. The _max_tool_result_chars attribute is no longer set
-        by on_start — the value is read from AgentPlugin at _launch time.
-
-        This test will FAIL before the fix: currently on_start overwrites the
-        sentinel value with the config-read value.
-        """
-        pm, _ = _make_pm_with_tool_registry()
-        plugin = SubagentPlugin(pm)
-
-        # Force a sentinel value onto the instance AFTER __init__ so we can
-        # detect whether on_start overwrites it from config.
-        sentinel = 99_999
-        plugin._max_tool_result_chars = sentinel
-
-        config_with_custom_limit = {
-            **BASE_CONFIG,
-            "agent": {"max_tool_result_chars": 12_345},
-        }
-        await plugin.on_start(config=config_with_custom_limit)
-
-        # After the fix: on_start must NOT touch _max_tool_result_chars.
-        # The sentinel value must survive. Before the fix, on_start overwrites
-        # it with 12_345 from config, causing this assertion to fail.
-        assert plugin._max_tool_result_chars == sentinel, (
-            "on_start must not independently read max_tool_result_chars from config; "
-            f"expected sentinel {sentinel}, got {plugin._max_tool_result_chars}"
+        assert not hasattr(plugin, "_llm_config"), (
+            "SubagentPlugin must not have _llm_config after Part 3 "
+            "(LLM config is owned by LLMPlugin)"
         )
 
 
@@ -635,28 +566,28 @@ class TestOnStart:
 
 
 class TestMaxToolResultCharsConsolidation:
-    """Verify that _launch reads max_tool_result_chars from AgentPlugin, not from
+    """Verify that _launch reads max_result_chars from ToolCollectionPlugin, not from
     SubagentPlugin's own attribute or from config.
 
-    These tests will FAIL before item 3 is implemented because the current
-    code passes plugin._max_tool_result_chars (SubagentPlugin's own copy)
-    to run_agent_loop instead of agent._max_tool_result_chars.
+    After Part 4, SubagentPlugin reads max_result_chars from ToolCollectionPlugin
+    directly rather than from AgentPlugin.
     """
 
     async def _launch_and_capture_max_result_chars(
         self,
-        agent_max_result_chars: int,
+        tools_max_result_chars: int,
     ) -> int:
-        """Helper: configure AgentPlugin with a custom _max_tool_result_chars,
+        """Helper: configure ToolCollectionPlugin with a custom max_result_chars,
         run _launch, and return the max_result_chars value seen by run_agent_loop.
         """
         pm, _ = _make_pm_with_tool_registry("shell", "subagent")
         plugin = SubagentPlugin(pm)
         await plugin.on_start(config=BASE_CONFIG)
 
-        # Override AgentPlugin's authoritative value directly.
-        agent_plugin = pm.get_plugin("agent_loop")
-        agent_plugin._max_tool_result_chars = agent_max_result_chars
+        # Override ToolCollectionPlugin's authoritative value directly.
+        from corvidae.tool_collection import ToolCollectionPlugin
+        tools_plugin = pm.get_plugin("tools")
+        tools_plugin.max_result_chars = tools_max_result_chars
 
         channel = _make_channel()
         task_queue = MagicMock(spec=TaskQueue)
@@ -670,16 +601,11 @@ class TestMaxToolResultCharsConsolidation:
 
         captured = {}
 
-        mock_client = MagicMock()
-        mock_client.start = AsyncMock()
-        mock_client.stop = AsyncMock()
-
         async def capture_run_agent_loop(client, messages, tools, tool_schemas, **kwargs):
             captured["max_result_chars"] = kwargs.get("max_result_chars")
             return "done"
 
-        with patch("corvidae.tools.subagent.LLMClient", return_value=mock_client), \
-             patch("corvidae.tools.subagent.run_agent_loop", side_effect=capture_run_agent_loop), \
+        with patch("corvidae.tools.subagent.run_agent_loop", side_effect=capture_run_agent_loop), \
              patch("corvidae.tools.subagent.strip_thinking", side_effect=lambda x: x):
             await plugin._launch("instructions", "desc", ctx)
             enqueued_task = task_queue.enqueue.call_args[0][0]
@@ -687,41 +613,37 @@ class TestMaxToolResultCharsConsolidation:
 
         return captured["max_result_chars"]
 
-    async def test_launch_passes_agent_max_result_chars_to_run_agent_loop(self):
-        """_launch must pass AgentPlugin._max_tool_result_chars to run_agent_loop.
+    async def test_launch_passes_tools_plugin_max_result_chars_to_run_agent_loop(self):
+        """_launch must pass ToolCollectionPlugin.max_result_chars to run_agent_loop.
 
-        This test will FAIL before the fix: SubagentPlugin currently passes its
-        own _max_tool_result_chars (read independently from config at on_start)
-        rather than the value stored on AgentPlugin.
+        After Part 4, SubagentPlugin reads max_result_chars from ToolCollectionPlugin
+        rather than from its own attribute or from config.
         """
         custom_value = 42_000
         observed = await self._launch_and_capture_max_result_chars(custom_value)
 
         assert observed == custom_value, (
             f"run_agent_loop received max_result_chars={observed}, "
-            f"expected AgentPlugin's value {custom_value}. "
-            "SubagentPlugin._launch must read from AgentPlugin._max_tool_result_chars."
+            f"expected ToolCollectionPlugin's value {custom_value}. "
+            "SubagentPlugin._launch must read from ToolCollectionPlugin.max_result_chars."
         )
 
-    async def test_launch_uses_agent_value_not_independent_config_read(self):
-        """AgentPlugin's value must win over any independent config read.
+    async def test_launch_uses_tools_plugin_value_not_independent_config_read(self):
+        """ToolCollectionPlugin's value must win over any independent config read.
 
-        Sets AgentPlugin._max_tool_result_chars to a value that differs from
-        the config default (100_000) and from the sentinel set by __init__.
+        Sets ToolCollectionPlugin.max_result_chars to a value that differs from
+        the config default (100_000).
         If SubagentPlugin reads config independently it will see 100_000;
-        if it reads AgentPlugin it will see the custom value.
-
-        This test will FAIL before the fix because the current code reads from
-        SubagentPlugin's own attribute (which is set from config in on_start).
+        if it reads ToolCollectionPlugin it will see the custom value.
         """
         # A value that is neither 100_000 (config default) nor the __init__
-        # sentinel — unambiguously identifies the AgentPlugin as the source.
-        agent_authoritative_value = 75_555
-        observed = await self._launch_and_capture_max_result_chars(agent_authoritative_value)
+        # sentinel — unambiguously identifies ToolCollectionPlugin as the source.
+        authoritative_value = 75_555
+        observed = await self._launch_and_capture_max_result_chars(authoritative_value)
 
-        assert observed == agent_authoritative_value, (
+        assert observed == authoritative_value, (
             f"run_agent_loop received max_result_chars={observed}, "
-            f"expected {agent_authoritative_value} from AgentPlugin. "
+            f"expected {authoritative_value} from ToolCollectionPlugin. "
             "SubagentPlugin._launch must not read config independently."
         )
 

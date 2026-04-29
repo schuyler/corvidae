@@ -26,7 +26,6 @@ import apluggy as pluggy
 if TYPE_CHECKING:
     from corvidae.channel import Channel
     from corvidae.context import ContextWindow, MessageType
-    from corvidae.llm import LLMClient
 
 T = TypeVar("T")
 
@@ -343,7 +342,7 @@ class AgentSpec:
 
     @hookspec
     async def compact_conversation(
-        self, channel: "Channel", conversation: "ContextWindow", client: "LLMClient", max_tokens: int
+        self, channel: "Channel", conversation: "ContextWindow", max_tokens: int
     ) -> None:
         """Optionally replace the default compaction strategy.
 

@@ -110,14 +110,14 @@ class TestToolCallDispatchesTask:
                 [_make_tool_call("call-001", "my_tool", {"x": "value"})]
             )
         )
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         # Register a simple tool so the tool call doesn't fail on execution
         async def my_tool(x: str) -> str:
             """A simple test tool."""
             return f"result:{x}"
 
-        plugin.tools = {"my_tool": my_tool}
+        plugin._tools = {"my_tool": my_tool}
 
         # Capture tasks enqueued by replacing enqueue with a spy
         enqueued_tasks: list[Task] = []
@@ -158,7 +158,7 @@ class TestToolCallResultTriggersContinuation:
             """A test tool."""
             return f"tool_result:{x}"
 
-        plugin.tools = {"my_tool": my_tool}
+        plugin._tools = {"my_tool": my_tool}
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(
@@ -171,7 +171,7 @@ class TestToolCallResultTriggersContinuation:
                 _make_text_response("Here is the answer."),
             ]
         )
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="do the thing")
         await drain(plugin, channel)
@@ -211,7 +211,7 @@ class TestMultipleToolCallsDispatched:
             """Tool C."""
             return f"c:{x}"
 
-        plugin.tools = {"tool_a": tool_a, "tool_b": tool_b, "tool_c": tool_c}
+        plugin._tools = {"tool_a": tool_a, "tool_b": tool_b, "tool_c": tool_c}
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(
@@ -223,7 +223,7 @@ class TestMultipleToolCallsDispatched:
                 ]
             )
         )
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         enqueued_tasks: list[Task] = []
         task_plugin = plugin.pm.get_plugin("task")
@@ -260,7 +260,7 @@ class TestMaxTurnsResetsOnUserMessage:
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("hello"))
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="reset me")
         await drain(plugin, channel)
@@ -284,7 +284,7 @@ class TestMaxTurnsIncrementsOnNotification:
             """A tool."""
             return "done"
 
-        plugin.tools = {"my_tool": my_tool}
+        plugin._tools = {"my_tool": my_tool}
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(
@@ -297,7 +297,7 @@ class TestMaxTurnsIncrementsOnNotification:
                 _make_text_response("done with it"),
             ]
         )
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="go")
         await drain(plugin, channel)
@@ -328,7 +328,7 @@ class TestMaxTurnsExceededSuppressesToolCalls:
             """A tool."""
             return "tool result"
 
-        plugin.tools = {"my_tool": my_tool}
+        plugin._tools = {"my_tool": my_tool}
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(
@@ -344,7 +344,7 @@ class TestMaxTurnsExceededSuppressesToolCalls:
                 ),
             ]
         )
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         enqueued_tasks: list[Task] = []
         task_plugin = plugin.pm.get_plugin("task")
@@ -394,7 +394,7 @@ class TestMaxTurnsExceededSendsFallbackText:
             """A tool."""
             return "tool result"
 
-        plugin.tools = {"my_tool": my_tool}
+        plugin._tools = {"my_tool": my_tool}
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(
@@ -409,7 +409,7 @@ class TestMaxTurnsExceededSendsFallbackText:
                 ),
             ]
         )
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         try:
             await plugin.on_message(channel=channel, sender="user", text="go")
@@ -444,8 +444,8 @@ class TestToolDispatchWithToolContext:
             received_ctx.append(_ctx)
             return "context received"
 
-        plugin.tools = {"ctx_tool": ctx_tool}
-        plugin.tool_schemas = []  # schemas not needed for this test
+        plugin._tools = {"ctx_tool": ctx_tool}
+        plugin._tool_schemas = []  # schemas not needed for this test
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(
@@ -456,7 +456,7 @@ class TestToolDispatchWithToolContext:
                 _make_text_response("done"),
             ]
         )
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="use ctx tool")
         await drain(plugin, channel)
@@ -481,7 +481,7 @@ class TestToolDispatchUnknownTool:
         """LLM calls a tool not in self.tools -> task result is error message."""
         plugin, channel, db = plugin_and_channel
 
-        plugin.tools = {}  # No tools registered
+        plugin._tools = {}  # No tools registered
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(
@@ -492,7 +492,7 @@ class TestToolDispatchUnknownTool:
                 _make_text_response("I tried."),
             ]
         )
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="use missing tool")
         await drain(plugin, channel)
@@ -522,7 +522,7 @@ class TestToolDispatchToolRaises:
             """A tool that always fails."""
             raise RuntimeError("tool explosion")
 
-        plugin.tools = {"failing_tool": failing_tool}
+        plugin._tools = {"failing_tool": failing_tool}
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(
@@ -533,7 +533,7 @@ class TestToolDispatchToolRaises:
                 _make_text_response("I see the tool failed."),
             ]
         )
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         # Should not raise
         await plugin.on_message(channel=channel, sender="user", text="use failing tool")
@@ -582,7 +582,7 @@ class TestNoTaskQueueLogsError:
             """A tool."""
             return "result"
 
-        plugin.tools = {"my_tool": my_tool}
+        plugin._tools = {"my_tool": my_tool}
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(
@@ -590,7 +590,7 @@ class TestNoTaskQueueLogsError:
                 [_make_tool_call("call-notq", "my_tool", {"x": "v"})]
             )
         )
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         channel = registry.get_or_create("test", "scope_notq")
 
@@ -625,7 +625,7 @@ class TestAssistantMessageWithToolCallsPersisted:
             """A tool."""
             return "done"
 
-        plugin.tools = {"my_tool": my_tool}
+        plugin._tools = {"my_tool": my_tool}
 
         tool_call = _make_tool_call("call-persist", "my_tool", {"x": "q"})
         mock_client = MagicMock()
@@ -635,7 +635,7 @@ class TestAssistantMessageWithToolCallsPersisted:
                 _make_text_response("finished"),
             ]
         )
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="persist test")
         await drain(plugin, channel)
@@ -676,7 +676,7 @@ class TestNoSendMessageWhenToolCallsDispatched:
             tool_called = True
             return "tool result"
 
-        plugin.tools = {"my_tool": my_tool}
+        plugin._tools = {"my_tool": my_tool}
 
         mock_client = MagicMock()
         # First call: tool call. Second call: text response (used by run_agent_loop).
@@ -688,7 +688,7 @@ class TestNoSendMessageWhenToolCallsDispatched:
                 _make_text_response("done"),
             ]
         )
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         await plugin.on_message(channel=channel, sender="user", text="use tool")
         await drain(plugin, channel)
@@ -729,11 +729,11 @@ class TestCompactionFailureResilience:
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("response after failed compaction"))
-        plugin.client = mock_client
+        plugin._client = mock_client
 
         class CrashingCompactionPlugin:
             @hookimpl
-            async def compact_conversation(self, conversation, client, max_tokens):
+            async def compact_conversation(self, conversation, max_tokens):
                 raise RuntimeError("compaction boom")
 
         plugin.pm.register(CrashingCompactionPlugin(), name="crashing_compaction")

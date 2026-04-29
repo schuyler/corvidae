@@ -25,6 +25,7 @@ from corvidae.compaction import CompactionPlugin
 from corvidae.hooks import create_plugin_manager, hookimpl, validate_dependencies
 from corvidae.idle import IdleMonitorPlugin
 from corvidae.llm import LLMClient
+from corvidae.llm_plugin import LLMPlugin
 from corvidae.mcp_client import McpClientPlugin
 from corvidae.persistence import PersistencePlugin
 from corvidae.task import TaskPlugin
@@ -233,11 +234,22 @@ async def _build_harness(config: dict) -> IntegrationHarness:
     mcp_plugin = McpClientPlugin()
     pm.register(mcp_plugin, name="mcp")
 
-    compaction_plugin = CompactionPlugin()
+    mock_client = AsyncMock(spec=LLMClient)
+    mock_client.start = AsyncMock()
+    mock_client.stop = AsyncMock()
+
+    llm_plugin = LLMPlugin(pm)
+    pm.register(llm_plugin, name="llm")
+
+    compaction_plugin = CompactionPlugin(pm=pm)
     pm.register(compaction_plugin, name="compaction")
 
     thinking_plugin = ThinkingPlugin(pm)
     pm.register(thinking_plugin, name="thinking")
+
+    from corvidae.tool_collection import ToolCollectionPlugin
+    tool_collection_plugin = ToolCollectionPlugin(pm)
+    pm.register(tool_collection_plugin, name="tools")
 
     agent_loop = AgentPlugin(pm)
     pm.register(agent_loop, name="agent_loop")
@@ -247,11 +259,8 @@ async def _build_harness(config: dict) -> IntegrationHarness:
 
     validate_dependencies(pm)
 
-    mock_client = AsyncMock(spec=LLMClient)
-    mock_client.start = AsyncMock()
-    mock_client.stop = AsyncMock()
-
-    with patch("corvidae.agent.LLMClient", return_value=mock_client):
+    # Patch LLMClient so LLMPlugin.on_start() uses the mock instead of creating a real session.
+    with patch("corvidae.llm_plugin.LLMClient", return_value=mock_client):
         await pm.ahook.on_start(config=config)
         await agent_loop.on_start(config=config)
 
@@ -306,11 +315,19 @@ class TestGroupALifecycle:
         mcp_plugin = McpClientPlugin()
         pm.register(mcp_plugin, name="mcp")
 
+        llm_plugin = LLMPlugin(pm)
+        llm_plugin.main_client = MagicMock()
+        pm.register(llm_plugin, name="llm")
+
         compaction_plugin = CompactionPlugin()
         pm.register(compaction_plugin, name="compaction")
 
         thinking_plugin = ThinkingPlugin(pm)
         pm.register(thinking_plugin, name="thinking")
+
+        from corvidae.tool_collection import ToolCollectionPlugin
+        tool_collection_plugin = ToolCollectionPlugin(pm)
+        pm.register(tool_collection_plugin, name="tools")
 
         agent_loop = AgentPlugin(pm)
         pm.register(agent_loop, name="agent_loop")
@@ -326,16 +343,16 @@ class TestGroupALifecycle:
         agent = harness.agent
 
         # Tool set matches CoreToolsPlugin + SubagentPlugin + TaskPlugin
-        expected_tools = {"shell", "read_file", "write_file", "web_fetch", "web_search", "subagent", "task_status"}
-        assert set(agent.tools.keys()) == expected_tools
+        expected_tools = {"shell", "read_file", "write_file", "web_fetch", "web_search", "subagent", "task_status", "task_pipeline"}
+        assert set(agent._tools.keys()) == expected_tools
 
-        # 7 schemas, each with type="function"
-        assert len(agent.tool_schemas) == 7
-        for schema in agent.tool_schemas:
+        # 8 schemas, each with type="function"
+        assert len(agent._tool_schemas) == 8
+        for schema in agent._tool_schemas:
             assert schema["type"] == "function"
 
-        # Client is the mock
-        assert agent.client is harness.mock_client
+        # Client is the mock (borrowed from LLMPlugin)
+        assert agent._client is harness.mock_client
 
         # TaskPlugin initialized
         assert harness.task_plugin.task_queue is not None
@@ -413,8 +430,8 @@ class TestGroupBRoundTrip:
             call_args_captured.append(text)
             return "hi\n"
 
-        harness.agent.tools["test_echo"] = test_echo
-        harness.agent.tool_schemas.append({
+        harness.agent._tools["test_echo"] = test_echo
+        harness.agent._tool_schemas.append({
             "type": "function",
             "function": {
                 "name": "test_echo",
@@ -479,8 +496,8 @@ class TestGroupBRoundTrip:
             return f"c:{x}"
 
         for fn in (tool_a, tool_b, tool_c):
-            harness.agent.tools[fn.__name__] = fn
-            harness.agent.tool_schemas.append({
+            harness.agent._tools[fn.__name__] = fn
+            harness.agent._tool_schemas.append({
                 "type": "function",
                 "function": {
                     "name": fn.__name__,
@@ -544,8 +561,8 @@ class TestGroupBRoundTrip:
             """A dummy tool."""
             return f"result:{x}"
 
-        harness.agent.tools["dummy_tool"] = dummy_tool
-        harness.agent.tool_schemas.append({
+        harness.agent._tools["dummy_tool"] = dummy_tool
+        harness.agent._tool_schemas.append({
             "type": "function",
             "function": {
                 "name": "dummy_tool",
@@ -600,8 +617,8 @@ class TestGroupBRoundTrip:
             await gate.wait()
             return f"gated:{x}"
 
-        harness.agent.tools["gated_tool"] = gated_tool
-        harness.agent.tool_schemas.append({
+        harness.agent._tools["gated_tool"] = gated_tool
+        harness.agent._tool_schemas.append({
             "type": "function",
             "function": {
                 "name": "gated_tool",
@@ -713,8 +730,8 @@ class TestGroupCPersistence:
             """Echo."""
             return "echo_result"
 
-        h1.agent.tools["test_echo"] = test_echo
-        h1.agent.tool_schemas.append({
+        h1.agent._tools["test_echo"] = test_echo
+        h1.agent._tool_schemas.append({
             "type": "function",
             "function": {
                 "name": "test_echo",
@@ -784,7 +801,7 @@ class TestGroupCPersistence:
         # Patch _summarize to return a canned summary without making an LLM call.
         # This keeps the side_effect list deterministic: one response per user message,
         # no ordering dependency on when compaction happens to trigger.
-        async def fake_summarize(self, client, messages):
+        async def fake_summarize(self, messages):
             return "test summary"
 
         # We need >5 messages to trigger compaction.
@@ -874,8 +891,8 @@ class TestGroupDMultiChannel:
             """Dummy."""
             return "result"
 
-        harness.agent.tools["dummy_tool"] = dummy_tool
-        harness.agent.tool_schemas.append({
+        harness.agent._tools["dummy_tool"] = dummy_tool
+        harness.agent._tool_schemas.append({
             "type": "function",
             "function": {
                 "name": "dummy_tool",
@@ -991,8 +1008,8 @@ class TestGroupDMultiChannel:
             await gate.wait()
             return "gated_result"
 
-        h.agent.tools["gated_tool"] = gated_tool
-        h.agent.tool_schemas.append({
+        h.agent._tools["gated_tool"] = gated_tool
+        h.agent._tool_schemas.append({
             "type": "function",
             "function": {
                 "name": "gated_tool",
@@ -1039,7 +1056,7 @@ class TestGroupDMultiChannel:
 
         long_text = "a_msg_" + ("x" * 50)
 
-        async def fake_summarize(self_inner, client, messages):
+        async def fake_summarize(self_inner, messages):
             return "channel A summary"
 
         with patch.object(CompactionPlugin, "_summarize", fake_summarize):
@@ -1172,8 +1189,8 @@ class TestGroupEErrorHandling:
             """A tool that always explodes."""
             raise RuntimeError("tool explosion")
 
-        harness.agent.tools["exploding_tool"] = exploding_tool
-        harness.agent.tool_schemas.append({
+        harness.agent._tools["exploding_tool"] = exploding_tool
+        harness.agent._tool_schemas.append({
             "type": "function",
             "function": {
                 "name": "exploding_tool",
@@ -1227,30 +1244,37 @@ class TestGroupEErrorHandling:
 
         # No TaskPlugin
 
-        compaction_plugin = CompactionPlugin()
+        mock_client = AsyncMock(spec=LLMClient)
+        mock_client.start = AsyncMock()
+        mock_client.stop = AsyncMock()
+
+        llm_plugin = LLMPlugin(pm)
+        pm.register(llm_plugin, name="llm")
+
+        compaction_plugin = CompactionPlugin(pm=pm)
         pm.register(compaction_plugin, name="compaction")
 
         thinking_plugin = ThinkingPlugin(pm)
         pm.register(thinking_plugin, name="thinking")
 
+        from corvidae.tool_collection import ToolCollectionPlugin
+        tool_collection_plugin = ToolCollectionPlugin(pm)
+        pm.register(tool_collection_plugin, name="tools")
+
         agent_loop = AgentPlugin(pm)
         pm.register(agent_loop, name="agent_loop")
-
-        mock_client = AsyncMock(spec=LLMClient)
-        mock_client.start = AsyncMock()
-        mock_client.stop = AsyncMock()
 
         async def tool_raiser(x: str) -> str:
             """Raises."""
             raise RuntimeError("no task plugin")
 
         config = make_config()
-        with patch("corvidae.agent.LLMClient", return_value=mock_client):
+        with patch("corvidae.llm_plugin.LLMClient", return_value=mock_client):
             await pm.ahook.on_start(config=config)
             await agent_loop.on_start(config=config)
 
         # Inject a tool that would need TaskPlugin
-        agent_loop.tools["test_tool"] = tool_raiser
+        agent_loop._tools["test_tool"] = tool_raiser
 
         mock_client.chat = AsyncMock(
             side_effect=[
@@ -1292,14 +1316,14 @@ class TestGroupFToolCollection:
 
     async def test_f1_all_expected_tools_registered(self, harness):
         """F1. After on_start with full plugin graph, expected tool set is exact."""
-        expected = {"shell", "read_file", "write_file", "web_fetch", "web_search", "subagent", "task_status"}
-        assert set(harness.agent.tools.keys()) == expected
+        expected = {"shell", "read_file", "write_file", "web_fetch", "web_search", "subagent", "task_status", "task_pipeline"}
+        assert set(harness.agent._tools.keys()) == expected
 
     async def test_f2_tool_schemas_structurally_valid(self, harness):
         """F2. Each tool schema has correct structure and no _ctx in parameters."""
-        tool_names = set(harness.agent.tools.keys())
+        tool_names = set(harness.agent._tools.keys())
 
-        for schema in harness.agent.tool_schemas:
+        for schema in harness.agent._tool_schemas:
             assert schema["type"] == "function", f"Schema missing type=function: {schema}"
             fn = schema["function"]
             assert "name" in fn, f"Schema missing function.name: {schema}"

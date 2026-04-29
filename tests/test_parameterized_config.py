@@ -501,10 +501,16 @@ class TestIRCMessageChunkSizeFromConfig:
 
 class TestAgentPluginMaxToolResultChars:
     async def test_agent_plugin_reads_max_tool_result_chars(self):
-        """AgentPlugin._start_plugin reads agent.max_tool_result_chars from config."""
+        """AgentPlugin._start_plugin reads max_result_chars from ToolCollectionPlugin.
+
+        After Part 4, AgentPlugin borrows _max_tool_result_chars from
+        ToolCollectionPlugin rather than reading agent.max_tool_result_chars directly.
+        """
         from corvidae.agent import AgentPlugin
         from corvidae.channel import ChannelRegistry
         from corvidae.hooks import create_plugin_manager
+        from corvidae.tool_collection import ToolCollectionPlugin
+        from corvidae.tool import ToolRegistry
 
         pm = create_plugin_manager()
         registry = ChannelRegistry({
@@ -514,11 +520,19 @@ class TestAgentPluginMaxToolResultChars:
         })
         pm.register(registry, name="registry")
 
+        from corvidae.llm_plugin import LLMPlugin
+        mock_llm = LLMPlugin(pm)
+        mock_llm.main_client = MagicMock()
+        pm.register(mock_llm, name="llm")
+
+        # Configure ToolCollectionPlugin with the custom max_result_chars value
+        tools_plugin = ToolCollectionPlugin(pm)
+        tools_plugin.registry = ToolRegistry()
+        tools_plugin.max_result_chars = 9999
+        pm.register(tools_plugin, name="tools")
+
         plugin = AgentPlugin(pm)
         pm.register(plugin, name="agent_loop")
-
-        mock_client = MagicMock()
-        mock_client.start = AsyncMock()
 
         config = {
             "llm": {
@@ -527,19 +541,15 @@ class TestAgentPluginMaxToolResultChars:
                     "model": "test",
                 }
             },
-            "agent": {
-                "max_tool_result_chars": 9999,
-            },
         }
 
-        with patch("corvidae.agent.LLMClient", return_value=mock_client):
-            await plugin._start_plugin(config)
+        await plugin._start_plugin(config)
 
         assert hasattr(plugin, "_max_tool_result_chars"), (
             "AgentPlugin must store _max_tool_result_chars after _start_plugin"
         )
         assert plugin._max_tool_result_chars == 9999, (
-            f"Expected _max_tool_result_chars=9999 from config, got {plugin._max_tool_result_chars!r}"
+            f"Expected _max_tool_result_chars=9999 from ToolCollectionPlugin, got {plugin._max_tool_result_chars!r}"
         )
 
 
