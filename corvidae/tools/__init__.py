@@ -11,7 +11,10 @@ from corvidae.tools.web import web_fetch, web_fetch_with_session, web_search
 
 
 class CoreToolsPlugin:
-    def __init__(self) -> None:
+    depends_on = set()
+
+    def __init__(self, pm) -> None:
+        self.pm = pm
         self._session: aiohttp.ClientSession | None = None
         self._shell_timeout: int = 30
         self._web_fetch_timeout: int = 15
@@ -66,7 +69,7 @@ class CoreToolsPlugin:
         from corvidae.tools.task_pipeline import TaskPipelinePlugin
         from corvidae.tools.index import WorkspaceIndexerPlugin
 
-        task_plugin = TaskPipelinePlugin()
+        task_plugin = TaskPipelinePlugin(self.pm)
         task_plugin.register_tools(tool_registry)
 
         tool_registry.extend([

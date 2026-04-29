@@ -71,7 +71,7 @@ class ContextCompactPlugin:
 
     depends_on = {"compaction", "llm"}
 
-    def __init__(self, pm=None) -> None:
+    def __init__(self, pm) -> None:
         self.pm = pm
         self._enabled: bool = True
         self._bg_block_threshold: int = 20

@@ -115,7 +115,7 @@ async def test_tool_collection_plugin_on_start_builds_registry():
     from corvidae.tool_collection import ToolCollectionPlugin
     from corvidae.tool import Tool, ToolRegistry
 
-    def my_test_tool(x: str) -> str:
+    async def my_test_tool(x: str) -> str:
         """A test tool."""
         return x
 

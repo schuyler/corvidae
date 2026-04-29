@@ -248,7 +248,10 @@ class TaskPipelinePlugin:
     status via the returned result string.
     """
 
-    def __init__(self) -> None:
+    depends_on = set()
+
+    def __init__(self, pm) -> None:
+        self.pm = pm
         self._tasks_cache: list[dict] = []  # last parsed task list
         self._task_status: dict[str, str] = {}  # name -> "pending"|"running"|"done"|"failed"
         self._task_results: dict[str, str] = {}  # name -> output/error string

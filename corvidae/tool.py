@@ -15,6 +15,7 @@ Public API:
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import logging
@@ -106,11 +107,18 @@ class Tool:
         """Create a Tool from a callable, auto-generating name and schema.
 
         Args:
-            fn: A callable (typically async) with type-annotated parameters
+            fn: An async callable with type-annotated parameters
 
         Returns:
             Tool instance with name=fn.__name__ and auto-generated schema
+
+        Raises:
+            TypeError: If fn is not a coroutine function (i.e. not async).
         """
+        if not asyncio.iscoroutinefunction(fn):
+            raise TypeError(
+                f"Tool function {fn.__qualname__!r} must be async (a coroutine function)"
+            )
         schema = tool_to_schema(fn)
         return cls(name=fn.__name__, fn=fn, schema=schema)
 
@@ -211,7 +219,11 @@ async def execute_tool_call(
             task_queue=task_queue,
         )
 
-    result = await tool_fn(**call_kwargs)
+    if not asyncio.iscoroutinefunction(tool_fn):
+        logger.warning("Tool %s is not async; wrapping in to_thread", tool_fn.__qualname__)
+        result = await asyncio.to_thread(tool_fn, **call_kwargs)
+    else:
+        result = await tool_fn(**call_kwargs)
     result_str = str(result)
     if len(result_str) > max_result_chars:
         original_len = len(result_str)

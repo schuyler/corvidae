@@ -216,3 +216,33 @@ class TestToolResultTruncation:
 
         result = await execute_tool_call(big_tool, {}, tool_call_id="call_notice")
         assert str(original_len) in result
+
+
+# ---------------------------------------------------------------------------
+# Tests for async enforcement (item 3)
+# ---------------------------------------------------------------------------
+
+
+def test_from_function_rejects_sync_function():
+    from corvidae.tool import Tool
+
+    def sync_fn(x: str) -> str:
+        """A sync tool."""
+        return x
+
+    with pytest.raises(TypeError, match="must be async"):
+        Tool.from_function(sync_fn)
+
+
+async def test_execute_tool_call_wraps_sync_callable():
+    """execute_tool_call wraps a sync callable in asyncio.to_thread."""
+
+    def sync_tool(x: str) -> str:
+        return f"sync-{x}"
+
+    result = await execute_tool_call(
+        sync_tool,
+        {"x": "hello"},
+        tool_call_id="call_sync",
+    )
+    assert result == "sync-hello"

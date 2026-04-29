@@ -17,8 +17,7 @@ import logging
 import time
 import aiosqlite
 
-from corvidae.channel import ChannelRegistry
-from corvidae.hooks import get_dependency, hookimpl
+from corvidae.hooks import hookimpl
 
 logger = logging.getLogger(__name__)
 
@@ -66,15 +65,14 @@ class PersistencePlugin:
             Public for test injection (same pattern as former Agent.db).
     """
 
+    depends_on = set()
+
     def __init__(self, pm) -> None:
         self.pm = pm
         self.db: aiosqlite.Connection | None = None
-        self._registry: ChannelRegistry | None = None
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
-        self._registry = get_dependency(self.pm, "registry", ChannelRegistry)
-
         # Open SQLite database (only if not already injected for testing)
         if self.db is None:
             db_path = config.get("daemon", {}).get("session_db", "sessions.db")

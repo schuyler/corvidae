@@ -14,7 +14,7 @@ from corvidae.context import MessageType
 def plugin():
     """Create a ContextCompactPlugin with default config."""
     from corvidae.context_compact import ContextCompactPlugin
-    p = ContextCompactPlugin()
+    p = ContextCompactPlugin(None)
     # Set very low thresholds for testing.
     p._enabled = True
     p._bg_block_threshold = 5
@@ -242,7 +242,7 @@ class TestContextCompactPlugin:
     async def test_config_defaults(self, db):
         """Plugin loads sensible defaults when no config provided."""
         from corvidae.context_compact import ContextCompactPlugin
-        p = ContextCompactPlugin()
+        p = ContextCompactPlugin(None)
         await p.on_start({"agent": {}})
 
         assert p._enabled is True
@@ -254,7 +254,7 @@ class TestContextCompactPlugin:
     async def test_config_custom_values(self, db):
         """Plugin respects custom config values."""
         from corvidae.context_compact import ContextCompactPlugin
-        p = ContextCompactPlugin()
+        p = ContextCompactPlugin(None)
         await p.on_start({
             "agent": {
                 "context_compact": {
@@ -281,7 +281,7 @@ class TestContextCompactIntegration:
         """End-to-end: generate a block, then inject it on next turn."""
         from corvidae.context_compact import ContextCompactPlugin
 
-        plugin = ContextCompactPlugin()
+        plugin = ContextCompactPlugin(None)
         plugin._enabled = True
         plugin._bg_block_threshold = 5
         plugin._chars_per_token = 3.5
@@ -321,12 +321,12 @@ class TestContextCompactIntegration:
         from corvidae.compaction import CompactionPlugin
         from corvidae.context_compact import ContextCompactPlugin
 
-        cc_plugin = ContextCompactPlugin()
+        cc_plugin = ContextCompactPlugin(None)
         cc_plugin._enabled = True
         cc_plugin._bg_block_threshold = 5
         cc_plugin._chars_per_token = 3.5
 
-        comp_plugin = CompactionPlugin()
+        comp_plugin = CompactionPlugin(None)
         comp_plugin._compaction_threshold = 0.8
         comp_plugin._compaction_retention = 0.5
         comp_plugin._min_messages = 3

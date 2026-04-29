@@ -52,7 +52,7 @@ def _get_set_settings_fn(immutable_settings=None):
 
     if immutable_settings is None:
         immutable_settings = set()
-    plugin = RuntimeSettingsPlugin(immutable_settings=immutable_settings)
+    plugin = RuntimeSettingsPlugin(None, immutable_settings=immutable_settings)
     registry = []
     plugin.register_tools(tool_registry=registry)
     # Find set_settings in registry
@@ -314,7 +314,7 @@ class TestRuntimeSettingsPlugin:
     def test_plugin_has_register_tools(self):
         """RuntimeSettingsPlugin must implement the register_tools hook."""
         from corvidae.tools.settings import RuntimeSettingsPlugin
-        plugin = RuntimeSettingsPlugin(immutable_settings=set())
+        plugin = RuntimeSettingsPlugin(None, immutable_settings=set())
         assert hasattr(plugin, "register_tools"), "must implement register_tools"
         assert callable(plugin.register_tools)
 
@@ -323,7 +323,7 @@ class TestRuntimeSettingsPlugin:
         from corvidae.tool import Tool
         from corvidae.tools.settings import RuntimeSettingsPlugin
 
-        plugin = RuntimeSettingsPlugin(immutable_settings=set())
+        plugin = RuntimeSettingsPlugin(None, immutable_settings=set())
         registry = []
         plugin.register_tools(tool_registry=registry)
 
@@ -344,7 +344,7 @@ class TestDefaultBlocklist:
         even when no operator config is provided."""
         from corvidae.tools.settings import RuntimeSettingsPlugin
 
-        plugin = RuntimeSettingsPlugin(immutable_settings=set())
+        plugin = RuntimeSettingsPlugin(None, immutable_settings=set())
         assert "system_prompt" in plugin.blocklist, (
             "system_prompt must always be in the blocklist"
         )
@@ -353,7 +353,7 @@ class TestDefaultBlocklist:
         """Operator-configured keys must be added to the blocklist."""
         from corvidae.tools.settings import RuntimeSettingsPlugin
 
-        plugin = RuntimeSettingsPlugin(immutable_settings={"max_turns"})
+        plugin = RuntimeSettingsPlugin(None, immutable_settings={"max_turns"})
         assert "system_prompt" in plugin.blocklist
         assert "max_turns" in plugin.blocklist
 
@@ -361,14 +361,14 @@ class TestDefaultBlocklist:
         """system_prompt must be in the blocklist regardless of operator config."""
         from corvidae.tools.settings import RuntimeSettingsPlugin
 
-        plugin = RuntimeSettingsPlugin(immutable_settings=set())
+        plugin = RuntimeSettingsPlugin(None, immutable_settings=set())
         assert "system_prompt" in plugin.blocklist
 
     def test_blocklist_is_a_set(self):
         """blocklist must be a set for O(1) lookup."""
         from corvidae.tools.settings import RuntimeSettingsPlugin
 
-        plugin = RuntimeSettingsPlugin(immutable_settings={"foo"})
+        plugin = RuntimeSettingsPlugin(None, immutable_settings={"foo"})
         assert isinstance(plugin.blocklist, set)
 
 

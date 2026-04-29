@@ -219,7 +219,7 @@ async def _build_harness(config: dict) -> IntegrationHarness:
     persistence_plugin = PersistencePlugin(pm)
     pm.register(persistence_plugin, name="persistence")
 
-    core_tools = CoreToolsPlugin()
+    core_tools = CoreToolsPlugin(pm)
     pm.register(core_tools, name="core_tools")
 
     fake_transport = FakeTransportPlugin(pm)
@@ -231,7 +231,7 @@ async def _build_harness(config: dict) -> IntegrationHarness:
     subagent_plugin = SubagentPlugin(pm)
     pm.register(subagent_plugin, name="subagent")
 
-    mcp_plugin = McpClientPlugin()
+    mcp_plugin = McpClientPlugin(pm)
     pm.register(mcp_plugin, name="mcp")
 
     mock_client = AsyncMock(spec=LLMClient)
@@ -300,7 +300,7 @@ class TestGroupALifecycle:
         persistence_plugin = PersistencePlugin(pm)
         pm.register(persistence_plugin, name="persistence")
 
-        core_tools = CoreToolsPlugin()
+        core_tools = CoreToolsPlugin(pm)
         pm.register(core_tools, name="core_tools")
 
         fake_transport = FakeTransportPlugin(pm)
@@ -312,14 +312,14 @@ class TestGroupALifecycle:
         subagent_plugin = SubagentPlugin(pm)
         pm.register(subagent_plugin, name="subagent")
 
-        mcp_plugin = McpClientPlugin()
+        mcp_plugin = McpClientPlugin(pm)
         pm.register(mcp_plugin, name="mcp")
 
         llm_plugin = LLMPlugin(pm)
         llm_plugin.main_client = MagicMock()
         pm.register(llm_plugin, name="llm")
 
-        compaction_plugin = CompactionPlugin()
+        compaction_plugin = CompactionPlugin(pm)
         pm.register(compaction_plugin, name="compaction")
 
         thinking_plugin = ThinkingPlugin(pm)
@@ -1236,7 +1236,7 @@ class TestGroupEErrorHandling:
         persistence_plugin = PersistencePlugin(pm)
         pm.register(persistence_plugin, name="persistence")
 
-        core_tools = CoreToolsPlugin()
+        core_tools = CoreToolsPlugin(pm)
         pm.register(core_tools, name="core_tools")
 
         fake_transport = FakeTransportPlugin(pm)

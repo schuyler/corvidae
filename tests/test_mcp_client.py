@@ -94,7 +94,7 @@ class TestOnStartNoConfig:
 
     async def test_no_mcp_key_in_config(self):
         """Config with no 'mcp' key: no servers connected, _cached_tools empty."""
-        plugin = McpClientPlugin()
+        plugin = McpClientPlugin(None)
         await plugin.on_start(config={})
         assert plugin._servers == []
         assert plugin._cached_tools == []
@@ -102,7 +102,7 @@ class TestOnStartNoConfig:
 
     async def test_empty_servers_dict(self):
         """Config with 'mcp.servers: {}': no servers connected, _cached_tools empty."""
-        plugin = McpClientPlugin()
+        plugin = McpClientPlugin(None)
         await plugin.on_start(config={"mcp": {"servers": {}}})
         assert plugin._servers == []
         assert plugin._cached_tools == []
@@ -110,7 +110,7 @@ class TestOnStartNoConfig:
 
     async def test_missing_servers_key(self):
         """Config with 'mcp: {}': no servers connected, _cached_tools empty."""
-        plugin = McpClientPlugin()
+        plugin = McpClientPlugin(None)
         await plugin.on_start(config={"mcp": {}})
         assert plugin._servers == []
         assert plugin._cached_tools == []
@@ -127,7 +127,7 @@ class TestOnStartWithStdioServer:
 
     async def test_connects_stdio_server_and_fetches_tools(self):
         """A configured stdio server results in a populated _servers list."""
-        plugin = McpClientPlugin()
+        plugin = McpClientPlugin(None)
 
         # Build mock objects for the MCP plumbing.
         mock_session = AsyncMock()
@@ -173,7 +173,7 @@ class TestOnStartWithStdioServer:
 
     async def test_session_initialize_called(self):
         """session.initialize() is called after entering the session context."""
-        plugin = McpClientPlugin()
+        plugin = McpClientPlugin(None)
 
         mock_session = AsyncMock()
         mock_session.initialize = AsyncMock()
@@ -212,7 +212,7 @@ class TestOnStartWithStdioServer:
 
     async def test_cached_tools_populated(self):
         """_cached_tools is populated from list_tools result."""
-        plugin = McpClientPlugin()
+        plugin = McpClientPlugin(None)
 
         mock_session = AsyncMock()
         mock_session.initialize = AsyncMock()
@@ -254,7 +254,7 @@ class TestOnStartWithStdioServer:
 
     async def test_failed_server_skipped(self):
         """A server that raises during connection is skipped; daemon continues."""
-        plugin = McpClientPlugin()
+        plugin = McpClientPlugin(None)
 
         mock_stdio_cm = AsyncMock()
         mock_stdio_cm.__aenter__ = AsyncMock(side_effect=ConnectionRefusedError("no server"))
@@ -292,7 +292,7 @@ class TestOnStartWithSseServer:
 
     async def test_connects_sse_server_and_fetches_tools(self):
         """A configured SSE server results in a populated _servers list."""
-        plugin = McpClientPlugin()
+        plugin = McpClientPlugin(None)
 
         mock_session = AsyncMock()
         mock_session.initialize = AsyncMock()
@@ -343,7 +343,7 @@ class TestOnStartUnknownTransport:
 
     async def test_unknown_transport_skipped_with_warning(self, caplog):
         """A server with an unknown transport type is skipped; daemon continues."""
-        plugin = McpClientPlugin()
+        plugin = McpClientPlugin(None)
 
         config = {
             "mcp": {
@@ -376,7 +376,7 @@ class TestRegisterTools:
         """Cached tools are appended to the provided tool_registry list."""
         from corvidae.tool import Tool
 
-        plugin = McpClientPlugin()
+        plugin = McpClientPlugin(None)
 
         # Build a fake cached tool.
         async def dummy_fn(**kwargs):
@@ -393,7 +393,7 @@ class TestRegisterTools:
 
     def test_empty_cached_tools_extends_nothing(self):
         """When no servers are configured, register_tools is a no-op."""
-        plugin = McpClientPlugin()
+        plugin = McpClientPlugin(None)
         registry = []
         plugin.register_tools(tool_registry=registry)
         assert registry == []
@@ -402,7 +402,7 @@ class TestRegisterTools:
         """register_tools extends (not replaces) an existing registry."""
         from corvidae.tool import Tool
 
-        plugin = McpClientPlugin()
+        plugin = McpClientPlugin(None)
 
         async def existing_fn(**kwargs):
             return "existing"
@@ -432,7 +432,7 @@ class TestOnStop:
 
     async def test_on_stop_closes_exit_stack(self):
         """on_stop calls aclose() on the exit stack if one exists."""
-        plugin = McpClientPlugin()
+        plugin = McpClientPlugin(None)
         mock_stack = AsyncMock()
         mock_stack.aclose = AsyncMock()
         plugin._exit_stack = mock_stack
@@ -443,7 +443,7 @@ class TestOnStop:
 
     async def test_on_stop_clears_exit_stack_reference(self):
         """on_stop sets _exit_stack to None after closing."""
-        plugin = McpClientPlugin()
+        plugin = McpClientPlugin(None)
         mock_stack = AsyncMock()
         mock_stack.aclose = AsyncMock()
         plugin._exit_stack = mock_stack
@@ -454,7 +454,7 @@ class TestOnStop:
 
     async def test_on_stop_no_exit_stack_is_safe(self):
         """on_stop is a no-op when _exit_stack is None (no servers configured)."""
-        plugin = McpClientPlugin()
+        plugin = McpClientPlugin(None)
         assert plugin._exit_stack is None
         # Must not raise.
         await plugin.on_stop()
@@ -832,7 +832,7 @@ class TestToolNameCollision:
 
     def test_first_tool_wins_on_collision(self):
         """When two servers expose the same tool name, only the first is kept."""
-        plugin = McpClientPlugin()
+        plugin = McpClientPlugin(None)
 
         mcp_tool_a = _make_mcp_tool("read_file", "Server A read_file")
         mcp_tool_b = _make_mcp_tool("read_file", "Server B read_file")
@@ -852,7 +852,7 @@ class TestToolNameCollision:
 
     def test_duplicate_skipped_warning_logged(self, caplog):
         """A WARNING is logged when a duplicate tool name is encountered."""
-        plugin = McpClientPlugin()
+        plugin = McpClientPlugin(None)
 
         mcp_tool_a = _make_mcp_tool("query")
         mcp_tool_b = _make_mcp_tool("query")
@@ -873,7 +873,7 @@ class TestToolNameCollision:
 
     def test_no_collision_both_tools_registered(self):
         """Tools with different names from different servers are both registered."""
-        plugin = McpClientPlugin()
+        plugin = McpClientPlugin(None)
 
         mcp_tool_a = _make_mcp_tool("read_file")
         mcp_tool_b = _make_mcp_tool("write_file")
@@ -892,7 +892,7 @@ class TestToolNameCollision:
 
     def test_prefix_prevents_collision(self):
         """With different prefixes, same MCP tool name from two servers does not collide."""
-        plugin = McpClientPlugin()
+        plugin = McpClientPlugin(None)
 
         mcp_tool_a = _make_mcp_tool("read_file")
         mcp_tool_b = _make_mcp_tool("read_file")

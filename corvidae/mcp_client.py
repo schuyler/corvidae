@@ -57,7 +57,10 @@ class McpClientPlugin:
     register_tools fires.
     """
 
-    def __init__(self) -> None:
+    depends_on = set()
+
+    def __init__(self, pm) -> None:
+        self.pm = pm
         self._servers: list[_McpServerState] = []
         self._cached_tools: list[Tool] = []
         self._exit_stack: AsyncExitStack | None = None

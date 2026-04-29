@@ -232,24 +232,24 @@ class TestSearch:
 class TestLocalIndexerPlugin:
     async def test_plugin_registers_tool(self, tmp_path):
         """Plugin should register search_workspace tool."""
-        plugin = LocalIndexerPlugin()
+        plugin = LocalIndexerPlugin(None)
         registry = []
         plugin.register_tools(tool_registry=registry)
         assert len(registry) == 1
 
     async def test_search_workspace_returns_string_no_indexer(self):
         """search_workspace should return error string when no indexer."""
-        plugin = LocalIndexerPlugin()
+        plugin = LocalIndexerPlugin(None)
         registry = []
         plugin.register_tools(tool_registry=registry)
-        tool_fn = registry[0]
+        tool_fn = registry[0].fn
 
         result = await tool_fn("test")
         assert "Local indexer not initialized" in result
 
     async def test_search_workspace_returns_string_with_indexer(self, tmp_path):
         """search_workspace should return formatted results when indexed."""
-        plugin = LocalIndexerPlugin()
+        plugin = LocalIndexerPlugin(None)
         from corvidae.tools.local_indexer import LocalIndexer
 
         db_path = tmp_path / "test_plugin.db"
@@ -263,7 +263,7 @@ class TestLocalIndexerPlugin:
 
         registry = []
         plugin.register_tools(tool_registry=registry)
-        tool_fn = registry[0]
+        tool_fn = registry[0].fn
 
         result = await tool_fn("test content", mode="text")
         assert isinstance(result, str)

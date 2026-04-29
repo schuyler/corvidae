@@ -21,6 +21,7 @@ from typing import Any
 
 import aiosqlite
 from corvidae.hooks import hookimpl
+from corvidae.tool import Tool
 
 logger = logging.getLogger(__name__)
 
@@ -377,7 +378,10 @@ class LocalIndexerPlugin:
         register_tools(tool_registry): Expose search_workspace tool.
     """
 
-    def __init__(self) -> None:
+    depends_on = set()
+
+    def __init__(self, pm) -> None:
+        self.pm = pm
         self.indexer: LocalIndexer | None = None
         self._workspace_root: Path | None = None
 
@@ -466,7 +470,7 @@ class LocalIndexerPlugin:
             return "\n".join(lines)
 
         _search_workspace.__name__ = "search_workspace"
-        tool_registry.append(_search_workspace)
+        tool_registry.append(Tool.from_function(_search_workspace))
 
 
 # ---------------------------------------------------------------------------
@@ -477,5 +481,7 @@ def get_local_indexer_plugin() -> LocalIndexerPlugin:
     """Return a new LocalIndexerPlugin instance.
 
     Used by entry-point-based plugin loading (see pyproject.toml [project.entry-points]).
+    Note: pm is set to None here because entry-point loading does not provide a pm at
+    factory call time. Callers that need pm should instantiate LocalIndexerPlugin directly.
     """
-    return LocalIndexerPlugin()
+    return LocalIndexerPlugin(pm=None)

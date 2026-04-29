@@ -30,7 +30,7 @@ class CompactionPlugin:
 
     depends_on = {"llm"}
 
-    def __init__(self, pm=None) -> None:
+    def __init__(self, pm) -> None:
         self.pm = pm
         self._compaction_threshold: float = 0.8
         self._compaction_retention: float = 0.5

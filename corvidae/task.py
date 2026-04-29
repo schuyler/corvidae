@@ -189,6 +189,8 @@ class TaskQueue:
 class TaskPlugin:
     """Plugin owning the TaskQueue and task_status tool."""
 
+    depends_on = set()
+
     def __init__(self, pm) -> None:
         self.pm = pm
         self.task_queue: TaskQueue | None = None
