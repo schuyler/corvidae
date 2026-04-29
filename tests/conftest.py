@@ -13,6 +13,21 @@ import aiosqlite
 warnings.filterwarnings("ignore", message=".*iscoroutinefunction.*deprecated.*")
 
 
+def pytest_addoption(parser):
+    parser.addoption(
+        "--run-eval", action="store_true", default=False,
+        help="Run live LLM evaluation tests (marked @pytest.mark.eval)",
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    if not config.getoption("--run-eval"):
+        skip_eval = pytest.mark.skip(reason="Needs --run-eval option")
+        for item in items:
+            if "eval" in [m.name for m in item.iter_markers()]:
+                item.add_marker(skip_eval)
+
+
 @pytest_asyncio.fixture
 async def db():
     from corvidae.persistence import init_db
