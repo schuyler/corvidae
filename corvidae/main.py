@@ -6,9 +6,9 @@ named `corvidae.<module>` via `logging.getLogger(__name__)`. The `corvidae` root
 logger controls the entire logging hierarchy.
 
 Logging Configuration:
-    The `logging` key in agent.yaml is passed to `logging.config.dictConfig()`.
-    If omitted, built-in defaults apply: INFO level to stderr, standard format.
-    See `_DEFAULT_LOGGING` for the default configuration schema.
+    The `logging` key in agent.yaml supplies simplified options (level, file)
+    forwarded to `configure_logging()`. If omitted, defaults apply: INFO level,
+    stderr in programmatic mode, file logging (corvidae.log) in CLI mode.
 
 Shutdown:
     SIGINT/SIGTERM trigger graceful shutdown via `stop_event`. The shutdown
@@ -17,7 +17,6 @@ Shutdown:
 
 import asyncio
 import logging
-import logging.config
 import os
 import signal
 import sys
@@ -32,17 +31,14 @@ from corvidae.channel import ChannelRegistry, load_channel_config
 from corvidae.channels.cli import CLIPlugin
 from corvidae.channels.irc import IRCPlugin
 from corvidae.hooks import create_plugin_manager, validate_dependencies
-from corvidae.logging import (  # noqa: F401 — re-exported for backward compat
-    StructuredFormatter,
-    _BUILTIN_LOG_ATTRS,
-    _DEFAULT_LOGGING,
-)
+from corvidae.logging import StructuredFormatter  # noqa: F401 — re-exported
+from corvidae.logging import configure_logging
 from corvidae.tools import CoreToolsPlugin
 
 logger = logging.getLogger(__name__)
 
 
-async def main(config_path: str = "agent.yaml") -> None:
+async def main(config_path: str = "agent.yaml", *, cli_mode: bool = False) -> None:
     """Daemon entry point.
 
     1. Load YAML config from config_path. Raises FileNotFoundError if missing.
@@ -56,11 +52,15 @@ async def main(config_path: str = "agent.yaml") -> None:
         config = yaml.safe_load(f)
 
     # Configure logging first — before any other work
-    log_config = config.get("logging", _DEFAULT_LOGGING)
-    logging.config.dictConfig(log_config)
+    log_section = config.get("logging", {})
+    log_level = log_section.get("level", "INFO")
+    log_file = log_section.get("file")
+    if log_file is None and cli_mode:
+        log_file = "corvidae.log"
+    configure_logging(level=log_level, file=log_file)
     logger.info(
         "logging configured",
-        extra={"source": "yaml" if "logging" in config else "defaults"},
+        extra={"level": log_level, "file": log_file or "stderr"},
     )
 
     config["_base_dir"] = Path(config_path).parent
@@ -221,4 +221,4 @@ async def _run_shutdown(agent: Agent, pm: pluggy.PluginManager) -> None:
 
 def cli() -> None:
     """Console script entry point."""
-    asyncio.run(main())
+    asyncio.run(main(cli_mode=True))
