@@ -96,8 +96,17 @@ class McpClientPlugin:
     async def on_stop(self) -> None:
         """Close all MCP sessions and transports via AsyncExitStack."""
         if self._exit_stack:
-            await self._exit_stack.aclose()
-            self._exit_stack = None
+            try:
+                await self._exit_stack.aclose()
+            # AsyncExitStack.aclose() aggregates cleanup from multiple MCP
+            # transports whose exception types are not under this codebase's
+            # control, so narrowing the catch to specific types is not feasible.
+            except Exception:
+                logger.warning(
+                    "McpClientPlugin: error during exit stack cleanup", exc_info=True
+                )
+            finally:
+                self._exit_stack = None
         logger.debug("McpClientPlugin stopped")
 
     @hookimpl

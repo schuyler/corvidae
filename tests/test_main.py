@@ -301,3 +301,163 @@ class TestMainMissingConfig:
         """main() should raise FileNotFoundError when the config file is absent."""
         with pytest.raises(FileNotFoundError):
             await main("nonexistent_config_file_that_does_not_exist.yaml")
+
+
+# ---------------------------------------------------------------------------
+# Helpers shared by graceful-shutdown tests
+# ---------------------------------------------------------------------------
+
+
+def _make_mock_pm_and_agent():
+    """Return a (mock_pm, mock_agent) pair suitable for main() patches."""
+    mock_pm = MagicMock()
+    mock_pm.ahook.on_start = AsyncMock(return_value=[])
+    mock_pm.ahook.on_stop = AsyncMock(return_value=[])
+
+    mock_agent = MagicMock()
+    mock_agent.on_start = AsyncMock()
+    mock_agent.on_stop = AsyncMock()
+    return mock_pm, mock_agent
+
+
+# ---------------------------------------------------------------------------
+# TestDoubleSignalForceExit
+# ---------------------------------------------------------------------------
+
+
+class TestDoubleSignalForceExit:
+    """A second interrupt signal must call os._exit(1) immediately."""
+
+    async def test_double_sigint_calls_os_exit(self):
+        """Second SIGINT triggers os._exit(1) — no graceful cleanup.
+
+        Uses event-gating to ensure agent.on_stop() blocks until the second
+        signal has been sent, preventing a race where main() exits before
+        the second signal fires. Polls mock_os_exit.called before unblocking
+        to account for asyncio signal-handler dispatch latency.
+        """
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            _write_config(f.name)
+            config_path = f.name
+
+        try:
+            mock_pm, mock_agent = _make_mock_pm_and_agent()
+
+            # Block on_stop until the second signal has been sent.
+            shutdown_started = asyncio.Event()
+            shutdown_proceed = asyncio.Event()
+
+            async def _blocking_on_stop():
+                shutdown_started.set()
+                await shutdown_proceed.wait()
+
+            mock_agent.on_stop = AsyncMock(side_effect=_blocking_on_stop)
+
+            with (
+                patch("corvidae.main.create_plugin_manager", return_value=mock_pm),
+                patch("corvidae.main.Agent", return_value=mock_agent),
+                patch("os._exit") as mock_os_exit,
+            ):
+                loop = asyncio.get_running_loop()
+
+                async def _orchestrate():
+                    os.kill(os.getpid(), signal.SIGINT)       # first signal
+                    await shutdown_started.wait()              # wait for shutdown entry
+                    os.kill(os.getpid(), signal.SIGINT)        # second signal while hung
+                    # Signal handler fires after multiple event-loop iterations
+                    # (wakeup fd → reader callback → _handle_signal → call_soon).
+                    # Poll until the mock records the call before unblocking main().
+                    while not mock_os_exit.called:
+                        await asyncio.sleep(0)
+                    shutdown_proceed.set()                     # unblock so main() can exit
+
+                loop.call_later(0.05, lambda: asyncio.ensure_future(_orchestrate()))
+                await main(config_path)
+
+            mock_os_exit.assert_called_once_with(1)
+        finally:
+            os.unlink(config_path)
+
+    async def test_sigterm_then_sigint_calls_os_exit(self):
+        """SIGTERM followed by SIGINT triggers os._exit(1).
+
+        Any second interrupt signal (regardless of type) should force-exit.
+        Uses event-gating to ensure agent.on_stop() blocks until the second
+        signal has been sent.
+        """
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            _write_config(f.name)
+            config_path = f.name
+
+        try:
+            mock_pm, mock_agent = _make_mock_pm_and_agent()
+
+            shutdown_started = asyncio.Event()
+            shutdown_proceed = asyncio.Event()
+
+            async def _blocking_on_stop():
+                shutdown_started.set()
+                await shutdown_proceed.wait()
+
+            mock_agent.on_stop = AsyncMock(side_effect=_blocking_on_stop)
+
+            with (
+                patch("corvidae.main.create_plugin_manager", return_value=mock_pm),
+                patch("corvidae.main.Agent", return_value=mock_agent),
+                patch("os._exit") as mock_os_exit,
+            ):
+                loop = asyncio.get_running_loop()
+
+                async def _orchestrate():
+                    os.kill(os.getpid(), signal.SIGTERM)       # first signal
+                    await shutdown_started.wait()               # wait for shutdown entry
+                    os.kill(os.getpid(), signal.SIGINT)         # second signal while hung
+                    while not mock_os_exit.called:
+                        await asyncio.sleep(0)
+                    shutdown_proceed.set()                      # unblock so main() can exit
+
+                loop.call_later(0.05, lambda: asyncio.ensure_future(_orchestrate()))
+                await main(config_path)
+
+            mock_os_exit.assert_called_once_with(1)
+        finally:
+            os.unlink(config_path)
+
+
+# ---------------------------------------------------------------------------
+# TestShutdownTimeout
+# ---------------------------------------------------------------------------
+
+
+class TestShutdownTimeout:
+    """If _run_shutdown takes too long, asyncio.wait_for triggers os._exit(1)."""
+
+    async def test_slow_shutdown_calls_os_exit_after_timeout(self):
+        """When _run_shutdown hangs, os._exit(1) is called after the timeout.
+
+        Patches asyncio.wait_for to raise TimeoutError immediately so the
+        test stays fast (no actual sleep).
+        """
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            _write_config(f.name)
+            config_path = f.name
+
+        try:
+            mock_pm, mock_agent = _make_mock_pm_and_agent()
+
+            async def _patched_wait_for(coro, timeout):
+                coro.close()  # prevent "coroutine never awaited" warning
+                raise asyncio.TimeoutError()
+
+            with (
+                patch("corvidae.main.create_plugin_manager", return_value=mock_pm),
+                patch("corvidae.main.Agent", return_value=mock_agent),
+                patch("os._exit") as mock_os_exit,
+                patch("corvidae.main.asyncio.wait_for", side_effect=_patched_wait_for),
+            ):
+                _schedule_sigint()
+                await main(config_path)
+
+            mock_os_exit.assert_called_once_with(1)
+        finally:
+            os.unlink(config_path)
