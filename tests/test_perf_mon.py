@@ -5,7 +5,6 @@ import time
 import pytest
 
 from corvidae.channel import Channel
-from corvidae.conversation import ConversationLog
 from corvidae.hooks import create_plugin_manager
 from corvidae.tools.perf_mon import PerfMonPlugin
 
