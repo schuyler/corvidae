@@ -189,3 +189,26 @@ class TestSendToolStatusCompleted:
         assert "→" in captured.out
         # Should not contain full 200-char result
         assert "x" * 200 not in captured.out
+
+
+# ---------------------------------------------------------------------------
+# send_progress
+# ---------------------------------------------------------------------------
+
+
+class TestSendProgress:
+    async def test_cli_channel_prints_progress_in_grey(self, capsys):
+        """send_progress on a cli channel prints text in grey (bright black)."""
+        plugin, channel = _make_cli_plugin()
+        await plugin.send_progress(channel=channel, text="Let me look that up...")
+        captured = capsys.readouterr()
+        assert "Let me look that up..." in captured.out
+        assert "\033[90m" in captured.out
+        assert "\033[0m" in captured.out
+
+    async def test_non_cli_channel_ignored(self, capsys):
+        """send_progress on a non-cli channel produces no output."""
+        plugin, channel = _make_non_cli_channel()
+        await plugin.send_progress(channel=channel, text="should not appear")
+        captured = capsys.readouterr()
+        assert captured.out == ""

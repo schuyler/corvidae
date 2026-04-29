@@ -284,6 +284,19 @@ class AgentSpec:
             args_summary: Short summary of arguments (for "dispatched"), or None.
             result_summary: Short summary of result (for "completed"), or None.
         """
+
+    @hookspec
+    async def send_progress(self, channel: Channel, text: str) -> None:
+        """Called to display intermediate assistant text before tool dispatch.
+
+        Fires when the LLM produces text content alongside tool calls.
+        Transport plugins may render this as a status indicator (e.g., grey text)
+        since it is not the final response.
+
+        Args:
+            channel: The Channel the text is associated with.
+            text: Intermediate text content from the LLM response.
+        """
     @hookspec
     def register_tools(self, tool_registry: list) -> None:
         """Called during startup so plugins can add tools to the agent loop.
