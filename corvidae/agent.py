@@ -29,7 +29,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, fields as dc_fields
 from enum import Enum
 
-from corvidae.agent_loop import AgentTurnResult, run_agent_turn
+from corvidae.agent_turn import AgentTurnResult, run_agent_turn
 from corvidae.channel import Channel, ChannelConfig, ChannelRegistry, resolve_system_prompt
 from corvidae.context import ContextWindow, MessageType, DEFAULT_CHARS_PER_TOKEN
 from corvidae.hooks import CorvidaePlugin, resolve_hook_results, HookStrategy, get_dependency, hookimpl
@@ -44,7 +44,7 @@ logger = logging.getLogger("corvidae.agent")
 FRAMEWORK_KEYS = {f.name for f in dc_fields(ChannelConfig)}
 
 DEFAULT_LLM_ERROR_MESSAGE = "Sorry, I encountered an error and could not process your message."
-# Note: same text as MAX_ROUNDS_REACHED_MESSAGE in agent_loop.py — kept in sync.
+# Note: same text as MAX_ROUNDS_REACHED_MESSAGE in tools/subagent.py — kept in sync.
 MAX_TURNS_FALLBACK_MESSAGE = "(max tool-calling rounds reached)"
 
 

@@ -5,8 +5,21 @@ into a standalone plugin that can be unregistered without crashing the system.
 """
 from __future__ import annotations
 
-from corvidae.agent_loop import strip_reasoning_content, strip_thinking
+import re
+
 from corvidae.hooks import CorvidaePlugin, hookimpl
+
+
+def strip_thinking(text: str) -> str:
+    """Remove <think>...</think> blocks from text."""
+    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+
+
+def strip_reasoning_content(messages: list[dict]) -> None:
+    """Remove reasoning_content from assistant messages in place."""
+    for msg in messages:
+        if msg.get("role") == "assistant":
+            msg.pop("reasoning_content", None)
 
 
 class ThinkingPlugin(CorvidaePlugin):

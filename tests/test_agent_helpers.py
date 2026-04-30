@@ -21,7 +21,7 @@ from corvidae.agent import (
     QueueItem,
     QueueItemRole,
 )
-from corvidae.agent_loop import AgentTurnResult
+from corvidae.agent_turn import AgentTurnResult
 
 from helpers import build_plugin_and_channel
 

@@ -239,7 +239,7 @@ class TestFrameworkKeys:
 class TestRunAgentTurnExtraBody:
     async def test_run_agent_turn_accepts_extra_body_kwarg(self):
         """run_agent_turn must accept an extra_body keyword argument."""
-        from corvidae.agent_loop import run_agent_turn
+        from corvidae.agent_turn import run_agent_turn
 
         client = MagicMock()
         client.chat = AsyncMock(
@@ -251,7 +251,7 @@ class TestRunAgentTurnExtraBody:
 
     async def test_run_agent_turn_passes_extra_body_to_client_chat(self):
         """run_agent_turn must forward extra_body to client.chat()."""
-        from corvidae.agent_loop import run_agent_turn
+        from corvidae.agent_turn import run_agent_turn
 
         client = MagicMock()
         client.chat = AsyncMock(
@@ -270,7 +270,7 @@ class TestRunAgentTurnExtraBody:
 
     async def test_run_agent_turn_no_extra_body_does_not_forward_it(self):
         """When extra_body is not provided, client.chat() must not receive extra_body kwarg."""
-        from corvidae.agent_loop import run_agent_turn
+        from corvidae.agent_turn import run_agent_turn
 
         client = MagicMock()
         client.chat = AsyncMock(
@@ -286,7 +286,7 @@ class TestRunAgentTurnExtraBody:
 
     async def test_run_agent_turn_extra_body_none_not_forwarded(self):
         """When extra_body=None is passed, client.chat() must not receive extra_body."""
-        from corvidae.agent_loop import run_agent_turn
+        from corvidae.agent_turn import run_agent_turn
 
         client = MagicMock()
         client.chat = AsyncMock(
