@@ -10,3 +10,7 @@ build/
 agent.yaml
 *.swp
 uv.lock
+
+# local dev
+apluggy
+*.log
