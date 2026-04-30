@@ -1,6 +1,5 @@
 """Tests for corvidae.turn -- run_agent_turn, AgentTurnResult, tool_to_schema, LLMClient extra_body."""
 
-import json
 import logging
 from unittest.mock import AsyncMock, MagicMock
 
@@ -9,32 +8,13 @@ import pytest
 from corvidae.turn import AgentTurnResult, run_agent_turn
 from corvidae.tool import tool_to_schema
 
-
-def _make_text_response(text: str) -> dict:
-    return {"choices": [{"message": {"content": text}}]}
-
-
-def _make_tool_call_response(calls: list[dict]) -> dict:
-    return {
-        "choices": [
-            {
-                "message": {
-                    "content": "",
-                    "tool_calls": calls,
-                }
-            }
-        ]
-    }
-
-
-def _make_tool_call(call_id: str, name: str, args: dict) -> dict:
-    return {
-        "id": call_id,
-        "function": {
-            "name": name,
-            "arguments": json.dumps(args),
-        },
-    }
+from llm_response_fixtures import (
+    _make_text_response,
+    _make_tool_call_response,
+    _make_tool_call,
+    _make_mixed_response,
+    _make_null_content_tool_call_response,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -129,34 +109,6 @@ async def test_llm_client_no_extra_body_by_default():
 # ---------------------------------------------------------------------------
 # run_agent_turn tests
 # ---------------------------------------------------------------------------
-
-
-def _make_mixed_response(text: str, calls: list[dict]) -> dict:
-    """Response with both text content and tool calls."""
-    return {
-        "choices": [
-            {
-                "message": {
-                    "content": text,
-                    "tool_calls": calls,
-                }
-            }
-        ]
-    }
-
-
-def _make_null_content_tool_call_response(calls: list[dict]) -> dict:
-    """Response with content=null and tool calls — as some LLMs emit."""
-    return {
-        "choices": [
-            {
-                "message": {
-                    "content": None,
-                    "tool_calls": calls,
-                }
-            }
-        ]
-    }
 
 
 # Cases 1, 7, 8: text-only response; message appended; latency positive float

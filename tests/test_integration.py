@@ -10,7 +10,6 @@ Baseline test count: 525 (all passing before this file was added).
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -33,41 +32,13 @@ from corvidae.thinking import ThinkingPlugin
 from corvidae.tools import CoreToolsPlugin
 from corvidae.tools.subagent import SubagentPlugin
 
+from llm_response_fixtures import (
+    _make_text_response,
+    _make_tool_call_response,
+    _make_tool_call,
+)
+
 pytestmark = pytest.mark.timeout(30)
-
-
-# ---------------------------------------------------------------------------
-# Response builder helpers (shared with other test files)
-# ---------------------------------------------------------------------------
-
-
-def _make_text_response(text: str) -> dict:
-    return {"choices": [{"message": {"role": "assistant", "content": text}}]}
-
-
-def _make_tool_call_response(calls: list[dict]) -> dict:
-    return {
-        "choices": [
-            {
-                "message": {
-                    "role": "assistant",
-                    "content": "",
-                    "tool_calls": calls,
-                }
-            }
-        ]
-    }
-
-
-def _make_tool_call(call_id: str, name: str, args: dict) -> dict:
-    return {
-        "id": call_id,
-        "type": "function",
-        "function": {
-            "name": name,
-            "arguments": json.dumps(args),
-        },
-    }
 
 
 # ---------------------------------------------------------------------------

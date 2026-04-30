@@ -8,7 +8,6 @@ These tests specify behavior that doesn't exist yet (Red TDD). They fail because
 """
 
 import asyncio
-import json
 from unittest.mock import AsyncMock, MagicMock
 
 import aiosqlite
@@ -24,6 +23,11 @@ from corvidae.task import Task, TaskPlugin, TaskQueue
 from corvidae.tool import ToolContext
 
 from helpers import build_plugin_and_channel, drain, drain_task_queue
+from llm_response_fixtures import (
+    _make_text_response,
+    _make_tool_call_response,
+    _make_tool_call,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -35,39 +39,6 @@ AGENT_DEFAULTS = {
     "max_context_tokens": 8000,
     "keep_thinking_in_history": False,
 }
-
-
-# ---------------------------------------------------------------------------
-# Response builder helpers
-# ---------------------------------------------------------------------------
-
-
-def _make_text_response(text: str) -> dict:
-    return {"choices": [{"message": {"role": "assistant", "content": text}}]}
-
-
-def _make_tool_call_response(calls: list[dict]) -> dict:
-    return {
-        "choices": [
-            {
-                "message": {
-                    "role": "assistant",
-                    "content": "",
-                    "tool_calls": calls,
-                }
-            }
-        ]
-    }
-
-
-def _make_tool_call(call_id: str, name: str, args: dict) -> dict:
-    return {
-        "id": call_id,
-        "function": {
-            "name": name,
-            "arguments": json.dumps(args),
-        },
-    }
 
 
 # ---------------------------------------------------------------------------
