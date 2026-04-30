@@ -10,8 +10,8 @@ Exports:
     AgentSpec       — hook specifications for all lifecycle, messaging,
                       and extension-point hooks
     create_plugin_manager()     — create and configure the PluginManager
-    HookStrategy                — enum of result-resolution strategies
-    resolve_hook_results()      — post-process broadcast hook result lists
+    HookStrategy                — enum with REJECT_WINS for gate hooks
+    resolve_hook_results()      — resolve broadcast gate-hook result lists
     get_dependency()            — typed plugin lookup
     validate_dependencies()     — dependency graph verification at startup
 """
@@ -41,26 +41,19 @@ class HookStrategy(Enum):
     """Strategy for resolving a list of broadcast hook results into a single value."""
 
     REJECT_WINS = "reject_wins"
-    ACCEPT_WINS = "accept_wins"
-    VALUE_FIRST = "value_first"
 
 
 def resolve_hook_results(
     results: list,
     hook_name: str,
     strategy: HookStrategy,
-    *,
-    pm: pluggy.PluginManager | None = None,
 ) -> object | None:
     """Resolve a list of broadcast hook results into a single value.
 
     Args:
         results: The list returned by ``await pm.ahook.<hook_name>(...)``.
-        hook_name: The hook method name (used for logging and tiebreaking).
-        strategy: One of HookStrategy.REJECT_WINS, ACCEPT_WINS, or VALUE_FIRST.
-        pm: Plugin manager, required for VALUE_FIRST tiebreaking with multiple
-            non-None results. If None, falls back to returning the first non-None
-            result with a warning logged.
+        hook_name: The hook method name (used for logging).
+        strategy: One of HookStrategy.REJECT_WINS.
 
     Returns:
         A single resolved value, or None.
@@ -72,45 +65,6 @@ def resolve_hook_results(
         if any(r is True for r in non_none):
             return True
         return None
-
-    if strategy is HookStrategy.ACCEPT_WINS:
-        if any(r is True for r in results):
-            return True
-        return None
-
-    # VALUE_FIRST
-    non_none = [r for r in results if r is not None]
-    if len(non_none) == 0:
-        return None
-    if len(non_none) == 1:
-        return non_none[0]
-
-    # Multiple non-None results: tiebreak by alphabetically-first plugin name.
-    if pm is None:
-        _resolve_logger.warning(
-            "hook %s: multiple non-None results but pm is None; returning first non-None",
-            hook_name,
-        )
-        return non_none[0]
-
-    hook_caller = getattr(pm.hook, hook_name)
-    # pluggy executes hooks in reversed(get_hookimpls()) order, so results[i]
-    # corresponds to reversed(get_hookimpls())[i].
-    impls = list(reversed(hook_caller.get_hookimpls()))
-    candidates = []
-    for impl, result in zip(impls, results):
-        if result is not None:
-            name = pm.get_name(impl.plugin) or type(impl.plugin).__name__
-            candidates.append((name, result))
-    candidates.sort(key=lambda pair: pair[0])
-    _resolve_logger.warning(
-        "hook %s: %d plugins returned non-None results: %s; using result from %s",
-        hook_name,
-        len(candidates),
-        [c[0] for c in candidates],
-        candidates[0][0],
-    )
-    return candidates[0][1]
 
 
 def get_dependency(pm: pluggy.PluginManager, name: str, expected_type: type[T]) -> T:
@@ -187,6 +141,22 @@ def validate_dependencies(pm: pluggy.PluginManager) -> None:
             dfs(node)
 
 
+class _SeedHooksPlugin:
+    """Internal plugin providing seed values for wrapper-chain hooks.
+
+    Registered with trylast=True so it runs innermost in the chain.
+    Returns the input value unchanged — wrappers above transform it.
+    """
+
+    @hookimpl(trylast=True)
+    async def transform_display_text(self, text, **kwargs) -> str:
+        return text
+
+    @hookimpl(trylast=True)
+    async def process_tool_result(self, result, **kwargs) -> str:
+        return result
+
+
 def create_plugin_manager() -> pluggy.PluginManager:
     """Create and configure the plugin manager with AgentSpec hooks.
 
@@ -197,6 +167,7 @@ def create_plugin_manager() -> pluggy.PluginManager:
     """
     pm = pluggy.PluginManager("corvidae")
     pm.add_hookspecs(AgentSpec)
+    pm.register(_SeedHooksPlugin(), name="_seed_hooks")
 
     _pm_logger.debug("plugin manager created")
 
@@ -438,15 +409,24 @@ class AgentSpec:
             max_tokens: The channel's max_context_tokens limit.
         """
 
-    @hookspec
+    @hookspec(firstresult=True)
     async def process_tool_result(
         self, tool_name: str, result: str, channel: "Channel | None"
     ) -> str | None:
         """Transform a tool result before it enters the conversation.
 
-        Broadcast hook. Return a replacement string or None to keep the
-        original. If multiple plugins return non-None, the alphabetically-first
-        plugin's result is used and a warning is logged.
+        Wrapper chain hook (firstresult=True). Use ``@hookimpl(wrapper=True)``
+        to wrap the chain result. The seed plugin returns the input unchanged;
+        wrappers above it compose transforms in LIFO order.
+
+        Example::
+
+            @hookimpl(wrapper=True)
+            def process_tool_result(self, **kwargs):
+                result = yield
+                if result is not None:
+                    return result.upper()
+                return result
 
         Fires when execute_tool_call was invoked (success or exception).
         Pre-dispatch errors (JSON parse failure, unknown tool) skip this hook.
@@ -532,15 +512,24 @@ class AgentSpec:
                 conversation log. Mutations affect subsequent prompt builds only.
         """
 
-    @hookspec
+    @hookspec(firstresult=True)
     async def transform_display_text(
         self, channel: "Channel", text: str, result_message: dict
     ) -> "str | None":
         """Called before sending the final text response to the channel.
 
-        Broadcast hook. Return a transformed string or None to leave unchanged.
-        If multiple plugins return non-None, the alphabetically-first plugin's
-        result is used and a warning is logged.
+        Wrapper chain hook (firstresult=True). Use ``@hookimpl(wrapper=True)``
+        to wrap the chain result. The seed plugin returns the input text
+        unchanged; wrappers above it compose transforms in LIFO order.
+
+        Example::
+
+            @hookimpl(wrapper=True)
+            def transform_display_text(self, **kwargs):
+                result = yield
+                if result is not None:
+                    return result.upper()
+                return result
 
         Args:
             channel: The Channel the response will be sent to.

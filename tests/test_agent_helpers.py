@@ -285,7 +285,7 @@ class TestResolveDisplayText:
         """transform_display_text returns a value -> that value is used."""
         plugin, channel, db = plugin_and_channel
         result = _make_turn_result(text="original")
-        plugin.pm.ahook.transform_display_text = AsyncMock(return_value=["transformed"])
+        plugin.pm.ahook.transform_display_text = AsyncMock(return_value="transformed")
 
         text = await plugin._resolve_display_text(channel, result, fallback=None)
 
@@ -295,7 +295,7 @@ class TestResolveDisplayText:
         """transform_display_text returns None -> falls back to result.text."""
         plugin, channel, db = plugin_and_channel
         result = _make_turn_result(text="original text")
-        plugin.pm.ahook.transform_display_text = AsyncMock(return_value=[])
+        plugin.pm.ahook.transform_display_text = AsyncMock(return_value=None)
 
         text = await plugin._resolve_display_text(channel, result, fallback=None)
 
@@ -307,7 +307,7 @@ class TestResolveDisplayText:
         """Resolved text is empty + fallback provided -> fallback returned."""
         plugin, channel, db = plugin_and_channel
         result = _make_turn_result(text="")
-        plugin.pm.ahook.transform_display_text = AsyncMock(return_value=[])
+        plugin.pm.ahook.transform_display_text = AsyncMock(return_value=None)
 
         text = await plugin._resolve_display_text(
             channel, result, fallback=MAX_TURNS_FALLBACK_MESSAGE
@@ -321,7 +321,7 @@ class TestResolveDisplayText:
         """fallback=None + resolved text is empty -> empty string returned as-is."""
         plugin, channel, db = plugin_and_channel
         result = _make_turn_result(text="")
-        plugin.pm.ahook.transform_display_text = AsyncMock(return_value=[])
+        plugin.pm.ahook.transform_display_text = AsyncMock(return_value=None)
 
         text = await plugin._resolve_display_text(channel, result, fallback=None)
 
@@ -371,7 +371,7 @@ class TestHandleResponse:
         result = _make_turn_result(text="the answer")
 
         # Ensure transform_display_text returns nothing so we use result.text
-        plugin.pm.ahook.transform_display_text = AsyncMock(return_value=[])
+        plugin.pm.ahook.transform_display_text = AsyncMock(return_value=None)
 
         await plugin._handle_response(
             result=result,
@@ -389,7 +389,7 @@ class TestHandleResponse:
         plugin, channel, db = plugin_and_channel
         channel.turn_counter = 2
         result = _make_turn_result(text="done")
-        plugin.pm.ahook.transform_display_text = AsyncMock(return_value=[])
+        plugin.pm.ahook.transform_display_text = AsyncMock(return_value=None)
 
         await plugin._handle_response(
             result=result,
@@ -404,7 +404,7 @@ class TestHandleResponse:
         """No tool calls -> on_agent_response hook fired with request and response text."""
         plugin, channel, db = plugin_and_channel
         result = _make_turn_result(text="the answer")
-        plugin.pm.ahook.transform_display_text = AsyncMock(return_value=[])
+        plugin.pm.ahook.transform_display_text = AsyncMock(return_value=None)
 
         await plugin._handle_response(
             result=result,
@@ -485,7 +485,7 @@ class TestHandleResponse:
             "function": {"name": "my_tool", "arguments": '{"x": "v"}'},
         }
         result = _make_turn_result(text="", tool_calls=[tool_call])
-        plugin.pm.ahook.transform_display_text = AsyncMock(return_value=[])
+        plugin.pm.ahook.transform_display_text = AsyncMock(return_value=None)
 
         enqueued_tasks = []
         task_plugin = plugin.pm.get_plugin("task")
@@ -522,7 +522,7 @@ class TestHandleResponse:
             "function": {"name": "my_tool", "arguments": '{"x": "v"}'},
         }
         result = _make_turn_result(text="", tool_calls=[tool_call])
-        plugin.pm.ahook.transform_display_text = AsyncMock(return_value=[])
+        plugin.pm.ahook.transform_display_text = AsyncMock(return_value=None)
 
         await plugin._handle_response(
             result=result,
@@ -544,7 +544,7 @@ class TestHandleResponse:
             text="done",
             latency_ms=123.4,
         )
-        plugin.pm.ahook.transform_display_text = AsyncMock(return_value=[])
+        plugin.pm.ahook.transform_display_text = AsyncMock(return_value=None)
 
         await plugin._handle_response(
             result=result,

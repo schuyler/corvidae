@@ -53,14 +53,14 @@ class ThinkingPlugin(CorvidaePlugin):
         if not resolved["keep_thinking_in_history"]:
             strip_reasoning_content([message])
 
-    @hookimpl
-    async def transform_display_text(self, channel, text, result_message) -> str | None:
-        """Strip <think>...</think> blocks from response text.
+    @hookimpl(wrapper=True)
+    def transform_display_text(self, **kwargs):
+        """Wrap the transform_display_text chain to strip <think> tags.
 
-        Returns the stripped string if it differs from the input.
-        Returns None if no transformation was needed (no <think> tags present).
+        Receives the chain result (from inner hooks or seed) and strips
+        <think>...</think> blocks if present.
         """
-        stripped = strip_thinking(text)
-        if stripped != text:
-            return stripped
-        return None
+        result = yield
+        if result is not None:
+            return strip_thinking(result)
+        return result

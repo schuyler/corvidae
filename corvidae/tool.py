@@ -286,9 +286,6 @@ async def dispatch_tool_call(
     Returns:
         ToolCallResult with the content, error flag, and timing information.
     """
-    # Deferred to avoid circular import: hooks may import from tool.
-    from corvidae.hooks import resolve_hook_results, HookStrategy
-
     call_id: str = call["id"]
     fn_name: str = call["function"]["name"]
     raw_args: str = call["function"]["arguments"]
@@ -369,11 +366,8 @@ async def dispatch_tool_call(
 
     # Step 5: Fire process_tool_result hook (only when execute_tool_call was invoked)
     if pm is not None:
-        results = await pm.ahook.process_tool_result(
+        hook_result = await pm.ahook.process_tool_result(
             tool_name=fn_name, result=content, channel=channel,
-        )
-        hook_result = resolve_hook_results(
-            results, "process_tool_result", HookStrategy.VALUE_FIRST, pm=pm,
         )
         if hook_result is not None:
             content = hook_result
