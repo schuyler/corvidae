@@ -99,7 +99,7 @@ class CompactionPlugin(CorvidaePlugin):
                 threshold, retention, gap,
             )
 
-    @hookimpl
+    @hookimpl(trylast=True)
     async def compact_conversation(self, channel, conversation, max_tokens):
         """Compact the conversation if it exceeds 80% of max_tokens.
 

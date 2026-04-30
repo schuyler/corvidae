@@ -75,6 +75,9 @@ class Runtime:
         5.  Create plugin manager.
         6.  Create ChannelRegistry and register it with the plugin manager.
         7.  Load channel config from merged config.
+        7b. Block disabled plugins via pm.set_blocked for each name in
+            config["plugins"]["disabled"]. Must precede step 8 so blocked
+            plugins are never instantiated by the entry-point loader.
         8.  Load entry-point plugins (corvidae group).
         9.  Validate plugin dependencies.
         10. await pm.ahook.on_init(pm=pm, config=config).
@@ -114,6 +117,12 @@ class Runtime:
 
         # 7. Load channel config
         load_channel_config(config, self.registry)
+
+        # 7b. Block disabled plugins before loading entry points so they are
+        #     never instantiated. Must precede load_setuptools_entrypoints.
+        disabled_plugins = config.get("plugins", {}).get("disabled", [])
+        for name in disabled_plugins:
+            self.pm.set_blocked(name)
 
         # 8. Load entry-point plugins
         self.pm.load_setuptools_entrypoints("corvidae")

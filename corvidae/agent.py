@@ -274,10 +274,7 @@ class Agent(CorvidaePlugin):
             return await run_agent_turn(self._client, messages, tool_schemas, extra_body=llm_overrides)
         except Exception as exc:
             logger.exception("run_agent_turn failed for channel %s", channel.id)
-            results = await self.pm.ahook.on_llm_error(channel=channel, error=exc)
-            error_msg = resolve_hook_results(
-                results, "on_llm_error", HookStrategy.VALUE_FIRST, pm=self.pm,
-            )
+            error_msg = await self.pm.ahook.on_llm_error(channel=channel, error=exc)
             if error_msg is None:
                 error_msg = DEFAULT_LLM_ERROR_MESSAGE
             try:
@@ -453,10 +450,7 @@ class Agent(CorvidaePlugin):
             if base_dir is None:
                 base_dir = Path(".")
             conv.system_prompt = resolve_system_prompt(resolved_cfg["system_prompt"], base_dir)
-            results = await self.pm.ahook.load_conversation(channel=channel)
-            history = resolve_hook_results(
-                results, "load_conversation", HookStrategy.VALUE_FIRST, pm=self.pm
-            )
+            history = await self.pm.ahook.load_conversation(channel=channel)
             if history:
                 conv.messages = history
             channel.conversation = conv

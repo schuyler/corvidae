@@ -404,25 +404,38 @@ class AgentSpec:
             Resolved with REJECT_WINS.
         """
 
-    @hookspec
+    @hookspec(firstresult=True)
     async def on_llm_error(
         self, channel: Channel, error: Exception
     ) -> str | None:
         """Called when run_agent_turn raises an exception.
 
-        Broadcast hook. Return a string to replace the default error message,
-        or None to defer. If multiple plugins return non-None, the
-        alphabetically-first plugin's result is used and a warning is logged.
+        Sequential hook (firstresult=True). Return a string to replace the
+        default error message, or None to defer to the next handler. The first
+        non-None return value wins; subsequent handlers are not called.
         """
 
-    @hookspec
+    @hookspec(firstresult=True)
     async def compact_conversation(
         self, channel: "Channel", conversation: "ContextWindow", max_tokens: int
-    ) -> None:
-        """Optionally replace the default compaction strategy.
+    ) -> "bool | None":
+        """Compact the conversation when approaching the context limit.
 
-        Broadcast hook. All implementations are called for side effects.
-        Return value is not used by the caller.
+        Sequential hook (firstresult=True). Handlers are called in priority
+        order. The first handler that returns a non-None value wins and the
+        chain stops. Return True to signal that compaction was performed,
+        or None to defer to the next handler.
+
+        Ordering:
+        - tryfirst handlers run first (e.g., ContextCompactPlugin for
+          background block generation — returns None, does not stop chain).
+        - Default-priority handlers run next (third-party replacements).
+        - trylast handlers run last (CompactionPlugin as fallback).
+
+        Args:
+            channel: The Channel being compacted.
+            conversation: The ContextWindow to compact.
+            max_tokens: The channel's max_context_tokens limit.
         """
 
     @hookspec
@@ -447,12 +460,13 @@ class AgentSpec:
         polling RSS feeds, checking email, or running maintenance tasks.
         """
 
-    @hookspec
+    @hookspec(firstresult=True)
     async def load_conversation(self, channel: "Channel") -> "list[dict] | None":
         """Load conversation history for a channel.
 
-        VALUE_FIRST resolution. Return a list of tagged message dicts if this
-        plugin has stored history, or None to defer to another plugin.
+        Sequential hook (firstresult=True). Return a list of tagged message
+        dicts if this plugin has stored history, or None to defer to the next
+        handler. The first non-None return value wins.
 
         Args:
             channel: The Channel to load history for.

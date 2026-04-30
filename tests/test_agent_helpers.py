@@ -229,7 +229,7 @@ class TestRunTurn:
         """run_agent_turn raises -> on_llm_error hook is called with channel and error."""
         plugin, channel, db = plugin_and_channel
         plugin._client = MagicMock()
-        plugin.pm.ahook.on_llm_error = AsyncMock(return_value=[])
+        plugin.pm.ahook.on_llm_error = AsyncMock(return_value=None)
 
         exc = RuntimeError("bad model")
         with patch(
