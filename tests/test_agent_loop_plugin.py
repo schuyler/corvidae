@@ -387,7 +387,7 @@ class TestOnMessagePersistenceAndLoop:
 
     async def test_on_message_calls_run_agent_turn(self):
         """Verify run_agent_turn is called with the correct arguments."""
-        from corvidae.agent_loop import AgentTurnResult
+        from corvidae.turn import AgentTurnResult
 
         plugin, channel, db = await build_plugin_and_channel()
 
@@ -773,7 +773,7 @@ class TestOnMessageCompactionAndConfig:
         with the correct client and max_tokens, and that it runs before the LLM.
         """
         from corvidae.hooks import hookimpl
-        from corvidae.agent_loop import AgentTurnResult
+        from corvidae.turn import AgentTurnResult
 
         plugin, channel, db = await build_plugin_and_channel()
 
@@ -1486,7 +1486,7 @@ class TestCompactConversation:
         """A custom compact_conversation plugin that returns True is invoked
         and the agent turn still runs. The hook call completes normally."""
         from corvidae.hooks import hookimpl
-        from corvidae.agent_loop import AgentTurnResult
+        from corvidae.turn import AgentTurnResult
 
         plugin, channel, db = await build_plugin_and_channel()
 
@@ -1529,7 +1529,7 @@ class TestCompactConversation:
         """When no compact_conversation impl returns a non-None result,
         the agent loop continues normally without error."""
         from corvidae.hooks import hookimpl
-        from corvidae.agent_loop import AgentTurnResult
+        from corvidae.turn import AgentTurnResult
 
         plugin, channel, db = await build_plugin_and_channel()
 
@@ -1566,7 +1566,7 @@ class TestCompactConversation:
         The agent turn still runs after the compaction block fails."""
         import logging
         from corvidae.hooks import hookimpl
-        from corvidae.agent_loop import AgentTurnResult
+        from corvidae.turn import AgentTurnResult
 
         plugin, channel, db = await build_plugin_and_channel()
 
@@ -1613,7 +1613,7 @@ class TestCompactConversation:
         """compact_conversation is called with conversation and max_tokens
         matching the channel's resolved config."""
         from corvidae.hooks import hookimpl
-        from corvidae.agent_loop import AgentTurnResult
+        from corvidae.turn import AgentTurnResult
 
         plugin, channel, db = await build_plugin_and_channel()
 
@@ -1663,7 +1663,7 @@ class TestProcessToolResult:
         """When process_tool_result returns a string, that string replaces the
         original tool result in the conversation."""
         from corvidae.hooks import resolve_hook_results, HookStrategy, hookimpl
-        from corvidae.agent_loop import run_agent_loop
+        from corvidae.tools.subagent import run_agent_loop
 
         tool_fn = AsyncMock(return_value="original tool output")
         client = MagicMock()
@@ -1700,7 +1700,7 @@ class TestProcessToolResult:
 
     async def test_hook_returns_none_keeps_original_result(self):
         """When process_tool_result returns None, the original tool result is kept."""
-        from corvidae.agent_loop import run_agent_loop
+        from corvidae.tools.subagent import run_agent_loop
         from corvidae.hooks import hookimpl
 
         tool_fn = AsyncMock(return_value="original output")
@@ -1743,7 +1743,7 @@ class TestProcessToolResult:
         This tests the 'no impl, fallback to default' path which requires BOTH
         the pm parameter AND the hook integration logic to exist in
         run_agent_loop. A bare signature addition is not sufficient."""
-        from corvidae.agent_loop import run_agent_loop
+        from corvidae.tools.subagent import run_agent_loop
 
         tool_fn = AsyncMock(return_value="original result")
         client = MagicMock()
@@ -1774,7 +1774,7 @@ class TestProcessToolResult:
 
     async def test_hook_receives_correct_tool_name_and_result(self):
         """process_tool_result receives the correct tool_name and result args."""
-        from corvidae.agent_loop import run_agent_loop
+        from corvidae.tools.subagent import run_agent_loop
         from corvidae.hooks import hookimpl
 
         tool_fn = AsyncMock(return_value="raw output")
@@ -1836,7 +1836,7 @@ class TestBeforeAgentTurn:
         This fails until the hookspec exists and _process_queue_item calls it.
         """
         from corvidae.hooks import hookimpl
-        from corvidae.agent_loop import AgentTurnResult
+        from corvidae.turn import AgentTurnResult
 
         plugin, channel, db = await build_plugin_and_channel()
 

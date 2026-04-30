@@ -402,7 +402,7 @@ class TestExecuteToolCallMaxResultChars:
 class TestRunAgentLoopMaxResultCharsParam:
     def test_agent_loop_max_result_chars_param(self):
         """run_agent_loop accepts max_result_chars kwarg."""
-        from corvidae.agent_loop import run_agent_loop
+        from corvidae.tools.subagent import run_agent_loop
 
         sig = inspect.signature(run_agent_loop)
         assert "max_result_chars" in sig.parameters, (
@@ -633,19 +633,20 @@ class TestAgentConstants:
 
 class TestAgentLoopConstants:
     def test_agent_loop_constants(self):
-        """LOG_TRUNCATION_LENGTH and MAX_ROUNDS_REACHED_MESSAGE exist in agent_loop.py."""
-        import corvidae.agent_loop as agent_loop_mod
+        """LOG_TRUNCATION_LENGTH lives in turn; MAX_ROUNDS_REACHED_MESSAGE lives in tools.subagent."""
+        import corvidae.turn as turn_mod
+        import corvidae.tools.subagent as subagent_mod
 
-        assert hasattr(agent_loop_mod, "LOG_TRUNCATION_LENGTH"), (
-            "corvidae.agent_loop must define LOG_TRUNCATION_LENGTH"
+        assert hasattr(turn_mod, "LOG_TRUNCATION_LENGTH"), (
+            "corvidae.turn must define LOG_TRUNCATION_LENGTH"
         )
-        assert isinstance(agent_loop_mod.LOG_TRUNCATION_LENGTH, int)
-        assert agent_loop_mod.LOG_TRUNCATION_LENGTH == 200, (
-            f"LOG_TRUNCATION_LENGTH must be 200, got {agent_loop_mod.LOG_TRUNCATION_LENGTH!r}"
+        assert isinstance(turn_mod.LOG_TRUNCATION_LENGTH, int)
+        assert turn_mod.LOG_TRUNCATION_LENGTH == 200, (
+            f"LOG_TRUNCATION_LENGTH must be 200, got {turn_mod.LOG_TRUNCATION_LENGTH!r}"
         )
 
-        assert hasattr(agent_loop_mod, "MAX_ROUNDS_REACHED_MESSAGE"), (
-            "corvidae.agent_loop must define MAX_ROUNDS_REACHED_MESSAGE"
+        assert hasattr(subagent_mod, "MAX_ROUNDS_REACHED_MESSAGE"), (
+            "corvidae.tools.subagent must define MAX_ROUNDS_REACHED_MESSAGE"
         )
-        assert isinstance(agent_loop_mod.MAX_ROUNDS_REACHED_MESSAGE, str)
-        assert len(agent_loop_mod.MAX_ROUNDS_REACHED_MESSAGE) > 0
+        assert isinstance(subagent_mod.MAX_ROUNDS_REACHED_MESSAGE, str)
+        assert len(subagent_mod.MAX_ROUNDS_REACHED_MESSAGE) > 0

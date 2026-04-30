@@ -1,9 +1,7 @@
-"""Tests for corvidae.tools.subagent — SubagentPlugin.
+"""Tests for corvidae.tools.subagent — SubagentPlugin and run_agent_loop."""
 
-These are Red TDD tests. They will fail with ImportError until
-corvidae/tools/subagent.py is implemented.
-"""
-
+import json
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -14,7 +12,7 @@ from corvidae.task import Task, TaskQueue
 from corvidae.tool import Tool, ToolContext, ToolRegistry
 
 from corvidae.llm_plugin import LLMPlugin
-from corvidae.tools.subagent import SubagentPlugin  # ImportError until implemented
+from corvidae.tools.subagent import SubagentPlugin, run_agent_loop
 
 
 # ---------------------------------------------------------------------------
@@ -681,3 +679,704 @@ class TestMaxToolResultCharsConsolidation:
             "on_start must not independently read max_tool_result_chars from config; "
             "found config-sourced value 55_555 on SubagentPlugin._max_tool_result_chars"
         )
+
+
+# ===========================================================================
+# run_agent_loop tests (moved from tests/test_agent_loop.py)
+# ===========================================================================
+
+
+def _make_text_response(text: str) -> dict:
+    return {"choices": [{"message": {"content": text}}]}
+
+
+def _make_tool_call_response(calls: list[dict]) -> dict:
+    return {
+        "choices": [
+            {
+                "message": {
+                    "content": "",
+                    "tool_calls": calls,
+                }
+            }
+        ]
+    }
+
+
+def _make_tool_call(call_id: str, name: str, args: dict) -> dict:
+    return {
+        "id": call_id,
+        "function": {
+            "name": name,
+            "arguments": json.dumps(args),
+        },
+    }
+
+
+def _make_tool_call_malformed_args(call_id: str, name: str, raw_args: str) -> dict:
+    """Build a tool call dict with raw (potentially invalid) JSON arguments."""
+    return {
+        "id": call_id,
+        "function": {
+            "name": name,
+            "arguments": raw_args,
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Basic run_agent_loop behavior
+# ---------------------------------------------------------------------------
+
+
+async def test_simple_response_no_tools():
+    client = MagicMock()
+    client.chat = AsyncMock(return_value=_make_text_response("Hello, world!"))
+
+    messages = [{"role": "user", "content": "Hi"}]
+    result = await run_agent_loop(client, messages, tools={}, tool_schemas=[])
+
+    assert result == "Hello, world!"
+    assert messages[-1] == {"role": "assistant", "content": "Hello, world!"}
+
+
+async def test_single_tool_call():
+    tool_fn = AsyncMock(return_value="tool result")
+    client = MagicMock()
+    client.chat = AsyncMock(
+        side_effect=[
+            _make_tool_call_response(
+                [_make_tool_call("call_1", "my_tool", {"x": "value"})]
+            ),
+            _make_text_response("final answer"),
+        ]
+    )
+
+    messages = [{"role": "user", "content": "do thing"}]
+    result = await run_agent_loop(
+        client,
+        messages,
+        tools={"my_tool": tool_fn},
+        tool_schemas=[],
+    )
+
+    # Tool should be called with the correct args
+    tool_fn.assert_awaited_once_with(x="value")
+
+    assert result == "final answer"
+
+    # messages should contain: user, assistant w/ tool_call, tool result, assistant final
+    roles = [m["role"] for m in messages]
+    assert roles == ["user", "assistant", "tool", "assistant"]
+
+    # assistant message with tool call
+    assert messages[1].get("tool_calls") is not None
+
+    # tool result message
+    assert messages[2]["role"] == "tool"
+    assert messages[2]["content"] == "tool result"
+
+    # final assistant message
+    assert messages[3] == {"role": "assistant", "content": "final answer"}
+
+
+async def test_unknown_tool_returns_error():
+    client = MagicMock()
+    client.chat = AsyncMock(
+        side_effect=[
+            _make_tool_call_response(
+                [_make_tool_call("call_x", "nonexistent_tool", {})]
+            ),
+            _make_text_response("ok"),
+        ]
+    )
+
+    messages = [{"role": "user", "content": "go"}]
+    await run_agent_loop(
+        client,
+        messages,
+        tools={},
+        tool_schemas=[],
+    )
+
+    tool_result = next(m for m in messages if m["role"] == "tool")
+    assert "Error: unknown tool" in tool_result["content"]
+
+
+async def test_tool_exception_returns_error():
+    async def bad_tool(**kwargs):
+        raise ValueError("something went wrong")
+
+    client = MagicMock()
+    client.chat = AsyncMock(
+        side_effect=[
+            _make_tool_call_response(
+                [_make_tool_call("call_2", "bad_tool", {})]
+            ),
+            _make_text_response("recovered"),
+        ]
+    )
+
+    messages = [{"role": "user", "content": "break it"}]
+    await run_agent_loop(
+        client,
+        messages,
+        tools={"bad_tool": bad_tool},
+        tool_schemas=[],
+    )
+
+    tool_result = next(m for m in messages if m["role"] == "tool")
+    assert tool_result["content"].startswith("Error:")
+
+
+async def test_max_turns_exceeded():
+    client = MagicMock()
+    # Always returns a tool call, never terminates naturally
+    client.chat = AsyncMock(
+        return_value=_make_tool_call_response(
+            [_make_tool_call("call_loop", "noop", {})]
+        )
+    )
+
+    noop = AsyncMock(return_value="noop result")
+    messages = [{"role": "user", "content": "spin"}]
+    result = await run_agent_loop(
+        client,
+        messages,
+        tools={"noop": noop},
+        tool_schemas=[],
+        max_turns=3,
+    )
+
+    assert result == "(max tool-calling rounds reached)"
+
+
+async def test_multiple_tool_calls_in_one_turn():
+    tool_a = AsyncMock(return_value="result_a")
+    tool_b = AsyncMock(return_value="result_b")
+
+    client = MagicMock()
+    client.chat = AsyncMock(
+        side_effect=[
+            _make_tool_call_response(
+                [
+                    _make_tool_call("call_a", "tool_a", {"n": 1}),
+                    _make_tool_call("call_b", "tool_b", {"n": 2}),
+                ]
+            ),
+            _make_text_response("done"),
+        ]
+    )
+
+    messages = [{"role": "user", "content": "run both"}]
+    result = await run_agent_loop(
+        client,
+        messages,
+        tools={"tool_a": tool_a, "tool_b": tool_b},
+        tool_schemas=[],
+    )
+
+    tool_a.assert_awaited_once_with(n=1)
+    tool_b.assert_awaited_once_with(n=2)
+    assert result == "done"
+
+    # Both tool result messages should be present
+    tool_messages = [m for m in messages if m["role"] == "tool"]
+    assert len(tool_messages) == 2
+
+
+async def test_run_agent_loop_does_not_pass_extra_body():
+    """run_agent_loop no longer accepts extra_body — LLMClient handles it internally.
+    Verify chat() is called without extra_body kwarg."""
+    mock_client = MagicMock()
+    mock_client.chat = AsyncMock(return_value=_make_text_response("test response"))
+
+    messages = [{"role": "user", "content": "hello"}]
+    tools = {}
+    tool_schemas = []
+
+    result = await run_agent_loop(
+        client=mock_client,
+        messages=messages,
+        tools=tools,
+        tool_schemas=tool_schemas,
+        max_turns=1,
+    )
+
+    # run_agent_loop passes no extra_body to client.chat() — LLMClient handles it
+    mock_client.chat.assert_called_once()
+    call_args = mock_client.chat.call_args
+    assert "extra_body" not in call_args.kwargs
+
+
+# ---------------------------------------------------------------------------
+# Logging tests — INFO records with latency_ms
+# ---------------------------------------------------------------------------
+
+
+async def test_llm_response_logs_info_with_latency_ms(caplog):
+    """After a successful LLM call, an INFO record with message 'LLM response
+    received' and a numeric latency_ms attribute must be emitted by run_agent_turn."""
+    client = MagicMock()
+    client.chat = AsyncMock(return_value=_make_text_response("hello"))
+
+    messages = [{"role": "user", "content": "hi"}]
+    with caplog.at_level(logging.INFO, logger="corvidae.turn"):
+        await run_agent_loop(client, messages, tools={}, tool_schemas=[])
+
+    records = [r for r in caplog.records if r.name == "corvidae.turn"]
+    matching = [r for r in records if r.levelno == logging.INFO and r.getMessage() == "LLM response received"]
+    assert matching, "Expected INFO record with message 'LLM response received'"
+    assert hasattr(matching[0], "latency_ms"), "'LLM response received' log must have latency_ms attribute"
+    assert isinstance(matching[0].latency_ms, (int, float)), "latency_ms must be numeric"
+
+
+async def test_tool_call_result_logs_info_with_latency_ms(caplog):
+    """After a successful tool execution, an INFO record with message 'tool call
+    result' and a numeric latency_ms attribute must be emitted."""
+    tool_fn = AsyncMock(return_value="tool result")
+    client = MagicMock()
+    client.chat = AsyncMock(
+        side_effect=[
+            _make_tool_call_response([_make_tool_call("c1", "my_tool", {"x": "v"})]),
+            _make_text_response("done"),
+        ]
+    )
+
+    messages = [{"role": "user", "content": "go"}]
+    with caplog.at_level(logging.INFO, logger="corvidae.tool"):
+        await run_agent_loop(client, messages, tools={"my_tool": tool_fn}, tool_schemas=[])
+
+    records = [r for r in caplog.records if r.name == "corvidae.tool"]
+    matching = [r for r in records if r.levelno == logging.INFO and r.getMessage() == "tool call result"]
+    assert matching, "Expected INFO record with message 'tool call result'"
+    assert hasattr(matching[0], "latency_ms"), "'tool call result' log must have latency_ms attribute"
+    assert isinstance(matching[0].latency_ms, (int, float)), "latency_ms must be numeric"
+
+
+async def test_tool_call_dispatched_logs_info(caplog):
+    """After dispatching a tool call, an INFO record with message 'tool call
+    dispatched' must be emitted (latency_ms not required)."""
+    tool_fn = AsyncMock(return_value="result")
+    client = MagicMock()
+    client.chat = AsyncMock(
+        side_effect=[
+            _make_tool_call_response([_make_tool_call("c1", "my_tool", {})]),
+            _make_text_response("done"),
+        ]
+    )
+
+    messages = [{"role": "user", "content": "go"}]
+    with caplog.at_level(logging.INFO, logger="corvidae.tool"):
+        await run_agent_loop(client, messages, tools={"my_tool": tool_fn}, tool_schemas=[])
+
+    records = [r for r in caplog.records if r.name == "corvidae.tool"]
+    matching = [r for r in records if r.levelno == logging.INFO and r.getMessage() == "tool call dispatched"]
+    assert matching, "Expected INFO record with message 'tool call dispatched'"
+
+
+async def test_tool_call_result_not_logged_for_unknown_tool(caplog):
+    """When an unknown tool is called, 'tool call result' INFO must NOT be emitted."""
+    client = MagicMock()
+    client.chat = AsyncMock(
+        side_effect=[
+            _make_tool_call_response([_make_tool_call("c1", "ghost_tool", {})]),
+            _make_text_response("done"),
+        ]
+    )
+
+    messages = [{"role": "user", "content": "go"}]
+    with caplog.at_level(logging.INFO, logger="corvidae.tool"):
+        await run_agent_loop(client, messages, tools={}, tool_schemas=[])
+
+    records = [r for r in caplog.records if r.name == "corvidae.tool"]
+    result_records = [r for r in records if r.levelno == logging.INFO and r.getMessage() == "tool call result"]
+    assert not result_records, "'tool call result' INFO must NOT be emitted for unknown tool"
+
+
+async def test_tool_call_result_not_logged_on_exception(caplog):
+    """When a tool raises an exception, 'tool call result' INFO must NOT be emitted."""
+    async def bad_tool(**kwargs):
+        raise ValueError("boom")
+
+    client = MagicMock()
+    client.chat = AsyncMock(
+        side_effect=[
+            _make_tool_call_response([_make_tool_call("c1", "bad_tool", {})]),
+            _make_text_response("recovered"),
+        ]
+    )
+
+    messages = [{"role": "user", "content": "go"}]
+    with caplog.at_level(logging.INFO, logger="corvidae.tool"):
+        await run_agent_loop(client, messages, tools={"bad_tool": bad_tool}, tool_schemas=[])
+
+    records = [r for r in caplog.records if r.name == "corvidae.tool"]
+    result_records = [r for r in records if r.levelno == logging.INFO and r.getMessage() == "tool call result"]
+    assert not result_records, "'tool call result' INFO must NOT be emitted when tool raises"
+
+
+# ---------------------------------------------------------------------------
+# Logging tests — DEBUG records for content visibility
+# ---------------------------------------------------------------------------
+
+
+async def test_llm_response_content_debug_log(caplog):
+    """After a successful LLM call, a DEBUG record with message 'LLM response
+    content' must be emitted by run_agent_turn with has_reasoning_content and
+    reasoning_content_length attributes."""
+    client = MagicMock()
+    client.chat = AsyncMock(return_value=_make_text_response("hello"))
+
+    messages = [{"role": "user", "content": "hi"}]
+    with caplog.at_level(logging.DEBUG, logger="corvidae.turn"):
+        await run_agent_loop(client, messages, tools={}, tool_schemas=[])
+
+    records = [r for r in caplog.records if r.name == "corvidae.turn"]
+    matching = [
+        r for r in records
+        if r.levelno == logging.DEBUG and r.getMessage() == "LLM response content"
+    ]
+    assert matching, "Expected DEBUG record with message 'LLM response content'"
+    rec = matching[0]
+    assert hasattr(rec, "has_reasoning_content"), (
+        "'LLM response content' DEBUG log must have has_reasoning_content attribute"
+    )
+    assert isinstance(rec.has_reasoning_content, bool), (
+        "has_reasoning_content must be a bool"
+    )
+    assert hasattr(rec, "reasoning_content_length"), (
+        "'LLM response content' DEBUG log must have reasoning_content_length attribute"
+    )
+    assert hasattr(rec, "content"), "'LLM response content' DEBUG log must have content attribute"
+
+
+async def test_llm_response_content_debug_log_with_reasoning(caplog):
+    """When response has reasoning_content, DEBUG log must have
+    has_reasoning_content=True and reasoning_content_length > 0."""
+    reasoning_text = "<reasoning>think step by step</reasoning>"
+    response = {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "final answer",
+                    "reasoning_content": reasoning_text,
+                }
+            }
+        ]
+    }
+    client = MagicMock()
+    client.chat = AsyncMock(return_value=response)
+
+    messages = [{"role": "user", "content": "hi"}]
+    with caplog.at_level(logging.DEBUG, logger="corvidae.turn"):
+        await run_agent_loop(client, messages, tools={}, tool_schemas=[])
+
+    records = [r for r in caplog.records if r.name == "corvidae.turn"]
+    matching = [
+        r for r in records
+        if r.levelno == logging.DEBUG and r.getMessage() == "LLM response content"
+    ]
+    assert matching, "Expected DEBUG record with message 'LLM response content'"
+    rec = matching[0]
+    assert rec.has_reasoning_content is True, (
+        "has_reasoning_content must be True when reasoning_content is present"
+    )
+    assert isinstance(rec.reasoning_content_length, int), (
+        "reasoning_content_length must be an int when reasoning_content is present"
+    )
+    assert rec.reasoning_content_length > 0, (
+        "reasoning_content_length must be > 0 for non-empty reasoning_content"
+    )
+    assert hasattr(rec, "content"), "'LLM response content' DEBUG log must have content attribute"
+
+
+async def test_llm_response_content_truncated(caplog):
+    """Content longer than 200 chars must be truncated in the DEBUG log."""
+    long_content = "x" * 300
+    client = MagicMock()
+    client.chat = AsyncMock(return_value=_make_text_response(long_content))
+
+    messages = [{"role": "user", "content": "hi"}]
+    with caplog.at_level(logging.DEBUG, logger="corvidae.turn"):
+        await run_agent_loop(client, messages, tools={}, tool_schemas=[])
+
+    records = [r for r in caplog.records if r.name == "corvidae.turn"]
+    matching = [
+        r for r in records
+        if r.levelno == logging.DEBUG and r.getMessage() == "LLM response content"
+    ]
+    assert matching, "Expected DEBUG record with message 'LLM response content'"
+    rec = matching[0]
+    assert hasattr(rec, "content"), (
+        "'LLM response content' DEBUG log must have content attribute"
+    )
+    assert len(rec.content) <= 203, (
+        "Truncated content must be at most 203 chars (200 + '...')"
+    )
+    assert rec.content.endswith("..."), (
+        "Truncated content must end with '...'"
+    )
+
+
+async def test_tool_call_arguments_debug_log(caplog):
+    """After dispatching a tool call, a DEBUG record with message 'tool call
+    arguments' must be emitted with tool and arguments attributes."""
+    tool_fn = AsyncMock(return_value="result")
+    client = MagicMock()
+    client.chat = AsyncMock(
+        side_effect=[
+            _make_tool_call_response([_make_tool_call("c1", "my_tool", {"x": "v"})]),
+            _make_text_response("done"),
+        ]
+    )
+
+    messages = [{"role": "user", "content": "go"}]
+    with caplog.at_level(logging.DEBUG, logger="corvidae.tool"):
+        await run_agent_loop(client, messages, tools={"my_tool": tool_fn}, tool_schemas=[])
+
+    records = [r for r in caplog.records if r.name == "corvidae.tool"]
+    matching = [
+        r for r in records
+        if r.levelno == logging.DEBUG and r.getMessage() == "tool call arguments"
+    ]
+    assert matching, "Expected DEBUG record with message 'tool call arguments'"
+    rec = matching[0]
+    assert hasattr(rec, "tool"), (
+        "'tool call arguments' DEBUG log must have tool attribute"
+    )
+    assert rec.tool == "my_tool", "tool attribute must match the called tool name"
+    assert hasattr(rec, "arguments"), (
+        "'tool call arguments' DEBUG log must have arguments attribute"
+    )
+    assert isinstance(rec.arguments, str), "arguments must be a string (JSON)"
+
+
+async def test_tool_call_result_content_debug_log(caplog):
+    """After a successful tool execution, a DEBUG record with message 'tool call
+    result content' must be emitted with tool and content attributes."""
+    tool_fn = AsyncMock(return_value="tool result")
+    client = MagicMock()
+    client.chat = AsyncMock(
+        side_effect=[
+            _make_tool_call_response([_make_tool_call("c1", "my_tool", {"x": "v"})]),
+            _make_text_response("done"),
+        ]
+    )
+
+    messages = [{"role": "user", "content": "go"}]
+    with caplog.at_level(logging.DEBUG, logger="corvidae.tool"):
+        await run_agent_loop(client, messages, tools={"my_tool": tool_fn}, tool_schemas=[])
+
+    records = [r for r in caplog.records if r.name == "corvidae.tool"]
+    matching = [
+        r for r in records
+        if r.levelno == logging.DEBUG and r.getMessage() == "tool call result content"
+    ]
+    assert matching, "Expected DEBUG record with message 'tool call result content'"
+    rec = matching[0]
+    assert hasattr(rec, "tool"), (
+        "'tool call result content' DEBUG log must have tool attribute"
+    )
+    assert rec.tool == "my_tool", "tool attribute must match the called tool name"
+    assert hasattr(rec, "content"), (
+        "'tool call result content' DEBUG log must have content attribute"
+    )
+
+
+async def test_tool_call_result_content_not_logged_on_exception(caplog):
+    """When a tool raises an exception, 'tool call result content' DEBUG must NOT
+    be emitted."""
+    async def bad_tool(**kwargs):
+        raise ValueError("boom")
+
+    client = MagicMock()
+    client.chat = AsyncMock(
+        side_effect=[
+            _make_tool_call_response([_make_tool_call("c1", "bad_tool", {})]),
+            _make_text_response("recovered"),
+        ]
+    )
+
+    messages = [{"role": "user", "content": "go"}]
+    with caplog.at_level(logging.DEBUG, logger="corvidae.tool"):
+        await run_agent_loop(client, messages, tools={"bad_tool": bad_tool}, tool_schemas=[])
+
+    records = [r for r in caplog.records if r.name == "corvidae.tool"]
+    result_content_records = [
+        r for r in records
+        if r.levelno == logging.DEBUG and r.getMessage() == "tool call result content"
+    ]
+    assert not result_content_records, (
+        "'tool call result content' DEBUG must NOT be emitted when tool raises"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tool exception error message includes fn_name
+# ---------------------------------------------------------------------------
+
+
+async def test_tool_exception_error_message_includes_tool_name():
+    """When a tool raises an exception in run_agent_loop, the tool result message
+    must include the tool name."""
+    async def bad_tool(**kwargs):
+        raise RuntimeError("deliberate failure")
+
+    client = MagicMock()
+    client.chat = AsyncMock(
+        side_effect=[
+            _make_tool_call_response(
+                [_make_tool_call("call_err", "bad_tool", {})]
+            ),
+            _make_text_response("recovered"),
+        ]
+    )
+
+    messages = [{"role": "user", "content": "trigger error"}]
+    await run_agent_loop(
+        client,
+        messages,
+        tools={"bad_tool": bad_tool},
+        tool_schemas=[],
+    )
+
+    tool_result = next(m for m in messages if m["role"] == "tool")
+    assert "bad_tool" in tool_result["content"], (
+        f"Error message must include the tool name 'bad_tool', got: {tool_result['content']!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Malformed JSON tool call arguments
+# ---------------------------------------------------------------------------
+
+
+async def test_malformed_json_tool_args_returns_error():
+    """When the LLM returns a tool call with malformed JSON arguments:
+    - The tool function must NOT be called.
+    - An error tool result message must be appended with content containing
+      'Error: malformed arguments'.
+    - The loop must continue and return the final text response.
+    """
+    tool_fn = AsyncMock(return_value="should not be called")
+    client = MagicMock()
+    client.chat = AsyncMock(
+        side_effect=[
+            _make_tool_call_response(
+                [_make_tool_call_malformed_args("call_bad", "my_tool", "{not valid json")]
+            ),
+            _make_text_response("recovered after error"),
+        ]
+    )
+
+    messages = [{"role": "user", "content": "do thing"}]
+    result = await run_agent_loop(
+        client,
+        messages,
+        tools={"my_tool": tool_fn},
+        tool_schemas=[],
+    )
+
+    # Tool must not be called when arguments are malformed
+    tool_fn.assert_not_awaited()
+
+    # An error tool result must be appended
+    tool_messages = [m for m in messages if m["role"] == "tool"]
+    assert len(tool_messages) == 1, f"Expected 1 tool result message, got {len(tool_messages)}"
+    assert "Error: malformed arguments" in tool_messages[0]["content"], (
+        f"Tool result must contain 'Error: malformed arguments', got: {tool_messages[0]['content']!r}"
+    )
+
+    # Loop must recover and return the final text response
+    assert result == "recovered after error", (
+        f"Expected 'recovered after error', got: {result!r}"
+    )
+
+
+async def test_malformed_json_does_not_skip_subsequent_calls():
+    """When two tool calls are in one turn and the first has malformed JSON:
+    - The first tool must NOT be called.
+    - The second tool MUST be called.
+    - Both tool result messages must be appended.
+    """
+    tool_a = AsyncMock(return_value="should not be called")
+    tool_b = AsyncMock(return_value="result_b")
+    client = MagicMock()
+    client.chat = AsyncMock(
+        side_effect=[
+            _make_tool_call_response(
+                [
+                    _make_tool_call_malformed_args("call_bad", "tool_a", "{not valid json"),
+                    _make_tool_call("call_good", "tool_b", {"n": 2}),
+                ]
+            ),
+            _make_text_response("done"),
+        ]
+    )
+
+    messages = [{"role": "user", "content": "run both"}]
+    result = await run_agent_loop(
+        client,
+        messages,
+        tools={"tool_a": tool_a, "tool_b": tool_b},
+        tool_schemas=[],
+    )
+
+    # First tool must not be called
+    tool_a.assert_not_awaited()
+
+    # Second tool must be called
+    tool_b.assert_awaited_once_with(n=2)
+
+    # Both tool result messages must be present
+    tool_messages = [m for m in messages if m["role"] == "tool"]
+    assert len(tool_messages) == 2, (
+        f"Expected 2 tool result messages, got {len(tool_messages)}"
+    )
+
+    # First result is the error for the malformed call
+    assert "Error: malformed arguments" in tool_messages[0]["content"], (
+        f"First tool result must contain 'Error: malformed arguments', got: {tool_messages[0]['content']!r}"
+    )
+
+    # Second result is the successful tool output
+    assert tool_messages[1]["content"] == "result_b", (
+        f"Second tool result must be 'result_b', got: {tool_messages[1]['content']!r}"
+    )
+
+    assert result == "done"
+
+
+async def test_malformed_json_logs_warning(caplog):
+    """When malformed JSON tool call arguments are encountered, a WARNING log
+    record with message 'malformed tool call arguments' must be emitted."""
+    tool_fn = AsyncMock(return_value="irrelevant")
+    client = MagicMock()
+    client.chat = AsyncMock(
+        side_effect=[
+            _make_tool_call_response(
+                [_make_tool_call_malformed_args("call_bad", "my_tool", "{not valid json")]
+            ),
+            _make_text_response("done"),
+        ]
+    )
+
+    messages = [{"role": "user", "content": "go"}]
+    with caplog.at_level(logging.WARNING, logger="corvidae.tool"):
+        await run_agent_loop(
+            client,
+            messages,
+            tools={"my_tool": tool_fn},
+            tool_schemas=[],
+        )
+
+    records = [r for r in caplog.records if r.name == "corvidae.tool"]
+    warning_records = [
+        r for r in records
+        if r.levelno == logging.WARNING and r.getMessage() == "malformed tool call arguments"
+    ]
+    assert warning_records, (
+        "Expected WARNING record with message 'malformed tool call arguments'"
+    )

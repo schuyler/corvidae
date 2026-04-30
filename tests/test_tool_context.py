@@ -3,7 +3,7 @@
 import json
 from unittest.mock import AsyncMock, MagicMock
 
-from corvidae.agent_loop import run_agent_loop
+from corvidae.tools.subagent import run_agent_loop
 from corvidae.tool import tool_to_schema
 from corvidae.tool import ToolContext
 
