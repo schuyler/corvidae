@@ -95,6 +95,12 @@ Key sections:
 | RuntimeSettingsPlugin | Lets the LLM adjust its own per-channel parameters mid-session |
 | IdleMonitorPlugin | Fires `on_idle` when all queues are quiescent |
 
+## CLI subcommands
+
+`corvidae scaffold <plugin-name> [-o/--output-dir <dir>]` generates a new plugin project directory containing `pyproject.toml`, a plugin module, and a test file. The plugin name is lowercased and non-alphanumeric runs are replaced with underscores to form the package name.
+
+Additional subcommands can be added by plugins via the `corvidae.commands` entry point group. See [docs/plugin-guide.md](docs/plugin-guide.md#registering-cli-subcommands) for details.
+
 ## Plugin system
 
 External plugins register via setuptools entry points under the `corvidae` group. See [docs/plugin-guide.md](docs/plugin-guide.md) for the hook API and a worked example.
