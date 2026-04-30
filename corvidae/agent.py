@@ -304,11 +304,8 @@ class Agent(CorvidaePlugin):
         When fallback is None, an empty resolved text is returned as-is.
         """
         try:
-            results = await self.pm.ahook.transform_display_text(
+            resolved = await self.pm.ahook.transform_display_text(
                 channel=channel, text=result.text, result_message=result.message,
-            )
-            transformed = resolve_hook_results(
-                results, "transform_display_text", HookStrategy.VALUE_FIRST, pm=self.pm,
             )
         except Exception:
             logger.warning(
@@ -316,8 +313,9 @@ class Agent(CorvidaePlugin):
                 exc_info=True,
                 extra={"channel": channel.id},
             )
-            transformed = None
-        resolved = transformed if transformed is not None else result.text
+            resolved = result.text
+        if resolved is None:
+            resolved = result.text
         if fallback is not None:
             return resolved or fallback
         return resolved

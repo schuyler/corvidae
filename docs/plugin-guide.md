@@ -169,22 +169,22 @@ only; they do not update the persisted record.
 
 ### Hook result resolution
 
-These hooks return a value. Hooks marked `firstresult=True` use pluggy's sequential dispatch — the chain stops at the first non-None return. Hooks marked `VALUE_FIRST` or `REJECT_WINS` use broadcast dispatch; the caller passes the result list to `resolve_hook_results`.
+These hooks return a value. Hooks marked `firstresult=True` (sequential) stop at the first non-None return. Wrapper chain hooks use `firstresult=True` with an identity seed; implementations use `@hookimpl(wrapper=True)` to compose transforms. Broadcast hooks use `resolve_hook_results` for result resolution.
 
 | Hook | Strategy | Returns | Behavior |
 |------|----------|---------|----------|
-| `should_process_message(channel, sender, text)` | `REJECT_WINS` | `bool \| None` | Any `False` vetoes the message; any `True` (with no `False`) accepts; `None` if all defer |
+| `should_process_message(channel, sender, text)` | `REJECT_WINS` (broadcast) | `bool \| None` | Any `False` vetoes the message; any `True` (with no `False`) accepts; `None` if all defer |
 | `on_llm_error(channel, error)` | `firstresult=True` | `str \| None` | First non-None string wins; chain stops. If all return None, default error message is used. |
 | `compact_conversation(channel, conversation, max_tokens)` | `firstresult=True` | `bool \| None` | First non-None return stops the chain. `ContextCompactPlugin` uses `tryfirst` (returns None). `CompactionPlugin` uses `trylast` (returns True). Third-party plugins run at default priority. |
-| `process_tool_result(tool_name, result, channel)` | `VALUE_FIRST` | `str \| None` | Non-None string replaces the tool result in the conversation; multiple non-None → alphabetically-first plugin wins with a warning |
-| `transform_display_text(channel, text, result_message)` | `VALUE_FIRST` | `str \| None` | Non-None string replaces the response text before it is sent to the channel; multiple non-None → alphabetically-first plugin wins with a warning |
+| `process_tool_result(tool_name, result, channel)` | `firstresult=True` wrapper chain | `str \| None` | Wrappers compose transforms in LIFO order. The seed returns the input unchanged. Non-wrapper hookimpls short-circuit the seed via firstresult. |
+| `transform_display_text(channel, text, result_message)` | `firstresult=True` wrapper chain | `str \| None` | Wrappers compose transforms in LIFO order. The seed returns the input text unchanged. Non-wrapper hookimpls short-circuit the seed via firstresult. |
 | `load_conversation(channel)` | `firstresult=True` | `list[dict] \| None` | First non-None result wins. `PersistencePlugin` uses `trylast` as fallback. Called once when a channel's conversation is first initialized. |
 
 `compact_conversation` — sequential hook (`firstresult=True`). The first handler returning a non-None value stops the chain. `ContextCompactPlugin` runs first (`tryfirst=True`) to generate background blocks and returns None (does not stop the chain). `CompactionPlugin` runs last (`trylast=True`) as the default strategy and returns True. A third-party plugin at default priority runs between them — if it returns non-None, `CompactionPlugin` is never called.
 
 `process_tool_result` fires for all tool calls — it is invoked from `dispatch_tool_call` in `corvidae/tool.py`, which is used by both the main agent loop and background subagent loops. It does not fire for pre-dispatch errors (JSON parse failure or unknown tool name).
 
-`transform_display_text` — `result_message` is the raw assistant message dict from the LLM response. It may contain `reasoning_content` if the model produces thinking tokens. `text` is the string content extracted from that message. Return `None` to leave `text` unchanged.
+`transform_display_text` — `result_message` is the raw assistant message dict from the LLM response. It may contain `reasoning_content` if the model produces thinking tokens. `text` is the string content extracted from that message. Wrapper implementations receive the chain result (the output of inner wrappers or the seed) via `yield`. Non-wrapper implementations that return `None` defer to the seed, which returns `text` unchanged.
 
 Example hook returning a value:
 
@@ -419,7 +419,9 @@ For `firstresult=True` hooks (`compact_conversation`, `load_conversation`, `on_l
 - `load_conversation` — not wrapped; an exception propagates to `_process_queue_item`, which will fail the queue item.
 - `on_llm_error` — called inside the existing try/except in `_run_turn`; an exception from the hook itself is not separately caught (it propagates up from `_run_turn`).
 
-For broadcast hooks using `resolve_hook_results` (`should_process_message`, `transform_display_text`, `process_tool_result`), exceptions propagate to the call site. `transform_display_text` is wrapped in try/except in `_resolve_display_text`.
+For `should_process_message` (broadcast with `resolve_hook_results`), exceptions propagate to the call site.
+
+For `transform_display_text` and `process_tool_result` (wrapper chain hooks), pluggy propagates exceptions from wrapper implementations to the call site. `transform_display_text` is wrapped in try/except in `_resolve_display_text`.
 
 ## Async considerations
 
@@ -431,13 +433,26 @@ For hooks with `firstresult=True` (`compact_conversation`, `load_conversation`, 
 result = await pm.ahook.load_conversation(channel=channel)
 ```
 
-For hooks using broadcast dispatch with result resolution (`should_process_message`, `transform_display_text`, `process_tool_result`), call `pm.ahook.<hook>(...)` and pass the result list to `resolve_hook_results`:
+For `transform_display_text` and `process_tool_result`, use `@hookimpl(wrapper=True)` to participate in the wrapper chain. The seed plugin returns the input value unchanged as the innermost result; each wrapper receives that result, optionally transforms it, and returns the modified value:
+
+```python
+from corvidae.hooks import hookimpl
+
+@hookimpl(wrapper=True)
+def transform_display_text(self, **kwargs):
+    result = yield
+    if result is not None:
+        return my_transform(result)
+    return result
+```
+
+For the `should_process_message` broadcast hook, call `pm.ahook.<hook>(...)` and pass the result list to `resolve_hook_results`:
 
 ```python
 from corvidae.hooks import resolve_hook_results, HookStrategy
 
-results = await pm.ahook.some_hook(channel=channel, ...)
-result = resolve_hook_results(results, "some_hook", HookStrategy.VALUE_FIRST, pm=pm)
+results = await pm.ahook.should_process_message(channel=channel, ...)
+result = resolve_hook_results(results, "should_process_message", HookStrategy.REJECT_WINS)
 ```
 
 `@hookimpl(tryfirst=True)` and `@hookimpl(trylast=True)` markers are respected by apluggy's dispatch and affect execution order. For `firstresult=True` hooks, `tryfirst` handlers run before default-priority handlers, which run before `trylast` handlers. The chain stops at the first non-None return.
@@ -555,9 +570,10 @@ Implements two hooks:
   resolved channel config. If `False`, calls `strip_reasoning_content`
   on the in-memory message dict. The DB copy is already written; this
   only affects subsequent prompt builds.
-- `transform_display_text` — calls `strip_thinking` on the response
-  text. Returns the stripped string if it differs from the input, or
-  `None` if no `<think>` tags were present.
+- `transform_display_text` (`@hookimpl(wrapper=True)`) — receives the
+  chain result and calls `strip_thinking` on it unconditionally. Returns
+  the stripped string. Operates as a sync wrapper; does not take
+  `channel`, `text`, or `result_message` parameters directly.
 
 **Without this plugin:** `<think>` blocks pass through to the channel
 verbatim, and `reasoning_content` remains in in-memory history

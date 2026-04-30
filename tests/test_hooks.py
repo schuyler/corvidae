@@ -235,159 +235,6 @@ def test_resolve_hook_results_reject_wins_empty_list():
     assert result is None
 
 
-def test_resolve_hook_results_accept_wins_true_when_any_true():
-    """ACCEPT_WINS: True when any result is True."""
-    result = resolve_hook_results(
-        [None, True, None], "ensure_conversation", HookStrategy.ACCEPT_WINS
-    )
-    assert result is True
-
-
-def test_resolve_hook_results_accept_wins_none_when_no_true():
-    """ACCEPT_WINS: None when no True is present."""
-    result = resolve_hook_results(
-        [None, None], "ensure_conversation", HookStrategy.ACCEPT_WINS
-    )
-    assert result is None
-
-
-def test_resolve_hook_results_accept_wins_ignores_false():
-    """ACCEPT_WINS: False values are ignored; returns None if no True."""
-    result = resolve_hook_results(
-        [None, False, None], "ensure_conversation", HookStrategy.ACCEPT_WINS
-    )
-    assert result is None
-
-
-def test_resolve_hook_results_value_first_empty_list():
-    """VALUE_FIRST: empty list returns None."""
-    result = resolve_hook_results(
-        [], "transform_display_text", HookStrategy.VALUE_FIRST
-    )
-    assert result is None
-
-
-def test_resolve_hook_results_value_first_all_none():
-    """VALUE_FIRST: list of all None values returns None."""
-    result = resolve_hook_results(
-        [None, None], "transform_display_text", HookStrategy.VALUE_FIRST
-    )
-    assert result is None
-
-
-def test_resolve_hook_results_value_first_single_non_none():
-    """VALUE_FIRST: single non-None result is returned directly."""
-    result = resolve_hook_results(
-        [None, "hello", None], "transform_display_text", HookStrategy.VALUE_FIRST
-    )
-    assert result == "hello"
-
-
-async def test_resolve_hook_results_value_first_warns_and_picks_alphabetically_first(
-    caplog,
-):
-    """VALUE_FIRST: warns and picks alphabetically-first plugin name on conflict."""
-    import logging
-
-    class AlphaPlugin:
-        @hookimpl
-        async def transform_display_text(self, channel, text, result_message):
-            return "alpha result"
-
-    class ZebraPlugin:
-        @hookimpl
-        async def transform_display_text(self, channel, text, result_message):
-            return "zebra result"
-
-    pm = create_plugin_manager()
-    pm.register(AlphaPlugin(), name="alpha")
-    pm.register(ZebraPlugin(), name="zebra")
-
-    results = await pm.ahook.transform_display_text(
-        channel=None, text="hi", result_message={}
-    )
-
-    with caplog.at_level(logging.WARNING, logger="corvidae.hooks"):
-        result = resolve_hook_results(
-            results, "transform_display_text", HookStrategy.VALUE_FIRST, pm=pm
-        )
-
-    assert result == "alpha result"
-    warning_records = [
-        r for r in caplog.records
-        if r.levelno == logging.WARNING and "transform_display_text" in r.getMessage()
-    ]
-    assert warning_records, "Expected a WARNING log naming the conflicting plugins"
-
-
-def test_resolve_hook_results_value_first_no_pm_falls_back_to_first(caplog):
-    """VALUE_FIRST: pm=None with multiple non-None results returns first, logs warning."""
-    import logging
-
-    with caplog.at_level(logging.WARNING, logger="corvidae.hooks"):
-        result = resolve_hook_results(
-            ["first_result", "second_result"],
-            "transform_display_text",
-            HookStrategy.VALUE_FIRST,
-            pm=None,
-        )
-
-    assert result == "first_result"
-    warning_records = [
-        r for r in caplog.records
-        if r.levelno == logging.WARNING
-    ]
-    assert warning_records, "Expected a WARNING log when pm is None and multiple results exist"
-
-
-async def test_resolve_hook_results_value_first_result_plugin_correlation_correct(
-    caplog,
-):
-    """VALUE_FIRST: result-to-plugin correlation is correct despite apluggy's reversed
-    execution order. Register two plugins returning distinct values; verify that
-    resolve_hook_results attributes each result to the correct plugin name.
-
-    apluggy (like pluggy) executes hooks in reversed registration order, so the
-    results list is in reversed order relative to get_hookimpls(). This test
-    guards against a zip(impls, results) ordering mismatch.
-    """
-    import logging
-
-    # "alpha" registered first, "zebra" registered second.
-    # apluggy executes zebra first, then alpha (reversed order).
-    # results list: [zebra_result, alpha_result]
-    # get_hookimpls() returns [alpha_impl, zebra_impl] (registration order).
-    # reversed(get_hookimpls()) == [zebra_impl, alpha_impl], matching results order.
-    # Alphabetically: "alpha" < "zebra", so alpha's result wins.
-
-    class AlphaPlugin:
-        @hookimpl
-        async def transform_display_text(self, channel, text, result_message):
-            return "from alpha"
-
-    class ZebraPlugin:
-        @hookimpl
-        async def transform_display_text(self, channel, text, result_message):
-            return "from zebra"
-
-    pm = create_plugin_manager()
-    pm.register(AlphaPlugin(), name="alpha")
-    pm.register(ZebraPlugin(), name="zebra")
-
-    results = await pm.ahook.transform_display_text(
-        channel=None, text="hi", result_message={}
-    )
-
-    with caplog.at_level(logging.WARNING, logger="corvidae.hooks"):
-        result = resolve_hook_results(
-            results, "transform_display_text", HookStrategy.VALUE_FIRST, pm=pm
-        )
-
-    # Alphabetically "alpha" < "zebra", so alpha's result must be selected.
-    assert result == "from alpha", (
-        f"Expected 'from alpha' (alphabetically first plugin), got {result!r}. "
-        "This may indicate a zip(impls, results) ordering mismatch."
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -466,5 +313,155 @@ def test_validate_dependencies_does_not_raise_on_valid_dag():
 
     # Should not raise.
     validate_dependencies(pm)
+
+
+# ---------------------------------------------------------------------------
+# Wrapper chain integration tests (Phase 4 red phase)
+# ---------------------------------------------------------------------------
+
+
+class TestWrapperChainIntegration:
+    """Integration tests for wrapper chain semantics on transform_display_text
+    and process_tool_result hooks.
+
+    These tests encode the NEW behavior where:
+    - Both hookspecs are firstresult=True
+    - A _SeedHooksPlugin (trylast=True) is auto-registered by create_plugin_manager()
+      and returns the input unchanged
+    - Wrapper hookimpls wrap the chain result with @hookimpl(wrapper=True)
+
+    All tests FAIL until Green phase is complete.
+    """
+
+    # ------------------------------------------------------------------
+    # transform_display_text
+    # ------------------------------------------------------------------
+
+    async def test_transform_display_text_seed_only_returns_input(self):
+        """Seed-only (no wrappers): result equals the input text unchanged."""
+        pm = create_plugin_manager()
+        # No additional plugins registered — only the seed.
+
+        result = await pm.ahook.transform_display_text(
+            channel=None, text="hello world", result_message={}
+        )
+
+        # firstresult=True returns a single value, not a list.
+        assert result == "hello world"
+
+    async def test_transform_display_text_single_wrapper_transforms_result(self):
+        """A single wrapper plugin transforms the seed's result."""
+        class UpperWrapper:
+            @hookimpl(wrapper=True)
+            def transform_display_text(self, **kwargs):
+                result = yield
+                if result is not None:
+                    return result.upper()
+                return result
+
+        pm = create_plugin_manager()
+        pm.register(UpperWrapper(), name="upper")
+
+        result = await pm.ahook.transform_display_text(
+            channel=None, text="hello", result_message={}
+        )
+
+        assert result == "HELLO"
+
+    async def test_transform_display_text_two_wrappers_stack(self):
+        """Two wrappers compose: both transforms apply in order."""
+        class ExclaimWrapper:
+            @hookimpl(wrapper=True)
+            def transform_display_text(self, **kwargs):
+                result = yield
+                if result is not None:
+                    return result + "!"
+                return result
+
+        class UpperWrapper:
+            @hookimpl(wrapper=True)
+            def transform_display_text(self, **kwargs):
+                result = yield
+                if result is not None:
+                    return result.upper()
+                return result
+
+        pm = create_plugin_manager()
+        pm.register(ExclaimWrapper(), name="exclaim")
+        pm.register(UpperWrapper(), name="upper")
+
+        result = await pm.ahook.transform_display_text(
+            channel=None, text="hello", result_message={}
+        )
+
+        # Pluggy LIFO: UpperWrapper (registered last) is outermost.
+        # Execution: seed returns "hello" → ExclaimWrapper returns "hello!" →
+        # UpperWrapper returns "HELLO!"
+        assert result == "HELLO!"
+
+    async def test_transform_display_text_non_wrapper_coexists_with_wrapper(self):
+        """A non-wrapper hookimpl coexists with a wrapper.
+
+        The non-wrapper (regular hookimpl) returns a non-None value, short-circuiting
+        the seed (firstresult). The wrapper above it still transforms that result.
+        """
+        class NonWrapperPlugin:
+            @hookimpl
+            async def transform_display_text(self, channel, text, result_message):
+                return "from non-wrapper"
+
+        class ExclaimWrapper:
+            @hookimpl(wrapper=True)
+            def transform_display_text(self, **kwargs):
+                result = yield
+                if result is not None:
+                    return result + "!"
+                return result
+
+        pm = create_plugin_manager()
+        pm.register(NonWrapperPlugin(), name="nonwrapper")
+        pm.register(ExclaimWrapper(), name="exclaim")
+
+        result = await pm.ahook.transform_display_text(
+            channel=None, text="original", result_message={}
+        )
+
+        # The non-wrapper's result is the inner value; the wrapper transforms it.
+        assert result == "from non-wrapper!"
+
+    # ------------------------------------------------------------------
+    # process_tool_result
+    # ------------------------------------------------------------------
+
+    async def test_process_tool_result_seed_only_returns_input(self):
+        """Seed-only (no wrappers): result equals the input result unchanged."""
+        pm = create_plugin_manager()
+        # No additional plugins registered — only the seed.
+
+        result = await pm.ahook.process_tool_result(
+            tool_name="my_tool", result="tool output", channel=None
+        )
+
+        # firstresult=True returns a single value, not a list.
+        assert result == "tool output"
+
+    async def test_process_tool_result_wrapper_transforms_result(self):
+        """A wrapper on process_tool_result transforms the seed's result."""
+        class TagWrapper:
+            @hookimpl(wrapper=True)
+            def process_tool_result(self, **kwargs):
+                result = yield
+                if result is not None:
+                    return f"[processed] {result}"
+                return result
+
+        pm = create_plugin_manager()
+        pm.register(TagWrapper(), name="tagger")
+
+        result = await pm.ahook.process_tool_result(
+            tool_name="my_tool", result="raw output", channel=None
+        )
+
+        assert result == "[processed] raw output"
 
 

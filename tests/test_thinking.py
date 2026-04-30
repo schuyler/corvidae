@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, AsyncMock
 import pytest
 
 from corvidae.thinking import ThinkingPlugin, strip_reasoning_content, strip_thinking
-from corvidae.hooks import create_plugin_manager, resolve_hook_results, HookStrategy
+from corvidae.hooks import create_plugin_manager
 
 
 # ---------------------------------------------------------------------------
@@ -147,52 +147,50 @@ class TestAfterPersistAssistant:
 
 class TestTransformDisplayText:
     async def test_transform_display_text_strips_thinking_tags(self):
-        """Text containing <think>...</think> blocks is stripped; the
-        transformed string (without the tags) is returned."""
-        pm = _make_pm()
+        """Text containing <think>...</think> blocks is stripped by the
+        ThinkingPlugin wrapper. The wrapper receives the seed's return value
+        (the input text) and strips <think> tags from it."""
+        pm = create_plugin_manager()
         plugin = ThinkingPlugin(pm)
+        pm.register(plugin, name="thinking")
         channel = _make_channel()
-        result_message = MagicMock()
 
         text = "<think>internal reasoning</think>clean answer"
-        result = await plugin.transform_display_text(
-            channel=channel, text=text, result_message=result_message
+        result = await pm.ahook.transform_display_text(
+            channel=channel, text=text, result_message={},
         )
 
         assert result == "clean answer"
-        assert result is not None
 
     async def test_transform_display_text_no_tags(self):
-        """Text without <think> blocks returns None (signal: no transformation
-        needed; caller keeps original text)."""
-        pm = _make_pm()
+        """Text without <think> blocks passes through the ThinkingPlugin
+        wrapper unchanged — the wrapper returns the seed value as-is."""
+        pm = create_plugin_manager()
         plugin = ThinkingPlugin(pm)
+        pm.register(plugin, name="thinking")
         channel = _make_channel()
-        result_message = MagicMock()
 
         text = "plain answer with no think tags"
-        result = await plugin.transform_display_text(
-            channel=channel, text=text, result_message=result_message
+        result = await pm.ahook.transform_display_text(
+            channel=channel, text=text, result_message={},
         )
 
-        assert result is None
+        assert result == text
 
     async def test_transform_display_text_empty_after_strip(self):
         """Text that is entirely a <think> block yields an empty string after
-        stripping. The plugin must return "" (not None) so the caller can
-        distinguish 'intentional empty result' from 'no transformation'."""
-        pm = _make_pm()
+        stripping. The wrapper returns "" (not the original text)."""
+        pm = create_plugin_manager()
         plugin = ThinkingPlugin(pm)
+        pm.register(plugin, name="thinking")
         channel = _make_channel()
-        result_message = MagicMock()
 
         text = "<think>only thinking, no answer</think>"
-        result = await plugin.transform_display_text(
-            channel=channel, text=text, result_message=result_message
+        result = await pm.ahook.transform_display_text(
+            channel=channel, text=text, result_message={},
         )
 
         assert result == ""
-        assert result is not None
 
 
 class TestGracefulDegradationWithoutThinkingPlugin:
@@ -200,8 +198,8 @@ class TestGracefulDegradationWithoutThinkingPlugin:
         """When no ThinkingPlugin is registered, the system does not crash.
 
         after_persist_assistant is a broadcast hook — zero implementations is a no-op.
-        transform_display_text via broadcast dispatch + resolve_hook_results returns None
-        when no impl exists.
+        transform_display_text with firstresult=True and a seed plugin returns the
+        input text unchanged when no other hookimpl is registered.
         """
         pm = create_plugin_manager()
         # ThinkingPlugin intentionally NOT registered.
@@ -211,13 +209,11 @@ class TestGracefulDegradationWithoutThinkingPlugin:
         # Broadcast hook with no implementations — must not raise.
         await pm.ahook.after_persist_assistant(channel=mock_channel, message={})
 
-        # Broadcast dispatch with no implementations — resolve_hook_results must return None.
-        results = await pm.ahook.transform_display_text(
+        # firstresult=True with seed plugin — returns input text unchanged.
+        input_text = "<think>foo</think>bar"
+        result = await pm.ahook.transform_display_text(
             channel=mock_channel,
-            text="<think>foo</think>bar",
+            text=input_text,
             result_message={},
         )
-        result = resolve_hook_results(
-            results, "transform_display_text", HookStrategy.VALUE_FIRST
-        )
-        assert result is None
+        assert result == input_text
