@@ -1,6 +1,5 @@
 """Tests for corvidae.tools.subagent — SubagentPlugin and run_agent_loop."""
 
-import json
 import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -13,6 +12,13 @@ from corvidae.tool import Tool, ToolContext, ToolRegistry
 
 from corvidae.llm_plugin import LLMPlugin
 from corvidae.tools.subagent import SubagentPlugin, run_agent_loop
+
+from llm_response_fixtures import (
+    _make_text_response,
+    _make_tool_call_response,
+    _make_tool_call,
+    _make_tool_call_malformed_args,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -684,44 +690,6 @@ class TestMaxToolResultCharsConsolidation:
 # ===========================================================================
 # run_agent_loop tests (moved from tests/test_agent_loop.py)
 # ===========================================================================
-
-
-def _make_text_response(text: str) -> dict:
-    return {"choices": [{"message": {"content": text}}]}
-
-
-def _make_tool_call_response(calls: list[dict]) -> dict:
-    return {
-        "choices": [
-            {
-                "message": {
-                    "content": "",
-                    "tool_calls": calls,
-                }
-            }
-        ]
-    }
-
-
-def _make_tool_call(call_id: str, name: str, args: dict) -> dict:
-    return {
-        "id": call_id,
-        "function": {
-            "name": name,
-            "arguments": json.dumps(args),
-        },
-    }
-
-
-def _make_tool_call_malformed_args(call_id: str, name: str, raw_args: str) -> dict:
-    """Build a tool call dict with raw (potentially invalid) JSON arguments."""
-    return {
-        "id": call_id,
-        "function": {
-            "name": name,
-            "arguments": raw_args,
-        },
-    }
 
 
 # ---------------------------------------------------------------------------
