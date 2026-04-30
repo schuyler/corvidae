@@ -685,6 +685,31 @@ class Agent(CorvidaePlugin):
         """Release LLM client reference (lifecycle owned by LLMPlugin)."""
         self._client = None
 
+    def refresh_tools(self) -> None:
+        """Re-borrow tools from ToolCollectionPlugin after a hot-reload."""
+        from corvidae.tool_collection import ToolCollectionPlugin
+        tools_plugin = get_dependency(self.pm, "tools", ToolCollectionPlugin)
+        self._tools, self._tool_schemas = tools_plugin.get_tools()
+        self._max_tool_result_chars = tools_plugin.max_result_chars
+
+    @hookimpl(trylast=True)
+    async def on_plugin_added(self, name: str, plugin: object) -> None:
+        """Refresh tools when a plugin is added at runtime.
+
+        trylast=True ensures ToolCollectionPlugin.rebuild_registry() runs
+        first, same ordering rationale as on_start.
+        """
+        self.refresh_tools()
+
+    @hookimpl(trylast=True)
+    async def on_plugin_removed(self, name: str) -> None:
+        """Refresh tools when a plugin is removed at runtime.
+
+        trylast=True ensures ToolCollectionPlugin.rebuild_registry() runs
+        first, same ordering rationale as on_start.
+        """
+        self.refresh_tools()
+
 
 # Backward-compatible alias; will be deprecated in a future release.
 AgentPlugin = Agent

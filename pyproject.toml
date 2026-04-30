@@ -42,6 +42,7 @@ tools = "corvidae.tool_collection:ToolCollectionPlugin"
 dream = "corvidae.tools.dream:DreamPlugin"
 agent = "corvidae.agent:Agent"
 idle_monitor = "corvidae.idle:IdleMonitorPlugin"
+hot_reload = "corvidae.hot_reload:HotReloadPlugin"
 
 [tool.setuptools.packages.find]
 include = ["corvidae*"]
