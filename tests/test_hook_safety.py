@@ -28,15 +28,7 @@ from corvidae.hooks import hookimpl
 from corvidae.task import Task
 
 from helpers import build_plugin_and_channel, drain, drain_task_queue
-
-
-# ---------------------------------------------------------------------------
-# Shared helpers
-# ---------------------------------------------------------------------------
-
-
-def _make_text_response(text: str) -> dict:
-    return {"choices": [{"message": {"role": "assistant", "content": text}}]}
+from llm_response_fixtures import _make_text_response
 
 
 # ---------------------------------------------------------------------------

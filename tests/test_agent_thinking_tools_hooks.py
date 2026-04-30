@@ -1,7 +1,6 @@
 """Tests for agent firing send_thinking and send_tool_status hooks."""
 
 import asyncio
-import json
 from unittest.mock import AsyncMock, MagicMock
 
 import aiosqlite
@@ -14,42 +13,11 @@ from corvidae.hooks import create_plugin_manager
 from corvidae.task import TaskPlugin
 
 from helpers import build_plugin_and_channel, drain, drain_task_queue
-
-
-# ---------------------------------------------------------------------------
-# Response helpers
-# ---------------------------------------------------------------------------
-
-
-def _make_text_response(text: str, reasoning: str | None = None) -> dict:
-    msg = {"role": "assistant", "content": text}
-    if reasoning is not None:
-        msg["reasoning_content"] = reasoning
-    return {"choices": [{"message": msg}]}
-
-
-def _make_tool_call_response(calls: list[dict]) -> dict:
-    return {
-        "choices": [
-            {
-                "message": {
-                    "role": "assistant",
-                    "content": "",
-                    "tool_calls": calls,
-                }
-            }
-        ]
-    }
-
-
-def _make_tool_call(call_id: str, name: str, args: dict) -> dict:
-    return {
-        "id": call_id,
-        "function": {
-            "name": name,
-            "arguments": json.dumps(args),
-        },
-    }
+from llm_response_fixtures import (
+    _make_text_response,
+    _make_tool_call_response,
+    _make_tool_call,
+)
 
 
 # ---------------------------------------------------------------------------
