@@ -136,7 +136,7 @@ async def should_process_message(self, channel, sender: str, text: str) -> bool 
 
 ## Tool registration
 
-Tools are async functions with type-annotated parameters. The docstring's first line becomes the tool description for the LLM. Register them in `register_tools`:
+Tools **must** be coroutine functions (`async def`) with type-annotated parameters. `Tool.from_function()` enforces this at registration time and raises `TypeError` if given a sync callable. The docstring's first line becomes the tool description for the LLM. See [Avoid blocking the event loop](#avoid-blocking-the-event-loop) for what `async def` means in practice — the check rejects sync functions, but it cannot detect blocking I/O called from inside an async one. Register tools in `register_tools`:
 
 ```python
 from corvidae.hooks import hookimpl
@@ -187,6 +187,39 @@ class MyPlugin:
 - `channel: Channel | None` — the channel this tool call is executing on
 - `tool_call_id: str` — the LLM-assigned call ID for this invocation
 - `task_queue: TaskQueue | None` — the task queue (None if TaskPlugin is not registered)
+
+## Avoid blocking the event loop
+
+Every tool runs on the single main asyncio event loop. A synchronous blocking call inside a tool — `requests.get`, `time.sleep`, a slow `open(...).read()`, a sync database driver — stalls the entire process: the main agent, every task-queue worker, and every channel queue all wait until the call returns.
+
+The `Tool.from_function()` async check rejects functions defined with `def` instead of `async def`, but it cannot see what your `async def` does internally. If your code calls a blocking library, you are responsible for moving that call off the event loop with `asyncio.to_thread()`. The pattern used by the built-in file tools (`corvidae/tools/files.py`) is the model: a small sync helper does the I/O, the async tool awaits it via `to_thread`.
+
+```python
+import asyncio
+from corvidae.hooks import hookimpl
+from corvidae.tool import Tool
+
+def _lookup_sync(symbol: str) -> str:
+    # Blocking call — sync HTTP client, sync DB driver, slow file read, etc.
+    import requests
+    return requests.get(f"https://api.example.com/{symbol}", timeout=5).text
+
+class QuotePlugin:
+    @hookimpl
+    def register_tools(self, tool_registry: list) -> None:
+        async def lookup(symbol: str) -> str:
+            """Look up a stock quote."""
+            return await asyncio.to_thread(_lookup_sync, symbol)
+
+        tool_registry.append(Tool.from_function(lookup))
+```
+
+For common cases the standard library and ecosystem offer native async alternatives — prefer them when available:
+
+- HTTP — use `aiohttp` (see `corvidae/tools/web.py`).
+- Subprocesses — use `asyncio.create_subprocess_shell` / `create_subprocess_exec` (see `corvidae/tools/shell.py`).
+
+As a last-resort safety net, `execute_tool_call` detects a sync callable registered as a bare `Tool(name=..., fn=sync_fn, schema=...)` (bypassing `Tool.from_function()`) and wraps the call in `asyncio.to_thread()`, logging a warning. Treat that warning as a bug to fix in the plugin, not a supported registration path.
 
 ## Plugin dependencies
 
@@ -317,6 +350,8 @@ result = resolve_hook_results(results, "some_hook", HookStrategy.VALUE_FIRST, pm
 ```
 
 `@hookimpl(tryfirst=True)` and `@hookimpl(trylast=True)` markers are respected by apluggy's broadcast dispatch and affect the order in which results are collected.
+
+The async-only rule extends to **tool functions** as well as hooks: `Tool.from_function()` enforces it at registration time, and any blocking I/O inside a tool must be wrapped with `asyncio.to_thread()`. See [Avoid blocking the event loop](#avoid-blocking-the-event-loop).
 
 ## Stock tools
 
