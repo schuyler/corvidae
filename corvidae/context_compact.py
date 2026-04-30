@@ -29,7 +29,7 @@ Configuration (via `agent` section in agent.yaml):
         min_background_blocks: 1     # Minimum blocks to retain in prompt context
         max_background_block_chars: 2048  # Max characters per background block
 
-Registered as `"context_compact"` in main.py, before `agent_loop`.
+Registered as `"context_compact"` in main.py, before `agent`.
 """
 
 from __future__ import annotations

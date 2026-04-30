@@ -74,14 +74,13 @@ async def run_agent_loop(
         WARNING: Max turns reached, unknown tools, tool exceptions
     """
     for _ in range(max_turns):
-        result = await run_agent_turn(client, messages, tool_schemas)
-        tool_calls = result.tool_calls or None  # run_agent_turn returns [] for no tool calls; existing code checks `if not tool_calls`
+        turn = await run_agent_turn(client, messages, tool_schemas)
 
-        if not tool_calls:
-            return result.text
+        if not turn.tool_calls:
+            return turn.text
 
-        for call in tool_calls:
-            result = await dispatch_tool_call(
+        for call in turn.tool_calls:
+            tool_result = await dispatch_tool_call(
                 call, tools,
                 channel=channel,
                 task_queue=task_queue,
@@ -90,8 +89,8 @@ async def run_agent_loop(
             )
             messages.append({
                 "role": "tool",
-                "tool_call_id": result.tool_call_id,
-                "content": result.content,
+                "tool_call_id": tool_result.tool_call_id,
+                "content": tool_result.content,
             })
 
     logger.warning("max tool-calling rounds reached")

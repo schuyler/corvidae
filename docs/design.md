@@ -207,9 +207,11 @@ request in seconds; `None` uses aiohttp's session default (300s).
 
 ## Agent Loop
 
-`agent_loop.py` contains two functions:
+The single-turn LLM primitive lives in `turn.py`. The multi-turn loop
+that drives subagents lives in `tools/subagent.py`. Text post-processing
+utilities for LLM output live in `thinking.py`.
 
-**`run_agent_turn`** — single LLM invocation. Used by Agent for
+**`turn.run_agent_turn`** — single LLM invocation. Used by Agent for
 interactive message processing. Returns an `AgentTurnResult` with the
 assistant message, any tool calls, text content, and latency.
 
@@ -232,19 +234,22 @@ async def run_agent_turn(
 `run_agent_turn` appends the assistant message to `messages` in place
 before returning. Callers should not append it again.
 
-**`run_agent_loop`** — multi-turn blocking loop. Used by subagent
-execution. Calls the LLM, executes tool calls inline, repeats until a
-text response or max_turns. Injects `ToolContext` into tools that
-declare a `_ctx` parameter. Accepts an optional `pm` keyword argument;
-when provided, passes it to `dispatch_tool_call()`, which calls the
-`process_tool_result` hook after each tool execution. When `pm` is
-`None`, the hook is skipped.
+**`tools.subagent.run_agent_loop`** — multi-turn blocking loop. Used
+by subagent execution (its only caller is `SubagentPlugin._launch`).
+Calls the LLM via `run_agent_turn`, executes tool calls inline, repeats
+until a text response or max_turns. Injects `ToolContext` into tools
+that declare a `_ctx` parameter. Accepts an optional `pm` keyword
+argument; when provided, passes it to `dispatch_tool_call()`, which
+calls the `process_tool_result` hook after each tool execution. When
+`pm` is `None`, the hook is skipped.
 
-Also in `agent_loop.py`:
+Also in `turn.py`:
+- `_truncate(text, max_len)` — truncation utility for logging
+
+In `thinking.py` (alongside `ThinkingPlugin`):
 - `strip_thinking(text)` — removes `<think>...</think>` blocks
 - `strip_reasoning_content(messages)` — removes `reasoning_content`
   from message dicts in place
-- `_truncate(text, max_len)` — truncation utility for logging
 
 ## Tool System
 
@@ -1127,7 +1132,7 @@ corvidae/
 ├── queue.py              # SerialQueue (is_empty property)
 ├── llm.py                # LLMClient
 ├── llm_plugin.py         # LLMPlugin (LLM client lifecycle)
-├── agent_loop.py         # run_agent_turn(), run_agent_loop(), strip_thinking
+├── turn.py               # run_agent_turn(), AgentTurnResult
 ├── context.py            # ContextWindow, MessageType, DEFAULT_CHARS_PER_TOKEN
 ├── context_compact.py    # ContextCompactPlugin (disabled — conflicts with CompactionPlugin)
 ├── jsonl_log.py          # JsonlLogPlugin (on_conversation_event, on_compaction)
@@ -1135,7 +1140,7 @@ corvidae/
 ├── agent.py              # Agent (single-turn dispatch)
 ├── persistence.py        # PersistencePlugin (DB lifecycle, conversation init)
 ├── idle.py               # IdleMonitorPlugin (no-op stub; idle detection is push-based in Agent)
-├── thinking.py           # ThinkingPlugin
+├── thinking.py           # ThinkingPlugin, strip_thinking(), strip_reasoning_content()
 ├── compaction.py         # CompactionPlugin
 ├── task.py               # Task, TaskQueue, TaskPlugin
 ├── mcp_client.py         # McpClientPlugin (MCP server bridge)
@@ -1148,7 +1153,7 @@ corvidae/
     ├── shell.py
     ├── files.py
     ├── web.py            # web_fetch, web_search
-    ├── subagent.py       # SubagentPlugin, subagent tool
+    ├── subagent.py       # SubagentPlugin, subagent tool, run_agent_loop()
     ├── settings.py       # RuntimeSettingsPlugin, set_settings tool
     ├── task_pipeline.py  # TaskPipelinePlugin, task_pipeline tool
     ├── dream.py          # DreamPlugin (background memory consolidation)
