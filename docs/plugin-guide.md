@@ -88,6 +88,8 @@ Entry point modules in `corvidae.commands` are imported at dispatcher load time,
 
 The existing `corvidae` entry point group (for plugins) and the `corvidae.commands` group (for subcommands) are distinct setuptools groups. Registering in one does not affect the other.
 
+The built-in subcommand `scaffold` is registered by corvidae itself under `corvidae.commands`. Do not register an entry point named `scaffold` in the `corvidae.commands` group — a collision will silently overwrite the built-in command, causing unpredictable behavior.
+
 ## Available hooks
 
 ### Lifecycle

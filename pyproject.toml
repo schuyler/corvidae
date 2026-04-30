@@ -29,6 +29,7 @@ corvidae = "corvidae.main:corvidae"
 [project.entry-points."corvidae.commands"]
 cli = "corvidae.channels.cli:cli_command"
 serve = "corvidae.commands.serve:serve_command"
+scaffold = "corvidae.scaffold:scaffold_command"
 
 [project.entry-points.corvidae]
 persistence = "corvidae.persistence:PersistencePlugin"
