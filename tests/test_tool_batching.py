@@ -10,40 +10,16 @@ via on_notify → serial queue → _process_queue_item. The fix ensures that:
 """
 
 import asyncio
-import json
 from unittest.mock import ANY, AsyncMock, MagicMock
 
 import pytest
 
 from helpers import build_plugin_and_channel, drain
-
-
-def _make_text_response(text: str) -> dict:
-    return {"choices": [{"message": {"role": "assistant", "content": text}}]}
-
-
-def _make_tool_call_response(calls: list[dict]) -> dict:
-    return {
-        "choices": [
-            {
-                "message": {
-                    "role": "assistant",
-                    "content": "",
-                    "tool_calls": calls,
-                }
-            }
-        ]
-    }
-
-
-def _make_tool_call(call_id: str, name: str, args: dict) -> dict:
-    return {
-        "id": call_id,
-        "function": {
-            "name": name,
-            "arguments": json.dumps(args),
-        },
-    }
+from llm_response_fixtures import (
+    _make_text_response,
+    _make_tool_call_response,
+    _make_tool_call,
+)
 
 
 class TestBatchedToolResults:

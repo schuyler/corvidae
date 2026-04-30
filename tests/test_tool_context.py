@@ -1,39 +1,12 @@
 """Tests for ToolContext injection in run_agent_loop."""
 
-import json
 from unittest.mock import AsyncMock, MagicMock
 
 from corvidae.tools.subagent import run_agent_loop
 from corvidae.tool import tool_to_schema
 from corvidae.tool import ToolContext
 
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _make_tool_call_response(calls: list[dict]) -> dict:
-    return {
-        "choices": [
-            {
-                "message": {
-                    "content": "",
-                    "tool_calls": calls,
-                }
-            }
-        ]
-    }
-
-
-def _make_tool_call(call_id: str, name: str, args: dict) -> dict:
-    return {
-        "id": call_id,
-        "function": {
-            "name": name,
-            "arguments": json.dumps(args),
-        },
-    }
+from llm_response_fixtures import _make_tool_call_response, _make_tool_call
 
 
 # ---------------------------------------------------------------------------
