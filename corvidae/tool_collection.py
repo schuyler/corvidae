@@ -48,6 +48,10 @@ class ToolCollectionPlugin(CorvidaePlugin):
 
     @hookimpl(trylast=True)
     async def on_start(self, config: dict) -> None:
+        await self.rebuild_registry()
+
+    async def rebuild_registry(self) -> None:
+        """Collect tools from all plugins and rebuild the tool registry."""
         # Collect tools from all plugins via register_tools hook (sync).
         collected: list = []
         self.pm.hook.register_tools(tool_registry=collected)
@@ -62,6 +66,16 @@ class ToolCollectionPlugin(CorvidaePlugin):
 
         self.registry = tool_registry
         logger.info("Tools collected: %d", len(tool_registry))
+
+    @hookimpl
+    async def on_plugin_added(self, name: str, plugin: object) -> None:
+        """Rebuild the tool registry when a plugin is added at runtime."""
+        await self.rebuild_registry()
+
+    @hookimpl
+    async def on_plugin_removed(self, name: str) -> None:
+        """Rebuild the tool registry when a plugin is removed at runtime."""
+        await self.rebuild_registry()
 
     def get_tools(self) -> tuple[dict, list[dict]]:
         """Return (tools_dict, tool_schemas) for the agent loop."""

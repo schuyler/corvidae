@@ -536,3 +536,20 @@ class AgentSpec:
         Returns:
             A transformed string, or None to leave text unchanged.
         """
+
+    @hookspec
+    async def on_plugin_added(self, name: str, plugin: object) -> None:
+        """Broadcast after a plugin is registered and initialized at runtime.
+
+        Args:
+            name: The registered name of the plugin.
+            plugin: The plugin instance that was added.
+        """
+
+    @hookspec
+    async def on_plugin_removed(self, name: str) -> None:
+        """Broadcast after a plugin is unregistered at runtime.
+
+        Args:
+            name: The registered name of the plugin that was removed.
+        """
