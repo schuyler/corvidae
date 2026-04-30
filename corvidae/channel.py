@@ -169,7 +169,7 @@ def load_channel_config(config: dict, registry: ChannelRegistry) -> None:
     """Pre-register channels from the config file.
 
     Precondition: This must run before on_start is called. The ordering
-    in main.py enforces this — load_channel_config is called between
+    in Runtime.start() enforces this — load_channel_config is called between
     plugin manager creation and the on_start hook.
 
     Reads the top-level "channels" dict from config. Each key must be

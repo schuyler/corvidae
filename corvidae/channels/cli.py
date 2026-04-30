@@ -6,8 +6,11 @@ import os
 import signal
 import sys
 
+import click
+
 from corvidae.channel import ChannelRegistry
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
+from corvidae.runtime import Runtime
 
 logger = logging.getLogger(__name__)
 
@@ -146,3 +149,17 @@ class CLIPlugin(CorvidaePlugin):
         except Exception:
             logger.exception("CLIPlugin read loop raised unexpected exception")
         self._task = None
+
+
+@click.command("cli")
+@click.option("--config", default="agent.yaml", help="Path to config file")
+def cli_command(config):
+    """Start corvidae with an interactive CLI session."""
+    runtime = Runtime(
+        config_path=config,
+        overrides={
+            "channels": {"cli:local": {}},
+            "logging": {"file": "corvidae.log"},
+        },
+    )
+    asyncio.run(runtime.run())
