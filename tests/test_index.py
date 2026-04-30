@@ -5,7 +5,29 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
+
+
+@pytest.fixture()
+def mock_model(monkeypatch):
+    """Replace _get_model with a deterministic stub that never hits the network.
+
+    encode() returns a fixed 384-dim unit vector so ChromaDB receives valid
+    embeddings without any model download.
+    """
+    import corvidae.tools.index as index_module
+
+    _embedding = np.ones(384, dtype=np.float32) / np.sqrt(384)
+
+    model_stub = MagicMock()
+    model_stub.encode.return_value = _embedding
+
+    monkeypatch.setattr(index_module, "_get_model", lambda: model_stub)
+    # Reset the module-level singleton so a real model loaded in a previous
+    # test (or import) doesn't bleed through.
+    monkeypatch.setattr(index_module, "_model", None)
+    return model_stub
 
 
 # ---------------------------------------------------------------------------
@@ -55,7 +77,7 @@ class TestChunkText:
 
 
 class TestWorkspaceIndexer:
-    async def test_build_indexes_files(self, tmp_path):
+    async def test_build_indexes_files(self, tmp_path, mock_model):
         from corvidae.tools.index import WorkspaceIndexer
 
         # Create some text files
@@ -69,7 +91,7 @@ class TestWorkspaceIndexer:
         assert stats["total_chunks"] >= 2
         assert len(stats["indexed_files"]) == 2
 
-    async def test_search_returns_results(self, tmp_path):
+    async def test_search_returns_results(self, tmp_path, mock_model):
         from corvidae.tools.index import WorkspaceIndexer
 
         # Create an indexed file with distinctive content
@@ -82,10 +104,11 @@ class TestWorkspaceIndexer:
 
         results = indexer.search("brown fox")
         assert len(results) >= 1
-        # Score is cosine similarity (1 - distance); expect positive similarity
+        # Score is cosine similarity (1 - distance); expect positive similarity.
+        # With a fixed unit-vector embedding all distances are 0, so score == 1.0.
         assert results[0]["score"] > 0.2
 
-    async def test_search_empty_collection(self, tmp_path):
+    async def test_search_empty_collection(self, tmp_path, mock_model):
         from corvidae.tools.index import WorkspaceIndexer
 
         indexer = WorkspaceIndexer(tmp_path)
@@ -124,7 +147,7 @@ class TestWorkspaceIndexerPlugin:
         assert "workspace_search" in names
         assert "build_index" in names
 
-    async def test_workspace_search_returns_formatted(self, tmp_path):
+    async def test_workspace_search_returns_formatted(self, tmp_path, mock_model):
         from corvidae.tools.index import WorkspaceIndexerPlugin
 
         # Create indexed file
@@ -141,7 +164,7 @@ class TestWorkspaceIndexerPlugin:
         assert "Python" in result
         assert "[" in result  # score bracket
 
-    async def test_workspace_search_no_results(self, tmp_path):
+    async def test_workspace_search_no_results(self, tmp_path, mock_model):
         from corvidae.tools.index import WorkspaceIndexerPlugin
 
         plugin = WorkspaceIndexerPlugin(None)
@@ -151,7 +174,7 @@ class TestWorkspaceIndexerPlugin:
         result = await plugin.workspace_search("query for empty index")
         assert "No results found" in result
 
-    async def test_build_index_returns_stats(self, tmp_path):
+    async def test_build_index_returns_stats(self, tmp_path, mock_model):
         from corvidae.tools.index import WorkspaceIndexerPlugin
 
         (tmp_path / "stats.txt").write_text("Stats test content here. " * 10)
@@ -170,7 +193,7 @@ class TestWorkspaceIndexerPlugin:
 
 
 class TestWorkspaceSearchTool:
-       async def test_tool_call_format(self, tmp_path):
+    async def test_tool_call_format(self, tmp_path, mock_model):
         from corvidae.tools.index import WorkspaceIndexerPlugin
         from corvidae.tool import Tool
 
