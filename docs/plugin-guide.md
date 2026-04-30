@@ -53,6 +53,31 @@ All plugin classes must be instantiable with no arguments. `pm` and `config` are
 
 **ChannelRegistry** is the exception: it is not an entry-point plugin. It is a plain class with no `@hookimpl` decorators, constructed explicitly in `Runtime.start()` and populated from config before the entry point plugins are loaded.
 
+## Writing replacement plugins
+
+To replace a built-in hook handler, implement the hook at default priority. Built-in handlers use `trylast=True` and serve as fallbacks.
+
+```python
+class FancyCompactionPlugin(CorvidaePlugin):
+    @hookimpl
+    async def compact_conversation(self, channel, conversation, max_tokens):
+        # Custom strategy
+        await self.my_compaction(conversation, max_tokens)
+        return True  # non-None stops the chain; built-in never runs
+```
+
+To observe without replacing, use `tryfirst=True` and return None:
+
+```python
+class CompactionObserver(CorvidaePlugin):
+    @hookimpl(tryfirst=True)
+    async def compact_conversation(self, channel, conversation, max_tokens):
+        self.record_metrics(conversation)
+        return None  # chain continues to the actual compaction handler
+```
+
+This pattern applies to any `firstresult=True` hook. For broadcast hooks (where all handlers run regardless), `tryfirst` and `trylast` affect only execution order, not whether subsequent handlers run.
+
 ## Registering CLI subcommands
 
 Plugins can add subcommands to the `corvidae` CLI by registering entries in the `corvidae.commands` entry point group. Each entry point maps a subcommand name to a `click.Command` (or `click.Group` for nested subcommands).
@@ -144,18 +169,18 @@ only; they do not update the persisted record.
 
 ### Hook result resolution
 
-These hooks are broadcast to all plugins. The caller uses `resolve_hook_results` to reduce the result list to a single value according to a per-hook strategy.
+These hooks return a value. Hooks marked `firstresult=True` use pluggy's sequential dispatch — the chain stops at the first non-None return. Hooks marked `VALUE_FIRST` or `REJECT_WINS` use broadcast dispatch; the caller passes the result list to `resolve_hook_results`.
 
 | Hook | Strategy | Returns | Behavior |
 |------|----------|---------|----------|
 | `should_process_message(channel, sender, text)` | `REJECT_WINS` | `bool \| None` | Any `False` vetoes the message; any `True` (with no `False`) accepts; `None` if all defer |
-| `on_llm_error(channel, error)` | `VALUE_FIRST` | `str \| None` | Non-None string replaces the default error message; multiple non-None → alphabetically-first plugin wins with a warning |
-| `compact_conversation(channel, conversation, max_tokens)` | broadcast only | `None` | Called for side effects; return value is not used by the caller |
+| `on_llm_error(channel, error)` | `firstresult=True` | `str \| None` | First non-None string wins; chain stops. If all return None, default error message is used. |
+| `compact_conversation(channel, conversation, max_tokens)` | `firstresult=True` | `bool \| None` | First non-None return stops the chain. `ContextCompactPlugin` uses `tryfirst` (returns None). `CompactionPlugin` uses `trylast` (returns True). Third-party plugins run at default priority. |
 | `process_tool_result(tool_name, result, channel)` | `VALUE_FIRST` | `str \| None` | Non-None string replaces the tool result in the conversation; multiple non-None → alphabetically-first plugin wins with a warning |
 | `transform_display_text(channel, text, result_message)` | `VALUE_FIRST` | `str \| None` | Non-None string replaces the response text before it is sent to the channel; multiple non-None → alphabetically-first plugin wins with a warning |
-| `load_conversation(channel)` | `VALUE_FIRST` | `list[dict] \| None` | Return tagged message dicts if this plugin has stored history; `None` to defer. Called once when a channel's conversation is first initialized. |
+| `load_conversation(channel)` | `firstresult=True` | `list[dict] \| None` | First non-None result wins. `PersistencePlugin` uses `trylast` as fallback. Called once when a channel's conversation is first initialized. |
 
-`compact_conversation` — all registered implementations run. The return value is ignored by the caller; this hook is not processed through `resolve_hook_results`. Use it for side effects (e.g., custom summarization that mutates the conversation in-place).
+`compact_conversation` — sequential hook (`firstresult=True`). The first handler returning a non-None value stops the chain. `ContextCompactPlugin` runs first (`tryfirst=True`) to generate background blocks and returns None (does not stop the chain). `CompactionPlugin` runs last (`trylast=True`) as the default strategy and returns True. A third-party plugin at default priority runs between them — if it returns non-None, `CompactionPlugin` is never called.
 
 `process_tool_result` fires for all tool calls — it is invoked from `dispatch_tool_call` in `corvidae/tool.py`, which is used by both the main agent loop and background subagent loops. It does not fire for pre-dispatch errors (JSON parse failure or unknown tool name).
 
@@ -349,6 +374,7 @@ subagent          (SubagentPlugin)      — entry point
 mcp               (McpClientPlugin)     — entry point
 llm               (LLMPlugin)           — entry point
 compaction        (CompactionPlugin)    — entry point
+context_compact   (ContextCompactPlugin) — entry point
 thinking          (ThinkingPlugin)      — entry point
 runtime_settings  (RuntimeSettingsPlugin) — entry point
 tools             (ToolCollectionPlugin) — entry point
@@ -367,17 +393,45 @@ idle_monitor      (IdleMonitorPlugin)   — entry point
 
 `idle_monitor` depends on `"agent"`. Its `on_start` uses `@hookimpl(trylast=True)` to run late in the broadcast. Because `Agent.on_start` is called after the broadcast completes, `idle_monitor` is always initialized before `Agent` starts.
 
+## Plugin disable
+
+Disable entry-point plugins via the `plugins.disabled` config key:
+
+```yaml
+plugins:
+  disabled:
+    - compaction          # disable the built-in compaction plugin
+```
+
+Names must match the entry-point name from `[project.entry-points.corvidae]` in `pyproject.toml`. `Runtime.start()` calls `pm.set_blocked(name)` for each entry before loading entry points. Blocked plugins are not instantiated.
+
+Only entry-point plugins can be disabled this way. Manually registered plugins (e.g., `ChannelRegistry`) cannot be blocked via config.
+
+This is a startup-time mechanism. It does not interact with hot-reload.
+
 ## Hook exception safety
 
 Broadcast hook calls from `Agent` are wrapped in `try/except`. If a plugin raises an exception from `before_agent_turn`, `after_persist_assistant`, `on_agent_response`, or `send_message`, the exception is logged at WARNING or ERROR level and processing continues. Plugins do not need to catch their own exceptions to protect the queue consumer.
 
-Hooks using `resolve_hook_results` are not wrapped — exceptions propagate to the call site. The exception is `compact_conversation`, whose broadcast invocation is wrapped: a compaction failure is logged at WARNING and the turn continues without compaction.
+For `firstresult=True` hooks (`compact_conversation`, `load_conversation`, `on_llm_error`), pluggy propagates the first handler's exception immediately — the chain stops and no further handlers run. The call sites in `Agent` handle these as follows:
+
+- `compact_conversation` — wrapped in try/except; failure is logged at WARNING and the turn continues without compaction.
+- `load_conversation` — not wrapped; an exception propagates to `_process_queue_item`, which will fail the queue item.
+- `on_llm_error` — called inside the existing try/except in `_run_turn`; an exception from the hook itself is not separately caught (it propagates up from `_run_turn`).
+
+For broadcast hooks using `resolve_hook_results` (`should_process_message`, `transform_display_text`, `process_tool_result`), exceptions propagate to the call site. `transform_display_text` is wrapped in try/except in `_resolve_display_text`.
 
 ## Async considerations
 
 All broadcast hooks are `async`. Corvidae uses apluggy's `pm.ahook.*` for async dispatch.
 
-For hooks that return a value, call `pm.ahook.<hook>(...)` and pass the result list to `resolve_hook_results` with the appropriate strategy:
+For hooks with `firstresult=True` (`compact_conversation`, `load_conversation`, `on_llm_error`), `pm.ahook.<hook>(...)` returns a single value (or None) directly:
+
+```python
+result = await pm.ahook.load_conversation(channel=channel)
+```
+
+For hooks using broadcast dispatch with result resolution (`should_process_message`, `transform_display_text`, `process_tool_result`), call `pm.ahook.<hook>(...)` and pass the result list to `resolve_hook_results`:
 
 ```python
 from corvidae.hooks import resolve_hook_results, HookStrategy
@@ -386,7 +440,7 @@ results = await pm.ahook.some_hook(channel=channel, ...)
 result = resolve_hook_results(results, "some_hook", HookStrategy.VALUE_FIRST, pm=pm)
 ```
 
-`@hookimpl(tryfirst=True)` and `@hookimpl(trylast=True)` markers are respected by apluggy's broadcast dispatch and affect the order in which results are collected.
+`@hookimpl(tryfirst=True)` and `@hookimpl(trylast=True)` markers are respected by apluggy's dispatch and affect execution order. For `firstresult=True` hooks, `tryfirst` handlers run before default-priority handlers, which run before `trylast` handlers. The chain stops at the first non-None return.
 
 The async-only rule extends to **tool functions** as well as hooks: `Tool.from_function()` enforces it at registration time, and any blocking I/O inside a tool must be wrapped with `asyncio.to_thread()`. See [Avoid blocking the event loop](#avoid-blocking-the-event-loop).
 
@@ -516,11 +570,7 @@ Compacts conversation history when it approaches the channel's
 
 Implements one hook:
 
-- `compact_conversation` — fires before each LLM call. Checks whether the
-  token estimate exceeds `compaction_threshold * max_tokens`. If so, and if
-  the conversation has more than `min_messages_to_compact` messages,
-  summarizes older messages to fit within `compaction_retention * max_tokens`.
-  The hook return value is not used by the caller.
+- `compact_conversation` (`trylast=True`) — fires before each LLM call. Checks whether the token estimate exceeds `compaction_threshold * max_tokens`. If so, and if the conversation has more than `min_messages_to_compact` messages, summarizes older messages to fit within `compaction_retention * max_tokens`. Returns True to stop the `firstresult` chain. Runs after `ContextCompactPlugin` (tryfirst) and any third-party handlers at default priority.
 
 Token estimation divides total character count by `chars_per_token`. The same
 `chars_per_token` value is used when constructing `ContextWindow` instances
@@ -537,6 +587,33 @@ agent:
 
 **Without this plugin:** conversations grow without bound. The LLM will
 receive an error from the API when the context limit is exceeded.
+
+### ContextCompactPlugin (`corvidae/context_compact.py`)
+
+Generates persistent background blocks from older conversation segments and injects them before each agent turn. Background blocks capture summarized context from messages older than the most recent compaction boundary, preserving historical knowledge across turns without growing the foreground context window. Entry point name: `"context_compact"`.
+
+Implements five hooks:
+
+- `on_start` — loads config from `agent.context_compact`.
+- `register_tools` — registers the `context_stats` tool for observability (turn counts, last block timestamps per channel).
+- `compact_conversation` (`tryfirst=True`) — generates background blocks from pre-compaction messages. Returns None (does not stop the chain; `CompactionPlugin` runs after).
+- `before_agent_turn` — injects the most recent background block as a CONTEXT entry if none exists in the current conversation.
+- `on_agent_response` — tracks per-channel turn counts.
+
+**Config:**
+```yaml
+agent:
+  context_compact:
+    enabled: true
+    bg_block_threshold: 20        # generate a block after this many turns
+    bg_compaction_threshold: 0.75 # compact when token budget exceeds this fraction
+    min_background_blocks: 1      # minimum blocks to retain in prompt context
+    max_background_block_chars: 2048  # max characters per background block
+```
+
+`context_compact` depends on `compaction` and `llm` (declared via `depends_on`). `validate_dependencies()` raises a `RuntimeError` at startup if either is absent.
+
+**Without this plugin:** no background blocks are generated. Compaction still works via `CompactionPlugin`.
 
 ### PersistencePlugin (`corvidae/persistence.py`)
 

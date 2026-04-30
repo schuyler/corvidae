@@ -11,7 +11,7 @@ import pytest
 
 from corvidae.channel import Channel, ChannelConfig, ChannelRegistry
 from corvidae.persistence import init_db
-from corvidae.hooks import create_plugin_manager, resolve_hook_results, HookStrategy
+from corvidae.hooks import create_plugin_manager
 
 
 # ---------------------------------------------------------------------------
@@ -542,10 +542,7 @@ class TestHookIntegration:
         channel = _make_channel(registry)
 
         # load_conversation hookspec must exist and dispatch correctly
-        results = await pm.ahook.load_conversation(channel=channel)
-        result = resolve_hook_results(
-            results, "load_conversation", HookStrategy.VALUE_FIRST, pm=pm
-        )
+        result = await pm.ahook.load_conversation(channel=channel)
 
         # No rows — should resolve to None
         assert result is None
@@ -586,10 +583,7 @@ class TestHookIntegration:
         pm = create_plugin_manager()
         channel = _make_channel()
 
-        results = await pm.ahook.load_conversation(channel=channel)
-        result = resolve_hook_results(
-            results, "load_conversation", HookStrategy.VALUE_FIRST, pm=pm
-        )
+        result = await pm.ahook.load_conversation(channel=channel)
 
         assert result is None
 

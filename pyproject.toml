@@ -59,6 +59,7 @@ build-backend = "setuptools.build_meta"
 
 [dependency-groups]
 dev = [
+    "pytest-asyncio>=1.3.0",
     "pytest-timeout>=2.4.0",
 ]
 

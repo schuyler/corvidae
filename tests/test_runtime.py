@@ -645,6 +645,116 @@ class TestRuntimeStart:
         finally:
             os.unlink(config_path)
 
+    async def test_start_blocks_disabled_plugins(self):
+        """start() calls pm.set_blocked for each name in plugins.disabled config.
+
+        With the Phase 2 implementation, Runtime.start() reads config.plugins.disabled
+        and calls pm.set_blocked(name) for each entry before loading entry points.
+        pm.set_blocked must be called BEFORE pm.load_setuptools_entrypoints so that
+        blocked plugins are never instantiated.
+
+        This test fails now because Runtime.start() does not yet read plugins.disabled
+        or call pm.set_blocked.
+        """
+        from corvidae.runtime import Runtime
+
+        config_data = {
+            "llm": {"main": {"base_url": "http://localhost:8080", "model": "m"}},
+            "plugins": {"disabled": ["compaction"]},
+        }
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".yaml", delete=False
+        ) as f:
+            yaml.dump(config_data, f)
+            config_path = f.name
+
+        # Track the order of set_blocked vs load_setuptools_entrypoints calls
+        call_order: list[str] = []
+
+        try:
+            mock_pm, mock_agent = _make_mock_pm_and_agent()
+
+            def record_set_blocked(name):
+                call_order.append(f"set_blocked:{name}")
+
+            def record_load_entrypoints(group):
+                call_order.append(f"load_entrypoints:{group}")
+
+            mock_pm.set_blocked = record_set_blocked
+            mock_pm.load_setuptools_entrypoints = record_load_entrypoints
+
+            with patch(
+                "corvidae.runtime.create_plugin_manager", return_value=mock_pm
+            ), patch("corvidae.runtime.validate_dependencies"), patch(
+                "corvidae.runtime.configure_logging"
+            ):
+                rt = Runtime(config_path=config_path)
+                await rt.start()
+
+            # set_blocked("compaction") must have been called
+            assert "set_blocked:compaction" in call_order, (
+                f"pm.set_blocked('compaction') was not called; call_order={call_order!r} — "
+                "Runtime.start() needs to read plugins.disabled and call pm.set_blocked"
+            )
+
+            # set_blocked must be called BEFORE load_setuptools_entrypoints
+            blocked_idx = call_order.index("set_blocked:compaction")
+            entrypoints_idx = call_order.index("load_entrypoints:corvidae")
+            assert blocked_idx < entrypoints_idx, (
+                f"set_blocked must precede load_setuptools_entrypoints; "
+                f"order={call_order!r}"
+            )
+        finally:
+            os.unlink(config_path)
+
+    async def test_start_no_disabled_section_no_set_blocked_calls(self):
+        """start() never calls pm.set_blocked when plugins.disabled is absent from config.
+
+        When the config has no 'plugins' key, set_blocked should not be called at all.
+
+        This test fails now because Runtime.start() does not yet handle plugins.disabled,
+        but it will pass trivially until the implementation is added; the real value is
+        as a regression guard that the implementation only calls set_blocked when needed.
+        """
+        from corvidae.runtime import Runtime
+
+        # Config with no 'plugins' key at all
+        config_data = {
+            "llm": {"main": {"base_url": "http://localhost:8080", "model": "m"}},
+        }
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".yaml", delete=False
+        ) as f:
+            yaml.dump(config_data, f)
+            config_path = f.name
+
+        set_blocked_calls: list[str] = []
+
+        try:
+            mock_pm, mock_agent = _make_mock_pm_and_agent()
+
+            def record_set_blocked(name):
+                set_blocked_calls.append(name)
+
+            mock_pm.set_blocked = record_set_blocked
+
+            with patch(
+                "corvidae.runtime.create_plugin_manager", return_value=mock_pm
+            ), patch("corvidae.runtime.validate_dependencies"), patch(
+                "corvidae.runtime.configure_logging"
+            ):
+                rt = Runtime(config_path=config_path)
+                await rt.start()
+
+            assert set_blocked_calls == [], (
+                f"pm.set_blocked should not be called when plugins.disabled is absent; "
+                f"got calls for: {set_blocked_calls!r}"
+            )
+        finally:
+            os.unlink(config_path)
+
 
 # ---------------------------------------------------------------------------
 # Section 4 — Runtime.stop() graceful shutdown

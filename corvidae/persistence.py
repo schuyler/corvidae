@@ -97,7 +97,7 @@ class PersistencePlugin(CorvidaePlugin):
         if self.db:
             await self.db.close()
 
-    @hookimpl
+    @hookimpl(trylast=True)
     async def load_conversation(self, channel) -> list[dict] | None:
         """Load conversation history from SQLite for the channel.
 

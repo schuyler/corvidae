@@ -137,11 +137,12 @@ class ContextCompactPlugin:
 
         tool_registry.append(Tool.from_function(context_stats))
 
-    @hookimpl
+    @hookimpl(tryfirst=True)
     async def compact_conversation(self, conversation, max_tokens):
         """Run background block generation when compaction is triggered.
 
-        This hook fires alongside CompactionPlugin's compaction. When the
+        Runs before CompactionPlugin in the firstresult chain (tryfirst=True).
+        Returns None so the chain continues to CompactionPlugin. When the
         conversation has grown beyond bg_block_threshold turns, we generate
         a background block summarizing segments older than the last stored block.
 
