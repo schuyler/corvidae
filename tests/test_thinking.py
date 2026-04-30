@@ -1,11 +1,60 @@
-"""Tests for corvidae.thinking.ThinkingPlugin."""
+"""Tests for corvidae.thinking — ThinkingPlugin and strip_* utilities."""
 
 from unittest.mock import MagicMock, AsyncMock
 
 import pytest
 
-from corvidae.thinking import ThinkingPlugin
+from corvidae.thinking import ThinkingPlugin, strip_reasoning_content, strip_thinking
 from corvidae.hooks import create_plugin_manager, resolve_hook_results, HookStrategy
+
+
+# ---------------------------------------------------------------------------
+# strip_thinking tests
+# ---------------------------------------------------------------------------
+
+
+def test_strip_thinking_removes_tags():
+    text = "<think>internal monologue</think>actual response"
+    assert strip_thinking(text) == "actual response"
+
+
+def test_strip_thinking_no_tags():
+    text = "plain response without thinking"
+    assert strip_thinking(text) == text
+
+
+def test_strip_thinking_multiline():
+    text = "<think>\nline one\nline two\n</think>\nfinal answer"
+    assert strip_thinking(text) == "final answer"
+
+
+# ---------------------------------------------------------------------------
+# strip_reasoning_content tests
+# ---------------------------------------------------------------------------
+
+
+def test_strip_reasoning_content_removes_from_assistant_messages():
+    """strip_reasoning_content removes reasoning_content from assistant messages
+    in place, leaves user/tool/system messages alone."""
+    messages = [
+        {"role": "user", "content": "hi", "reasoning_content": "should not be touched"},
+        {"role": "assistant", "content": "hello", "reasoning_content": "thinking..."},
+        {"role": "tool", "content": "result", "reasoning_content": "shouldn't be here either"},
+    ]
+    strip_reasoning_content(messages)
+
+    assert "reasoning_content" not in messages[1]
+    assert messages[1]["content"] == "hello"
+    # Non-assistant messages must be untouched
+    assert messages[0]["reasoning_content"] == "should not be touched"
+    assert messages[2]["reasoning_content"] == "shouldn't be here either"
+
+
+def test_strip_reasoning_content_no_reasoning_content_is_noop():
+    """Assistant messages without reasoning_content are left unchanged."""
+    messages = [{"role": "assistant", "content": "hi"}]
+    strip_reasoning_content(messages)
+    assert messages == [{"role": "assistant", "content": "hi"}]
 
 
 def _make_pm(keep_thinking_in_history=False, registry_missing=False):
