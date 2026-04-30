@@ -134,5 +134,13 @@ async def _run_shutdown(agent: object, pm: pluggy.PluginManager) -> None:
 
 
 def cli() -> None:
-    """Console script entry point."""
-    asyncio.run(main(cli_mode=True))
+    """Console script entry point.
+
+    Dispatches to sub-commands before starting the daemon:
+      corvidae scaffold <name>   — generate a new tool plugin package
+    """
+    if len(sys.argv) > 1 and sys.argv[1] == "scaffold":
+        from corvidae.scaffold import scaffold_cli
+        scaffold_cli(sys.argv[2:])
+    else:
+        asyncio.run(main(cli_mode=True))
