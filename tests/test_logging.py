@@ -44,12 +44,19 @@ def _reset_logging():
 class TestLoggerNamingConvention:
     """Every module must have a module-level logger named after __name__."""
 
-    def test_agent_loop_has_module_logger(self):
-        """corvidae.agent_loop must expose a module-level `logger` attribute
+    def test_turn_has_module_logger(self):
+        """corvidae.turn must expose a module-level `logger` attribute
         whose name matches the module __name__."""
-        import corvidae.agent_loop as mod
-        assert hasattr(mod, "logger"), "agent_loop.py must define module-level `logger`"
-        assert mod.logger.name == "corvidae.agent_loop"
+        import corvidae.turn as mod
+        assert hasattr(mod, "logger"), "turn.py must define module-level `logger`"
+        assert mod.logger.name == "corvidae.turn"
+
+    def test_subagent_has_module_logger(self):
+        """corvidae.tools.subagent must expose a module-level `logger` attribute
+        whose name matches the module __name__."""
+        import corvidae.tools.subagent as mod
+        assert hasattr(mod, "logger"), "tools/subagent.py must define module-level `logger`"
+        assert mod.logger.name == "corvidae.tools.subagent"
 
     def test_llm_has_module_logger(self):
         """corvidae.llm must expose a module-level `logger` attribute."""
@@ -506,8 +513,9 @@ class TestAgentLoopLogging:
     """run_agent_loop must log WARNING for edge cases and INFO per turn."""
 
     async def test_max_turns_logs_warning(self, caplog):
-        """When max turns are exhausted, agent_loop must emit a WARNING log."""
-        from corvidae.agent_loop import run_agent_loop
+        """When max turns are exhausted, run_agent_loop must emit a WARNING log
+        from the corvidae.tools.subagent logger."""
+        from corvidae.tools.subagent import run_agent_loop
 
         client = MagicMock()
         client.chat = AsyncMock(
@@ -523,7 +531,7 @@ class TestAgentLoopLogging:
         )
         noop = AsyncMock(return_value="result")
 
-        with caplog.at_level(logging.WARNING, logger="corvidae.agent_loop"):
+        with caplog.at_level(logging.WARNING, logger="corvidae.tools.subagent"):
             await run_agent_loop(
                 client,
                 [{"role": "user", "content": "go"}],
@@ -532,7 +540,7 @@ class TestAgentLoopLogging:
                 max_turns=2,
             )
 
-        records = [r for r in caplog.records if r.name == "corvidae.agent_loop"]
+        records = [r for r in caplog.records if r.name == "corvidae.tools.subagent"]
         warning_records = [r for r in records if r.levelno == logging.WARNING]
         assert warning_records, (
             "run_agent_loop must emit a WARNING when max_turns is reached"
@@ -540,7 +548,7 @@ class TestAgentLoopLogging:
 
     async def test_unknown_tool_logs_warning(self, caplog):
         """When LLM calls an unknown tool, agent_loop must emit a WARNING log."""
-        from corvidae.agent_loop import run_agent_loop
+        from corvidae.tools.subagent import run_agent_loop
 
         client = MagicMock()
         client.chat = AsyncMock(
@@ -572,7 +580,7 @@ class TestAgentLoopLogging:
 
     async def test_tool_exception_logs_warning(self, caplog):
         """When a tool raises, agent_loop must emit a WARNING log with exc_info."""
-        from corvidae.agent_loop import run_agent_loop
+        from corvidae.tools.subagent import run_agent_loop
 
         async def bad_tool(**kwargs):
             raise ValueError("something broke")
@@ -607,8 +615,9 @@ class TestAgentLoopLogging:
 
     async def test_turn_info_log(self, caplog):
         """Each turn in run_agent_loop must emit at least one INFO log, and at
-        least one INFO record must carry a latency_ms attribute."""
-        from corvidae.agent_loop import run_agent_loop
+        least one INFO record must carry a latency_ms attribute. The INFO log
+        comes from run_agent_turn under the corvidae.turn logger."""
+        from corvidae.tools.subagent import run_agent_loop
 
         client = MagicMock()
         client.chat = AsyncMock(
@@ -617,7 +626,7 @@ class TestAgentLoopLogging:
             }
         )
 
-        with caplog.at_level(logging.INFO, logger="corvidae.agent_loop"):
+        with caplog.at_level(logging.INFO, logger="corvidae.turn"):
             await run_agent_loop(
                 client,
                 [{"role": "user", "content": "hi"}],
@@ -625,7 +634,7 @@ class TestAgentLoopLogging:
                 tool_schemas=[],
             )
 
-        records = [r for r in caplog.records if r.name == "corvidae.agent_loop"]
+        records = [r for r in caplog.records if r.name == "corvidae.turn"]
         info_records = [r for r in records if r.levelno == logging.INFO]
         assert info_records, (
             "run_agent_loop must emit at least one INFO log per turn"

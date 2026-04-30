@@ -28,7 +28,7 @@ class StructuredFormatter(logging.Formatter):
     is appended to the formatted message, e.g.::
 
         logger.debug("tool call arguments", extra={"tool": "shell", "arguments": "ls"})
-        # → "2026-04-23 12:00:00 DEBUG    corvidae.agent_loop: tool call arguments  tool='shell' arguments='ls'"
+        # → "2026-04-23 12:00:00 DEBUG    corvidae.tool: tool call arguments  tool='shell' arguments='ls'"
 
     This formatter is applied automatically by ``configure_logging()``. It does
     not need to be referenced in YAML configuration.

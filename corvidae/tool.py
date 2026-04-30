@@ -58,7 +58,7 @@ def tool_to_schema(fn: Callable) -> dict:
     fields = {}
     for param_name, param in sig.parameters.items():
         # Explicitly skip _-prefixed parameters — they are injected at
-        # call time by run_agent_loop, not supplied by the LLM.
+        # call time by dispatch_tool_call, not supplied by the LLM.
         if param_name.startswith("_"):
             continue
         annotation = param.annotation if param.annotation is not inspect.Parameter.empty else str
@@ -194,8 +194,8 @@ async def execute_tool_call(
     task_queue and injects it. Otherwise, calls with args only.
 
     Does **not** catch exceptions — callers are responsible for error handling
-    since the two call sites (Agent and run_agent_loop) have different
-    error-reporting requirements.
+    since the two call sites (Agent and tools.subagent.run_agent_loop) have
+    different error-reporting requirements.
 
     Args:
         tool_fn: The async tool callable to invoke.
@@ -391,12 +391,12 @@ async def dispatch_tool_call(
 class ToolContext:
     """Context injected into tools that declare a ``_ctx`` parameter.
 
-    Constructed per tool call by run_agent_loop. Tools without ``_ctx``
-    work exactly as before.
+    Constructed per tool call by ``dispatch_tool_call``. Tools without
+    ``_ctx`` work exactly as before.
 
     Attributes:
         channel: The channel this tool call is executing on. None when
-            run_agent_loop is called without channel context (e.g.,
+            dispatch_tool_call is called without channel context (e.g.,
             background task sub-agent loops in Phase 1).
         tool_call_id: The LLM-assigned call ID for this invocation.
         task_queue: The TaskQueue for enqueueing background work. None

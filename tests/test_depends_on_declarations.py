@@ -57,43 +57,48 @@ def test_thinking_plugin_depends_on_includes_registry():
 
 
 # ---------------------------------------------------------------------------
-# 4. agent_loop must NOT re-export ToolContext, execute_tool_call,
-#    or tool_to_schema; but MUST still expose MAX_TOOL_RESULT_CHARS
-#    and dispatch_tool_call.
+# 4. turn must NOT re-export tool-related symbols (single-LLM-turn module).
+#    tools.subagent owns run_agent_loop and MUST expose MAX_TOOL_RESULT_CHARS
+#    and dispatch_tool_call (used by run_agent_loop).
 # ---------------------------------------------------------------------------
 
 @pytest.fixture(scope="module")
-def agent_loop_module():
-    return importlib.import_module("corvidae.agent_loop")
+def turn_module():
+    return importlib.import_module("corvidae.turn")
 
 
-def test_agent_loop_does_not_export_ToolContext(agent_loop_module):
-    assert not hasattr(agent_loop_module, "ToolContext"), (
-        "corvidae.agent_loop should not re-export ToolContext — see plans/declare-deps-clean-reexports.md §2.7"
+@pytest.fixture(scope="module")
+def subagent_module():
+    return importlib.import_module("corvidae.tools.subagent")
+
+
+def test_turn_does_not_export_ToolContext(turn_module):
+    assert not hasattr(turn_module, "ToolContext"), (
+        "corvidae.turn should not re-export ToolContext"
     )
 
 
-def test_agent_loop_does_not_export_execute_tool_call(agent_loop_module):
-    assert not hasattr(agent_loop_module, "execute_tool_call"), (
-        "corvidae.agent_loop should not re-export execute_tool_call — see plans/declare-deps-clean-reexports.md §2.7"
+def test_turn_does_not_export_execute_tool_call(turn_module):
+    assert not hasattr(turn_module, "execute_tool_call"), (
+        "corvidae.turn should not re-export execute_tool_call"
     )
 
 
-def test_agent_loop_does_not_export_tool_to_schema(agent_loop_module):
-    assert not hasattr(agent_loop_module, "tool_to_schema"), (
-        "corvidae.agent_loop should not re-export tool_to_schema — see plans/declare-deps-clean-reexports.md §2.7"
+def test_turn_does_not_export_tool_to_schema(turn_module):
+    assert not hasattr(turn_module, "tool_to_schema"), (
+        "corvidae.turn should not re-export tool_to_schema"
     )
 
 
-def test_agent_loop_still_exports_MAX_TOOL_RESULT_CHARS(agent_loop_module):
-    assert hasattr(agent_loop_module, "MAX_TOOL_RESULT_CHARS"), (
-        "corvidae.agent_loop should still expose MAX_TOOL_RESULT_CHARS (used as default arg at line 132)"
+def test_subagent_still_exports_MAX_TOOL_RESULT_CHARS(subagent_module):
+    assert hasattr(subagent_module, "MAX_TOOL_RESULT_CHARS"), (
+        "corvidae.tools.subagent should expose MAX_TOOL_RESULT_CHARS (used as default arg in run_agent_loop)"
     )
 
 
-def test_agent_loop_still_exports_dispatch_tool_call(agent_loop_module):
-    assert hasattr(agent_loop_module, "dispatch_tool_call"), (
-        "corvidae.agent_loop should still expose dispatch_tool_call (called at line 168)"
+def test_subagent_still_exports_dispatch_tool_call(subagent_module):
+    assert hasattr(subagent_module, "dispatch_tool_call"), (
+        "corvidae.tools.subagent should expose dispatch_tool_call (called inside run_agent_loop)"
     )
 
 

@@ -16,21 +16,14 @@ import pytest
 from corvidae.compaction import CompactionPlugin
 
 
-def _make_plugin_with_config(
-    threshold: float = 0.8,
-    retention: float = 0.5,
-    max_context_tokens: int = 60000,
-) -> CompactionPlugin:
-    """Create a CompactionPlugin and call on_start with the given config."""
-    plugin = CompactionPlugin(pm=None)
-    return plugin
-
-
 async def _start_plugin(
     threshold: float = 0.8,
     retention: float = 0.5,
 ) -> CompactionPlugin:
-    """Create a CompactionPlugin and run on_start with the given config values."""
+    """Create a CompactionPlugin and run on_init with the given config values.
+
+    Config validation runs in on_init (where config is read), not on_start.
+    """
     plugin = CompactionPlugin(pm=None)
     config = {
         "agent": {
@@ -38,7 +31,7 @@ async def _start_plugin(
             "compaction_retention": retention,
         },
     }
-    await plugin.on_start(config)
+    await plugin.on_init(None, config)
     return plugin
 
 
@@ -160,7 +153,7 @@ class TestDefaultConfigIsValid:
         """Default threshold=0.8, retention=0.5 must produce no warnings."""
         with caplog.at_level(logging.WARNING, logger="corvidae.compaction"):
             plugin = CompactionPlugin(pm=None)
-            await plugin.on_start(config={"agent": {}})
+            await plugin.on_init(None, {"agent": {}})
 
         config_warnings = [
             r for r in caplog.records
@@ -203,10 +196,10 @@ class TestBadConfigDoesNotBlockCompaction:
 
     @pytest.mark.asyncio
     async def test_bad_config_does_not_raise(self):
-        """on_start must not raise even with threshold <= retention."""
+        """on_init must not raise even with threshold <= retention."""
         plugin = CompactionPlugin(pm=None)
         # Should not raise
-        await plugin.on_start({
+        await plugin.on_init(None, {
             "agent": {
                 "compaction_threshold": 0.5,
                 "compaction_retention": 0.5,
@@ -215,9 +208,9 @@ class TestBadConfigDoesNotBlockCompaction:
 
     @pytest.mark.asyncio
     async def test_plugin_stores_bad_config_values(self):
-        """on_start must store the config values even if they're bad."""
+        """on_init must store the config values even if they're bad."""
         plugin = CompactionPlugin(pm=None)
-        await plugin.on_start({
+        await plugin.on_init(None, {
             "agent": {
                 "compaction_threshold": 0.3,
                 "compaction_retention": 0.7,
