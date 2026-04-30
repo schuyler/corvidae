@@ -130,9 +130,13 @@ class WorkspaceIndexer:
                 client.delete_collection(self.collection_name)
             except chromadb.errors.NotFoundError:
                 pass
+            # Pass a no-op embedding_function to prevent chromadb from
+            # downloading a default model.  We always supply embeddings
+            # explicitly in add() and query().
             self._collection = client.get_or_create_collection(
                 name=self.collection_name,
                 metadata={"hnsw:space": "cosine"},
+                embedding_function=None,
             )
         return self._collection
 
