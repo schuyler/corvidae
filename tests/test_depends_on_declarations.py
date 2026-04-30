@@ -57,14 +57,14 @@ def test_thinking_plugin_depends_on_includes_registry():
 
 
 # ---------------------------------------------------------------------------
-# 4. agent_turn must NOT re-export tool-related symbols (single-LLM-turn module).
+# 4. turn must NOT re-export tool-related symbols (single-LLM-turn module).
 #    tools.subagent owns run_agent_loop and MUST expose MAX_TOOL_RESULT_CHARS
 #    and dispatch_tool_call (used by run_agent_loop).
 # ---------------------------------------------------------------------------
 
 @pytest.fixture(scope="module")
-def agent_turn_module():
-    return importlib.import_module("corvidae.agent_turn")
+def turn_module():
+    return importlib.import_module("corvidae.turn")
 
 
 @pytest.fixture(scope="module")
@@ -72,21 +72,21 @@ def subagent_module():
     return importlib.import_module("corvidae.tools.subagent")
 
 
-def test_agent_turn_does_not_export_ToolContext(agent_turn_module):
-    assert not hasattr(agent_turn_module, "ToolContext"), (
-        "corvidae.agent_turn should not re-export ToolContext"
+def test_turn_does_not_export_ToolContext(turn_module):
+    assert not hasattr(turn_module, "ToolContext"), (
+        "corvidae.turn should not re-export ToolContext"
     )
 
 
-def test_agent_turn_does_not_export_execute_tool_call(agent_turn_module):
-    assert not hasattr(agent_turn_module, "execute_tool_call"), (
-        "corvidae.agent_turn should not re-export execute_tool_call"
+def test_turn_does_not_export_execute_tool_call(turn_module):
+    assert not hasattr(turn_module, "execute_tool_call"), (
+        "corvidae.turn should not re-export execute_tool_call"
     )
 
 
-def test_agent_turn_does_not_export_tool_to_schema(agent_turn_module):
-    assert not hasattr(agent_turn_module, "tool_to_schema"), (
-        "corvidae.agent_turn should not re-export tool_to_schema"
+def test_turn_does_not_export_tool_to_schema(turn_module):
+    assert not hasattr(turn_module, "tool_to_schema"), (
+        "corvidae.turn should not re-export tool_to_schema"
     )
 
 

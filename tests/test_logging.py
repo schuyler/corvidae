@@ -44,12 +44,12 @@ def _reset_logging():
 class TestLoggerNamingConvention:
     """Every module must have a module-level logger named after __name__."""
 
-    def test_agent_turn_has_module_logger(self):
-        """corvidae.agent_turn must expose a module-level `logger` attribute
+    def test_turn_has_module_logger(self):
+        """corvidae.turn must expose a module-level `logger` attribute
         whose name matches the module __name__."""
-        import corvidae.agent_turn as mod
-        assert hasattr(mod, "logger"), "agent_turn.py must define module-level `logger`"
-        assert mod.logger.name == "corvidae.agent_turn"
+        import corvidae.turn as mod
+        assert hasattr(mod, "logger"), "turn.py must define module-level `logger`"
+        assert mod.logger.name == "corvidae.turn"
 
     def test_subagent_has_module_logger(self):
         """corvidae.tools.subagent must expose a module-level `logger` attribute
@@ -616,7 +616,7 @@ class TestAgentLoopLogging:
     async def test_turn_info_log(self, caplog):
         """Each turn in run_agent_loop must emit at least one INFO log, and at
         least one INFO record must carry a latency_ms attribute. The INFO log
-        comes from run_agent_turn under the corvidae.agent_turn logger."""
+        comes from run_agent_turn under the corvidae.turn logger."""
         from corvidae.tools.subagent import run_agent_loop
 
         client = MagicMock()
@@ -626,7 +626,7 @@ class TestAgentLoopLogging:
             }
         )
 
-        with caplog.at_level(logging.INFO, logger="corvidae.agent_turn"):
+        with caplog.at_level(logging.INFO, logger="corvidae.turn"):
             await run_agent_loop(
                 client,
                 [{"role": "user", "content": "hi"}],
@@ -634,7 +634,7 @@ class TestAgentLoopLogging:
                 tool_schemas=[],
             )
 
-        records = [r for r in caplog.records if r.name == "corvidae.agent_turn"]
+        records = [r for r in caplog.records if r.name == "corvidae.turn"]
         info_records = [r for r in records if r.levelno == logging.INFO]
         assert info_records, (
             "run_agent_loop must emit at least one INFO log per turn"

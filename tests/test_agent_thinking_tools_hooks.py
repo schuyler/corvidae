@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 import aiosqlite
 import pytest
 
-from corvidae.agent_turn import AgentTurnResult
+from corvidae.turn import AgentTurnResult
 from corvidae.channel import ChannelConfig, ChannelRegistry
 from corvidae.persistence import PersistencePlugin, init_db
 from corvidae.hooks import create_plugin_manager

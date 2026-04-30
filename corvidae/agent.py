@@ -29,7 +29,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field, fields as dc_fields
 from enum import Enum
 
-from corvidae.agent_turn import AgentTurnResult, run_agent_turn
+from corvidae.turn import AgentTurnResult, run_agent_turn
 from corvidae.channel import Channel, ChannelConfig, ChannelRegistry, resolve_system_prompt
 from corvidae.context import ContextWindow, MessageType, DEFAULT_CHARS_PER_TOKEN
 from corvidae.hooks import CorvidaePlugin, resolve_hook_results, HookStrategy, get_dependency, hookimpl
