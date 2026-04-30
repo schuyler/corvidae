@@ -633,16 +633,16 @@ class TestAgentConstants:
 
 class TestAgentLoopConstants:
     def test_agent_loop_constants(self):
-        """LOG_TRUNCATION_LENGTH lives in agent_turn; MAX_ROUNDS_REACHED_MESSAGE lives in tools.subagent."""
-        import corvidae.agent_turn as agent_turn_mod
+        """LOG_TRUNCATION_LENGTH lives in turn; MAX_ROUNDS_REACHED_MESSAGE lives in tools.subagent."""
+        import corvidae.turn as turn_mod
         import corvidae.tools.subagent as subagent_mod
 
-        assert hasattr(agent_turn_mod, "LOG_TRUNCATION_LENGTH"), (
-            "corvidae.agent_turn must define LOG_TRUNCATION_LENGTH"
+        assert hasattr(turn_mod, "LOG_TRUNCATION_LENGTH"), (
+            "corvidae.turn must define LOG_TRUNCATION_LENGTH"
         )
-        assert isinstance(agent_turn_mod.LOG_TRUNCATION_LENGTH, int)
-        assert agent_turn_mod.LOG_TRUNCATION_LENGTH == 200, (
-            f"LOG_TRUNCATION_LENGTH must be 200, got {agent_turn_mod.LOG_TRUNCATION_LENGTH!r}"
+        assert isinstance(turn_mod.LOG_TRUNCATION_LENGTH, int)
+        assert turn_mod.LOG_TRUNCATION_LENGTH == 200, (
+            f"LOG_TRUNCATION_LENGTH must be 200, got {turn_mod.LOG_TRUNCATION_LENGTH!r}"
         )
 
         assert hasattr(subagent_mod, "MAX_ROUNDS_REACHED_MESSAGE"), (

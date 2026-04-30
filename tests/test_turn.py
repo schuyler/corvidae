@@ -1,4 +1,4 @@
-"""Tests for corvidae.agent_turn -- run_agent_turn, AgentTurnResult, tool_to_schema, LLMClient extra_body."""
+"""Tests for corvidae.turn -- run_agent_turn, AgentTurnResult, tool_to_schema, LLMClient extra_body."""
 
 import json
 import logging
@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from corvidae.agent_turn import AgentTurnResult, run_agent_turn
+from corvidae.turn import AgentTurnResult, run_agent_turn
 from corvidae.tool import tool_to_schema
 
 
@@ -253,10 +253,10 @@ async def test_run_agent_turn_logging_info_and_debug(caplog):
     client.chat = AsyncMock(return_value=_make_text_response("logged"))
 
     messages = [{"role": "user", "content": "hi"}]
-    with caplog.at_level(logging.DEBUG, logger="corvidae.agent_turn"):
+    with caplog.at_level(logging.DEBUG, logger="corvidae.turn"):
         await run_agent_turn(client, messages, tool_schemas=[])
 
-    records = [r for r in caplog.records if r.name == "corvidae.agent_turn"]
+    records = [r for r in caplog.records if r.name == "corvidae.turn"]
 
     info_records = [
         r for r in records
@@ -293,10 +293,10 @@ async def test_run_agent_turn_reasoning_content_debug_log(caplog):
     client.chat = AsyncMock(return_value=response)
 
     messages = [{"role": "user", "content": "reason through it"}]
-    with caplog.at_level(logging.DEBUG, logger="corvidae.agent_turn"):
+    with caplog.at_level(logging.DEBUG, logger="corvidae.turn"):
         await run_agent_turn(client, messages, tool_schemas=[])
 
-    records = [r for r in caplog.records if r.name == "corvidae.agent_turn"]
+    records = [r for r in caplog.records if r.name == "corvidae.turn"]
     debug_records = [
         r for r in records
         if r.levelno == logging.DEBUG and r.getMessage() == "LLM response content"

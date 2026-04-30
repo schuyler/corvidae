@@ -15,7 +15,7 @@ import aiosqlite
 import pytest
 
 from corvidae.agent import Agent
-from corvidae.agent_turn import AgentTurnResult, run_agent_turn  # noqa: F401 (used in comments/type checking)
+from corvidae.turn import AgentTurnResult, run_agent_turn  # noqa: F401 (used in comments/type checking)
 from corvidae.channel import ChannelConfig, ChannelRegistry
 from corvidae.persistence import init_db
 from corvidae.hooks import create_plugin_manager

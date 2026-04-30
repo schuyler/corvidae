@@ -387,7 +387,7 @@ class TestOnMessagePersistenceAndLoop:
 
     async def test_on_message_calls_run_agent_turn(self):
         """Verify run_agent_turn is called with the correct arguments."""
-        from corvidae.agent_turn import AgentTurnResult
+        from corvidae.turn import AgentTurnResult
 
         plugin, channel, db = await build_plugin_and_channel()
 
@@ -773,7 +773,7 @@ class TestOnMessageCompactionAndConfig:
         with the correct client and max_tokens, and that it runs before the LLM.
         """
         from corvidae.hooks import hookimpl
-        from corvidae.agent_turn import AgentTurnResult
+        from corvidae.turn import AgentTurnResult
 
         plugin, channel, db = await build_plugin_and_channel()
 
@@ -1486,7 +1486,7 @@ class TestCompactConversation:
         """A custom compact_conversation plugin that returns True is invoked
         and the agent turn still runs. The hook call completes normally."""
         from corvidae.hooks import hookimpl
-        from corvidae.agent_turn import AgentTurnResult
+        from corvidae.turn import AgentTurnResult
 
         plugin, channel, db = await build_plugin_and_channel()
 
@@ -1529,7 +1529,7 @@ class TestCompactConversation:
         """When no compact_conversation impl returns a non-None result,
         the agent loop continues normally without error."""
         from corvidae.hooks import hookimpl
-        from corvidae.agent_turn import AgentTurnResult
+        from corvidae.turn import AgentTurnResult
 
         plugin, channel, db = await build_plugin_and_channel()
 
@@ -1566,7 +1566,7 @@ class TestCompactConversation:
         The agent turn still runs after the compaction block fails."""
         import logging
         from corvidae.hooks import hookimpl
-        from corvidae.agent_turn import AgentTurnResult
+        from corvidae.turn import AgentTurnResult
 
         plugin, channel, db = await build_plugin_and_channel()
 
@@ -1613,7 +1613,7 @@ class TestCompactConversation:
         """compact_conversation is called with conversation and max_tokens
         matching the channel's resolved config."""
         from corvidae.hooks import hookimpl
-        from corvidae.agent_turn import AgentTurnResult
+        from corvidae.turn import AgentTurnResult
 
         plugin, channel, db = await build_plugin_and_channel()
 
@@ -1836,7 +1836,7 @@ class TestBeforeAgentTurn:
         This fails until the hookspec exists and _process_queue_item calls it.
         """
         from corvidae.hooks import hookimpl
-        from corvidae.agent_turn import AgentTurnResult
+        from corvidae.turn import AgentTurnResult
 
         plugin, channel, db = await build_plugin_and_channel()
 

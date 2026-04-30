@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Callable
 
-from corvidae.agent_turn import run_agent_turn
+from corvidae.turn import run_agent_turn
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 from corvidae.llm import LLMClient
 from corvidae.task import Task
