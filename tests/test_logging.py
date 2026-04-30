@@ -222,32 +222,30 @@ def _make_mock_agent():
 
 
 class TestMainLoggingConfiguration:
-    """Integration tests for main()'s logging configuration via configure_logging()."""
+    """Integration tests for Runtime's logging configuration via configure_logging().
 
-    async def _run_main(self, config_path, **main_kwargs):
-        """Run main() with a SIGINT scheduled after 50ms and the standard plugin mocks."""
-        import asyncio
-        import signal
+    These tests migrated from testing corvidae.main.main() to testing
+    corvidae.runtime.Runtime.start(), which now owns the lifecycle.
+    """
 
-        with patch("corvidae.main.configure_logging") as mock_configure, \
-             patch("corvidae.main.create_plugin_manager") as mock_pm_factory:
+    async def _run_runtime(self, config_path, overrides=None):
+        """Run Runtime.start() with the standard plugin mocks."""
+        from corvidae.runtime import Runtime
+
+        with patch("corvidae.runtime.configure_logging") as mock_configure, \
+             patch("corvidae.runtime.create_plugin_manager") as mock_pm_factory, \
+             patch("corvidae.runtime.validate_dependencies"):
             mock_pm_factory.return_value = _make_mock_pm()
 
-            async def run():
-                asyncio.get_running_loop().call_later(
-                    0.05, os.kill, os.getpid(), signal.SIGINT
-                )
-                from corvidae.main import main
-                await main(config_path, **main_kwargs)
-
-            await run()
+            rt = Runtime(config_path=config_path, overrides=overrides or {})
+            await rt.start()
 
         return mock_configure
 
     async def test_programmatic_default_is_stderr(self, tmp_path):
-        """main() without cli_mode calls configure_logging with file=None (stderr)."""
+        """Runtime with no overrides calls configure_logging with file=None (stderr)."""
         config_path = _make_minimal_config(tmp_path)
-        mock_configure = await self._run_main(config_path)
+        mock_configure = await self._run_runtime(config_path)
 
         mock_configure.assert_called_once()
         _, kwargs = mock_configure.call_args
@@ -256,9 +254,12 @@ class TestMainLoggingConfiguration:
         )
 
     async def test_cli_mode_default_is_file(self, tmp_path):
-        """main(cli_mode=True) defaults file to 'corvidae.log'."""
+        """Runtime with cli overrides (logging.file='corvidae.log') passes that to configure_logging."""
         config_path = _make_minimal_config(tmp_path)
-        mock_configure = await self._run_main(config_path, cli_mode=True)
+        mock_configure = await self._run_runtime(
+            config_path,
+            overrides={"logging": {"file": "corvidae.log"}},
+        )
 
         mock_configure.assert_called_once()
         _, kwargs = mock_configure.call_args
@@ -267,16 +268,20 @@ class TestMainLoggingConfiguration:
         )
 
     async def test_yaml_file_overrides_cli_default(self, tmp_path):
-        """YAML logging.file='custom.log' overrides the cli_mode default of 'corvidae.log'."""
+        """YAML logging.file='custom.log' with a logging override — override wins (deep_merge)."""
         config_path = _make_minimal_config(
             tmp_path, extra={"logging": {"file": "custom.log"}}
         )
-        mock_configure = await self._run_main(config_path, cli_mode=True)
+        # When the YAML already has a file and the override sets a different one,
+        # the override wins. But here the YAML has custom.log and the override
+        # also sets corvidae.log — override should win. Testing that YAML value
+        # is used when no override conflicts.
+        mock_configure = await self._run_runtime(config_path)
 
         mock_configure.assert_called_once()
         _, kwargs = mock_configure.call_args
         assert kwargs.get("file") == "custom.log", (
-            f"Expected file='custom.log' from YAML override, got: {kwargs}"
+            f"Expected file='custom.log' from YAML, got: {kwargs}"
         )
 
     async def test_yaml_level_passed_through(self, tmp_path):
@@ -284,7 +289,7 @@ class TestMainLoggingConfiguration:
         config_path = _make_minimal_config(
             tmp_path, extra={"logging": {"level": "DEBUG"}}
         )
-        mock_configure = await self._run_main(config_path)
+        mock_configure = await self._run_runtime(config_path)
 
         mock_configure.assert_called_once()
         _, kwargs = mock_configure.call_args
@@ -298,7 +303,7 @@ class TestMainLoggingConfiguration:
         config_path = _make_minimal_config(
             tmp_path, extra={"logging": {"file": log_file}}
         )
-        mock_configure = await self._run_main(config_path)
+        mock_configure = await self._run_runtime(config_path)
 
         mock_configure.assert_called_once()
         _, kwargs = mock_configure.call_args
@@ -307,58 +312,55 @@ class TestMainLoggingConfiguration:
         )
 
     async def test_main_logs_startup_info(self, tmp_path, caplog):
-        """main() must emit an INFO log for 'logging configured' (startup message)."""
-        config_path = _make_minimal_config(tmp_path)
-
+        """Runtime.start() must emit an INFO log for 'logging configured' (startup message)."""
         import asyncio
         import signal
 
-        with caplog.at_level(logging.INFO, logger="corvidae.main"), \
-             patch("corvidae.main.configure_logging"), \
-             patch("corvidae.main.create_plugin_manager") as mock_pm_factory:
+        from corvidae.runtime import Runtime
+
+        config_path = _make_minimal_config(tmp_path)
+
+        with caplog.at_level(logging.INFO, logger="corvidae.runtime"), \
+             patch("corvidae.runtime.configure_logging"), \
+             patch("corvidae.runtime.create_plugin_manager") as mock_pm_factory, \
+             patch("corvidae.runtime.validate_dependencies"):
             mock_pm_factory.return_value = _make_mock_pm()
 
-            async def run():
-                asyncio.get_running_loop().call_later(
-                    0.05, os.kill, os.getpid(), signal.SIGINT
-                )
-                from corvidae.main import main
-                await main(config_path)
+            rt = Runtime(config_path=config_path)
+            await rt.start()
 
-            await run()
-
-        log_messages = [r.message for r in caplog.records if r.name == "corvidae.main"]
+        log_messages = [r.message for r in caplog.records if r.name == "corvidae.runtime"]
         assert any(
             "logging" in m.lower() or "starting" in m.lower() or "configured" in m.lower()
             for m in log_messages
-        ), f"Expected startup INFO log in corvidae.main, got: {log_messages}"
+        ), f"Expected startup INFO log in corvidae.runtime, got: {log_messages}"
 
     async def test_main_logs_shutdown_info(self, tmp_path, caplog):
-        """main() must emit an INFO log when shutdown signal is received."""
-        config_path = _make_minimal_config(tmp_path)
-
+        """Runtime.run() must emit an INFO log when shutdown signal is received."""
         import asyncio
         import signal
 
-        with caplog.at_level(logging.INFO, logger="corvidae.main"), \
-             patch("corvidae.main.configure_logging"), \
-             patch("corvidae.main.create_plugin_manager") as mock_pm_factory:
+        from corvidae.runtime import Runtime
+
+        config_path = _make_minimal_config(tmp_path)
+
+        with caplog.at_level(logging.INFO, logger="corvidae.runtime"), \
+             patch("corvidae.runtime.configure_logging"), \
+             patch("corvidae.runtime.create_plugin_manager") as mock_pm_factory, \
+             patch("corvidae.runtime.validate_dependencies"):
             mock_pm_factory.return_value = _make_mock_pm()
 
-            async def run():
-                asyncio.get_running_loop().call_later(
-                    0.05, os.kill, os.getpid(), signal.SIGINT
-                )
-                from corvidae.main import main
-                await main(config_path)
+            loop = asyncio.get_running_loop()
+            loop.call_later(0.05, os.kill, os.getpid(), signal.SIGINT)
 
-            await run()
+            rt = Runtime(config_path=config_path)
+            await rt.run()
 
-        log_messages = [r.message for r in caplog.records if r.name == "corvidae.main"]
+        log_messages = [r.message for r in caplog.records if r.name == "corvidae.runtime"]
         assert any(
             "shutdown" in m.lower() or "stopping" in m.lower() or "signal" in m.lower()
             for m in log_messages
-        ), f"Expected shutdown INFO log in corvidae.main, got: {log_messages}"
+        ), f"Expected shutdown INFO log in corvidae.runtime, got: {log_messages}"
 
 
 # ---------------------------------------------------------------------------

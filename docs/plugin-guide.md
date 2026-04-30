@@ -47,11 +47,46 @@ Plugins are loaded via setuptools entry points. Declare them in `pyproject.toml`
 my_plugin = "my_package:MyPlugin"
 ```
 
-`main.py` calls `pm.load_setuptools_entrypoints("corvidae")`, which instantiates each entry point class with no arguments and registers it. `validate_dependencies(pm)` runs next, then `pm.ahook.on_init(pm=pm, config=config)` broadcasts to all registered plugins.
+`Runtime.start()` calls `pm.load_setuptools_entrypoints("corvidae")`, which instantiates each entry point class with no arguments and registers it. `validate_dependencies(pm)` runs next, then `pm.ahook.on_init(pm=pm, config=config)` broadcasts to all registered plugins.
 
 All plugin classes must be instantiable with no arguments. `pm` and `config` are delivered via `on_init`.
 
-**ChannelRegistry** is the exception: it is not an entry-point plugin. It is a plain class with no `@hookimpl` decorators, constructed explicitly in `main.py` and populated from config before the entry point plugins are loaded.
+**ChannelRegistry** is the exception: it is not an entry-point plugin. It is a plain class with no `@hookimpl` decorators, constructed explicitly in `Runtime.start()` and populated from config before the entry point plugins are loaded.
+
+## Registering CLI subcommands
+
+Plugins can add subcommands to the `corvidae` CLI by registering entries in the `corvidae.commands` entry point group. Each entry point maps a subcommand name to a `click.Command` (or `click.Group` for nested subcommands).
+
+```toml
+[project.entry-points."corvidae.commands"]
+scaffold = "corvidae_scaffold:scaffold_command"
+```
+
+The entry point value must be a `click.Command` or `click.Group` object. `corvidae.main` discovers all registered entries at import time and adds them to the top-level `corvidae` group. If an entry point fails to load, a warning is logged and the subcommand is skipped — other subcommands are unaffected.
+
+Subcommands are standard click commands managed by the `corvidae` click Group. Subcommands that need the agent runtime construct a `Runtime` instance and call `asyncio.run(runtime.run())`:
+
+```python
+import asyncio
+import click
+from corvidae.runtime import Runtime
+
+@click.command("myplugin")
+@click.option("--config", default="agent.yaml", help="Path to config file")
+def myplugin_command(config):
+    """Start corvidae with myplugin active."""
+    runtime = Runtime(
+        config_path=config,
+        overrides={"channels": {"cli:local": {}}},
+    )
+    asyncio.run(runtime.run())
+```
+
+Utility subcommands that do not need the agent runtime omit the `Runtime` import entirely. They can perform their work synchronously without booting the plugin system.
+
+Entry point modules in `corvidae.commands` are imported at dispatcher load time, before `Runtime.start()` configures logging or creates an event loop. These modules must not have module-level side effects that depend on logging configuration or a running event loop. Standard library imports (`asyncio`, `click`) and `corvidae.runtime` are safe at module level. Avoid importing modules with side effects (network connections, file I/O, logging configuration) at the top level — use lazy imports inside the command function for those.
+
+The existing `corvidae` entry point group (for plugins) and the `corvidae.commands` group (for subcommands) are distinct setuptools groups. Registering in one does not affect the other.
 
 ## Available hooks
 
@@ -63,7 +98,7 @@ All plugin classes must be instantiable with no arguments. `pm` and `config` are
 | `on_start(config: dict)` | async broadcast | Once at startup, after `on_init`. Use to open runtime resources: DB connections, network clients, file handles, asyncio tasks. |
 | `on_stop()` | async broadcast | On SIGINT/SIGTERM, before process exits |
 
-`config` is the full parsed `agent.yaml` dict. The key `_base_dir` (a `Path`) is injected by `main.py` pointing to the config file's directory.
+`config` is the full parsed `agent.yaml` dict. The key `_base_dir` (a `Path`) is set by `Runtime.start()` pointing to the config file's directory.
 
 `CorvidaePlugin.on_init` stores `pm` and `config` as instance attributes. Subclasses that override `on_init` must call `await super().on_init(pm, config)` to preserve this behavior.
 
@@ -284,7 +319,7 @@ channels:
     max_context_tokens: 16000
 ```
 
-The `irc` transport is provided by `IRCPlugin` (registered as `"irc"` in `main.py`). Its config block:
+The `irc` transport is provided by `IRCPlugin` (registered via the `corvidae` entry point group). Its config block:
 
 ```yaml
 irc:
@@ -324,9 +359,9 @@ idle_monitor      (IdleMonitorPlugin)   — entry point
 
 **Tool collection:** `ToolCollectionPlugin.on_start` uses `@hookimpl(trylast=True)` so it fires after all other `on_start` hooks, then calls `register_tools` to collect tools from every registered plugin. The non-deterministic loading order does not affect tool collection because `trylast=True` ensures `ToolCollectionPlugin.on_start` always runs last in the broadcast.
 
-**Startup order:** `main.py` broadcasts `on_init`, then `on_start`. `ToolCollectionPlugin.on_start` runs last (trylast) to collect tools. `main.py` then calls `agent.on_start(config=config)` explicitly after the broadcast completes. `Agent.on_start` does not have `@hookimpl` — it is called only by `main.py`. Adding `@hookimpl` to `Agent.on_start` would cause double initialization.
+**Startup order:** `Runtime.start()` broadcasts `on_init`, then `on_start`. `ToolCollectionPlugin.on_start` runs last (trylast) to collect tools. `Runtime.start()` then calls `agent.on_start(config=config)` explicitly after the broadcast completes. `Agent.on_start` does not have `@hookimpl` — it is called only by `Runtime.start()`. Adding `@hookimpl` to `Agent.on_start` would cause double initialization.
 
-**Shutdown order:** `main.py` calls `agent.on_stop()` first (drains queues), then `pm.ahook.on_stop()` to tear down all other plugins.
+**Shutdown order:** `Runtime.stop()` calls `agent.on_stop()` first (drains queues), then `pm.ahook.on_stop()` to tear down all other plugins.
 
 `idle_monitor` depends on `"agent"`. Its `on_start` uses `@hookimpl(trylast=True)` to run late in the broadcast. Because `Agent.on_start` is called after the broadcast completes, `idle_monitor` is always initialized before `Agent` starts.
 
