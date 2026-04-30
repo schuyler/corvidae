@@ -5,7 +5,7 @@ requires-python = ">=3.13"
 dependencies = [
     "aiohttp>=3.9",
     "aiosqlite>=0.19",
-    "apluggy>=1.1.2",
+    "apluggy @ git+https://github.com/schuyler/apluggy.git@main",
     "chromadb>=0.5",
     "click>=8.0",
     "ddgs>=9.0",
