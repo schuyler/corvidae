@@ -221,9 +221,12 @@ class TestPushBasedIdle:
 
         agent = Agent(pm)
         agent._idle_cooldown = 3600.0  # long cooldown
-        agent._last_idle_fire = 0.0
+        # Set last-fire two cooldowns in the past so the first call definitely
+        # passes the cooldown check, regardless of the absolute monotonic clock
+        # value (which is environment-dependent — small in fresh sandboxes).
+        agent._last_idle_fire = time.monotonic() - 2 * agent._idle_cooldown
 
-        # First call should fire (cooldown not yet elapsed from 0.0)
+        # First call should fire (cooldown has elapsed)
         await agent._maybe_fire_idle()
         assert pm.ahook.on_idle.await_count == 1
 
