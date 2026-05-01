@@ -102,7 +102,7 @@ async def test_comment_escapes_body():
 
 
 async def test_comment_skips_when_workflow_comment_exists():
-    """comment_on_issue skips posting if a workflow comment already exists."""
+    """comment_on_issue returns existing comment for review when marker found."""
     comments_json = (
         '[{"body": "Nice idea"},'
         ' {"body": "Plan here\\n\\n<!-- corvidae-workflow -->"}]'
@@ -116,7 +116,8 @@ async def test_comment_skips_when_workflow_comment_exists():
         # Should NOT have called shell to post — dedup found the marker
         mock_shell.assert_not_awaited()
         assert "already exists" in result
-        assert "Skipping" in result
+        assert "Plan here" in result
+        assert "review" in result.lower()
 
 
 async def test_comment_posts_when_no_workflow_comment_exists():

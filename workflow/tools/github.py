@@ -85,16 +85,23 @@ def make_github_comment_tool(repo: str, issue_number: int) -> Tool:
         Args:
             body: The comment text to post.
         """
-        # Deduplication: skip if a workflow comment already exists.
+        # Deduplication: if a workflow comment already exists, return
+        # its body so the LLM can review it and decide whether to
+        # update it or proceed without changes.
         existing = await _existing_workflow_comment()
         if existing is not None:
             logger.info(
-                "Workflow comment already exists on %s#%d, skipping",
+                "Workflow comment already exists on %s#%d, returning for review",
                 repo, issue_number,
             )
             return (
                 "A workflow comment already exists on this issue. "
-                "Skipping duplicate post."
+                "Here is its current content:\n\n"
+                + existing
+                + "\n\nReview this comment. If it is still accurate and "
+                "complete, call stage_complete with outcome='proceed' "
+                "without posting a new comment. If it needs changes, "
+                "post an updated comment."
             )
 
         # Append hidden marker so future runs can detect this comment.

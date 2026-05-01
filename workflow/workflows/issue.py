@@ -19,6 +19,7 @@ they require waiting for external events (PR review, PR merge).
 
 from __future__ import annotations
 
+import logging
 import re
 
 from corvidae.tool import Tool
@@ -41,6 +42,8 @@ from workflow.tools.plan import (
     PlanHolder,
     make_record_plan_tool,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def parse_issue_url(url: str) -> tuple[str, int]:
@@ -77,20 +80,49 @@ async def write_source(path: str, content: str) -> str:
 
 # -- Mechanical stage helpers --
 
-def _make_add_label_fn(repo: str, issue_number: int):
-    """Create a mechanical_fn that adds the 'in-progress' label."""
+def _make_add_label_fn(repo: str, issue_number: int, label: str = "in progress"):
+    """Create a mechanical_fn that adds a label to the issue.
+
+    Defaults to 'in progress' (the label name in the GitHub repo).
+    Creates the label first if it doesn't exist.
+    """
     async def fn(ctx: WorkflowContext) -> StageResult:
         import shlex
-        cmd = (
+        # Try adding the label; if it fails because the label doesn't
+        # exist, create it first then retry.
+        add_cmd = (
             f"gh issue edit {issue_number} "
             f"--repo {shlex.quote(repo)} "
-            f"--add-label in-progress"
+            f"--add-label {shlex.quote(label)}"
         )
-        await shell(cmd, timeout=30)
+        result = await shell(add_cmd, timeout=30)
+
+        if "not found" in result:
+            # Label doesn't exist in the repo — create it then retry.
+            logger.info(
+                "Label %r not found, creating it in %s",
+                label, repo,
+            )
+            create_cmd = (
+                f"gh label create {shlex.quote(label)} "
+                f"--repo {shlex.quote(repo)} "
+                f"--description 'Currently being worked on' "
+                f"--color 7eeea2 --force"
+            )
+            await shell(create_cmd, timeout=30)
+            result = await shell(add_cmd, timeout=30)
+
+        if "failed" in result.lower() or "error" in result.lower():
+            return StageResult(
+                stage_name="add_label",
+                outcome=StageOutcome.BLOCKED,
+                summary=f"Failed to add label: {result}",
+            )
+
         return StageResult(
             stage_name="add_label",
             outcome=StageOutcome.PROCEED,
-            summary="Added in-progress label",
+            summary=f"Added label '{label}' to issue #{issue_number}",
         )
     return fn
 

@@ -122,7 +122,8 @@ The motivating workflow. Stages:
    implementation plan. Also calls `record_plan` to save a structured
    plan artifact (branch name, task type, files to change, etc.) for
    later stages. *Tools: GitHub comments API, record_plan.*
-2. **Add "in progress" label** — Mechanical. No LLM.
+2. **Add "in progress" label** — Mechanical. Creates the label if
+   it doesn't exist in the repo, then adds it to the issue. No LLM.
 3. **Create branch and worktree** — Uses the plan's suggested branch
    name if available, otherwise the LLM suggests one.
    *Tools: git.*
@@ -214,6 +215,12 @@ lives in `workflow/` and imports Corvidae primitives directly.
   stages produce a detailed summary showing which stage failed, the
   LLM's reasoning, and suggested next steps (including branch name
   for manual cleanup).
+- **Comment deduplication**: The `comment_on_issue` tool tags comments
+  with a hidden `<!-- corvidae-workflow -->` HTML marker. On re-runs,
+  the tool checks for an existing marked comment. If found, it returns
+  the existing comment body so the LLM can review it and decide
+  whether to update it or proceed without changes. If the check fails
+  (network error, parse error), the tool fails open and posts anyway.
 - **Plan artifact**: The `comment_on_issue` stage produces a structured
   plan (`branch_name`, `task_type`, `needs_tests`, `needs_docs`,
   `files_to_change`, `pr_title`, `summary`) via the `record_plan` tool.

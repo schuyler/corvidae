@@ -79,6 +79,38 @@ def test_mechanical_stages_are_marked():
     assert label_stage.mechanical_fn is not None
 
 
+@pytest.mark.timeout(5)
+async def test_add_label_creates_label_if_missing():
+    """add_label creates the label if it doesn't exist in the repo."""
+    stages = build_issue_workflow(
+        repo="o/r", issue_number=1,
+        repo_path="/r", issue_body="x",
+    )
+    label_stage = next(s for s in stages if s.name == "add_label")
+    from workflow.context import WorkflowContext
+    ctx = WorkflowContext()
+
+    with patch("workflow.workflows.issue.shell", new_callable=AsyncMock) as mock:
+        # First call: add-label fails with "not found"
+        # Second call: create label succeeds
+        # Third call: add-label succeeds
+        mock.side_effect = [
+            "failed to update: 'in progress' not found",
+            "Label 'in progress' created",
+            "",  # success on retry
+        ]
+        result = await label_stage.mechanical_fn(ctx)
+
+        assert result.outcome == StageOutcome.PROCEED
+        assert "in progress" in result.summary
+        # Verify create + retry
+        calls = mock.call_args_list
+        assert len(calls) == 3
+        assert "--add-label" in calls[0][0][0]
+        assert "label create" in calls[1][0][0]
+        assert "--add-label" in calls[2][0][0]
+
+
 def test_llm_stages_have_instructions():
     """Every non-mechanical stage has a non-empty instruction."""
     stages = build_issue_workflow(
