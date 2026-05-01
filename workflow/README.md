@@ -30,14 +30,21 @@ stages.
 This prevents context drift and means each stage is predictable and
 testable in isolation.
 
-### The orchestrator gathers facts; the LLM explains reasoning
+### Prefer deterministic code; the LLM explains reasoning
+
+Where possible, move responsibility for any work to deterministic code
+rather than the LLM. The LLM should only do things that require
+judgment. If it's unclear whether a task needs the LLM, prefer
+deterministic code and check with a human when output quality might
+suffer.
 
 Stage output has two channels:
 
 1. **LLM summary** — decisions made, reasoning behind them, approaches
    tried and rejected. Only things that require *judgment*.
 2. **Orchestrator-gathered facts** — file diffs, test results, branch
-   names, GitHub state. Anything observable programmatically.
+   names, GitHub state, and the inputs and outputs of tool calls made
+   during the stage. Anything observable programmatically.
 
 The LLM never redundantly reports what the orchestrator can verify
 directly. This keeps summaries small and prevents inaccurate
@@ -164,6 +171,13 @@ Human gates are configurable per stage. Likely candidates: before stage 5
   reviewers benefit from knowing what was tried and abandoned.
 - **Verify independently.** Don't trust the LLM's claim that it's done.
   Check exit criteria programmatically.
+- **Prefer deterministic code.** If a task can be done without the LLM,
+  do it in code. If it's unclear, prefer code and ask a human when output
+  quality might suffer. The LLM is expensive and unreliable; Python is
+  cheap and deterministic.
+- **Capture tool I/O.** The orchestrator logs tool call inputs and
+  outputs as facts. The LLM doesn't need to summarise what it did — the
+  orchestrator already knows.
 - **Start thin, evolve when patterns are clear.** Don't build a
   framework until you've built at least two workflows and can see what's
   reusable.
