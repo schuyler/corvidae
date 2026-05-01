@@ -63,6 +63,11 @@ responsibility.
 
 ### Three-layer stage exit
 
+Within a stage, the LLM runs in a tool-calling loop (like Corvidae's
+`run_agent_loop`). It may call tools multiple times — write files, run
+shell commands, post comments — before signalling completion. The loop
+ends when the LLM calls the `stage_complete` tool.
+
 A stage completes when:
 
 1. The LLM calls a structured `stage_complete(outcome, summary)` tool
