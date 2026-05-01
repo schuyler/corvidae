@@ -181,3 +181,43 @@ Human gates are configurable per stage. Likely candidates: before stage 5
 - **Start thin, evolve when patterns are clear.** Don't build a
   framework until you've built at least two workflows and can see what's
   reusable.
+
+## Implementation Status
+
+**Approach A** (standalone script) is implemented. The workflow engine
+lives in `workflow/` and imports Corvidae primitives directly.
+
+### What's built
+
+- **Core engine**: Stage, StageRunner, WorkflowEngine with linear backbone
+  and escape hatches
+- **stage_complete tool**: Three-layer exit (LLM signal → exit criteria
+  verification → human gate)
+- **Tool scoping**: Each stage receives only the tools it needs
+- **WorkflowContext**: Two-channel accumulation (summaries + facts)
+- **GitHub issue workflow**: 10 of 12 stages implemented (stages 1–10;
+  PR feedback and issue close deferred)
+
+### Usage
+
+```bash
+# Run the issue implementation workflow
+python -m workflow implement --issue https://github.com/owner/repo/issues/42
+
+# Specify a local repo path
+python -m workflow implement --issue https://github.com/owner/repo/issues/42 --repo-path /path/to/repo
+```
+
+### Prerequisites
+
+- Python 3.13+
+- `gh` CLI installed and authenticated
+- `agent.yaml` in the working directory with `llm.main` config
+
+### What's deferred
+
+- **Stage 11** (respond to PR feedback): Requires waiting for external
+  events. Will need a pause/resume mechanism.
+- **Stage 12** (close issue): Requires waiting for PR merge.
+- **Framework extraction** (Approach B/C): Wait until a second workflow
+  exists to identify reusable patterns.
