@@ -14,3 +14,7 @@ uv.lock
 # local dev
 apluggy
 *.log
+
+# artifacts
+.superpowers/
+eval_results.json
