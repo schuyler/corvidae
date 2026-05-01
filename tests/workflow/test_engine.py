@@ -243,3 +243,64 @@ async def test_proceed_with_spurious_escape_target_advances():
 
     # Both stages should run — engine ignores the spurious escape_target
     assert order == ["a", "b"]
+
+
+class TestEngineDisplay:
+    """Tests for engine's display output during stage lifecycle."""
+
+    async def test_displays_stage_start(self, capsys):
+        """Engine shows stage start via display."""
+        stages = [
+            Stage(name="alpha", instruction="", is_mechanical=True,
+                  mechanical_fn=_mech_fn("alpha", StageOutcome.PROCEED, "ok")),
+        ]
+        engine = WorkflowEngine(MagicMock())
+        await engine.run(stages, WorkflowContext())
+        captured = capsys.readouterr()
+        assert "▸ alpha" in captured.out
+
+    async def test_displays_stage_complete(self, capsys):
+        """Engine shows stage completion via display."""
+        stages = [
+            Stage(name="beta", instruction="", is_mechanical=True,
+                  mechanical_fn=_mech_fn("beta", StageOutcome.PROCEED, "ok")),
+        ]
+        engine = WorkflowEngine(MagicMock())
+        await engine.run(stages, WorkflowContext())
+        captured = capsys.readouterr()
+        assert "✓ beta (proceed)" in captured.out
+
+    async def test_displays_stage_skip(self, capsys):
+        """Engine shows skipped stage via display."""
+        stages = [
+            Stage(name="gamma", instruction="", is_mechanical=True,
+                  mechanical_fn=_mech_fn("gamma", StageOutcome.PROCEED, "ok"),
+                  should_run=lambda ctx: False),
+        ]
+        engine = WorkflowEngine(MagicMock())
+        await engine.run(stages, WorkflowContext())
+        captured = capsys.readouterr()
+        assert "⊘ gamma (skipped)" in captured.out
+
+    async def test_displays_blocked_workflow(self, capsys):
+        """Engine shows blocked message when workflow stops."""
+        stages = [
+            Stage(name="delta", instruction="", is_mechanical=True,
+                  mechanical_fn=_mech_fn("delta", StageOutcome.BLOCKED, "stuck")),
+        ]
+        engine = WorkflowEngine(MagicMock())
+        await engine.run(stages, WorkflowContext())
+        captured = capsys.readouterr()
+        assert "✗ delta (blocked)" in captured.out
+        assert "blocked" in captured.out.lower()
+
+    async def test_displays_workflow_complete(self, capsys):
+        """Engine shows completion message when all stages finish."""
+        stages = [
+            Stage(name="zeta", instruction="", is_mechanical=True,
+                  mechanical_fn=_mech_fn("zeta", StageOutcome.PROCEED, "done")),
+        ]
+        engine = WorkflowEngine(MagicMock())
+        await engine.run(stages, WorkflowContext())
+        captured = capsys.readouterr()
+        assert "done" in captured.out.lower()

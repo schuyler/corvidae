@@ -31,6 +31,29 @@ def make_create_branch_tool(repo_path: str) -> Tool:
     return Tool.from_function(create_branch)
 
 
+def make_commit_tool(repo_path: str) -> Tool:
+    """Create a tool for staging all changes and committing.
+
+    Runs git add -A then git commit with the provided message.
+    Uses git -C to specify the working directory.
+    """
+
+    async def commit_changes(message: str) -> str:
+        """Stage all changes and commit with a message.
+
+        Args:
+            message: The commit message.
+        """
+        cmd = (
+            f"git -C {shlex.quote(repo_path)} add -A && "
+            f"git -C {shlex.quote(repo_path)} "
+            f"commit -m {shlex.quote(message)}"
+        )
+        return await shell(cmd, timeout=30)
+
+    return Tool.from_function(commit_changes)
+
+
 def make_create_worktree_tool(repo_path: str) -> Tool:
     """Create a tool for adding a git worktree."""
 

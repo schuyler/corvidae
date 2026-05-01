@@ -10,10 +10,9 @@ closure in the tool function. When exit criteria fail, the holder
 is reset and the LLM gets another chance within the same stage.
 """
 
-from __future__ import annotations
-
 import logging
 from dataclasses import dataclass
+from typing import Literal
 
 from workflow.types import StageOutcome
 
@@ -47,14 +46,14 @@ def make_stage_complete_tool(holder: StageCompleteHolder):
     """
 
     async def stage_complete(
-        outcome: str,
+        outcome: Literal["proceed", "need_clarification", "scope_changed", "blocked"],
         summary: str,
         escape_target: str | None = None,
     ) -> str:
         """Signal that this stage is complete.
 
         Args:
-            outcome: EXACTLY one of these values: 'proceed',
+            outcome: EXACTLY one of these four values: 'proceed',
                 'need_clarification', 'scope_changed', 'blocked'.
                 Do NOT pass a sentence or description — pass only one of
                 those four literal strings.
@@ -71,9 +70,9 @@ def make_stage_complete_tool(holder: StageCompleteHolder):
                 "stage_complete received invalid outcome %r", outcome,
             )
             return (
-                f"Error: 'outcome' must be one of {_VALID_OUTCOMES_STR}, "
-                f"but got {outcome!r}. "
-                f"Please call stage_complete again with a valid outcome."
+                f"Error: You passed {outcome!r} which is not a valid outcome. "
+                f"Pass EXACTLY one of: {_VALID_OUTCOMES_STR}. "
+                f"Do not write a sentence — use one of those four literal strings."
             )
 
         holder.outcome = StageOutcome(outcome)

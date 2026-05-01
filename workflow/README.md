@@ -208,6 +208,22 @@ uv run python -m workflow implement --issue https://github.com/owner/repo/issues
 uv run python -m workflow implement --issue https://github.com/owner/repo/issues/42 --repo-path /path/to/repo
 ```
 
+### Logging
+
+The workflow uses dual-handler logging:
+
+- **STDOUT**: Concise, human-readable stage progress — one line per stage
+  using unicode symbols (▸ start, ✓ complete, ✗ blocked, ⊘ skipped).
+  No timestamps or internal logging noise.
+- **File**: Full DEBUG-level structured logs written to `workflow.log`
+  (or a configured path). Uses `StructuredFormatter` for key=value
+  extra fields. Captures everything for post-mortem debugging.
+
+The `workflow/display.py` module provides the `Display` class that
+handles STDOUT output. The engine calls display methods at each stage
+lifecycle event. The display can be injected into `WorkflowEngine`
+for testing.
+
 ### Prerequisites
 
 - Python 3.13+

@@ -19,6 +19,7 @@ from corvidae.llm import LLMClient
 
 from workflow.types import StageOutcome
 from workflow.context import WorkflowContext
+from workflow.display import Display
 from workflow.stage import Stage, StageRunner
 
 logger = logging.getLogger(__name__)
@@ -36,9 +37,13 @@ class WorkflowEngine:
         client: LLMClient,
         max_turns: int = 20,
         max_iterations: int = 50,
+        display: Display | None = None,
     ) -> None:
         self.runner = StageRunner(client, max_turns)
         self.max_iterations = max_iterations
+        # Display for human-readable STDOUT output.
+        # Defaults to a new Display writing to sys.stdout.
+        self.display = display or Display()
 
     async def run(
         self, stages: list[Stage], context: WorkflowContext
@@ -72,8 +77,12 @@ class WorkflowEngine:
                 logger.info(
                     "Skipping stage: %s (should_run=False)", stage.name
                 )
+                self.display.stage_skip(stage.name)
                 current_idx += 1
                 continue
+
+            # Show stage start on STDOUT
+            self.display.stage_start(stage.name)
 
             # Run the stage via StageRunner
             result = await self.runner.run(stage, context)
@@ -83,6 +92,9 @@ class WorkflowEngine:
                 stage.name, result.summary, result.tool_calls
             )
 
+            # Show stage completion on STDOUT
+            self.display.stage_complete(stage.name, result.outcome.value)
+
             # Human gate — pause for approval if enabled and stage succeeded
             if stage.human_gate and result.outcome == StageOutcome.PROCEED:
                 approved = await self._human_approval(stage, result)
@@ -90,6 +102,7 @@ class WorkflowEngine:
                     logger.info(
                         "Human gate rejected for stage: %s", stage.name
                     )
+                    self.display.workflow_blocked(stage.name, "Human gate rejected")
                     return
 
             # Determine next stage based on outcome
@@ -104,11 +117,19 @@ class WorkflowEngine:
                         result.outcome.value,
                         stage.name,
                     )
+                    self.display.workflow_blocked(
+                        stage.name,
+                        f"Undeclared escape target: {result.escape_target}",
+                    )
                     return
                 target_idx = self._find_stage(stages, result.escape_target)
                 if target_idx is None:
                     logger.error(
                         "Invalid escape target: %s", result.escape_target
+                    )
+                    self.display.workflow_blocked(
+                        stage.name,
+                        f"Invalid escape target: {result.escape_target}",
                     )
                     return
                 logger.info(
@@ -136,7 +157,13 @@ class WorkflowEngine:
                     "stopping workflow",
                     stage.name, result.outcome.value,
                 )
+                self.display.workflow_blocked(
+                    stage.name, result.summary,
+                )
                 return
+
+        # All stages completed successfully
+        self.display.workflow_complete()
 
     @staticmethod
     def _find_stage(stages: list[Stage], name: str) -> int | None:

@@ -6,6 +6,12 @@ Usage:
 The workflow engine reads agent.yaml for LLM configuration,
 fetches the issue body via gh CLI, and runs the issue
 implementation workflow.
+
+Logging setup:
+    configure_workflow_logging() installs dual handlers:
+    - File handler: DEBUG-level structured logs (full detail)
+    - STDOUT handler: only shows workflow-level events
+      (stage start/complete via the display module)
 """
 
 from __future__ import annotations
@@ -13,14 +19,68 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import sys
 
+from corvidae.logging import StructuredFormatter
 from workflow.config import load_agent_config, create_llm_client
 from workflow.context import WorkflowContext
 from workflow.engine import WorkflowEngine
 from workflow.workflows.issue import build_issue_workflow, parse_issue_url
 
 logger = logging.getLogger(__name__)
+
+
+def configure_workflow_logging(
+    *,
+    log_file: str = "workflow.log",
+) -> None:
+    """Set up dual-handler logging for the workflow.
+
+    Two handlers are installed on the 'workflow' logger:
+
+    1. File handler (DEBUG level): Writes full structured logs to
+       the given file path. Uses StructuredFormatter for key=value
+       extra fields. Creates parent directories if needed.
+
+    2. STDOUT handler (WARNING level): Only lets through
+       WARNING+ messages to STDOUT. Stage progress is shown via
+       the Display module (plain print), not via the logging system.
+       This prevents INFO/DEBUG noise from flooding the terminal.
+
+    The root logger is set to WARNING to suppress third-party noise.
+    """
+    # Create log directory if it doesn't exist
+    log_dir = os.path.dirname(log_file)
+    if log_dir:
+        os.makedirs(log_dir, exist_ok=True)
+
+    # Get the workflow logger
+    workflow_logger = logging.getLogger("workflow")
+    workflow_logger.setLevel(logging.DEBUG)
+    workflow_logger.propagate = False
+
+    # Remove any existing handlers to avoid duplicates on re-configure
+    workflow_logger.handlers.clear()
+
+    # File handler: full structured debug logs
+    file_handler = logging.FileHandler(log_file, encoding="utf-8")
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(StructuredFormatter(
+        fmt="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    ))
+    workflow_logger.addHandler(file_handler)
+
+    # STDOUT handler: only warnings and above
+    # Stage progress is shown via the Display module, not through logging
+    stdout_handler = logging.StreamHandler(sys.stdout)
+    stdout_handler.setLevel(logging.WARNING)
+    stdout_handler.setFormatter(logging.Formatter("%(message)s"))
+    workflow_logger.addHandler(stdout_handler)
+
+    # Quiet the root logger to suppress third-party noise
+    logging.getLogger().setLevel(logging.WARNING)
 
 
 async def fetch_issue_body(repo: str, issue_number: int) -> str:
@@ -94,11 +154,9 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    # Configure logging
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
-    )
+    # Configure dual-handler logging: file gets DEBUG detail,
+    # STDOUT only shows human-readable stage progress.
+    configure_workflow_logging()
 
     if args.command == "implement":
         asyncio.run(run_workflow(args.issue, args.repo_path))

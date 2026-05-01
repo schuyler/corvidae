@@ -2,6 +2,7 @@
 
 import pytest
 
+from corvidae.tool import Tool
 from workflow.tools.stage_complete import StageCompleteHolder, make_stage_complete_tool
 
 
@@ -115,3 +116,55 @@ async def test_stage_complete_preserves_real_escape_target():
     )
 
     assert holder.escape_target == "comment_on_issue"
+
+
+# ---------------------------------------------------------------------------
+# Schema enum constraint tests
+# ---------------------------------------------------------------------------
+
+
+def test_stage_complete_schema_has_enum_for_outcome():
+    """The tool schema must include an enum constraint for the outcome parameter.
+
+    This is the core fix: the LLM sees the enum in the schema and is forced
+    to pick one of the four valid values instead of passing free-form text.
+    """
+    holder = StageCompleteHolder()
+    tool_fn = make_stage_complete_tool(holder)
+    tool = Tool.from_function(tool_fn)
+
+    outcome_prop = tool.schema["function"]["parameters"]["properties"]["outcome"]
+    assert "enum" in outcome_prop, "outcome property should have enum constraint"
+    assert set(outcome_prop["enum"]) == {
+        "proceed",
+        "need_clarification",
+        "scope_changed",
+        "blocked",
+    }
+
+
+def test_stage_complete_schema_outcome_is_required():
+    """The outcome parameter must be in the required list."""
+    holder = StageCompleteHolder()
+    tool_fn = make_stage_complete_tool(holder)
+    tool = Tool.from_function(tool_fn)
+
+    params = tool.schema["function"]["parameters"]
+    assert "outcome" in params["required"]
+
+
+async def test_stage_complete_error_message_explicit_about_sentences():
+    """When the LLM passes a sentence, the error message must be very explicit."""
+    holder = StageCompleteHolder()
+    tool_fn = make_stage_complete_tool(holder)
+
+    result = await tool_fn(
+        outcome="Created and checked out branch fix/issue-6",
+        summary="Done",
+    )
+
+    # The error must tell the LLM it passed a sentence and list valid values.
+    assert "Error" in result
+    assert "'proceed'" in result
+    assert holder.called is False
+    assert holder.outcome is None

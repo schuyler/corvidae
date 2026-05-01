@@ -1,8 +1,10 @@
 """Tests for workflow.tools.git — git CLI tool factories."""
 
+import pytest
 from unittest.mock import AsyncMock, patch
 
 from workflow.tools.git import (
+    make_commit_tool,
     make_create_branch_tool,
     make_create_worktree_tool,
 )
@@ -35,6 +37,37 @@ async def test_create_worktree():
         assert "/repo-wt" in cmd
 
 
+@pytest.mark.timeout(5)
+async def test_commit_tool_adds_and_commits():
+    """commit tool runs git add -A then git commit with message."""
+    with patch("workflow.tools.git.shell", new_callable=AsyncMock) as mock:
+        mock.return_value = "[main abc123] Fix the bug"
+        tool = make_commit_tool("/repo")
+        result = await tool.fn(message="Fix the bug")
+
+        # shell is called once with both commands chained
+        assert mock.call_count == 1
+        cmd = mock.call_args[0][0]
+        assert "add -A" in cmd
+        assert "commit -m" in cmd
+        assert "Fix the bug" in cmd
+        assert "/repo" in cmd
+
+
+@pytest.mark.timeout(5)
+async def test_commit_tool_quotes_message():
+    """commit tool shell-escapes the commit message."""
+    with patch("workflow.tools.git.shell", new_callable=AsyncMock) as mock:
+        mock.return_value = "ok"
+        tool = make_commit_tool("/repo")
+        await tool.fn(message="fix; rm -rf /")
+
+        cmd = mock.call_args[0][0]
+        # The semicolon should be inside quotes, not a real shell separator
+        assert "rm -rf" not in cmd or "'" in cmd
+
+
+@pytest.mark.timeout(5)
 async def test_create_branch_quotes_name():
     """create_branch shell-escapes the branch name."""
     with patch("workflow.tools.git.shell", new_callable=AsyncMock) as mock:

@@ -8,10 +8,12 @@ Defines the stages for implementing a GitHub issue:
 5. Write tests (red)
 6. Implement (green)
 7. Refactor
-8. Update docs (conditional — skipped if gate_docs decides not needed)
-9. Submit PR
+8. Commit changes (mechanical)
+9. Gate: docs needed?
+10. Update docs (conditional — skipped if gate_docs decides not needed)
+11. Submit PR
 
-Stages 10-12 (respond to PR feedback, close issue) are deferred —
+Stages 12-14 (respond to PR feedback, close issue) are deferred —
 they require waiting for external events (PR review, PR merge).
 """
 
@@ -85,6 +87,32 @@ def _make_add_label_fn(repo: str, issue_number: int):
             stage_name="add_label",
             outcome=StageOutcome.PROCEED,
             summary="Added in-progress label",
+        )
+    return fn
+
+
+def _make_commit_fn(repo_path: str):
+    """Create a mechanical_fn that stages and commits all changes.
+
+    Uses the implement stage's summary as the commit message.
+    Falls back to a generic message if no implement summary exists.
+    """
+    async def fn(ctx: WorkflowContext) -> StageResult:
+        import shlex
+        # Derive commit message from the implement stage's summary
+        message = ctx.summaries.get("implement", "Implement changes").strip()
+        # Truncate to first line to avoid multi-line commit message issues
+        message = message.split("\n")[0][:200]
+        cmd = (
+            f"git -C {shlex.quote(repo_path)} add -A && "
+            f"git -C {shlex.quote(repo_path)} "
+            f"commit -m {shlex.quote(message)}"
+        )
+        await shell(cmd, timeout=30)
+        return StageResult(
+            stage_name="commit_changes",
+            outcome=StageOutcome.PROCEED,
+            summary=f"Committed changes: {message}",
         )
     return fn
 
@@ -222,7 +250,15 @@ def build_issue_workflow(
             tools=file_tools + [shell_tool],
         ),
 
-        # 8. Gate: docs needed? (merged into update_docs for simplicity)
+        # 8. Commit changes (mechanical)
+        Stage(
+            name="commit_changes",
+            instruction="Commit all changes to the branch",
+            is_mechanical=True,
+            mechanical_fn=_make_commit_fn(repo_path),
+        ),
+
+        # 9. Gate: docs needed? (merged into update_docs for simplicity)
         Stage(
             name="gate_docs",
             instruction=(
@@ -234,7 +270,7 @@ def build_issue_workflow(
             ),
         ),
 
-        # 9. Update docs (conditional)
+        # 10. Update docs (conditional)
         Stage(
             name="update_docs",
             instruction=(
@@ -245,7 +281,7 @@ def build_issue_workflow(
             should_run=_docs_should_run,
         ),
 
-        # 10. Submit PR
+        # 11. Submit PR
         Stage(
             name="submit_pr",
             instruction=(
