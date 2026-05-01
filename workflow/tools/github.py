@@ -12,14 +12,48 @@ injection.
 
 from __future__ import annotations
 
+import json
+import logging
 import shlex
 
 from corvidae.tool import Tool
 from corvidae.tools.shell import shell
 
+logger = logging.getLogger(__name__)
+
+# Hidden HTML comment appended to workflow comments so we can detect
+# them on re-runs and avoid posting duplicates.
+_WORKFLOW_MARKER = "<!-- corvidae-workflow -->"
+
 
 def make_github_comment_tool(repo: str, issue_number: int) -> Tool:
-    """Create a tool for posting comments on a GitHub issue."""
+    """Create a tool for posting comments on a GitHub issue.
+
+    Includes deduplication: before posting, the tool checks whether
+    the issue already has a comment tagged with the corvidae-workflow
+    marker. If one is found the comment is skipped and a message
+    is returned instead.
+    """
+
+    async def _existing_workflow_comment() -> str | None:
+        """Return the body of an existing workflow comment, or None."""
+        cmd = (
+            f"gh issue view {issue_number} "
+            f"--repo {shlex.quote(repo)} "
+            f"--comments --json comments -q .comments"
+        )
+        raw = await shell(cmd, timeout=30)
+        try:
+            comments = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            # If we can't parse comments, assume none exist and
+            # let the post proceed — fail open rather than block.
+            return None
+        for comment in comments:
+            body = comment.get("body", "")
+            if _WORKFLOW_MARKER in body:
+                return body
+        return None
 
     async def comment_on_issue(body: str) -> str:
         """Post a comment on the GitHub issue.
@@ -27,10 +61,24 @@ def make_github_comment_tool(repo: str, issue_number: int) -> Tool:
         Args:
             body: The comment text to post.
         """
+        # Deduplication: skip if a workflow comment already exists.
+        existing = await _existing_workflow_comment()
+        if existing is not None:
+            logger.info(
+                "Workflow comment already exists on %s#%d, skipping",
+                repo, issue_number,
+            )
+            return (
+                "A workflow comment already exists on this issue. "
+                "Skipping duplicate post."
+            )
+
+        # Append hidden marker so future runs can detect this comment.
+        tagged_body = body + "\n\n" + _WORKFLOW_MARKER
         cmd = (
             f"gh issue comment {issue_number} "
             f"--repo {shlex.quote(repo)} "
-            f"--body {shlex.quote(body)}"
+            f"--body {shlex.quote(tagged_body)}"
         )
         return await shell(cmd, timeout=30)
 

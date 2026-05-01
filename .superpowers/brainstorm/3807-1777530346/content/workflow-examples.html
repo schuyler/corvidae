@@ -1,0 +1,94 @@
+<h2>Three concrete scenarios</h2>
+<p class="subtitle">Let's trace the workflow through these to see what shape emerges</p>
+
+<div class="section">
+  <h3>Scenario A: Clean implementation</h3>
+  <p>A well-written issue for a small feature. No ambiguity, no PR feedback.</p>
+  <div class="mockup">
+    <div class="mockup-header">Happy path — linear</div>
+    <div class="mockup-body" style="font-family:monospace;font-size:0.85rem;line-height:1.8">
+      <span style="color:#4a9">● comment on issue</span> → "Planning to implement X"<br>
+      <span style="color:#4a9">● add "in progress" label</span><br>
+      <span style="color:#4a9">● create branch &amp; worktree</span><br>
+      <span style="color:#4a9">● <b>gate:</b> ready to implement?</span> → yes<br>
+      <span style="color:#4a9">● write tests (red)</span><br>
+      <span style="color:#4a9">● implement (green)</span><br>
+      <span style="color:#4a9">● refactor</span><br>
+      <span style="color:#4a9">● <b>gate:</b> docs needed?</span> → no<br>
+      <span style="color:#4a9">● submit PR</span><br>
+      <span style="color:#888">○ respond to feedback</span> — skipped, PR approved<br>
+      <span style="color:#4a9">● close issue</span>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>Scenario B: Ambiguous issue, PR feedback</h3>
+  <p>An issue with unclear requirements. PR gets review feedback requiring changes.</p>
+  <div class="mockup">
+    <div class="mockup-header">Messy path — loops back</div>
+    <div class="mockup-body" style="font-family:monospace;font-size:0.85rem;line-height:1.8">
+      <span style="color:#4a9">● comment on issue</span> → "What does X mean in context Y?"<br>
+      <span style="color:#4a9">● add "in progress" label</span><br>
+      <span style="color:#4a9">● create branch &amp; worktree</span><br>
+      <span style="color:#e8a"><b>gate:</b> ready to implement?</span> → <b>no, need clarification</b><br>
+      <span style="color:#e8a">● comment on issue</span> → more questions<br>
+      <span style="color:#e8a"><b>gate:</b> ready to implement?</span> → <b>no</b><br>
+      <span style="color:#e8a">● comment on issue</span> → "Also, should Z be affected?"<br>
+      <span style="color:#4a9"><b>gate:</b> ready to implement?</span> → yes<br>
+      <span style="color:#4a9">● red / green / refactor</span><br>
+      <span style="color:#4a9">● submit PR</span><br>
+      <span style="color:#e8a">● <b>feedback received</b></span> → "Needs error handling"<br>
+      <span style="color:#e8a">● respond to feedback</span> → add error handling, push<br>
+      <span style="color:#4a9">● close issue</span>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>Scenario C: Implementation reveals scope change</h3>
+  <p>While coding, the agent discovers the issue affects more than expected.</p>
+  <div class="mockup">
+    <div class="mockup-header">Discovery path — back to planning</div>
+    <div class="mockup-body" style="font-family:monospace;font-size:0.85rem;line-height:1.8">
+      <span style="color:#4a9">● comment / label / branch</span><br>
+      <span style="color:#4a9"><b>gate:</b> ready to implement?</span> → yes<br>
+      <span style="color:#4a9">● write tests (red)</span><br>
+      <span style="color:#e8a">● implement (green)</span> → <b>discovers dependency on module Q</b><br>
+      <span style="color:#e8a"><b>gate:</b> still on track?</span> → <b>no, scope expanded</b><br>
+      <span style="color:#e8a">● comment on issue</span> → "This also affects Q. OK to expand scope?"<br>
+      <span style="color:#4a9"><b>gate:</b> ready to implement?</span> → yes (updated scope)<br>
+      <span style="color:#4a9">● red / green / refactor</span> (expanded)<br>
+      <span style="color:#4a9">● <b>gate:</b> docs needed?</span> → yes<br>
+      <span style="color:#4a9">● update docs</span><br>
+      <span style="color:#4a9">● submit PR → close issue</span>
+    </div>
+  </div>
+</div>
+
+<div class="section" style="margin-top:2rem">
+  <h3>What shape do these suggest?</h3>
+  <div class="options">
+    <div class="option" data-choice="linear-gates" onclick="toggleSelect(this)">
+      <div class="letter">A</div>
+      <div class="content">
+        <h3>Linear with gates and explicit retry targets</h3>
+        <p>Each gate can loop back to a specific earlier stage. The orchestrator defines which loops are allowed.</p>
+      </div>
+    </div>
+    <div class="option" data-choice="state-machine" onclick="toggleSelect(this)">
+      <div class="letter">B</div>
+      <div class="content">
+        <h3>General state machine</h3>
+        <p>Each stage is a state. Transitions are determined by LLM gate decisions. Any transition is possible.</p>
+      </div>
+    </div>
+    <div class="option" data-choice="mixed" onclick="toggleSelect(this)">
+      <div class="letter">C</div>
+      <div class="content">
+        <h3>Hybrid: linear backbone with escape hatches</h3>
+        <p>A default forward path, but specific stages can "escape" to earlier points when conditions warrant.</p>
+      </div>
+    </div>
+  </div>
+</div>

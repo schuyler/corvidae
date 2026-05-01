@@ -12,9 +12,16 @@ is reset and the LLM gets another chance within the same stage.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from workflow.types import StageOutcome
+
+logger = logging.getLogger(__name__)
+
+# Pre-compute valid outcome values for fast lookup and error messages.
+_VALID_OUTCOMES = [e.value for e in StageOutcome]
+_VALID_OUTCOMES_STR = ", ".join(repr(v) for v in _VALID_OUTCOMES)
 
 
 @dataclass
@@ -47,13 +54,28 @@ def make_stage_complete_tool(holder: StageCompleteHolder):
         """Signal that this stage is complete.
 
         Args:
-            outcome: One of 'proceed', 'need_clarification', 'scope_changed', 'blocked'.
+            outcome: EXACTLY one of these values: 'proceed',
+                'need_clarification', 'scope_changed', 'blocked'.
+                Do NOT pass a sentence or description — pass only one of
+                those four literal strings.
             summary: Your reasoning and decisions. Describe what you did and why.
                      Include approaches you tried and rejected. Do NOT repeat facts
                      the orchestrator can verify directly (file contents, test output).
             escape_target: Name of the stage to return to (only for
                            need_clarification or scope_changed).
         """
+        # Validate outcome before constructing the enum so we can return a
+        # helpful error message instead of letting the ValueError propagate.
+        if outcome not in _VALID_OUTCOMES:
+            logger.warning(
+                "stage_complete received invalid outcome %r", outcome,
+            )
+            return (
+                f"Error: 'outcome' must be one of {_VALID_OUTCOMES_STR}, "
+                f"but got {outcome!r}. "
+                f"Please call stage_complete again with a valid outcome."
+            )
+
         holder.outcome = StageOutcome(outcome)
         holder.summary = summary
         holder.escape_target = escape_target

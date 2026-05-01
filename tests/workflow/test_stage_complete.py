@@ -44,9 +44,29 @@ async def test_stage_complete_tool_with_escape_target():
 
 
 async def test_stage_complete_tool_invalid_outcome():
-    """stage_complete raises ValueError for invalid outcome."""
+    """stage_complete returns an error string for invalid outcome."""
     holder = StageCompleteHolder()
     tool_fn = make_stage_complete_tool(holder)
 
-    with pytest.raises(ValueError):
-        await tool_fn(outcome="invalid", summary="oops")
+    result = await tool_fn(outcome="invalid", summary="oops")
+
+    # Should NOT raise — returns a helpful error for the LLM to retry.
+    assert "Error" in result
+    assert "'proceed'" in result
+    assert holder.called is False
+
+
+async def test_stage_complete_tool_invalid_outcome_sentence():
+    """stage_complete returns an error when the LLM passes a sentence."""
+    holder = StageCompleteHolder()
+    tool_fn = make_stage_complete_tool(holder)
+
+    result = await tool_fn(
+        outcome="Comment posted on GitHub issue #6 describing the plan.",
+        summary="Done",
+    )
+
+    assert "Error" in result
+    assert "'proceed'" in result
+    assert holder.called is False
+    assert holder.outcome is None

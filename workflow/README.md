@@ -202,10 +202,10 @@ lives in `workflow/` and imports Corvidae primitives directly.
 
 ```bash
 # Run the issue implementation workflow
-python -m workflow implement --issue https://github.com/owner/repo/issues/42
+uv run python -m workflow implement --issue https://github.com/owner/repo/issues/42
 
 # Specify a local repo path
-python -m workflow implement --issue https://github.com/owner/repo/issues/42 --repo-path /path/to/repo
+uv run python -m workflow implement --issue https://github.com/owner/repo/issues/42 --repo-path /path/to/repo
 ```
 
 ### Prerequisites

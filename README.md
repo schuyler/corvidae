@@ -119,6 +119,39 @@ The LLM has access to these tools out of the box:
 
 MCP servers add their tools to this list at startup.
 
+## Workflow engine
+
+Corvidae includes a workflow engine for automating multi-stage processes like implementing GitHub issues. Run it with:
+
+```sh
+uv run python -m workflow implement --issue https://github.com/owner/repo/issues/42
+```
+
+The issue workflow runs these stages in order:
+
+1. Comment on issue with implementation plan
+2. Add "in-progress" label
+3. Create branch
+4. Gate: ready to implement?
+5. Write tests (red)
+6. Implement (green)
+7. Refactor
+8. Gate: docs needed?
+9. Update docs (conditional)
+10. Submit PR
+
+### Deduplication
+
+The `comment_on_issue` tool tags its comments with a hidden HTML marker (`<!-- corvidae-workflow -->`). On re-runs, it checks for an existing tagged comment and skips posting if one is found. This prevents duplicate comments when re-running a failed workflow.
+
+### Checkpoint support (future)
+
+The workflow engine currently has no checkpoint/resume mechanism — each run starts from the first stage. Planned improvements include:
+
+- Persisting workflow state to disk between runs
+- Resuming from the last completed stage
+- Replaying stage history for context recovery
+
 ## Inspiration
 
 Corvidae was inspired by [pi.dev](https://pi.dev/) and [mira](https://github.com/taylorsatula/mira-OSS).
