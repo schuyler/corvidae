@@ -94,8 +94,13 @@ class Runtime:
         # 2. Deep-merge overrides
         config = deep_merge(config, self.overrides)
 
-        # 3. Set _base_dir after merge — cannot be overridden
+        # 3. Set reserved keys after merge — cannot be overridden via YAML.
+        # _base_dir: parent directory of config_path for resolving relative paths.
+        # _config_path: Path to the config file, used by ConfigWatcherPlugin to poll for changes.
+        # _cli_overrides: CLI overrides dict, re-applied on every config reload.
         config["_base_dir"] = Path(self.config_path).parent
+        config["_config_path"] = Path(self.config_path)
+        config["_cli_overrides"] = self.overrides
 
         # 4. Configure logging — must be first operational step
         log_section = config.get("logging", {})

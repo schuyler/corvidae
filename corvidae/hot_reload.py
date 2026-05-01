@@ -46,6 +46,11 @@ class HotReloadPlugin(CorvidaePlugin):
     async def on_init(self, pm, config: dict) -> None:
         await super().on_init(pm, config)
 
+    @hookimpl
+    async def on_config_reload(self, config: dict) -> None:
+        """Update stored config so plugins reloaded after a config change receive current values."""
+        self.config = config
+
     # ------------------------------------------------------------------
     # Public API used by tests and the manage_plugins tool
     # ------------------------------------------------------------------

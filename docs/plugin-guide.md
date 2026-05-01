@@ -124,10 +124,33 @@ The built-in subcommand `scaffold` is registered by corvidae itself under `corvi
 | `on_init(pm, config: dict)` | async broadcast | After all plugins are registered, before `on_start`. Use to store `pm`, read config values, and resolve references to other plugins. Do not create runtime resources here. |
 | `on_start(config: dict)` | async broadcast | Once at startup, after `on_init`. Use to open runtime resources: DB connections, network clients, file handles, asyncio tasks. |
 | `on_stop()` | async broadcast | On SIGINT/SIGTERM, before process exits |
+| `on_config_reload(config: dict)` | async broadcast | When `agent.yaml` is modified while the daemon is running. The config dict has been re-parsed, merged with CLI overrides, and validated before dispatch. |
 
 `config` is the full parsed `agent.yaml` dict. The key `_base_dir` (a `Path`) is set by `Runtime.start()` pointing to the config file's directory.
 
 `CorvidaePlugin.on_init` stores `pm` and `config` as instance attributes. Subclasses that override `on_init` must call `await super().on_init(pm, config)` to preserve this behavior.
+
+#### Supporting hot-reload in plugins
+
+Implement `on_config_reload` to re-read configuration values when `agent.yaml` changes at runtime. The hook fires on the event loop thread; implementations must not block.
+
+```python
+from corvidae.hooks import CorvidaePlugin, hookimpl
+
+class MyPlugin(CorvidaePlugin):
+    @hookimpl
+    async def on_init(self, pm, config: dict) -> None:
+        await super().on_init(pm, config)
+        self.threshold = config.get("my_plugin", {}).get("threshold", 0.8)
+
+    @hookimpl
+    async def on_config_reload(self, config: dict) -> None:
+        self.threshold = config.get("my_plugin", {}).get("threshold", 0.8)
+```
+
+`on_config_reload` receives the full re-parsed config dict, already merged with CLI overrides. Per-plugin errors are caught and logged by `ConfigWatcherPlugin`; a failing `on_config_reload` in one plugin does not prevent other plugins from receiving the reload.
+
+The `config` parameter is optional in `on_config_reload` hookimpls. Pluggy forwards only the arguments declared in the hookimpl signature, so a hookimpl that omits `config` is called with no arguments.
 
 ### Messaging
 
@@ -381,6 +404,7 @@ tools             (ToolCollectionPlugin) — entry point
 dream             (DreamPlugin)         — entry point
 agent             (Agent)               — entry point
 idle_monitor      (IdleMonitorPlugin)   — entry point
+config_watcher    (ConfigWatcherPlugin) — entry point
 ```
 
 `ChannelRegistry` is constructed and registered explicitly before entry points load. Its `agent_defaults` attribute and channel config are populated from config before the `on_init` broadcast runs.
@@ -830,3 +854,31 @@ daemon:
 ```
 
 **Without this plugin:** the `on_idle` hook is never fired. Plugins that implement `on_idle` (such as `DreamPlugin`) will not receive calls.
+
+### ConfigWatcherPlugin (`corvidae/config_watcher.py`)
+
+Polls `agent.yaml` for mtime changes and dispatches `on_config_reload` to all registered plugins when the file changes. Entry point name: `"config_watcher"`.
+
+Implements three hooks:
+
+- `on_init` — reads `_config_path`, `_cli_overrides`, and `daemon.config_poll_interval` from the config dict.
+- `on_start` — records the file's current mtime (to suppress a reload on the first poll) and starts the background polling task.
+- `on_stop` — cancels the polling task and waits for it to finish.
+
+On each poll cycle, when the mtime has changed:
+1. The file is parsed as YAML.
+2. CLI overrides are deep-merged on top of the new YAML.
+3. The result is validated (must be a dict with `llm.main`).
+4. `ChannelRegistry.agent_defaults` is updated from the new `agent` section.
+5. `load_channel_config` is called to register any new channel entries (existing channels are not updated).
+6. `on_config_reload` is dispatched to each plugin individually. A plugin that raises logs an error but does not block the other plugins.
+
+**Config:**
+```yaml
+daemon:
+  config_poll_interval: 2.0   # seconds between mtime checks (default 2.0)
+```
+
+See [Hot-reload](configuration.md#hot-reload) in the configuration reference for which settings update on reload and which require restart.
+
+**Without this plugin:** `agent.yaml` changes are not detected at runtime. Reload requires a daemon restart.
