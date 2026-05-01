@@ -684,6 +684,29 @@ class Agent(CorvidaePlugin):
         self._tools, self._tool_schemas = tools_plugin.get_tools()
         self._max_tool_result_chars = tools_plugin.max_result_chars
 
+    @hookimpl
+    async def on_config_reload(self, config: dict) -> None:
+        """Re-read agent config and re-borrow the LLM client from LLMPlugin.
+
+        Re-borrows _client because LLMPlugin may have swapped its main_client
+        during this same reload cycle (Key Design Decision #3 in design doc).
+        System prompt changes take effect only on new conversations (existing
+        conversations retain their current ContextWindow.system_prompt).
+        """
+        # Re-read agent config values.
+        agent_config = config.get("agent", {})
+        self._chars_per_token = agent_config.get("chars_per_token", DEFAULT_CHARS_PER_TOKEN)
+        daemon_config = config.get("daemon", {})
+        self._idle_cooldown = daemon_config.get("idle_cooldown_seconds", 30.0)
+
+        # Re-borrow the LLM client from LLMPlugin after a possible swap.
+        # Avoids isinstance check so MagicMock(spec=LLMPlugin) works in tests.
+        llm = self.pm.get_plugin("llm")
+        if llm is not None and hasattr(llm, "get_client"):
+            self._client = llm.get_client()
+
+        logger.info("on_config_reload: agent config updated")
+
     @hookimpl(trylast=True)
     async def on_plugin_added(self, name: str, plugin: object) -> None:
         """Refresh tools when a plugin is added at runtime.
