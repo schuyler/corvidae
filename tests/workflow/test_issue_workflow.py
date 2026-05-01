@@ -154,16 +154,28 @@ async def test_commit_changes_uses_implement_summary():
     ctx.summaries["implement"] = "Implemented the new feature with tests"
 
     with patch("workflow.workflows.issue.shell", new_callable=AsyncMock) as mock:
-        mock.return_value = "[main abc123] Implemented the new feature with tests"
+        # Three sequential calls: commit, branch name, push
+        mock.side_effect = [
+            "[main abc123] Implemented the new feature with tests",
+            "fix/issue-1\n",
+            "Everything up-to-date",
+        ]
         result = await commit_stage.mechanical_fn(ctx)
 
         assert result.outcome == StageOutcome.PROCEED
         assert result.stage_name == "commit_changes"
         # Verify the commit command used the implement summary
-        cmd = mock.call_args[0][0]
-        assert "add -A" in cmd
-        assert "commit -m" in cmd
-        assert "Implemented the new feature" in cmd
+        commit_cmd = mock.call_args_list[0][0][0]
+        assert "add -A" in commit_cmd
+        assert "commit -m" in commit_cmd
+        assert "Implemented the new feature" in commit_cmd
+        # Verify the branch name query ran
+        branch_cmd = mock.call_args_list[1][0][0]
+        assert "rev-parse --abbrev-ref HEAD" in branch_cmd
+        # Verify the push command ran
+        push_cmd = mock.call_args_list[2][0][0]
+        assert "push --force-with-lease origin" in push_cmd
+        assert "fix/issue-1" in push_cmd
 
 
 def test_update_docs_is_conditional():

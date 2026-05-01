@@ -128,8 +128,13 @@ def make_add_label_tool(repo: str, issue_number: int) -> Tool:
     return Tool.from_function(add_label)
 
 
-def make_create_pr_tool(repo: str, branch: str) -> Tool:
-    """Create a tool for opening a pull request."""
+def make_create_pr_tool(repo: str, branch: str | None = None) -> Tool:
+    """Create a tool for opening a pull request.
+
+    If branch is None, the tool dynamically reads the current branch
+    from git at invocation time. This ensures the correct branch name
+    is used even when the tool is created before the branch exists.
+    """
 
     async def create_pr(title: str, body: str) -> str:
         """Create a pull request on GitHub.
@@ -138,10 +143,20 @@ def make_create_pr_tool(repo: str, branch: str) -> Tool:
             title: The PR title.
             body: The PR description.
         """
+        # Resolve branch name dynamically if not provided
+        head_branch = branch
+        if head_branch is None:
+            import subprocess
+            result = subprocess.run(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                capture_output=True, text=True, timeout=15,
+            )
+            head_branch = result.stdout.strip()
+
         cmd = (
             f"gh pr create "
             f"--repo {shlex.quote(repo)} "
-            f"--head {shlex.quote(branch)} "
+            f"--head {shlex.quote(head_branch)} "
             f"--title {shlex.quote(title)} "
             f"--body {shlex.quote(body)}"
         )

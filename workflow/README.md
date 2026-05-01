@@ -135,6 +135,9 @@ The motivating workflow. Stages:
    for `docs_only` tasks. *Tools: file write, shell, file read.*
 7. **Refactor** — LLM cleans up. Skipped for `docs_only` tasks.
    *Tools: file write, shell, file read.*
+   **Commit & push** (mechanical, unnumbered) — `git add -A && git commit && git push`.
+   Uses the implement stage's summary as the commit message. Pushes to
+   origin so the branch is visible to GitHub for PR creation.
 8. **Gate: docs needed?** — Mechanical. Checks git diff for source file changes
    and whether the project has a `docs/` directory. No LLM needed. Stores the
    decision in `context.facts["docs_needed"]` for the conditional `update_docs`

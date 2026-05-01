@@ -69,6 +69,24 @@ async def test_create_pr():
         assert "feat/issue-1" in cmd
 
 
+async def test_create_pr_dynamic_branch():
+    """create_pr reads current branch dynamically when branch is None."""
+    with patch("workflow.tools.github.shell", new_callable=AsyncMock) as mock_shell:
+        mock_shell.return_value = "https://github.com/o/r/pull/6"
+        # Patch subprocess.run inside the function's local import
+        import subprocess as real_subprocess
+        from unittest.mock import MagicMock, patch as local_patch
+        cp = MagicMock()
+        cp.stdout = "fix/dynamic-branch\n"
+
+        with local_patch("subprocess.run", return_value=cp):
+            tool = make_create_pr_tool("owner/repo")
+            result = await tool.fn(title="Fix bug", body="Description")
+
+            cmd = mock_shell.call_args[0][0]
+            assert "fix/dynamic-branch" in cmd
+
+
 async def test_comment_escapes_body():
     """comment_on_issue shell-escapes the body to prevent injection."""
     with patch("workflow.tools.github.asyncio.create_subprocess_shell",

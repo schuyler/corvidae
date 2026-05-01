@@ -96,10 +96,12 @@ def _make_add_label_fn(repo: str, issue_number: int):
 
 
 def _make_commit_fn(repo_path: str):
-    """Create a mechanical_fn that stages and commits all changes.
+    """Create a mechanical_fn that stages, commits, and pushes changes.
 
     Uses the implement stage's summary as the commit message.
     Falls back to a generic message if no implement summary exists.
+    Pushes the branch to origin after committing so GitHub can see
+    the commits for PR creation.
     """
     async def fn(ctx: WorkflowContext) -> StageResult:
         import shlex
@@ -107,16 +109,30 @@ def _make_commit_fn(repo_path: str):
         message = ctx.summaries.get("implement", "Implement changes").strip()
         # Truncate to first line to avoid multi-line commit message issues
         message = message.split("\n")[0][:200]
-        cmd = (
+        commit_cmd = (
             f"git -C {shlex.quote(repo_path)} add -A && "
             f"git -C {shlex.quote(repo_path)} "
             f"commit -m {shlex.quote(message)}"
         )
-        await shell(cmd, timeout=30)
+        await shell(commit_cmd, timeout=30)
+
+        # Push the current branch to origin so GitHub can see it.
+        # Use --force-with-lease for safety on retries.
+        branch_cmd = (
+            f"git -C {shlex.quote(repo_path)} "
+            f"rev-parse --abbrev-ref HEAD"
+        )
+        branch = (await shell(branch_cmd, timeout=15)).strip()
+        push_cmd = (
+            f"git -C {shlex.quote(repo_path)} "
+            f"push --force-with-lease origin {shlex.quote(branch)}"
+        )
+        await shell(push_cmd, timeout=60)
+
         return StageResult(
             stage_name="commit_changes",
             outcome=StageOutcome.PROCEED,
-            summary=f"Committed changes: {message}",
+            summary=f"Committed and pushed changes to {branch}: {message}",
         )
     return fn
 
@@ -274,7 +290,7 @@ def build_issue_workflow(
     # Create scoped tools
     github_comment = make_github_comment_tool(repo, issue_number)
     create_branch = make_create_branch_tool(repo_path)
-    create_pr = make_create_pr_tool(repo, "HEAD")
+    create_pr = make_create_pr_tool(repo)
 
     # File and shell tools (shared across stages)
     shell_tool = Tool.from_function(run_command)
