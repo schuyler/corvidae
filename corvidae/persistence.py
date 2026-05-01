@@ -18,31 +18,114 @@ import time
 import aiosqlite
 
 from corvidae.hooks import CorvidaePlugin, hookimpl
+from corvidae.migrations import MIGRATIONS
 
 logger = logging.getLogger(__name__)
 
 _ALLOWED_JOURNAL_MODES = {"delete", "truncate", "persist", "memory", "wal", "off"}
 
 
-async def init_db(db: aiosqlite.Connection) -> None:
-    """Create message_log table and index.
+# ---------------------------------------------------------------------------
+# Schema versioning helpers
+# ---------------------------------------------------------------------------
 
-    Creates the message_log table if it doesn't exist, plus an index on
-    (channel_id, timestamp) for efficient per-channel queries ordered by time.
-    """
-    await db.execute(
-        """CREATE TABLE IF NOT EXISTS message_log (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            channel_id TEXT NOT NULL,
-            message TEXT NOT NULL,
-            timestamp REAL NOT NULL,
-            message_type TEXT NOT NULL DEFAULT 'message'
-        )"""
-    )
-    await db.execute(
-        "CREATE INDEX IF NOT EXISTS idx_log_channel ON message_log (channel_id, timestamp)"
-    )
+_CREATE_SCHEMA_VERSION_TABLE = """\
+CREATE TABLE IF NOT EXISTS schema_version (
+    version INTEGER NOT NULL
+)"""
+
+
+async def _ensure_schema_version_table(db: aiosqlite.Connection) -> None:
+    """Create the schema_version meta table if absent and seed it with version 0."""
+    await db.execute(_CREATE_SCHEMA_VERSION_TABLE)
+
+    async with db.execute("SELECT COUNT(*) FROM schema_version") as cursor:
+        row = await cursor.fetchone()
+    if row[0] == 0:
+        await db.execute("INSERT INTO schema_version (version) VALUES (0)")
     await db.commit()
+
+
+async def get_schema_version(db: aiosqlite.Connection) -> int:
+    """Return the current schema version from the database.
+
+    Returns 0 if the ``schema_version`` table does not exist yet (fresh DB
+    or legacy database created before the migration system).
+    """
+    try:
+        async with db.execute("SELECT version FROM schema_version") as cursor:
+            row = await cursor.fetchone()
+        return row[0] if row else 0
+    except aiosqlite.OperationalError:
+        return 0
+
+
+async def _apply_pending_migrations(db: aiosqlite.Connection) -> None:
+    """Apply every migration whose number is greater than the stored version.
+
+    Each migration runs via ``executescript``. On success the version is
+    advanced; on failure the transaction is rolled back and the version
+    remains where it was.
+    """
+    async with db.execute("SELECT version FROM schema_version") as cursor:
+        row = await cursor.fetchone()
+    current_version = row[0]
+
+    pending = MIGRATIONS[current_version:]
+
+    if not pending:
+        logger.info(
+            "Schema is up to date at version %d, no pending migrations",
+            current_version,
+        )
+        return
+
+    for i, migration_sql in enumerate(pending):
+        migration_number = current_version + i + 1
+        try:
+            await db.executescript(migration_sql)
+            await db.execute(
+                "UPDATE schema_version SET version = ?", (migration_number,)
+            )
+            await db.commit()
+            logger.info(
+                "Applied migration #%d (version %d/%d)",
+                migration_number,
+                migration_number,
+                len(MIGRATIONS),
+            )
+        except Exception:
+            await db.rollback()
+            logger.exception(
+                "Migration #%d failed, schema_version remains at %d",
+                migration_number,
+                current_version,
+            )
+            raise
+
+
+# ---------------------------------------------------------------------------
+# Database initialisation
+# ---------------------------------------------------------------------------
+
+async def init_db(db: aiosqlite.Connection) -> None:
+    """Apply pending schema migrations and update the version tracker.
+
+    On a fresh database this creates the ``schema_version`` meta table and
+    runs all migrations in order. On an existing database it checks the
+    current version and applies only the pending migrations.
+    """
+    await _ensure_schema_version_table(db)
+    await _apply_pending_migrations(db)
+
+
+# ---------------------------------------------------------------------------
+# Message helpers
+# ---------------------------------------------------------------------------
+
+def _strip_internal_tags(message: dict) -> dict:
+    """Return a copy of *message* with internal metadata keys removed."""
+    return {k: v for k, v in message.items() if not k.startswith("_")}
 
 
 def _parse_message_rows(rows: list[tuple]) -> list[dict]:
@@ -55,6 +138,10 @@ def _parse_message_rows(rows: list[tuple]) -> list[dict]:
         result.append(msg)
     return result
 
+
+# ---------------------------------------------------------------------------
+# Plugin
+# ---------------------------------------------------------------------------
 
 class PersistencePlugin(CorvidaePlugin):
     """Plugin that manages SQLite database lifecycle and conversation persistence.
@@ -152,14 +239,9 @@ class PersistencePlugin(CorvidaePlugin):
 
     @hookimpl
     async def on_conversation_event(self, channel, message: dict, message_type) -> None:
-        """Persist a conversation message to SQLite.
-
-        Strips _message_type from the message dict before writing to the DB
-        to avoid serializing internal metadata.
-        """
+        """Persist a conversation message to SQLite."""
         ts = time.time()
-        # Strip _message_type tag if present (must not be written to JSON column)
-        clean = {k: v for k, v in message.items() if k != "_message_type"}
+        clean = _strip_internal_tags(message)
         await self.db.execute(
             "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
             "VALUES (?, ?, ?, ?)",
@@ -169,11 +251,7 @@ class PersistencePlugin(CorvidaePlugin):
 
     @hookimpl
     async def on_compaction(self, channel, summary_msg: dict, retain_count: int) -> None:
-        """Persist a compaction summary to SQLite with timestamp boundary logic.
-
-        The summary timestamp is set just before the oldest retained message
-        so that load_conversation correctly excludes pre-compaction messages.
-        """
+        """Persist a compaction summary to SQLite with timestamp boundary logic."""
         if retain_count > 0:
             async with self.db.execute(
                 "SELECT timestamp FROM message_log "
@@ -186,8 +264,7 @@ class PersistencePlugin(CorvidaePlugin):
         else:
             summary_ts = time.time()
 
-        # Strip _message_type if present
-        clean = {k: v for k, v in summary_msg.items() if k != "_message_type"}
+        clean = _strip_internal_tags(summary_msg)
         await self.db.execute(
             "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
             "VALUES (?, ?, ?, ?)",
