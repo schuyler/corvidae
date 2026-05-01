@@ -18,12 +18,22 @@ Config:
       background:     # optional — absent means use llm.main
         (same keys)
 """
+import asyncio
 import logging
 
 from corvidae.hooks import CorvidaePlugin, hookimpl
 from corvidae.llm import LLMClient
 
 logger = logging.getLogger(__name__)
+
+
+async def _close_after(client: LLMClient, delay: float = 5.0) -> None:
+    """Close an old LLM client after a delay, allowing in-flight requests to finish."""
+    await asyncio.sleep(delay)
+    try:
+        await client.stop()
+    except Exception:
+        logger.warning("failed to close old LLM client", exc_info=True)
 
 
 class LLMPlugin(CorvidaePlugin):
@@ -68,6 +78,42 @@ class LLMPlugin(CorvidaePlugin):
             await self.main_client.stop()
         if self.background_client:
             await self.background_client.stop()
+
+    @hookimpl
+    async def on_config_reload(self, config: dict) -> None:
+        """Re-read llm config and swap main_client if it changed.
+
+        Compares the new llm.main dict with the stored one. If changed,
+        creates a new LLMClient, starts its session, and swaps the reference.
+        The old client is closed asynchronously after a delay to allow
+        in-flight requests to complete.
+        """
+        llm_config = config.get("llm", {})
+        new_main_config = llm_config.get("main")
+        if new_main_config is None:
+            # Validation should have caught this; log and skip.
+            logger.error("on_config_reload: llm.main missing from new config, skipping LLM swap")
+            return
+
+        # Compare new config with stored config; skip swap if unchanged.
+        if new_main_config == self._main_config:
+            return
+
+        logger.info("on_config_reload: llm.main changed, creating new LLM client")
+
+        # Create and start new client before swapping so that an error during
+        # start does not leave the plugin with a None client.
+        new_client = self._create_client(new_main_config)
+        await new_client.start()
+
+        # Swap the reference and store the updated config.
+        old_client = self.main_client
+        self.main_client = new_client
+        self._main_config = new_main_config
+
+        # Schedule deferred closure of the old client so in-flight requests finish.
+        if old_client is not None:
+            asyncio.create_task(_close_after(old_client, delay=5.0))
 
     def get_client(self, role: str = "main") -> LLMClient:
         """Return the client for the given role.

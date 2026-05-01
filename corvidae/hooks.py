@@ -556,3 +556,18 @@ class AgentSpec:
         Args:
             name: The registered name of the plugin that was removed.
         """
+
+    @hookspec
+    async def on_config_reload(self, config: dict) -> None:
+        """Called when agent.yaml is reloaded from disk.
+
+        Plugins should re-read their configuration from the new config dict.
+        The config dict has already been merged with CLI overrides and validated.
+
+        This hook fires on the event loop thread. Plugins must not block.
+        Errors are caught per-plugin and logged; they do not prevent other
+        plugins from receiving the update.
+
+        Args:
+            config: The full re-parsed and merged config dict.
+        """

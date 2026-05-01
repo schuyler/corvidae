@@ -92,6 +92,7 @@ Retry behavior applies to transient status codes (429, 500, 502, 503, 504) and c
 | `daemon.idle_cooldown_seconds` | number | `30` | Minimum seconds between consecutive `on_idle` hook firings. Idle detection is push-based (`Agent._maybe_fire_idle`); this value governs the cooldown between successive firings. |
 | `daemon.sqlite_journal_mode` | string | `wal` | SQLite journal mode for the session database. Allowed values: `delete`, `truncate`, `persist`, `memory`, `wal`, `off`. Read by `PersistencePlugin`. |
 | `daemon.jsonl_log_dir` | string | — | Directory for per-channel JSONL conversation logs. When set, `JsonlLogPlugin` appends one JSON line per conversation event to `<dir>/<channel_id>.jsonl`. Relative paths are resolved against `_base_dir`. Omit to disable JSONL logging. |
+| `daemon.config_poll_interval` | float | `2.0` | Seconds between `agent.yaml` mtime checks by `ConfigWatcherPlugin`. |
 
 ---
 
@@ -218,6 +219,42 @@ mcp:
       tool_prefix: "remote"            # optional; defaults to server name
       timeout_seconds: 30              # optional; default 30
 ```
+
+---
+
+## Hot-reload
+
+`ConfigWatcherPlugin` polls `agent.yaml` for mtime changes every `daemon.config_poll_interval` seconds (default 2.0). When a change is detected, the file is re-parsed, CLI overrides are re-applied, and `on_config_reload` is dispatched to all registered plugins.
+
+No restart is required for the changes listed below. Changes that require restart are listed separately.
+
+### What updates on reload
+
+| Setting | Effect |
+|---------|--------|
+| `llm.main` | New `LLMClient` created and started; old client closed asynchronously after in-flight requests finish. |
+| `agent.compaction_threshold` | `CompactionPlugin` reads the new threshold on its next compaction check. |
+| `agent.chars_per_token` | `Agent` and `CompactionPlugin` use the new ratio for token estimation. |
+| `daemon.idle_cooldown_seconds` | `Agent` uses the new cooldown on the next idle check. |
+| `agent.immutable_settings` | `RuntimeSettingsPlugin` resets its blocklist and re-applies the new list. Constructor-supplied immutable keys are always retained. |
+| New channel entries in `channels:` | `load_channel_config` registers newly added channels. |
+| `agent` defaults | `ChannelRegistry.agent_defaults` is updated; new channels created after the reload use the new defaults. |
+
+### What requires restart
+
+| Setting | Reason |
+|---------|--------|
+| `irc.host`, `irc.port`, `irc.nick` | IRC transport is connected at startup; changing connection parameters requires reconnection. |
+| Existing channel config in `channels:` | Channels already registered retain their original `ChannelConfig` until restart. |
+| `llm.background` | Not updated on reload. |
+| `tools.max_result_chars`, `tools.shell_timeout`, `tools.web_fetch_timeout` | Deferred; not currently implemented in hot-reload path. |
+
+### Error handling
+
+- **Invalid YAML**: logged at `ERROR`; reload is skipped and the running config is unchanged.
+- **Missing `llm.main` after merge**: logged at `ERROR`; reload is skipped.
+- **Config file deleted**: logged at `WARNING`; polling continues. The file may reappear.
+- **Per-plugin failure in `on_config_reload`**: logged at `ERROR`; other plugins still receive the reload.
 
 ---
 

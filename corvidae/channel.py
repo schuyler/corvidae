@@ -116,6 +116,12 @@ class Channel:
 class ChannelRegistry:
     """Manages the lifecycle of channels."""
 
+    # Class-level agent_defaults allows ConfigWatcherPlugin to update the default
+    # config globally by setting ChannelRegistry.agent_defaults = new_config.get("agent", {}).
+    # Instance __init__ sets self.agent_defaults which shadows this for existing instances;
+    # the class attribute is the target for hot-reload updates via ConfigWatcherPlugin.
+    agent_defaults: dict = {}
+
     def __init__(self, agent_defaults: dict | None = None) -> None:
         """
         Args:

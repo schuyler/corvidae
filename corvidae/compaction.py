@@ -99,6 +99,28 @@ class CompactionPlugin(CorvidaePlugin):
                 threshold, retention, gap,
             )
 
+    @hookimpl
+    async def on_config_reload(self, config: dict) -> None:
+        """Re-read compaction thresholds and invalidate the cached LLM client.
+
+        Invalidates _llm_client so it is re-resolved from LLMPlugin on the
+        next compaction call (necessary after LLMPlugin swaps the client on reload).
+        """
+        agent_config = config.get("agent", {})
+        self._compaction_threshold = agent_config.get("compaction_threshold", 0.8)
+        self._compaction_retention = agent_config.get("compaction_retention", 0.5)
+        self._min_messages = agent_config.get("min_messages_to_compact", 5)
+        self._chars_per_token = agent_config.get("chars_per_token", DEFAULT_CHARS_PER_TOKEN)
+        self._summary_prompt = agent_config.get("compaction_prompt", self.DEFAULT_SUMMARY_PROMPT)
+
+        # Invalidate cached LLM client so it is re-borrowed from LLMPlugin.
+        # LLMPlugin may have swapped the client during this same reload cycle.
+        self._llm_client = None
+
+        self._validate_config()
+
+        logger.info("on_config_reload: compaction thresholds updated")
+
     @hookimpl(trylast=True)
     async def compact_conversation(self, channel, conversation, max_tokens):
         """Compact the conversation if it exceeds 80% of max_tokens.

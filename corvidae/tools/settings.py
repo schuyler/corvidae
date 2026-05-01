@@ -31,15 +31,33 @@ class RuntimeSettingsPlugin(CorvidaePlugin):
         # immutable_settings keyword arg so existing test code still works.
         if pm is not None:
             self.pm = pm
-        self.blocklist: set = {"system_prompt"}
-        if immutable_settings is not None:
-            self.blocklist |= set(immutable_settings)
+
+        # Store constructor-supplied immutable settings separately so they
+        # survive config reloads (reload only re-applies config-sourced entries).
+        self._constructor_immutable: set = set(immutable_settings) if immutable_settings is not None else set()
+
+        # Blocklist always includes system_prompt plus constructor-supplied entries.
+        self.blocklist: set = {"system_prompt"} | self._constructor_immutable
 
     @hookimpl
     async def on_init(self, pm, config: dict) -> None:
         await super().on_init(pm, config)
         immutable = config.get("agent", {}).get("immutable_settings", [])
         self.blocklist |= set(immutable)
+
+    @hookimpl
+    async def on_config_reload(self, config: dict) -> None:
+        """Reset blocklist and re-apply immutable_settings from the new config.
+
+        Resets to constructor-supplied entries plus "system_prompt" first so
+        that removed config entries do not persist across reloads (they would
+        accumulate if we used |= on the existing blocklist).
+        """
+        # Reset to base (constructor entries + system_prompt), then re-apply config.
+        self.blocklist = {"system_prompt"} | self._constructor_immutable
+        immutable = config.get("agent", {}).get("immutable_settings", [])
+        self.blocklist |= set(immutable)
+        logger.debug("on_config_reload: blocklist reset and re-applied")
 
     @hookimpl
     def register_tools(self, tool_registry: list) -> None:
