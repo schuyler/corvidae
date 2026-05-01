@@ -11,3 +11,17 @@
 
 * If you are solving a GitHub issue, post the requirements and implementation plan as a comment on the issue before implementing.
 * Check @docs/ before your work is complete and make sure the documentation is updated.
+
+## Agent skills
+
+### Issue tracker
+
+Issues live in GitHub Issues (schuyler/corvidae). Uses the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Uses the default five-label vocabulary (needs-triage, needs-info, ready-for-agent, ready-for-human, wontfix). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context layout — `CONTEXT.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
