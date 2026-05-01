@@ -119,23 +119,32 @@ patterns emerge, the engine may evolve into a declarative framework
 The motivating workflow. Stages:
 
 1. **Comment on issue** — LLM writes a comment describing its
-   implementation plan. *Tools: GitHub comments API.*
+   implementation plan. Also calls `record_plan` to save a structured
+   plan artifact (branch name, task type, files to change, etc.) for
+   later stages. *Tools: GitHub comments API, record_plan.*
 2. **Add "in progress" label** — Mechanical. No LLM.
-3. **Create branch and worktree** — Mostly mechanical. LLM may suggest
-   a branch name. *Tools: git.*
+3. **Create branch and worktree** — Uses the plan's suggested branch
+   name if available, otherwise the LLM suggests one.
+   *Tools: git.*
 4. **Gate: ready to implement?** — LLM decides whether it has enough
    information, or needs to go back and ask more questions in the issue.
    *Escape target: stage 1.*
-5. **Write tests (red)** — LLM writes failing tests. *Tools: file write,
-   shell.*
-6. **Implement (green)** — LLM writes code to pass the tests. *Tools:
-   file write, shell, file read.*
-7. **Refactor** — LLM cleans up. *Tools: file write, shell, file read.*
-8. **Gate: docs needed?** — LLM decides whether documentation updates
-   would add value.
+5. **Write tests (red)** — LLM writes failing tests. Skipped if the
+   plan says `needs_tests == False`. *Tools: file write, shell.*
+6. **Implement (green)** — LLM writes code to pass the tests. Skipped
+   for `docs_only` tasks. *Tools: file write, shell, file read.*
+7. **Refactor** — LLM cleans up. Skipped for `docs_only` tasks.
+   *Tools: file write, shell, file read.*
+8. **Gate: docs needed?** — Mechanical. Checks git diff for source file changes
+   and whether the project has a `docs/` directory. No LLM needed. Stores the
+   decision in `context.facts["docs_needed"]` for the conditional `update_docs`
+   stage.
 9. **Update docs** — LLM writes documentation. *Tools: file write.*
-10. **Submit PR** — LLM writes PR description. Mechanical PR creation.
-    *Tools: GitHub PR API.*
+10. **Submit PR** — LLM writes PR description. Uses the plan's
+    suggested PR title and summary if available. Mechanical PR creation.
+    *Tools: GitHub PR API.* If PR creation fails (auth, network, branch
+    conflicts), the stage can escape back to `commit_changes` for retry.
+    *Escape target: stage 8 (commit_changes) on BLOCKED.*
 11. **Respond to PR feedback** — LLM reads review comments and makes
     changes. May loop. *Tools: file write, shell, GitHub API.*
     *Escape target: stage 7 (refactor) or stage 5 (rewrite tests).*
@@ -197,6 +206,30 @@ lives in `workflow/` and imports Corvidae primitives directly.
 - **WorkflowContext**: Two-channel accumulation (summaries + facts)
 - **GitHub issue workflow**: 10 of 12 stages implemented (stages 1–10;
   PR feedback and issue close deferred)
+- **Blocked stage recovery**: When `submit_pr` fails with BLOCKED, the
+  engine escapes back to `commit_changes` for retry. Other blocked
+  stages produce a detailed summary showing which stage failed, the
+  LLM's reasoning, and suggested next steps (including branch name
+  for manual cleanup).
+- **Plan artifact**: The `comment_on_issue` stage produces a structured
+  plan (`branch_name`, `task_type`, `needs_tests`, `needs_docs`,
+  `files_to_change`, `pr_title`, `summary`) via the `record_plan` tool.
+  The plan is stored in `context.facts["plan"]` and automatically
+  included in the prompts of all subsequent LLM stages. Later stages
+  consume the plan to avoid redundant re-analysis:
+  - `create_branch` reads the suggested branch name
+  - `write_tests` is skipped when `needs_tests` is `False`
+  - `refactor` is skipped for `docs_only` tasks
+  - `submit_pr` reads the suggested PR title and summary
+  - All stages gracefully degrade if no plan exists
+- **Fast path for trivial tasks**: `write_tests`, `implement`, and
+  `refactor` are conditionally skipped based on `task_type` from the
+  plan artifact. `docs_only` tasks skip the full TDD cycle since
+  there's no code to write or tests to run — the `update_docs` stage
+  handles the changes instead. Stages that always run regardless of
+  task type: `commit_changes`, `gate_docs`, `submit_pr`. Classification
+  is deterministic once decided (stored in `context.facts["plan"]`).
+  Graceful degradation: if no plan exists, all stages run.
 
 ### Usage
 
@@ -218,6 +251,25 @@ The workflow uses dual-handler logging:
 - **File**: Full DEBUG-level structured logs written to `workflow.log`
   (or a configured path). Uses `StructuredFormatter` for key=value
   extra fields. Captures everything for post-mortem debugging.
+
+The log file captures detailed workflow-specific information per stage:
+
+- **LLM response text**: Logged at INFO level, truncated to 500 chars.
+  Shows what the LLM said on each turn.
+- **Tool dispatch**: Each tool call is logged at INFO with tool name
+  and truncated arguments (JSON, truncated to 500 chars).
+- **Tool result**: Each tool result is logged at INFO with tool name
+  and truncated content (500 chars). Errors are prefixed with
+  `error=`.
+- **Stage summary**: After each stage completes, a compact one-line
+  summary is logged with total tool call count and breakdown by
+  tool name (e.g. `Stage summary: implement — 8 tool calls
+  (2 write_source, 3 run_command, 1 read_source, 1 stage_complete,
+  1 error)`).
+
+This workflow-specific logging is in addition to the structured
+logging already provided by `corvidae/tool.py` and `corvidae/turn.py`
+(those log at DEBUG level for the daemon and are not changed).
 
 The `workflow/display.py` module provides the `Display` class that
 handles STDOUT output. The engine calls display methods at each stage

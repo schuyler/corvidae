@@ -68,6 +68,11 @@ class WorkflowEngine:
                     "Max iterations (%d) reached, stopping workflow",
                     self.max_iterations,
                 )
+                self.display.workflow_blocked(
+                    "(loop guard)",
+                    reason=f"Max iterations ({self.max_iterations}) reached",
+                    branch=context.facts.get("branch_name", ""),
+                )
                 return
 
             stage = stages[current_idx]
@@ -92,6 +97,11 @@ class WorkflowEngine:
                 stage.name, result.summary, result.tool_calls
             )
 
+            # Run post-stage callback if defined (e.g. copy plan
+            # artifact from tool holder into context.facts).
+            if stage.post_fn is not None:
+                stage.post_fn(result, context)
+
             # Show stage completion on STDOUT
             self.display.stage_complete(stage.name, result.outcome.value)
 
@@ -102,7 +112,12 @@ class WorkflowEngine:
                     logger.info(
                         "Human gate rejected for stage: %s", stage.name
                     )
-                    self.display.workflow_blocked(stage.name, "Human gate rejected")
+                    self.display.workflow_blocked(
+                        stage.name,
+                        reason="Human gate rejected",
+                        summary=result.summary,
+                        branch=context.facts.get("branch_name", ""),
+                    )
                     return
 
             # Determine next stage based on outcome
@@ -120,6 +135,8 @@ class WorkflowEngine:
                     self.display.workflow_blocked(
                         stage.name,
                         f"Undeclared escape target: {result.escape_target}",
+                        summary=result.summary,
+                        branch=context.facts.get("branch_name", ""),
                     )
                     return
                 target_idx = self._find_stage(stages, result.escape_target)
@@ -130,6 +147,8 @@ class WorkflowEngine:
                     self.display.workflow_blocked(
                         stage.name,
                         f"Invalid escape target: {result.escape_target}",
+                        summary=result.summary,
+                        branch=context.facts.get("branch_name", ""),
                     )
                     return
                 logger.info(
@@ -151,14 +170,20 @@ class WorkflowEngine:
                 current_idx += 1
 
             else:
-                # Non-PROCEED outcome with no escape target — stop
+                # Non-PROCEED outcome with no escape target — stop.
+                # Show a detailed summary with the LLM's reasoning and
+                # branch info for manual cleanup.
                 logger.warning(
                     "Stage %s ended with %s and no escape target, "
                     "stopping workflow",
                     stage.name, result.outcome.value,
                 )
                 self.display.workflow_blocked(
-                    stage.name, result.summary,
+                    stage.name,
+                    reason=f"Stage returned {result.outcome.value} "
+                           f"with no escape target",
+                    summary=result.summary,
+                    branch=context.facts.get("branch_name", ""),
                 )
                 return
 

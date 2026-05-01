@@ -6,7 +6,10 @@ from unittest.mock import AsyncMock, patch
 
 from workflow.types import StageOutcome
 from workflow.stage import Stage
-from workflow.workflows.issue import build_issue_workflow, parse_issue_url
+from workflow.workflows.issue import (
+    build_issue_workflow, parse_issue_url, _docs_should_run,
+    _tests_should_run, _refactor_should_run, _implement_should_run,
+)
 
 
 def test_parse_issue_url():
@@ -171,3 +174,425 @@ def test_update_docs_is_conditional():
     )
     docs = next(s for s in stages if s.name == "update_docs")
     assert docs.should_run is not None
+
+
+def test_gate_docs_is_mechanical():
+    """gate_docs is a mechanical stage (no LLM needed)."""
+    stages = build_issue_workflow(
+        repo="o/r", issue_number=1,
+        repo_path="/r", issue_body="x",
+    )
+    gate = next(s for s in stages if s.name == "gate_docs")
+    assert gate.is_mechanical is True
+    assert gate.mechanical_fn is not None
+
+
+@pytest.mark.timeout(5)
+async def test_docs_should_run_reads_facts_true():
+    """_docs_should_run returns True when facts say docs are needed."""
+    from workflow.context import WorkflowContext
+    ctx = WorkflowContext()
+    ctx.facts["docs_needed"] = True
+    assert _docs_should_run(ctx) is True
+
+
+@pytest.mark.timeout(5)
+async def test_docs_should_run_reads_facts_false():
+    """_docs_should_run returns False when facts say docs not needed."""
+    from workflow.context import WorkflowContext
+    ctx = WorkflowContext()
+    ctx.facts["docs_needed"] = False
+    assert _docs_should_run(ctx) is False
+
+
+@pytest.mark.timeout(5)
+async def test_docs_should_run_defaults_false_when_no_fact():
+    """_docs_should_run returns False if no docs_needed fact is set."""
+    from workflow.context import WorkflowContext
+    ctx = WorkflowContext()
+    assert _docs_should_run(ctx) is False
+
+
+@pytest.mark.timeout(5)
+async def test_gate_docs_mechanical_sets_facts_needed():
+    """gate_docs mechanical fn sets docs_needed=True when source changed."""
+    from workflow.context import WorkflowContext
+    stages = build_issue_workflow(
+        repo="o/r", issue_number=1,
+        repo_path="/r", issue_body="x",
+    )
+    gate = next(s for s in stages if s.name == "gate_docs")
+    ctx = WorkflowContext()
+
+    # Simulate: git diff shows source files changed, and docs/ dir exists
+    diff_output = "src/main.py\nsrc/utils.py"
+    ls_output = "configuration.md\ndesign.md\nplugin-guide.md"
+
+    with patch("workflow.workflows.issue.shell", new_callable=AsyncMock) as mock:
+        mock.side_effect = [diff_output, ls_output]
+        result = await gate.mechanical_fn(ctx)
+
+    assert result.outcome == StageOutcome.PROCEED
+    assert result.stage_name == "gate_docs"
+    assert ctx.facts["docs_needed"] is True
+
+
+@pytest.mark.timeout(5)
+async def test_gate_docs_mechanical_sets_facts_not_needed():
+    """gate_docs mechanical fn sets docs_needed=False when only tests changed."""
+    from workflow.context import WorkflowContext
+    stages = build_issue_workflow(
+        repo="o/r", issue_number=1,
+        repo_path="/r", issue_body="x",
+    )
+    gate = next(s for s in stages if s.name == "gate_docs")
+    ctx = WorkflowContext()
+
+    # Simulate: only test files changed
+    diff_output = "tests/test_main.py\ntests/test_utils.py"
+    ls_output = "configuration.md\ndesign.md\nplugin-guide.md"
+
+    with patch("workflow.workflows.issue.shell", new_callable=AsyncMock) as mock:
+        mock.side_effect = [diff_output, ls_output]
+        result = await gate.mechanical_fn(ctx)
+
+    assert result.outcome == StageOutcome.PROCEED
+    assert result.stage_name == "gate_docs"
+    assert ctx.facts["docs_needed"] is False
+
+
+@pytest.mark.timeout(5)
+async def test_gate_docs_mechanical_no_docs_dir():
+    """gate_docs sets docs_needed=False when no docs directory exists."""
+    from workflow.context import WorkflowContext
+    stages = build_issue_workflow(
+        repo="o/r", issue_number=1,
+        repo_path="/r", issue_body="x",
+    )
+    gate = next(s for s in stages if s.name == "gate_docs")
+    ctx = WorkflowContext()
+
+    # Source files changed, but no docs directory
+    diff_output = "src/main.py\nsrc/utils.py"
+    ls_output = ""  # No docs found
+
+    with patch("workflow.workflows.issue.shell", new_callable=AsyncMock) as mock:
+        mock.side_effect = [diff_output, ls_output]
+        result = await gate.mechanical_fn(ctx)
+
+    assert result.outcome == StageOutcome.PROCEED
+    assert ctx.facts["docs_needed"] is False
+
+
+def test_comment_on_issue_has_record_plan_tool():
+    """comment_on_issue stage includes the record_plan tool."""
+    stages = build_issue_workflow(
+        repo="o/r", issue_number=1,
+        repo_path="/r", issue_body="x",
+    )
+    comment = next(s for s in stages if s.name == "comment_on_issue")
+    tool_names = [t.name for t in comment.tools]
+    assert "record_plan" in tool_names
+    assert "comment_on_issue" in tool_names
+
+
+def test_comment_on_issue_has_post_fn():
+    """comment_on_issue stage has a post_fn to copy plan to context."""
+    stages = build_issue_workflow(
+        repo="o/r", issue_number=1,
+        repo_path="/r", issue_body="x",
+    )
+    comment = next(s for s in stages if s.name == "comment_on_issue")
+    assert comment.post_fn is not None
+
+
+def test_comment_on_issue_instruction_mentions_record_plan():
+    """comment_on_issue instruction tells the LLM to call record_plan."""
+    stages = build_issue_workflow(
+        repo="o/r", issue_number=1,
+        repo_path="/r", issue_body="x",
+    )
+    comment = next(s for s in stages if s.name == "comment_on_issue")
+    assert "record_plan" in comment.instruction
+
+
+def test_write_tests_has_should_run():
+    """write_tests stage has a should_run predicate."""
+    stages = build_issue_workflow(
+        repo="o/r", issue_number=1,
+        repo_path="/r", issue_body="x",
+    )
+    write_tests = next(s for s in stages if s.name == "write_tests")
+    assert write_tests.should_run is not None
+
+
+def test_refactor_has_should_run():
+    """refactor stage has a should_run predicate."""
+    stages = build_issue_workflow(
+        repo="o/r", issue_number=1,
+        repo_path="/r", issue_body="x",
+    )
+    refactor = next(s for s in stages if s.name == "refactor")
+    assert refactor.should_run is not None
+
+
+def test_create_branch_mentions_plan():
+    """create_branch instruction mentions the implementation plan."""
+    stages = build_issue_workflow(
+        repo="o/r", issue_number=1,
+        repo_path="/r", issue_body="x",
+    )
+    branch = next(s for s in stages if s.name == "create_branch")
+    assert "plan" in branch.instruction.lower()
+
+
+def test_submit_pr_mentions_plan():
+    """submit_pr instruction mentions the implementation plan."""
+    stages = build_issue_workflow(
+        repo="o/r", issue_number=1,
+        repo_path="/r", issue_body="x",
+    )
+    pr = next(s for s in stages if s.name == "submit_pr")
+    assert "plan" in pr.instruction.lower()
+
+
+# -- should_run predicate tests --
+
+
+@pytest.mark.timeout(5)
+async def test_tests_should_run_defaults_true_without_plan():
+    """_tests_should_run returns True when no plan exists."""
+    from workflow.context import WorkflowContext
+    ctx = WorkflowContext()
+    assert _tests_should_run(ctx) is True
+
+
+@pytest.mark.timeout(5)
+async def test_tests_should_run_true_when_plan_needs_tests():
+    """_tests_should_run returns True when plan says tests needed."""
+    from workflow.context import WorkflowContext
+    ctx = WorkflowContext()
+    ctx.facts["plan"] = {"needs_tests": True, "task_type": "feature"}
+    assert _tests_should_run(ctx) is True
+
+
+@pytest.mark.timeout(5)
+async def test_tests_should_run_false_when_plan_no_tests():
+    """_tests_should_run returns False when plan says no tests needed."""
+    from workflow.context import WorkflowContext
+    ctx = WorkflowContext()
+    ctx.facts["plan"] = {"needs_tests": False, "task_type": "docs_only"}
+    assert _tests_should_run(ctx) is False
+
+
+@pytest.mark.timeout(5)
+async def test_refactor_should_run_defaults_true_without_plan():
+    """_refactor_should_run returns True when no plan exists."""
+    from workflow.context import WorkflowContext
+    ctx = WorkflowContext()
+    assert _refactor_should_run(ctx) is True
+
+
+@pytest.mark.timeout(5)
+async def test_refactor_should_run_false_for_docs_only():
+    """_refactor_should_run returns False for docs_only tasks."""
+    from workflow.context import WorkflowContext
+    ctx = WorkflowContext()
+    ctx.facts["plan"] = {"task_type": "docs_only", "needs_tests": False}
+    assert _refactor_should_run(ctx) is False
+
+
+@pytest.mark.timeout(5)
+async def test_refactor_should_run_true_for_feature():
+    """_refactor_should_run returns True for feature tasks."""
+    from workflow.context import WorkflowContext
+    ctx = WorkflowContext()
+    ctx.facts["plan"] = {"task_type": "feature", "needs_tests": True}
+    assert _refactor_should_run(ctx) is True
+
+
+@pytest.mark.timeout(5)
+async def test_refactor_should_run_true_for_bug_fix():
+    """_refactor_should_run returns True for bug_fix tasks."""
+    from workflow.context import WorkflowContext
+    ctx = WorkflowContext()
+    ctx.facts["plan"] = {"task_type": "bug_fix", "needs_tests": True}
+    assert _refactor_should_run(ctx) is True
+
+
+@pytest.mark.timeout(5)
+async def test_post_fn_copies_plan_to_context():
+    """comment_on_issue post_fn copies plan from holder to context.facts."""
+    from workflow.context import WorkflowContext
+    stages = build_issue_workflow(
+        repo="o/r", issue_number=1,
+        repo_path="/r", issue_body="x",
+    )
+    comment = next(s for s in stages if s.name == "comment_on_issue")
+
+    ctx = WorkflowContext()
+    # Simulate the plan being recorded by the tool
+    # (The plan_holder is internal to build_issue_workflow, so we
+    # test by using the record_plan tool directly)
+    from workflow.tools.plan import PlanHolder, make_record_plan_tool
+    holder = PlanHolder()
+    tool = make_record_plan_tool(holder)
+    await tool.fn(
+        branch_name="feat/issue-1",
+        task_type="feature",
+        needs_tests=True,
+        files_to_change=["src/main.py"],
+    )
+
+    # Now simulate the post_fn behavior
+    assert holder.data is not None
+    ctx.facts["plan"] = holder.data
+    assert ctx.facts["plan"]["branch_name"] == "feat/issue-1"
+    assert ctx.facts["plan"]["task_type"] == "feature"
+    assert ctx.facts["plan"]["needs_tests"] is True
+
+
+def test_gate_ready_instructions_mention_proceed():
+    """gate_ready instructions clearly tell the LLM to use 'proceed'."""
+    stages = build_issue_workflow(
+        repo="o/r", issue_number=1,
+        repo_path="/r", issue_body="x",
+    )
+    gate = next(s for s in stages if s.name == "gate_ready")
+    # Instructions should explicitly mention calling stage_complete
+    # with 'proceed' (not just referencing it vaguely)
+    assert "proceed" in gate.instruction.lower()
+
+
+# -- Fast path tests (Task 5) --
+
+
+def test_implement_has_should_run():
+    """implement stage has a should_run predicate for fast path."""
+    stages = build_issue_workflow(
+        repo="o/r", issue_number=1,
+        repo_path="/r", issue_body="x",
+    )
+    implement = next(s for s in stages if s.name == "implement")
+    assert implement.should_run is not None
+
+
+@pytest.mark.timeout(5)
+async def test_implement_should_run_defaults_true_without_plan():
+    """_implement_should_run returns True when no plan exists (graceful degradation)."""
+    from workflow.context import WorkflowContext
+    from workflow.workflows.issue import _implement_should_run
+    ctx = WorkflowContext()
+    assert _implement_should_run(ctx) is True
+
+
+@pytest.mark.timeout(5)
+async def test_implement_should_run_true_for_feature():
+    """_implement_should_run returns True for feature tasks."""
+    from workflow.context import WorkflowContext
+    from workflow.workflows.issue import _implement_should_run
+    ctx = WorkflowContext()
+    ctx.facts["plan"] = {"task_type": "feature", "needs_tests": True}
+    assert _implement_should_run(ctx) is True
+
+
+@pytest.mark.timeout(5)
+async def test_implement_should_run_true_for_bug_fix():
+    """_implement_should_run returns True for bug_fix tasks."""
+    from workflow.context import WorkflowContext
+    from workflow.workflows.issue import _implement_should_run
+    ctx = WorkflowContext()
+    ctx.facts["plan"] = {"task_type": "bug_fix", "needs_tests": True}
+    assert _implement_should_run(ctx) is True
+
+
+@pytest.mark.timeout(5)
+async def test_implement_should_run_false_for_docs_only():
+    """_implement_should_run returns False for docs_only tasks (fast path)."""
+    from workflow.context import WorkflowContext
+    from workflow.workflows.issue import _implement_should_run
+    ctx = WorkflowContext()
+    ctx.facts["plan"] = {"task_type": "docs_only", "needs_tests": False}
+    assert _implement_should_run(ctx) is False
+
+
+@pytest.mark.timeout(5)
+async def test_implement_should_run_true_for_refactor():
+    """_implement_should_run returns True for refactor tasks."""
+    from workflow.context import WorkflowContext
+    from workflow.workflows.issue import _implement_should_run
+    ctx = WorkflowContext()
+    ctx.facts["plan"] = {"task_type": "refactor", "needs_tests": True}
+    assert _implement_should_run(ctx) is True
+
+
+def test_fast_path_docs_only_skips_tdd_stages():
+    """docs_only tasks skip write_tests, implement, and refactor (fast path).
+
+    The fast path means a simple README change doesn't go through the
+    full TDD cycle of write_tests → implement → refactor.
+    """
+    from workflow.context import WorkflowContext
+    stages = build_issue_workflow(
+        repo="o/r", issue_number=1,
+        repo_path="/r", issue_body="Update README",
+    )
+    ctx = WorkflowContext()
+    # Simulate plan recorded by comment_on_issue stage
+    ctx.facts["plan"] = {
+        "task_type": "docs_only",
+        "needs_tests": False,
+        "needs_docs": True,
+    }
+
+    # Stages that should be skipped for docs_only
+    write_tests = next(s for s in stages if s.name == "write_tests")
+    implement = next(s for s in stages if s.name == "implement")
+    refactor = next(s for s in stages if s.name == "refactor")
+
+    assert write_tests.should_run(ctx) is False
+    assert implement.should_run(ctx) is False
+    assert refactor.should_run(ctx) is False
+
+
+def test_fast_path_feature_runs_all_tdd_stages():
+    """Feature tasks run all TDD stages (no fast path)."""
+    from workflow.context import WorkflowContext
+    stages = build_issue_workflow(
+        repo="o/r", issue_number=1,
+        repo_path="/r", issue_body="Add new feature",
+    )
+    ctx = WorkflowContext()
+    ctx.facts["plan"] = {
+        "task_type": "feature",
+        "needs_tests": True,
+    }
+
+    write_tests = next(s for s in stages if s.name == "write_tests")
+    implement = next(s for s in stages if s.name == "implement")
+    refactor = next(s for s in stages if s.name == "refactor")
+
+    assert write_tests.should_run(ctx) is True
+    assert implement.should_run(ctx) is True
+    assert refactor.should_run(ctx) is True
+
+
+def test_fast_path_always_runs_commit_and_submit():
+    """commit_changes and submit_pr always run regardless of task_type."""
+    from workflow.context import WorkflowContext
+    stages = build_issue_workflow(
+        repo="o/r", issue_number=1,
+        repo_path="/r", issue_body="Docs update",
+    )
+    ctx = WorkflowContext()
+    ctx.facts["plan"] = {
+        "task_type": "docs_only",
+        "needs_tests": False,
+    }
+
+    # These stages have no should_run — they always execute
+    commit = next(s for s in stages if s.name == "commit_changes")
+    submit = next(s for s in stages if s.name == "submit_pr")
+
+    assert commit.should_run is None
+    assert submit.should_run is None

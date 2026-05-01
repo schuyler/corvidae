@@ -58,9 +58,39 @@ class Display:
         """Display workflow completion message."""
         self._print("✓ Workflow done")
 
-    def workflow_blocked(self, stage_name: str, reason: str) -> None:
-        """Display workflow blocked summary."""
-        self._print(f"✗ Workflow blocked at {stage_name}: {reason}")
+    def workflow_blocked(
+        self,
+        stage_name: str,
+        reason: str,
+        summary: str = "",
+        branch: str = "",
+    ) -> None:
+        """Display workflow blocked summary with suggested next steps.
+
+        Args:
+            stage_name: The stage that failed.
+            reason: Why the workflow stopped.
+            summary: The LLM's summary from the failed stage.
+            branch: Branch name if one was created (for manual cleanup).
+        """
+        self._print(f"\n{'─' * 60}")
+        self._print(f"✗ Workflow blocked at stage: {stage_name}")
+        if reason:
+            self._print(f"  Reason: {reason}")
+        if summary and summary != reason:
+            # Show LLM summary if it differs from the reason
+            self._print(f"  Summary: {summary}")
+        if branch:
+            self._print(f"  Branch: {branch}")
+        self._print("  Suggested next steps:")
+        self._print("    1. Check the log file for full details")
+        if branch:
+            self._print(f"    2. Switch to branch: git checkout {branch}")
+            self._print("    3. Fix the issue and retry, or clean up:")
+            self._print(f"       git checkout main && git branch -D {branch}")
+        else:
+            self._print("    2. Fix the issue and re-run the workflow")
+        self._print(f"{'─' * 60}")
 
 
 # Module-level convenience functions

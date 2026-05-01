@@ -22,6 +22,42 @@ from workflow.tools.stage_complete import StageCompleteHolder, make_stage_comple
 
 logger = logging.getLogger(__name__)
 
+# Maximum length for truncated log output of tool args/results/LLM text
+_LOG_TRUNCATE_LENGTH = 500
+
+
+def _truncate(s: str, maxlen: int = _LOG_TRUNCATE_LENGTH) -> str:
+    """Truncate a string to maxlen characters, appending '...' if truncated."""
+    return s[:maxlen] + "..." if len(s) > maxlen else s
+
+
+def _log_stage_summary(
+    stage_name: str, tool_records: list[ToolCallRecord]
+) -> None:
+    """Log a compact stage summary with tool call counts by name.
+
+    Produces a single INFO log line like:
+        Stage summary: implement — 8 tool calls (2 echo, 1 stage_complete, 1 error)
+    """
+    from collections import Counter
+
+    total = len(tool_records)
+    # Count calls per tool name
+    name_counts = Counter(rec.tool_name for rec in tool_records)
+    # Count errors
+    error_count = sum(1 for rec in tool_records if rec.error)
+
+    parts = [f"{count} {name}" for name, count in name_counts.most_common()]
+    if error_count:
+        parts.append(f"{error_count} error{'s' if error_count != 1 else ''}")
+
+    breakdown = ", ".join(parts)
+    logger.info(
+        "Stage summary: %s — %d tool calls (%s)",
+        stage_name, total, breakdown,
+    )
+
+
 # System prompt for all LLM stages
 SYSTEM_PROMPT = (
     "You are a workflow agent executing a specific stage of a workflow. "
@@ -35,6 +71,7 @@ SYSTEM_PROMPT = (
 ExitCriteriaFn = Callable[[StageResult, WorkflowContext], Awaitable[bool]]
 MechanicalFn = Callable[[WorkflowContext], Awaitable[StageResult]]
 ShouldRunFn = Callable[[WorkflowContext], bool]
+PostStageFn = Callable[["StageResult", WorkflowContext], None]
 
 
 @dataclass
@@ -53,6 +90,9 @@ class Stage:
         human_gate: Whether to pause for human approval before proceeding.
         is_mechanical: If True, run mechanical_fn instead of LLM.
         mechanical_fn: Async function for mechanical stages.
+        post_fn: Optional sync callback run after stage completes. Receives
+            (StageResult, WorkflowContext). Used to copy structured data
+            (e.g. plan artifact) from tool holders into context.facts.
     """
 
     name: str
@@ -64,6 +104,7 @@ class Stage:
     human_gate: bool = False
     is_mechanical: bool = False
     mechanical_fn: MechanicalFn | None = None
+    post_fn: PostStageFn | None = None
 
 
 class StageRunner:
@@ -133,6 +174,16 @@ class StageRunner:
                 f"\n\n## Context from previous stages\n{prior_context}"
             )
 
+        # Include plan artifact if available — downstream stages can
+        # use branch_name, task_type, needs_tests, etc. without
+        # re-analyzing the issue.
+        plan = context.facts.get("plan")
+        if plan:
+            user_content += (
+                f"\n\n## Implementation Plan\n"
+                f"{json.dumps(plan, indent=2)}"
+            )
+
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_content},
@@ -146,6 +197,13 @@ class StageRunner:
             turn = await run_agent_turn(
                 self.client, messages, tool_schemas
             )
+
+            # Log LLM response text at INFO level (truncated)
+            if turn.text:
+                logger.info(
+                    "LLM response text: %s",
+                    _truncate(turn.text, _LOG_TRUNCATE_LENGTH),
+                )
 
             # No tool calls — LLM returned text only
             if not turn.tool_calls:
@@ -182,6 +240,21 @@ class StageRunner:
                     error=result.error,
                 ))
 
+                # Log tool dispatch with name and truncated arguments
+                logger.info(
+                    "Tool dispatched: %s args=%s",
+                    result.tool_name,
+                    _truncate(json.dumps(args), _LOG_TRUNCATE_LENGTH),
+                )
+
+                # Log tool result with name and truncated content
+                logger.info(
+                    "Tool result: %s %s%s",
+                    result.tool_name,
+                    "error=" if result.error else "",
+                    _truncate(result.content, _LOG_TRUNCATE_LENGTH),
+                )
+
                 if holder.called:
                     break  # stage_complete was dispatched
 
@@ -205,6 +278,7 @@ class StageRunner:
                             "Exit criteria failed %d times for stage %s",
                             exit_criteria_failures, stage.name,
                         )
+                        _log_stage_summary(stage.name, tool_records)
                         return StageResult(
                             stage_name=stage.name,
                             outcome=StageOutcome.BLOCKED,
@@ -236,12 +310,16 @@ class StageRunner:
             logger.error(
                 "Stage %s ended without stage_complete", stage.name
             )
+            _log_stage_summary(stage.name, tool_records)
             return StageResult(
                 stage_name=stage.name,
                 outcome=StageOutcome.BLOCKED,
                 summary="Stage ended without calling stage_complete",
                 tool_calls=tool_records,
             )
+
+        # Log a compact stage summary with tool call counts
+        _log_stage_summary(stage.name, tool_records)
 
         return StageResult(
             stage_name=stage.name,
