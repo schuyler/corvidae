@@ -211,3 +211,35 @@ async def test_max_iterations_prevents_infinite_loop():
 
     # Should stop after 5 iterations, not hang forever
     assert len(ctx.summaries.get("loop", "")) >= 0
+
+
+async def test_proceed_with_spurious_escape_target_advances():
+    """Engine advances normally when PROCEED has a spurious escape_target.
+
+    LLMs sometimes pass escape_target='null' or similar. The engine
+    should ignore it and just advance.
+    """
+    order = []
+
+    def mk(name, outcome, escape=None):
+        async def fn(ctx):
+            order.append(name)
+            return StageResult(
+                stage_name=name, outcome=outcome, summary=name,
+                escape_target=escape,
+            )
+        return fn
+
+    stages = [
+        Stage(name="a", instruction="", is_mechanical=True,
+              mechanical_fn=mk("a", StageOutcome.PROCEED, escape="null")),
+        Stage(name="b", instruction="", is_mechanical=True,
+              mechanical_fn=mk("b", StageOutcome.PROCEED)),
+    ]
+
+    engine = WorkflowEngine(MagicMock())
+    ctx = WorkflowContext()
+    await engine.run(stages, ctx)
+
+    # Both stages should run — engine ignores the spurious escape_target
+    assert order == ["a", "b"]

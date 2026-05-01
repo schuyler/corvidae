@@ -70,3 +70,48 @@ async def test_stage_complete_tool_invalid_outcome_sentence():
     assert "'proceed'" in result
     assert holder.called is False
     assert holder.outcome is None
+
+
+async def test_stage_complete_normalizes_null_escape_target():
+    """stage_complete normalizes 'null' escape_target to None."""
+    holder = StageCompleteHolder()
+    tool_fn = make_stage_complete_tool(holder)
+
+    await tool_fn(outcome="proceed", summary="done", escape_target="null")
+
+    assert holder.outcome.value == "proceed"
+    assert holder.escape_target is None
+
+
+async def test_stage_complete_normalizes_none_escape_target():
+    """stage_complete normalizes 'none' escape_target to None."""
+    holder = StageCompleteHolder()
+    tool_fn = make_stage_complete_tool(holder)
+
+    await tool_fn(outcome="proceed", summary="done", escape_target="none")
+
+    assert holder.escape_target is None
+
+
+async def test_stage_complete_normalizes_empty_escape_target():
+    """stage_complete normalizes '' escape_target to None."""
+    holder = StageCompleteHolder()
+    tool_fn = make_stage_complete_tool(holder)
+
+    await tool_fn(outcome="proceed", summary="done", escape_target="")
+
+    assert holder.escape_target is None
+
+
+async def test_stage_complete_preserves_real_escape_target():
+    """stage_complete preserves a real escape target value."""
+    holder = StageCompleteHolder()
+    tool_fn = make_stage_complete_tool(holder)
+
+    await tool_fn(
+        outcome="need_clarification",
+        summary="unclear",
+        escape_target="comment_on_issue",
+    )
+
+    assert holder.escape_target == "comment_on_issue"

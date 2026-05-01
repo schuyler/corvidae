@@ -93,8 +93,9 @@ class WorkflowEngine:
                     return
 
             # Determine next stage based on outcome
-            if result.escape_target:
-                # Validate that the escape is allowed from this stage
+            if result.escape_target and result.outcome != StageOutcome.PROCEED:
+                # Escape hatch: validate that this escape is declared
+                # on the stage, then jump to the target.
                 if result.outcome not in stage.escape_targets:
                     logger.error(
                         "Escape target %s not allowed for outcome %s "
@@ -118,6 +119,14 @@ class WorkflowEngine:
                 current_idx = target_idx
 
             elif result.outcome == StageOutcome.PROCEED:
+                # Normal forward progression. Ignore any escape_target
+                # the LLM may have set — PROCEED always advances.
+                if result.escape_target:
+                    logger.debug(
+                        "Ignoring spurious escape_target %r on PROCEED "
+                        "in stage %s",
+                        result.escape_target, stage.name,
+                    )
                 current_idx += 1
 
             else:

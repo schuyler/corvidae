@@ -1,6 +1,6 @@
 """Tests for workflow.tools.github — GitHub CLI tool factories."""
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from workflow.tools.github import (
     make_github_comment_tool,
@@ -9,25 +9,33 @@ from workflow.tools.github import (
 )
 
 
+def _mock_subprocess(stdout: str, rc: int = 0):
+    """Create a mock asyncio.subprocess.Process that yields the given stdout."""
+    proc = MagicMock()
+    proc.communicate = AsyncMock(return_value=(
+        stdout.encode(), b"",
+    ))
+    proc.returncode = rc
+    return proc
+
+
 async def test_comment_on_issue():
     """comment_on_issue runs gh CLI with correct arguments."""
-    with patch("workflow.tools.github.shell", new_callable=AsyncMock) as mock:
-        # First call: fetch existing comments (returns empty list)
-        # Second call: post the comment
-        mock.side_effect = [
-            "[]",  # no existing comments
-            "https://github.com/o/r/issues/1#issuecomment-1",
-        ]
+    with patch("workflow.tools.github.asyncio.create_subprocess_shell",
+               return_value=_mock_subprocess("[]")) as mock_sp, \
+         patch("workflow.tools.github.shell", new_callable=AsyncMock) as mock_shell:
+        mock_shell.return_value = (
+            "https://github.com/o/r/issues/1#issuecomment-1"
+        )
         tool = make_github_comment_tool("owner/repo", 42)
         result = await tool.fn(body="My comment")
 
         assert "comment" in result
-        assert mock.await_count == 2
-        # First call: checking for existing comments
-        check_cmd = mock.call_args_list[0][0][0]
-        assert "--comments" in check_cmd
-        # Second call: posting the comment
-        post_cmd = mock.call_args_list[1][0][0]
+        # subprocess called for dedup check (no --comments flag)
+        check_cmd = mock_sp.call_args[0][0]
+        assert "--json comments" in check_cmd
+        # shell called for posting
+        post_cmd = mock_shell.call_args[0][0]
         assert "42" in post_cmd
         assert "owner/repo" in post_cmd
         assert "--body" in post_cmd
@@ -63,68 +71,76 @@ async def test_create_pr():
 
 async def test_comment_escapes_body():
     """comment_on_issue shell-escapes the body to prevent injection."""
-    with patch("workflow.tools.github.shell", new_callable=AsyncMock) as mock:
-        mock.side_effect = ["[]", "ok"]
+    with patch("workflow.tools.github.asyncio.create_subprocess_shell",
+               return_value=_mock_subprocess("[]")), \
+         patch("workflow.tools.github.shell", new_callable=AsyncMock) as mock:
+        mock.return_value = "ok"
         tool = make_github_comment_tool("o/r", 1)
         await tool.fn(body="test'; rm -rf /")
 
-        # Second call is the post
-        cmd = mock.call_args_list[1][0][0]
-        # The body should be shell-quoted, not raw
+        # The post call should have shell-quoted body
+        cmd = mock.call_args[0][0]
         assert "rm -rf" not in cmd or "'" in cmd or '"' in cmd
 
 
 async def test_comment_skips_when_workflow_comment_exists():
     """comment_on_issue skips posting if a workflow comment already exists."""
-    with patch("workflow.tools.github.shell", new_callable=AsyncMock) as mock:
-        # Return existing comments, one with the workflow marker
-        mock.return_value = '[{"body": "Nice idea"}, {"body": "Plan here\\n\\n<!-- corvidae-workflow -->"}]'
+    comments_json = (
+        '[{"body": "Nice idea"},'
+        ' {"body": "Plan here\\n\\n<!-- corvidae-workflow -->"}]'
+    )
+    with patch("workflow.tools.github.asyncio.create_subprocess_shell",
+               return_value=_mock_subprocess(comments_json)), \
+         patch("workflow.tools.github.shell", new_callable=AsyncMock) as mock_shell:
         tool = make_github_comment_tool("owner/repo", 42)
         result = await tool.fn(body="My new plan")
 
-        # Should only have been called once (the check), not twice (the post)
-        mock.assert_awaited_once()
+        # Should NOT have called shell to post — dedup found the marker
+        mock_shell.assert_not_awaited()
         assert "already exists" in result
         assert "Skipping" in result
 
 
 async def test_comment_posts_when_no_workflow_comment_exists():
     """comment_on_issue posts when existing comments lack the marker."""
-    with patch("workflow.tools.github.shell", new_callable=AsyncMock) as mock:
-        mock.side_effect = [
-            '[{"body": "Nice idea"}]',  # no workflow marker
-            "https://github.com/o/r/issues/1#issuecomment-1",
-        ]
+    with patch("workflow.tools.github.asyncio.create_subprocess_shell",
+               return_value=_mock_subprocess('[{"body": "Nice idea"}]')), \
+         patch("workflow.tools.github.shell", new_callable=AsyncMock) as mock_shell:
+        mock_shell.return_value = (
+            "https://github.com/o/r/issues/1#issuecomment-1"
+        )
         tool = make_github_comment_tool("owner/repo", 42)
         result = await tool.fn(body="My plan")
 
-        assert mock.await_count == 2
+        mock_shell.assert_awaited_once()
         assert "comment" in result
 
 
 async def test_comment_posts_when_comments_fetch_fails():
     """comment_on_issue posts anyway if comment check fails (fail open)."""
-    with patch("workflow.tools.github.shell", new_callable=AsyncMock) as mock:
-        mock.side_effect = [
-            "not valid json",  # gh CLI returned unexpected output
-            "https://github.com/o/r/issues/1#issuecomment-1",
-        ]
+    with patch("workflow.tools.github.asyncio.create_subprocess_shell",
+               return_value=_mock_subprocess("not valid json")), \
+         patch("workflow.tools.github.shell", new_callable=AsyncMock) as mock_shell:
+        mock_shell.return_value = (
+            "https://github.com/o/r/issues/1#issuecomment-1"
+        )
         tool = make_github_comment_tool("owner/repo", 42)
         result = await tool.fn(body="My plan")
 
-        assert mock.await_count == 2
+        mock_shell.assert_awaited_once()
         assert "comment" in result
 
 
 async def test_comment_posts_when_no_comments_exist():
     """comment_on_issue posts when the issue has zero comments."""
-    with patch("workflow.tools.github.shell", new_callable=AsyncMock) as mock:
-        mock.side_effect = [
-            "[]",  # no comments at all
-            "https://github.com/o/r/issues/1#issuecomment-1",
-        ]
+    with patch("workflow.tools.github.asyncio.create_subprocess_shell",
+               return_value=_mock_subprocess("[]")), \
+         patch("workflow.tools.github.shell", new_callable=AsyncMock) as mock_shell:
+        mock_shell.return_value = (
+            "https://github.com/o/r/issues/1#issuecomment-1"
+        )
         tool = make_github_comment_tool("owner/repo", 42)
         result = await tool.fn(body="My plan")
 
-        assert mock.await_count == 2
+        mock_shell.assert_awaited_once()
         assert "comment" in result

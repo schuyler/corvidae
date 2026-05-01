@@ -12,6 +12,7 @@ injection.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import shlex
@@ -36,18 +37,41 @@ def make_github_comment_tool(repo: str, issue_number: int) -> Tool:
     """
 
     async def _existing_workflow_comment() -> str | None:
-        """Return the body of an existing workflow comment, or None."""
+        """Return the body of an existing workflow comment, or None.
+
+        Uses subprocess directly (not the shared shell() helper) so
+        we can parse stdout separately from stderr. The shell() helper
+        concatenates both, which breaks JSON parsing when gh emits
+        warnings to stderr.
+        """
         cmd = (
             f"gh issue view {issue_number} "
             f"--repo {shlex.quote(repo)} "
-            f"--comments --json comments -q .comments"
+            f"--json comments -q .comments"
         )
-        raw = await shell(cmd, timeout=30)
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout_bytes, _ = await asyncio.wait_for(
+                proc.communicate(), timeout=30
+            )
+        except (OSError, asyncio.TimeoutError):
+            # Can't run the check — fail open.
+            logger.debug(
+                "Failed to check existing comments", exc_info=True,
+            )
+            return None
+
+        raw = stdout_bytes.decode(errors="replace").strip()
         try:
             comments = json.loads(raw)
         except (json.JSONDecodeError, TypeError):
             # If we can't parse comments, assume none exist and
             # let the post proceed — fail open rather than block.
+            logger.debug("Could not parse comments JSON: %s", raw[:200])
             return None
         for comment in comments:
             body = comment.get("body", "")

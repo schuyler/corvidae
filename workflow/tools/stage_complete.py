@@ -78,6 +78,12 @@ def make_stage_complete_tool(holder: StageCompleteHolder):
 
         holder.outcome = StageOutcome(outcome)
         holder.summary = summary
+        # Normalize sentinel values that LLMs sometimes emit for
+        # "no escape target" — these should all be treated as None.
+        if escape_target is not None and escape_target.strip().lower() in (
+            "null", "none", "", "n/a", "nil",
+        ):
+            escape_target = None
         holder.escape_target = escape_target
         holder.called = True
         return f"Stage complete: {outcome}"
