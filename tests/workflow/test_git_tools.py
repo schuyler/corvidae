@@ -77,3 +77,50 @@ async def test_create_branch_quotes_name():
 
         cmd = mock.call_args[0][0]
         assert "rm -rf" not in cmd or "'" in cmd
+
+
+# -- Co-authored-by trailer tests --
+
+
+@pytest.mark.timeout(5)
+async def test_commit_includes_co_authored_by():
+    """commit tool appends Co-authored-by trailer when agent_name is set."""
+    with patch("workflow.tools.git.shell", new_callable=AsyncMock) as mock:
+        mock.return_value = "[main abc123] Fix the bug"
+        tool = make_commit_tool(
+            "/repo",
+            agent_name="corvidae-workflow",
+        )
+        await tool.fn(message="Fix the bug")
+
+        cmd = mock.call_args[0][0]
+        assert "Co-authored-by" in cmd
+        assert "corvidae-workflow" in cmd
+
+
+@pytest.mark.timeout(5)
+async def test_commit_co_authored_by_with_custom_email():
+    """commit tool uses custom email in Co-authored-by trailer."""
+    with patch("workflow.tools.git.shell", new_callable=AsyncMock) as mock:
+        mock.return_value = "ok"
+        tool = make_commit_tool(
+            "/repo",
+            agent_name="corvidae-bot",
+            agent_email="bot@corvidae.dev",
+        )
+        await tool.fn(message="Fix")
+
+        cmd = mock.call_args[0][0]
+        assert "Co-authored-by: corvidae-bot <bot@corvidae.dev>" in cmd
+
+
+@pytest.mark.timeout(5)
+async def test_commit_no_co_authored_by_by_default():
+    """commit tool does NOT add Co-authored-by when agent_name is not set."""
+    with patch("workflow.tools.git.shell", new_callable=AsyncMock) as mock:
+        mock.return_value = "ok"
+        tool = make_commit_tool("/repo")
+        await tool.fn(message="Fix")
+
+        cmd = mock.call_args[0][0]
+        assert "Co-authored-by" not in cmd

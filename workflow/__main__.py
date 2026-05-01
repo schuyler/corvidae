@@ -110,6 +110,21 @@ async def run_workflow(issue_url: str, repo_path: str) -> None:
     client = create_llm_client(config)
     await client.start()
 
+    # Read agent identity config for co-authored-by and signatures
+    workflow_config = config.get("workflow", {})
+    agent_name = workflow_config.get("agent_name", "corvidae-workflow")
+    agent_email = workflow_config.get("agent_email", "agent@corvidae")
+    gh_user = workflow_config.get("gh_user")
+
+    # If gh_user not configured, try to read it from gh CLI
+    if not gh_user:
+        try:
+            from corvidae.tools.shell import shell
+            gh_user = (await shell("gh api user -q .login", timeout=10)).strip()
+        except Exception:
+            logger.debug("Could not determine gh user, using 'user'")
+            gh_user = "user"
+
     try:
         # Build and run the workflow
         stages = build_issue_workflow(
@@ -117,6 +132,9 @@ async def run_workflow(issue_url: str, repo_path: str) -> None:
             issue_number=issue_number,
             repo_path=repo_path,
             issue_body=issue_body,
+            agent_name=agent_name,
+            agent_email=agent_email,
+            gh_user=gh_user,
         )
 
         context = WorkflowContext()

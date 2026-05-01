@@ -26,14 +26,40 @@ logger = logging.getLogger(__name__)
 # them on re-runs and avoid posting duplicates.
 _WORKFLOW_MARKER = "<!-- corvidae-workflow -->"
 
+# Footer template for agent-attributed posts. Shows that the post
+# was made by an agent, not directly by the user.
+_SIGNATURE_TEMPLATE = (
+    "\n\n---\n*Posted by {agent_name} on behalf of {user}*"
+)
 
-def make_github_comment_tool(repo: str, issue_number: int) -> Tool:
+
+def _build_signature(agent_name: str | None, gh_user: str | None) -> str:
+    """Build the agent signature footer string.
+
+    Returns empty string if agent_name is not set (no signature).
+    """
+    if not agent_name:
+        return ""
+    user = gh_user or "user"
+    return _SIGNATURE_TEMPLATE.format(agent_name=agent_name, user=user)
+
+
+def make_github_comment_tool(
+    repo: str,
+    issue_number: int,
+    *,
+    agent_name: str | None = None,
+    gh_user: str | None = None,
+) -> Tool:
     """Create a tool for posting comments on a GitHub issue.
 
     Includes deduplication: before posting, the tool checks whether
     the issue already has a comment tagged with the corvidae-workflow
     marker. If one is found the comment is skipped and a message
     is returned instead.
+
+    When agent_name is set, a signature footer is appended to
+    the comment body indicating it was posted by the agent.
     """
 
     async def _existing_workflow_comment() -> str | None:
@@ -105,7 +131,9 @@ def make_github_comment_tool(repo: str, issue_number: int) -> Tool:
             )
 
         # Append hidden marker so future runs can detect this comment.
-        tagged_body = body + "\n\n" + _WORKFLOW_MARKER
+        # Append agent signature if configured.
+        signature = _build_signature(agent_name, gh_user)
+        tagged_body = body + "\n\n" + _WORKFLOW_MARKER + signature
         cmd = (
             f"gh issue comment {issue_number} "
             f"--repo {shlex.quote(repo)} "
@@ -135,12 +163,21 @@ def make_add_label_tool(repo: str, issue_number: int) -> Tool:
     return Tool.from_function(add_label)
 
 
-def make_create_pr_tool(repo: str, branch: str | None = None) -> Tool:
+def make_create_pr_tool(
+    repo: str,
+    branch: str | None = None,
+    *,
+    agent_name: str | None = None,
+    gh_user: str | None = None,
+) -> Tool:
     """Create a tool for opening a pull request.
 
     If branch is None, the tool dynamically reads the current branch
     from git at invocation time. This ensures the correct branch name
     is used even when the tool is created before the branch exists.
+
+    When agent_name is set, a signature footer is appended to
+    the PR body indicating it was posted by the agent.
     """
 
     async def create_pr(title: str, body: str) -> str:
@@ -160,12 +197,15 @@ def make_create_pr_tool(repo: str, branch: str | None = None) -> Tool:
             )
             head_branch = result.stdout.strip()
 
+        # Append agent signature if configured.
+        signature = _build_signature(agent_name, gh_user)
+        tagged_body = body + signature
         cmd = (
             f"gh pr create "
             f"--repo {shlex.quote(repo)} "
             f"--head {shlex.quote(head_branch)} "
             f"--title {shlex.quote(title)} "
-            f"--body {shlex.quote(body)}"
+            f"--body {shlex.quote(tagged_body)}"
         )
         return await shell(cmd, timeout=30)
 

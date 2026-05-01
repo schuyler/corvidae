@@ -1,5 +1,6 @@
 """Tests for workflow.tools.github — GitHub CLI tool factories."""
 
+import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from workflow.tools.github import (
@@ -163,3 +164,88 @@ async def test_comment_posts_when_no_comments_exist():
 
         mock_shell.assert_awaited_once()
         assert "comment" in result
+
+
+# -- Agent identity signature tests --
+
+
+async def test_comment_includes_agent_signature():
+    """comment_on_issue appends the agent signature footer."""
+    with patch("workflow.tools.github.asyncio.create_subprocess_shell",
+               return_value=_mock_subprocess("[]")), \
+         patch("workflow.tools.github.shell", new_callable=AsyncMock) as mock_shell:
+        mock_shell.return_value = (
+            "https://github.com/o/r/issues/1#issuecomment-1"
+        )
+        tool = make_github_comment_tool(
+            "owner/repo", 42,
+            agent_name="corvidae-workflow",
+        )
+        await tool.fn(body="My plan")
+
+        post_cmd = mock_shell.call_args[0][0]
+        # The posted body should include the agent signature
+        assert "corvidae-workflow" in post_cmd
+        assert "on behalf of" in post_cmd
+
+
+async def test_comment_signature_after_marker():
+    """Agent signature appears after the dedup marker in the body."""
+    with patch("workflow.tools.github.asyncio.create_subprocess_shell",
+               return_value=_mock_subprocess("[]")), \
+         patch("workflow.tools.github.shell", new_callable=AsyncMock) as mock_shell:
+        mock_shell.return_value = "ok"
+        tool = make_github_comment_tool(
+            "owner/repo", 42,
+            agent_name="corvidae-workflow",
+        )
+        await tool.fn(body="My plan")
+
+        post_cmd = mock_shell.call_args[0][0]
+        # The marker <!-- corvidae-workflow --> appears, then the
+        # signature also mentions corvidae-workflow on behalf of.
+        # Find both occurrences — signature should be after marker.
+        marker_pos = post_cmd.index("corvidae-workflow")
+        signature_pos = post_cmd.index("on behalf of")
+        assert signature_pos > marker_pos
+
+
+async def test_comment_no_signature_by_default():
+    """comment_on_issue does NOT add signature when agent_name is not set."""
+    with patch("workflow.tools.github.asyncio.create_subprocess_shell",
+               return_value=_mock_subprocess("[]")), \
+         patch("workflow.tools.github.shell", new_callable=AsyncMock) as mock_shell:
+        mock_shell.return_value = "ok"
+        tool = make_github_comment_tool("owner/repo", 42)
+        await tool.fn(body="My plan")
+
+        post_cmd = mock_shell.call_args[0][0]
+        assert "on behalf of" not in post_cmd
+
+
+@pytest.mark.timeout(5)
+async def test_create_pr_includes_agent_signature():
+    """create_pr appends agent signature to the PR body."""
+    with patch("workflow.tools.github.shell", new_callable=AsyncMock) as mock:
+        mock.return_value = "https://github.com/o/r/pull/5"
+        tool = make_create_pr_tool(
+            "owner/repo", "feat/issue-1",
+            agent_name="corvidae-workflow",
+        )
+        result = await tool.fn(title="Fix bug", body="Description")
+
+        cmd = mock.call_args[0][0]
+        assert "corvidae-workflow" in cmd
+        assert "on behalf of" in cmd
+
+
+@pytest.mark.timeout(5)
+async def test_create_pr_no_signature_by_default():
+    """create_pr does NOT add signature when agent_name is not set."""
+    with patch("workflow.tools.github.shell", new_callable=AsyncMock) as mock:
+        mock.return_value = "https://github.com/o/r/pull/5"
+        tool = make_create_pr_tool("owner/repo", "feat/issue-1")
+        result = await tool.fn(title="Fix bug", body="Description")
+
+        cmd = mock.call_args[0][0]
+        assert "on behalf of" not in cmd

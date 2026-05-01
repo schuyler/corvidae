@@ -31,12 +31,22 @@ def make_create_branch_tool(repo_path: str) -> Tool:
     return Tool.from_function(create_branch)
 
 
-def make_commit_tool(repo_path: str) -> Tool:
+def make_commit_tool(
+    repo_path: str,
+    *,
+    agent_name: str | None = None,
+    agent_email: str | None = None,
+) -> Tool:
     """Create a tool for staging all changes and committing.
 
     Runs git add -A then git commit with the provided message.
     Uses git -C to specify the working directory.
+
+    When agent_name is set, a Co-authored-by trailer is appended
+    to the commit message so commits show dual authorship.
     """
+    # Default email for co-authored-by if name is set but email is not
+    _agent_email = agent_email or "agent@corvidae"
 
     async def commit_changes(message: str) -> str:
         """Stage all changes and commit with a message.
@@ -44,6 +54,11 @@ def make_commit_tool(repo_path: str) -> Tool:
         Args:
             message: The commit message.
         """
+        # Append Co-authored-by trailer if agent identity is configured
+        if agent_name:
+            trailer = f"\n\nCo-authored-by: {agent_name} <{_agent_email}>"
+            message = message + trailer
+
         cmd = (
             f"git -C {shlex.quote(repo_path)} add -A && "
             f"git -C {shlex.quote(repo_path)} "

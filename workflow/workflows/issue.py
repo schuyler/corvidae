@@ -127,13 +127,16 @@ def _make_add_label_fn(repo: str, issue_number: int, label: str = "in progress")
     return fn
 
 
-def _make_commit_fn(repo_path: str):
+def _make_commit_fn(repo_path: str, agent_name: str | None = None, agent_email: str | None = None):
     """Create a mechanical_fn that stages, commits, and pushes changes.
 
     Uses the implement stage's summary as the commit message.
     Falls back to a generic message if no implement summary exists.
     Pushes the branch to origin after committing so GitHub can see
     the commits for PR creation.
+
+    When agent_name is set, appends a Co-authored-by trailer to
+    the commit message.
     """
     async def fn(ctx: WorkflowContext) -> StageResult:
         import shlex
@@ -141,6 +144,12 @@ def _make_commit_fn(repo_path: str):
         message = ctx.summaries.get("implement", "Implement changes").strip()
         # Truncate to first line to avoid multi-line commit message issues
         message = message.split("\n")[0][:200]
+
+        # Append Co-authored-by trailer if agent identity is configured
+        if agent_name:
+            email = agent_email or "agent@corvidae"
+            message += f"\n\nCo-authored-by: {agent_name} <{email}>"
+
         commit_cmd = (
             f"git -C {shlex.quote(repo_path)} add -A && "
             f"git -C {shlex.quote(repo_path)} "
@@ -295,6 +304,10 @@ def build_issue_workflow(
     issue_number: int,
     repo_path: str,
     issue_body: str,
+    *,
+    agent_name: str | None = None,
+    agent_email: str | None = None,
+    gh_user: str | None = None,
 ) -> list[Stage]:
     """Build the GitHub issue implementation workflow.
 
@@ -303,6 +316,9 @@ def build_issue_workflow(
         issue_number: The issue number.
         repo_path: Local path to the git repository.
         issue_body: The issue body text (fetched via gh CLI).
+        agent_name: Agent identity name for co-authored-by and signatures.
+        agent_email: Agent email for co-authored-by trailers.
+        gh_user: GitHub username for "on behalf of" signatures.
 
     Returns:
         Ordered list of Stage instances.
@@ -320,9 +336,15 @@ def build_issue_workflow(
             ctx.facts["plan"] = plan_holder.data
 
     # Create scoped tools
-    github_comment = make_github_comment_tool(repo, issue_number)
+    github_comment = make_github_comment_tool(
+        repo, issue_number,
+        agent_name=agent_name, gh_user=gh_user,
+    )
     create_branch = make_create_branch_tool(repo_path)
-    create_pr = make_create_pr_tool(repo)
+    create_pr = make_create_pr_tool(
+        repo,
+        agent_name=agent_name, gh_user=gh_user,
+    )
 
     # File and shell tools (shared across stages)
     shell_tool = Tool.from_function(run_command)
@@ -440,7 +462,11 @@ def build_issue_workflow(
             name="commit_changes",
             instruction="Commit all changes to the branch",
             is_mechanical=True,
-            mechanical_fn=_make_commit_fn(repo_path),
+            mechanical_fn=_make_commit_fn(
+                repo_path,
+                agent_name=agent_name,
+                agent_email=agent_email,
+            ),
         ),
 
         # 9. Gate: docs needed? (mechanical — checks diffs and docs/ dir)

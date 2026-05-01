@@ -640,3 +640,47 @@ def test_fast_path_always_runs_commit_and_submit():
 
     assert commit.should_run is None
     assert submit.should_run is None
+
+
+@pytest.mark.timeout(5)
+async def test_commit_includes_co_authored_by_when_agent_name_set():
+    """Mechanical commit fn appends Co-authored-by when agent_name is set."""
+    from workflow.context import WorkflowContext
+    stages = build_issue_workflow(
+        repo="o/r", issue_number=1,
+        repo_path="/r", issue_body="Fix",
+        agent_name="corvidae-workflow",
+        agent_email="agent@corvidae",
+    )
+    commit = next(s for s in stages if s.name == "commit_changes")
+    ctx = WorkflowContext()
+    ctx.summaries["implement"] = "Fixed the thing"
+
+    with patch("workflow.workflows.issue.shell", new_callable=AsyncMock) as mock:
+        mock.return_value = "ok"
+        result = await commit.mechanical_fn(ctx)
+
+    # The commit command should include Co-authored-by
+    # There are 3 shell calls: commit, branch, push
+    commit_cmd = mock.call_args_list[0][0][0]
+    assert "Co-authored-by: corvidae-workflow <agent@corvidae>" in commit_cmd
+
+
+@pytest.mark.timeout(5)
+async def test_commit_no_co_authored_by_when_no_agent():
+    """Mechanical commit fn does NOT include Co-authored-by by default."""
+    from workflow.context import WorkflowContext
+    stages = build_issue_workflow(
+        repo="o/r", issue_number=1,
+        repo_path="/r", issue_body="Fix",
+    )
+    commit = next(s for s in stages if s.name == "commit_changes")
+    ctx = WorkflowContext()
+    ctx.summaries["implement"] = "Fixed the thing"
+
+    with patch("workflow.workflows.issue.shell", new_callable=AsyncMock) as mock:
+        mock.return_value = "ok"
+        result = await commit.mechanical_fn(ctx)
+
+    commit_cmd = mock.call_args_list[0][0][0]
+    assert "Co-authored-by" not in commit_cmd

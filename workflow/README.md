@@ -286,6 +286,31 @@ handles STDOUT output. The engine calls display methods at each stage
 lifecycle event. The display can be injected into `WorkflowEngine`
 for testing.
 
+### Agent identity
+
+The workflow attributes its actions to a combined "user + agent"
+identity so it's clear when posts and commits are agent-generated:
+
+- **Commits** get a `Co-authored-by: <agent_name> <<agent_email>>`
+  trailer (standard git convention; GitHub renders it as dual
+  authorship).
+- **Issue comments** and **PR descriptions** get a footer:
+  `--- *Posted by <agent_name> on behalf of <gh_user>*`.
+
+Configuration is in `agent.yaml` under the `workflow` key:
+
+```yaml
+workflow:
+  agent_name: corvidae-workflow    # default: corvidae-workflow
+  agent_email: agent@corvidae       # default: agent@corvidae
+  # gh_user is auto-detected from `gh api user -q .login`
+  # gh_user: yozlet                # override if needed
+```
+
+All parameters are optional. If `agent_name` is not set, no
+co-authored-by trailers or signatures are added (backward
+compatible).
+
 ### Prerequisites
 
 - Python 3.13+
