@@ -8,7 +8,7 @@ Corvidae is a minimalist, extensible architecture for building LLM agent harness
 
 Three layers: a plugin system ([apluggy](https://github.com/nextline-dev/apluggy)), an agent loop, and transport plugins. Each transport converts platform-specific messages to a common Channel abstraction. The agent loop handles prompt construction and LLM interaction. The plugin system wires everything together via lifecycle hooks.
 
-Every built-in plugin is optional. Without PersistencePlugin, messages drop but the daemon doesn't crash. Without CompactionPlugin, history grows unbounded. Without ThinkingPlugin, `<think>` blocks pass through to the channel. The system is designed to work with any subset of its parts — add what you need, leave out what you don't.
+Every built-in plugin is optional. Without PersistencePlugin, messages drop but the daemon doesn't crash. Without CompactionPlugin, history grows unbounded. Without ThinkingPlugin, `<thinking>` blocks pass through to the channel. The system is designed to work with any subset of its parts — add what you need, leave out what you don't.
 
 The agent loop uses single-turn dispatch: one LLM call per queue item. Tool calls become independent async tasks. When a task completes, the result arrives as a notification that feeds back into the queue, triggering the next LLM call. Multi-turn reasoning emerges from this cycle rather than from a blocking loop. This keeps the channel queue responsive — user messages are never stuck behind a long tool chain.
 
@@ -30,7 +30,7 @@ agent:
 ```
 
 ```sh
-corvidae          # reads agent.yaml from cwd
+uv run corvidae          # reads agent.yaml from cwd
 ```
 
 The daemon connects to configured transports, listens for messages, and runs until SIGINT or SIGTERM.
@@ -41,7 +41,7 @@ Clone the repo — corvidae isn't published on PyPI.
 
 ```sh
 uv sync
-corvidae
+uv run corvidae
 ```
 
 For development (includes pytest):
@@ -73,7 +73,7 @@ Key sections:
 - Multi-turn tool-calling loop: tool calls run as async tasks, results trigger the next turn
 - Context window management: estimates token count, compacts (summarizes) when nearing the budget
 - SQLite conversation persistence with an append-only message log
-- `<think>` block handling: stripped from display, optionally retained in DB
+- `<thinking>` block handling: stripped from display, optionally retained in DB
 - MCP (Model Context Protocol) client: connects to external tool servers over stdio or SSE
 - Per-channel config overrides for system prompt, token budget, turn limits, and more
 - Runtime settings tool: the LLM can adjust its own parameters mid-session (with optional immutable keys)
@@ -91,7 +91,7 @@ Key sections:
 | SubagentPlugin | Launches background agents with their own LLM sessions |
 | McpClientPlugin | Connects to external MCP servers and exposes their tools |
 | CompactionPlugin | Summarizes older messages when nearing the token budget |
-| ThinkingPlugin | Strips `<think>` blocks from display, optionally from prompt history |
+| ThinkingPlugin | Strips `<thinking>` blocks from display, optionally from prompt history |
 | RuntimeSettingsPlugin | Lets the LLM adjust its own per-channel parameters mid-session |
 | IdleMonitorPlugin | Fires `on_idle` when all queues are quiescent |
 
