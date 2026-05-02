@@ -66,7 +66,7 @@ dev = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-pythonpath = ["tests"]
+pythonpath = ["tests", "."]
 markers = ["eval: live LLM evaluation tests (deselected by default, run with --run-eval)"]
 filterwarnings = [
     "ignore::DeprecationWarning:chromadb",

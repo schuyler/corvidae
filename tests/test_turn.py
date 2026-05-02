@@ -79,6 +79,24 @@ def test_tool_to_schema_zero_params():
     assert "required" not in params
 
 
+def test_tool_to_schema_literal_type_produces_enum():
+    """Literal type annotations produce enum constraints in the schema."""
+    from typing import Literal
+
+    async def choose(color: Literal["red", "green", "blue"], reason: str) -> str:
+        """Pick a color."""
+        return color
+
+    schema = tool_to_schema(choose)
+
+    color_prop = schema["function"]["parameters"]["properties"]["color"]
+    assert "enum" in color_prop
+    assert set(color_prop["enum"]) == {"red", "green", "blue"}
+    assert color_prop["type"] == "string"
+    # title should be stripped
+    assert "title" not in color_prop
+
+
 # ---------------------------------------------------------------------------
 # LLMClient extra_body tests
 # ---------------------------------------------------------------------------
