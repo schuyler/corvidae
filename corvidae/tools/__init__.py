@@ -71,7 +71,6 @@ class CoreToolsPlugin(CorvidaePlugin):
         _web_search.__name__ = "web_search"
 
         from corvidae.tools.task_pipeline import TaskPipelinePlugin
-        from corvidae.tools.index import WorkspaceIndexerPlugin
 
         task_plugin = TaskPipelinePlugin(self.pm)
         task_plugin.register_tools(tool_registry)

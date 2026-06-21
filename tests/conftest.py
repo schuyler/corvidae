@@ -7,9 +7,8 @@ import pytest
 import pytest_asyncio
 import aiosqlite
 
-# Safety net: suppress chromadb deprecation warning that triggers SIGINT in pytest async runner
-# The pytest filterwarnings config also handles this, but conftest-level suppression
-# ensures the filter is active before any test module imports happen.
+# Suppress iscoroutinefunction deprecation warning that can trigger SIGINT in pytest async runner.
+# conftest-level suppression ensures the filter is active before any test module imports happen.
 warnings.filterwarnings("ignore", message=".*iscoroutinefunction.*deprecated.*")
 
 

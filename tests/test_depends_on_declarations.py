@@ -237,7 +237,6 @@ _REGISTERED_PLUGIN_CLASSES = [
     "corvidae.thinking.ThinkingPlugin",
     "corvidae.context_compact.ContextCompactPlugin",
     "corvidae.tools.settings.RuntimeSettingsPlugin",
-    "corvidae.tools.index.WorkspaceIndexerPlugin",
     "corvidae.tool_collection.ToolCollectionPlugin",
     "corvidae.agent.Agent",
     "corvidae.idle.IdleMonitorPlugin",
