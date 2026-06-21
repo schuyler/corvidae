@@ -26,7 +26,6 @@ agent:
   compaction_threshold: 0.8
   compaction_retention: 0.5
   min_messages_to_compact: 5
-  chars_per_token: 3.5
 
 tools:
   shell_timeout: 30
@@ -109,7 +108,7 @@ These values apply to all channels. Per-channel overrides in the `channels` sect
 | `agent.compaction_threshold` | float | `0.8` | Compaction triggers when `token_estimate / max_context_tokens` exceeds this value. |
 | `agent.compaction_retention` | float | `0.5` | After compaction, retain messages that fit within `compaction_retention × max_context_tokens` tokens, counting from the most recent. |
 | `agent.min_messages_to_compact` | integer | `5` | Skip compaction if the conversation has this many messages or fewer. |
-| `agent.chars_per_token` | float | `3.5` | Character-to-token ratio used by `token_estimate()`. Must match across `CompactionPlugin` and `PersistencePlugin`; configure once here. |
+| `agent.chars_per_token` | float | `3.5` | **Deprecated.** Accepted for interface and config compatibility. Has no effect on token counting — `count_tokens()` uses the module-level `_FALLBACK_CHARS_PER_TOKEN` constant (3.5) regardless of this value. |
 | `agent.immutable_settings` | list of strings | `[]` | Keys the agent is blocked from changing via the `set_settings` tool. `system_prompt` is always blocked regardless of this list. |
 
 ### `agent.context_compact` — background compaction (disabled)
@@ -234,7 +233,7 @@ No restart is required for the changes listed below. Changes that require restar
 |---------|--------|
 | `llm.main` | New `LLMClient` created and started; old client closed asynchronously after in-flight requests finish. |
 | `agent.compaction_threshold` | `CompactionPlugin` reads the new threshold on its next compaction check. |
-| `agent.chars_per_token` | `Agent` and `CompactionPlugin` use the new ratio for token estimation. |
+| `agent.chars_per_token` | Deprecated. The value is reloaded into `Agent` and `CompactionPlugin` for config compatibility, but has no effect on token counting — `count_tokens()` uses the module-level constant. |
 | `daemon.idle_cooldown_seconds` | `Agent` uses the new cooldown on the next idle check. |
 | `agent.immutable_settings` | `RuntimeSettingsPlugin` resets its blocklist and re-applies the new list. Constructor-supplied immutable keys are always retained. |
 | New channel entries in `channels:` | `load_channel_config` registers newly added channels. |

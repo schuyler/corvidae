@@ -948,26 +948,27 @@ class TestGroupDMultiChannel:
         # Build a custom harness with calibrated max_context_tokens to trigger
         # compaction exactly at the 6th user message (phase 3), not before.
         #
-        # Token math (token_estimate = int(total_chars / 3.5)):
-        #   system_prompt = "You are a test agent." = 21 chars
-        #   long_text = "a_msg_" + "x"*50 = 56 chars per user msg
-        #   assistant response = "a response" = 10 chars per assistant msg
+        # Token math (count_tokens mocked to return len(text)):
+        #   system_prompt = "You are a test agent." = 21 chars/tokens
+        #   long_text = "a_msg_" + "x"*50 = 56 chars/tokens per user msg
+        #   assistant response = "a response" = 10 chars/tokens per assistant msg
         #
         #   After 5 round-trips (10 msgs):
-        #     total_chars = 21 + 5*56 + 5*10 = 351
-        #     tokens = int(351 / 3.5) = 100
+        #     tokens = 21 + 5*56 + 5*10 = 351
         #
         #   After 6th user msg appended (11 msgs, phase 3):
-        #     total_chars = 21 + 6*56 + 5*10 = 407
-        #     tokens = int(407 / 3.5) = 116
+        #     tokens = 21 + 6*56 + 5*10 = 407
         #
-        #   With max_context_tokens=140, threshold = 0.8*140 = 112:
-        #     100 < 112 → no compaction after phase 1 ✓
-        #     116 > 112 AND len(msgs)=11 > 5 → compaction fires in phase 3 ✓
+        #   With max_context_tokens=500, threshold = 0.8*500 = 400:
+        #     351 < 400 → no compaction after phase 1 ✓
+        #     407 > 400 AND len(msgs)=11 > 5 → compaction fires in phase 3 ✓
+        #
+        # count_tokens is mocked to return len(text) for deterministic results
+        # regardless of the actual tiktoken encoding used.
         config = make_config(extra={
             "agent": {
                 "system_prompt": "You are a test agent.",
-                "max_context_tokens": 140,
+                "max_context_tokens": 500,
             },
         })
         h = await _build_harness(config)
@@ -1030,11 +1031,14 @@ class TestGroupDMultiChannel:
         async def fake_summarize(self_inner, messages, prior_summaries=None):
             return "channel A summary"
 
-        with patch.object(CompactionPlugin, "_summarize", fake_summarize):
+        with patch("corvidae.context.count_tokens", side_effect=lambda t: len(t)), \
+             patch("corvidae.compaction.count_tokens", side_effect=lambda t: len(t)), \
+             patch.object(CompactionPlugin, "_summarize", fake_summarize):
             # Phase 1: Build up channel A's conversation history (5 round-trips).
             # After 5 user messages + 5 assistant responses, the token estimate
-            # is 100 tokens, which is below the 112-token threshold (80% of 140).
-            # The 6th message (phase 3) pushes it to 116 tokens and triggers compaction.
+            # is 351 tokens (mocked as len(text)), which is below the 400-token
+            # threshold (80% of 500).
+            # The 6th message (phase 3) pushes it to 407 tokens and triggers compaction.
             for i in range(5):
                 await h.pm.ahook.on_message(
                     channel=chan_a, sender="user", text=long_text

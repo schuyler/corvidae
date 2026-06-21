@@ -4,6 +4,7 @@ RED phase: all tests fail with ImportError until corvidae/context.py is created.
 """
 
 import pytest
+from unittest.mock import patch
 
 # This import fails until corvidae/context.py exists — that is the intended red state.
 from corvidae.context import ContextWindow, MessageType, DEFAULT_CHARS_PER_TOKEN
@@ -269,44 +270,63 @@ class TestContextWindowBuildPrompt:
 
 class TestContextWindowTokenEstimate:
     def test_token_estimate_basic(self):
-        """token_estimate() returns int(total_chars / chars_per_token)."""
+        """token_estimate() delegates to count_tokens for each text segment."""
+        # count_tokens returns a fixed value per call: 5 for system_prompt, 3 for each message.
+        # With 3 calls (system_prompt + 2 messages), total = 5 + 3 + 3 = 11.
         cw = ContextWindow("test:scope")
-        cw.system_prompt = "You are helpful."  # 16 chars
+        cw.system_prompt = "You are helpful."
         cw.messages = [
-            {"role": "user", "content": "Hello there!", "_message_type": MessageType.MESSAGE},  # 12 chars
-            {"role": "assistant", "content": "Hi!", "_message_type": MessageType.MESSAGE},      # 3 chars
+            {"role": "user", "content": "Hello there!", "_message_type": MessageType.MESSAGE},
+            {"role": "assistant", "content": "Hi!", "_message_type": MessageType.MESSAGE},
         ]
-        # total = 16 + 12 + 3 = 31 chars; int(31 / 3.5) = 8
-        assert cw.token_estimate() == int(31 / 3.5)
+        call_results = iter([5, 3, 3])
+        with patch("corvidae.context.count_tokens", side_effect=lambda t: next(call_results)):
+            result = cw.token_estimate()
+        assert result == 11
 
     def test_token_estimate_empty(self):
         """token_estimate() on empty ContextWindow returns 0."""
         cw = ContextWindow("test:scope")
-        assert cw.token_estimate() == 0
+        # count_tokens("") returns 0 for the empty system_prompt.
+        with patch("corvidae.context.count_tokens", return_value=0):
+            assert cw.token_estimate() == 0
 
     def test_token_estimate_none_content(self):
-        """token_estimate() treats None content as 0 chars."""
+        """token_estimate() treats None content as 0 tokens."""
         cw = ContextWindow("test:scope")
         cw.messages = [
             {"role": "assistant", "content": None, "_message_type": MessageType.MESSAGE},
         ]
-        assert cw.token_estimate() == 0
+        # Only system_prompt is passed to count_tokens (None content is skipped / treated as "").
+        # count_tokens returns 0 for the empty system_prompt; None content contributes 0.
+        with patch("corvidae.context.count_tokens", return_value=0):
+            assert cw.token_estimate() == 0
 
     def test_token_estimate_list_content(self):
-        """token_estimate() treats non-string content as 0 chars."""
+        """token_estimate() treats non-string content as 0 tokens."""
         cw = ContextWindow("test:scope")
         cw.messages = [
             {"role": "assistant", "content": [{"type": "text", "text": "hi"}], "_message_type": MessageType.MESSAGE},
         ]
-        assert cw.token_estimate() == 0
+        # Non-string content is skipped; only the empty system_prompt hits count_tokens.
+        with patch("corvidae.context.count_tokens", return_value=0):
+            assert cw.token_estimate() == 0
 
-    def test_token_estimate_custom_chars_per_token(self):
-        """token_estimate() uses self.chars_per_token."""
+    def test_token_estimate_delegates_to_count_tokens(self):
+        """token_estimate() uses count_tokens(), not chars_per_token arithmetic."""
+        # Verify that token_estimate() calls count_tokens and uses its return value.
         cw = ContextWindow("test:scope", chars_per_token=4.0)
         cw.messages = [
-            {"role": "user", "content": "aaaa", "_message_type": MessageType.MESSAGE},  # 4 chars
+            {"role": "user", "content": "aaaa", "_message_type": MessageType.MESSAGE},
         ]
-        assert cw.token_estimate() == 1  # int(4 / 4.0)
+        # If chars_per_token were still used: int(4 / 4.0) = 1.
+        # With count_tokens mocked to return 7, the result must be 7 (not 1).
+        with patch("corvidae.context.count_tokens", return_value=7):
+            result = cw.token_estimate()
+        # system_prompt ("") contributes 7, "aaaa" contributes 7: total 14.
+        assert result == 14, (
+            f"token_estimate() must use count_tokens(), not chars_per_token; expected 14 got {result}"
+        )
 
 
 class TestContextWindowRemoveByType:

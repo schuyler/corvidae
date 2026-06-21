@@ -11,7 +11,7 @@ Agent is the central plugin that:
 
 Config:
     agent:
-      chars_per_token: 4.0  # optional — used for ContextWindow token estimation
+      chars_per_token: 4.0  # optional — deprecated; retained for config compatibility only
 
 LLM client configuration is owned by LLMPlugin (llm: main:, llm: background:).
 Tool result truncation configuration is owned by ToolCollectionPlugin (tools: max_result_chars:).

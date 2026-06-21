@@ -21,7 +21,9 @@ def plugin():
     p._bg_compaction_threshold = 0.75
     p._min_background_blocks = 1
     p._max_bg_block_chars = 2048
-    p._chars_per_token = 3.5
+    # _chars_per_token removed: ContextCompactPlugin has no token-sizing call
+    # sites; the attribute is dead state. Token counting is now done via
+    # count_tokens() in CompactionPlugin.
     return p
 
 
@@ -303,7 +305,8 @@ class TestContextCompactIntegration:
         plugin = ContextCompactPlugin(None)
         plugin._enabled = True
         plugin._bg_block_threshold = 5
-        plugin._chars_per_token = 3.5
+        # _chars_per_token not set: ContextCompactPlugin has no token-sizing
+        # call sites. Token counting is handled by count_tokens() in CompactionPlugin.
 
         conv = ContextWindow("chan1")
         conv.system_prompt = "You are a helpful assistant."
@@ -338,19 +341,20 @@ class TestContextCompactIntegration:
 
     async def test_block_survives_compaction(self):
         """Background block persists through basic compaction."""
+        from unittest.mock import patch
         from corvidae.compaction import CompactionPlugin
         from corvidae.context_compact import ContextCompactPlugin
 
         cc_plugin = ContextCompactPlugin(None)
         cc_plugin._enabled = True
         cc_plugin._bg_block_threshold = 5
-        cc_plugin._chars_per_token = 3.5
+        # _chars_per_token not set on cc_plugin: it has no token-sizing call sites.
 
         comp_plugin = CompactionPlugin(None)
         comp_plugin._compaction_threshold = 0.8
         comp_plugin._compaction_retention = 0.5
         comp_plugin._min_messages = 3
-        comp_plugin._chars_per_token = 3.5
+        # _chars_per_token not set on comp_plugin: token counting now uses count_tokens().
 
         conv = ContextWindow("chan1")
         conv.system_prompt = ""
