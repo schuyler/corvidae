@@ -6,7 +6,6 @@ dependencies = [
     "aiohttp>=3.9",
     "aiosqlite>=0.19",
     "apluggy @ git+https://github.com/schuyler/apluggy.git@main",
-    "chromadb>=0.5",
     "click>=8.0",
     "ddgs>=9.0",
     "mcp>=1.0",
@@ -69,6 +68,5 @@ asyncio_mode = "auto"
 pythonpath = ["tests", "."]
 markers = ["eval: live LLM evaluation tests (deselected by default, run with --run-eval)"]
 filterwarnings = [
-    "ignore::DeprecationWarning:chromadb",
     "ignore::DeprecationWarning:_pytest",
 ]
