@@ -20,7 +20,7 @@ import json
 import logging
 import time
 
-from corvidae.context import DEFAULT_CHARS_PER_TOKEN, MessageType
+from corvidae.context import DEFAULT_CHARS_PER_TOKEN, MessageType, count_tokens
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 
 logger = logging.getLogger(__name__)
@@ -166,7 +166,7 @@ class CompactionPlugin(CorvidaePlugin):
             content = msg.get("content") or ""
             if not isinstance(content, str):
                 content = ""
-            msg_tokens = int(len(content) / self._chars_per_token)
+            msg_tokens = count_tokens(content)
             if retain_tokens + msg_tokens > retain_budget and retain_count > 0:
                 break
             retain_tokens += msg_tokens

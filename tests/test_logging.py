@@ -660,7 +660,8 @@ class TestCompactionLogging:
 
         conv = ContextWindow("test:chan1")
         conv.system_prompt = ""
-        # 25 messages × 100 chars = 2500 chars; token_estimate ~714; 80% of 100 = 80 → triggers
+        # 25 messages × 100 "x" chars = 2500 tokens (tiktoken: each "x" is 1 token);
+        # 80% of 100 = 80 → compaction triggers (2500 >> 80).
         conv.messages = [{"role": "user", "content": "x" * 100} for _ in range(25)]
 
         mock_client = AsyncMock()

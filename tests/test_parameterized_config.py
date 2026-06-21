@@ -318,7 +318,9 @@ class TestContextWindowCharsPerToken:
         )
 
     def test_context_window_chars_per_token_override(self):
-        """ContextWindow(chars_per_token=4.0) uses 4.0 in token_estimate."""
+        """ContextWindow(chars_per_token=4.0) stores the value but token_estimate
+        delegates to count_tokens, not chars_per_token arithmetic."""
+        from unittest.mock import patch
         from corvidae.context import ContextWindow
 
         conv = ContextWindow("chan1", chars_per_token=4.0)
@@ -327,14 +329,17 @@ class TestContextWindowCharsPerToken:
             f"Expected chars_per_token=4.0, got {conv.chars_per_token!r}"
         )
 
-        # Verify it actually affects token_estimate.
+        # Verify token_estimate delegates to count_tokens, not chars_per_token.
         conv.system_prompt = ""
         conv.messages = [{"role": "user", "content": "a" * 40}]
 
-        estimate = conv.token_estimate()
-        # 40 chars / 4.0 = 10
-        assert estimate == 10, (
-            f"token_estimate with chars_per_token=4.0 and 40 chars should be 10, got {estimate}"
+        # Mock count_tokens to return len(text) so the result is deterministic.
+        with patch("corvidae.context.count_tokens", side_effect=lambda t: len(t)):
+            estimate = conv.token_estimate()
+        # system_prompt="" → 0, "a"*40 → 40; total = 40.
+        # Under old char-based math, int(40 / 4.0) = 10.  The new value is 40.
+        assert estimate == 40, (
+            f"token_estimate must delegate to count_tokens (expected 40 with len mock), got {estimate}"
         )
 
 

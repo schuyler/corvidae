@@ -1,11 +1,14 @@
 """ContextWindow — in-memory conversation context.
 
-Provides the ContextWindow class, MessageType enum, and DEFAULT_CHARS_PER_TOKEN
-constant. This module is purely in-memory: no database access, no async I/O.
-Persistence is handled externally via the on_conversation_event and on_compaction
-hook infrastructure.
+Provides the ContextWindow class, MessageType enum, count_tokens function, and
+DEFAULT_CHARS_PER_TOKEN constant. Token counting uses tiktoken (cl100k_base
+encoding) when available, falling back to character-based estimation if tiktoken
+cannot be imported. This module is purely in-memory: no database access, no
+async I/O. Persistence is handled externally via the on_conversation_event and
+on_compaction hook infrastructure.
 
 Logging:
+    - WARNING: logged once at import time if tiktoken is unavailable
     - DEBUG: entries removed by type
 """
 
@@ -13,6 +16,26 @@ import enum
 import logging
 
 logger = logging.getLogger(__name__)
+
+try:
+    import tiktoken
+    _encoder = tiktoken.get_encoding("cl100k_base")
+except Exception:
+    _encoder = None
+    logger.warning(
+        "tiktoken unavailable; falling back to character-based token estimation"
+    )
+
+_FALLBACK_CHARS_PER_TOKEN: float = 3.5
+
+
+def count_tokens(text: str) -> int:
+    """Count tokens in a string using tiktoken, or fall back to char estimate."""
+    if not text:
+        return 0
+    if _encoder is not None:
+        return len(_encoder.encode(text))
+    return int(len(text) / _FALLBACK_CHARS_PER_TOKEN)
 
 
 class MessageType(str, enum.Enum):
@@ -48,7 +71,9 @@ class ContextWindow:
         channel_id: Identifies the channel this window belongs to.
         messages: In-memory list of tagged message dicts.
         system_prompt: The system prompt prepended by ``build_prompt``.
-        chars_per_token: Characters-per-token estimate for token counting.
+        chars_per_token: Retained for interface and config compatibility. Has no
+            effect on token counting — ``count_tokens()`` uses the module-level
+            ``_FALLBACK_CHARS_PER_TOKEN`` constant, not this attribute.
     """
 
     def __init__(self, channel_id: str, chars_per_token: float = DEFAULT_CHARS_PER_TOKEN):
@@ -105,19 +130,19 @@ class ContextWindow:
         return [{"role": "system", "content": self.system_prompt}] + cleaned
 
     def token_estimate(self) -> int:
-        """Rough token count: int(total_chars / chars_per_token).
+        """Token count using tiktoken (cl100k_base), with character-based fallback.
 
-        Uses a simple character-based heuristic. Includes system prompt length
-        plus all message content lengths. Non-string content (None, lists) is
-        treated as 0 characters.
+        Includes system prompt plus all message content. Non-string content
+        (None, lists) is treated as 0 tokens. Falls back to character-based
+        estimation if tiktoken is unavailable.
         """
-        total_chars = len(self.system_prompt)
+        total = count_tokens(self.system_prompt)
         for msg in self.messages:
             content = msg.get("content") or ""
             if not isinstance(content, str):
-                content = ""
-            total_chars += len(content)
-        return int(total_chars / self.chars_per_token)
+                continue
+            total += count_tokens(content)
+        return total
 
     def remove_by_type(self, message_type: MessageType) -> int:
         """Remove all in-memory entries of a given type.

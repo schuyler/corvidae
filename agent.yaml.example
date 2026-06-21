@@ -44,7 +44,7 @@ agent:
   #                                    If retention ≥ threshold, compaction is a no-op and the agent
   #                                    will re-compact every few messages without reducing context.
   # min_messages_to_compact: 5      # skip compaction with this many messages or fewer
-  # chars_per_token: 3.5            # character-to-token ratio for token estimation
+  # chars_per_token: 3.5            # deprecated: retained for config compatibility; has no effect on token counting
   # immutable_settings:             # keys the agent cannot change via set_settings (system_prompt always blocked)
   #   - max_turns                   # example: prevent the agent from extending its own turn limit
 

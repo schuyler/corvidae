@@ -612,9 +612,7 @@ Implements one hook:
 
 - `compact_conversation` (`trylast=True`) — fires before each LLM call. Checks whether the token estimate exceeds `compaction_threshold * max_tokens`. If so, and if the conversation has more than `min_messages_to_compact` messages, summarizes older messages to fit within `compaction_retention * max_tokens`. Returns True to stop the `firstresult` chain. Runs after `ContextCompactPlugin` (tryfirst) and any third-party handlers at default priority.
 
-Token estimation divides total character count by `chars_per_token`. The same
-`chars_per_token` value is used when constructing `ContextWindow` instances
-(done by `Agent`); configure via `agent.chars_per_token`.
+Token counting uses tiktoken (cl100k_base encoding) via `count_tokens()` in `corvidae/context.py`. When tiktoken is unavailable, a character-based fallback is used (3.5 chars per token). `agent.chars_per_token` is deprecated and only takes effect in the fallback path.
 
 **Config:**
 ```yaml
@@ -622,7 +620,7 @@ agent:
   compaction_threshold: 0.8      # compact when token estimate exceeds this fraction of max_context_tokens
   compaction_retention: 0.5      # retain this fraction of max_context_tokens after compaction
   min_messages_to_compact: 5     # skip compaction if conversation has this many messages or fewer
-  chars_per_token: 3.5           # character-to-token ratio used for token estimation
+  # chars_per_token: 3.5         # deprecated; only used when tiktoken is unavailable
 ```
 
 **Without this plugin:** conversations grow without bound. The LLM will

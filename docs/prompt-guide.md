@@ -73,7 +73,7 @@ The system prompt is resolved **on the first message to a channel**. It is store
 After the system message, `build_prompt()` appends all messages from `ContextWindow.messages`:
 
 ```python
-# corvidae/context.py:94
+# corvidae/context.py:118
 def build_prompt(self) -> list[dict]:
     cleaned = []
     for msg in self.messages:
@@ -99,7 +99,7 @@ Every entry in `ContextWindow.messages` carries a `_message_type` that controls 
 
 When `token_estimate() >= compaction_threshold × max_context_tokens` (default: 80% of budget), `CompactionPlugin` summarizes older `MESSAGE` entries via the LLM and replaces them with a single `SUMMARY` entry. `CONTEXT` and `SUMMARY` entries are not themselves compacted.
 
-Token estimation is character-based: `int(total_chars / chars_per_token)`. The system prompt length is included. The default ratio is 3.5 characters per token; configure via `agent.chars_per_token`.
+Token counting uses tiktoken (cl100k_base encoding) via `count_tokens()` in `corvidae/context.py`. The system prompt length is included. When tiktoken is unavailable, a character-based fallback is used (3.5 chars per token, hardcoded in `_FALLBACK_CHARS_PER_TOKEN`). The `agent.chars_per_token` config key is retained for interface compatibility but has no effect on token counting — `count_tokens()` uses the module-level constant, not the instance attribute.
 
 ---
 
@@ -199,12 +199,13 @@ If enabled, it would run on the `compact_conversation` hook with `tryfirst=True`
 
 | Component | File | What it does |
 |-----------|------|--------------|
-| `resolve_system_prompt()` | `corvidae/channel.py:210` | Reads file list or returns literal string |
+| `resolve_system_prompt()` | `corvidae/channel.py:216` | Reads file list or returns literal string |
 | `ChannelConfig.resolve()` | `corvidae/channel.py:40` | Merges agent defaults, channel overrides, runtime overrides |
-| `ContextWindow` | `corvidae/context.py:40` | Holds messages and system prompt in memory |
-| `ContextWindow.build_prompt()` | `corvidae/context.py:94` | Assembles final message list for LLM |
-| `ContextWindow.token_estimate()` | `corvidae/context.py:107` | Character-based token count |
-| `ContextWindow.remove_by_type()` | `corvidae/context.py:122` | Clears in-memory entries of a given type |
+| `ContextWindow` | `corvidae/context.py:63` | Holds messages and system prompt in memory |
+| `ContextWindow.build_prompt()` | `corvidae/context.py:118` | Assembles final message list for LLM |
+| `count_tokens()` | `corvidae/context.py:32` | Tiktoken-based token count (cl100k_base); char-based fallback |
+| `ContextWindow.token_estimate()` | `corvidae/context.py:131` | Token count for all messages; delegates to `count_tokens()` |
+| `ContextWindow.remove_by_type()` | `corvidae/context.py:146` | Clears in-memory entries of a given type |
 | Lazy initialization | `corvidae/agent.py:442` | First-message conversation setup |
 | `before_agent_turn` hook | `corvidae/agent.py:506` | Context injection point |
 | `compact_conversation` hook | `corvidae/agent.py:495` | Compaction trigger |
