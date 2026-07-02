@@ -178,6 +178,10 @@ qualifications make the rule implementable:
   §3.4 promises the full pipeline. A producer registers its payload and
   enqueues a stub only if none is pending *for its origin*; the stub text
   carries a count; a drain admits only payloads matching the stub's origin.
+  The drain learns the triggering exchange's origin (and key) from the
+  enriched `before_agent_turn(channel, exchange_key, origin)` hook (§4.7) —
+  never by parsing the stub's rendered text, which §4.7's no-inference rule
+  forbids.
   Payloads unregister at successful **admission** (the funnel's append in
   `before_agent_turn`) — not at turn success, because admission persists
   before the LLM call can fail, and waiting for turn success would
@@ -378,9 +382,10 @@ the tail via the admission funnel (§2.2), **each annotated with its relevance
 band** (strong/moderate/weak) per §4 step 2. Record the retrieval in the
 accessed records' access statistics (the write half of reconsolidation), and
 expose *and persist* the retrieval profile — top score, hit count, probe
-score — per turn in the outcome log (§3.7): the provenance trigger in §3.3
-keys off it, and it is the raw material for the §3.2 surprise signal and
-encode/retrieve-gate calibration.
+score — per turn in the outcome log (§3.7), **under the exchange key the
+enriched `before_agent_turn` supplies** (§4.7): the provenance trigger in
+§3.3 keys off it, and it is the raw material for the §3.2 surprise signal
+and encode/retrieve-gate calibration.
 
 **Contradiction handling.** The spec gives observations supersede/contradict
 logic (§4.4) but episodic records none — two conflicting first-person
@@ -440,10 +445,16 @@ blocking model call to the response path.
   including a §3.9 guardrail's — so core fires
   `on_message_admitted(channel, exchange_key, sender, text)` /
   `on_message_rejected(…)` after resolution, and the appraisal plugin keys
-  its store off the passed key without ever guessing what happened. Core
-  carries the key on the queue item it constructs and, holding both key and
-  rowid at persistence time, delivers the pairing through the enriched
-  hooks — no per-channel FIFO, no rebinding race (an earlier draft's
+  its store off the passed key without ever guessing what happened.
+  Notification-born exchanges — reminder, heartbeat, critique stub,
+  standalone task — never cross the inbound gate, so for them **core mints
+  the key at dequeue** when the item carries none, and the producer stamps
+  the origin explicitly in `on_notify` meta (§3.3). Core carries the key on
+  the queue item it constructs and, holding both key and rowid at
+  persistence time, delivers the pairing to plugins through a dedicated
+  core-fired hook, **`on_message_persisted(channel, exchange_key, rowid)`**
+  — an earlier draft said "the enriched hooks" deliver it, which named no
+  carrier — with no per-channel FIFO and no rebinding race (a still-earlier
   plugin-side FIFO desynchronized permanently the moment another plugin's
   veto won the gate). Gate-rejected messages still get outcome-log rows
   under their key with a null rowid — their stage-1 appraisals are
@@ -627,14 +638,18 @@ Deferred-deliberation mode (§2.1), appraisal-gated (§2.4). Flow:
    verdict-triggered turn that calls tools *also* ends on a
    `tool_call_id`-bearing turn, and such an exchange has no originating user
    message to judge against. The mechanism that avoids both:
-   - **Origin is stamped at the exchange's first turn** — `user` (with the
+   - **Origin is stamped at the exchange's first turn, by a named
+     stamper.** `user` is stamped by **core at the gate** (with the
      originating message stored in the exchange-keyed record; *not* a
-     per-channel slot, since user messages interleave mid-cycle by design),
-     `reminder`, `critique`, `heartbeat`, or `task` — and **propagated**:
-     tool dispatch stamps the exchange key + origin into each `Task`, and
-     completions return them via `on_notify` meta (which does exist on the
-     notify path). Every turn of a tool cycle inherits its exchange's
-     origin, however many hops.
+     per-channel slot, since user messages interleave mid-cycle by design).
+     The four notification-born origins are stamped by **their producers in
+     `on_notify` meta** — the scheduler stamps `reminder` and `heartbeat`,
+     the critique plugin stamps `critique`, the task plugin stamps `task` —
+     and core mints their exchange key at dequeue (§3.2). Origin then
+     **propagates**: tool dispatch stamps the exchange key + origin into
+     each `Task`, and completions return them via `on_notify` meta. Every
+     turn of a tool cycle inherits its exchange's origin, however many
+     hops.
    - **Eligibility by origin:** `user` and `reminder` exchanges →
      **critique-eligible**, the final response judged against the stored
      originating message (`reminder` because scheduler-fired turns in
@@ -647,7 +662,8 @@ Deferred-deliberation mode (§2.1), appraisal-gated (§2.4). Flow:
    schema-constrained JSON output (llama-server grammar / `json_schema` via
    `extra_body`) — structured objections, not free text. The provenance
    template gets the CONTEXT memory entries that were in the window that turn
-   (snapshotted in `before_agent_turn`). **Critic independence:** the spec
+   (snapshotted in `before_agent_turn`, stored under the exchange key the
+   enriched hook now carries — §4.7). **Critic independence:** the spec
    never addresses that a sycophantic generator may be a lenient critic of
    itself; where the deployment has two models, bind `llm.critic` to the one
    that didn't generate. With one model, the structured objection schema and
@@ -693,8 +709,10 @@ committed — there is no retro-tagging. The gate fires in **two modes**:
   inverse hazard: its tool calls are never dispatched, so persisting them
   verbatim leaves a *dangling* `tool_calls` message with no tool rows —
   equally server-invalid on reload, and pre-existing for ordinary MESSAGE
-  rows today — so that branch strips `tool_calls` at persistence
-  regardless of the gate's verdict. The WITHHELD
+  rows today — so that branch strips `tool_calls` from **both the persisted
+  row and the in-window copy** at step 8, regardless of the gate's verdict:
+  stripping only the DB row would leave the live window and a reloaded one
+  disagreeing, violating the window-identity principle below. The WITHHELD
   semantics are: **transports never see it; the window always does.**
   WITHHELD rows are *reloaded into the window on restart, tagged* — this
   preserves window identity across restarts (the pre-restart window holds
@@ -971,29 +989,48 @@ all of it:
    plugin's veto wins, including a §3.9 guardrail's. Channel-keyed
    single-slot storage races under multi-item bursts, and the rowid cannot
    serve as the key — it does not exist at stage-1 time (§3.2). Rejected
-   messages keep their key with a null rowid.
+   messages keep their key with a null rowid. Two completions of the
+   plumbing: notification-born exchanges never cross the gate, so core
+   mints their key **at dequeue** when the item carries none (producers
+   stamp origin in `on_notify` meta; §3.3); and the key↔rowid pairing
+   reaches plugins via a core-fired
+   **`on_message_persisted(channel, exchange_key, rowid)`** — the outcome
+   log's rowid column has no other writer path.
 6. **Silent tasks**: `Task` gains `deliver: bool` (default true) so
    subcortical work can complete without triggering a main-model turn (§2.3).
    Invariant: `deliver=False ⇒ tool_call_id is None`, or the channel's tool
    batch stalls forever.
-7. **`on_agent_response` enrichment + origin propagation** (§3.3): the hook
+7. **Hook enrichment + origin propagation** (§3.3): `on_agent_response`
    carries the exchange key, the exchange's **stamped origin**, and the
    originating message from the exchange-keyed record — today's
    `request_text` mis-pairs on tool cycles, and source-blindness enables
-   critique recursion. Origin propagates mechanically: tool dispatch stamps
-   exchange key + origin into each `Task`, and completions return them via
-   `on_notify` meta. Critique eligibility is by propagated origin (§3.3) —
-   never inferred from source strings or `tool_call_id` presence, both of
-   which were tried and failed in opposite directions.
+   critique recursion. **`before_agent_turn` grows the same pair:
+   `(channel, exchange_key, origin)`** — three mechanisms live inside it
+   (the funnel's per-origin drain §2.2, the retrieval-profile persist §3.1,
+   the provenance snapshot §3.3) and it receives only `channel` today.
+   (Implementation latitude: core may instead stash the current item's
+   key+origin on the channel for the duration of the turn — safe because
+   SerialQueue processes one item per channel at a time — but the hook
+   parameters are the explicit form.) Origin propagates mechanically: tool
+   dispatch stamps exchange key + origin into each `Task`, and completions
+   return them via `on_notify` meta. Critique eligibility is by propagated
+   origin (§3.3) — never inferred from source strings or `tool_call_id`
+   presence, both of which were tried and failed in opposite directions.
 8. **Rowid threading + `on_compaction` payload extension** (§3.1):
    `on_conversation_event` returns the `message_log` rowid and the agent
    attaches it to the in-memory message — window messages carry no DB ids
    today, so without this the compacted id range has no producer and the
-   exchange key (§4.5) nothing to rebind to. `on_conversation_event` is a
-   broadcast hook whose results are currently discarded, so the resolution
-   rule is explicit: exactly one plugin (persistence) returns a non-None
-   rowid; more than one is a configuration error. The compacted id range
-   then rides `on_compaction` alongside the summary.
+   key↔rowid pairing (§4.5) nothing to pair with. `on_conversation_event`
+   is a broadcast hook whose results are currently discarded, so the
+   resolution rule is explicit: exactly one plugin (persistence) returns a
+   non-None rowid; more than one is a configuration error. The compacted id
+   range then rides `on_compaction` alongside the summary. Two completions:
+   the **reload path re-attaches ids** — the loader change already open in
+   item 1 also returns rowids, or the first post-restart compaction has no
+   range producer and the timestamp arithmetic this item removes silently
+   returns; and the **prompt-build/compaction strip widens** — it removes
+   only the message-type tag today, so the attached rowid must be stripped
+   alongside it or it leaks into every LLM request.
 9. **Scheduler enqueue semantics** (§3.4): scheduled firings reset
    `channel.turn_counter` (USER-like), or notification-only channels
    permanently exhaust `max_turns`.
