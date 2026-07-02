@@ -11,7 +11,12 @@ KV-cache economy, appraisal-gated deliberation, single-daemon asyncio)?
 > admission-funnel seam (§2.2), the novelty-as-surprise specification and
 > encode/retrieve gate (§3.2), the semantic-fact generalization (§3.6), the
 > frozen-weights criterion (§5), and the Phase 6 A/B toggles (§7). This note
-> stands as the rationale record.
+> stands as the rationale record. A subsequent code-grounded critique demoted
+> two of its claims: input-side perplexity is not exposed by chat-completions
+> APIs (it costs a separate scoring pass, not a freebie), and the
+> encode/retrieve gate's cost case is weak — per-turn retrieval is cheap, and
+> the real cost is the window tokens admitted, which the admission budget
+> controls. Both survive only as Phase 6 toggles expected to lose their A/B.
 
 The framing is purely engineering. Each candidate is stated as an agent
 mechanism with an evaluation attached, because — per `bootstrap-mapping.md` §6 —
