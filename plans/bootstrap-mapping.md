@@ -280,8 +280,22 @@ each tier optional (graceful degradation all the way down):
    after generation. This is genuinely interoceptive — the gut check reads
    the organism's internal state rather than judging text from outside.
    High-entropy spans over factual claims are a critique trigger in
-   themselves. (c) Surface heuristics: negation density, question marks,
-   imperatives, disagreement markers, numbers/commitments.
+   themselves. Two caveats bound this signal. *Provider dependence*: it is a
+   perk of local-first deployment — llama-server and most self-hosted
+   backends expose logprobs, but commercial APIs are a patchwork (OpenAI
+   yes on standard chat models but not reasoning models; Anthropic not at
+   all) — so it is an optional input, never load-bearing. Substitutes on
+   logprob-less providers are poor and should not be faked: verbalized
+   confidence is miscalibrated, and self-consistency sampling (k generations,
+   measure divergence) recovers real uncertainty but at k× cost — at most an
+   escalation for the highest-stakes appraisal band. *Signal validity*:
+   entropy is per-token and syntax-confounded, and confident confabulation
+   is *low*-entropy — it detects "the generator was torn," not "the
+   generator was wrong." An independent reason the provenance gate keys off
+   retrieval evidence mechanically, never off generator-side confidence
+   (§2.4). (c) Surface heuristics: negation density, question marks,
+   imperatives, disagreement markers, numbers/commitments — all local and
+   provider-independent.
 2. **A small readout head over the embedding.** A tiny classifier (logistic
    regression or two-layer MLP, sub-millisecond on CPU) mapping the
    already-computed embedding to the appraisal dimensions. Bootstrap training
@@ -521,6 +535,8 @@ Everything above lands as plugins plus:
 4. **Logprob passthrough**: `LLMClient.chat` already accepts `extra_body`;
    the appraisal tier-1 signals need the response's logprobs surfaced on
    `AgentTurnResult` when requested — a small, additive change to `turn.py`.
+   Best-effort: providers that return no logprobs (see §3.2 tier 1) surface
+   `None`, and appraisal proceeds on its other signals.
 5. **New SQLite tables** (memory + access stats, appraisal/outcome log,
    reminders, goals, persons, observations, usage records) — all additive;
    `message_log` and its append-only invariant untouched.
