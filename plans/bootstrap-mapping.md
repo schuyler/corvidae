@@ -6,7 +6,11 @@ autonomous agents with persistent autobiographical memory, counter-perspective
 critique, heartbeat-driven autonomy, and cost observability — inside the
 corvidae code base. This is not a transcription of the spec: §5 records where
 we deliberately diverge from it and why, and §6 states the testing philosophy
-those divergences rest on.
+those divergences rest on. It also folds in the adjustments implied by the
+`agent-directions.md` follow-on note — the design seams in Phases 0–2, the
+surprise specification (§3.2), the semantic-fact generalization (§3.6), and
+the Phase 6 toggle set (§7) — so that this document remains the single plan
+of record; that note stands as the rationale for those changes.
 
 The mapping is filtered through corvidae's driving theory:
 
@@ -127,6 +131,17 @@ window** and budget accordingly. Persyn's "fraction of context window" budget
 (§2) becomes "fraction of `max_context_tokens`, counting CONTEXT entries
 already present."
 
+Implementation discipline: all tail CONTEXT appends — retrieved memories,
+open goals, critique verdicts, date/time grounding, observations — route
+through a single **context-admission funnel** module. Its initial policy is
+per-source budgets, and the dedupe-against-window check lives here, written
+once instead of per-plugin. The funnel is deliberately also a seam: when
+Phases 1–3 all compete for tail space, cross-source **salience arbitration**
+(appraisal-ranked admission of new entries — Phase 6 toggle) becomes a policy
+swap inside the funnel rather than a change to every append site. Arbitration
+decides only *what to newly append and in what order* — never
+evict-and-reinsert, per the append-only constraint above.
+
 ### 2.3 Subcortical processes are cheap-model background tasks
 
 Persyn's model registry (§2: response, summarization, rating, classification,
@@ -145,7 +160,8 @@ this: a cheap, always-on **appraisal** — heuristics plus a small readout over
 signals the system computes anyway (see §3.2) — produces a low-dimensional
 salience/valence vector per exchange, and *that* determines how much
 downstream machinery fires. Cheap perception is continuous; expensive
-cognition is allocated.
+cognition is allocated. (In one phrase: a **fast gate in front of slow
+deliberation** — the organizing principle named in `agent-directions.md`.)
 
 Two corollaries discipline the design:
 
@@ -202,7 +218,15 @@ verbatim tier, already built.
 not a verdict. When `AppraisalPlugin` (§3.2) is registered, the appraisal
 vector recorded at exchange time supplies it (salient exchanges encode more
 durably — the amygdala-modulates-hippocampus pattern); without it, degrade to
-a cheap-model rubric rating per the spec. Either way the prior is then
+a cheap-model rubric rating per the spec. The prior's supplier is a
+**pluggable interface** — appraisal when registered, rubric otherwise — so
+that a weighted **surprise** term (§3.2) can join it later as a Phase 6
+toggle: surprising exchanges encode more strongly, routine ones more weakly.
+One invariant bounds that gate: surprise modulates *consolidated-record
+encoding strength only*, never entry into the append-only `message_log`. The
+raw log stores everything regardless, so under-encoding is always recoverable
+via "remember harder," and the §3.3 provenance gate must check both tiers
+before objecting that no record exists. Either way the prior is then
 **updated by use**: see retention.
 
 **Retention — reconsolidation, not culling.** Two deliberate divergences from
@@ -230,11 +254,13 @@ relevance function (semantic similarity × temporal decay × participant
 match), filter by channel compartmentalization (`channel.id`; add an optional
 YAML channel-group map for shared memory), dedupe against CONTEXT entries
 already in the window, and append the winners as a single CONTEXT message at
-the tail, **each annotated with its relevance band** (strong/moderate/weak)
-per §4 step 2. Record the retrieval in the accessed records' access
-statistics (the write half of reconsolidation), and expose the retrieval
-profile — top score, hit count — to downstream consumers (the provenance
-trigger in §3.3 keys off it).
+the tail via the admission funnel (§2.2), **each annotated with its relevance
+band** (strong/moderate/weak) per §4 step 2. Record the retrieval in the
+accessed records' access statistics (the write half of reconsolidation), and
+expose *and persist* the retrieval profile — top score, hit count, probe
+score — per turn in the outcome log (§3.7): the provenance trigger in §3.3
+keys off it, and it is the raw material for the §3.2 surprise signal and
+encode/retrieve-gate calibration.
 
 **Contradiction handling.** The spec gives observations supersede/contradict
 logic (§4.4) but episodic records none — two conflicting first-person
@@ -310,6 +336,27 @@ each tier optional (graceful degradation all the way down):
    `main`): a schema-constrained score vector. ~10–50× cheaper than a
    critique pass. This is the day-one implementation; tiers 1–2 grow
    underneath it and progressively replace calls with lookups.
+
+**The `novelty` dimension is specified as *surprise*** — prediction error,
+not mere familiarity, because the two diverge: a familiar input can still be
+surprising (`agent-directions.md` #1). It is composed from (i) the
+familiarity score of a cheap **pre-retrieval probe** — an FTS5 keyword probe
+or a coarse top-1 ANN check, strictly cheaper than full retrieval, which
+scores, filters, dedupes, and formats — and (ii), where the provider exposes
+it, **input-side perplexity**: the symmetric twin of the output-logprob
+signal in tier 1b, inheriting its exact caveats (provider-dependent,
+syntax-confounded, an optional input, never load-bearing). The probe is a
+shared front-end with two consumers: it feeds this dimension every turn, and
+its score drives the **encode/retrieve gate** (Phase 6 toggle, default off) —
+full retrieval runs only past a familiarity threshold, saving the most
+expensive per-turn operation on evidently-novel turns, where there is nothing
+to recall. The gate calibrates through the same outcome-log loop as the other
+thresholds here: a random sample of below-threshold turns runs full retrieval
+anyway, bounding what the gate would have missed. Surprise decides *episodic
+encoding strength* (§3.1); its orthogonal twin — **frequency**, the
+recurring-but-important that pure surprise-gating under-encodes — already
+exists as usage-weighted reconsolidation (§3.1 retention), whose access
+statistics are also the promotion signal for the semantic tier (§3.6).
 
 **Three consumers, one signal:**
 
@@ -416,6 +463,11 @@ wake the daemon at 9am Friday. This plugin adds real scheduling:
   inventing things to do on schedule produces goal churn and unprompted
   noise, not agency (§5). Whether to act is itself an engagement decision,
   and the §3.3 outbound gate applies to anything the beat wants to send.
+  The beat template also carries a **distillation/rehearsal slot**: propose
+  cross-episode regularities as semantic facts (§3.6) and optionally pre-load
+  an open goal's next step. Per `agent-directions.md`, this is a heartbeat
+  *template* plus result-caching, not new architecture — the base model does
+  the simulating; the beat asks and caches.
 - Bootstrapped exactly once with a durable deleted-flag in SQLite so restart
   doesn't resurrect a deleted heartbeat (the spec is explicit and right about
   this: sleep is a durable state).
@@ -440,14 +492,28 @@ every response; the heartbeat reviews/retires them. **Effort: S–M.**
 Today `sender` is a bare string. Add: `person` records keyed by
 `(transport, scope, sender)` — precisely the spec's "service + channel +
 speaker identifier" lookup key — auto-created on first contact; `observation`
-records (subject, type, value, timestamp, source conversation);
-reconciliation of a new observation against existing ones via a cheap-model
-judgment; a `dossier` synthesis path; operator curation (fold/detach) as CLI
-commands via the existing `corvidae.commands` entry-point group rather than a
-console UI. Participant-match scoring in §3.1's relevance function gets its
-real data source here (ship §3.1 with channel-match as the proxy; upgrade
-when this lands). Person records also carry the **trust level** that
-write-side guardrails need (§3.9). **Effort: M.**
+records generalized to **subject-typed semantic facts** —
+`(subject_type ∈ {person, channel, topic}, subject_id, type, value,
+timestamp, source episode ids)`. The generalization is deliberate: an
+observation *is* a semantic fact distilled from episodes and a dossier is its
+consolidated schema (`agent-directions.md` #2), so building the person-only
+table and migrating later means paying twice for one schema. Ship with
+**person-subject extraction only** (exactly the spec behavior); channel/topic
+extraction stays unbuilt until the §6 suite demands it (Phase 6 toggle).
+Reconciliation of a new fact against existing ones (supersede/contradict) via
+a cheap-model judgment, written once against the general schema; a `dossier`
+synthesis path; operator curation (fold/detach) as CLI commands via the
+existing `corvidae.commands` entry-point group rather than a console UI, plus
+a first-class verb for **operator-authored facts** — cheap human curation may
+dominate automatic extraction for a personal agent, and the §6 eval can only
+test that if hand-authoring is a supported input rather than a SQL trick. The
+whole tier is bounded by the frozen-weights criterion (§5): semantic facts
+are restricted to agent-specific, post-training regularities — this user,
+this deployment, these channels — never a reconstruction of general knowledge
+the weights already hold. Participant-match scoring in §3.1's relevance
+function gets its real data source here (ship §3.1 with channel-match as the
+proxy; upgrade when this lands). Person records also carry the **trust
+level** that write-side guardrails need (§3.9). **Effort: M.**
 
 ### 3.7 Observability — usage records, metrics, tracing (Persyn App. C–D)
 
@@ -464,7 +530,13 @@ log — the latter mirroring `JsonlLogPlugin`) are `on_metrics` consumers,
 fail-soft. **Effort: M**, independent of everything above — a good early win.
 It also feeds §3.2's self-calibration (appraisal-vs-outcome correlation needs
 per-call records) and makes the token cost of every later phase measurable as
-it ships.
+it ships. Two requirements sharpen the scope: the per-turn **retrieval
+profile** (§3.1) is persisted in the outcome log from day one — the raw
+material for the surprise signal and gate calibration, accumulating before
+the mechanisms that want it exist — and **eval-readiness is an acceptance
+criterion**, not just cost legibility: the stage-attributed records must be
+able to answer the Phase 6 questions, all of which are denominated in tokens
+("recall at a fixed token budget," "tokens saved by the gate").
 
 ### 3.8 Skills (Persyn §4.6)
 
@@ -497,7 +569,9 @@ Additions, all in this plugin cluster:
   retrievable, but surfaced with an explicit provenance warning
   ("a stranger claimed…") and never allowed to satisfy the provenance gate as
   corroboration. Corroboration by a trusted participant or the operator
-  promotes them.
+  promotes them. Semantic facts (§3.6) inherit the *minimum* trust of the
+  episodes they were distilled from — distillation must not launder trust —
+  and low-trust facts quarantine exactly like low-trust memories.
 - **Read-side sensitivity** (spec §5): a sensitivity column + retrieval
   filter in §3.1 — a record surfaces only if current-channel participants
   satisfy its access designation. Participant-aware policy needs §3.6.
@@ -558,8 +632,15 @@ mandated as architecture that are really *hypotheses about model behavior*.
 Its own §9 acceptance criteria are behavioral and already test the outcomes
 those mechanisms are meant to guarantee. We therefore invert its stance: **the
 behavioral test suite is normative; the mechanisms are a reference
-implementation, built where the tests demand them** (§6). Specific
-divergences:
+implementation, built where the tests demand them** (§6). A second normative
+filter sits alongside that stance, from `agent-directions.md`: the pretrained
+weights are frozen and vast, so **prefer mechanisms about the agent's own
+idiosyncratic runtime stream — which the weights cannot contain — over
+mechanisms that reconstruct general knowledge, which they already hold.**
+This criterion is the *prior* the evals then test: it predicts which Phase 6
+toggles lose (it favors surprise and arbitration, trims the semantic tier to
+its agent-specific slice, and retires forward-simulation-as-module), and the
+harness checks the prediction per deployed model. Specific divergences:
 
 1. **Unconditional critique → appraisal-gated critique** (§3.2–3.3). The
    spec's per-response critique+provenance+refine is a 2–3× cost multiplier
@@ -657,6 +738,13 @@ them). Corvidae's TDD culture (AGENTS.md: red/green) forces the fix:
   (the spec is model-agnostic; the anti-sycophancy machinery reads as
   calibrated to weaker models than currently deployable). Failures, not
   doctrine, pull machinery in.
+- **Phase 6 A/B benchmarks** (the `agent-directions.md` eval questions), each
+  measuring a toggle against its simpler baseline at a fixed token budget:
+  surprise-gated encoding vs. rubric-only importance; the semantic tier vs.
+  episodic-only *and* vs. operator-authored facts; salience-ranked admission
+  vs. per-source budgets under tail contention; encode/retrieve gate on vs.
+  off (tokens saved against recall lost). Authored as fixture benchmarks
+  *before* their toggles are built — red tests first, per AGENTS.md.
 
 ---
 
@@ -667,12 +755,20 @@ AGENTS.md):
 
 | Phase | Contents | Persyn acceptance criteria unlocked (§9) | Effort |
 |---|---|---|---|
-| 0 | Observability hooks + metering adapters (§3.7) | — (makes cost legible; feeds appraisal calibration) | M |
-| 1 | MemoryPlugin: consolidation, vector retrieval, reconsolidation/demotion, memory tools; epistemic-calibration prompt fragment; fixture evals (§3.1, §6) | recall across restarts; per-channel recall; "no memory of that"; hedging + remember-harder; bounded store | L |
-| 2 | AppraisalPlugin (tier 1 + 3, outcome log) + CritiquePlugin + `should_send_response` + decide-gate (§3.2, §3.3) | pushes back on flawed premises; declines capable requests; adds nothing → stays silent | M+M |
-| 3 | SchedulerPlugin + heartbeat + goals (§3.4, §3.5) | unprompted messages; durable heartbeat deletion → dormancy | M |
-| 4 | PeoplePlugin + directory curation commands; participant-match retrieval upgrade (§3.6) | knows who it's talking to; agent-to-agent with budgets (with phase-2 gates) | M |
-| 5 | Trust/quarantine, sensitivity, pattern guardrails, skills; appraisal tier-2 readout head (§3.8, §3.9) | safe to leave running | M (aggregate) |
+| 0 | Observability hooks + metering adapters; per-turn retrieval profiles and stage-attributed costs persisted from day one; eval-readiness as acceptance criterion (§3.7) | — (makes cost legible; feeds appraisal calibration and Phase 6 evals) | M |
+| 1 | MemoryPlugin: consolidation, vector retrieval, reconsolidation/demotion, memory tools; **context-admission funnel** (§2.2); pluggable importance prior (§3.1); epistemic-calibration prompt fragment; fixture evals (§3.1, §6) | recall across restarts; per-channel recall; "no memory of that"; hedging + remember-harder; bounded store | L |
+| 2 | AppraisalPlugin (tier 1 + 3, outcome log) with novelty-as-surprise + shared pre-retrieval probe (§3.2) + CritiquePlugin + `should_send_response` + decide-gate (§3.3) | pushes back on flawed premises; declines capable requests; adds nothing → stays silent | M+M |
+| 3 | SchedulerPlugin + heartbeat (with distillation slot) + goals (§3.4, §3.5) | unprompted messages; durable heartbeat deletion → dormancy | M |
+| 4 | PeoplePlugin with subject-typed semantic facts (person extraction only) + operator fact authoring + directory curation commands; participant-match retrieval upgrade (§3.6) | knows who it's talking to; agent-to-agent with budgets (with phase-2 gates) | M |
+| 5 | Trust/quarantine (incl. distilled-fact trust inheritance), sensitivity, pattern guardrails, skills; appraisal tier-2 readout head (§3.8, §3.9) | safe to leave running | M (aggregate) |
+| 6 | A/B toggles behind the §6 harness: surprise term in the importance prior; semantic-tier extraction/promotion beyond persons; salience-arbitration policy in the funnel; encode/retrieve gate | — (refinements; each ships only if it beats its baseline) | S per toggle |
+
+Phase 6 has no fixed contents: it is where the toggles the earlier seams
+enable are measured against their simpler baselines — with the expectation,
+per `agent-directions.md`, that the honest eval retires more of this
+scaffolding than intuition assumes, because the base model is more capable
+than the mechanisms presume. Toggles that lose stay off; toggles that win
+graduate into defaults.
 
 The spec's week-long continuity bar — "the same someone you talked to
 yesterday, who remembers, who learned, and who occasionally tells you you're

@@ -6,6 +6,13 @@ of the mechanisms one *could* add, which are the highest-yield, cheapest, and
 most native to corvidae's existing constraints (append/truncate-only context,
 KV-cache economy, appraisal-gated deliberation, single-daemon asyncio)?
 
+> **Status:** the adjustments these candidates imply have been folded into
+> `bootstrap-mapping.md`, which remains the single plan of record — the
+> admission-funnel seam (§2.2), the novelty-as-surprise specification and
+> encode/retrieve gate (§3.2), the semantic-fact generalization (§3.6), the
+> frozen-weights criterion (§5), and the Phase 6 A/B toggles (§7). This note
+> stands as the rationale record.
+
 The framing is purely engineering. Each candidate is stated as an agent
 mechanism with an evaluation attached, because — per `bootstrap-mapping.md` §6 —
 the behavioral test suite is the normative bar, and failures, not doctrine,
