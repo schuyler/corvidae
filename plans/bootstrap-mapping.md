@@ -454,7 +454,12 @@ blocking model call to the response path.
   persistence time, delivers the pairing to plugins through a dedicated
   core-fired hook, **`on_message_persisted(channel, exchange_key, rowid)`**
   — an earlier draft said "the enriched hooks" deliver it, which named no
-  carrier — with no per-channel FIFO and no rebinding race (a still-earlier
+  carrier. The hook fires **once per exchange, at the persistence of the
+  exchange's originating message**; mid-exchange tool-result rows, injected
+  CONTEXT rows, and assistant rows do not fire it — that single pairing is
+  all the outcome log's rowid column needs, and the compaction-range join
+  gets its per-row ids from `on_compaction` (§4.8). No per-channel FIFO and
+  no rebinding race (a still-earlier
   plugin-side FIFO desynchronized permanently the moment another plugin's
   veto won the gate). Gate-rejected messages still get outcome-log rows
   under their key with a null rowid — their stage-1 appraisals are
@@ -994,8 +999,11 @@ all of it:
    mints their key **at dequeue** when the item carries none (producers
    stamp origin in `on_notify` meta; §3.3); and the key↔rowid pairing
    reaches plugins via a core-fired
-   **`on_message_persisted(channel, exchange_key, rowid)`** — the outcome
-   log's rowid column has no other writer path.
+   **`on_message_persisted(channel, exchange_key, rowid)`**, fired **once
+   per exchange at the persistence of its originating message** (never on
+   mid-exchange tool rows, injected CONTEXT, or assistant rows) — the
+   outcome log's rowid column has no other writer path, and per-row firing
+   under one key would overwrite it with each successive row.
 6. **Silent tasks**: `Task` gains `deliver: bool` (default true) so
    subcortical work can complete without triggering a main-model turn (§2.3).
    Invariant: `deliver=False ⇒ tool_call_id is None`, or the channel's tool
