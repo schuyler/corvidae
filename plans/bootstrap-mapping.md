@@ -10,7 +10,12 @@ those divergences rest on. It also folds in the adjustments implied by the
 `agent-directions.md` follow-on note — the design seams in Phases 0–2, the
 surprise specification (§3.2), the semantic-fact generalization (§3.6), and
 the Phase 6 toggle set (§7) — so that this document remains the single plan
-of record; that note stands as the rationale for those changes.
+of record; that note stands as the rationale for those changes. A
+code-grounded adversarial critique pass has also been applied: several claims
+that existing plumbing "already carries" the new signals were verified false,
+and the corrections — chiefly the two-stage appraisal (§3.2), the
+veto-before-persist rule (§3.3), silent subcortical tasks (§2.3), and an
+honestly larger §4 — are folded in below.
 
 The mapping is filtered through corvidae's driving theory:
 
@@ -53,7 +58,7 @@ Two headline conclusions:
 | Channel adapters (§3) | Transport plugins + `Channel` abstraction (`channel.py`, `channels/`) | ✅ built (IRC, CLI) |
 | Event dispatcher (§3) | Per-channel `SerialQueue` + `TaskQueue` + `on_notify` | ✅ built (in-process) |
 | Short-term memory tier (§4.1) | Append-only `message_log` (SQLite) — raw verbatim dialog, never deleted | ✅ built |
-| Summarization of old dialog (§4 step 8) | `CompactionPlugin` — LLM summary replaces head of window | ✅ built (second-person, not first-person) |
+| Summarization of old dialog (§4 step 8) | `CompactionPlugin` — LLM summary replaces head of window | ✅ built (third-person, not first-person) |
 | Fast/strong model split (§2, App. A) | `llm.main` / `llm.background` roles in `LLMPlugin` | ✅ built (needs more roles) |
 | Tool registry (§4.6) | `ToolRegistry` + `register_tools` hook + `ToolCollectionPlugin` | ✅ built |
 | External tool servers (§4.6) | `McpClientPlugin` — namespacing, fail-soft startup | ✅ built (no mid-session reconnect) |
@@ -142,6 +147,16 @@ swap inside the funnel rather than a change to every append site. Arbitration
 decides only *what to newly append and in what order* — never
 evict-and-reinsert, per the append-only constraint above.
 
+One routing rule keeps the funnel honest: content that arrives via the
+*notification* path — critique verdicts, task results, scheduler objectives —
+is today embedded wholesale in the triggering turn's message
+(`_build_conversation_message` renders it as a role-"system" entry), bypassing
+any budget. If the funnel governed only `before_agent_turn` appends, it would
+be blind to exactly the sources most likely to contend for tail space. So:
+the notification carries a minimal wake-up stub; the *payload* is registered
+with the funnel by the producing plugin and admitted as CONTEXT at the turn
+the notification triggers, under the same budget as everything else.
+
 ### 2.3 Subcortical processes are cheap-model background tasks
 
 Persyn's model registry (§2: response, summarization, rating, classification,
@@ -150,6 +165,17 @@ role table beyond `main`/`background` — add `critic`, `embedding`,
 `appraisal`, and let any role fall back to `main`. Every subcortical plugin
 (appraisal, critique, consolidation, guardrails) gets its client via
 `get_client(role)` and runs on `TaskQueue`, never blocking the channel queue.
+
+One verified correction: as built, the TaskQueue cannot run a *silent* task —
+every completion is unconditionally delivered via `on_notify`
+(`task.py:_on_task_complete`), which enqueues a NOTIFICATION and triggers a
+full main-model turn. As originally specified, every appraisal computation,
+every consolidation job, and every *empty* critique verdict would wake the
+main model. Subcortical work therefore needs a fire-and-forget mode: `Task`
+gains a `deliver: bool` (default true), or subcortical plugins own bare
+`asyncio.create_task` calls with their own error handling. Either way this is
+core surface, named in §4 — the earlier "no changes to the queue system"
+claim was wrong.
 
 ### 2.4 Deliberation is salience-gated, not unconditional
 
@@ -199,10 +225,24 @@ absorbed/replaced by it.
   **epistemic framing preserved** ("I speculated that…"), embed it, extract
   metadata, and store a memory record. This reframes compaction from lossy
   forgetting into memory formation — the most elegant single alignment between
-  the two documents.
+  the two documents. Two verified caveats: the hook today delivers only
+  `(channel, summary_msg, retain_count)` — the compacted-away range would have
+  to be reconstructed by fragile summary-timestamp arithmetic — so the hook
+  must be extended to carry the compacted `message_log` id range (§4). And
+  don't pay twice: the compactor has just LLM-summarized the same segment, so
+  prefer one summarization call with two outputs (window summary +
+  first-person memory record) over a second pass on identical content.
 - `on_idle` — consolidate the still-active conversation tail on conversation
   lull (Persyn's 30-minute session auto-expiry maps to idle-time-since
-  `channel.last_active`), and run the retention job.
+  `channel.last_active`), and run the retention job. Note `on_idle` is
+  push-based — it fires only after queue activity — so on a zero-traffic
+  daemon retention and guardrail scans never run until Phase 3's clock-based
+  scheduler exists; run retention opportunistically at startup and hand it to
+  the scheduler when that lands.
+
+Both triggers write against a per-channel **consolidation watermark** (the
+last-consolidated `message_log` id, part of the §4 schema), so the idle-path
+and compaction-path passes never double-store overlapping dialog.
 
 **Memory record** (new SQLite tables + sqlite-vec index in `sessions.db`):
 id (time-sortable — timestamp-prefixed hex, matching corvidae's existing
@@ -246,6 +286,29 @@ the spec (§4.1):
    satisfies the spec's §9 storage-bounds criterion (index size and query
    latency stay bounded), and the raw record remains reachable via
    "remember harder."
+
+Three disciplines keep reconsolidation from eating itself, plus one deliberate
+exception to demote-don't-delete:
+
+- **Grace period and floor.** New records are exempt from usage-weighting for
+  a grace period — a never-retrieved record is exactly the one nobody thought
+  to ask about yet — and high-prior records get a demotion floor rather than
+  aging out purely for lack of traffic.
+- **Merge near-duplicates at consolidation time,** not only at window
+  admission: usage-weighting inherits retrieval's similarity bias, so
+  near-duplicate records otherwise reinforce one another and crowd the
+  retrieval budget (rich-get-richer).
+- **Text is canonical; embeddings are a rebuildable cache.** Summaries are
+  stored as text and re-embedded on encoder migration — an inevitable
+  operational event over a multi-year store — with the index versioned
+  alongside the encoder (as the §3.2 readout head already is).
+- **An operator-only `redact` command** tombstones `message_log` row content
+  and cascades to derived records (memory records, semantic facts,
+  embeddings). "Forget that," an accidentally pasted secret, and data-subject
+  requests all need an actual deletion path; refusing one is a privacy defect
+  dressed as an ethos. Redaction is a privacy affordance, not retention
+  policy: it is operator-invoked only, never agent-accessible, and never
+  triggered by scores.
 
 **Retrieval (read path).** In `before_agent_turn`: embed the inbound text
 (embedding client role; degrade to FTS5 keyword search if the encoder is
@@ -294,9 +357,33 @@ blocking model call to the response path.
 
 **Output.** A small appraisal vector attached to each exchange — e.g.
 `{valence, arousal/stakes, ambiguity, commitment_density, novelty}`, each
-0–1 — riding on `QueueItem.meta` inbound and on the persisted assistant
-message outbound. Computed from three signal tiers, in ascending cost, with
-each tier optional (graceful degradation all the way down):
+0–1. Two corrections to an earlier draft, both verified against the code:
+
+- **There is no existing carrier.** `QueueItem.meta` is populated only on the
+  notify path; inbound USER items are constructed without it, and no hook
+  ever exposes a `QueueItem` to plugins (`should_process_message` receives
+  `(channel, sender, text)` and returns a bool; `before_agent_turn` receives
+  only `channel`). The vector therefore lives in a **channel-keyed appraisal
+  store** owned by the plugin and read by consumers, plus a persisted column
+  in the outcome log (§3.7). Attaching it to the item proper requires the
+  richer admission hook in §4 — the earlier "rides on `QueueItem.meta`
+  without schema changes" claim was wrong.
+- **The appraisal is two-stage,** forced by control flow: the engagement gate
+  runs *synchronously inside the transport read path* (the gate hook is
+  awaited from the IRC read loop, before enqueue), and the retrieval profile
+  cannot exist at gate time because divergence 3 deliberately orders
+  retrieval *after* the gate.
+  - **Stage 1 — gate appraisal:** strictly non-LLM and non-blocking — surface
+    heuristics plus the FTS5 probe. This is all the inbound engagement gate
+    ever reads.
+  - **Stage 2 — full appraisal:** post-acceptance, off the response path —
+    retrieval profile, output logprobs, the tier-2 readout head, and the
+    tier-3 fast-model call. Deliberation depth and consolidation strength
+    read this stage; so may the *outbound* gate, which is not in the read
+    loop.
+
+Computed from three signal tiers, in ascending cost, with each tier optional
+(graceful degradation all the way down):
 
 1. **Free byproducts.** (a) The inbound embedding is already computed for
    retrieval (§3.1); the *retrieval profile* — top relevance score, hit
@@ -334,36 +421,48 @@ each tier optional (graceful degradation all the way down):
    invalidates both).
 3. **Fast-model fallback.** `llm.appraisal` (falls back to `background`, then
    `main`): a schema-constrained score vector. ~10–50× cheaper than a
-   critique pass. This is the day-one implementation; tiers 1–2 grow
-   underneath it and progressively replace calls with lookups.
+   critique pass. This is the day-one implementation *for stage 2 only* —
+   never for the gate stage; tiers 1–2 grow underneath it and progressively
+   replace calls with lookups.
 
 **The `novelty` dimension is specified as *surprise*** — prediction error,
 not mere familiarity, because the two diverge: a familiar input can still be
-surprising (`agent-directions.md` #1). It is composed from (i) the
-familiarity score of a cheap **pre-retrieval probe** — an FTS5 keyword probe
-or a coarse top-1 ANN check, strictly cheaper than full retrieval, which
-scores, filters, dedupes, and formats — and (ii), where the provider exposes
-it, **input-side perplexity**: the symmetric twin of the output-logprob
-signal in tier 1b, inheriting its exact caveats (provider-dependent,
-syntax-confounded, an optional input, never load-bearing). The probe is a
-shared front-end with two consumers: it feeds this dimension every turn, and
-its score drives the **encode/retrieve gate** (Phase 6 toggle, default off) —
-full retrieval runs only past a familiarity threshold, saving the most
-expensive per-turn operation on evidently-novel turns, where there is nothing
-to recall. The gate calibrates through the same outcome-log loop as the other
-thresholds here: a random sample of below-threshold turns runs full retrieval
-anyway, bounding what the gate would have missed. Surprise decides *episodic
-encoding strength* (§3.1); its orthogonal twin — **frequency**, the
-recurring-but-important that pure surprise-gating under-encodes — already
-exists as usage-weighted reconsolidation (§3.1 retention), whose access
-statistics are also the promotion signal for the semantic tier (§3.6).
+surprising (`agent-directions.md` #1). Realistically it is composed from the
+familiarity score of a cheap **FTS5 keyword probe** plus the surface
+heuristics of tier 1c. The probe is FTS5-*only*: a "coarse top-1 vector
+probe" is not cheaper on this stack — sqlite-vec does brute-force exact KNN
+(there is no ANN index), so top-1 costs the same full scan as top-k *and* the
+same embedding call retrieval needs. Input-side perplexity — the symmetric
+twin of the output-logprob signal in tier 1b — is demoted to
+*future-if-provider-supports*: chat-completions APIs, including
+llama-server's, expose logprobs for generated tokens only, and scoring the
+prompt means a separate forward pass that is neither cheap nor
+KV-cache-friendly. The probe is a shared front-end with two consumers: it
+feeds this dimension every turn (it is also the stage-1 gate appraisal's main
+signal), and its score drives the **encode/retrieve gate** (Phase 6 toggle,
+default off) — full retrieval runs only past a familiarity threshold. Honest
+cost accounting says this gate is expected to *lose* its A/B: per-turn
+retrieval is one small-model embedding call plus a milliseconds scan, and the
+genuinely expensive part — the window tokens retrieval admits — is controlled
+by the admission budget, not the gate. It stays specified as a toggle
+precisely so the harness can retire it cheaply (the frozen-weights stance in
+§5 applied to our own idea). The gate calibrates through the same outcome-log
+loop as the other thresholds here: a random sample of below-threshold turns
+runs full retrieval anyway, bounding what the gate would have missed.
+Surprise decides *episodic encoding strength* (§3.1); its orthogonal twin —
+**frequency**, the recurring-but-important that pure surprise-gating
+under-encodes — already exists as usage-weighted reconsolidation (§3.1
+retention), whose access statistics are also the promotion signal for the
+semantic tier (§3.6).
 
 **Three consumers, one signal:**
 
 1. **Engagement** (§4 step 6, inverted — see §5): the appraisal feeds
    `should_process_message` and the outbound `should_send_response` gate, so
-   the *decision to engage* costs an appraisal, not a full pipeline run. On
-   busy multi-speaker channels the agent observes everything and appraises
+   the *decision to engage* costs an appraisal, not a full pipeline run. The
+   inbound gate reads **stage 1 only** — it runs in the transport read path
+   and must never block on a model call; the outbound gate may read stage 2.
+   On busy multi-speaker channels the agent observes everything and appraises
    everything, but retrieves/generates only for what crosses the salience
    threshold.
 2. **Deliberation depth and lens** (§3.3): whether critique fires, and which
@@ -387,6 +486,16 @@ below-threshold responses is critiqued anyway to measure the false-negative
 rate. The gate learns its own sensitivity from outcomes. This log is also the
 seed data for the tier-2 readout head, and the backbone of §6.
 
+The two gates calibrate differently, and conflating them is a trap.
+Below-threshold *critique* sampling is invisible — the critic runs, nobody
+sees it. Below-threshold *engagement* sampling means sending messages the
+gate would have suppressed: user-visible noise, worst on exactly the busy
+channels where the gate matters most. And "did the response draw a reply" is
+coupled to the agent's own behavior — speaking less shifts reply base rates,
+which retrains the gate that decides how much to speak. Engagement thresholds
+therefore calibrate **offline**: replay logged traffic against candidate
+thresholds, plus explicit operator feedback — never by live exploration.
+
 **Degradation contract:** without `AppraisalPlugin`, the critique plugin
 falls back to spec behavior (critique everything, random lens), consolidation
 falls back to rubric-rated importance, and engagement gates pass everything —
@@ -405,7 +514,17 @@ Deferred-deliberation mode (§2.1), appraisal-gated (§2.4). Flow:
    Independently and mechanically, the **provenance gate** fires when the
    response asserts past events/commitments *and* the turn's retrieval
    profile was weak or empty — regardless of appraisal (§2.4). No appraisal
-   plugin registered → critique everything (spec behavior).
+   plugin registered → critique everything (spec behavior). Two verified
+   defects in the hook as built, both §4 items: `request_text` derives from
+   the *current* queue item, so for a tool-using exchange the "request" is
+   the last tool-result notification, not the user message — the critic
+   would judge the response against a tool result; and the hook carries no
+   trigger source, so a verdict-triggered turn is itself critique-eligible
+   (verdict → turn → response → critique → verdict…), a loop the mechanical
+   provenance gate would never break on its own. The hook must carry the
+   triggering item's role/source and the true originating user message, and
+   there is a hard recursion rule: **no critique of turns whose trigger
+   source is critique, heartbeat, or task.**
 2. Enqueued critique `Task`s run on the `critic`/`background` client with
    schema-constrained JSON output (llama-server grammar / `json_schema` via
    `extra_body`) — structured objections, not free text. The provenance
@@ -416,11 +535,14 @@ Deferred-deliberation mode (§2.1), appraisal-gated (§2.4). Flow:
    that didn't generate. With one model, the structured objection schema and
    mechanical provenance check carry most of the weight.
 3. Empty objections → done; log the (appraisal, no-objection) outcome for
-   calibration and let nothing re-enter the window. Otherwise the verdict
-   arrives via the standard `on_notify` path as a notification
-   ("Self-critique of my last reply: …objections…"), triggering a next agent
-   turn in which the agent corrects itself on-channel, updates a goal, or
-   (having considered) lets it stand.
+   calibration and let nothing re-enter the window (this requires the silent
+   Task mode of §2.3 — without it, even an empty verdict wakes the main
+   model). Otherwise the verdict wakes the channel via the standard
+   `on_notify` path, per the §2.2 routing rule: the notification itself is a
+   minimal stub, and the structured objections are registered with the
+   admission funnel and enter as CONTEXT at the turn it triggers — budgeted
+   like every other tail source. The agent then corrects itself on-channel,
+   updates a goal, or (having considered) lets it stand.
 
 This *is* the "parallel agents augmenting each other's context with
 evaluation outputs" thesis; anti-sycophancy holds across-turns exactly as the
@@ -428,13 +550,24 @@ spec's deferred mode specifies, and in multi-agent IRC channels it provides
 the error-cascade damping of §4.2 for free.
 
 **The decide step / right to silence** (§4 step 6) needs one new hook:
-`should_send_response(channel, text) → bool | None` (REJECT_WINS), fired in
-`Agent._handle_response` before `send_message` — the outbound mirror of
-`should_process_message`. Consumers: the appraisal-fed engagement gate,
-token-budget and rate-limit gates for agent-to-agent channels (§4.5),
-guardrail blocking (§3.9). A vetoed response is still persisted in the log
-(append-only: the agent *thought* it, it just didn't say it), tagged so
-transports never see it.
+`should_send_response(channel, text) → bool | None` (REJECT_WINS) — the
+outbound mirror of `should_process_message`. Placement matters, and the
+original placement was wrong: the assistant message is appended and persisted
+as an ordinary MESSAGE at step 8 of the turn loop, *before*
+`_handle_response` runs at step 10, and the persistence event has already
+committed — there is no retro-tagging. The hook therefore fires **between
+generation and persistence** (after step 7), so a veto can persist with a
+distinct message type (e.g. `WITHHELD`) that transports and history loaders
+never surface. The vetoed text also cannot simply sit in the active window
+untagged, or the model will later reference statements its interlocutor never
+saw ("as I mentioned earlier…"); the funnel appends a one-line marker ("the
+previous response was withheld — the channel did not see it"). The
+error-fallback path (`_process_queue_item`'s exception handler sends an
+apology via `send_message` directly) must route through the gate as well.
+Consumers: the appraisal-fed engagement gate, token-budget and rate-limit
+gates for agent-to-agent channels (§4.5), guardrail blocking (§3.9). The
+append-only principle is preserved: the agent *thought* it, it just didn't
+say it, and the log records both facts.
 
 **Effort: M** for the critique loop; **S** for the hook + a first decide-gate
 plugin. Depends on §3.2 for gating (degrades to unconditional without it) and
@@ -456,7 +589,13 @@ wake the daemon at 9am Friday. This plugin adds real scheduling:
   (§4.7's management surface).
 - **The heartbeat** is a standing recurring reminder targeting a dedicated
   self-channel (e.g. `internal:heartbeat` — channels are cheap; per-channel
-  config gives it its own prompt and small token budget). Each beat: review
+  config gives it its own prompt and small token budget). One verified trap:
+  `channel.turn_counter` resets only on USER items, so a channel driven
+  purely by notifications hits `max_turns` (default 10) after ten responses
+  and has every subsequent tool call suppressed, permanently — and the
+  heartbeat's review-and-act loop is tool-dependent. A scheduled firing must
+  therefore enqueue with USER-like semantics (resetting the counter); §4
+  item. Each beat: review
   recent memory and open goals, self-assess through a critique template, and
   act *if the self-assessment warrants it*. The spec demands "self-reflection
   *and action*" every beat; mandated action manufactures busywork — an agent
@@ -513,7 +652,14 @@ this deployment, these channels — never a reconstruction of general knowledge
 the weights already hold. Participant-match scoring in §3.1's relevance
 function gets its real data source here (ship §3.1 with channel-match as the
 proxy; upgrade when this lands). Person records also carry the **trust
-level** that write-side guardrails need (§3.9). **Effort: M.**
+level** that write-side guardrails need (§3.9) — and trust is only as strong
+as identity. On IRC the sender is an unauthenticated nick passed verbatim, so
+the `(transport, scope, sender)` key is spoofable: a poisoner who takes the
+operator's nick would inherit operator trust, and all of §3.9's quarantine
+machinery sits downstream of that key. Person records therefore also carry an
+**identity-assurance level** (transport-verified — e.g. a NickServ/services
+account — vs. bare nick), and the trust attainable through a transport is
+capped by the assurance that transport can actually provide. **Effort: M.**
 
 ### 3.7 Observability — usage records, metrics, tracing (Persyn App. C–D)
 
@@ -521,22 +667,32 @@ level** that write-side guardrails need (§3.9). **Effort: M.**
 question #1 decisively: **capture at the model gateway, the single chokepoint
 every call passes through** — i.e. `on_llm_request`/`on_llm_response` fire from
 `LLMClient`, not `run_agent_turn`, so compaction, critique, appraisal,
-consolidation, and subagent calls are all metered. The spec's "attribution
-context rides the reasoning context implicitly" maps to a `contextvars`
-binding (stage, channel, conversation) set by the caller and read by the
-client when emitting — no threading through call sites, and background tasks
-inherit it for free under asyncio. Adapters (counters endpoint, JSONL event
+consolidation, and subagent calls are all metered. (Supporting evidence that
+the turn loop is the wrong site: the existing timing path reads
+`result.message.get("usage")`, but usage lives on the response envelope
+`run_agent_turn` discards — that field is always `None` today.) The spec's
+"attribution context rides the reasoning context implicitly" maps to a
+`contextvars` binding (stage, channel, conversation) set by the caller and
+read by the client when emitting — no threading through call sites. One
+verified correction: TaskQueue workers do **not** inherit it for free —
+contextvars snapshot at `asyncio.create_task` time, and the worker coroutines
+are created once at startup, so a binding set at enqueue time is invisible
+when the task body runs. `Task` therefore captures
+`contextvars.copy_context()` at creation and runs its work inside it (or
+carries attribution as explicit fields). A small change, but Phase 0 rests on
+it; it goes in the Phase 0 plan, not a footnote. Adapters (counters endpoint, JSONL event
 log — the latter mirroring `JsonlLogPlugin`) are `on_metrics` consumers,
 fail-soft. **Effort: M**, independent of everything above — a good early win.
 It also feeds §3.2's self-calibration (appraisal-vs-outcome correlation needs
 per-call records) and makes the token cost of every later phase measurable as
-it ships. Two requirements sharpen the scope: the per-turn **retrieval
-profile** (§3.1) is persisted in the outcome log from day one — the raw
-material for the surprise signal and gate calibration, accumulating before
-the mechanisms that want it exist — and **eval-readiness is an acceptance
-criterion**, not just cost legibility: the stage-attributed records must be
-able to answer the Phase 6 questions, all of which are denominated in tokens
-("recall at a fixed token budget," "tokens saved by the gate").
+it ships. Two requirements sharpen the scope: Phase 0 lands the outcome-log
+**schema and write path** for per-turn retrieval profiles — populated from
+Phase 1, since there is no retrieval to profile before then — so that
+calibration data accumulates from the moment retrieval exists; and
+**eval-readiness is an acceptance criterion**, not just cost legibility: the
+stage-attributed records must be able to answer the Phase 6 questions, all of
+which are denominated in tokens ("recall at a fixed token budget," "tokens
+saved by the gate").
 
 ### 3.8 Skills (Persyn §4.6)
 
@@ -594,32 +750,60 @@ theatrics are persona. **Effort: S.**
 
 ---
 
-## 4. New core surface required (deliberately tiny)
+## 4. New core surface required (larger than first drafted)
 
-Everything above lands as plugins plus:
+Everything above lands as plugins plus the core changes below. An earlier
+draft called this list "deliberately tiny" and claimed no existing hook or
+queue-system change was needed; code-level verification showed otherwise.
+The list is still bounded — the dispatch model and compaction boundary
+mechanics are untouched — but Phase 1/2 implementation should expect to land
+all of it:
 
-1. **`should_send_response` hook** (REJECT_WINS, in `_handle_response`) — the
-   outbound gate. Enables decide-step, right-to-silence, token budgets,
-   guardrail blocking.
+1. **`should_send_response` hook** (REJECT_WINS), fired **between generation
+   and persistence** — not in `_handle_response`, which runs after the
+   assistant message has already been persisted (§3.3). A veto persists the
+   message with a distinct `WITHHELD` message type; the error-fallback send
+   path routes through the gate too.
 2. **`on_llm_request` / `on_llm_response` / `on_metrics` hooks** — already
    specified in `plans/new-hooks.md`; site resolved to `LLMClient` per §3.7.
 3. **`llm.<role>` generalization** in `LLMPlugin` (`critic`, `embedding`,
-   `appraisal`, …, falling back to `main`) — a loop instead of two hardcoded
-   keys.
+   `appraisal`, …, falling back to `main`) — **plus an embeddings client
+   surface**: `LLMClient` implements only `chat()` today, so the embedding
+   role needs a `/v1/embeddings` method, separate-endpoint config (a
+   generation server does not serve the embedding model), and its own
+   fail-soft semantics (§3.1 degrades to FTS5).
 4. **Logprob passthrough**: `LLMClient.chat` already accepts `extra_body`;
    the appraisal tier-1 signals need the response's logprobs surfaced on
    `AgentTurnResult` when requested — a small, additive change to `turn.py`.
    Best-effort: providers that return no logprobs (see §3.2 tier 1) surface
    `None`, and appraisal proceeds on its other signals.
-5. **New SQLite tables** (memory + access stats, appraisal/outcome log,
-   reminders, goals, persons, observations, usage records) — all additive;
-   `message_log` and its append-only invariant untouched.
-6. Optional dependencies: `sqlite-vec` (vector index); optionally a tiny
-   sklearn-or-hand-rolled readout head for appraisal tier 2.
-
-No changes to the agent loop's dispatch model, the queue system, the
-compaction boundary mechanics, or any existing hook. `QueueItem.meta` already
-exists and carries the appraisal vector without schema changes.
+5. **An appraisal carrier** (§3.2): either a richer inbound admission hook
+   that can attach metadata to the accepted item, or a channel-keyed
+   appraisal store owned by the plugin. `should_process_message` exposes only
+   `(channel, sender, text)` and returns a bool; `QueueItem.meta` is
+   notify-path-only and never exposed to plugins — it is *not* a free
+   carrier.
+6. **Silent tasks**: `Task` gains `deliver: bool` (default true) so
+   subcortical work can complete without triggering a main-model turn (§2.3).
+7. **`on_agent_response` enrichment** (§3.3): the hook carries the triggering
+   item's role/source and the true originating user message — today's
+   `request_text` mis-pairs on tool cycles, and source-blindness enables
+   critique recursion.
+8. **`on_compaction` payload extension** (§3.1): the compacted `message_log`
+   id range rides the hook alongside the summary.
+9. **Scheduler enqueue semantics** (§3.4): scheduled firings reset
+   `channel.turn_counter` (USER-like), or notification-only channels
+   permanently exhaust `max_turns`.
+10. **`contextvars` capture at `Task` creation** (§3.7) — attribution does
+    not otherwise propagate into TaskQueue workers.
+11. **New SQLite tables** (memory + access stats + per-channel consolidation
+    watermark, appraisal/outcome log, reminders, goals, persons +
+    identity-assurance, semantic facts, usage records) — all additive;
+    `message_log` and its append-only invariant untouched (redaction
+    tombstones content in place, §3.1).
+12. Optional dependencies: `sqlite-vec` (vector index; brute-force exact KNN
+    at this scale); optionally a tiny sklearn-or-hand-rolled readout head for
+    appraisal tier 2.
 
 ---
 
@@ -656,9 +840,9 @@ harness checks the prediction per deployed model. Specific divergences:
 3. **Engagement decision inverted** (§3.2). The spec runs the full pipeline
    on every observed message and decides whether to speak at step 6.
    Generating a refined response in order to discard it, per message, on a
-   busy channel is waste. The cheap gate comes *first* (appraisal →
-   `should_process_message`); retrieval and generation run only past the
-   salience threshold. The right-to-silence principle is kept; the control
+   busy channel is waste. The cheap gate comes *first* (the stage-1, non-LLM
+   gate appraisal → `should_process_message`; §3.2); retrieval and generation
+   run only past the salience threshold. The right-to-silence principle is kept; the control
    flow is fixed.
 4. **Inline refine step never implemented inline** (§2.1). Deferred
    deliberation is the spec's own recommended default; corvidae simply has no
@@ -673,7 +857,9 @@ harness checks the prediction per deployed model. Specific divergences:
    Deletion contradicts "memory is the personality" and the append-only
    ethos; usage-weighted retention beats birth-rating on both effectiveness
    and cognitive plausibility. Index size stays bounded, satisfying the
-   spec's storage criterion.
+   spec's storage criterion. One deliberate exception: the operator-only
+   `redact` verb (§3.1) — privacy and secret-hygiene require an actual
+   deletion path, and "no deletion ever" is a defect dressed as an ethos.
 7. **Knowledge graph cut, not optional** (spec §4.3). Extraction pipelines
    are noisy, n-hop context is token-expensive, and at personal-agent scale
    the graph duplicates observations + vector retrieval + FTS. Revisit only
@@ -719,12 +905,21 @@ agent for a week. Its weighted relevance function is presented with false
 precision (the weights are the whole game; nothing says how to validate
 them). Corvidae's TDD culture (AGENTS.md: red/green) forces the fix:
 
-- **Fixture-based memory evals**: recorded conversation fixtures (the
-  `tests/fixtures/` + `scripts/eval_compaction.py` pattern already exists for
-  compaction quality) with known-relevant memories; assert retrieval
-  rank/recall, summary epistemic-framing preservation, and
-  contradiction-annotation behavior. Relevance-function weights become tuned
-  parameters with a benchmark, not constants with an aura.
+- **Fixture-based memory evals**: recorded conversation fixtures with
+  known-relevant memories; assert retrieval rank/recall, summary
+  epistemic-framing preservation, and contradiction-annotation behavior.
+  Relevance-function weights become tuned parameters with a benchmark, not
+  constants with an aura. Honest sizing: the `tests/fixtures/` +
+  `scripts/eval_compaction.py` pattern exists, but today it is one fixture
+  and one script — the harness is real work with its own effort line in §7,
+  not a footnote that rides along for free.
+- **Ground truth and CI discipline** — questions the harness must answer at
+  design time, not "eval later": fixture labels (known-relevant memories,
+  epistemic-framing judgments) are **operator-authored**; the CI-facing
+  metrics are **deterministic** rank/recall against those labels, red/green
+  per AGENTS.md. LLM-judged suites (summary fidelity, the live-daemon §9
+  criteria below) are *not* CI: they run scheduled and out-of-band, and their
+  outputs are tracked as benchmarks over time, not pass/fail gates.
 - **The appraisal outcome log is a standing experiment** (§3.2): every gated
   decision is labeled by its consequence, thresholds are fit to data, and a
   below-threshold random sample bounds the false-negative rate.
@@ -755,10 +950,10 @@ AGENTS.md):
 
 | Phase | Contents | Persyn acceptance criteria unlocked (§9) | Effort |
 |---|---|---|---|
-| 0 | Observability hooks + metering adapters; per-turn retrieval profiles and stage-attributed costs persisted from day one; eval-readiness as acceptance criterion (§3.7) | — (makes cost legible; feeds appraisal calibration and Phase 6 evals) | M |
-| 1 | MemoryPlugin: consolidation, vector retrieval, reconsolidation/demotion, memory tools; **context-admission funnel** (§2.2); pluggable importance prior (§3.1); epistemic-calibration prompt fragment; fixture evals (§3.1, §6) | recall across restarts; per-channel recall; "no memory of that"; hedging + remember-harder; bounded store | L |
-| 2 | AppraisalPlugin (tier 1 + 3, outcome log) with novelty-as-surprise + shared pre-retrieval probe (§3.2) + CritiquePlugin + `should_send_response` + decide-gate (§3.3) | pushes back on flawed premises; declines capable requests; adds nothing → stays silent | M+M |
-| 3 | SchedulerPlugin + heartbeat (with distillation slot) + goals (§3.4, §3.5) | unprompted messages; durable heartbeat deletion → dormancy | M |
+| 0 | Observability hooks + metering adapters; `contextvars` capture at `Task` creation; outcome-log schema incl. retrieval-profile columns (populated from Phase 1); **eval-harness foundations** (fixture format, deterministic metrics, out-of-CI LLM-judge runner) (§3.7, §6) | — (makes cost legible; feeds appraisal calibration and Phase 6 evals) | M–L |
+| 1 | MemoryPlugin: consolidation (watermarked, sharing the compactor's LLM pass), vector retrieval, reconsolidation/demotion (grace period, near-dup merge), `redact`, memory tools; **context-admission funnel** (§2.2); pluggable importance prior (§3.1); embeddings client surface (§4.3); epistemic-calibration prompt fragment; fixture evals (§3.1, §6) | recall across restarts; per-channel recall; "no memory of that"; hedging + remember-harder; bounded store | L |
+| 2 | AppraisalPlugin (**two-stage**: non-LLM gate appraisal + post-acceptance full appraisal; tier 1 + 3, outcome log) with novelty-as-surprise + FTS5 probe (§3.2) + CritiquePlugin (recursion-guarded, silent-task mode) + `should_send_response` (pre-persistence) + decide-gate (§3.3) | pushes back on flawed premises; declines capable requests; adds nothing → stays silent | M+M |
+| 3 | SchedulerPlugin (USER-like enqueue semantics) + heartbeat (with distillation slot) + goals (§3.4, §3.5) | unprompted messages; durable heartbeat deletion → dormancy | M |
 | 4 | PeoplePlugin with subject-typed semantic facts (person extraction only) + operator fact authoring + directory curation commands; participant-match retrieval upgrade (§3.6) | knows who it's talking to; agent-to-agent with budgets (with phase-2 gates) | M |
 | 5 | Trust/quarantine (incl. distilled-fact trust inheritance), sensitivity, pattern guardrails, skills; appraisal tier-2 readout head (§3.8, §3.9) | safe to leave running | M (aggregate) |
 | 6 | A/B toggles behind the §6 harness: surprise term in the importance prior; semantic-tier extraction/promotion beyond persons; salience-arbitration policy in the funnel; encode/retrieve gate | — (refinements; each ships only if it beats its baseline) | S per toggle |
