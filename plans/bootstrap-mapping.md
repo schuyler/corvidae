@@ -10,16 +10,15 @@ those divergences rest on. It also folds in the adjustments implied by the
 `agent-directions.md` follow-on note — the design seams in Phases 0–2, the
 surprise specification (§3.2), the semantic-fact generalization (§3.6), and
 the Phase 6 toggle set (§7) — so that this document remains the single plan
-of record; that note stands as the rationale for those changes. Two
-code-grounded adversarial critique passes have also been applied. The first
-found that several claims of existing plumbing "already carrying" the new
-signals were false, yielding the two-stage appraisal (§3.2), the
-veto-before-persist rule (§3.3), silent subcortical tasks (§2.3), and an
-honestly larger §4. The second stress-tested those corrections themselves and
-fixed what they broke: the veto is scoped to final-text results, critique
-eligibility is by exchange origin rather than source string, the appraisal
-store is exchange-keyed, and the funnel's routing rule gained scope,
-coalescing, and injection-defense clauses (§2.2).
+of record; that note stands as the rationale for those changes. The document
+has also been through three code-grounded adversarial critique passes, each
+reviewing the previous round's edits — rounds two and three both found real
+defects *inside* the prior round's corrections, which is why the cadence
+exists. The major outcomes: the two-stage appraisal with minted-and-rebound
+exchange keys (§3.2), the two-mode output gate (persistence-controlling +
+per-emission; §3.3), critique eligibility by stamped-and-propagated exchange
+origin (§3.3), silent subcortical tasks (§2.3), the funnel's scope,
+coalescing, and injection-defense clauses (§2.2), and an honestly larger §4.
 
 The mapping is filtered through corvidae's driving theory:
 
@@ -173,6 +172,9 @@ qualifications make the rule implementable:
   owns a per-channel pending flag: a producer registers its payload and
   enqueues a stub only if none is pending; the stub text carries a count
   ("3 background results pending") so the triggering turn is not contentless.
+  The flag clears when a drain is *attempted*, not only on success — an
+  errored turn leaves the payloads registered, and the next producer's stub
+  re-arms the channel rather than wedging it.
 - **Rendering discipline (injection defense).** Everything the funnel admits
   is *data that arrived*, not instructions — retrieved memories can embed
   instruction-shaped content from trusted senders (a pasted web page, a
@@ -416,11 +418,19 @@ blocking model call to the response path.
   channel a single per-channel slot would be overwritten by message N+1
   before message N's consumers — lens selection, consolidation strength —
   read it, silently attributing the wrong exchange's appraisal. The key is a
-  correlation id minted at admission (the `message_log` rowid once §4.8
-  threads rowids into the window), and the enriched hooks of §4 carry the
-  key to consumers. The same keying applies to the §3.3 provenance snapshot,
-  which is stored in the outcome log under the same id. The earlier "rides
-  on `QueueItem.meta` without schema changes" claim was wrong.
+  **plugin-minted correlation id, created at the gate** — it cannot be the
+  `message_log` rowid, because stage 1 completes in the transport read path
+  *before* the message is enqueued, let alone persisted; the rowid exists
+  only after dequeue, when `on_conversation_event` fires. A per-channel FIFO
+  rebinds minted ids to rowids at persistence time — race-free, because
+  SerialQueue guarantees messages persist in admission order. Gate-*rejected*
+  messages are never enqueued and never get a rowid at all, yet their
+  stage-1 appraisals are precisely what offline engagement calibration
+  replays (§3.2 self-calibration); their outcome-log rows keep the minted id
+  with a null rowid. The enriched hooks of §4 carry the key to consumers,
+  and the same keying applies to the §3.3 provenance snapshot, stored in the
+  outcome log under the same id. The earlier "rides on `QueueItem.meta`
+  without schema changes" claim was wrong.
 - **The appraisal is two-stage,** forced by control flow: the engagement gate
   runs *synchronously inside the transport read path* (the gate hook is
   awaited from the IRC read loop, before enqueue), and the retrieval profile
@@ -587,25 +597,32 @@ Deferred-deliberation mode (§2.1), appraisal-gated (§2.4). Flow:
    would judge the response against a tool result; and the hook carries no
    trigger source, so a verdict-triggered turn is itself critique-eligible
    (verdict → turn → response → critique → verdict…), a loop the mechanical
-   provenance gate would never break on its own. The hook must carry the
-   triggering item's role/source, its `tool_call_id` presence, and the true
-   originating user message. The recursion rule is then by **exchange
-   origin**, not bare source string — an earlier draft said "no critique of
-   critique/heartbeat/task turns," which would have exempted every
-   tool-using exchange from critique (the final response of a tool cycle
-   arrives on a `source="task"` turn), gutting the critic on exactly the
-   commitment-dense responses it exists for:
-   - `tool_call_id`-bearing task notifications are *continuations of a
-     user-originated exchange* → **critique-eligible**, judged against the
-     stored originating user message (the very case the request-pairing
-     enrichment exists for);
-   - standalone background-task completions (no `tool_call_id`) → exempt;
-   - critique-verdict-triggered turns → **exempt** (the recursion brake);
-   - heartbeat *self-channel* turns → exempt (the beat already runs a
-     critique template as its self-assessment); scheduler-fired reminders
-     into ordinary channels → **eligible** — they are agent-initiated
-     exchanges with a real audience, and §3.4's "full pipeline runs
-     unchanged" promise for reminders depends on this.
+   provenance gate would never break on its own. The rule is by **exchange
+   origin**, and origin is an explicitly **stamped and propagated
+   property**, never inferred. Two earlier drafts failed in opposite
+   directions: "no critique of critique/heartbeat/task turns" exempted every
+   tool-using exchange (a tool cycle's final response arrives on a
+   `source="task"` turn), while "`tool_call_id`-bearing means
+   user-originated" reopened the recursion loop one tool call deep — a
+   verdict-triggered turn that calls tools *also* ends on a
+   `tool_call_id`-bearing turn, and such an exchange has no originating user
+   message to judge against. The mechanism that avoids both:
+   - **Origin is stamped at the exchange's first turn** — `user` (with the
+     originating message stored in the exchange-keyed record; *not* a
+     per-channel slot, since user messages interleave mid-cycle by design),
+     `reminder`, `critique`, `heartbeat`, or `task` — and **propagated**:
+     tool dispatch stamps the exchange key + origin into each `Task`, and
+     completions return them via `on_notify` meta (which does exist on the
+     notify path). Every turn of a tool cycle inherits its exchange's
+     origin, however many hops.
+   - **Eligibility by origin:** `user` and `reminder` exchanges →
+     **critique-eligible**, the final response judged against the stored
+     originating message (`reminder` because scheduler-fired turns in
+     ordinary channels are agent-initiated exchanges with a real audience —
+     §3.4's "full pipeline runs unchanged" promise depends on this);
+     `critique` → **exempt**, the recursion brake, now unbypassable by tool
+     use; `heartbeat` → exempt (the beat already runs a critique template as
+     its self-assessment); standalone `task` → exempt.
 2. Enqueued critique `Task`s run on the `critic`/`background` client with
    schema-constrained JSON output (llama-server grammar / `json_schema` via
    `extra_body`) — structured objections, not free text. The provenance
@@ -636,27 +653,38 @@ outbound mirror of `should_process_message`. Placement matters, and the
 original placement was wrong: the assistant message is appended and persisted
 as an ordinary MESSAGE at step 8 of the turn loop, *before*
 `_handle_response` runs at step 10, and the persistence event has already
-committed — there is no retro-tagging. The hook therefore fires **between
-generation and persistence** (after step 7), and it is **scoped to
-final-text results only**: a step-7 result carrying `tool_calls` never faces
-the gate — vetoing it is incoherent (nothing was going to be sent; the turn
-dispatches tools and returns), and hiding a `tool_calls` assistant message
-from a rebuilt history would orphan its matching `role:"tool"` rows, which
-OpenAI-compatible servers reject. Both scope conditions (`result.tool_calls`
-empty, or the max-turns fallback branch) are determinable at the hook site.
-A veto persists the message with a distinct `WITHHELD` message type, and the
-semantics are: **transports never see it; the window always does.** WITHHELD
-rows are *reloaded into the window on restart, tagged* — this preserves
-window identity across restarts (the pre-restart window holds the withheld
-text, so the post-restart one must too, or the model's memory of its own
-recent turns silently diverges), and the tag plus a funnel-appended one-line
-marker ("the previous response was withheld — the channel did not see it")
-prevent the model from citing unsent statements as said. And the gate covers
-**every channel-visible output path**, not just `send_message`: the
-error-fallback apology, `send_progress` (intermediate text before tool
-dispatch), and `send_thinking` (reasoning content) all carry LLM output to
-the channel — a guardrail that suppresses the final answer while the
-"thinking" containing it already went out is a leak, not a gate. Consumers:
+committed — there is no retro-tagging. The gate fires in **two modes**:
+
+- **The persistence-controlling firing** happens between generation and
+  persistence (after step 7) and is scoped to **final-text results only**
+  (`result.tool_calls` empty, or the max-turns fallback branch — both
+  determinable at the hook site). Only this firing governs how the message
+  persists: a veto stores it with a distinct `WITHHELD` message type. It
+  never fires on a `tool_calls` result, because hiding a `tool_calls`
+  assistant message from a rebuilt history would orphan its matching
+  `role:"tool"` rows, which OpenAI-compatible servers reject. The WITHHELD
+  semantics are: **transports never see it; the window always does.**
+  WITHHELD rows are *reloaded into the window on restart, tagged* — this
+  preserves window identity across restarts (the pre-restart window holds
+  the withheld text, so the post-restart one must too, or the model's
+  memory of its own recent turns silently diverges), and the tag plus a
+  funnel-appended one-line marker ("the previous response was withheld —
+  the channel did not see it") prevent the model from citing unsent
+  statements as said.
+- **Per-emission firings** at every other channel-visible output site:
+  `send_progress` (which fires *only* on tool-calls results — the
+  intermediate text before dispatch), `send_thinking` (which fires on every
+  result, tool-calls included), and the error-fallback apology. A veto here
+  suppresses **that emission only** — the assistant message persists as an
+  ordinary MESSAGE and tool dispatch proceeds unchanged.
+
+The two modes exist because an earlier draft claimed a `tool_calls` result
+"never faces the gate — nothing was going to be sent," which is false
+against the code: tool-calls turns are precisely the ones emitting progress
+text and reasoning to the channel. Final-text scoping without per-emission
+firings would ship the thinking while suppressing the answer — a leak, not
+a gate, on every tool-using turn, which is where §3.9's guardrail blocking
+matters most. Consumers:
 the appraisal-fed engagement gate, token-budget and rate-limit gates for
 agent-to-agent channels (§4.5), guardrail blocking (§3.9). The append-only
 principle is preserved: the agent *thought* it, it just didn't say it, and
@@ -866,15 +894,15 @@ The list is still bounded — the dispatch model and compaction boundary
 mechanics are untouched — but Phase 1/2 implementation should expect to land
 all of it:
 
-1. **`should_send_response` hook** (REJECT_WINS), fired **between generation
-   and persistence** — not in `_handle_response`, which runs after the
-   assistant message has already been persisted — and **scoped to final-text
-   results only** (never a `tool_calls` result; §3.3). A veto persists the
-   message as `WITHHELD`; WITHHELD rows reload into the window tagged
-   (transports never see them, the window always does), and the loader
-   change is part of this item. The gate covers every channel-visible output
-   path: `send_message`, the error-fallback apology, `send_progress`, and
-   `send_thinking`.
+1. **`should_send_response` hook** (REJECT_WINS), firing in **two modes**
+   (§3.3): a persistence-controlling firing between generation and
+   persistence, scoped to final-text results only, whose veto persists the
+   message as `WITHHELD` (rows reload into the window tagged — transports
+   never see them, the window always does; the loader change is part of
+   this item); and **per-emission firings** at the `send_progress`,
+   `send_thinking`, and error-fallback sites, whose veto suppresses that
+   emission only while the message persists as ordinary MESSAGE and tool
+   dispatch proceeds.
 2. **`on_llm_request` / `on_llm_response` / `on_metrics` hooks** — already
    specified in `plans/new-hooks.md`; site resolved to `LLMClient` per §3.7.
 3. **`llm.<role>` generalization** in `LLMPlugin` (`critic`, `embedding`,
@@ -894,22 +922,33 @@ all of it:
    key. `should_process_message` exposes only `(channel, sender, text)` and
    returns a bool; `QueueItem.meta` is notify-path-only and never exposed to
    plugins — it is *not* a free carrier. Channel-keyed single-slot storage
-   races under multi-item bursts (§3.2).
+   races under multi-item bursts (§3.2). The key is **minted by the plugin
+   at the gate** and rebound to the `message_log` rowid via a per-channel
+   FIFO at persistence time — it cannot *be* the rowid, which does not exist
+   at stage-1 time; gate-rejected messages keep their minted id with a null
+   rowid (§3.2).
 6. **Silent tasks**: `Task` gains `deliver: bool` (default true) so
    subcortical work can complete without triggering a main-model turn (§2.3).
    Invariant: `deliver=False ⇒ tool_call_id is None`, or the channel's tool
    batch stalls forever.
-7. **`on_agent_response` enrichment** (§3.3): the hook carries the triggering
-   item's role/source, its `tool_call_id` presence, the exchange key, and the
-   true originating user message — today's `request_text` mis-pairs on tool
-   cycles, and source-blindness enables critique recursion. Critique
-   eligibility is by exchange origin (§3.3), not bare source string.
+7. **`on_agent_response` enrichment + origin propagation** (§3.3): the hook
+   carries the exchange key, the exchange's **stamped origin**, and the
+   originating message from the exchange-keyed record — today's
+   `request_text` mis-pairs on tool cycles, and source-blindness enables
+   critique recursion. Origin propagates mechanically: tool dispatch stamps
+   exchange key + origin into each `Task`, and completions return them via
+   `on_notify` meta. Critique eligibility is by propagated origin (§3.3) —
+   never inferred from source strings or `tool_call_id` presence, both of
+   which were tried and failed in opposite directions.
 8. **Rowid threading + `on_compaction` payload extension** (§3.1):
    `on_conversation_event` returns the `message_log` rowid and the agent
    attaches it to the in-memory message — window messages carry no DB ids
    today, so without this the compacted id range has no producer and the
-   exchange key (§4.5) no mint. The compacted id range then rides
-   `on_compaction` alongside the summary.
+   exchange key (§4.5) nothing to rebind to. `on_conversation_event` is a
+   broadcast hook whose results are currently discarded, so the resolution
+   rule is explicit: exactly one plugin (persistence) returns a non-None
+   rowid; more than one is a configuration error. The compacted id range
+   then rides `on_compaction` alongside the summary.
 9. **Scheduler enqueue semantics** (§3.4): scheduled firings reset
    `channel.turn_counter` (USER-like), or notification-only channels
    permanently exhaust `max_turns`.
