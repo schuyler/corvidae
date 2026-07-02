@@ -10,12 +10,16 @@ those divergences rest on. It also folds in the adjustments implied by the
 `agent-directions.md` follow-on note — the design seams in Phases 0–2, the
 surprise specification (§3.2), the semantic-fact generalization (§3.6), and
 the Phase 6 toggle set (§7) — so that this document remains the single plan
-of record; that note stands as the rationale for those changes. A
-code-grounded adversarial critique pass has also been applied: several claims
-that existing plumbing "already carries" the new signals were verified false,
-and the corrections — chiefly the two-stage appraisal (§3.2), the
+of record; that note stands as the rationale for those changes. Two
+code-grounded adversarial critique passes have also been applied. The first
+found that several claims of existing plumbing "already carrying" the new
+signals were false, yielding the two-stage appraisal (§3.2), the
 veto-before-persist rule (§3.3), silent subcortical tasks (§2.3), and an
-honestly larger §4 — are folded in below.
+honestly larger §4. The second stress-tested those corrections themselves and
+fixed what they broke: the veto is scoped to final-text results, critique
+eligibility is by exchange origin rather than source string, the appraisal
+store is exchange-keyed, and the funnel's routing rule gained scope,
+coalescing, and injection-defense clauses (§2.2).
 
 The mapping is filtered through corvidae's driving theory:
 
@@ -148,14 +152,35 @@ decides only *what to newly append and in what order* — never
 evict-and-reinsert, per the append-only constraint above.
 
 One routing rule keeps the funnel honest: content that arrives via the
-*notification* path — critique verdicts, task results, scheduler objectives —
-is today embedded wholesale in the triggering turn's message
+*notification* path — critique verdicts, scheduler objectives, background
+observations — is today embedded wholesale in the triggering turn's message
 (`_build_conversation_message` renders it as a role-"system" entry), bypassing
 any budget. If the funnel governed only `before_agent_turn` appends, it would
 be blind to exactly the sources most likely to contend for tail space. So:
 the notification carries a minimal wake-up stub; the *payload* is registered
 with the funnel by the producing plugin and admitted as CONTEXT at the turn
-the notification triggers, under the same budget as everything else.
+the notification triggers, under the same budget as everything else. Three
+qualifications make the rule implementable:
+
+- **Scope: non-`tool_call_id` notifications only.** Tool results are rendered
+  as `role:"tool"` messages, and the tool protocol requires the payload *in*
+  that message — a stub-plus-CONTEXT split would break the pairing the model
+  expects. Tool results stay on their existing path, untouched.
+- **Stub coalescing.** `before_agent_turn` receives only the channel, so the
+  funnel cannot know which stub it is draining for; without coalescing, N
+  queued stubs would mean the first turn admits all N payloads and the
+  remaining N−1 stubs each run a contentless full main-model turn. The funnel
+  owns a per-channel pending flag: a producer registers its payload and
+  enqueues a stub only if none is pending; the stub text carries a count
+  ("3 background results pending") so the triggering turn is not contentless.
+- **Rendering discipline (injection defense).** Everything the funnel admits
+  is *data that arrived*, not instructions — retrieved memories can embed
+  instruction-shaped content from trusted senders (a pasted web page, a
+  quoted email), and critique-verdict strings re-enter the window with the
+  authority of an internal voice. The funnel wraps every admitted entry in
+  explicit data-not-instructions framing with a source label, written once at
+  the chokepoint rather than per-plugin — the read-side complement to §3.9's
+  write-side trust tagging.
 
 ### 2.3 Subcortical processes are cheap-model background tasks
 
@@ -175,7 +200,9 @@ main model. Subcortical work therefore needs a fire-and-forget mode: `Task`
 gains a `deliver: bool` (default true), or subcortical plugins own bare
 `asyncio.create_task` calls with their own error handling. Either way this is
 core surface, named in §4 — the earlier "no changes to the queue system"
-claim was wrong.
+claim was wrong. One invariant: `deliver=False` requires `tool_call_id is
+None` — a silent task holding a tool-call id would leave the channel's
+`pending_tool_call_ids` set never clearing, stalling its tool batch forever.
 
 ### 2.4 Deliberation is salience-gated, not unconditional
 
@@ -215,7 +242,12 @@ dependency order.
 
 The biggest and highest-value piece. `docs/design.md` already sketches it
 ("Unimplemented: Memory retrieval"); `DreamPlugin` is its embryo and should be
-absorbed/replaced by it.
+absorbed/replaced by it. So should `ContextCompactPlugin`
+(`context_compact.py`) — a disabled-by-default background-block system that
+already summarizes old segments and injects them via `before_agent_turn`,
+squarely overlapping this plugin's territory. Disposition: superseded by
+MemoryPlugin; absorb its turn-stats idea into §3.7 and remove the rest, or a
+Phase 1 collision is guaranteed.
 
 **Consolidation (write path).** Two natural triggers, both already hooked:
 
@@ -228,10 +260,20 @@ absorbed/replaced by it.
   the two documents. Two verified caveats: the hook today delivers only
   `(channel, summary_msg, retain_count)` — the compacted-away range would have
   to be reconstructed by fragile summary-timestamp arithmetic — so the hook
-  must be extended to carry the compacted `message_log` id range (§4). And
-  don't pay twice: the compactor has just LLM-summarized the same segment, so
-  prefer one summarization call with two outputs (window summary +
-  first-person memory record) over a second pass on identical content.
+  must be extended to carry the compacted `message_log` id range (§4). That
+  range needs a *producer*, and today none exists: window messages carry no
+  DB ids (the persistence loader drops the `id` column, and
+  `on_conversation_event` results are discarded by the agent), so the id
+  range can only be supplied by **threading rowids into the window** —
+  `on_conversation_event` returns the rowid and the agent attaches it to the
+  in-memory message (§4.8); anything else quietly reintroduces the timestamp
+  arithmetic this correction removes. Consolidation must also depend *only*
+  on the hook payload, never on the summary row already being written —
+  ordering between MemoryPlugin and PersistencePlugin on the same broadcast
+  is just pluggy registration order. And don't pay twice: the compactor has
+  just LLM-summarized the same segment, so prefer one summarization call with
+  two outputs (window summary + first-person memory record) over a second
+  pass on identical content.
 - `on_idle` — consolidate the still-active conversation tail on conversation
   lull (Persyn's 30-minute session auto-expiry maps to idle-time-since
   `channel.last_active`), and run the retention job. Note `on_idle` is
@@ -303,8 +345,11 @@ exception to demote-don't-delete:
   operational event over a multi-year store — with the index versioned
   alongside the encoder (as the §3.2 readout head already is).
 - **An operator-only `redact` command** tombstones `message_log` row content
-  and cascades to derived records (memory records, semantic facts,
-  embeddings). "Forget that," an accidentally pasted secret, and data-subject
+  and cascades to *every* derived surface: memory records, semantic facts,
+  embeddings (sqlite-vec row deletion), and the FTS indexes —
+  external-content FTS5 requires an explicit delete/reinsert on content
+  change, so the cascade must name it or the redacted text remains
+  keyword-searchable. "Forget that," an accidentally pasted secret, and data-subject
   requests all need an actual deletion path; refusing one is a privacy defect
   dressed as an ethos. Redaction is a privacy affordance, not retention
   policy: it is operator-invoked only, never agent-accessible, and never
@@ -363,11 +408,19 @@ blocking model call to the response path.
   notify path; inbound USER items are constructed without it, and no hook
   ever exposes a `QueueItem` to plugins (`should_process_message` receives
   `(channel, sender, text)` and returns a bool; `before_agent_turn` receives
-  only `channel`). The vector therefore lives in a **channel-keyed appraisal
-  store** owned by the plugin and read by consumers, plus a persisted column
-  in the outcome log (§3.7). Attaching it to the item proper requires the
-  richer admission hook in §4 — the earlier "rides on `QueueItem.meta`
-  without schema changes" claim was wrong.
+  only `channel`). The vector therefore lives in an **exchange-keyed
+  appraisal store** owned by the plugin, plus a persisted column in the
+  outcome log (§3.7). Exchange-keyed, not channel-keyed, because neither
+  appraisal stage runs inside the SerialQueue's serialization (stage 1 fires
+  before enqueue; stage 2 runs on a multi-worker TaskQueue): on a busy
+  channel a single per-channel slot would be overwritten by message N+1
+  before message N's consumers — lens selection, consolidation strength —
+  read it, silently attributing the wrong exchange's appraisal. The key is a
+  correlation id minted at admission (the `message_log` rowid once §4.8
+  threads rowids into the window), and the enriched hooks of §4 carry the
+  key to consumers. The same keying applies to the §3.3 provenance snapshot,
+  which is stored in the outcome log under the same id. The earlier "rides
+  on `QueueItem.meta` without schema changes" claim was wrong.
 - **The appraisal is two-stage,** forced by control flow: the engagement gate
   runs *synchronously inside the transport read path* (the gate hook is
   awaited from the IRC read loop, before enqueue), and the retrieval profile
@@ -379,8 +432,11 @@ blocking model call to the response path.
   - **Stage 2 — full appraisal:** post-acceptance, off the response path —
     retrieval profile, output logprobs, the tier-2 readout head, and the
     tier-3 fast-model call. Deliberation depth and consolidation strength
-    read this stage; so may the *outbound* gate, which is not in the read
-    loop.
+    read this stage. The *outbound* gate reads the current exchange's
+    **stage 1 plus the previous exchange's stage 2** — the current
+    exchange's stage 2 is by construction unfinished when the gate fires
+    within the same turn, and computing tier 3 synchronously there would be
+    exactly the blocking model call this section forbids.
 
 Computed from three signal tiers, in ascending cost, with each tier optional
 (graceful degradation all the way down):
@@ -437,10 +493,20 @@ twin of the output-logprob signal in tier 1b — is demoted to
 *future-if-provider-supports*: chat-completions APIs, including
 llama-server's, expose logprobs for generated tokens only, and scoring the
 prompt means a separate forward pass that is neither cheap nor
-KV-cache-friendly. The probe is a shared front-end with two consumers: it
-feeds this dimension every turn (it is also the stage-1 gate appraisal's main
-signal), and its score drives the **encode/retrieve gate** (Phase 6 toggle,
-default off) — full retrieval runs only past a familiarity threshold. Honest
+KV-cache-friendly. The probe's corpus is the **memory-record FTS index** —
+"familiarity" means *does consolidated memory match this input*, consistent
+with the retrieval-degrade path (a separate `message_log` FTS serves the
+keyword-search tools; §4.11 specifies both). Operationally the probe runs on
+a **dedicated read-only SQLite connection** — WAL mode permits concurrent
+readers, and a shared aiosqlite connection serializes all statements through
+one worker thread, so borrowing the persistence connection would queue the
+gate behind consolidation writes, worst during exactly the idle-consolidation
+bursts §3.1 schedules — under a hard latency budget, **failing open** (no
+probe result within budget ⇒ the gate decides on surface heuristics alone).
+The probe is a shared front-end with two consumers: it feeds this dimension
+every turn (it is also the stage-1 gate appraisal's main signal), and its
+score drives the **encode/retrieve gate** (Phase 6 toggle, default off) —
+full retrieval runs only past a familiarity threshold. Honest
 cost accounting says this gate is expected to *lose* its A/B: per-turn
 retrieval is one small-model embedding call plus a milliseconds scan, and the
 genuinely expensive part — the window tokens retrieval admits — is controlled
@@ -522,9 +588,24 @@ Deferred-deliberation mode (§2.1), appraisal-gated (§2.4). Flow:
    trigger source, so a verdict-triggered turn is itself critique-eligible
    (verdict → turn → response → critique → verdict…), a loop the mechanical
    provenance gate would never break on its own. The hook must carry the
-   triggering item's role/source and the true originating user message, and
-   there is a hard recursion rule: **no critique of turns whose trigger
-   source is critique, heartbeat, or task.**
+   triggering item's role/source, its `tool_call_id` presence, and the true
+   originating user message. The recursion rule is then by **exchange
+   origin**, not bare source string — an earlier draft said "no critique of
+   critique/heartbeat/task turns," which would have exempted every
+   tool-using exchange from critique (the final response of a tool cycle
+   arrives on a `source="task"` turn), gutting the critic on exactly the
+   commitment-dense responses it exists for:
+   - `tool_call_id`-bearing task notifications are *continuations of a
+     user-originated exchange* → **critique-eligible**, judged against the
+     stored originating user message (the very case the request-pairing
+     enrichment exists for);
+   - standalone background-task completions (no `tool_call_id`) → exempt;
+   - critique-verdict-triggered turns → **exempt** (the recursion brake);
+   - heartbeat *self-channel* turns → exempt (the beat already runs a
+     critique template as its self-assessment); scheduler-fired reminders
+     into ordinary channels → **eligible** — they are agent-initiated
+     exchanges with a real audience, and §3.4's "full pipeline runs
+     unchanged" promise for reminders depends on this.
 2. Enqueued critique `Task`s run on the `critic`/`background` client with
    schema-constrained JSON output (llama-server grammar / `json_schema` via
    `extra_body`) — structured objections, not free text. The provenance
@@ -556,18 +637,30 @@ original placement was wrong: the assistant message is appended and persisted
 as an ordinary MESSAGE at step 8 of the turn loop, *before*
 `_handle_response` runs at step 10, and the persistence event has already
 committed — there is no retro-tagging. The hook therefore fires **between
-generation and persistence** (after step 7), so a veto can persist with a
-distinct message type (e.g. `WITHHELD`) that transports and history loaders
-never surface. The vetoed text also cannot simply sit in the active window
-untagged, or the model will later reference statements its interlocutor never
-saw ("as I mentioned earlier…"); the funnel appends a one-line marker ("the
-previous response was withheld — the channel did not see it"). The
-error-fallback path (`_process_queue_item`'s exception handler sends an
-apology via `send_message` directly) must route through the gate as well.
-Consumers: the appraisal-fed engagement gate, token-budget and rate-limit
-gates for agent-to-agent channels (§4.5), guardrail blocking (§3.9). The
-append-only principle is preserved: the agent *thought* it, it just didn't
-say it, and the log records both facts.
+generation and persistence** (after step 7), and it is **scoped to
+final-text results only**: a step-7 result carrying `tool_calls` never faces
+the gate — vetoing it is incoherent (nothing was going to be sent; the turn
+dispatches tools and returns), and hiding a `tool_calls` assistant message
+from a rebuilt history would orphan its matching `role:"tool"` rows, which
+OpenAI-compatible servers reject. Both scope conditions (`result.tool_calls`
+empty, or the max-turns fallback branch) are determinable at the hook site.
+A veto persists the message with a distinct `WITHHELD` message type, and the
+semantics are: **transports never see it; the window always does.** WITHHELD
+rows are *reloaded into the window on restart, tagged* — this preserves
+window identity across restarts (the pre-restart window holds the withheld
+text, so the post-restart one must too, or the model's memory of its own
+recent turns silently diverges), and the tag plus a funnel-appended one-line
+marker ("the previous response was withheld — the channel did not see it")
+prevent the model from citing unsent statements as said. And the gate covers
+**every channel-visible output path**, not just `send_message`: the
+error-fallback apology, `send_progress` (intermediate text before tool
+dispatch), and `send_thinking` (reasoning content) all carry LLM output to
+the channel — a guardrail that suppresses the final answer while the
+"thinking" containing it already went out is a leak, not a gate. Consumers:
+the appraisal-fed engagement gate, token-budget and rate-limit gates for
+agent-to-agent channels (§4.5), guardrail blocking (§3.9). The append-only
+principle is preserved: the agent *thought* it, it just didn't say it, and
+the log records both facts.
 
 **Effort: M** for the critique loop; **S** for the hook + a first decide-gate
 plugin. Depends on §3.2 for gating (degrades to unconditional without it) and
@@ -624,7 +717,12 @@ goals persisted in SQLite, created by the agent via a tool (we relax the
 spec's "no other authoring path" — an operator seeding a goal out of band is
 useful, and forbidding it is purity without payoff), with open goals appended
 as a CONTEXT entry (tail, deduped — same discipline as memories) so they shape
-every response; the heartbeat reviews/retires them. **Effort: S–M.**
+every response; the heartbeat reviews/retires them. One wrinkle dedupe does
+not cover: goals are mutable *state*, not archival memory — a retired goal's
+earlier CONTEXT entry persists in the window until compaction, alongside the
+updated list. Goal entries therefore carry as-of framing, and the standing
+prompt rule is that a later goals entry supersedes every earlier one — cheap
+to state given the funnel's per-entry source labels (§2.2). **Effort: S–M.**
 
 ### 3.6 PeoplePlugin — persons, observations, contact directory (Persyn §4.4–4.5)
 
@@ -702,7 +800,12 @@ prompt region (it changes rarely — a library refresh is a legitimate cache
 break), and a `use_skill(name)` tool that returns full instructions as a tool
 result (tail-appended — progressive disclosure is naturally KV-cache-friendly).
 Protected skills = read-only files restored from a bundled copy. Self-authoring
-= `write_file` into the skills dir + refresh. **Effort: S–M.**
+= `write_file` into the skills dir + refresh — but **gated**: an unrestricted
+skill write is a channel-influenceable path into the stable system-prompt
+region (the index lives there), which is exactly the persistence-of-influence
+shape §3.9 exists to police. Skill creation/modification requires operator
+confirmation or a trust gate, and skill-dir writes join §3.9's guardrail
+surface. **Effort: S–M.**
 
 ### 3.9 Guardrails, trust, and sensitivity (Persyn §4.10, §5 — extended)
 
@@ -734,9 +837,13 @@ Additions, all in this plugin cluster:
 - **Pattern guardrails** (spec §4.10): an `on_idle` background scan over
   recent memory with pattern prompts (escalating conflict, repeated
   prohibited-content elicitation, behavioral anomalies — and now: repeated
-  low-trust assertions on the same theme, the poisoning signature); actions
-  wire into `should_process_message` / `should_send_response`, plus operator
-  notification via any configured channel.
+  low-trust assertions on the same theme, the poisoning signature, and
+  skill-directory writes, §3.8's channel-influenceable path into the stable
+  prompt region); actions wire into `should_process_message` /
+  `should_send_response`, plus operator notification via any configured
+  channel. The read-side complement — data-not-instructions framing on
+  everything the funnel admits, including critique-verdict strings — lives at
+  the funnel chokepoint (§2.2).
 
 **Effort: M** (aggregate), after §3.1 and §3.6.
 
@@ -761,9 +868,13 @@ all of it:
 
 1. **`should_send_response` hook** (REJECT_WINS), fired **between generation
    and persistence** — not in `_handle_response`, which runs after the
-   assistant message has already been persisted (§3.3). A veto persists the
-   message with a distinct `WITHHELD` message type; the error-fallback send
-   path routes through the gate too.
+   assistant message has already been persisted — and **scoped to final-text
+   results only** (never a `tool_calls` result; §3.3). A veto persists the
+   message as `WITHHELD`; WITHHELD rows reload into the window tagged
+   (transports never see them, the window always does), and the loader
+   change is part of this item. The gate covers every channel-visible output
+   path: `send_message`, the error-fallback apology, `send_progress`, and
+   `send_thinking`.
 2. **`on_llm_request` / `on_llm_response` / `on_metrics` hooks** — already
    specified in `plans/new-hooks.md`; site resolved to `LLMClient` per §3.7.
 3. **`llm.<role>` generalization** in `LLMPlugin` (`critic`, `embedding`,
@@ -777,32 +888,51 @@ all of it:
    `AgentTurnResult` when requested — a small, additive change to `turn.py`.
    Best-effort: providers that return no logprobs (see §3.2 tier 1) surface
    `None`, and appraisal proceeds on its other signals.
-5. **An appraisal carrier** (§3.2): either a richer inbound admission hook
-   that can attach metadata to the accepted item, or a channel-keyed
-   appraisal store owned by the plugin. `should_process_message` exposes only
-   `(channel, sender, text)` and returns a bool; `QueueItem.meta` is
-   notify-path-only and never exposed to plugins — it is *not* a free
-   carrier.
+5. **An appraisal carrier** (§3.2): an **exchange-keyed appraisal store**
+   owned by the plugin *plus* enriched hooks that carry the exchange key to
+   consumers — not either/or; the store holds the data, the hooks route the
+   key. `should_process_message` exposes only `(channel, sender, text)` and
+   returns a bool; `QueueItem.meta` is notify-path-only and never exposed to
+   plugins — it is *not* a free carrier. Channel-keyed single-slot storage
+   races under multi-item bursts (§3.2).
 6. **Silent tasks**: `Task` gains `deliver: bool` (default true) so
    subcortical work can complete without triggering a main-model turn (§2.3).
+   Invariant: `deliver=False ⇒ tool_call_id is None`, or the channel's tool
+   batch stalls forever.
 7. **`on_agent_response` enrichment** (§3.3): the hook carries the triggering
-   item's role/source and the true originating user message — today's
-   `request_text` mis-pairs on tool cycles, and source-blindness enables
-   critique recursion.
-8. **`on_compaction` payload extension** (§3.1): the compacted `message_log`
-   id range rides the hook alongside the summary.
+   item's role/source, its `tool_call_id` presence, the exchange key, and the
+   true originating user message — today's `request_text` mis-pairs on tool
+   cycles, and source-blindness enables critique recursion. Critique
+   eligibility is by exchange origin (§3.3), not bare source string.
+8. **Rowid threading + `on_compaction` payload extension** (§3.1):
+   `on_conversation_event` returns the `message_log` rowid and the agent
+   attaches it to the in-memory message — window messages carry no DB ids
+   today, so without this the compacted id range has no producer and the
+   exchange key (§4.5) no mint. The compacted id range then rides
+   `on_compaction` alongside the summary.
 9. **Scheduler enqueue semantics** (§3.4): scheduled firings reset
    `channel.turn_counter` (USER-like), or notification-only channels
    permanently exhaust `max_turns`.
 10. **`contextvars` capture at `Task` creation** (§3.7) — attribution does
     not otherwise propagate into TaskQueue workers.
-11. **New SQLite tables** (memory + access stats + per-channel consolidation
-    watermark, appraisal/outcome log, reminders, goals, persons +
-    identity-assurance, semantic facts, usage records) — all additive;
-    `message_log` and its append-only invariant untouched (redaction
-    tombstones content in place, §3.1).
-12. Optional dependencies: `sqlite-vec` (vector index; brute-force exact KNN
-    at this scale); optionally a tiny sklearn-or-hand-rolled readout head for
+11. **New SQLite tables and indexes** (memory + access stats + per-channel
+    consolidation watermark, appraisal/outcome log keyed by exchange id and
+    holding the per-turn retrieval/provenance snapshot, reminders, goals,
+    persons + identity-assurance, semantic facts, usage records) — plus the
+    **FTS5 surfaces**, load-bearing in three subsystems and previously
+    unlisted: an FTS index over memory-record summaries (the §3.2 probe's
+    corpus and §3.1's retrieval fallback) and one over `message_log` (the
+    `search_memory`/`recall_raw` keyword tools), each with content-sync
+    triggers. All additive; `message_log` and its append-only invariant
+    untouched (redaction tombstones content in place, §3.1).
+12. Optional dependencies and operational ground rules: `sqlite-vec` (vector
+    index; brute-force exact KNN at this scale; requires
+    `enable_load_extension`, which some Python builds lack — check at
+    startup, degrade to FTS per §3.1); **WAL mode stated as a requirement**,
+    not an accident — the §3.2 probe's read-only connection and the CLI
+    curation commands (§3.6, a second process on the same DB) both depend on
+    it, and the CLI side needs a `busy_timeout` and short-transaction
+    discipline; optionally a tiny sklearn-or-hand-rolled readout head for
     appraisal tier 2.
 
 ---
@@ -951,8 +1081,9 @@ AGENTS.md):
 | Phase | Contents | Persyn acceptance criteria unlocked (§9) | Effort |
 |---|---|---|---|
 | 0 | Observability hooks + metering adapters; `contextvars` capture at `Task` creation; outcome-log schema incl. retrieval-profile columns (populated from Phase 1); **eval-harness foundations** (fixture format, deterministic metrics, out-of-CI LLM-judge runner) (§3.7, §6) | — (makes cost legible; feeds appraisal calibration and Phase 6 evals) | M–L |
-| 1 | MemoryPlugin: consolidation (watermarked, sharing the compactor's LLM pass), vector retrieval, reconsolidation/demotion (grace period, near-dup merge), `redact`, memory tools; **context-admission funnel** (§2.2); pluggable importance prior (§3.1); embeddings client surface (§4.3); epistemic-calibration prompt fragment; fixture evals (§3.1, §6) | recall across restarts; per-channel recall; "no memory of that"; hedging + remember-harder; bounded store | L |
-| 2 | AppraisalPlugin (**two-stage**: non-LLM gate appraisal + post-acceptance full appraisal; tier 1 + 3, outcome log) with novelty-as-surprise + FTS5 probe (§3.2) + CritiquePlugin (recursion-guarded, silent-task mode) + `should_send_response` (pre-persistence) + decide-gate (§3.3) | pushes back on flawed premises; declines capable requests; adds nothing → stays silent | M+M |
+| 1a | MemoryPlugin core: schema + FTS surfaces (§4.11); rowid threading (§4.8); embeddings client surface (§4.3); consolidation (watermarked, sharing the compactor's LLM pass); vector retrieval; minimal **context-admission funnel** (per-source budgets, §2.2); pluggable importance prior; epistemic-calibration prompt fragment; retire `ContextCompactPlugin` (§3.1) | recall across restarts; per-channel recall; "no memory of that" | L |
+| 1b | Reconsolidation/demotion (grace period, near-dup merge); `redact` with full cascade; memory tools (`search_memory`, `recall_raw`); fixture evals (§3.1, §6) | hedging + remember-harder; bounded store | M |
+| 2 | AppraisalPlugin (**two-stage**: non-LLM gate appraisal + post-acceptance full appraisal; tier 1 + 3; exchange-keyed store + outcome log) with novelty-as-surprise + FTS5 probe (§3.2); logprob passthrough (§4.4); CritiquePlugin (eligibility by exchange origin, silent-task mode) + `should_send_response` (pre-persistence, final-text-scoped) + decide-gate (§3.3) | pushes back on flawed premises; declines capable requests; adds nothing → stays silent | M+M |
 | 3 | SchedulerPlugin (USER-like enqueue semantics) + heartbeat (with distillation slot) + goals (§3.4, §3.5) | unprompted messages; durable heartbeat deletion → dormancy | M |
 | 4 | PeoplePlugin with subject-typed semantic facts (person extraction only) + operator fact authoring + directory curation commands; participant-match retrieval upgrade (§3.6) | knows who it's talking to; agent-to-agent with budgets (with phase-2 gates) | M |
 | 5 | Trust/quarantine (incl. distilled-fact trust inheritance), sensitivity, pattern guardrails, skills; appraisal tier-2 readout head (§3.8, §3.9) | safe to leave running | M (aggregate) |
