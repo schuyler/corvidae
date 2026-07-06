@@ -697,9 +697,9 @@ conversation history within the configured token budget. Registered as
 `"compaction"` in `main.py` before `Agent`. Declares `depends_on = {"llm"}`.
 Logger name: `corvidae.compaction`.
 
-**ContextCompactPlugin** (`context_compact.py`) is an alternative compaction
-strategy that is currently disabled in `main.py`. It is commented out because
-it conflicts with `CompactionPlugin` when both operate on the same conversation.
+**ContextCompactPlugin** (`context_compact.py`) has been removed: superseded
+by `MemoryPlugin` (compaction-time memory consolidation plus retrieval), and
+per-turn token stats now live in Phase 0's `usage_log` table.
 
 ### compact_conversation
 
@@ -1214,7 +1214,6 @@ corvidae/
 ├── llm_plugin.py         # LLMPlugin (LLM client lifecycle)
 ├── turn.py               # run_agent_turn(), AgentTurnResult
 ├── context.py            # ContextWindow, MessageType, DEFAULT_CHARS_PER_TOKEN
-├── context_compact.py    # ContextCompactPlugin (disabled — conflicts with CompactionPlugin)
 ├── jsonl_log.py          # JsonlLogPlugin (on_conversation_event, on_compaction)
 ├── logging.py            # StructuredFormatter, configure_logging()
 ├── agent.py              # Agent (single-turn dispatch)

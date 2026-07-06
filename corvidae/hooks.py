@@ -398,8 +398,8 @@ class AgentSpec:
         or None to defer to the next handler.
 
         Ordering:
-        - tryfirst handlers run first (e.g., ContextCompactPlugin for
-          background block generation — returns None, does not stop chain).
+        - tryfirst handlers run first (side-effect handlers that return
+          None and do not stop the chain).
         - Default-priority handlers run next (third-party replacements).
         - trylast handlers run last (CompactionPlugin as fallback).
 

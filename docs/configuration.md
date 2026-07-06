@@ -112,17 +112,9 @@ These values apply to all channels. Per-channel overrides in the `channels` sect
 | `agent.chars_per_token` | float | `3.5` | **Deprecated.** Accepted for interface and config compatibility. Has no effect on token counting — `count_tokens()` uses the module-level `_FALLBACK_CHARS_PER_TOKEN` constant (3.5) regardless of this value. |
 | `agent.immutable_settings` | list of strings | `[]` | Keys the agent is blocked from changing via the `set_settings` tool. `system_prompt` is always blocked regardless of this list. |
 
-### `agent.context_compact` — background compaction (disabled)
+### `agent.context_compact` — removed
 
-`ContextCompactPlugin` is registered but currently disabled in `main.py`. The configuration keys are accepted but have no effect until the plugin is re-enabled.
-
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `agent.context_compact.enabled` | boolean | `true` | Enable background block management when the plugin is active. |
-| `agent.context_compact.bg_block_threshold` | integer | `20` | Number of conversation turns after which a background block is generated. |
-| `agent.context_compact.bg_compaction_threshold` | float | `0.75` | Token-budget fraction at which background compaction is triggered. |
-| `agent.context_compact.min_background_blocks` | integer | `1` | Minimum number of background blocks to retain in prompt context. |
-| `agent.context_compact.max_background_block_chars` | integer | `2048` | Maximum characters per generated background block. |
+`ContextCompactPlugin` has been removed: superseded by `MemoryPlugin` (memory consolidation and retrieval), with per-turn token stats now in the Phase 0 `usage_log` table. Any `agent.context_compact.*` keys in existing configs are ignored.
 
 ---
 

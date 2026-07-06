@@ -246,12 +246,12 @@ These hooks return a value. Hooks marked `firstresult=True` (sequential) stop at
 |------|----------|---------|----------|
 | `should_process_message(channel, sender, text)` | `REJECT_WINS` (broadcast) | `bool \| None` | Any `False` vetoes the message; any `True` (with no `False`) accepts; `None` if all defer |
 | `on_llm_error(channel, error)` | `firstresult=True` | `str \| None` | First non-None string wins; chain stops. If all return None, default error message is used. |
-| `compact_conversation(channel, conversation, max_tokens)` | `firstresult=True` | `bool \| None` | First non-None return stops the chain. `ContextCompactPlugin` uses `tryfirst` (returns None). `CompactionPlugin` uses `trylast` (returns True). Third-party plugins run at default priority. |
+| `compact_conversation(channel, conversation, max_tokens)` | `firstresult=True` | `bool \| None` | First non-None return stops the chain. `CompactionPlugin` uses `trylast` (returns True). Third-party plugins run at default priority. |
 | `process_tool_result(tool_name, result, channel)` | `firstresult=True` wrapper chain | `str \| None` | Wrappers compose transforms in LIFO order. The seed returns the input unchanged. Non-wrapper hookimpls short-circuit the seed via firstresult. |
 | `transform_display_text(channel, text, result_message)` | `firstresult=True` wrapper chain | `str \| None` | Wrappers compose transforms in LIFO order. The seed returns the input text unchanged. Non-wrapper hookimpls short-circuit the seed via firstresult. |
 | `load_conversation(channel)` | `firstresult=True` | `list[dict] \| None` | First non-None result wins. `PersistencePlugin` uses `trylast` as fallback. Called once when a channel's conversation is first initialized. |
 
-`compact_conversation` — sequential hook (`firstresult=True`). The first handler returning a non-None value stops the chain. `ContextCompactPlugin` runs first (`tryfirst=True`) to generate background blocks and returns None (does not stop the chain). `CompactionPlugin` runs last (`trylast=True`) as the default strategy and returns True. A third-party plugin at default priority runs between them — if it returns non-None, `CompactionPlugin` is never called.
+`compact_conversation` — sequential hook (`firstresult=True`). The first handler returning a non-None value stops the chain. `CompactionPlugin` runs last (`trylast=True`) as the default strategy and returns True. A third-party plugin at default priority runs before it — if it returns non-None, `CompactionPlugin` is never called.
 
 `process_tool_result` fires for all tool calls — it is invoked from `dispatch_tool_call` in `corvidae/tool.py`, which is used by both the main agent loop and background subagent loops. It does not fire for pre-dispatch errors (JSON parse failure or unknown tool name).
 
@@ -445,7 +445,6 @@ subagent          (SubagentPlugin)      — entry point
 mcp               (McpClientPlugin)     — entry point
 llm               (LLMPlugin)           — entry point
 compaction        (CompactionPlugin)    — entry point
-context_compact   (ContextCompactPlugin) — entry point
 thinking          (ThinkingPlugin)      — entry point
 runtime_settings  (RuntimeSettingsPlugin) — entry point
 tools             (ToolCollectionPlugin) — entry point
@@ -658,7 +657,7 @@ Compacts conversation history when it approaches the channel's
 
 Implements one hook:
 
-- `compact_conversation` (`trylast=True`) — fires before each LLM call. Checks whether the token estimate exceeds `compaction_threshold * max_tokens`. If so, and if the conversation has more than `min_messages_to_compact` messages, summarizes older messages to fit within `compaction_retention * max_tokens`. Returns True to stop the `firstresult` chain. Runs after `ContextCompactPlugin` (tryfirst) and any third-party handlers at default priority.
+- `compact_conversation` (`trylast=True`) — fires before each LLM call. Checks whether the token estimate exceeds `compaction_threshold * max_tokens`. If so, and if the conversation has more than `min_messages_to_compact` messages, summarizes older messages to fit within `compaction_retention * max_tokens`. Returns True to stop the `firstresult` chain. Runs after any third-party handlers at default priority.
 
 Token counting uses tiktoken (cl100k_base encoding) via `count_tokens()` in `corvidae/context.py`. When tiktoken is unavailable, a character-based fallback is used (3.5 chars per token). `agent.chars_per_token` is deprecated and only takes effect in the fallback path.
 
@@ -673,33 +672,6 @@ agent:
 
 **Without this plugin:** conversations grow without bound. The LLM will
 receive an error from the API when the context limit is exceeded.
-
-### ContextCompactPlugin (`corvidae/context_compact.py`)
-
-Generates persistent background blocks from older conversation segments and injects them before each agent turn. Background blocks capture summarized context from messages older than the most recent compaction boundary, preserving historical knowledge across turns without growing the foreground context window. Entry point name: `"context_compact"`.
-
-Implements five hooks:
-
-- `on_start` — loads config from `agent.context_compact`.
-- `register_tools` — registers the `context_stats` tool for observability (turn counts, last block timestamps per channel).
-- `compact_conversation` (`tryfirst=True`) — generates background blocks from pre-compaction messages. Returns None (does not stop the chain; `CompactionPlugin` runs after).
-- `before_agent_turn` — injects the most recent background block as a CONTEXT entry if none exists in the current conversation.
-- `on_agent_response` — tracks per-channel turn counts.
-
-**Config:**
-```yaml
-agent:
-  context_compact:
-    enabled: true
-    bg_block_threshold: 20        # generate a block after this many turns
-    bg_compaction_threshold: 0.75 # compact when token budget exceeds this fraction
-    min_background_blocks: 1      # minimum blocks to retain in prompt context
-    max_background_block_chars: 2048  # max characters per background block
-```
-
-`context_compact` depends on `compaction` and `llm` (declared via `depends_on`). `validate_dependencies()` raises a `RuntimeError` at startup if either is absent.
-
-**Without this plugin:** no background blocks are generated. Compaction still works via `CompactionPlugin`.
 
 ### PersistencePlugin (`corvidae/persistence.py`)
 
