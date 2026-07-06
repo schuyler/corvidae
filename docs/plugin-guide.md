@@ -180,15 +180,17 @@ async def send_message(self, channel, text: str) -> None:
 | `on_agent_response(channel, request_text: str, response_text: str)` | async broadcast | After agent produces a response |
 | `before_agent_turn(channel)` | async broadcast | Before each LLM invocation |
 | `after_persist_assistant(channel, message: dict)` | async broadcast | After assistant message is written to DB; plugins may mutate the in-memory dict |
-| `on_conversation_event(channel, message: dict, message_type: MessageType)` | async broadcast | After every `conv.append()` call; message is the untagged dict (no `_message_type` key) |
-| `on_compaction(channel, summary_msg: dict, retain_count: int)` | async broadcast | After compaction replaces older messages with a summary; `summary_msg` is the untagged summary dict |
+| `on_conversation_event(channel, message: dict, message_type: MessageType) -> int \| None` | async broadcast | After every `conv.append()` call; message is the untagged dict (no `_message_type` key). Persistence returns the inserted `message_log` rowid; **exactly one implementation may return non-None** (all others return None). Callers resolve with `resolve_single_result` and attach the rowid to the in-window message as `_db_id`. |
+| `on_compaction(channel, summary_msg: dict, retain_count: int, compacted_ids: list[int])` | async broadcast | After compaction replaces older messages with a summary; `summary_msg` is the untagged summary dict. `compacted_ids` carries the `message_log` rowids of exactly the removed messages (empty when unknown) — the consolidation range consumed by `MemoryPlugin`. |
 | `on_idle()` | async broadcast | All queues empty and cooldown elapsed; only fires when `IdleMonitorPlugin` is registered |
 
 `after_persist_assistant` — the DB row is already written when this
 hook fires. Mutations to `message` affect in-memory prompt construction
 only; they do not update the persisted record.
 
-`before_agent_turn` — messages injected via `channel.conversation.append()` inside this hook are passed through `on_conversation_event` and persisted to the DB.
+`before_agent_turn` — messages injected via `channel.conversation.append()` inside this hook are passed through `on_conversation_event` and persisted to the DB, unless they already carry a `_db_id` (i.e. their producer — such as the admission funnel — persisted them itself).
+
+Window messages carry internal `_`-prefixed tags (`_message_type`, `_db_id`). Every serialization boundary (prompt build, compaction summarizer prep, persistence, JSONL log) strips all `_`-prefixed keys — internal tags never reach the LLM or the DB.
 
 ### Observability
 
@@ -396,6 +398,8 @@ class MemoryPlugin(CorvidaePlugin):
 
 `MessageType.CONTEXT` entries survive compaction — compaction only summarizes `MESSAGE` entries.
 
+Prefer routing CONTEXT through the admission funnel instead of appending directly: `pm.get_plugin("funnel").admit(channel, conv, "<source>", entries)` gives you window dedupe, per-source token budgets, and the mandatory data-not-instructions framing for free (see FunnelPlugin below). Direct appends bypass all three.
+
 ## Channels
 
 A channel is a `transport:scope` pair like `irc:#general` or `cli:local`. Each channel has its own `ContextWindow` initialized on first message.
@@ -448,7 +452,8 @@ compaction        (CompactionPlugin)    — entry point
 thinking          (ThinkingPlugin)      — entry point
 runtime_settings  (RuntimeSettingsPlugin) — entry point
 tools             (ToolCollectionPlugin) — entry point
-dream             (DreamPlugin)         — entry point
+memory            (MemoryPlugin)        — entry point
+funnel            (FunnelPlugin)        — entry point
 agent             (Agent)               — entry point
 idle_monitor      (IdleMonitorPlugin)   — entry point
 config_watcher    (ConfigWatcherPlugin) — entry point
@@ -879,29 +884,47 @@ tools_dict, schemas = tools_plugin.get_tools()
 **Without this plugin:** `Agent` cannot retrieve tools and will raise
 `RuntimeError` during startup.
 
-### DreamPlugin (`corvidae/tools/dream.py`)
+### MemoryPlugin (`corvidae/memory.py`)
 
-Periodically reviews recent conversation history and appends extracted facts
-to `MEMORY.md`. Entry point name: `"dream"`.
+Autobiographical memory: consolidates compacted dialog into first-person
+memory records (SQLite + sqlite-vec + FTS5) and retrieves them into the
+prompt through the admission funnel. Entry point name: `"memory"`;
+`depends_on = {"persistence", "llm"}`. Absorbs the removed `DreamPlugin`.
 
-Implements two hooks:
+Implements five hooks:
 
-- `on_start` — locates `sessions.db` within the workspace tree.
-- `on_idle` — runs a dream cycle if `interval_seconds` have elapsed since
-  the last cycle. Queries the last 40 rows from `message_log`, filters for
-  assistant messages, strips `<think>` blocks, and appends new sentences to
-  the `## Long-term Memory` section of `MEMORY.md`. Skips sentences already
-  present (deduplication by normalized text). No-ops if `sessions.db` is not
-  found.
+- `on_start` — creates the memory schema on the persistence connection
+  (retried lazily on first use; on_start ordering is LIFO across plugins).
+- `on_compaction` — spawns a tracked background task consolidating the
+  `compacted_ids` range above the per-channel watermark.
+- `on_idle` — consolidates the un-consolidated tail of channels inactive
+  past `memory.idle_consolidate_after` seconds.
+- `before_agent_turn` — embeds the inbound user text, scores candidates
+  (`similarity × exp(-age_days / half_life)`), bands them
+  (strong/moderate/weak), admits winners through the funnel, bumps access
+  stats for admitted records, and writes a `retrieval_log` row.
+- `on_stop` — cancels in-flight background tasks.
 
-**Config:**
-```yaml
-dream:
-  interval_seconds: 300   # minimum seconds between dream cycles (default 300)
-```
+The importance prior is pluggable (`MemoryPlugin.importance_prior`,
+default `RubricPrior`); Phase 2's appraisal replaces it. Configuration is
+documented in [configuration.md](configuration.md) (`memory.*`,
+`llm.embedding`).
 
-**Without this plugin:** `MEMORY.md` is not updated automatically. The
-`on_idle` hook fires for other listeners regardless.
+**Without this plugin:** no memory records form and no retrieval happens;
+compaction remains plain lossy summarization.
+
+### FunnelPlugin (`corvidae/funnel.py`)
+
+The context-admission funnel — the single chokepoint for tail CONTEXT
+admission. Entry point name: `"funnel"`. Exposes
+`admit(channel, conv, source, entries, budget_tokens=None) -> int`:
+dedupes against CONTEXT already in the window, budgets tokens per source
+(drops are logged, never silent), wraps everything in explicit
+data-not-instructions framing with a source label, appends one CONTEXT
+message at the tail, and persists it with the rowid attached.
+
+**Without this plugin:** sources that route through the funnel (memory
+retrieval) log a warning and admit nothing.
 
 ### IdleMonitorPlugin (`corvidae/idle.py`)
 
@@ -911,7 +934,7 @@ Entry point name: `"idle_monitor"`.
 Currently a stub — implements `on_idle` as a no-op. The idle
 detection logic itself lives in `Agent._maybe_fire_idle`, which
 checks queue quiescence and fires the `on_idle` broadcast.
-Plugins that implement `on_idle` (such as `DreamPlugin`) receive
+Plugins that implement `on_idle` (such as `MemoryPlugin`) receive
 those calls.
 
 **Idle condition:** all `SerialQueue` instances have `is_empty=True`,
@@ -925,7 +948,7 @@ daemon:
   idle_cooldown_seconds: 30   # minimum seconds between on_idle firings (default 30)
 ```
 
-**Without this plugin:** the `on_idle` hook is never fired. Plugins that implement `on_idle` (such as `DreamPlugin`) will not receive calls.
+**Without this plugin:** the `on_idle` hook is never fired. Plugins that implement `on_idle` (such as `MemoryPlugin`) will not receive calls.
 
 ### ConfigWatcherPlugin (`corvidae/config_watcher.py`)
 

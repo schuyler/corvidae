@@ -54,7 +54,7 @@ channels:
 
 ## `llm` — LLM backend
 
-The `llm.main` block is required. `llm.background` is optional; when absent, subagents use `llm.main`.
+The `llm.main` block is required. Every other key under `llm:` is an optional **role** (`background`, `embedding`, and future roles) built into its own client; `LLMPlugin.get_client(role)` falls back to `llm.main` for unconfigured or unknown roles. Only `llm.main` is hot-swapped on config reload — other roles are restart-only.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
@@ -74,8 +74,12 @@ The `llm.main` block is required. `llm.background` is optional; when absent, sub
 | `llm.background.retry_base_delay` | float | `2.0` | Base delay in seconds for background LLM retry backoff. |
 | `llm.background.retry_max_delay` | float | `60.0` | Maximum delay cap in seconds for background LLM retries. |
 | `llm.background.timeout` | float | `null` | HTTP timeout in seconds for background LLM requests. |
+| `llm.embedding.base_url` | string | — | Base URL for an OpenAI-compatible `/embeddings` endpoint (embedding servers are usually separate from generation servers). Optional. |
+| `llm.embedding.model` | string | — | Embedding model identifier. Recorded in `embedding_meta`; changing it against an existing store logs an ERROR and disables embedding (re-embed flow is Phase 1b). |
+| `llm.embedding.dimensions` | integer | — | **Required when `llm.embedding` is present.** Fixed vector dimension of the embedding model; the `memory_vec` table schema depends on it. Validated at startup. |
+| `llm.embedding.*` | — | — | The remaining keys (`api_key`, `max_retries`, ...) match `llm.main`. |
 
-`llm.background` is parsed by `LLMPlugin`. If the key is absent, `LLMPlugin.get_client("background")` returns the main client, so all callers (including `SubagentPlugin`) fall back to `llm.main`.
+`llm.background` is parsed by `LLMPlugin`. If the key is absent, `LLMPlugin.get_client("background")` returns the main client, so all callers (including `SubagentPlugin`) fall back to `llm.main`. When `llm.embedding` is absent, `MemoryPlugin` stores records with `embedded=0` and retrieval degrades to FTS5 keyword search.
 
 Retry behavior applies to transient status codes (429, 500, 502, 503, 504) and connection errors. The `Retry-After` header (429 responses) is honored when present; otherwise exponential backoff is used. Retries do not apply to client errors (4xx) other than 429.
 
@@ -118,13 +122,30 @@ These values apply to all channels. Per-channel overrides in the `channels` sect
 
 ---
 
-## `dream` — background memory consolidation
+## `memory` — autobiographical memory
 
-`DreamPlugin` runs on the `on_idle` hook and reviews recent conversation history to update `MEMORY.md`.
+`MemoryPlugin` consolidates compacted dialog into first-person memory records and retrieves them into the prompt (see [design.md](design.md)). The former `dream.*` keys are gone with `DreamPlugin` (absorbed by this plugin).
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `dream.interval_seconds` | integer | `300` | Minimum seconds between dream cycles. A cycle is skipped if less than this time has elapsed since the last run. |
+| `memory.idle_consolidate_after` | float | `1800` | Seconds of channel inactivity before the `on_idle` trigger consolidates that channel's un-consolidated tail. |
+| `memory.half_life_days` | float | `30` | Recency half-life of the retrieval score (`similarity × exp(-age_days / half_life)`). |
+| `memory.retrieval.k` | integer | `8` | Vector-KNN candidate count per retrieval. |
+| `memory.retrieval.bands.strong` | float | `0.75` | Score at or above which a retrieved memory is banded `[strong]`. |
+| `memory.retrieval.bands.moderate` | float | `0.60` | Score at or above which a retrieved memory is banded `[moderate]`; below is `[weak]` (dropped unless nothing else matched). |
+| `memory.channel_groups` | mapping | `{}` | `{group_name: [channel ids]}` — channels in the same group share retrieval scope. Memory is otherwise compartmentalized per channel. |
+| `memory.consolidation_prompt` | string | built-in | Overrides the consolidation system prompt (documented copy: `prompts/memory_consolidation.md`). |
+
+---
+
+## `funnel` — context-admission funnel
+
+`FunnelPlugin` is the single chokepoint for tail CONTEXT admission (dedupe, budgets, injection framing).
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `funnel.default_budget` | integer | `512` | Token budget per `admit()` call when the source has no override. |
+| `funnel.budgets.<source>` | integer | — | Per-source budget override (e.g. `funnel.budgets.memory`). |
 
 ---
 

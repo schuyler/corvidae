@@ -7,7 +7,6 @@ These tests cover:
 4. CorvidaePlugin subclassing for each plugin
 5. Entry points registered in the "corvidae" group
 6. RuntimeSettingsPlugin.on_init extends blocklist from config
-7. DreamPlugin.on_start and on_idle have @hookimpl decorators
 
 All tests FAIL until the implementation is complete.
 """
@@ -194,13 +193,6 @@ def test_tool_collection_plugin_no_arg_constructor():
     assert plugin is not None
 
 
-def test_dream_plugin_no_arg_constructor():
-    """DreamPlugin() must work with no arguments."""
-    from corvidae.tools.dream import DreamPlugin
-    plugin = DreamPlugin()
-    assert plugin is not None
-
-
 def test_agent_no_arg_constructor():
     """Agent() must work with no arguments."""
     from corvidae.agent import Agent
@@ -331,14 +323,6 @@ def test_tool_collection_plugin_subclasses_corvidae_plugin():
     )
 
 
-def test_dream_plugin_subclasses_corvidae_plugin():
-    from corvidae.hooks import CorvidaePlugin
-    from corvidae.tools.dream import DreamPlugin
-    assert issubclass(DreamPlugin, CorvidaePlugin), (
-        "DreamPlugin must subclass CorvidaePlugin"
-    )
-
-
 def test_agent_subclasses_corvidae_plugin():
     from corvidae.hooks import CorvidaePlugin
     from corvidae.agent import Agent
@@ -390,7 +374,6 @@ def test_corvidae_entry_points_contain_expected_names():
         "thinking",
         "runtime_settings",
         "tools",
-        "dream",
         "agent",
         "idle_monitor",
     }
@@ -418,7 +401,6 @@ def test_corvidae_entry_points_load_correct_classes():
         "thinking": "corvidae.thinking:ThinkingPlugin",
         "runtime_settings": "corvidae.tools.settings:RuntimeSettingsPlugin",
         "tools": "corvidae.tool_collection:ToolCollectionPlugin",
-        "dream": "corvidae.tools.dream:DreamPlugin",
         "agent": "corvidae.agent:Agent",
         "idle_monitor": "corvidae.idle:IdleMonitorPlugin",
     }
@@ -488,83 +470,6 @@ async def test_runtime_settings_plugin_on_init_empty_immutable_settings():
 
     assert "system_prompt" in plugin.blocklist, (
         "system_prompt must remain in blocklist when immutable_settings absent from config"
-    )
-
-
-# ---------------------------------------------------------------------------
-# 7. DreamPlugin @hookimpl decorators on on_start and on_idle
-# ---------------------------------------------------------------------------
-
-
-def test_dream_plugin_on_start_has_hookimpl():
-    """DreamPlugin.on_start must be decorated with @hookimpl."""
-    from corvidae.tools.dream import DreamPlugin
-    from corvidae.hooks import hookimpl
-
-    marker_attr = hookimpl.project_name + "_impl"  # "corvidae_impl"
-    impl_opts = getattr(DreamPlugin.on_start, marker_attr, None)
-    assert impl_opts is not None, (
-        "DreamPlugin.on_start must be decorated with @hookimpl — "
-        "currently missing, which means on_start is never dispatched by pluggy"
-    )
-
-
-def test_dream_plugin_on_idle_has_hookimpl():
-    """DreamPlugin.on_idle must be decorated with @hookimpl."""
-    from corvidae.tools.dream import DreamPlugin
-    from corvidae.hooks import hookimpl
-
-    marker_attr = hookimpl.project_name + "_impl"  # "corvidae_impl"
-    impl_opts = getattr(DreamPlugin.on_idle, marker_attr, None)
-    assert impl_opts is not None, (
-        "DreamPlugin.on_idle must be decorated with @hookimpl — "
-        "currently missing, which means on_idle is never dispatched by pluggy"
-    )
-
-
-async def test_dream_plugin_dispatched_via_pm_on_start():
-    """DreamPlugin.on_start must be called when pm.ahook.on_start is broadcast."""
-    from corvidae.tools.dream import DreamPlugin
-
-    pm = create_plugin_manager()
-    plugin = DreamPlugin()
-    plugin.workspace_root = None  # avoid Path resolution in on_start
-    pm.register(plugin)
-
-    # on_start will fail without a proper config — we only care it's called,
-    # not that it succeeds. Catch any error from missing config but verify
-    # dispatch happened by checking on_start is recognised as a hookimpl.
-    try:
-        await pm.ahook.on_start(config={})
-    except (TypeError, KeyError, AttributeError, ValueError):
-        pass  # Expected — on_start needs config; we only test dispatch registration
-
-    # If @hookimpl is missing, the hook simply never called on_start on this plugin.
-    # We verify dispatch by checking the hookimpl is registered.
-    hook_caller = pm.hook.on_start
-    impl_plugins = [impl.plugin for impl in hook_caller.get_hookimpls()]
-    assert plugin in impl_plugins, (
-        "DreamPlugin must be registered as an on_start hookimpl. "
-        "Ensure @hookimpl is applied to DreamPlugin.on_start."
-    )
-
-
-async def test_dream_plugin_dispatched_via_pm_on_idle():
-    """DreamPlugin.on_idle must be called when pm.ahook.on_idle is broadcast."""
-    from corvidae.tools.dream import DreamPlugin
-
-    pm = create_plugin_manager()
-    plugin = DreamPlugin()
-    plugin.workspace_root = None
-    plugin._db_path = None
-    plugin._last_dream_time = 0.0
-    pm.register(plugin)
-
-    hook_caller = pm.hook.on_idle
-    impl_plugins = [impl.plugin for impl in hook_caller.get_hookimpls()]
-    assert plugin in impl_plugins, (
-        "DreamPlugin must be registered as an on_idle hookimpl. "
-        "Ensure @hookimpl is applied to DreamPlugin.on_idle."
     )
 
 

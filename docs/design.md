@@ -844,36 +844,95 @@ agent:
 **Graceful degradation:** without `ToolCollectionPlugin`, `Agent.depends_on`
 validation fails at startup.
 
-## DreamPlugin
+## MemoryPlugin
 
-`tools/dream.py` — background memory consolidation. Registered as `"dream"` in
-`main.py` after `ToolCollectionPlugin`. Does not use `hookimpl` decorators —
-its `on_start` and `on_idle` are plain async methods registered via the standard
-`pm.register()` path.
+`memory.py` — autobiographical memory (bootstrap-mapping §3.1). Entry point
+name: `"memory"`; `depends_on = {"persistence", "llm"}`. Absorbs the former
+`DreamPlugin` embryo (removed): compaction becomes memory formation instead
+of file-based fact scraping.
 
-### What it does
+### Consolidation (write path)
 
-On each `on_idle` firing, if `interval_seconds` have elapsed since the last
-dream cycle, queries `sessions.db` for recent assistant messages (up to 40
-rows, filtered to `role=assistant`, capped at 20 per channel), extracts
-sentences from the content, deduplicates against the existing `## Long-term
-Memory` section of `MEMORY.md`, and appends new facts (up to 20 per cycle).
+Two triggers, one watermarked code path:
 
-### DB discovery
+- **`on_compaction(channel, summary_msg, retain_count, compacted_ids)`** —
+  the moment dialog leaves the active window it enters long-term memory.
+  The compacted `message_log` id range rides the hook payload (rowid
+  threading, below); consolidation never depends on the summary row being
+  in the DB.
+- **`on_idle`** — channels inactive past `memory.idle_consolidate_after`
+  seconds get their un-consolidated tail consolidated.
 
-Searches for `sessions.db` in the workspace root at startup, checking
-`workspace/corvidae/sessions.db` and `workspace/sessions.db` first, then
-recursively up to depth 3. If not found, the dream cycle is a no-op.
+Both spawn a tracked plugin-owned `asyncio.create_task` (never the
+TaskQueue — every TaskQueue completion wakes the main model). The task
+reads the per-channel **consolidation watermark**, fetches the working
+range, makes one `llm.background` call (first-person summary with
+epistemic framing, JSON out — see `prompts/memory_consolidation.md`),
+scores an importance prior through the pluggable
+`MemoryPlugin.importance_prior` (default: cheap-model `RubricPrior`,
+0.5 on failure; Phase 2 appraisal replaces it), embeds the summary via
+`llm.embedding`, and commits the memory row together with the watermark
+advance in one compare-and-set section. Overlapping triggers on the same
+range discard the loser's record — no duplicates. Embedding failure
+stores the record with `embedded=0` for later backfill; the summary text
+is canonical and vectors are a rebuildable cache. All consolidation LLM
+calls carry `stage="consolidation"` attribution in `usage_log`.
 
-### Configuration
+### Retrieval (read path)
 
-```yaml
-dream:
-  interval_seconds: 300   # minimum seconds between dream cycles (default 300)
-```
+`before_agent_turn` runs when the window tail is a plain user MESSAGE
+(notification-triggered turns skip retrieval until Phase 2's origin
+machinery). The inbound text is embedded and matched against `memory_vec`
+(sqlite-vec exact KNN, cosine distance); candidates are filtered to
+`indexed=1 AND redacted=0` and channel-compartmentalized (`channel_id`
+match, or shared scope via `memory.channel_groups`). Scores are
+`cosine_similarity × exp(-age_days / memory.half_life_days)` and annotated
+into relevance bands (strong ≥ 0.75, moderate ≥ 0.60, else weak; weak
+drops unless nothing else matched). Winners enter the window as
+`[band] (age) summary` lines through the admission funnel — never by
+direct CONTEXT append. Admitted memories get their access statistics
+bumped (`retrieval_count`, `last_retrieved_at` — the write half of
+reconsolidation), and every retrieval writes a `retrieval_log` row
+(top score, hit/admitted counts, degradation flag).
 
-**Graceful degradation:** if `sessions.db` is not found, or if `MEMORY.md`
-is absent, the plugin skips the cycle without error.
+**Graceful degradation:** encoder down → FTS5 keyword retrieval over
+`memory_fts` (flagged `degraded_to_fts=1`); sqlite-vec unloadable → FTS5
+with one clear startup warning; no `llm.embedding` role → records stored
+with `embedded=0`, retrieval FTS5-only; a stored encoder differing from
+config → ERROR and embeddings disabled rather than silently mixing
+encoders. Nothing in the memory path raises into the turn loop.
+
+### Schema
+
+`memory` (records + Phase 1b columns: `indexed`, `superseded_by`,
+`redacted`, `embedded`), `consolidation_watermark`, `embedding_meta`,
+`memory_fts` (external-content FTS5 with insert/update sync triggers; no
+delete trigger — memory rows are never deleted), `memory_vec` (vec0,
+created only when the extension loads), and `retrieval_log`. All on the
+persistence connection in `sessions.db`; `message_log` stays append-only.
+
+The epistemic-calibration prompt fragment (`prompts/memory_calibration.md`)
+is documented but NOT auto-injected — hedging vocabulary is persona, not
+architecture.
+
+## FunnelPlugin
+
+`funnel.py` — the context-admission funnel (bootstrap-mapping §2.2). Entry
+point name: `"funnel"`. The single chokepoint for tail CONTEXT admission:
+
+1. **Dedupe** against CONTEXT already in the window.
+2. **Budget** per source (`funnel.default_budget`, default 512 tokens;
+   `funnel.budgets.<source>` overrides), greedy in given order, drops
+   logged rather than silent.
+3. **Frame** every admitted batch in explicit data-not-instructions
+   wrapping with a source label (injection defense, written once here).
+4. **Append + persist** one CONTEXT message at the tail through
+   `on_conversation_event`, with the rowid attached, so the window matches
+   its reload. Stale CONTEXT retires by aging past the compaction boundary.
+
+Phase 1a callers: memory retrieval (and optionally date/time grounding).
+The deferred registration/stub machinery for notification payloads is
+Phase 2+.
 
 ## Subagent Tool
 
@@ -1110,8 +1169,20 @@ tools:
   max_file_read_bytes: 1048576  # read_file size limit in bytes (default 1MB)
   web_search_max_results: 8     # web_search result count (default 8)
 
-dream:
-  interval_seconds: 300         # minimum seconds between dream cycles (default 300)
+memory:
+  idle_consolidate_after: 1800  # seconds of channel inactivity before idle consolidation
+  half_life_days: 30            # retrieval recency half-life
+  retrieval:
+    k: 8                        # KNN candidate count
+    bands:
+      strong: 0.75              # assert confidently at or above this score
+      moderate: 0.60            # hedge at or above this score
+  channel_groups: {}            # {group: [channel ids]} shared memory scopes
+
+funnel:
+  default_budget: 512           # tokens per admission-funnel call
+  budgets:
+    memory: 512                 # optional per-source overrides
 
 channels:
   "irc:#channel":
@@ -1154,9 +1225,10 @@ Defined in `main.py`:
 12. `ThinkingPlugin` — handles `<think>` stripping and `reasoning_content` removal
 13. `RuntimeSettingsPlugin` — registers the `set_settings` tool
 14. `ToolCollectionPlugin` — collects tools from all plugins via `register_tools` hook; `on_start` is `trylast=True` so it fires after all other `on_start` hooks
-15. `DreamPlugin` — background memory consolidation via `on_idle`
-16. `Agent` — agent loop (after all tools, transports, and support plugins)
-17. `IdleMonitorPlugin` — no-op stub; registered after `Agent`
+15. `MemoryPlugin` — consolidation (`on_compaction`/`on_idle`) and retrieval (`before_agent_turn`)
+16. `FunnelPlugin` — context-admission funnel for tail CONTEXT entries
+17. `Agent` — agent loop (after all tools, transports, and support plugins)
+18. `IdleMonitorPlugin` — no-op stub; registered after `Agent`
 
 After all registrations, `validate_dependencies(pm)` runs to verify that
 every plugin's `depends_on` set names a registered plugin. Startup aborts
@@ -1223,6 +1295,8 @@ corvidae/
 ├── compaction.py         # CompactionPlugin
 ├── task.py               # Task, TaskQueue, TaskPlugin
 ├── mcp_client.py         # McpClientPlugin (MCP server bridge)
+├── memory.py             # MemoryPlugin (consolidation + retrieval)
+├── funnel.py             # FunnelPlugin (context-admission funnel)
 ├── main.py               # daemon entry point
 ├── channels/
 │   ├── cli.py            # CLIPlugin
@@ -1235,7 +1309,6 @@ corvidae/
     ├── subagent.py       # SubagentPlugin, subagent tool, run_agent_loop()
     ├── settings.py       # RuntimeSettingsPlugin, set_settings tool
     ├── task_pipeline.py  # TaskPipelinePlugin, task_pipeline tool
-    ├── dream.py          # DreamPlugin (background memory consolidation)
     ├── goal_tracker.py   # experimental; not registered
     ├── perf_mon.py       # experimental; not registered
     ├── local_indexer.py  # experimental; not registered
@@ -1280,11 +1353,13 @@ are registered statically in `main.py`.
 
 ### Memory retrieval
 
-The original design described a retrieval system using embeddings
-(nomic-embed-text or similar) with sqlite-vec for vector similarity
-search. The system would inject `<memory>` blocks into the conversation
-stream between turns. Prerequisites exist (the message log with durable
-compaction), but the retrieval pipeline is not built.
+**Implemented** (Phase 1a) — see the MemoryPlugin section above.
+Consolidation turns compaction into memory formation; retrieval injects
+framed CONTEXT blocks through the admission funnel; sqlite-vec provides
+exact-KNN similarity with an FTS5 degradation path. The remaining memory
+work (retention/demotion, near-duplicate merge, `redact`, the
+`search_memory`/`recall_raw` tools, fixture benchmarks) is Phase 1b —
+see `plans/implementation/phase-1b.md`.
 
 ### Double-buffer compaction
 
