@@ -35,13 +35,112 @@ Config:
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
+import time
+from collections.abc import Callable
+from typing import Protocol
 
 import aiosqlite
 
+from corvidae.attribution import reset_attribution, set_attribution
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 
 logger = logging.getLogger("corvidae.memory")
+
+# Seconds a channel must be inactive before the idle trigger consolidates
+# its un-consolidated tail.
+DEFAULT_IDLE_CONSOLIDATE_AFTER = 1800.0
+
+# Default consolidation prompt. prompts/memory_consolidation.md is the
+# documented copy of this text; memory.consolidation_prompt in config
+# overrides it with a literal string.
+DEFAULT_CONSOLIDATION_PROMPT = (
+    "You are consolidating a conversation segment into the agent's "
+    "long-term autobiographical memory. Write a FIRST-PERSON summary from "
+    "the agent's point of view (the assistant is \"I\").\n\n"
+    "Preserve epistemic framing: distinguish what I was told from what I "
+    "inferred or speculated (\"Schuyler told me...\", \"I speculated "
+    "that...\", \"I suggested...\"). Keep concrete details that would "
+    "matter later: names, decisions, commitments, corrections, and "
+    "outcomes. Omit filler.\n\n"
+    "Respond with a single JSON object, nothing else:\n"
+    "{\n"
+    '  "summary": "<first-person summary, a few sentences>",\n'
+    '  "topic_tags": ["<short topic tag>", ...],\n'
+    '  "participants": ["<sender name>", ...]\n'
+    "}"
+)
+
+# Rubric for the default importance prior (Persyn-style cheap-model rating).
+RUBRIC_PROMPT = (
+    "Rate the lasting importance of remembering this conversation segment "
+    "for a personal agent, from 0.0 (trivial small talk, transient chatter) "
+    "to 1.0 (identity-level facts, standing commitments, significant "
+    "decisions, or emotionally weighty events).\n\n"
+    'Respond with a single JSON object, nothing else: {"importance": <float>}'
+)
+
+
+def _parse_json_block(text: str) -> dict:
+    """Extract the first JSON object from LLM output.
+
+    Tolerates surrounding prose and markdown code fences. Raises ValueError
+    when no parseable object is present — callers own their degradation.
+    """
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        raise ValueError(f"no JSON object in LLM output: {text[:200]!r}")
+    return json.loads(text[start:end + 1])
+
+
+def _dialog_transcript(messages: list[dict]) -> str:
+    """Render dialog messages as 'role: content' lines for a prompt."""
+    return "\n".join(
+        f"{m.get('role', '?')}: {m.get('content', '')}" for m in messages
+    )
+
+
+class ImportancePrior(Protocol):
+    """Pluggable supplier of the consolidation-time importance prior (§3.1).
+
+    Held as ``MemoryPlugin.importance_prior`` and assignable by later
+    phases: the Phase 2 appraisal replaces the default rubric; a Phase 6
+    toggle adds a surprise term.
+    """
+
+    async def score(self, messages: list[dict]) -> float: ...   # 0.0–1.0
+
+
+class RubricPrior:
+    """Default importance prior: cheap-model rubric rating (§3.1).
+
+    Returns 0.5 on any failure (logged) — a scoring outage must never
+    block memory formation.
+    """
+
+    def __init__(self, get_client: Callable[[], object]) -> None:
+        # A callable, not a client, so the current background client is
+        # resolved at call time (clients can be swapped on config reload).
+        self._get_client = get_client
+
+    async def score(self, messages: list[dict]) -> float:
+        try:
+            client = self._get_client()
+            response = await client.chat([
+                {"role": "system", "content": RUBRIC_PROMPT},
+                {"role": "user", "content": _dialog_transcript(messages)},
+            ])
+            text = response["choices"][0]["message"]["content"]
+            importance = float(_parse_json_block(text)["importance"])
+            return max(0.0, min(1.0, importance))
+        except Exception:
+            logger.warning(
+                "importance rubric failed; defaulting to 0.5", exc_info=True
+            )
+            return 0.5
 
 # ---------------------------------------------------------------------------
 # Schema DDL (bootstrap-mapping §4.11–4.12)
@@ -134,6 +233,20 @@ class MemoryPlugin(CorvidaePlugin):
         self._encoder_mismatch = False
         self._embedding_cfg: dict | None = None
         self._memory_cfg: dict = {}
+        self._idle_consolidate_after: float = DEFAULT_IDLE_CONSOLIDATE_AFTER
+        self._consolidation_prompt: str = DEFAULT_CONSOLIDATION_PROMPT
+        # Tracked background tasks (consolidation) — plugin-owned
+        # asyncio.create_task, never the TaskQueue: every TaskQueue
+        # completion triggers a full main-model turn (§2.3, trap #5).
+        self._tasks: set[asyncio.Task] = set()
+        # Serializes the check-and-insert commit section of consolidation
+        # so the watermark compare-and-set is race-free on the shared
+        # persistence connection.
+        self._db_lock = asyncio.Lock()
+        # Pluggable importance prior; replaced by later phases (§3.1).
+        self.importance_prior: ImportancePrior = RubricPrior(
+            lambda: self._llm().get_client("background")
+        )
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -145,6 +258,12 @@ class MemoryPlugin(CorvidaePlugin):
         await super().on_init(pm, config)
         self._memory_cfg = config.get("memory", {}) or {}
         self._embedding_cfg = (config.get("llm", {}) or {}).get("embedding")
+        self._idle_consolidate_after = self._memory_cfg.get(
+            "idle_consolidate_after", DEFAULT_IDLE_CONSOLIDATE_AFTER
+        )
+        self._consolidation_prompt = self._memory_cfg.get(
+            "consolidation_prompt", DEFAULT_CONSOLIDATION_PROMPT
+        )
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
@@ -158,9 +277,279 @@ class MemoryPlugin(CorvidaePlugin):
         except Exception:
             logger.warning("memory schema creation deferred", exc_info=True)
 
+    @hookimpl
+    async def on_stop(self) -> None:
+        """Cancel tracked background tasks (consolidation in flight)."""
+        for task in list(self._tasks):
+            task.cancel()
+        if self._tasks:
+            await asyncio.gather(*list(self._tasks), return_exceptions=True)
+        self._tasks.clear()
+
+    # ------------------------------------------------------------------
+    # Consolidation triggers (bootstrap-mapping §3.1)
+    # ------------------------------------------------------------------
+
+    @hookimpl
+    async def on_compaction(
+        self, channel, summary_msg: dict, retain_count: int, compacted_ids: list[int]
+    ) -> None:
+        """Trigger A: dialog leaving the active window enters long-term memory.
+
+        Depends only on the hook payload — never on the summary row being
+        in the DB (ordering against PersistencePlugin on this broadcast is
+        just registration order; trap #4).
+
+        Deliberate divergence note (OPT-1a-1): bootstrap-mapping §3.1
+        prefers a single summarization call with two outputs (window
+        summary + memory record). This phase ships consolidation as its own
+        cheap-model call for plugin decoupling; Phase 0 metering makes the
+        double-pay measurable, and merging the calls is a named follow-up
+        once the cost is known.
+        """
+        if not compacted_ids:
+            return
+        self._spawn(self._consolidate_range(channel.id, max(compacted_ids)))
+
+    @hookimpl
+    async def on_idle(self) -> None:
+        """Trigger B: consolidate the un-consolidated tail of inactive channels.
+
+        Inactivity comes from the live Channel's last_active when the
+        channel is registered, else from the newest message_log timestamp
+        (covers backlog on channels this process has not seen traffic on).
+        """
+        try:
+            db = await self._ensure_schema()
+            if db is None:
+                return
+            now = time.time()
+            registry = self.pm.get_plugin("registry")
+            async with db.execute(
+                "SELECT channel_id, MAX(id), MAX(timestamp) FROM message_log "
+                "GROUP BY channel_id"
+            ) as cursor:
+                rows = await cursor.fetchall()
+            for channel_id, max_id, max_ts in rows:
+                watermark = await self._get_watermark(db, channel_id)
+                if max_id <= watermark:
+                    continue
+                last_active = max_ts
+                channel = registry.get(channel_id) if registry is not None else None
+                if channel is not None:
+                    last_active = channel.last_active
+                if now - last_active < self._idle_consolidate_after:
+                    continue
+                self._spawn(self._consolidate_range(channel_id, max_id))
+        except Exception:
+            logger.warning("idle consolidation scan failed", exc_info=True)
+
+    # ------------------------------------------------------------------
+    # Background task tracking (§2.3 — silent, never the TaskQueue)
+    # ------------------------------------------------------------------
+
+    def _spawn(self, coro) -> asyncio.Task:
+        """Run a coroutine as a tracked background task with full logging."""
+        task = asyncio.create_task(coro)
+        self._tasks.add(task)
+        task.add_done_callback(self._on_task_done)
+        return task
+
+    def _on_task_done(self, task: asyncio.Task) -> None:
+        """Drop the handle and surface any unhandled exception."""
+        self._tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.warning("memory background task failed", exc_info=exc)
+
+    async def wait_for_background_tasks(self) -> None:
+        """Await all tracked tasks — a test/live-check convenience."""
+        while self._tasks:
+            await asyncio.gather(*list(self._tasks), return_exceptions=True)
+
+    # ------------------------------------------------------------------
+    # The consolidation task (single code path for both triggers)
+    # ------------------------------------------------------------------
+
+    async def _consolidate_range(self, channel_id: str, range_end: int) -> None:
+        """Consolidate message_log rows (watermark, range_end] into one record.
+
+        Overlap safety (trap #6): both triggers WILL race to the same
+        range. The watermark is read optimistically before the LLM work,
+        then re-checked under the DB lock in the same atomic section as the
+        insert + watermark advance; any concurrent advance discards this
+        task's record.
+        """
+        attribution_token = set_attribution(
+            stage="consolidation", channel_id=channel_id
+        )
+        try:
+            db = await self._ensure_schema()
+            if db is None:
+                return
+            watermark = await self._get_watermark(db, channel_id)
+            if range_end <= watermark:
+                return
+
+            # Fetch the working range and keep only real dialog.
+            async with db.execute(
+                "SELECT id, message, message_type FROM message_log "
+                "WHERE channel_id = ? AND id > ? AND id <= ? ORDER BY id",
+                (channel_id, watermark, range_end),
+            ) as cursor:
+                rows = await cursor.fetchall()
+            dialog = []
+            for _rowid, message_json, message_type in rows:
+                if message_type != "message":
+                    continue
+                message = json.loads(message_json)
+                content = message.get("content")
+                if message.get("role") in ("user", "assistant") and \
+                        isinstance(content, str) and content.strip():
+                    dialog.append(message)
+
+            if not dialog:
+                # Pure CONTEXT/system segments advance the watermark
+                # without producing a record.
+                async with self._db_lock:
+                    current = await self._get_watermark(db, channel_id)
+                    if current == watermark:
+                        await self._set_watermark(db, channel_id, range_end)
+                        await db.commit()
+                return
+
+            # One background-model call produces the first-person record.
+            record = await self._summarize_range(dialog)
+            importance = await self.importance_prior.score(dialog)
+
+            # Embed the summary; failure stores embedded=0 for later
+            # backfill (trap #10 — degrade, never block).
+            embedding: list[float] | None = None
+            if self._embedding_enabled():
+                try:
+                    client = self._llm().get_client("embedding")
+                    embedding = (await client.embed([record["summary"]]))[0]
+                except Exception:
+                    logger.warning(
+                        "memory embedding failed; storing record with "
+                        "embedded=0 for backfill", exc_info=True,
+                    )
+
+            # Atomic commit section: insert + watermark advance together.
+            async with self._db_lock:
+                current = await self._get_watermark(db, channel_id)
+                if current != watermark:
+                    logger.debug(
+                        "watermark moved during consolidation; discarding",
+                        extra={"channel_id": channel_id},
+                    )
+                    return
+                cursor = await db.execute(
+                    "INSERT INTO memory (channel_id, created_at, summary, "
+                    "importance, topic_tags, participants, msg_id_start, "
+                    "msg_id_end, embedded) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        channel_id,
+                        time.time(),
+                        record["summary"],
+                        importance,
+                        json.dumps(record["topic_tags"]),
+                        json.dumps(record["participants"]),
+                        rows[0][0],
+                        rows[-1][0],
+                        1 if embedding is not None else 0,
+                    ),
+                )
+                memory_id = cursor.lastrowid
+                if embedding is not None and self._vec_available:
+                    import sqlite_vec
+                    await db.execute(
+                        "INSERT INTO memory_vec (memory_id, embedding) VALUES (?, ?)",
+                        (memory_id, sqlite_vec.serialize_float32(embedding)),
+                    )
+                await self._set_watermark(db, channel_id, range_end)
+                await db.commit()
+            logger.info(
+                "memory consolidated",
+                extra={
+                    "channel_id": channel_id,
+                    "memory_id": memory_id,
+                    "msg_id_start": rows[0][0],
+                    "msg_id_end": rows[-1][0],
+                    "embedded": embedding is not None,
+                },
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Fail-soft: the watermark did not advance, so a later trigger
+            # retries this range.
+            logger.warning(
+                "consolidation failed for %s", channel_id, exc_info=True
+            )
+        finally:
+            reset_attribution(attribution_token)
+
+    async def _summarize_range(self, dialog: list[dict]) -> dict:
+        """One llm.background call producing the first-person record.
+
+        Returns {"summary": str, "topic_tags": list, "participants": list};
+        raises on unusable output (the task logs and leaves the watermark).
+        """
+        client = self._llm().get_client("background")
+        response = await client.chat([
+            {"role": "system", "content": self._consolidation_prompt},
+            {"role": "user", "content": _dialog_transcript(dialog)},
+        ])
+        text = response["choices"][0]["message"]["content"]
+        data = _parse_json_block(text)
+        summary = data.get("summary")
+        if not isinstance(summary, str) or not summary.strip():
+            raise ValueError("consolidation output has no usable summary")
+        return {
+            "summary": summary.strip(),
+            "topic_tags": [str(t) for t in data.get("topic_tags") or []],
+            "participants": [str(p) for p in data.get("participants") or []],
+        }
+
+    # ------------------------------------------------------------------
+    # Watermark helpers
+    # ------------------------------------------------------------------
+
+    async def _get_watermark(self, db: aiosqlite.Connection, channel_id: str) -> int:
+        """The last consolidated message_log id for a channel (0 when none)."""
+        async with db.execute(
+            "SELECT last_message_id FROM consolidation_watermark WHERE channel_id = ?",
+            (channel_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        return row[0] if row else 0
+
+    async def _set_watermark(
+        self, db: aiosqlite.Connection, channel_id: str, message_id: int
+    ) -> None:
+        """Advance the per-channel watermark (caller commits)."""
+        await db.execute(
+            "INSERT INTO consolidation_watermark (channel_id, last_message_id) "
+            "VALUES (?, ?) ON CONFLICT(channel_id) "
+            "DO UPDATE SET last_message_id = excluded.last_message_id",
+            (channel_id, message_id),
+        )
+
     # ------------------------------------------------------------------
     # Schema plumbing
     # ------------------------------------------------------------------
+
+    def _llm(self):
+        """The LLMPlugin instance (role-client access)."""
+        from corvidae.llm_plugin import LLMPlugin
+        return get_dependency(self.pm, "llm", LLMPlugin)
+
+    def _embedding_enabled(self) -> bool:
+        """True when an embedding role is configured and encoders match."""
+        return self._embedding_cfg is not None and not self._encoder_mismatch
 
     def _resolve_db(self) -> aiosqlite.Connection | None:
         """Return the persistence plugin's DB connection, or None if not open yet."""
