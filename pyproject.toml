@@ -13,6 +13,7 @@ dependencies = [
     "pydantic>=2.13.3",
     "pyyaml>=6.0.3",
     "tiktoken>=0.7",
+    "sqlite-vec>=0.1.9",
 ]
 
 [project.optional-dependencies]
@@ -40,6 +41,7 @@ subagent = "corvidae.tools.subagent:SubagentPlugin"
 mcp = "corvidae.mcp_client:McpClientPlugin"
 llm = "corvidae.llm_plugin:LLMPlugin"
 compaction = "corvidae.compaction:CompactionPlugin"
+memory = "corvidae.memory:MemoryPlugin"
 thinking = "corvidae.thinking:ThinkingPlugin"
 runtime_settings = "corvidae.tools.settings:RuntimeSettingsPlugin"
 tools = "corvidae.tool_collection:ToolCollectionPlugin"

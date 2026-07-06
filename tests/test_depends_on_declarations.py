@@ -234,6 +234,7 @@ _REGISTERED_PLUGIN_CLASSES = [
     "corvidae.mcp_client.McpClientPlugin",
     "corvidae.llm_plugin.LLMPlugin",
     "corvidae.compaction.CompactionPlugin",
+    "corvidae.memory.MemoryPlugin",
     "corvidae.thinking.ThinkingPlugin",
     "corvidae.tools.settings.RuntimeSettingsPlugin",
     "corvidae.tool_collection.ToolCollectionPlugin",
