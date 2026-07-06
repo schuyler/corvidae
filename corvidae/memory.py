@@ -38,6 +38,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
+import re
 import time
 from collections.abc import Callable
 from typing import Protocol
@@ -52,6 +54,20 @@ logger = logging.getLogger("corvidae.memory")
 # Seconds a channel must be inactive before the idle trigger consolidates
 # its un-consolidated tail.
 DEFAULT_IDLE_CONSOLIDATE_AFTER = 1800.0
+
+# Retrieval scoring parameters. These are tuned parameters, not truths —
+# the §6 eval benchmarks (tests/evals, scripts/eval_memory.py) govern
+# changes to them.
+DEFAULT_RETRIEVAL_K = 8
+DEFAULT_HALF_LIFE_DAYS = 30.0
+DEFAULT_BAND_STRONG = 0.75
+DEFAULT_BAND_MODERATE = 0.60
+# Honest similarity stand-in for FTS5-degraded retrieval, where cosine
+# similarity cannot be measured: keyword hits enter at the moderate band.
+FTS_SIMILARITY_PROXY = 0.6
+# Vec KNN over-fetch factor: candidates are filtered by channel scope and
+# indexed/redacted flags after the KNN scan, so fetch more than k.
+VEC_OVERFETCH = 4
 
 # Default consolidation prompt. prompts/memory_consolidation.md is the
 # documented copy of this text; memory.consolidation_prompt in config
@@ -101,6 +117,29 @@ def _dialog_transcript(messages: list[dict]) -> str:
     return "\n".join(
         f"{m.get('role', '?')}: {m.get('content', '')}" for m in messages
     )
+
+
+def _format_age(seconds: float) -> str:
+    """Compact human age for retrieval lines: 'now', '12m', '5h', '3d'."""
+    if seconds < 60:
+        return "now"
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m"
+    if seconds < 86400:
+        return f"{int(seconds // 3600)}h"
+    return f"{int(seconds // 86400)}d"
+
+
+def _fts_match_query(text: str) -> str | None:
+    """Build a safe FTS5 MATCH expression from free text.
+
+    Raw user text can be FTS5 syntax-invalid; quote each word token and OR
+    them. Returns None when the text has no word tokens.
+    """
+    tokens = re.findall(r"\w+", text)[:20]
+    if not tokens:
+        return None
+    return " OR ".join(f'"{token}"' for token in tokens)
 
 
 class ImportancePrior(Protocol):
@@ -206,6 +245,22 @@ CREATE TRIGGER IF NOT EXISTS memory_au AFTER UPDATE OF summary ON memory BEGIN
 END
 """
 
+# The per-retrieval raw profile stream (§3.7 wants this accumulating from
+# day one). Phase 2 keys it by exchange and copies it into exchange_log;
+# until then exchange_key stays NULL.
+RETRIEVAL_LOG_DDL = """
+CREATE TABLE IF NOT EXISTS retrieval_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts REAL NOT NULL,
+    channel_id TEXT NOT NULL,
+    exchange_key TEXT,              -- NULL until Phase 2 wires the key
+    top_score REAL,
+    hit_count INTEGER NOT NULL,
+    admitted_count INTEGER NOT NULL,
+    degraded_to_fts INTEGER NOT NULL DEFAULT 0
+)
+"""
+
 
 class MemoryPlugin(CorvidaePlugin):
     """Plugin that owns the memory store schema (consolidation and retrieval
@@ -235,6 +290,11 @@ class MemoryPlugin(CorvidaePlugin):
         self._memory_cfg: dict = {}
         self._idle_consolidate_after: float = DEFAULT_IDLE_CONSOLIDATE_AFTER
         self._consolidation_prompt: str = DEFAULT_CONSOLIDATION_PROMPT
+        self._retrieval_k: int = DEFAULT_RETRIEVAL_K
+        self._band_strong: float = DEFAULT_BAND_STRONG
+        self._band_moderate: float = DEFAULT_BAND_MODERATE
+        self._half_life_days: float = DEFAULT_HALF_LIFE_DAYS
+        self._channel_groups: dict[str, list[str]] = {}
         # Tracked background tasks (consolidation) — plugin-owned
         # asyncio.create_task, never the TaskQueue: every TaskQueue
         # completion triggers a full main-model turn (§2.3, trap #5).
@@ -264,6 +324,15 @@ class MemoryPlugin(CorvidaePlugin):
         self._consolidation_prompt = self._memory_cfg.get(
             "consolidation_prompt", DEFAULT_CONSOLIDATION_PROMPT
         )
+        retrieval_cfg = self._memory_cfg.get("retrieval", {}) or {}
+        self._retrieval_k = retrieval_cfg.get("k", DEFAULT_RETRIEVAL_K)
+        bands = retrieval_cfg.get("bands", {}) or {}
+        self._band_strong = bands.get("strong", DEFAULT_BAND_STRONG)
+        self._band_moderate = bands.get("moderate", DEFAULT_BAND_MODERATE)
+        self._half_life_days = self._memory_cfg.get(
+            "half_life_days", DEFAULT_HALF_LIFE_DAYS
+        )
+        self._channel_groups = self._memory_cfg.get("channel_groups", {}) or {}
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
@@ -515,6 +584,234 @@ class MemoryPlugin(CorvidaePlugin):
         }
 
     # ------------------------------------------------------------------
+    # Retrieval read path (§3.1)
+    # ------------------------------------------------------------------
+
+    @hookimpl
+    async def before_agent_turn(self, channel) -> None:
+        """Retrieve memories for the inbound user text and admit them.
+
+        Runs only when the window tail is a plain user MESSAGE — retrieval
+        is skipped entirely on notification-triggered turns for now
+        (Phase 2's origin machinery refines this). Everything here is
+        fail-soft: retrieval trouble must never break the turn.
+        """
+        try:
+            conv = getattr(channel, "conversation", None)
+            if conv is None or not conv.messages:
+                return
+            tail = conv.messages[-1]
+            from corvidae.context import MessageType
+            if (
+                tail.get("role") != "user"
+                or tail.get("_message_type", MessageType.MESSAGE) != MessageType.MESSAGE
+                or not isinstance(tail.get("content"), str)
+                or not tail["content"].strip()
+            ):
+                return
+
+            db = await self._ensure_schema()
+            if db is None:
+                return
+
+            candidates, degraded = await self.retrieve(channel.id, tail["content"])
+
+            # Drop weak-banded candidates unless nothing else matched.
+            non_weak = [c for c in candidates if c["band"] != "weak"]
+            selected = non_weak or candidates
+
+            # One line per memory: "[band] (age) summary".
+            lines = [
+                f"[{c['band']}] ({_format_age(c['age_seconds'])}) {c['summary']}"
+                for c in selected
+            ]
+
+            # Admit through the funnel — never append CONTEXT directly
+            # (trap #8); the funnel dedupes against the window and budgets.
+            admitted_ids: list[int] = []
+            if lines:
+                funnel = self.pm.get_plugin("funnel")
+                if funnel is None:
+                    logger.warning(
+                        "funnel plugin not registered; memory retrieval "
+                        "cannot admit context"
+                    )
+                else:
+                    message_count = len(conv.messages)
+                    await funnel.admit(channel, conv, "memory", lines)
+                    if len(conv.messages) > message_count:
+                        appended = conv.messages[-1].get("content") or ""
+                        admitted_ids = [
+                            c["id"] for c, line in zip(selected, lines)
+                            if line in appended
+                        ]
+
+            # Access stats — the write half of reconsolidation — move only
+            # for memories that actually entered the window.
+            if admitted_ids:
+                now = time.time()
+                placeholders = ",".join("?" for _ in admitted_ids)
+                await db.execute(
+                    f"UPDATE memory SET retrieval_count = retrieval_count + 1, "
+                    f"last_retrieved_at = ? WHERE id IN ({placeholders})",
+                    (now, *admitted_ids),
+                )
+
+            # Persist the retrieval profile (§3.7's day-one raw stream).
+            await db.execute(
+                "INSERT INTO retrieval_log (ts, channel_id, top_score, "
+                "hit_count, admitted_count, degraded_to_fts) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    time.time(),
+                    channel.id,
+                    candidates[0]["score"] if candidates else None,
+                    len(candidates),
+                    len(admitted_ids),
+                    1 if degraded else 0,
+                ),
+            )
+            await db.commit()
+        except Exception:
+            logger.warning(
+                "memory retrieval failed; turn proceeds without it",
+                exc_info=True, extra={"channel_id": channel.id},
+            )
+
+    async def retrieve(
+        self, channel_id: str, text: str, k: int | None = None
+    ) -> tuple[list[dict], bool]:
+        """Score memory candidates for a query text.
+
+        Vector KNN over memory_vec when available; FTS5 keyword search
+        otherwise or when the encoder fails (trap #10). Candidates are
+        channel-compartmentalized: same channel, or same configured group.
+
+        Returns:
+            (candidates sorted by score descending, degraded_to_fts).
+            Each candidate: {id, summary, created_at, similarity, score,
+            band, age_seconds}.
+        """
+        db = await self._ensure_schema()
+        if db is None:
+            return [], False
+        k = k or self._retrieval_k
+        scope = self._channel_scope(channel_id)
+        now = time.time()
+
+        rows: list[tuple] = []
+        degraded = False
+        if self._vec_available and self._embedding_enabled():
+            try:
+                client = self._llm().get_client("embedding")
+                query_vector = (await client.embed([text]))[0]
+                rows = await self._vec_candidates(db, query_vector, scope, k)
+            except Exception:
+                logger.warning(
+                    "retrieval embedding failed; degrading to FTS5",
+                    exc_info=True,
+                )
+                degraded = True
+        else:
+            degraded = True
+
+        if degraded:
+            rows = await self._fts_candidates(db, text, scope, k)
+
+        candidates = []
+        for memory_id, summary, created_at, similarity in rows:
+            age_seconds = max(0.0, now - created_at)
+            # Relevance × recency decay; participant-match arrives with
+            # Phase 4 (channel scope is the proxy until then, §3.1).
+            score = similarity * math.exp(
+                -(age_seconds / 86400.0) / self._half_life_days
+            )
+            if score >= self._band_strong:
+                band = "strong"
+            elif score >= self._band_moderate:
+                band = "moderate"
+            else:
+                band = "weak"
+            candidates.append({
+                "id": memory_id,
+                "summary": summary,
+                "created_at": created_at,
+                "similarity": similarity,
+                "score": score,
+                "band": band,
+                "age_seconds": age_seconds,
+            })
+        candidates.sort(key=lambda c: c["score"], reverse=True)
+        return candidates[:k], degraded
+
+    def _channel_scope(self, channel_id: str) -> list[str]:
+        """The channel ids whose memories this channel may retrieve.
+
+        The channel itself, plus every member of any configured group it
+        belongs to (memory.channel_groups, §3.1 compartmentalization).
+        """
+        scope = {channel_id}
+        for members in self._channel_groups.values():
+            if channel_id in members:
+                scope.update(members)
+        return sorted(scope)
+
+    async def _vec_candidates(
+        self, db: aiosqlite.Connection, query_vector: list[float],
+        scope: list[str], k: int,
+    ) -> list[tuple]:
+        """Exact-KNN candidates: (id, summary, created_at, cosine_similarity).
+
+        sqlite-vec is brute-force exact KNN (no ANN index), so the KNN scan
+        costs the same regardless of k; we over-fetch and filter by scope
+        and flags in the join.
+        """
+        import sqlite_vec
+        placeholders = ",".join("?" for _ in scope)
+        async with db.execute(
+            "SELECT m.id, m.summary, m.created_at, v.distance "
+            "FROM (SELECT memory_id, distance FROM memory_vec "
+            "      WHERE embedding MATCH ? AND k = ?) AS v "
+            "JOIN memory m ON m.id = v.memory_id "
+            f"WHERE m.indexed = 1 AND m.redacted = 0 "
+            f"AND m.channel_id IN ({placeholders}) "
+            "ORDER BY v.distance",
+            (
+                sqlite_vec.serialize_float32(query_vector),
+                k * VEC_OVERFETCH,
+                *scope,
+            ),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        # vec0 cosine distance = 1 - cosine similarity.
+        return [
+            (memory_id, summary, created_at, 1.0 - distance)
+            for memory_id, summary, created_at, distance in rows
+        ]
+
+    async def _fts_candidates(
+        self, db: aiosqlite.Connection, text: str, scope: list[str], k: int
+    ) -> list[tuple]:
+        """FTS5 keyword candidates with a fixed similarity proxy."""
+        match = _fts_match_query(text)
+        if match is None:
+            return []
+        placeholders = ",".join("?" for _ in scope)
+        async with db.execute(
+            "SELECT m.id, m.summary, m.created_at "
+            "FROM memory_fts JOIN memory m ON m.id = memory_fts.rowid "
+            f"WHERE memory_fts MATCH ? AND m.indexed = 1 AND m.redacted = 0 "
+            f"AND m.channel_id IN ({placeholders}) "
+            "ORDER BY rank LIMIT ?",
+            (match, *scope, k),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [
+            (memory_id, summary, created_at, FTS_SIMILARITY_PROXY)
+            for memory_id, summary, created_at in rows
+        ]
+
+    # ------------------------------------------------------------------
     # Watermark helpers
     # ------------------------------------------------------------------
 
@@ -611,6 +908,7 @@ class MemoryPlugin(CorvidaePlugin):
         await db.execute(MEMORY_FTS_DDL)
         await db.execute(MEMORY_FTS_INSERT_TRIGGER)
         await db.execute(MEMORY_FTS_UPDATE_TRIGGER)
+        await db.execute(RETRIEVAL_LOG_DDL)
 
         # The vector surface exists only with an embedding role configured
         # and a loadable sqlite-vec extension; anything else degrades to
