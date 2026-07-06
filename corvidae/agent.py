@@ -33,7 +33,14 @@ from corvidae.turn import AgentTurnResult, run_agent_turn
 from corvidae.attribution import reset_attribution, set_attribution
 from corvidae.channel import Channel, ChannelConfig, ChannelRegistry, resolve_system_prompt
 from corvidae.context import ContextWindow, MessageType, DEFAULT_CHARS_PER_TOKEN
-from corvidae.hooks import CorvidaePlugin, resolve_hook_results, HookStrategy, get_dependency, hookimpl
+from corvidae.hooks import (
+    CorvidaePlugin,
+    HookStrategy,
+    get_dependency,
+    hookimpl,
+    resolve_hook_results,
+    resolve_single_result,
+)
 from corvidae.queue import SerialQueue
 from corvidae.task import Task
 from corvidae.tool import dispatch_tool_call
@@ -478,15 +485,20 @@ class Agent(CorvidaePlugin):
         resolved = self._registry.resolve_config(channel)
         max_turns_limit = resolved["max_turns"]
 
-        # 4. Append message to conversation log and fire persistence event
+        # 4. Append message to conversation log and fire persistence event.
+        # The resolved rowid attaches to the WINDOW copy (conv.append
+        # shallow-copies, so the local dict would not update the window).
         _t_persist_start = _time.monotonic()
         conv.append(conversation_message)
         try:
-            await self.pm.ahook.on_conversation_event(
+            results = await self.pm.ahook.on_conversation_event(
                 channel=channel,
                 message=conversation_message,
                 message_type=MessageType.MESSAGE,
             )
+            rowid = resolve_single_result(results, "on_conversation_event")
+            if rowid is not None:
+                conv.messages[-1]["_db_id"] = rowid
         except Exception:
             logger.warning("on_conversation_event hook failed", exc_info=True)
         _phases["persist"] = _time.monotonic() - _t_persist_start
@@ -527,14 +539,22 @@ class Agent(CorvidaePlugin):
             logger.warning(
                 "before_agent_turn hook failed, skipping", exc_info=True
             )
-        # Fire on_conversation_event for any messages injected by before_agent_turn
+        # Fire on_conversation_event for any messages injected by
+        # before_agent_turn. Messages already carrying a _db_id were
+        # persisted by their producer (e.g. the admission funnel) — firing
+        # again would double-store them.
         for msg in conv.messages[msg_count_before:]:
+            if isinstance(msg.get("_db_id"), int):
+                continue
             mt = msg.get("_message_type", MessageType.MESSAGE)
-            clean = {k: v for k, v in msg.items() if k != "_message_type"}
+            clean = {k: v for k, v in msg.items() if not k.startswith("_")}
             try:
-                await self.pm.ahook.on_conversation_event(
+                results = await self.pm.ahook.on_conversation_event(
                     channel=channel, message=clean, message_type=mt,
                 )
+                rowid = resolve_single_result(results, "on_conversation_event")
+                if rowid is not None:
+                    msg["_db_id"] = rowid
             except Exception:
                 logger.warning("on_conversation_event hook failed", exc_info=True)
         _phases["before_turn"] = _time.monotonic() - _t_before_turn_start
@@ -548,14 +568,18 @@ class Agent(CorvidaePlugin):
         if result is None:
             return
 
-        # 8. Append assistant message and fire persistence event
+        # 8. Append assistant message and fire persistence event, attaching
+        # the resolved rowid to the window copy (same rule as step 4).
         conv.append(result.message)
         try:
-            await self.pm.ahook.on_conversation_event(
+            results = await self.pm.ahook.on_conversation_event(
                 channel=channel,
                 message=result.message,
                 message_type=MessageType.MESSAGE,
             )
+            rowid = resolve_single_result(results, "on_conversation_event")
+            if rowid is not None:
+                conv.messages[-1]["_db_id"] = rowid
         except Exception:
             logger.warning("on_conversation_event hook failed", exc_info=True)
 

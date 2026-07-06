@@ -410,7 +410,7 @@ class TestOnCompaction:
         summary_msg = {"role": "assistant", "content": "[Summary]"}
 
         await plugin.on_compaction(
-            channel=channel, summary_msg=summary_msg, retain_count=0
+            channel=channel, summary_msg=summary_msg, retain_count=0, compacted_ids=[]
         )
 
         async with db.execute(
@@ -449,7 +449,7 @@ class TestOnCompaction:
         # retain_count=1: keep the last 1 row (timestamp base_ts+2)
         # summary_ts must be exactly (base_ts+2) - 1e-6
         await plugin.on_compaction(
-            channel=channel, summary_msg=summary_msg, retain_count=1
+            channel=channel, summary_msg=summary_msg, retain_count=1, compacted_ids=[]
         )
 
         # Verify exact timestamp arithmetic
@@ -483,7 +483,7 @@ class TestOnCompaction:
         before = time.time()
         summary_msg = {"role": "assistant", "content": "[Summary]"}
         await plugin.on_compaction(
-            channel=channel, summary_msg=summary_msg, retain_count=0
+            channel=channel, summary_msg=summary_msg, retain_count=0, compacted_ids=[]
         )
         after = time.time()
 
@@ -507,6 +507,7 @@ class TestOnCompaction:
             channel=channel,
             summary_msg={"role": "assistant", "content": "[Summary]"},
             retain_count=0,
+            compacted_ids=[],
         )
 
         async with db.execute(

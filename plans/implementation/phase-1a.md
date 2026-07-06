@@ -486,3 +486,232 @@ CREATE TABLE IF NOT EXISTS retrieval_log (
 - `usage_log` shows consolidation and embedding calls with
   `stage="consolidation"` (Phase 0 integration proof).
 - Docs updated per WP1a.8.
+
+## Phase 1a conformance review (2026-07-06)
+
+**Reviewer:** independent conformance agent (no implementation context)
+**Branch:** `phase-1a-validation` (8 commits WP1a.1–WP1a.8)
+**Test run:** 62 Phase 1a tests + 1185 pre-existing suite — all green
+
+### Verdict
+
+**PROCEED: yes** — 0 critical, 2 important, 5 cosmetic
+
+---
+
+### Findings by work package
+
+#### WP1a.1 — Retire ContextCompactPlugin ✓
+
+`context_compact.py`, its tests, and `DreamPlugin` (`tools/dream.py`) are
+deleted. `docs/design.md` updated. Entry points removed. No residual
+references found. Full suite passes after deletion.
+
+#### WP1a.2 — Rowid threading ✓
+
+All five red-test requirements are met. `resolve_single_result` is
+implemented as specified. Steps 4 and 8 in `agent.py` correctly attach the
+rowid to `conv.messages[-1]` (not the local dict, satisfying trap #2). The
+`before_agent_turn` sweep skips messages that already carry `_db_id` to
+prevent double-persistence. All serialization boundaries (context.py,
+compaction.py, persistence.py) widen the underscore strip from
+`_message_type`-only to all `_`-prefixed keys. `load_conversation` gains the
+`id` column in both query paths and re-attaches `_db_id` on reload.
+`on_compaction` hookspec gains `compacted_ids: list[int]` as a required
+parameter (no default — satisfies the pluggy forwarding requirement); all
+three implementations accept it.
+
+#### WP1a.3 — Embeddings client + role generalization ✓
+
+`LLMClient.embed` is implemented, extracts `_post_with_retries` shared helper
+(no copy-paste), fires the Phase 0 observer `response` with usage, and raises
+on terminal failure. `LLMPlugin` replaces the two hardcoded clients with a
+role dict; `get_client(role)` falls back to main for unknown roles; legacy
+`main_client`/`background_client` properties preserved over the dict.
+Missing `dimensions` on a configured embedding role raises `ValueError` at
+startup. Observer test confirmed.
+
+#### WP1a.4 — Memory schema ✓
+
+All DDL from the plan is implemented: `memory`, `consolidation_watermark`,
+`embedding_meta`, `memory_fts` (external-content FTS5 with insert/update
+triggers), and `memory_vec` (vec0 with `distance_metric=cosine`) when
+sqlite-vec loads. No delete trigger (rows are never deleted — correct per
+plan). Encoder mismatch logged as ERROR and disables embedding writes without
+mixing. `_ensure_schema` is safe to call repeatedly (IF NOT EXISTS throughout)
+and degrades gracefully when the persistence DB is not yet open. `retrieval_log`
+table added per WP1a.7 spec.
+
+#### WP1a.5 — Context-admission funnel ✓
+
+Framing format matches the plan exactly. Dedupe uses substring containment
+against existing CONTEXT messages. Budget is greedy, logged on drop. Appended
+message is tagged `CONTEXT` and persisted via `on_conversation_event`; rowid
+attached to window copy. Empty-after-dedupe exits without appending. All
+required tests pass.
+
+#### WP1a.6 — Consolidation write path ✓
+
+Both triggers implemented (on_compaction, on_idle). Single shared
+`_consolidate_range` code path. Watermark is read optimistically (outside
+lock), LLM work runs, watermark is re-checked under `_db_lock` and re-compared
+exactly to the pre-LLM value; if it moved, the task discards. Insert and
+watermark advance are committed atomically. Pure CONTEXT/system ranges advance
+the watermark without producing a record. Embedder failure stores `embedded=0`
+with no exception escape. `set_attribution(stage="consolidation")` inside the
+task. `RubricPrior` clamps output to [0.0, 1.0] and defaults to 0.5 on
+failure. OPT-1a-1 deliberate-divergence comment is present.
+
+#### WP1a.7 — Retrieval read path ✓
+
+`before_agent_turn` retrieves on plain user MESSAGE only (skips system,
+tool, non-string, empty content). Vector KNN with `VEC_OVERFETCH=4` and
+channel-compartmentalization filter. Recency-decay scoring formula is
+`similarity × exp(-age_days / half_life_days)` — matches plan exactly. Band
+annotation (strong/moderate/weak) with weak-band suppression unless nothing
+else matched. Admission through funnel (trap #8 honored). Access stats
+incremented only for admitted memories. `retrieval_log` row written per
+retrieval. Recall benchmark against fixture asserts ≥0.75 mean recall@5.
+
+The vec0 distance inversion (`1 - distance` → cosine similarity) is correct:
+`distance_metric=cosine` in vec0 returns cosine distance (1 − cos θ), and the
+code inverts it to similarity.
+
+#### WP1a.8 — Prompt fragment, DreamPlugin absorption, docs ✓
+
+`prompts/memory_calibration.md` and `prompts/memory_consolidation.md` exist.
+DreamPlugin absorbed. `docs/design.md`, `docs/configuration.md`,
+`docs/plugin-guide.md`, `docs/prompt-guide.md` all updated.
+
+---
+
+### Important findings
+
+**I-1: `admitted_ids` computation uses substring matching and can produce false
+positives.**
+
+In `before_agent_turn` (memory.py lines 643–647):
+
+```python
+admitted_ids = [
+    c["id"] for c, line in zip(selected, lines)
+    if line in appended
+]
+```
+
+If the formatted line for memory A (`"[strong] (5h) wifi"`) is a substring of
+the formatted line for memory B (`"[strong] (5h) esp32 wifi fixed"`), and B
+is admitted but A is not (e.g., A was budget-dropped), `line_A in appended`
+evaluates True, falsely crediting A with an access-stat increment and
+inflating `admitted_count` in `retrieval_log`. The `[band] (age)` prefix
+reduces the collision probability substantially, but the structural bug is
+present. The correct fix is for `FunnelPlugin.admit` to return the admitted
+entries (not just the count) so the caller can compare by identity rather
+than substring. This is an API change to the funnel, but a small one. Phase
+1b's reconsolidation decisions rely on `retrieval_count` being accurate;
+inflated stats could cause premature reconsolidation of irrelevant memories.
+
+**I-2: Idle-trigger range discard can silently skip consolidation when two
+tasks race with different `range_end` values.**
+
+When the compaction trigger fires (range_end = max of compacted_ids = N) and
+the idle trigger simultaneously fires (range_end = max DB id = M > N), both
+tasks read the same watermark. The task that wins (say, compaction, range_end=N)
+advances the watermark to N. The idle task discards entirely because
+`current != watermark` — even though messages (N+1..M) remain unconsolidated.
+Those messages are correctly handled by the next idle cycle, but there is no
+alert that consolidation was partially skipped. The plan designs for this
+(idle provides eventual consolidation), but operators may expect compaction to
+guarantee full consolidation of everything above the watermark. No data is
+corrupted; this is a documentation/operational-clarity gap. A comment near
+the discard `return` explaining the intended retry path would help.
+
+---
+
+### Cosmetic findings
+
+**C-1:** `FunnelPlugin.depends_on = frozenset()` — the plugin fires
+`on_conversation_event` to persist CONTEXT entries but declares no dependency
+on `persistence`. If persistence is absent, CONTEXT messages are silently not
+persisted (window diverges from reload). A comment explaining the intentional
+loose coupling would prevent future confusion.
+
+**C-2:** `test_notification_turns_skip_retrieval` only exercises the
+`role="system"` case. The `role="tool"` case (tool-result notifications) is
+also skipped by the `role != "user"` guard but has no test. Low risk — the
+guard is simple — but coverage is incomplete relative to the two notification
+message types the agent actually produces.
+
+**C-3:** `VEC_OVERFETCH = 4` is applied to the KNN `k` parameter inside the
+sqlite-vec subquery, but the outer `candidates[:k]` cutoff in `retrieve()` is
+on the final scored list. The comment in `_vec_candidates` correctly explains
+the over-fetch rationale, but there is no comment near `VEC_OVERFETCH`
+explaining that the final k-limit happens in the caller rather than the query.
+
+**C-4:** The `_db_lock` serializes only the check-and-commit section of
+`_consolidate_range`; the LLM work runs outside the lock (as intended). The
+comment on `_db_lock` describes what it protects ("compare-and-set is race-free
+on the shared persistence connection") but does not note that aiosqlite's
+single-threaded event-loop model makes the out-of-lock DB reads in the
+optimistic phase safe without additional locking. Future readers might
+question whether the out-of-lock `_get_watermark` and message fetch are safe.
+
+**C-5:** The `before_agent_turn` hookimpl in `MemoryPlugin` accesses
+`self.pm.get_plugin("registry")` by string name to look up `last_active`.
+This is a silent soft-coupling not declared in `depends_on`. The coupling is
+correct (registry IS registered as "registry" in runtime.py), and the code
+gracefully falls back to the DB timestamp when registry is absent, but the
+string-literal coupling is a maintenance risk if the registry name changes.
+
+---
+
+### Plan conformance summary
+
+All 8 work packages have faithful implementations. No plan requirement was
+silently dropped, weakened, or materially reinterpreted. The thresholds
+(band values, half-life, idle timeout, default budget), watermark semantics,
+hook firing scope, schema fields, and admission-funnel behavior all match the
+plan's specifications. The single documented deliberate divergence (OPT-1a-1
+double LLM call) is correctly noted in the code. Phase 1b can proceed.
+
+### Tranche 2 fixes (2026-07-06)
+
+**I-1 (bug fix):** `FunnelPlugin.admit` return type changed from `int` to
+`list[str]` (the admitted entries). The retrieval caller in
+`before_agent_turn` (memory.py) now uses this list directly via exact list
+membership (`line in admitted_lines`) instead of substring search (`line in
+appended`). This eliminates the false-positive misattribution when one
+formatted memory line is a prefix/substring of another. All seven
+`test_funnel.py` callers that tested the return value updated from
+`admitted == N` to `len(admitted) == N`.
+
+New test: `tests/test_memory_retrieval.py::TestDedupeAndStats::
+test_admitted_ids_no_substring_collision` — seeds two memories whose
+formatted lines share a prefix ("wifi router" / "wifi router fixed the
+issue"), sets band thresholds to 0.0 (all memories "strong") and a token
+budget that admits only the longer entry (B), then asserts the shorter
+entry's (A's) `retrieval_count` remains 0 after retrieval.  The test failed
+on the old substring-match code and passes after the fix.
+
+**I-2 (comment):** Added an explanatory comment at the discard `return` in
+`_consolidate_range` (memory.py) explaining that the partial discard is by
+design: the losing concurrent task does not attempt to consolidate the
+non-overlapping tail, relying instead on the idle trigger's next cycle to
+pick up any remaining rows. This prevents confusing operators who expect
+compaction to guarantee full consolidation immediately.
+
+Full suite: 1248 passed, 2 skipped (baseline 1247 + 1 new test).
+
+### Tranche 2 re-review (2026-07-06)
+
+**I-1 verified.** `funnel.admit` now returns `list[str]`; the caller uses `line in admitted_lines` (list membership, `==` equality), not substring search. All 8 callers accounted for (7 in tests/test_funnel.py, 1 in corvidae/memory.py); every return-value use updated from `admitted == N` / arithmetic to `len(admitted) == N`. The new test `test_admitted_ids_no_substring_collision` would genuinely fail against the old code: A's formatted line `"[strong] (now) wifi router"` is a substring of B's `"[strong] (now) wifi router fixed the issue"`, and the old `line in appended` (string containment) would credit A; the new `line in admitted_lines` (list equality) does not.
+
+**I-2 verified.** Comment added at the discard `return` in `_consolidate_range`. Content is accurate and matches the plan's intent (partial-skip is intentional; idle trigger picks up remaining rows next cycle). The label "OPT-1a-2" in the comment is not aligned with the review's "I-2" designation, but the substance is correct.
+
+**Truthiness check.** `if admitted_lines:` (empty list is falsy) is semantically equivalent to the old `if len(conv.messages) > message_count:` for the guard path. No arithmetic or `> 0` comparisons on the return value remain.
+
+**C-new: duplicate formatted lines.** The formatted line `f"[{band}] ({age}) {summary}"` contains no memory ID. If two memories in `selected` produce an identical formatted string (same band, same formatted age, same summary text), `line in admitted_lines` would credit both when only one was admitted. This is structurally analogous to the old I-1 but requires exact string identity rather than substring containment. In practice, two memories with truly identical summaries, bands, and age resolution are very unlikely (consolidation discourages duplicates), so this is cosmetic.
+
+**Test suite:** 1248 passed, 2 skipped — matches expected baseline.
+
+**Verdict:** 0 critical, 0 important, 1 cosmetic (duplicate-formatted-lines edge case). Gate passes.
