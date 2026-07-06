@@ -118,7 +118,7 @@ def test_llm_plugin_get_client_background_falls_back_to_main_when_not_set():
 
 
 def test_llm_plugin_create_client_returns_llm_client_with_correct_params():
-    """_create_client(cfg) must return an LLMClient constructed from cfg."""
+    """_create_client(cfg, role) must return an LLMClient constructed from cfg."""
     from corvidae.llm_plugin import LLMPlugin
     from corvidae.llm import LLMClient
 
@@ -133,7 +133,7 @@ def test_llm_plugin_create_client_returns_llm_client_with_correct_params():
         "timeout": 60.0,
     }
 
-    client = LLMPlugin._create_client(cfg)
+    client = LLMPlugin()._create_client(cfg, role="main")
 
     assert isinstance(client, LLMClient), (
         f"_create_client should return an LLMClient, got {type(client)!r}"
@@ -153,7 +153,7 @@ def test_llm_plugin_create_client_uses_defaults_for_optional_params():
     }
 
     # Must not raise
-    client = LLMPlugin._create_client(cfg)
+    client = LLMPlugin()._create_client(cfg, role="main")
     assert isinstance(client, LLMClient)
 
 
@@ -184,7 +184,7 @@ async def test_llm_plugin_on_start_creates_and_starts_main_client():
     with patch.object(LLMPlugin, "_create_client", return_value=mock_client) as mock_create:
         await plugin.on_start(config=config)
 
-    mock_create.assert_called_once_with(config["llm"]["main"])
+    mock_create.assert_called_once_with(config["llm"]["main"], role="main")
     mock_client.start.assert_awaited_once()
     assert plugin.main_client is mock_client
 

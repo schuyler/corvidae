@@ -13,6 +13,7 @@ import logging
 from typing import TYPE_CHECKING, Callable
 
 from corvidae.turn import run_agent_turn
+from corvidae.attribution import reset_attribution, set_attribution
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 from corvidae.llm import LLMClient
 from corvidae.task import Task
@@ -180,12 +181,20 @@ class SubagentPlugin(CorvidaePlugin):
         ]
 
         async def work():
-            result = await run_agent_loop(
-                client, messages, tools_dict, tool_schemas,
-                channel=channel,
-                task_queue=task_queue,
-                max_result_chars=max_result_chars,
+            # Attribute the subagent's LLM calls to the subagent stage,
+            # shadowing whatever attribution the enqueuing turn captured.
+            attribution_token = set_attribution(
+                stage="subagent", channel_id=channel.id
             )
+            try:
+                result = await run_agent_loop(
+                    client, messages, tools_dict, tool_schemas,
+                    channel=channel,
+                    task_queue=task_queue,
+                    max_result_chars=max_result_chars,
+                )
+            finally:
+                reset_attribution(attribution_token)
             return strip_thinking(result)
 
         task = Task(

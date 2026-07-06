@@ -20,6 +20,7 @@ import json
 import logging
 import time
 
+from corvidae.attribution import reset_attribution, set_attribution
 from corvidae.context import DEFAULT_CHARS_PER_TOKEN, MessageType, count_tokens
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 
@@ -201,12 +202,18 @@ class CompactionPlugin(CorvidaePlugin):
             for m in new_messages
         ]
 
+        # Attribute the summary LLM call to the compaction stage. Set/reset
+        # around the call only, so it shadows the enclosing turn attribution
+        # and restores it afterwards.
+        attribution_token = set_attribution(stage="compaction", channel_id=channel_id)
         try:
             summary_text = await self._summarize(new_messages_clean, prior_summaries_clean)
         except Exception:
             # Record failure time for cooldown
             self._last_failed_compaction[channel_id] = time.monotonic()
             raise
+        finally:
+            reset_attribution(attribution_token)
 
         # Reject blank/empty summaries — they're worse than no summary
         # because they erase context without preserving any information.

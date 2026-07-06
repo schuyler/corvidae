@@ -21,10 +21,47 @@ Config:
 import asyncio
 import logging
 
+from corvidae.attribution import get_attribution
 from corvidae.hooks import CorvidaePlugin, hookimpl
 from corvidae.llm import LLMClient
 
 logger = logging.getLogger(__name__)
+
+
+class _HookObserver:
+    """Bridges LLMClient observer callbacks to the plugin hook system.
+
+    Defined here (not in corvidae.llm) so the LLM client module stays free
+    of plugin-system knowledge. Carries the role the client was created
+    for and snapshots the attribution contextvar at call time.
+    """
+
+    def __init__(self, pm, role: str, model: str) -> None:
+        self._pm = pm
+        self._role = role
+        self._model = model
+
+    async def request(
+        self, model: str | None = None, **kwargs
+    ) -> None:
+        """Fire on_llm_request with role and attribution filled in."""
+        await self._pm.ahook.on_llm_request(
+            role=self._role,
+            model=model or self._model,
+            attribution=get_attribution(),
+            **kwargs,
+        )
+
+    async def response(
+        self, model: str | None = None, **kwargs
+    ) -> None:
+        """Fire on_llm_response with role and attribution filled in."""
+        await self._pm.ahook.on_llm_response(
+            role=self._role,
+            model=model or self._model,
+            attribution=get_attribution(),
+            **kwargs,
+        )
 
 
 async def _close_after(client: LLMClient, delay: float = 5.0) -> None:
@@ -64,12 +101,12 @@ class LLMPlugin(CorvidaePlugin):
             main_config = config.get("llm", {}).get("main")
         if main_config is None:
             raise KeyError("llm.main config is required")
-        self.main_client = self._create_client(main_config)
+        self.main_client = self._create_client(main_config, role="main")
         await self.main_client.start()
 
         bg_config = self._bg_config
         if bg_config:
-            self.background_client = self._create_client(bg_config)
+            self.background_client = self._create_client(bg_config, role="background")
             await self.background_client.start()
 
     @hookimpl
@@ -103,7 +140,7 @@ class LLMPlugin(CorvidaePlugin):
 
         # Create and start new client before swapping so that an error during
         # start does not leave the plugin with a None client.
-        new_client = self._create_client(new_main_config)
+        new_client = self._create_client(new_main_config, role="main")
         await new_client.start()
 
         # Swap the reference and store the updated config.
@@ -126,9 +163,14 @@ class LLMPlugin(CorvidaePlugin):
             return self.background_client or self.main_client
         return self.main_client
 
-    @staticmethod
-    def _create_client(cfg: dict) -> LLMClient:
-        return LLMClient(
+    def _create_client(self, cfg: dict, role: str = "main") -> LLMClient:
+        """Construct an LLMClient from config and inject its hook observer.
+
+        The observer bridges client callbacks to on_llm_request/on_llm_response
+        with the given role. Injection is skipped when pm is unavailable
+        (e.g. a plugin constructed bare in tests).
+        """
+        client = LLMClient(
             base_url=cfg["base_url"],
             model=cfg["model"],
             api_key=cfg.get("api_key"),
@@ -138,3 +180,7 @@ class LLMPlugin(CorvidaePlugin):
             retry_max_delay=cfg.get("retry_max_delay", 60.0),
             timeout=cfg.get("timeout"),
         )
+        pm = getattr(self, "pm", None)
+        if pm is not None:
+            client.observer = _HookObserver(pm, role, cfg["model"])
+        return client

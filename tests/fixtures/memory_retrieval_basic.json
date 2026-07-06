@@ -1,0 +1,41 @@
+{
+  "description": "Hand-written seed fixture proving the memory-retrieval eval plumbing. Eight consolidated memories from a hobby-electronics support channel, four operator-labeled queries. Real fixtures accumulate during Phase 1.",
+  "source": "operator-authored, Phase 0 (plans/implementation/phase-0.md WP0.6)",
+  "conversation": [
+    {"role": "user", "content": "My weather station keeps dropping off wifi after a few hours. It's the ESP32 build we talked about.", "sender": "kestrel", "ts": 0},
+    {"role": "assistant", "content": "Last time we saw that, it was the power-save mode on the wifi driver. Did you set WIFI_PS_NONE?", "sender": "agent", "ts": 60},
+    {"role": "user", "content": "That fixed it! Also FYI I moved the rain gauge to the north fence, readings look saner now.", "sender": "kestrel", "ts": 7200}
+  ],
+  "memories": [
+    {"id": "m1", "summary": "kestrel's weather station is an ESP32 build; it was dropping off wifi after a few hours until wifi power-save was disabled (WIFI_PS_NONE), which fixed it.", "channel_id": "irc:#electronics"},
+    {"id": "m2", "summary": "kestrel moved the rain gauge to the north fence, which made its readings saner (previous location caused splash-over anomalies).", "channel_id": "irc:#electronics"},
+    {"id": "m3", "summary": "kestrel prefers PlatformIO over the Arduino IDE and keeps all firmware projects in a monorepo called birdhouse.", "channel_id": "irc:#electronics"},
+    {"id": "m4", "summary": "The greenhouse humidity sensor (SHT31) reads about 4% high; agreed to apply a -4 offset in firmware rather than replace it.", "channel_id": "irc:#electronics"},
+    {"id": "m5", "summary": "robin's soldering iron is a Pinecil; the USB-C supply must be 20V-capable or the tip won't reach temperature.", "channel_id": "irc:#electronics"},
+    {"id": "m6", "summary": "The shared parts bin has run out of BC547 transistors; robin volunteered to reorder from the usual distributor.", "channel_id": "irc:#electronics"},
+    {"id": "m7", "summary": "kestrel's solar charge controller logs to MQTT topic garden/power; retention on the broker is 7 days.", "channel_id": "irc:#garden"},
+    {"id": "m8", "summary": "Decision: all outdoor sensor enclosures get conformal coating after the spring condensation failures.", "channel_id": "irc:#garden"}
+  ],
+  "queries": [
+    {
+      "text": "Why did the ESP32 weather station keep losing its wifi connection?",
+      "relevant": ["m1"],
+      "note": "m1 is the only memory about the wifi dropout and its power-save root cause."
+    },
+    {
+      "text": "What do we know about kestrel's rain gauge placement?",
+      "relevant": ["m2"],
+      "note": "m2 records the move to the north fence and why; m1 is the same project but does not answer placement."
+    },
+    {
+      "text": "Is there anything wrong with the humidity readings in the greenhouse?",
+      "relevant": ["m4"],
+      "note": "m4 records the SHT31's +4% bias and the firmware-offset decision."
+    },
+    {
+      "text": "What power-related gotchas have come up with kestrel's outdoor projects?",
+      "relevant": ["m1", "m7"],
+      "note": "Broad query with two labeled hits: wifi power-save on the weather station (m1) and the solar charge controller MQTT logging (m7). m5 is power-related but robin's, not kestrel's."
+    }
+  ]
+}

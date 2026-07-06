@@ -122,6 +122,9 @@ Pure broadcast hooks (e.g. `on_start`, `on_idle`) do not call
 | `load_conversation` | broadcast / VALUE_FIRST | `_process_queue_item`, when `channel.conversation is None`; return list of tagged message dicts or None to defer |
 | `on_conversation_event` | broadcast | `_process_queue_item`, after every `conv.append()`; side effects only (persistence, JSONL logging) |
 | `on_compaction` | broadcast | `CompactionPlugin`, after `replace_with_summary()`; side effects only (persistence) |
+| `on_llm_request` | broadcast | `LLMClient.chat()` via LLMPlugin's injected observer, before the retry loop; side effects only (observability) |
+| `on_llm_response` | broadcast | `LLMClient.chat()` via the observer, exactly once per call (success or terminal failure); side effects only (metrics, usage log) |
+| `on_metrics` | broadcast | any plugin via `pm.ahook.on_metrics(...)`; built-in emission from `MetricsPlugin.on_llm_response`; never emit from inside an `on_metrics` implementation (recursion) |
 
 ## Channel System
 
@@ -204,6 +207,83 @@ Retry parameters: `max_retries` (default 3, set to 0 to disable), `retry_base_de
 Retries apply to transient HTTP status codes (429, 500, 502, 503, 504) and connection
 errors. Honors `Retry-After` response headers. `timeout` is the total HTTP timeout per
 request in seconds; `None` uses aiohttp's session default (300s).
+
+### Observability (Phase 0)
+
+Every LLM call is metered at the `LLMClient` chokepoint — not the turn
+loop — so compaction, subagent, and future background calls (critique,
+consolidation, appraisal) are all covered.
+
+**Observer seam.** `LLMClient.observer` (default `None`) is any object
+with async `request(**kwargs)`/`response(**kwargs)` methods. `chat()`
+mints a `request_id` per call, fires `request` before the retry loop,
+and fires `response` exactly once — after success (with the envelope's
+`usage` verbatim and measured latency) or when a terminal exception is
+about to propagate (with `error` set, `usage=None`). Retried transient
+attempts do not fire `response`. Observer failures are individually
+caught and logged; they never break the call. `llm.py` stays free of
+pluggy imports — `LLMPlugin` injects a `_HookObserver` (defined in
+`llm_plugin.py`) that bridges to the `on_llm_request`/`on_llm_response`
+hooks with the client's role ("main"/"background") and the current
+attribution snapshot.
+
+**Attribution.** `attribution.py` holds a single ContextVar dict
+(`stage`, `channel_id`, later `exchange_key`). Callers set it at the top
+of a logical operation and reset in a `finally`: the Agent turn loop
+(`stage="turn"`), CompactionPlugin around its summary call
+(`stage="compaction"`, shadowing the turn), and the subagent work loop
+(`stage="subagent"`). Contextvars snapshot at `asyncio.create_task`
+time and TaskQueue workers are created once at startup, so `Task`
+captures `contextvars.copy_context()` at creation and the worker runs
+`task.work()` inside that context via
+`asyncio.create_task(task.work(), context=task.ctx)`.
+
+**Sinks.** `metrics.py` provides `MetricsPlugin` (translates
+`on_llm_response` into `on_metrics` events: `llm.tokens.*`,
+`llm.latency_ms`, `llm.errors`), `UsageLogPlugin` (one `usage_log` row
+per call), and `MetricsJsonlPlugin` (JSONL event sink, config
+`daemon.metrics_jsonl`). `outcome_log.py` owns the `exchange_log` table
+(schema + guarded writer API only in Phase 0; rows are written from
+Phase 1a/2). All sinks are fail-soft.
+
+```sql
+CREATE TABLE usage_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts REAL NOT NULL,
+    request_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    model TEXT NOT NULL,
+    stage TEXT,
+    channel_id TEXT,
+    exchange_key TEXT,          -- NULL until Phase 2
+    prompt_tokens INTEGER,
+    completion_tokens INTEGER,
+    total_tokens INTEGER,
+    latency_ms REAL,
+    error TEXT
+);
+
+CREATE TABLE exchange_log (
+    exchange_key TEXT PRIMARY KEY,
+    channel_id TEXT NOT NULL,
+    origin TEXT,                    -- 'user'|'reminder'|'critique'|'heartbeat'|'task'; NULL until Phase 2
+    message_rowid INTEGER,          -- message_log.id of the originating message
+    created_at REAL NOT NULL,
+    retrieval_top_score REAL,       -- Phase 1a
+    retrieval_hit_count INTEGER,    -- Phase 1a
+    probe_score REAL,               -- Phase 2
+    appraisal TEXT,                 -- JSON; Phase 2
+    provenance_snapshot TEXT,       -- JSON; Phase 2
+    outcomes TEXT                   -- JSON; Phase 2
+);
+```
+
+**Eval harness.** Deterministic metric functions (`recall_at_k`, `mrr`,
+`tokens_of`) live in `tests/evals/metrics.py` and run in CI with no
+network; the fixture format is documented there
+(`tests/fixtures/memory_retrieval_basic.json` is the operator-authored
+seed). The live runner `scripts/eval_memory.py` is out-of-band only;
+live tests carry the `eval` marker (run with `--run-eval`).
 
 ## Agent Loop
 

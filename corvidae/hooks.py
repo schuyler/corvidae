@@ -433,6 +433,93 @@ class AgentSpec:
         """
 
     @hookspec
+    async def on_llm_request(
+        self,
+        role: str,
+        model: str,
+        request_id: str,
+        message_count: int,
+        tool_count: int,
+        attribution: dict,
+    ) -> None:
+        """Fired immediately before an LLM chat-completion call is made.
+
+        Broadcast hook (side effects only). Fires from the LLMClient
+        chokepoint via an observer injected by LLMPlugin, so every LLM
+        call in the system is covered — turn-loop, compaction, subagent,
+        and future background calls alike.
+
+        The request payload is summarized (counts), not shipped wholesale —
+        full messages in a broadcast hook would copy the entire prompt per
+        call. A debugging consumer needing full payloads is a new hook, not
+        a widening of this one.
+
+        Args:
+            role: The LLMPlugin role that made the call ("main", "background").
+            model: The model name configured for the client.
+            request_id: uuid hex minted per call; pairs request with response.
+            message_count: Number of messages in the request payload.
+            tool_count: Number of tool schemas in the request payload.
+            attribution: Snapshot of corvidae.attribution.get_attribution()
+                at call time (keys like "stage", "channel_id"; may be empty).
+        """
+
+    @hookspec
+    async def on_llm_response(
+        self,
+        role: str,
+        model: str,
+        request_id: str,
+        usage: dict | None,
+        latency_ms: float,
+        attribution: dict,
+        error: str | None,
+    ) -> None:
+        """Fired exactly once per LLM call, after it succeeds or terminally fails.
+
+        Broadcast hook (side effects only). Retried transient attempts do
+        NOT fire this hook — one on_llm_request pairs with exactly one
+        on_llm_response, matched by request_id.
+
+        Args:
+            role: The LLMPlugin role that made the call ("main", "background").
+            model: The model name configured for the client.
+            request_id: The id minted for the matching on_llm_request.
+            usage: The response's "usage" field verbatim, or None (missing
+                usage or terminal failure).
+            latency_ms: Wall-clock latency of the final attempt in ms.
+            attribution: Snapshot of corvidae.attribution.get_attribution().
+            error: None on success; exception string on terminal failure.
+        """
+
+    @hookspec
+    async def on_metrics(
+        self, name: str, value: float, tags: dict[str, str]
+    ) -> None:
+        """Broadcast hook: consume a metric event (side effects only).
+
+        The shape follows the StatsD/OpenTelemetry common denominator — a
+        named numeric value with dimensional tags (dotted-hierarchy names,
+        e.g. "llm.tokens.prompt", "llm.latency_ms"). Metric types (counter
+        vs gauge) are inferred from the name convention, not modeled.
+
+        Any plugin can emit metrics by calling
+        ``await self.pm.ahook.on_metrics(name=..., value=..., tags=...)``
+        from tool functions, other hook implementations, or background tasks.
+
+        Reentrancy constraint: never call ``pm.ahook.on_metrics(...)`` from
+        inside an on_metrics implementation — pluggy dispatches back into
+        the same implementation and recurses forever. A plugin that both
+        produces and consumes metrics emits from its other hooks, never
+        from on_metrics itself.
+
+        Args:
+            name: Dotted metric name (e.g. "llm.tokens.total").
+            value: The numeric measurement.
+            tags: Dimensional tags (e.g. {"role": "main", "stage": "turn"}).
+        """
+
+    @hookspec
     async def on_idle(self) -> None:
         """Broadcast hook: fired when all queues are empty and cooldown has elapsed.
 
