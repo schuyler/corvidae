@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import contextvars
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
@@ -47,6 +48,11 @@ class Task:
         tool_call_id: LLM tool call ID for deferred result delivery.
             None if not triggered by a tool call.
         description: Human-readable label for status display.
+        ctx: contextvars.Context captured at Task creation time (i.e. in
+            the enqueuing caller's context). The worker runs the work
+            inside this context so attribution set by the enqueuer is
+            visible to the task body — worker coroutines are created once
+            at startup and would otherwise never see it.
     """
 
     work: Callable[[], Awaitable[str]]
@@ -55,6 +61,7 @@ class Task:
     created_at: float = field(default_factory=time)
     tool_call_id: str | None = None
     description: str = ""
+    ctx: contextvars.Context = field(default_factory=contextvars.copy_context)
 
 
 class TaskQueue:
@@ -130,13 +137,20 @@ class TaskQueue:
                 extra={"task_id": task.task_id, "description": task.description},
             )
             result = TASK_FAILURE_TEMPLATE.format(task_id=task.task_id, error="(unknown error)")
+            # Run the work inside the context captured at Task creation so
+            # attribution contextvars set by the enqueuer are visible here.
+            # The extra task indirection is the accepted cost of entering a
+            # contextvars.Context for a coroutine.
+            work_task = asyncio.create_task(task.work(), context=task.ctx)
             try:
-                result = await task.work()
+                result = await work_task
                 logger.debug(
                     "task completed",
                     extra={"task_id": task.task_id, "result_length": len(result)},
                 )
             except asyncio.CancelledError:
+                # Worker was cancelled while awaiting; don't orphan the work.
+                work_task.cancel()
                 try:
                     self._active_tasks.remove(task)
                 except ValueError:

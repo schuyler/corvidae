@@ -17,6 +17,7 @@ provide usage data, the fields are logged as `None`.
 import asyncio
 import logging
 import time
+import uuid
 
 import aiohttp
 
@@ -36,6 +37,14 @@ class LLMClient:
         model: Model name for requests (e.g., "llama3.1")
         api_key: Optional API key for Bearer auth
         session: aiohttp session (created by start(), closed by stop())
+        observer: Optional observation seam — any object with async
+            ``request(**kwargs)`` and ``response(**kwargs)`` methods.
+            Default None (behavior is byte-for-byte unobserved). This
+            module stays free of plugin-system imports; LLMPlugin injects
+            an observer that bridges to the hook system. Observer failures
+            are logged and never break an LLM call. Exactly one response
+            callback fires per chat() call (retried transient attempts do
+            not fire it).
     """
 
     def __init__(
@@ -77,6 +86,22 @@ class LLMClient:
             aiohttp.ClientTimeout(total=timeout) if timeout is not None else None
         )
         self.session: aiohttp.ClientSession | None = None
+        self.observer: object | None = None
+
+    async def _fire_observer(self, method: str, **kwargs) -> None:
+        """Invoke an observer callback, swallowing (but logging) its errors.
+
+        A metering bug must never take down an LLM call, so each observer
+        invocation is individually wrapped.
+        """
+        if self.observer is None:
+            return
+        try:
+            await getattr(self.observer, method)(**kwargs)
+        except Exception:
+            logger.warning(
+                "LLM observer %s callback failed", method, exc_info=True
+            )
 
     def _retry_delay(
         self, attempt: int, retry_after: str | None = None
@@ -165,57 +190,82 @@ class LLMClient:
         if extra_body:
             payload.update(extra_body)  # call-level override wins
 
-        for attempt in range(1 + self.max_retries):
-            try:
-                start = time.monotonic()
-                async with self.session.post(
-                    f"{self.base_url}/chat/completions",
-                    json=payload,
-                    timeout=self.timeout,
-                ) as resp:
-                    if (
-                        resp.status in TRANSIENT_STATUS_CODES
-                        and attempt < self.max_retries
-                    ):
-                        retry_after = resp.headers.get("Retry-After")
-                        delay = self._retry_delay(attempt, retry_after)
+        # Mint a per-call id pairing the observer request with its response,
+        # and announce the call (summarized — counts, not payloads).
+        request_id = uuid.uuid4().hex[:12]
+        await self._fire_observer(
+            "request",
+            model=self.model,
+            request_id=request_id,
+            message_count=len(messages),
+            tool_count=len(tools) if tools else 0,
+        )
+
+        start = time.monotonic()
+        try:
+            for attempt in range(1 + self.max_retries):
+                try:
+                    start = time.monotonic()
+                    async with self.session.post(
+                        f"{self.base_url}/chat/completions",
+                        json=payload,
+                        timeout=self.timeout,
+                    ) as resp:
+                        if (
+                            resp.status in TRANSIENT_STATUS_CODES
+                            and attempt < self.max_retries
+                        ):
+                            retry_after = resp.headers.get("Retry-After")
+                            delay = self._retry_delay(attempt, retry_after)
+                            logger.warning(
+                                "transient LLM error, retrying",
+                                extra={
+                                    "status": resp.status,
+                                    "attempt": attempt + 1,
+                                    "delay": delay,
+                                },
+                            )
+                            await asyncio.sleep(delay)
+                            continue
+
+                        try:
+                            resp.raise_for_status()
+                            response = await resp.json()
+                        except aiohttp.ClientResponseError:
+                            logger.error(
+                                "chat completion failed",
+                                extra={"status": resp.status},
+                            )
+                            raise
+
+                except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as exc:
+                    if attempt < self.max_retries:
+                        delay = self._retry_delay(attempt)
                         logger.warning(
-                            "transient LLM error, retrying",
+                            "transient LLM connection error, retrying",
                             extra={
-                                "status": resp.status,
+                                "error": str(exc),
                                 "attempt": attempt + 1,
                                 "delay": delay,
                             },
                         )
                         await asyncio.sleep(delay)
                         continue
+                    raise
 
-                    try:
-                        resp.raise_for_status()
-                        response = await resp.json()
-                    except aiohttp.ClientResponseError:
-                        logger.error(
-                            "chat completion failed",
-                            extra={"status": resp.status},
-                        )
-                        raise
-
-            except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as exc:
-                if attempt < self.max_retries:
-                    delay = self._retry_delay(attempt)
-                    logger.warning(
-                        "transient LLM connection error, retrying",
-                        extra={
-                            "error": str(exc),
-                            "attempt": attempt + 1,
-                            "delay": delay,
-                        },
-                    )
-                    await asyncio.sleep(delay)
-                    continue
-                raise
-
-            break  # success
+                break  # success
+        except Exception as exc:
+            # Terminal (non-retried) failure about to propagate: fire the
+            # single response callback with the error before re-raising.
+            await self._fire_observer(
+                "response",
+                model=self.model,
+                request_id=request_id,
+                usage=None,
+                latency_ms=(time.monotonic() - start) * 1000,
+                error=str(exc),
+            )
+            raise
 
         elapsed = time.monotonic() - start
 
@@ -229,6 +279,17 @@ class LLMClient:
                 "completion_tokens": usage.get("completion_tokens"),
                 "total_tokens": usage.get("total_tokens"),
             },
+        )
+
+        # Success: fire the single response callback with usage verbatim
+        # (None when the API omitted it) and the already-computed latency.
+        await self._fire_observer(
+            "response",
+            model=self.model,
+            request_id=request_id,
+            usage=response.get("usage"),
+            latency_ms=elapsed * 1000,
+            error=None,
         )
 
         return response

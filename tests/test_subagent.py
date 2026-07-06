@@ -1348,3 +1348,40 @@ async def test_malformed_json_logs_warning(caplog):
     assert warning_records, (
         "Expected WARNING record with message 'malformed tool call arguments'"
     )
+
+
+# ---------------------------------------------------------------------------
+# TestSubagentAttribution (Phase 0, WP0.1 call site)
+# ---------------------------------------------------------------------------
+
+
+class TestSubagentAttribution:
+    async def test_subagent_work_runs_loop_with_subagent_attribution(self):
+        """The launched task's work() labels its LLM activity stage="subagent"
+        with the launching channel's id, and restores attribution after."""
+        from unittest.mock import patch
+
+        from corvidae.attribution import get_attribution
+        from corvidae.tool import ToolContext
+
+        plugin = await _make_started_plugin()
+        channel = _make_channel()
+        task_queue = TaskQueue()
+        ctx = ToolContext(channel=channel, task_queue=task_queue, tool_call_id="c1")
+
+        observed: dict = {}
+
+        async def fake_loop(*args, **kwargs):
+            observed.update(get_attribution())
+            return "loop result"
+
+        with patch("corvidae.tools.subagent.run_agent_loop", side_effect=fake_loop):
+            await plugin._launch("do something", "my description", ctx)
+            task = await task_queue.queue.get()
+            result = await task.work()
+
+        assert result == "loop result"
+        assert observed.get("stage") == "subagent"
+        assert observed.get("channel_id") == channel.id
+        # Attribution restored after the loop finishes.
+        assert get_attribution().get("stage") != "subagent"

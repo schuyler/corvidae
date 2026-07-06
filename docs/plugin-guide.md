@@ -190,6 +190,54 @@ only; they do not update the persisted record.
 
 `before_agent_turn` — messages injected via `channel.conversation.append()` inside this hook are passed through `on_conversation_event` and persisted to the DB.
 
+### Observability
+
+| Hook | Type | When |
+|------|------|------|
+| `on_llm_request(role, model, request_id, message_count, tool_count, attribution)` | async broadcast | Immediately before an LLM chat-completion call |
+| `on_llm_response(role, model, request_id, usage, latency_ms, attribution, error)` | async broadcast | Exactly once per LLM call, after success or terminal failure |
+| `on_metrics(name, value, tags)` | async broadcast | Whenever any plugin emits a metric event |
+
+`on_llm_request` / `on_llm_response` fire from the `LLMClient` chokepoint
+(via an observer injected by `LLMPlugin`), so **every** LLM call in the
+system is covered — turn-loop, compaction, and subagent calls alike.
+`request_id` pairs a request with its response. Retried transient attempts
+do not fire `on_llm_response`; one request pairs with exactly one response.
+`usage` is the response envelope's `usage` field verbatim (or `None`);
+`error` is `None` on success and the exception string on terminal failure.
+The request payload is summarized (message/tool counts), never shipped
+wholesale. Observer failures are logged and never break the LLM call.
+
+`attribution` is a snapshot of `corvidae.attribution.get_attribution()` —
+a contextvar dict describing what the current code path is doing on whose
+behalf. Built-in callers set `stage` (`"turn"`, `"compaction"`,
+`"subagent"`) and `channel_id`; the dict is open for plugin-defined fields.
+Set it around a logical operation and always reset in a `finally`:
+
+```python
+from corvidae.attribution import reset_attribution, set_attribution
+
+token = set_attribution(stage="consolidation", channel_id=channel.id)
+try:
+    await client.chat(messages)
+finally:
+    reset_attribution(token)
+```
+
+Contextvars snapshot at `asyncio.create_task` time, so attribution does
+not automatically reach long-lived workers. `Task` (corvidae/task.py)
+captures `contextvars.copy_context()` at creation and the TaskQueue worker
+runs the work inside that context — attribution set by the enqueuer is
+visible in the task body.
+
+`on_metrics` carries a named numeric value with dimensional tags
+(StatsD/OpenTelemetry common denominator; dotted names like
+`llm.tokens.prompt`, `llm.latency_ms`). Emit metrics from any hook or tool
+with `await self.pm.ahook.on_metrics(name=..., value=..., tags=...)`.
+**Reentrancy constraint:** never emit from inside an `on_metrics`
+implementation — pluggy dispatches back into the same implementation and
+recurses forever.
+
 ### Hook result resolution
 
 These hooks return a value. Hooks marked `firstresult=True` (sequential) stop at the first non-None return. Wrapper chain hooks use `firstresult=True` with an identity seed; implementations use `@hookimpl(wrapper=True)` to compose transforms. Broadcast hooks use `resolve_hook_results` for result resolution.
@@ -697,6 +745,54 @@ daemon:
 **Without this plugin:** no JSONL log is written. Conversation history is
 still persisted in SQLite by `PersistencePlugin`.
 
+### MetricsPlugin, UsageLogPlugin, MetricsJsonlPlugin (`corvidae/metrics.py`)
+
+The observability sinks. All three are fail-soft: a metering failure is
+logged with a traceback and never breaks an LLM call.
+
+- **`MetricsPlugin`** (entry point `"metrics"`) — consumes `on_llm_response`
+  and emits `on_metrics` events: `llm.tokens.prompt`, `llm.tokens.completion`,
+  `llm.tokens.total` (each skipped if the usage dict lacks it),
+  `llm.latency_ms` (always), and `llm.errors` (value 1.0, on terminal
+  failure). Tags: `{"role", "model", "stage", "channel"}` — stage and
+  channel come from the call's attribution snapshot.
+- **`UsageLogPlugin`** (entry point `"usage_log"`, depends on
+  `"persistence"`) — consumes `on_llm_response` and writes one row per LLM
+  call into the `usage_log` SQLite table (in the persistence plugin's
+  database): timestamp, request id, role, model, stage, channel id,
+  exchange key (NULL until Phase 2), token counts, latency, and error.
+  The table is created lazily on first use (`CREATE TABLE IF NOT EXISTS`).
+- **`MetricsJsonlPlugin`** (entry point `"metrics_jsonl"`) — consumes
+  `on_metrics` and appends one JSON line per event
+  (`{"ts", "name", "value", "tags"}`) to the file named by
+  `daemon.metrics_jsonl`. A complete no-op when the key is unset.
+
+**Config:**
+```yaml
+daemon:
+  metrics_jsonl: metrics.jsonl   # path relative to the config file; omit to disable
+```
+
+**Without these plugins:** the `on_llm_request`/`on_llm_response` hooks
+still fire from LLMPlugin's observer; nothing records them.
+
+### OutcomeLogPlugin (`corvidae/outcome_log.py`)
+
+Owns the `exchange_log` table — one row per exchange, accumulating the
+retrieval/appraisal/outcome profile later phases correlate for
+calibration. Entry point name: `"outcome_log"`; depends on
+`"persistence"`. Phase 0 ships schema and writer API only; nothing writes
+rows yet (retrieval-profile columns populate from Phase 1a, the rest from
+Phase 2).
+
+Writer API (used by later phases, not hooks):
+
+- `record_exchange(exchange_key, channel_id, origin=None, message_rowid=None)`
+  — idempotent insert (`INSERT OR IGNORE`).
+- `update_exchange(exchange_key, **columns)` — guarded update of the
+  nullable profile columns only; unknown or immutable column names raise
+  `ValueError` (SQL is never built from arbitrary kwargs).
+
 ### LLMPlugin (`corvidae/llm_plugin.py`)
 
 Owns the `LLMClient` instance lifecycle. Entry point name: `"llm"`. Other plugins retrieve clients via
@@ -707,6 +803,12 @@ Implements two hooks:
 - `on_start` — reads `llm.main` (required) and `llm.background` (optional),
   creates `LLMClient` instances, and starts their aiohttp sessions.
 - `on_stop` — closes all aiohttp sessions.
+
+Each created client gets a hook observer injected that fires
+`on_llm_request`/`on_llm_response` (with the client's role and the current
+attribution snapshot) around every chat call. `corvidae/llm.py` itself
+stays free of plugin-system imports — the observer seam is a plain object
+with async `request`/`response` methods, defined in `llm_plugin.py`.
 
 `get_client(role)` returns the client for `"main"` or `"background"`. If no
 background client is configured, `get_client("background")` falls back to

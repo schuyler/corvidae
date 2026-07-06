@@ -30,6 +30,7 @@ from dataclasses import dataclass, field, fields as dc_fields
 from enum import Enum
 
 from corvidae.turn import AgentTurnResult, run_agent_turn
+from corvidae.attribution import reset_attribution, set_attribution
 from corvidae.channel import Channel, ChannelConfig, ChannelRegistry, resolve_system_prompt
 from corvidae.context import ContextWindow, MessageType, DEFAULT_CHARS_PER_TOKEN
 from corvidae.hooks import CorvidaePlugin, resolve_hook_results, HookStrategy, get_dependency, hookimpl
@@ -416,10 +417,6 @@ class Agent(CorvidaePlugin):
         loop (as run_agent_loop uses for subagents) would block the queue
         for the entire tool-calling sequence.
         """
-        import time as _time
-        _t0 = _time.monotonic()
-        _phases: dict[str, float] = {}
-
         logger.debug(
             "processing queue item",
             extra={
@@ -430,6 +427,24 @@ class Agent(CorvidaePlugin):
             },
         )
         channel = item.channel
+
+        # Attribute all LLM activity in this turn (including tool Tasks
+        # created during dispatch, which capture the context at creation)
+        # to the turn stage and this channel. Compaction re-labels itself
+        # around its own LLM call and restores this attribution after.
+        attribution_token = set_attribution(stage="turn", channel_id=channel.id)
+        try:
+            await self._process_queue_item_attributed(item, channel)
+        finally:
+            reset_attribution(attribution_token)
+
+    async def _process_queue_item_attributed(
+        self, item: QueueItem, channel: Channel
+    ) -> None:
+        """Body of _process_queue_item, run with turn attribution set."""
+        import time as _time
+        _t0 = _time.monotonic()
+        _phases: dict[str, float] = {}
 
         # Build the conversation message based on item role
         msg_result = self._build_conversation_message(item)

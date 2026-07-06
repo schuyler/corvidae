@@ -1006,3 +1006,127 @@ class TestTaskPluginConfig:
         )
 
         await plugin.on_stop()
+
+
+# ---------------------------------------------------------------------------
+# TestTaskAttributionContext (WP0.2)
+# ---------------------------------------------------------------------------
+
+
+class TestTaskAttributionContext:
+    async def test_task_sees_attribution_set_before_enqueue(self):
+        """A task created in an attributed context sees that attribution when
+        the worker runs it — even though the worker coroutine was started
+        before the attribution was set."""
+        from corvidae.attribution import get_attribution, reset_attribution, set_attribution
+
+        queue = TaskQueue()
+        channel = _make_channel()
+        done = asyncio.Event()
+        observed: dict = {}
+
+        async def work():
+            observed.update(get_attribution())
+            done.set()
+            return "ok"
+
+        async def on_complete(t, result):
+            pass
+
+        # Worker starts BEFORE the attribution is set.
+        worker = asyncio.create_task(queue.run_worker(on_complete))
+
+        token = set_attribution(stage="x", channel_id=channel.id)
+        try:
+            task = Task(work=work, channel=channel)
+        finally:
+            reset_attribution(token)
+
+        await queue.enqueue(task)
+        await asyncio.wait_for(done.wait(), timeout=2.0)
+        worker.cancel()
+        try:
+            await worker
+        except asyncio.CancelledError:
+            pass
+
+        assert observed.get("stage") == "x"
+        assert observed.get("channel_id") == channel.id
+
+    async def test_two_tasks_each_see_their_own_attribution(self):
+        """Tasks enqueued from different attribution contexts each observe
+        their own snapshot, not each other's."""
+        from corvidae.attribution import get_attribution, reset_attribution, set_attribution
+
+        queue = TaskQueue()
+        channel = _make_channel()
+        done = asyncio.Event()
+        observed: dict[str, dict] = {}
+        completed = []
+
+        def make_work(label):
+            async def work():
+                observed[label] = dict(get_attribution())
+                return label
+            return work
+
+        async def on_complete(t, result):
+            completed.append(result)
+            if len(completed) == 2:
+                done.set()
+
+        worker = asyncio.create_task(queue.run_worker(on_complete))
+
+        token_a = set_attribution(stage="a")
+        try:
+            task_a = Task(work=make_work("a"), channel=channel)
+        finally:
+            reset_attribution(token_a)
+
+        token_b = set_attribution(stage="b")
+        try:
+            task_b = Task(work=make_work("b"), channel=channel)
+        finally:
+            reset_attribution(token_b)
+
+        await queue.enqueue(task_a)
+        await queue.enqueue(task_b)
+        await asyncio.wait_for(done.wait(), timeout=2.0)
+        worker.cancel()
+        try:
+            await worker
+        except asyncio.CancelledError:
+            pass
+
+        assert observed["a"]["stage"] == "a"
+        assert observed["b"]["stage"] == "b"
+
+    async def test_no_attribution_no_behavior_change(self):
+        """A task whose creator set no attribution runs with an empty
+        attribution dict and completes normally."""
+        from corvidae.attribution import get_attribution
+
+        queue = TaskQueue()
+        channel = _make_channel()
+        done = asyncio.Event()
+        observed: dict = {"sentinel": True}
+
+        async def work():
+            observed.clear()
+            observed.update(get_attribution())
+            done.set()
+            return "ok"
+
+        async def on_complete(t, result):
+            pass
+
+        worker = asyncio.create_task(queue.run_worker(on_complete))
+        await queue.enqueue(Task(work=work, channel=channel))
+        await asyncio.wait_for(done.wait(), timeout=2.0)
+        worker.cancel()
+        try:
+            await worker
+        except asyncio.CancelledError:
+            pass
+
+        assert observed == {}
