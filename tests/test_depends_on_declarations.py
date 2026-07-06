@@ -235,6 +235,7 @@ _REGISTERED_PLUGIN_CLASSES = [
     "corvidae.llm_plugin.LLMPlugin",
     "corvidae.compaction.CompactionPlugin",
     "corvidae.memory.MemoryPlugin",
+    "corvidae.funnel.FunnelPlugin",
     "corvidae.thinking.ThinkingPlugin",
     "corvidae.tools.settings.RuntimeSettingsPlugin",
     "corvidae.tool_collection.ToolCollectionPlugin",
