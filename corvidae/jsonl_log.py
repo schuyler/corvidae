@@ -60,8 +60,8 @@ class JsonlLogPlugin(CorvidaePlugin):
         """Write a JSONL record for a conversation message event."""
         if self._log_dir is None:
             return
-        # Strip _message_type tag if present
-        clean = {k: v for k, v in message.items() if k != "_message_type"}
+        # Strip internal window tags if present
+        clean = {k: v for k, v in message.items() if not k.startswith("_")}
         record = {
             "ts": time.time(),
             "channel": channel.id,
@@ -71,12 +71,17 @@ class JsonlLogPlugin(CorvidaePlugin):
         await asyncio.to_thread(self._write_record, channel.id, record)
 
     @hookimpl
-    async def on_compaction(self, channel, summary_msg: dict, retain_count: int) -> None:
-        """Write a JSONL record for a compaction summary event."""
+    async def on_compaction(
+        self, channel, summary_msg: dict, retain_count: int, compacted_ids: list[int]
+    ) -> None:
+        """Write a JSONL record for a compaction summary event.
+
+        compacted_ids is ignored — it exists for consolidation consumers.
+        """
         if self._log_dir is None:
             return
-        # Strip _message_type tag if present
-        clean = {k: v for k, v in summary_msg.items() if k != "_message_type"}
+        # Strip internal window tags if present
+        clean = {k: v for k, v in summary_msg.items() if not k.startswith("_")}
         record = {
             "ts": time.time(),
             "channel": channel.id,

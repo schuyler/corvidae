@@ -67,6 +67,23 @@ def resolve_hook_results(
         return None
 
 
+def resolve_single_result(results: list, hook_name: str) -> object | None:
+    """Exactly-one-non-None resolution (bootstrap-mapping §4.8).
+
+    For broadcast hooks where exactly one implementation is expected to
+    return a value (e.g. on_conversation_event's rowid from persistence).
+    More than one non-None result is a configuration error: log it and
+    use the first.
+    """
+    non_none = [r for r in results if r is not None]
+    if len(non_none) > 1:
+        _resolve_logger.error(
+            "%s: %d plugins returned values; configuration error, using first",
+            hook_name, len(non_none),
+        )
+    return non_none[0] if non_none else None
+
+
 def get_dependency(pm: pluggy.PluginManager, name: str, expected_type: type[T]) -> T:
     """Typed wrapper around pm.get_plugin(name).
 
@@ -398,8 +415,8 @@ class AgentSpec:
         or None to defer to the next handler.
 
         Ordering:
-        - tryfirst handlers run first (e.g., ContextCompactPlugin for
-          background block generation — returns None, does not stop chain).
+        - tryfirst handlers run first (side-effect handlers that return
+          None and do not stop the chain).
         - Default-priority handlers run next (third-party replacements).
         - trylast handlers run last (CompactionPlugin as fallback).
 
@@ -542,20 +559,33 @@ class AgentSpec:
     @hookspec
     async def on_conversation_event(
         self, channel: "Channel", message: dict, message_type: "MessageType"
-    ) -> None:
+    ) -> "int | None":
         """Fired after a message is appended to the conversation.
 
-        Broadcast hook (side effects only). Called after every conv.append().
+        Broadcast hook. Called after every conv.append(). Persistence
+        returns the inserted ``message_log`` rowid; exactly one
+        implementation may return non-None; all others return None.
+        Callers resolve the result list with ``resolve_single_result``
+        and attach the rowid to the in-window message copy as ``_db_id``
+        (bootstrap-mapping §4.8).
 
         Args:
             channel: The Channel where the event occurred.
             message: The untagged message dict (no _message_type key).
             message_type: The MessageType of the message.
+
+        Returns:
+            The message_log rowid from the persistence implementation,
+            None from every other implementation.
         """
 
     @hookspec
     async def on_compaction(
-        self, channel: "Channel", summary_msg: dict, retain_count: int
+        self,
+        channel: "Channel",
+        summary_msg: dict,
+        retain_count: int,
+        compacted_ids: list[int],
     ) -> None:
         """Fired after compaction replaces older messages with a summary.
 
@@ -565,6 +595,11 @@ class AgentSpec:
             channel: The Channel where compaction occurred.
             summary_msg: The untagged summary message dict.
             retain_count: Number of messages retained alongside the summary.
+            compacted_ids: The ``message_log`` rowids (``_db_id`` tags) of
+                the messages that were removed by this compaction, in
+                window order. Empty list when unknown (e.g. messages that
+                were never persisted). Consumers such as MemoryPlugin use
+                this range for consolidation (bootstrap-mapping §3.1, §4.8).
         """
 
     @hookspec

@@ -192,14 +192,22 @@ class CompactionPlugin(CorvidaePlugin):
             m for m in older
             if m.get("_message_type", MessageType.MESSAGE) == MessageType.MESSAGE
         ]
-        # Strip _message_type before passing to LLM.
+        # Strip every internal _-prefixed tag before passing to the LLM
+        # (bootstrap-mapping §4.8 — the rowid tag must not leak into requests).
         prior_summaries_clean = [
-            {k: v for k, v in m.items() if k != "_message_type"}
+            {k: v for k, v in m.items() if not k.startswith("_")}
             for m in prior_summaries
         ]
         new_messages_clean = [
-            {k: v for k, v in m.items() if k != "_message_type"}
+            {k: v for k, v in m.items() if not k.startswith("_")}
             for m in new_messages
+        ]
+
+        # Collect the message_log rowids of everything about to be removed —
+        # the on_compaction payload consolidation consumes (§3.1, §4.8).
+        # Messages that were never persisted carry no _db_id and are skipped.
+        compacted_ids = [
+            m["_db_id"] for m in older if isinstance(m.get("_db_id"), int)
         ]
 
         # Attribute the summary LLM call to the compaction stage. Set/reset
@@ -243,6 +251,7 @@ class CompactionPlugin(CorvidaePlugin):
                     channel=channel,
                     summary_msg=summary_msg,
                     retain_count=retain_count,
+                    compacted_ids=compacted_ids,
                 )
             except Exception:
                 logger.warning("on_compaction hook failed", exc_info=True)

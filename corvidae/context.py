@@ -117,15 +117,17 @@ class ContextWindow:
         self.messages = [tagged] + retained
 
     def build_prompt(self) -> list[dict]:
-        """Return [system_message, *self.messages] with _message_type stripped.
+        """Return [system_message, *self.messages] with internal tags stripped.
 
-        Does not modify self.messages. Strips internal _message_type metadata
-        from each message dict before returning.
+        Does not modify self.messages. Strips every _-prefixed key
+        (_message_type, _db_id, ...) from each message dict before
+        returning — internal tags must never reach the LLM
+        (bootstrap-mapping §4.8).
         """
         cleaned = []
         for msg in self.messages:
-            if "_message_type" in msg:
-                msg = {k: v for k, v in msg.items() if k != "_message_type"}
+            if any(k.startswith("_") for k in msg):
+                msg = {k: v for k, v in msg.items() if not k.startswith("_")}
             cleaned.append(msg)
         return [{"role": "system", "content": self.system_prompt}] + cleaned
 

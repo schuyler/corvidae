@@ -187,11 +187,13 @@ A typical prompt for a CLI session with a composable system prompt:
 
 ---
 
-## Note on ContextCompactPlugin
+## Note on ContextCompactPlugin (removed)
 
-`ContextCompactPlugin` provides an alternative compaction strategy that generates persistent background blocks from older conversation segments and injects them before each agent turn. However, it is **not currently active** — it is absent from the `[project.entry-points.corvidae]` section of `pyproject.toml` and is therefore not loaded by the daemon.
+`ContextCompactPlugin` was a disabled-by-default background-block system that summarized older conversation segments and injected them via `before_agent_turn`. It has been removed: it is superseded by `MemoryPlugin` (memory consolidation and retrieval — see [design.md](design.md)), and per-turn token stats now live in the Phase 0 `usage_log` table.
 
-If enabled, it would run on the `compact_conversation` hook with `tryfirst=True` (returning `None` to let `CompactionPlugin` continue), and on `before_agent_turn` to inject the most recent background block as a `CONTEXT` entry. Its configuration keys are documented in [configuration.md](configuration.md).
+## Memory calibration fragment
+
+`prompts/memory_calibration.md` is a documented system-prompt fragment for deployments running `MemoryPlugin`: assert only strongly-banded memories, hedge moderate ones, frame unretrieved claims as inference, and treat "I have no memory of that" as a correct answer when retrieval comes back empty. It is **not** auto-injected — epistemic hedging vocabulary is persona, not architecture. Add it to a channel's `system_prompt` file list if you want the behavior.
 
 ---
 

@@ -45,13 +45,27 @@ async def init_db(db: aiosqlite.Connection) -> None:
     await db.commit()
 
 
+def _strip_internal_keys(message: dict) -> dict:
+    """Drop every _-prefixed key before serialization.
+
+    Internal window tags (_message_type, _db_id, ...) must never reach the
+    DB (bootstrap-mapping §4.8).
+    """
+    return {k: v for k, v in message.items() if not k.startswith("_")}
+
+
 def _parse_message_rows(rows: list[tuple]) -> list[dict]:
-    """Parse (message_json, message_type) rows into tagged message dicts."""
+    """Parse (id, message_json, message_type) rows into tagged message dicts.
+
+    Re-attaches the rowid as _db_id so the reload path restores the rowid
+    threading that consolidation depends on (bootstrap-mapping §4.8).
+    """
     from corvidae.context import MessageType
     result = []
     for row in rows:
-        msg = json.loads(row[0])
-        msg["_message_type"] = MessageType(row[1])
+        msg = json.loads(row[1])
+        msg["_message_type"] = MessageType(row[2])
+        msg["_db_id"] = row[0]
         result.append(msg)
     return result
 
@@ -119,12 +133,13 @@ class PersistencePlugin(CorvidaePlugin):
         from corvidae.context import MessageType
 
         if summary_row:
-            _, summary_message, summary_ts = summary_row
+            summary_id, summary_message, summary_ts = summary_row
             summary_msg = json.loads(summary_message)
             summary_msg["_message_type"] = MessageType.SUMMARY
+            summary_msg["_db_id"] = summary_id
             # Load non-summary rows after the summary boundary
             async with self.db.execute(
-                "SELECT message, message_type FROM message_log "
+                "SELECT id, message, message_type FROM message_log "
                 "WHERE channel_id = ? AND message_type != 'summary' "
                 "AND timestamp > ? ORDER BY id",
                 (channel.id, summary_ts),
@@ -134,7 +149,7 @@ class PersistencePlugin(CorvidaePlugin):
             result = [summary_msg] + loaded
         else:
             async with self.db.execute(
-                "SELECT message, message_type FROM message_log "
+                "SELECT id, message, message_type FROM message_log "
                 "WHERE channel_id = ? AND message_type != 'summary' "
                 "ORDER BY timestamp, id",
                 (channel.id,),
@@ -151,28 +166,38 @@ class PersistencePlugin(CorvidaePlugin):
         return result
 
     @hookimpl
-    async def on_conversation_event(self, channel, message: dict, message_type) -> None:
-        """Persist a conversation message to SQLite.
+    async def on_conversation_event(
+        self, channel, message: dict, message_type
+    ) -> int | None:
+        """Persist a conversation message to SQLite and return its rowid.
 
-        Strips _message_type from the message dict before writing to the DB
-        to avoid serializing internal metadata.
+        Strips every _-prefixed key from the message dict before writing to
+        the DB to avoid serializing internal metadata. This is the single
+        implementation of this hook allowed to return non-None
+        (bootstrap-mapping §4.8).
         """
         ts = time.time()
-        # Strip _message_type tag if present (must not be written to JSON column)
-        clean = {k: v for k, v in message.items() if k != "_message_type"}
-        await self.db.execute(
+        # Strip internal window tags (must not be written to the JSON column)
+        clean = _strip_internal_keys(message)
+        cursor = await self.db.execute(
             "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
             "VALUES (?, ?, ?, ?)",
             (channel.id, json.dumps(clean), ts, message_type),
         )
+        rowid = cursor.lastrowid
         await self.db.commit()
+        return rowid
 
     @hookimpl
-    async def on_compaction(self, channel, summary_msg: dict, retain_count: int) -> None:
+    async def on_compaction(
+        self, channel, summary_msg: dict, retain_count: int, compacted_ids: list[int]
+    ) -> None:
         """Persist a compaction summary to SQLite with timestamp boundary logic.
 
         The summary timestamp is set just before the oldest retained message
         so that load_conversation correctly excludes pre-compaction messages.
+        The compacted_ids parameter is ignored here — it exists for
+        consolidation consumers (MemoryPlugin).
         """
         if retain_count > 0:
             async with self.db.execute(
@@ -186,8 +211,8 @@ class PersistencePlugin(CorvidaePlugin):
         else:
             summary_ts = time.time()
 
-        # Strip _message_type if present
-        clean = {k: v for k, v in summary_msg.items() if k != "_message_type"}
+        # Strip internal window tags if present
+        clean = _strip_internal_keys(summary_msg)
         await self.db.execute(
             "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
             "VALUES (?, ?, ?, ?)",

@@ -54,6 +54,7 @@ class TestJsonlPluginNoOp:
             channel=channel,
             summary_msg={"role": "assistant", "content": "[Summary]"},
             retain_count=0,
+            compacted_ids=[],
         )
 
         await plugin.on_stop()
@@ -268,7 +269,7 @@ class TestOnCompaction:
 
         before = time.time()
         await plugin.on_compaction(
-            channel=channel, summary_msg=summary_msg, retain_count=2
+            channel=channel, summary_msg=summary_msg, retain_count=2, compacted_ids=[]
         )
         after = time.time()
 
@@ -300,6 +301,7 @@ class TestOnCompaction:
             channel=channel,
             summary_msg={"role": "assistant", "content": "[Summary]"},
             retain_count=0,
+            compacted_ids=[],
         )
 
         assert not list(tmp_path.glob("**/*.jsonl"))
