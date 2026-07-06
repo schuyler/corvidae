@@ -1,6 +1,6 @@
 # LLM backend — OpenAI-compatible Chat Completions API (required)
-# llm.main is required. llm.background is optional; if absent, background
-# tasks use llm.main.
+# llm.main is required. Every other key under llm: is an optional role
+# (background, embedding, ...); any unconfigured role falls back to llm.main.
 llm:
   main:
     base_url: http://localhost:8080/v1   # llama-server, vLLM, OpenAI, etc.
@@ -22,6 +22,11 @@ llm:
   #   # retry_base_delay: 2.0
   #   # retry_max_delay: 60.0
   #   # timeout: null
+  # embedding:                         # optional: embedding model for memory retrieval
+  #   base_url: http://localhost:8082/v1  # embedding servers are usually separate endpoints
+  #   model: nomic-embed-text
+  #   dimensions: 768                  # REQUIRED: fixed vector dimension of the model
+  #   # api_key: sk-...                # omit for local servers
 
 # Daemon settings (optional)
 daemon:

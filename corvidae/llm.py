@@ -201,13 +201,83 @@ class LLMClient:
             tool_count=len(tools) if tools else 0,
         )
 
+        response, elapsed = await self._post_with_retries(
+            "/chat/completions", payload, request_id, label="chat completion"
+        )
+
+        usage = response.get("usage", {})
+        logger.info(
+            "chat completion returned",
+            extra={
+                "model": self.model,
+                "latency_ms": round(elapsed * 1000, 1),
+                "prompt_tokens": usage.get("prompt_tokens"),
+                "completion_tokens": usage.get("completion_tokens"),
+                "total_tokens": usage.get("total_tokens"),
+            },
+        )
+
+        return response
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        """POST {base_url}/embeddings (OpenAI-compatible).
+
+        Returns one vector per input text, in order. Raises on terminal
+        failure — callers own their degradation (bootstrap-mapping §3.1).
+        """
+        if self.session is None:
+            raise RuntimeError("LLMClient.start() must be called before embed()")
+
+        payload = {"model": self.model, "input": texts}
+
+        # One observer request/response pair per embed call, same as chat().
+        request_id = uuid.uuid4().hex[:12]
+        await self._fire_observer(
+            "request",
+            model=self.model,
+            request_id=request_id,
+            message_count=len(texts),
+            tool_count=0,
+        )
+
+        response, elapsed = await self._post_with_retries(
+            "/embeddings", payload, request_id, label="embeddings"
+        )
+
+        # Unpack one vector per input, honoring the index field when the
+        # provider supplies it (the order is not guaranteed by every server).
+        data = sorted(response["data"], key=lambda d: d.get("index", 0))
+        vectors = [d["embedding"] for d in data]
+
+        logger.info(
+            "embeddings returned",
+            extra={
+                "model": self.model,
+                "latency_ms": round(elapsed * 1000, 1),
+                "input_count": len(texts),
+                "vector_count": len(vectors),
+            },
+        )
+        return vectors
+
+    async def _post_with_retries(
+        self, path: str, payload: dict, request_id: str, label: str
+    ) -> tuple[dict, float]:
+        """POST with transient-error retries; shared by chat() and embed().
+
+        Fires exactly one observer ``response`` callback per call — with
+        usage on success, with the error string on terminal failure.
+
+        Returns:
+            (parsed JSON response, elapsed seconds of the final attempt).
+        """
         start = time.monotonic()
         try:
             for attempt in range(1 + self.max_retries):
                 try:
                     start = time.monotonic()
                     async with self.session.post(
-                        f"{self.base_url}/chat/completions",
+                        f"{self.base_url}{path}",
                         json=payload,
                         timeout=self.timeout,
                     ) as resp:
@@ -233,7 +303,7 @@ class LLMClient:
                             response = await resp.json()
                         except aiohttp.ClientResponseError:
                             logger.error(
-                                "chat completion failed",
+                                "%s failed", label,
                                 extra={"status": resp.status},
                             )
                             raise
@@ -269,18 +339,6 @@ class LLMClient:
 
         elapsed = time.monotonic() - start
 
-        usage = response.get("usage", {})
-        logger.info(
-            "chat completion returned",
-            extra={
-                "model": self.model,
-                "latency_ms": round(elapsed * 1000, 1),
-                "prompt_tokens": usage.get("prompt_tokens"),
-                "completion_tokens": usage.get("completion_tokens"),
-                "total_tokens": usage.get("total_tokens"),
-            },
-        )
-
         # Success: fire the single response callback with usage verbatim
         # (None when the API omitted it) and the already-computed latency.
         await self._fire_observer(
@@ -292,4 +350,4 @@ class LLMClient:
             error=None,
         )
 
-        return response
+        return response, elapsed
