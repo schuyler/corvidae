@@ -27,6 +27,24 @@ quality claims become benchmarks.
   pattern (the redact CLI follows it).
 - `tests/evals/metrics.py` and `scripts/eval_memory.py` from Phase 0.
 
+## Amendments after embedding-prefixes (2026-07-06)
+
+The embedding-prefixes change (merged to main after 1a) postdates this plan.
+Three consequences, folded into the WP text below and repeated here for the
+design phase:
+
+1. Every 1b call site that embeds memory text (backfill, re-promotion
+   re-embed) must call `embed(texts, kind="document")` — unprefixed vectors
+   are inconsistent with the prefixed index.
+2. The `embedding_meta` guard now covers `document_prefix`/`query_prefix`
+   as well as encoder/dimensions. On mismatch, embedding is DISABLED and
+   config revert is the only remediation. The retention job's backfill step
+   must check for that disabled state and skip (log once, DEBUG), not retry
+   into an error loop.
+3. Consolidation-time dup detection (WP1b.2) and the stub-embedder
+   benchmarks (WP1b.5) are unaffected: the former reuses the consolidation
+   document embedding, the latter is prefix-agnostic by construction.
+
 ## Design constraints and traps
 
 1. **Demote, never delete** (§3.1, §5 divergence 6). Demotion = remove the
@@ -101,10 +119,14 @@ def retention_score(importance: float, retrieval_count: int,
      memory_vec WHERE memory_id=?`). Log count.
    - For every `indexed=0 AND redacted=0 AND superseded_by IS NULL` record:
      if score ≥ threshold (it was recalled via the tools since demotion) →
-     re-promote (`indexed=1`, re-insert vec row — re-embed if `embedded=0`).
+     re-promote (`indexed=1`, re-insert vec row — re-embed if `embedded=0`,
+     with `kind="document"`; see Amendments).
      Demotion is reversible or it isn't demotion (§3.1).
    - Records with `embedded=0` and an available encoder: backfill embed
-     (bounded batch per run, `memory.retention.backfill_batch` default 32).
+     with `kind="document"` (bounded batch per run,
+     `memory.retention.backfill_batch` default 32). Skip entirely when
+     embedding is disabled by the `embedding_meta` prefix/encoder mismatch
+     guard (see Amendments).
 3. **Tools count as recall:** `search_memory`/`recall_raw` (WP1b.3) update
    `retrieval_count`/`last_retrieved_at` exactly as passive retrieval does —
    that is what makes re-promotion reachable.
@@ -271,7 +293,9 @@ floor).
   exists to consume it.
 - Semantic facts, trust, sensitivity filters — Phases 4–5.
 - Encoder-migration tooling (bulk re-embed command) — the `embedded=0`
-  backfill path and `embedding_meta` guard from 1a are sufficient until an
+  backfill path and `embedding_meta` guard (which, post
+  embedding-prefixes, also covers `document_prefix`/`query_prefix`, with
+  config revert as the only mismatch remediation) are sufficient until an
   encoder change actually happens; write the runbook note in
   `docs/design.md` instead ("text is canonical; embeddings are a
   rebuildable cache").
