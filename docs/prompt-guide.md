@@ -195,6 +195,8 @@ A typical prompt for a CLI session with a composable system prompt:
 
 `prompts/memory_calibration.md` is a documented system-prompt fragment for deployments running `MemoryPlugin`: assert only strongly-banded memories, hedge moderate ones, frame unretrieved claims as inference, and treat "I have no memory of that" as a correct answer when retrieval comes back empty. It is **not** auto-injected — epistemic hedging vocabulary is persona, not architecture. Add it to a channel's `system_prompt` file list if you want the behavior.
 
+Retrieval quality depends on `llm.embedding.document_prefix` and `llm.embedding.query_prefix` matching the embedding model's card — mismatched prefixes degrade cosine similarity and cause the system to fall back to FTS5 keyword search.
+
 ---
 
 ## Key source locations

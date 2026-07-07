@@ -61,7 +61,7 @@ class StubClient:
         })
         return {"choices": [{"message": {"role": "assistant", "content": self.chat_text}}]}
 
-    async def embed(self, texts):
+    async def embed(self, texts, kind=None):
         self.embed_calls.append(list(texts))
         if isinstance(self.embed_result, Exception):
             raise self.embed_result
@@ -347,3 +347,47 @@ class TestRubricPrior:
         client = StubClient(chat_text=json.dumps({"importance": 3.5}))
         prior = RubricPrior(lambda: client)
         assert await prior.score([{"role": "user", "content": "x"}]) == 1.0
+
+
+# --- RED: design item 6 (consolidation call site) ---
+
+
+class _KindTrackingEmbedStub(StubClient):
+    """StubClient variant that records the kind argument passed to embed()."""
+
+    def __init__(self):
+        super().__init__()
+        self.embed_kind_calls: list[str | None] = []
+
+    async def embed(self, texts, kind=None):
+        self.embed_kind_calls.append(kind)
+        if isinstance(self.embed_result, Exception):
+            raise self.embed_result
+        return self.embed_result
+
+
+class TestEmbedCallSiteKinds:
+    async def test_consolidation_embeds_with_document_kind(self):
+        """item 6: the consolidation write path calls embed() with kind='document'."""
+        memory, persistence, _original_stub, channel, db = await build_consolidation_env()
+        tracker = _KindTrackingEmbedStub()
+        llm = memory.pm.get_plugin("llm")
+        llm._clients["embedding"] = tracker
+
+        rowids = await seed_dialog(persistence, channel, [
+            ("user", "what board does the weather station use?"),
+            ("assistant", "an ESP32"),
+        ])
+        await memory.on_compaction(
+            channel=channel,
+            summary_msg={"role": "assistant", "content": "[Summary]"},
+            retain_count=0,
+            compacted_ids=rowids,
+        )
+        await memory.wait_for_background_tasks()
+
+        assert tracker.embed_kind_calls, "embed() was never called during consolidation"
+        assert tracker.embed_kind_calls[0] == "document", (
+            f"expected kind='document', got {tracker.embed_kind_calls[0]!r}"
+        )
+        await db.close()

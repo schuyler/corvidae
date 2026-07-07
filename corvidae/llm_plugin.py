@@ -234,6 +234,8 @@ class LLMPlugin(CorvidaePlugin):
             retry_base_delay=cfg.get("retry_base_delay", 2.0),
             retry_max_delay=cfg.get("retry_max_delay", 60.0),
             timeout=cfg.get("timeout"),
+            document_prefix=cfg.get("document_prefix", ""),
+            query_prefix=cfg.get("query_prefix", ""),
         )
         pm = getattr(self, "pm", None)
         if pm is not None:

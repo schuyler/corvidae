@@ -220,7 +220,9 @@ CREATE TABLE IF NOT EXISTS consolidation_watermark (
 EMBEDDING_META_DDL = """
 CREATE TABLE IF NOT EXISTS embedding_meta (
     encoder TEXT NOT NULL,
-    dimensions INTEGER NOT NULL
+    dimensions INTEGER NOT NULL,
+    document_prefix TEXT NOT NULL DEFAULT '',
+    query_prefix TEXT NOT NULL DEFAULT ''
 )
 """
 
@@ -499,7 +501,7 @@ class MemoryPlugin(CorvidaePlugin):
             if self._embedding_enabled():
                 try:
                     client = self._llm().get_client("embedding")
-                    embedding = (await client.embed([record["summary"]]))[0]
+                    embedding = (await client.embed([record["summary"]], kind="document"))[0]
                 except Exception:
                     logger.warning(
                         "memory embedding failed; storing record with "
@@ -710,7 +712,7 @@ class MemoryPlugin(CorvidaePlugin):
         if self._vec_available and self._embedding_enabled():
             try:
                 client = self._llm().get_client("embedding")
-                query_vector = (await client.embed([text]))[0]
+                query_vector = (await client.embed([text], kind="query"))[0]
                 rows = await self._vec_candidates(db, query_vector, scope, k)
             except Exception:
                 logger.warning(
@@ -911,6 +913,18 @@ class MemoryPlugin(CorvidaePlugin):
         await db.execute(MEMORY_INDEX_DDL)
         await db.execute(WATERMARK_DDL)
         await db.execute(EMBEDDING_META_DDL)
+        # Schema upgrade: pre-existing two-column tables (before this feature)
+        # lack document_prefix/query_prefix. Add them with DEFAULT '' so they
+        # compare equal to prefix-less config, and mismatch against configured
+        # prefixes routes through the normal _encoder_mismatch path.
+        async with db.execute("PRAGMA table_info(embedding_meta)") as cursor:
+            existing_cols = {row[1] for row in await cursor.fetchall()}
+        for col in ("document_prefix", "query_prefix"):
+            if col not in existing_cols:
+                await db.execute(
+                    f"ALTER TABLE embedding_meta ADD COLUMN {col} "
+                    f"TEXT NOT NULL DEFAULT ''"
+                )
         await db.execute(MEMORY_FTS_DDL)
         await db.execute(MEMORY_FTS_INSERT_TRIGGER)
         await db.execute(MEMORY_FTS_UPDATE_TRIGGER)
@@ -948,25 +962,34 @@ class MemoryPlugin(CorvidaePlugin):
     ) -> None:
         """Record or verify the encoder identity the vector cache was built with.
 
-        A stored encoder differing from config is an operator ERROR — mixing
-        encoders in one index silently corrupts similarity. The rebuild flow
-        is Phase 1b territory; here we refuse to mix and disable embedding.
+        A stored encoder, dimensions, or prefix value differing from config is
+        an operator ERROR — mixing encoders or prefixes silently corrupts
+        similarity. Config revert is the only remediation; here we refuse to
+        mix and disable embedding.
         """
+        doc_prefix = (self._embedding_cfg or {}).get("document_prefix", "") or ""
+        qry_prefix = (self._embedding_cfg or {}).get("query_prefix", "") or ""
+
         async with db.execute(
-            "SELECT encoder, dimensions FROM embedding_meta LIMIT 1"
+            "SELECT encoder, dimensions, document_prefix, query_prefix "
+            "FROM embedding_meta LIMIT 1"
         ) as cursor:
             row = await cursor.fetchone()
         if row is None:
             await db.execute(
-                "INSERT INTO embedding_meta (encoder, dimensions) VALUES (?, ?)",
-                (encoder, dimensions),
+                "INSERT INTO embedding_meta "
+                "(encoder, dimensions, document_prefix, query_prefix) "
+                "VALUES (?, ?, ?, ?)",
+                (encoder, dimensions, doc_prefix, qry_prefix),
             )
             return
-        if (row[0], row[1]) != (encoder, dimensions):
+        # Normalize NULL (from ALTER TABLE DEFAULT '') to '' for comparison.
+        stored = (row[0], row[1], row[2] or "", row[3] or "")
+        if stored != (encoder, dimensions, doc_prefix, qry_prefix):
             self._encoder_mismatch = True
             logger.error(
-                "embedding_meta records encoder %s/%dd but config wants %s/%dd; "
-                "embeddings disabled — re-embed the memory store to switch "
-                "encoders (rebuild flow lands in Phase 1b)",
-                row[0], row[1], encoder, dimensions,
+                "embedding_meta records %s/%dd/%r/%r but config wants %s/%dd/%r/%r; "
+                "embeddings disabled — revert config to restore vector retrieval",
+                stored[0], stored[1], stored[2], stored[3],
+                encoder, dimensions, doc_prefix, qry_prefix,
             )

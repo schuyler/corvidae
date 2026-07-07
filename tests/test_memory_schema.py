@@ -201,5 +201,149 @@ class TestEncoderMismatch:
             await memory.on_start(config=EMBED_CONFIG)
 
         assert memory._encoder_mismatch is True
-        assert any("re-embed" in rec.message for rec in caplog.records)
+        assert any("embedding_meta" in rec.message for rec in caplog.records)
+        await db.close()
+
+
+# --- RED: design items 4, 5, 8 ---
+
+EMBED_CONFIG_WITH_PREFIXES = {
+    "llm": {
+        "main": {"base_url": "http://localhost:8080", "model": "chat"},
+        "embedding": {
+            "base_url": "http://localhost:8081",
+            "model": "test-embedder",
+            "dimensions": 4,
+            "document_prefix": "search_document: ",
+            "query_prefix": "search_query: ",
+        },
+    }
+}
+
+
+class TestPrefixSupport:
+    async def test_embedding_meta_records_both_prefixes_on_first_write(self):
+        """item 4: embedding_meta stores document_prefix and query_prefix alongside encoder/dimensions."""
+        memory, db = await build_memory_plugin(EMBED_CONFIG_WITH_PREFIXES)
+        async with db.execute(
+            "SELECT encoder, dimensions, document_prefix, query_prefix FROM embedding_meta"
+        ) as cursor:
+            row = await cursor.fetchone()
+        assert row == ("test-embedder", 4, "search_document: ", "search_query: ")
+        await db.close()
+
+    async def test_prefix_mismatch_disables_embedding_and_logs_error(self, caplog):
+        """item 5: stored prefix != config prefix → ERROR log + _encoder_mismatch True."""
+        db = await aiosqlite.connect(":memory:")
+        await init_db(db)
+        # Pre-seed a table that already has prefix columns (simulates a store
+        # built with the new schema) but with different prefix values.
+        await db.execute(
+            "CREATE TABLE IF NOT EXISTS embedding_meta "
+            "(encoder TEXT NOT NULL, dimensions INTEGER NOT NULL, "
+            "document_prefix TEXT NOT NULL DEFAULT '', "
+            "query_prefix TEXT NOT NULL DEFAULT '')"
+        )
+        await db.execute(
+            "INSERT INTO embedding_meta (encoder, dimensions, document_prefix, query_prefix) "
+            "VALUES (?, ?, ?, ?)",
+            ("test-embedder", 4, "old_doc: ", "old_query: "),
+        )
+        await db.commit()
+
+        pm = create_plugin_manager()
+        persistence = PersistencePlugin()
+        persistence.db = db
+        pm.register(persistence, name="persistence")
+        llm = LLMPlugin()
+        pm.register(llm, name="llm")
+        await llm.on_init(pm=pm, config=EMBED_CONFIG_WITH_PREFIXES)
+        llm.embedding_dimensions = 4
+
+        memory = MemoryPlugin()
+        pm.register(memory, name="memory")
+        await memory.on_init(pm=pm, config=EMBED_CONFIG_WITH_PREFIXES)
+        with caplog.at_level(logging.ERROR, logger="corvidae.memory"):
+            await memory.on_start(config=EMBED_CONFIG_WITH_PREFIXES)
+
+        assert memory._encoder_mismatch is True
+        assert not memory._embedding_enabled()
+        assert any(
+            rec.levelno == logging.ERROR and "embedding_meta" in rec.message
+            for rec in caplog.records
+        )
+        await db.close()
+
+    async def test_schema_upgrade_old_shape_prefix_less_config(self):
+        """item 8a: old two-column embedding_meta + no prefix config → ALTER adds columns."""
+        db = await aiosqlite.connect(":memory:")
+        await init_db(db)
+        # Pre-seed the old two-column shape (as existed before this feature).
+        await db.execute(
+            "CREATE TABLE IF NOT EXISTS embedding_meta "
+            "(encoder TEXT NOT NULL, dimensions INTEGER NOT NULL)"
+        )
+        await db.execute(
+            "INSERT INTO embedding_meta (encoder, dimensions) VALUES (?, ?)",
+            ("test-embedder", 4),
+        )
+        await db.commit()
+
+        pm = create_plugin_manager()
+        persistence = PersistencePlugin()
+        persistence.db = db
+        pm.register(persistence, name="persistence")
+        llm = LLMPlugin()
+        pm.register(llm, name="llm")
+        await llm.on_init(pm=pm, config=EMBED_CONFIG)
+        llm.embedding_dimensions = 4
+
+        memory = MemoryPlugin()
+        pm.register(memory, name="memory")
+        await memory.on_init(pm=pm, config=EMBED_CONFIG)
+        # Must not raise OperationalError.
+        await memory.on_start(config=EMBED_CONFIG)
+
+        assert memory._encoder_mismatch is False
+        # The ALTER must have added the prefix columns with empty-string defaults.
+        async with db.execute(
+            "SELECT document_prefix, query_prefix FROM embedding_meta"
+        ) as cursor:
+            row = await cursor.fetchone()
+        assert row == ("", "")
+        await db.close()
+
+    async def test_schema_upgrade_old_shape_with_prefix_config_yields_mismatch(self, caplog):
+        """item 8b: old two-column table + prefix config → mismatch-disable, not crash."""
+        db = await aiosqlite.connect(":memory:")
+        await init_db(db)
+        # Pre-seed old two-column shape (no prefix columns stored).
+        await db.execute(
+            "CREATE TABLE IF NOT EXISTS embedding_meta "
+            "(encoder TEXT NOT NULL, dimensions INTEGER NOT NULL)"
+        )
+        await db.execute(
+            "INSERT INTO embedding_meta (encoder, dimensions) VALUES (?, ?)",
+            ("test-embedder", 4),
+        )
+        await db.commit()
+
+        pm = create_plugin_manager()
+        persistence = PersistencePlugin()
+        persistence.db = db
+        pm.register(persistence, name="persistence")
+        llm = LLMPlugin()
+        pm.register(llm, name="llm")
+        await llm.on_init(pm=pm, config=EMBED_CONFIG_WITH_PREFIXES)
+        llm.embedding_dimensions = 4
+
+        memory = MemoryPlugin()
+        pm.register(memory, name="memory")
+        await memory.on_init(pm=pm, config=EMBED_CONFIG_WITH_PREFIXES)
+        with caplog.at_level(logging.ERROR, logger="corvidae.memory"):
+            # Must not raise OperationalError — should route to mismatch-disable.
+            await memory.on_start(config=EMBED_CONFIG_WITH_PREFIXES)
+
+        # Empty-string stored prefixes != configured prefixes → mismatch.
+        assert memory._encoder_mismatch is True
         await db.close()

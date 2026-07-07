@@ -60,7 +60,7 @@ class TestLLMClientEmbed:
         client = LLMClient(base_url=BASE_URL, model=MODEL)
         client.session = _make_mock_session(_make_mock_response())
 
-        vectors = await client.embed(["alpha", "beta"])
+        vectors = await client.embed(["alpha", "beta"], kind="document")
 
         assert vectors == [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]
         call_args = client.session.post.call_args
@@ -75,7 +75,7 @@ class TestLLMClientEmbed:
         client.session = _make_mock_session(_make_mock_response(status=500))
 
         with pytest.raises(ClientResponseError):
-            await client.embed(["alpha"])
+            await client.embed(["alpha"], kind="document")
 
     async def test_embed_fires_observer_response_with_usage(self):
         """The Phase 0 observer sees exactly one response per embed call."""
@@ -86,7 +86,7 @@ class TestLLMClientEmbed:
         observer.response = AsyncMock()
         client.observer = observer
 
-        await client.embed(["alpha", "beta"])
+        await client.embed(["alpha", "beta"], kind="document")
 
         observer.response.assert_called_once()
         kwargs = observer.response.call_args.kwargs
@@ -113,10 +113,51 @@ class TestLLMClientEmbed:
         client.session = session
 
         with patch("asyncio.sleep", new_callable=AsyncMock):
-            vectors = await client.embed(["alpha", "beta"])
+            vectors = await client.embed(["alpha", "beta"], kind="document")
 
         assert vectors == [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]
         assert session.post.call_count == 2
+
+    # --- RED: design items 1, 2, 3 ---
+
+    async def test_embed_document_kind_prepends_document_prefix(self):
+        """item 1: kind='document' prepends document_prefix to every batch element."""
+        client = LLMClient(
+            base_url=BASE_URL, model=MODEL,
+            document_prefix="search_document: ",
+            query_prefix="search_query: ",
+        )
+        client.session = _make_mock_session(_make_mock_response())
+        await client.embed(["alpha", "beta"], kind="document")
+        payload = client.session.post.call_args[1]["json"]
+        assert payload["input"] == ["search_document: alpha", "search_document: beta"]
+
+    async def test_embed_query_kind_prepends_query_prefix(self):
+        """item 1: kind='query' prepends query_prefix to every batch element."""
+        client = LLMClient(
+            base_url=BASE_URL, model=MODEL,
+            document_prefix="search_document: ",
+            query_prefix="search_query: ",
+        )
+        client.session = _make_mock_session(_make_mock_response())
+        await client.embed(["alpha", "beta"], kind="query")
+        payload = client.session.post.call_args[1]["json"]
+        assert payload["input"] == ["search_query: alpha", "search_query: beta"]
+
+    async def test_embed_empty_prefix_sends_texts_unchanged(self):
+        """item 2: absent/empty prefixes leave the wire payload byte-identical to today."""
+        client = LLMClient(base_url=BASE_URL, model=MODEL)
+        client.session = _make_mock_session(_make_mock_response())
+        await client.embed(["alpha", "beta"], kind="document")
+        payload = client.session.post.call_args[1]["json"]
+        assert payload["input"] == ["alpha", "beta"]
+
+    async def test_embed_unknown_kind_raises_value_error(self):
+        """item 3: a kind value other than 'document'/'query' raises ValueError."""
+        client = LLMClient(base_url=BASE_URL, model=MODEL)
+        client.session = _make_mock_session(_make_mock_response())
+        with pytest.raises(ValueError):
+            await client.embed(["alpha"], kind="passage")
 
 
 class TestLLMPluginRoles:
@@ -177,3 +218,18 @@ class TestLLMPluginRoles:
         with patch.object(LLMClient, "start", new_callable=AsyncMock):
             with pytest.raises((KeyError, ValueError)):
                 await plugin.on_start(config=config)
+
+    def test_create_client_passes_prefix_params_from_config(self):
+        """item 7: document_prefix/query_prefix under llm.embedding reach the client."""
+        cfg = {
+            "base_url": BASE_URL,
+            "model": MODEL,
+            "dimensions": 3,
+            "document_prefix": "search_document: ",
+            "query_prefix": "search_query: ",
+        }
+        plugin = LLMPlugin()
+        client = plugin._create_client(cfg, role="embedding")
+        # Both prefix attributes must be set on the constructed client.
+        assert client.document_prefix == "search_document: "
+        assert client.query_prefix == "search_query: "
