@@ -1,0 +1,34 @@
+{
+  "description": "Contradiction-bearing fixture for WP1b.5. Reserved for §3.1 contradiction-annotation behavior — two conflicting records for the same claim. Tests against this fixture are marked xfail until Phase 2's appraisal/critique machinery exists. Labels are hand-written per bootstrap-mapping §6.",
+  "source": "operator-authored, Phase 1b (plans/implementation/phase-1b.md WP1b.5)",
+  "conversation": [],
+  "memories": [
+    {
+      "id": "c1",
+      "summary": "kestrel told me they prefer PlatformIO for all firmware projects and switched to it from the Arduino IDE about a year ago; they find the dependency management far better.",
+      "channel_id": "irc:#electronics"
+    },
+    {
+      "id": "c2",
+      "summary": "kestrel mentioned switching back to the Arduino IDE for the new sensor project because the team they are collaborating with doesn't use PlatformIO and they want to keep things simple.",
+      "channel_id": "irc:#electronics"
+    },
+    {
+      "id": "c3",
+      "summary": "robin mentioned that kestrel uses both PlatformIO and the Arduino IDE depending on the project — PlatformIO for solo work, Arduino IDE for team collaborations.",
+      "channel_id": "irc:#electronics"
+    }
+  ],
+  "queries": [
+    {
+      "text": "Does kestrel prefer PlatformIO or the Arduino IDE for firmware development?",
+      "relevant": ["c1", "c2", "c3"],
+      "note": "Contradiction: c1 says PlatformIO exclusively; c2 says switched back to Arduino IDE for team projects; c3 synthesizes both. A contradiction-aware retriever should flag c1 and c2 as conflicting and surface c3. This assertion is xfail until Phase 2 contradiction-annotation is implemented (bootstrap-mapping §3.1)."
+    },
+    {
+      "text": "What development tool did kestrel most recently decide to use for team projects?",
+      "relevant": ["c2"],
+      "note": "c2 is the more recent statement about team projects specifically. A non-contradiction-aware retriever may return c1 as well, which conflicts. xfail until Phase 2."
+    }
+  ]
+}
