@@ -6,11 +6,11 @@ Each phase document is written to be implemented by a coding agent without
 architectural judgment calls: exact signatures, DDL, ordered work packages,
 red tests first, and explicit trap warnings.
 
-| Order | Document | Scope | Effort |
-|---|---|---|---|
-| 1 | `phase-0.md` | Observability hooks, attribution, outcome-log schema, eval-harness foundations | M–L |
-| 2 | `phase-1a.md` | MemoryPlugin core: schema, rowid threading, embeddings, consolidation, retrieval, admission funnel | L |
-| 3 | `phase-1b.md` | Reconsolidation/demotion, redact, memory tools, fixture evals | M |
+| Order | Document | Scope | Effort | Status |
+|---|---|---|---|---|
+| 1 | `phase-0.md` | Observability hooks, attribution, outcome-log schema, eval-harness foundations | M–L | DONE (11b07b3) |
+| 2 | `phase-1a.md` | MemoryPlugin core: schema, rowid threading, embeddings, consolidation, retrieval, admission funnel | L | DONE (4c64ce1) |
+| 3 | `phase-1b.md` | Reconsolidation/demotion, redact, memory tools, fixture evals | M | DONE (a1c42fd) |
 
 Phases 2+ are deliberately not planned at this level yet — per
 `bootstrap-mapping.md` §6, their detail depends on what the Phase 1 evals
