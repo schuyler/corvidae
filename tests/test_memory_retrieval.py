@@ -62,7 +62,7 @@ class StubEmbedClient:
         self.fail = False
         self.calls: list[list[str]] = []
 
-    async def embed(self, texts):
+    async def embed(self, texts, kind=None):
         self.calls.append(list(texts))
         if self.fail:
             raise RuntimeError("encoder down")
@@ -352,6 +352,44 @@ class TestRetrievalLog:
         ) as cursor:
             rows = await cursor.fetchall()
         assert rows == [(0, 0)]
+        await db.close()
+
+
+# --- RED: design item 6 (retrieval call site) ---
+
+
+class _KindTrackingRetrievalStub(StubEmbedClient):
+    """StubEmbedClient variant that records the kind argument passed to embed()."""
+
+    def __init__(self):
+        super().__init__()
+        self.embed_kind_calls: list[str | None] = []
+
+    async def embed(self, texts, kind=None):
+        self.embed_kind_calls.append(kind)
+        if self.fail:
+            raise RuntimeError("encoder down")
+        return [bow_embed(t) for t in texts]
+
+
+class TestEmbedCallSiteKinds:
+    async def test_retrieval_embeds_with_query_kind(self):
+        """item 6: the retrieval read path calls embed() with kind='query'."""
+        memory, _original_embedder, channel, conv, db = await build_retrieval_env()
+        if not memory._vec_available:
+            pytest.skip("sqlite-vec unavailable; retrieval embed path not exercised")
+
+        tracker = _KindTrackingRetrievalStub()
+        llm = memory.pm.get_plugin("llm")
+        llm._clients["embedding"] = tracker
+
+        await seed_memory(db, channel.id, "kestrel's ESP32 weather station")
+        await ask(memory, channel, conv, "what board does the weather station use?")
+
+        assert tracker.embed_kind_calls, "embed() was never called during retrieval"
+        assert tracker.embed_kind_calls[0] == "query", (
+            f"expected kind='query', got {tracker.embed_kind_calls[0]!r}"
+        )
         await db.close()
 
 

@@ -476,6 +476,8 @@ class TestOnMessagePersistenceAndLoop:
             retry_base_delay=2.0,
             retry_max_delay=60.0,
             timeout=None,
+            document_prefix="",
+            query_prefix="",
         )
 
         await db.close()
@@ -515,6 +517,8 @@ class TestOnMessagePersistenceAndLoop:
             retry_base_delay=2.0,
             retry_max_delay=60.0,
             timeout=None,
+            document_prefix="",
+            query_prefix="",
         )
 
         await db.close()
@@ -554,6 +558,8 @@ class TestOnMessagePersistenceAndLoop:
             retry_base_delay=2.0,
             retry_max_delay=60.0,
             timeout=None,
+            document_prefix="",
+            query_prefix="",
         )
 
         await db.close()
@@ -593,6 +599,8 @@ class TestOnMessagePersistenceAndLoop:
             retry_base_delay=2.0,
             retry_max_delay=60.0,
             timeout=None,
+            document_prefix="",
+            query_prefix="",
         )
 
         await db.close()

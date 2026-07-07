@@ -57,6 +57,8 @@ class LLMClient:
         retry_base_delay: float = 2.0,
         retry_max_delay: float = 60.0,
         timeout: float | None = None,
+        document_prefix: str = "",
+        query_prefix: str = "",
     ) -> None:
         """Initialize the LLM client.
 
@@ -74,6 +76,10 @@ class LLMClient:
             retry_max_delay: Maximum delay cap in seconds.
             timeout: Total HTTP timeout in seconds per LLM request.
                      None uses aiohttp's session-level default (300s).
+            document_prefix: String prepended to every text when kind='document'.
+                             Defaults to '' (no prefix).
+            query_prefix: String prepended to every text when kind='query'.
+                          Defaults to '' (no prefix).
         """
         self.base_url = base_url.rstrip("/")
         self.model = model
@@ -85,6 +91,8 @@ class LLMClient:
         self.timeout = (
             aiohttp.ClientTimeout(total=timeout) if timeout is not None else None
         )
+        self.document_prefix = document_prefix
+        self.query_prefix = query_prefix
         self.session: aiohttp.ClientSession | None = None
         self.observer: object | None = None
 
@@ -219,14 +227,32 @@ class LLMClient:
 
         return response
 
-    async def embed(self, texts: list[str]) -> list[list[float]]:
+    async def embed(
+        self, texts: list[str], kind: str
+    ) -> list[list[float]]:
         """POST {base_url}/embeddings (OpenAI-compatible).
+
+        Args:
+            texts: Input strings to embed.
+            kind: Embedding kind — 'document' prepends document_prefix,
+                  'query' prepends query_prefix. Unknown values raise ValueError.
 
         Returns one vector per input text, in order. Raises on terminal
         failure — callers own their degradation (bootstrap-mapping §3.1).
         """
         if self.session is None:
             raise RuntimeError("LLMClient.start() must be called before embed()")
+
+        if kind == "document":
+            prefix = self.document_prefix
+        elif kind == "query":
+            prefix = self.query_prefix
+        else:
+            raise ValueError(
+                f"embed kind must be 'document' or 'query', got {kind!r}"
+            )
+        if prefix:
+            texts = [prefix + t for t in texts]
 
         payload = {"model": self.model, "input": texts}
 
