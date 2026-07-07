@@ -908,12 +908,81 @@ encoders. Nothing in the memory path raises into the turn loop.
 `redacted`, `embedded`), `consolidation_watermark`, `embedding_meta`,
 `memory_fts` (external-content FTS5 with insert/update sync triggers; no
 delete trigger — memory rows are never deleted), `memory_vec` (vec0,
-created only when the extension loads), and `retrieval_log`. All on the
-persistence connection in `sessions.db`; `message_log` stays append-only.
+created only when the extension loads), `retrieval_log`, `retention_meta`
+(one-row table persisting `last_run` for the retention job interval), and
+`message_fts` (regular FTS5 table over `message_log` content, maintained by
+`message_log_ai`/`message_log_au` triggers; queried and cleared by `corvidae
+redact` — not by `search_memory`, which queries `memory_fts`). All on the persistence connection in
+`sessions.db`; `message_log` stays append-only except for the
+operator-only redaction tombstone.
 
 The epistemic-calibration prompt fragment (`prompts/memory_calibration.md`)
 is documented but NOT auto-injected — hedging vocabulary is persona, not
 architecture.
+
+### Operator redaction (`corvidae redact`)
+
+`corvidae/commands/redact.py` — operator-only CLI for permanent content
+removal. Never a registered agent tool; never reachable from any hook the
+model can influence.
+
+**Forms:**
+
+```
+corvidae redact --db sessions.db message <id> [<id2>...]   # specific message_log rows
+corvidae redact --db sessions.db memory <memory_id>        # a record + its raw range
+corvidae redact --db sessions.db range <start_id> <end_id> # message_log id range (inclusive)
+```
+
+`--dry-run` prints affected row counts without writing.
+
+**WAL requirement.** The CLI opens its own connection (`PRAGMA busy_timeout
+= 5000`, short transactions) and asserts WAL journal mode at startup. If
+the mode is not WAL, it aborts with a message naming the current mode and
+how to convert. The `corvidae` daemon configures WAL on startup; a
+daemon-created DB is always WAL.
+
+**Schema-presence probe (pre-Phase-1b DBs).** Before touching any surface,
+the CLI probes `sqlite_master` for the tables and triggers it needs. If
+`message_fts` is absent, the message tombstone is still written but the FTS
+surface is skipped with a printed notice — safe because the Phase 1b
+`message_log_ai`/`message_log_au` triggers will index the tombstone (not
+the original content) the next time the daemon runs its `message_fts`
+backfill. If `memory` or `memory_vec` are absent, the memory cascade is
+skipped with a notice. The CLI never creates schema; schema is
+daemon-owned.
+
+**Cascade (per-form behavior).**
+
+- **`message` form:** for each supplied `message_log` id, rewrites the
+  `message` JSON — keeping `role` and structural keys, replacing `content`
+  with `[redacted by operator YYYY-MM-DD]`, dropping `tool_calls` and
+  payload fields. Row id and timestamps are unchanged. The `message_log_au`
+  trigger propagates the change to `message_fts` automatically (when
+  present). Then cascades to memory: for every `memory` row whose
+  `[msg_id_start, msg_id_end]` contains the redacted message's id **and**
+  whose `channel_id` matches — the `message_log` id sequence is global
+  across all channels, so a numeric-range match alone would over-redact
+  unrelated channels — tombstones the memory summary to `[redacted by
+  operator]`, sets `redacted=1`, `indexed=0`, `embedded=0`, and deletes its
+  vec row. The `memory_au` trigger propagates to `memory_fts`.
+- **`memory` form:** resolves the record's `[msg_id_start, msg_id_end]`
+  range with `WHERE channel_id = record.channel_id AND id BETWEEN ...` —
+  the per-channel predicate is load-bearing because the global-id range
+  otherwise includes interleaved foreign-channel rows — then tombstones
+  those messages. Tombstones the target memory record itself and cascades
+  to any other same-channel memory records whose ranges intersect the
+  tombstoned message ids.
+- **`range` form:** collects all `message_log` ids in the range and
+  delegates to the `message` form cascade.
+
+**Verification pass.** After each cascade, the CLI extracts a sample token
+from the original content (before tombstoning) and runs FTS `MATCH` queries
+against `message_fts` and `memory_fts`. It prints `"verified: 0 hits for
+'<token>' in <tables>"` when clean or `"WARNING: FTS still contains hits for
+'<token>': <table>: <N> hits"` when the cascade left searchable content — every invocation proves its own
+completeness. Skipped when `--dry-run` is in effect or when no suitable
+sample token can be extracted.
 
 ## FunnelPlugin
 
@@ -1226,9 +1295,10 @@ Defined in `main.py`:
 13. `RuntimeSettingsPlugin` — registers the `set_settings` tool
 14. `ToolCollectionPlugin` — collects tools from all plugins via `register_tools` hook; `on_start` is `trylast=True` so it fires after all other `on_start` hooks
 15. `MemoryPlugin` — consolidation (`on_compaction`/`on_idle`) and retrieval (`before_agent_turn`)
-16. `FunnelPlugin` — context-admission funnel for tail CONTEXT entries
-17. `Agent` — agent loop (after all tools, transports, and support plugins)
-18. `IdleMonitorPlugin` — no-op stub; registered after `Agent`
+16. `MemoryToolsPlugin` — registers `search_memory` and `recall_raw` agent tools; `depends_on = {"memory"}`
+17. `FunnelPlugin` — context-admission funnel for tail CONTEXT entries
+18. `Agent` — agent loop (after all tools, transports, and support plugins)
+19. `IdleMonitorPlugin` — no-op stub; registered after `Agent`
 
 After all registrations, `validate_dependencies(pm)` runs to verify that
 every plugin's `depends_on` set names a registered plugin. Startup aborts
@@ -1261,6 +1331,7 @@ IRCPlugin           → "registry"    (ChannelRegistry)
 SubagentPlugin      → "llm", "tools"
 CompactionPlugin    → "llm"         (LLMPlugin)
 ThinkingPlugin      → "registry"    (ChannelRegistry)
+MemoryToolsPlugin   → "memory"      (MemoryPlugin)
 ```
 
 Plugins with `depends_on = set()` (declared but empty):
@@ -1295,12 +1366,15 @@ corvidae/
 ├── compaction.py         # CompactionPlugin
 ├── task.py               # Task, TaskQueue, TaskPlugin
 ├── mcp_client.py         # McpClientPlugin (MCP server bridge)
-├── memory.py             # MemoryPlugin (consolidation + retrieval)
+├── memory.py             # MemoryPlugin (consolidation + retrieval + message_fts schema)
+├── retention.py          # run_retention_job(), retention_score() (WP1b.1)
 ├── funnel.py             # FunnelPlugin (context-admission funnel)
 ├── main.py               # daemon entry point
 ├── channels/
 │   ├── cli.py            # CLIPlugin
 │   └── irc.py            # IRCPlugin
+├── commands/
+│   └── redact.py         # corvidae redact CLI (operator-only; WP1b.4)
 └── tools/
     ├── __init__.py       # CoreToolsPlugin
     ├── shell.py
@@ -1308,6 +1382,7 @@ corvidae/
     ├── web.py            # web_fetch, web_search
     ├── subagent.py       # SubagentPlugin, subagent tool, run_agent_loop()
     ├── settings.py       # RuntimeSettingsPlugin, set_settings tool
+    ├── memory_tools.py   # MemoryToolsPlugin, search_memory, recall_raw (WP1b.3)
     ├── task_pipeline.py  # TaskPipelinePlugin, task_pipeline tool
     ├── goal_tracker.py   # experimental; not registered
     ├── perf_mon.py       # experimental; not registered
@@ -1353,13 +1428,16 @@ are registered statically in `main.py`.
 
 ### Memory retrieval
 
-**Implemented** (Phase 1a) — see the MemoryPlugin section above.
+**Implemented** (Phases 1a and 1b) — see the MemoryPlugin section above.
 Consolidation turns compaction into memory formation; retrieval injects
 framed CONTEXT blocks through the admission funnel; sqlite-vec provides
-exact-KNN similarity with an FTS5 degradation path. The remaining memory
-work (retention/demotion, near-duplicate merge, `redact`, the
-`search_memory`/`recall_raw` tools, fixture benchmarks) is Phase 1b —
-see `plans/implementation/phase-1b.md`.
+exact-KNN similarity with an FTS5 degradation path. Phase 1b added
+retention scoring and demotion (usage-weighted, grace period, importance
+floor), near-duplicate merge at consolidation time, the `search_memory`
+and `recall_raw` agent tools (via `MemoryToolsPlugin`), `message_fts` for
+full-text search over raw message history, and the `corvidae redact`
+operator CLI with its full FTS cascade and verification pass. See Operator
+redaction in the MemoryPlugin section.
 
 ### Double-buffer compaction
 

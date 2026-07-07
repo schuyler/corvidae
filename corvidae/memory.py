@@ -263,6 +263,41 @@ CREATE TABLE IF NOT EXISTS retrieval_log (
 )
 """
 
+# Phase 1b: one-row table persisting the retention job's last-run timestamp
+# so restart loops don't re-run it on every start (trap #5).
+RETENTION_META_DDL = """
+CREATE TABLE IF NOT EXISTS retention_meta (
+    last_run REAL NOT NULL DEFAULT 0
+)
+"""
+
+# Phase 1b: standalone (non-external-content) FTS5 over message_log content.
+# Content-sync is done by triggers, NOT external-content; the update trigger
+# uses plain DELETE because the FTS5 'delete' command is only valid for
+# external-content tables (verified empirically, SQLite 3.47.1 — plain DELETE
+# works correctly for regular FTS5 tables).
+MESSAGE_FTS_DDL = """
+CREATE VIRTUAL TABLE IF NOT EXISTS message_fts USING fts5(content_text)
+"""
+
+MESSAGE_FTS_INSERT_TRIGGER = """
+CREATE TRIGGER IF NOT EXISTS message_log_ai AFTER INSERT ON message_log BEGIN
+    INSERT INTO message_fts(rowid, content_text)
+    VALUES (new.id, coalesce(json_extract(new.message, '$.content'), ''));
+END
+"""
+
+# Plain DELETE — not the FTS5 'delete' command — because message_fts is a
+# regular (non-external-content) FTS5 table. Verified empirically: the 'delete'
+# command aborts every UPDATE message_log SET message=... with "SQL logic error".
+MESSAGE_FTS_UPDATE_TRIGGER = """
+CREATE TRIGGER IF NOT EXISTS message_log_au AFTER UPDATE OF message ON message_log BEGIN
+    DELETE FROM message_fts WHERE rowid = old.id;
+    INSERT INTO message_fts(rowid, content_text)
+    VALUES (new.id, coalesce(json_extract(new.message, '$.content'), ''));
+END
+"""
+
 
 class MemoryPlugin(CorvidaePlugin):
     """Plugin that owns the memory store schema (consolidation and retrieval
@@ -297,6 +332,8 @@ class MemoryPlugin(CorvidaePlugin):
         self._band_moderate: float = DEFAULT_BAND_MODERATE
         self._half_life_days: float = DEFAULT_HALF_LIFE_DAYS
         self._channel_groups: dict[str, list[str]] = {}
+        # Phase 1b: near-dup merge threshold (WP1b.2)
+        self._dup_threshold: float = 0.95
         # Tracked background tasks (consolidation) — plugin-owned
         # asyncio.create_task, never the TaskQueue: every TaskQueue
         # completion triggers a full main-model turn (§2.3, trap #5).
@@ -335,6 +372,8 @@ class MemoryPlugin(CorvidaePlugin):
             "half_life_days", DEFAULT_HALF_LIFE_DAYS
         )
         self._channel_groups = self._memory_cfg.get("channel_groups", {}) or {}
+        # Phase 1b: near-dup merge threshold (WP1b.2)
+        self._dup_threshold = float(self._memory_cfg.get("dup_threshold", 0.95))
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
@@ -342,9 +381,17 @@ class MemoryPlugin(CorvidaePlugin):
 
         Deferred to first use when the persistence DB has not opened yet
         (hook-ordering dependent, same pattern as UsageLogPlugin).
+        After schema creation, spawns the message_fts backfill task and the
+        retention startup trigger (both silent background tasks, trap #5).
         """
         try:
-            await self._ensure_schema()
+            db = await self._ensure_schema()
+            if db is not None:
+                self._spawn(self._backfill_message_fts())
+                # Run synchronously so it completes before on_start returns,
+                # preventing races with tests/callers that call run_retention_job
+                # directly without waiting for background tasks first.
+                await self._retention_startup()
         except Exception:
             logger.warning("memory schema creation deferred", exc_info=True)
 
@@ -386,10 +433,12 @@ class MemoryPlugin(CorvidaePlugin):
     async def on_idle(self) -> None:
         """Trigger B: consolidate the un-consolidated tail of inactive channels.
 
+        Also spawns the retention job (rate-limited by retention_meta.last_run).
         Inactivity comes from the live Channel's last_active when the
         channel is registered, else from the newest message_log timestamp
         (covers backlog on channels this process has not seen traffic on).
         """
+        self._spawn(self._retention_startup())
         try:
             db = await self._ensure_schema()
             if db is None:
@@ -439,6 +488,85 @@ class MemoryPlugin(CorvidaePlugin):
         """Await all tracked tasks — a test/live-check convenience."""
         while self._tasks:
             await asyncio.gather(*list(self._tasks), return_exceptions=True)
+
+    # ------------------------------------------------------------------
+    # Phase 1b background tasks: message_fts backfill and retention job
+    # ------------------------------------------------------------------
+
+    async def _backfill_message_fts(self) -> None:
+        """Index message_log rows absent from message_fts.
+
+        Uses NOT IN (SELECT rowid FROM message_fts) — crash-safe: a rerun
+        after a mid-backfill crash picks up only missing rows without hitting
+        FTS5 rowid uniqueness on re-insert (verified empirically, SQLite 3.47.1).
+        """
+        try:
+            db = await self._ensure_schema()
+            if db is None:
+                return
+            async with db.execute(
+                "SELECT id, message FROM message_log "
+                "WHERE id NOT IN (SELECT rowid FROM message_fts)"
+            ) as cursor:
+                rows = await cursor.fetchall()
+            if not rows:
+                return
+            for row_id, msg_json in rows:
+                try:
+                    content = json.loads(msg_json).get("content") or ""
+                except Exception:
+                    content = ""
+                await db.execute(
+                    "INSERT INTO message_fts(rowid, content_text) VALUES (?, ?)",
+                    (row_id, content if isinstance(content, str) else ""),
+                )
+            await db.commit()
+            logger.info("message_fts: backfilled %d rows", len(rows))
+        except Exception:
+            logger.warning("message_fts backfill failed", exc_info=True)
+
+    async def _retention_startup(self) -> None:
+        """Startup trigger for the retention job (rate-limited by retention_meta).
+
+        Runs the job if the configured interval has elapsed since last_run.
+        Persisting last_run prevents crash-looping daemons from re-running
+        the job on every restart (trap #5). Also preserves the zero-traffic
+        guarantee: daemons idle longer than the interval run the job on next start.
+        """
+        try:
+            db = await self._ensure_schema()
+            if db is None:
+                return
+            retention_cfg = self._memory_cfg.get("retention", {}) or {}
+            interval = float(retention_cfg.get("interval", 21600))
+
+            async with db.execute(
+                "SELECT last_run FROM retention_meta LIMIT 1"
+            ) as cursor:
+                row = await cursor.fetchone()
+
+            now = time.time()
+            last_run = row[0] if row is not None else 0.0
+
+            if now - last_run < interval:
+                logger.debug("retention: skipping (interval not elapsed)")
+                return
+
+            # Update last_run before running (prevents double-run on crash restart)
+            if row is None:
+                await db.execute(
+                    "INSERT INTO retention_meta (last_run) VALUES (?)", (now,)
+                )
+            else:
+                await db.execute(
+                    "UPDATE retention_meta SET last_run = ?", (now,)
+                )
+            await db.commit()
+
+            from corvidae.retention import run_retention_job
+            await run_retention_job(self, now=now)
+        except Exception:
+            logger.warning("retention startup trigger failed", exc_info=True)
 
     # ------------------------------------------------------------------
     # The consolidation task (single code path for both triggers)
@@ -542,12 +670,102 @@ class MemoryPlugin(CorvidaePlugin):
                     ),
                 )
                 memory_id = cursor.lastrowid
+
+                # WP1b.2 — near-dup check: query BEFORE inserting the new vec row
+                # so the new record is naturally excluded from the top-1 result.
+                # Scoped to same channel_id (not group scope): groups grant shared
+                # retrieval, not shared ownership; cross-channel merge is a
+                # compartment leak and cross-channel msg-id ranges can't be folded.
+                # Skip entirely when embedding is unavailable or the new record
+                # has no vector (embed failed — no vector to compare).
+                dup_old_id: int | None = None
+                if (
+                    embedding is not None
+                    and self._vec_available
+                    and not self._encoder_mismatch
+                ):
+                    try:
+                        import sqlite_vec as _sv
+                        async with db.execute(
+                            "SELECT v.memory_id, (1.0 - v.distance) as similarity "
+                            "FROM (SELECT memory_id, distance FROM memory_vec "
+                            "      WHERE embedding MATCH ? AND k = ?) AS v "
+                            "JOIN memory m ON m.id = v.memory_id "
+                            "WHERE m.channel_id = ? AND m.indexed = 1 "
+                            "ORDER BY v.distance LIMIT 1",
+                            (
+                                _sv.serialize_float32(embedding),
+                                VEC_OVERFETCH * 2,
+                                channel_id,
+                            ),
+                        ) as dup_cursor:
+                            dup_row = await dup_cursor.fetchone()
+                        if dup_row is not None:
+                            dup_candidate_id, dup_similarity = dup_row
+                            if dup_similarity >= self._dup_threshold:
+                                dup_old_id = dup_candidate_id
+                    except Exception:
+                        logger.debug(
+                            "dup detection query failed; skipping for this record",
+                            exc_info=True,
+                        )
+
                 if embedding is not None and self._vec_available:
                     import sqlite_vec
                     await db.execute(
                         "INSERT INTO memory_vec (memory_id, embedding) VALUES (?, ?)",
                         (memory_id, sqlite_vec.serialize_float32(embedding)),
                     )
+
+                # If a near-dup was found, fold the old record into the new one.
+                if dup_old_id is not None:
+                    async with db.execute(
+                        "SELECT retrieval_count, last_retrieved_at, importance, "
+                        "msg_id_start, msg_id_end "
+                        "FROM memory WHERE id = ?",
+                        (dup_old_id,),
+                    ) as old_cursor:
+                        old_row = await old_cursor.fetchone()
+                    if old_row is not None:
+                        (old_rc, old_lra, old_importance,
+                         old_start, old_end) = old_row
+                        # Fold stats into the new record
+                        inherited_rc = (old_rc or 0)  # old record's count to fold in
+                        new_importance = max(importance, old_importance or 0.0)
+                        new_lra = old_lra  # new record has None; old may have a value
+                        new_start = min(old_start, rows[0][0])
+                        new_end = max(old_end, rows[-1][0])
+                        await db.execute(
+                            "UPDATE memory SET "
+                            "retrieval_count = retrieval_count + ?, "
+                            "importance = ?, "
+                            "last_retrieved_at = CASE "
+                            "  WHEN last_retrieved_at IS NULL THEN ? "
+                            "  WHEN ? IS NULL THEN last_retrieved_at "
+                            "  ELSE MAX(last_retrieved_at, ?) "
+                            "END, "
+                            "msg_id_start = ?, msg_id_end = ? "
+                            "WHERE id = ?",
+                            (inherited_rc, new_importance,
+                             new_lra, new_lra, new_lra,
+                             new_start, new_end, memory_id),
+                        )
+                        # Supersede the old record
+                        await db.execute(
+                            "UPDATE memory SET superseded_by = ?, indexed = 0, embedded = 0 "
+                            "WHERE id = ?",
+                            (memory_id, dup_old_id),
+                        )
+                        if self._vec_available:
+                            await db.execute(
+                                "DELETE FROM memory_vec WHERE memory_id = ?",
+                                (dup_old_id,),
+                            )
+                        logger.info(
+                            "memory dedup: superseded %d with %d (similarity=%.3f)",
+                            dup_old_id, memory_id, dup_similarity,
+                        )
+
                 await self._set_watermark(db, channel_id, range_end)
                 await db.commit()
             logger.info(
@@ -929,6 +1147,11 @@ class MemoryPlugin(CorvidaePlugin):
         await db.execute(MEMORY_FTS_INSERT_TRIGGER)
         await db.execute(MEMORY_FTS_UPDATE_TRIGGER)
         await db.execute(RETRIEVAL_LOG_DDL)
+        # Phase 1b: message_fts and retention_meta
+        await db.execute(MESSAGE_FTS_DDL)
+        await db.execute(MESSAGE_FTS_INSERT_TRIGGER)
+        await db.execute(MESSAGE_FTS_UPDATE_TRIGGER)
+        await db.execute(RETENTION_META_DDL)
 
         # The vector surface exists only with an embedding role configured
         # and a loadable sqlite-vec extension; anything else degrades to

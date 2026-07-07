@@ -1,0 +1,134 @@
+{
+  "description": "General-recall fixture for WP1b.5 CI benchmark. 15 operator-authored memories across hobby-electronics, garden, and home channels; 10 labeled queries including 2 with no relevant memory. Labels are hand-written per bootstrap-mapping §6.",
+  "source": "operator-authored, Phase 1b (plans/implementation/phase-1b.md WP1b.5)",
+  "conversation": [],
+  "memories": [
+    {
+      "id": "m1",
+      "summary": "kestrel's weather station is an ESP32 build; it was dropping off wifi after a few hours until wifi power-save was disabled (WIFI_PS_NONE), which fixed it.",
+      "channel_id": "irc:#electronics"
+    },
+    {
+      "id": "m2",
+      "summary": "kestrel moved the rain gauge to the north fence, which made its readings saner (previous location caused splash-over anomalies).",
+      "channel_id": "irc:#electronics"
+    },
+    {
+      "id": "m3",
+      "summary": "kestrel prefers PlatformIO over the Arduino IDE and keeps all firmware projects in a monorepo called birdhouse.",
+      "channel_id": "irc:#electronics"
+    },
+    {
+      "id": "m4",
+      "summary": "The greenhouse humidity sensor (SHT31) reads about 4% high; agreed to apply a -4 offset in firmware rather than replace it.",
+      "channel_id": "irc:#electronics"
+    },
+    {
+      "id": "m5",
+      "summary": "robin's soldering iron is a Pinecil; the USB-C supply must be 20V-capable or the tip won't reach temperature.",
+      "channel_id": "irc:#electronics"
+    },
+    {
+      "id": "m6",
+      "summary": "The shared parts bin has run out of BC547 transistors; robin volunteered to reorder from the usual distributor.",
+      "channel_id": "irc:#electronics"
+    },
+    {
+      "id": "m7",
+      "summary": "kestrel's solar charge controller logs to MQTT topic garden/power; retention on the broker is 7 days.",
+      "channel_id": "irc:#garden"
+    },
+    {
+      "id": "m8",
+      "summary": "Decision: all outdoor sensor enclosures get conformal coating after the spring condensation failures.",
+      "channel_id": "irc:#garden"
+    },
+    {
+      "id": "m9",
+      "summary": "robin volunteered to write up the wiring schema for the main electronics bench as a Markdown doc in the birdhouse repo.",
+      "channel_id": "irc:#electronics"
+    },
+    {
+      "id": "m10",
+      "summary": "kestrel's Makita 18V tools share batteries with the shop vac but not with the older 14.4V drill; confirmed the battery form factor is incompatible.",
+      "channel_id": "irc:#home"
+    },
+    {
+      "id": "m11",
+      "summary": "The compost bin temperature sensor is a DS18B20 on a 2-meter cable; it reads consistently about 1.5°C high in ambient air.",
+      "channel_id": "irc:#garden"
+    },
+    {
+      "id": "m12",
+      "summary": "The grow light timer in the seedling cabinet is set to 14 hours per day for the tomato seedlings; kestrel will reduce to 12h after transplanting.",
+      "channel_id": "irc:#garden"
+    },
+    {
+      "id": "m13",
+      "summary": "kestrel prefers VSCode with the YAML extension over vim for editing config files; mainly for inline schema validation.",
+      "channel_id": "irc:#home"
+    },
+    {
+      "id": "m14",
+      "summary": "The garden irrigation controller is a Wemos D1 Mini running ESPHome; it controls four solenoid valves on a schedule loaded from YAML.",
+      "channel_id": "irc:#garden"
+    },
+    {
+      "id": "m15",
+      "summary": "kestrel set up a Raspberry Pi 4 as a home server running Home Assistant and Mosquitto; it backs up nightly to a USB drive.",
+      "channel_id": "irc:#home"
+    }
+  ],
+  "queries": [
+    {
+      "text": "Why did the ESP32 weather station keep losing its wifi connection?",
+      "relevant": ["m1"],
+      "note": "m1 is the only memory about the wifi dropout and its WIFI_PS_NONE fix."
+    },
+    {
+      "text": "What is the humidity sensor problem in the greenhouse and how was it addressed?",
+      "relevant": ["m4"],
+      "note": "m4 records the SHT31 high-reading bias and the firmware-offset decision."
+    },
+    {
+      "text": "What power supply does the Pinecil soldering iron need?",
+      "relevant": ["m5"],
+      "note": "m5 specifies the 20V USB-C supply requirement for the Pinecil tip temperature."
+    },
+    {
+      "text": "Where does the solar charge controller publish its data?",
+      "relevant": ["m7"],
+      "note": "m7 records the MQTT topic garden/power and the 7-day broker retention."
+    },
+    {
+      "text": "What temperature sensor is in the compost bin?",
+      "relevant": ["m11"],
+      "note": "m11 records the DS18B20 on a 2-meter cable and its +1.5°C ambient bias."
+    },
+    {
+      "text": "What controls the garden irrigation valves and how is it configured?",
+      "relevant": ["m14"],
+      "note": "m14 records the Wemos D1 Mini running ESPHome with YAML-loaded solenoid schedule."
+    },
+    {
+      "text": "What tool does kestrel use as a home server and what runs on it?",
+      "relevant": ["m15"],
+      "note": "m15 records the Raspberry Pi 4 with Home Assistant and Mosquitto."
+    },
+    {
+      "text": "What is kestrel's preferred firmware development environment?",
+      "relevant": ["m3"],
+      "note": "m3 records the PlatformIO preference and the birdhouse monorepo."
+    },
+    {
+      "text": "Has anyone ordered a 3D printer for the lab yet?",
+      "relevant": [],
+      "note": "No memory of a 3D printer. This is a negative case — the system should admit nothing."
+    },
+    {
+      "text": "What guitar model does kestrel play?",
+      "relevant": [],
+      "note": "No memory of any guitar. This is a negative case — the system should admit nothing."
+    }
+  ]
+}

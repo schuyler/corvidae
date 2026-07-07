@@ -453,6 +453,7 @@ thinking          (ThinkingPlugin)      — entry point
 runtime_settings  (RuntimeSettingsPlugin) — entry point
 tools             (ToolCollectionPlugin) — entry point
 memory            (MemoryPlugin)        — entry point
+memory_tools      (MemoryToolsPlugin)   — entry point
 funnel            (FunnelPlugin)        — entry point
 agent             (Agent)               — entry point
 idle_monitor      (IdleMonitorPlugin)   — entry point
@@ -912,6 +913,48 @@ documented in [configuration.md](configuration.md) (`memory.*`,
 
 **Without this plugin:** no memory records form and no retrieval happens;
 compaction remains plain lossy summarization.
+
+### MemoryToolsPlugin (`corvidae/tools/memory_tools.py`)
+
+Registers the `search_memory` and `recall_raw` agent tools — the active
+memory surface ("remember harder", bootstrap-mapping §3.1). Entry point
+name: `"memory_tools"`; `depends_on = frozenset({"memory"})`. Reaches the
+DB and channel-scope logic through `get_dependency(pm, "memory",
+MemoryPlugin)`.
+
+Implements one hook:
+
+- `register_tools` — appends `search_memory` and `recall_raw` to
+  `tool_registry`.
+
+**Compartment scoping:** both tools enforce the calling channel's
+`_channel_scope` (the channel itself plus any group siblings configured in
+`memory.channel_groups` — identical to the scope `MemoryPlugin`'s passive
+retrieval uses). The calling channel comes from `_ctx.channel`; when
+`_ctx.channel is None` both tools return an error string and never fall
+back to unscoped access. The tools are broader than passive retrieval in
+*status* (they reach demoted, superseded, and redacted-tombstone records)
+but never broader in *compartment* — channel B cannot enumerate or raw-recall
+channel A's memories.
+
+**Tools:**
+
+| Tool | Parameters | What it does |
+|------|------------|--------------|
+| `search_memory` | `query: str`, `channel: str\|None` (default `None`), `tags: list[str]\|None` (default `None`), `after: str\|None` (default `None`), `before: str\|None` (default `None`), `include_demoted: bool` (default `True`), `max_tokens: int` (default `2000`) | FTS5 keyword search over `memory_fts`. Returns a numbered list `id. score (age)[flags] summary` sorted by FTS relevance, capped at approximately `max_tokens`. `channel` narrows within the calling channel's scope; a value outside scope returns an error string naming visible channels. `after`/`before` are ISO-8601 (`YYYY-MM-DD` or full timestamp; naive values treated as UTC) compared against `created_at` (`after` ⇒ `≥`, `before` ⇒ `<`); unparseable values return an error string. `include_demoted=False` restricts to `indexed=1` records, hiding demoted, superseded, and redacted-tombstone records (all are `indexed=0`). `tags` filters by `topic_tags` JSON array intersection. **Does not update access stats.** |
+| `recall_raw` | `memory_id: int`, `max_tokens: int` (default `1000`) | Replays the raw `message_log` dialog for the record's `[msg_id_start, msg_id_end]` range using `WHERE channel_id = record.channel_id AND id BETWEEN ...` — the channel predicate is load-bearing because the `message_log` id sequence is global across all channels. Returns a participants header (`[memory N: messages S–E, participants: {...}]`) followed by verbatim `role: content` lines, truncated at `max_tokens` with an explicit marker. Works on demoted, superseded, and tombstoned records. Rejects out-of-scope record IDs without bumping stats. **Bumps `retrieval_count` and `last_retrieved_at`** on the record — the bump is what makes the record eligible for re-promotion by the next retention job run. |
+
+**Recall-stat semantics:** `recall_raw` bumps the record's access stats;
+`search_memory` does not. `search_memory` is a catalog for choosing what
+to recall; bumping every listed record would inflate scores for marginal
+matches and distort retention scoring. The re-promotion path is:
+`search_memory` surfaces a demoted record (flagged `[demoted]`) → agent
+calls `recall_raw` → next retention job run finds the score above the
+demotion threshold and re-promotes.
+
+**Without this plugin:** the `search_memory` and `recall_raw` tools are
+not available. Memory records are still formed and passively retrieved
+by `MemoryPlugin`; only the agent's active access surface is absent.
 
 ### FunnelPlugin (`corvidae/funnel.py`)
 
