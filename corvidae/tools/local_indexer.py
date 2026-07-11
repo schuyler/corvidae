@@ -387,7 +387,7 @@ class LocalIndexerPlugin:
         self._workspace_root: Path | None = None
 
     @hookimpl
-    async def on_start(self, config: dict[str, Any] | None = None) -> None:
+    async def on_start(self, config: dict[str, Any]) -> None:
         """Initialize the workspace indexer."""
         if not config:
             return
