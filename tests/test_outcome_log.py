@@ -87,10 +87,16 @@ class TestExchangeLogWriter:
             await plugin.update_exchange("ex5", channel_id="hijacked")
 
     async def test_update_json_columns(self, db):
+        """appraisal/outcomes are merge columns: dict fragments are merged
+        via atomic json_patch, not stored verbatim (see WP2.1's
+        test_merge_column_rejects_scalar_value for the scalar-rejection
+        half of this contract)."""
+        import json
+
         plugin = await _setup(db)
         await plugin.record_exchange("ex6", "cli:local")
         await plugin.update_exchange(
-            "ex6", appraisal='{"valence": 0.2}', outcomes='{"verdict": "good"}'
+            "ex6", appraisal={"valence": 0.2}, outcomes={"verdict": "good"}
         )
 
         async with db.execute(
@@ -99,4 +105,19 @@ class TestExchangeLogWriter:
         ) as cursor:
             row = await cursor.fetchone()
 
-        assert row == ('{"valence": 0.2}', '{"verdict": "good"}')
+        assert json.loads(row[0]) == {"valence": 0.2}
+        assert json.loads(row[1]) == {"verdict": "good"}
+
+        # A second update with a new fragment merges rather than overwrites.
+        await plugin.update_exchange("ex6", appraisal={"stage2": {"score": 0.5}})
+
+        async with db.execute(
+            "SELECT appraisal FROM exchange_log WHERE exchange_key = ?",
+            ("ex6",),
+        ) as cursor:
+            (merged_appraisal,) = await cursor.fetchone()
+
+        assert json.loads(merged_appraisal) == {
+            "valence": 0.2,
+            "stage2": {"score": 0.5},
+        }

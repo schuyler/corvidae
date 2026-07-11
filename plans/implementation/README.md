@@ -11,10 +11,10 @@ red tests first, and explicit trap warnings.
 | 1 | `phase-0.md` | Observability hooks, attribution, outcome-log schema, eval-harness foundations | M–L | DONE (11b07b3) |
 | 2 | `phase-1a.md` | MemoryPlugin core: schema, rowid threading, embeddings, consolidation, retrieval, admission funnel | L | DONE (4c64ce1) |
 | 3 | `phase-1b.md` | Reconsolidation/demotion, redact, memory tools, fixture evals | M | DONE (a1c42fd) |
+| 4 | `phase-2.md` | Appraisal (stage 1 heuristics/FTS5 probe + stage 2 LLM), CritiquePlugin, `should_send_response`/WITHHELD output gate, engagement/decide gates, calibration + correction harvesting | L | PLANNED — design consistency review passed (gate: pass with cosmetics, 2026-07-07); implementation not started |
 
-Phases 2+ are deliberately not planned at this level yet — per
-`bootstrap-mapping.md` §6, their detail depends on what the Phase 1 evals
-show. Plan them when Phase 1 is green.
+Phase 2 is planned and gated (`phase-2.md`). Phases 3+ remain unplanned at
+this level — plan them once Phase 2 is underway and their scope is known.
 
 ## Shared conventions (apply to every phase)
 

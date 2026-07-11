@@ -432,11 +432,11 @@ class TestOnMessagePersistenceAndLoop:
             text="my answer",
             latency_ms=ANY,
         )
-        plugin.pm.ahook.on_agent_response.assert_awaited_once_with(
-            channel=channel,
-            request_text="question",
-            response_text="my answer",
-        )
+        plugin.pm.ahook.on_agent_response.assert_awaited_once()
+        call_kwargs = plugin.pm.ahook.on_agent_response.call_args.kwargs
+        assert call_kwargs["channel"] == channel
+        assert call_kwargs["request_text"] == "question"
+        assert call_kwargs["response_text"] == "my answer"
 
         await db.close()
 

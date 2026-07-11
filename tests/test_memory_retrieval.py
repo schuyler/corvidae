@@ -136,7 +136,7 @@ async def seed_memory(
 async def ask(memory, channel, conv, text: str) -> None:
     """Simulate the turn-loop entry: append the user message, fire retrieval."""
     conv.append({"role": "user", "content": text})
-    await memory.before_agent_turn(channel=channel)
+    await memory.before_agent_turn(channel=channel, exchange_key=None, origin=None)
 
 
 def context_messages(conv) -> list[dict]:
@@ -182,7 +182,7 @@ class TestRetrievalBasics:
         memory, embedder, channel, conv, db = await build_retrieval_env()
         await seed_memory(db, channel.id, "some memory about wifi networks")
         conv.append({"role": "system", "content": "[task]\n\nwifi wifi wifi"})
-        await memory.before_agent_turn(channel=channel)
+        await memory.before_agent_turn(channel=channel, exchange_key=None, origin=None)
         assert context_messages(conv) == []
         assert embedder.calls == []
         await db.close()

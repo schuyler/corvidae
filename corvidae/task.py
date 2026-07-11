@@ -53,6 +53,11 @@ class Task:
             inside this context so attribution set by the enqueuer is
             visible to the task body — worker coroutines are created once
             at startup and would otherwise never see it.
+        exchange_key: The exchange this task belongs to (Phase 2). Stamped
+            by Agent._dispatch_tool_calls from the current turn's
+            attribution so the tool cycle carries its exchange forward.
+        origin: 'user'|'reminder'|'critique'|'heartbeat'|'task'. Stamped
+            alongside exchange_key.
     """
 
     work: Callable[[], Awaitable[str]]
@@ -62,6 +67,8 @@ class Task:
     tool_call_id: str | None = None
     description: str = ""
     ctx: contextvars.Context = field(default_factory=contextvars.copy_context)
+    exchange_key: str | None = None
+    origin: str | None = None
 
 
 class TaskQueue:
@@ -282,7 +289,11 @@ class TaskPlugin(CorvidaePlugin):
                 source="task",
                 text=f"[Task {task.task_id}] {result}",
                 tool_call_id=task.tool_call_id,
-                meta={"task_id": task.task_id},
+                meta={
+                    "task_id": task.task_id,
+                    "exchange_key": task.exchange_key,
+                    "origin": task.origin,
+                },
             )
         except Exception:
             logger.warning(

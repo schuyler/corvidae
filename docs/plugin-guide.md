@@ -157,6 +157,10 @@ The `config` parameter is optional in `on_config_reload` hookimpls. Pluggy forwa
 | Hook | Type | When |
 |------|------|------|
 | `on_message(channel, sender: str, text: str)` | async broadcast | Inbound message arrives |
+| `should_process_message(channel, sender: str, text: str, exchange_key: str)` | async broadcast, `REJECT_WINS` | Gate: decide whether to process a message (Phase 2). Return False to reject, True to accept, None for no opinion. |
+| `on_message_admitted(channel, exchange_key: str, sender: str, text: str)` | async broadcast | After should_process_message admits a USER message |
+| `on_message_rejected(channel, exchange_key: str, sender: str, text: str)` | async broadcast | After should_process_message vetoes a USER message |
+| `on_message_persisted(channel, exchange_key: str, rowid: int, origin: str \| None)` | async broadcast | After the exchange-originating message is persisted to the database (Phase 2). Origin is 'user', 'reminder', 'critique', 'heartbeat', or 'task'. |
 | `send_message(channel, text: str, latency_ms: float \| None)` | async broadcast | Outbound delivery request |
 | `on_notify(channel, source: str, text: str, tool_call_id: str \| None, meta: dict \| None)` | async broadcast | Notification injected into channel |
 
@@ -177,8 +181,8 @@ async def send_message(self, channel, text: str) -> None:
 | Hook | Type | When |
 |------|------|------|
 | `register_tools(tool_registry: list)` | sync broadcast | During `on_start`, to collect tools |
-| `on_agent_response(channel, request_text: str, response_text: str)` | async broadcast | After agent produces a response |
-| `before_agent_turn(channel)` | async broadcast | Before each LLM invocation |
+| `on_agent_response(channel, request_text: str, response_text: str, exchange_key: str \| None, origin: str \| None, originating_text: str \| None, logprobs: dict \| None, withheld: bool \| None)` | async broadcast | After agent produces a response (Phase 2 enriched with exchange metadata) |
+| `before_agent_turn(channel, exchange_key: str \| None, origin: str \| None)` | async broadcast | Before each LLM invocation (Phase 2 enriched with exchange metadata) |
 | `after_persist_assistant(channel, message: dict)` | async broadcast | After assistant message is written to DB; plugins may mutate the in-memory dict |
 | `on_conversation_event(channel, message: dict, message_type: MessageType) -> int \| None` | async broadcast | After every `conv.append()` call; message is the untagged dict (no `_message_type` key). Persistence returns the inserted `message_log` rowid; **exactly one implementation may return non-None** (all others return None). Callers resolve with `resolve_single_result` and attach the rowid to the in-window message as `_db_id`. |
 | `on_compaction(channel, summary_msg: dict, retain_count: int, compacted_ids: list[int])` | async broadcast | After compaction replaces older messages with a summary; `summary_msg` is the untagged summary dict. `compacted_ids` carries the `message_log` rowids of exactly the removed messages (empty when unknown) — the consolidation range consumed by `MemoryPlugin`. |
@@ -246,7 +250,7 @@ These hooks return a value. Hooks marked `firstresult=True` (sequential) stop at
 
 | Hook | Strategy | Returns | Behavior |
 |------|----------|---------|----------|
-| `should_process_message(channel, sender, text)` | `REJECT_WINS` (broadcast) | `bool \| None` | Any `False` vetoes the message; any `True` (with no `False`) accepts; `None` if all defer |
+| `should_process_message(channel, sender, text, exchange_key)` | `REJECT_WINS` (broadcast) | `bool \| None` | Any `False` vetoes the message; any `True` (with no `False`) accepts; `None` if all defer |
 | `on_llm_error(channel, error)` | `firstresult=True` | `str \| None` | First non-None string wins; chain stops. If all return None, default error message is used. |
 | `compact_conversation(channel, conversation, max_tokens)` | `firstresult=True` | `bool \| None` | First non-None return stops the chain. `CompactionPlugin` uses `trylast` (returns True). Third-party plugins run at default priority. |
 | `process_tool_result(tool_name, result, channel)` | `firstresult=True` wrapper chain | `str \| None` | Wrappers compose transforms in LIFO order. The seed returns the input unchanged. Non-wrapper hookimpls short-circuit the seed via firstresult. |
@@ -263,7 +267,7 @@ Example hook returning a value:
 
 ```python
 @hookimpl
-async def should_process_message(self, channel, sender: str, text: str) -> bool | None:
+async def should_process_message(self, channel, sender: str, text: str, exchange_key: str) -> bool | None:
     if sender in self.blocklist:
         return False
     return None  # no opinion
@@ -379,7 +383,7 @@ registry = tools_plugin.get_registry()
 
 ## Injecting context before agent turns
 
-`before_agent_turn` fires before every LLM call. Use it to inject contextual information (memory retrieval, current state, etc.) into the conversation:
+`before_agent_turn` fires before every LLM call. Use it to inject contextual information (memory retrieval, current state, etc.) into the conversation. The hook receives the current exchange key and origin (Phase 2):
 
 ```python
 from corvidae.context import MessageType
@@ -387,8 +391,8 @@ from corvidae.hooks import CorvidaePlugin, hookimpl
 
 class MemoryPlugin(CorvidaePlugin):
     @hookimpl
-    async def before_agent_turn(self, channel) -> None:
-        notes = await self.fetch_relevant_notes(channel.id)
+    async def before_agent_turn(self, channel, exchange_key: str | None, origin: str | None) -> None:
+        notes = await self.fetch_relevant_notes(channel.id, exchange_key)
         if notes:
             channel.conversation.append(
                 {"role": "user", "content": f"[Context]\n{notes}"},
@@ -399,6 +403,32 @@ class MemoryPlugin(CorvidaePlugin):
 `MessageType.CONTEXT` entries survive compaction — compaction only summarizes `MESSAGE` entries.
 
 Prefer routing CONTEXT through the admission funnel instead of appending directly: `pm.get_plugin("funnel").admit(channel, conv, "<source>", entries)` gives you window dedupe, per-source token budgets, and the mandatory data-not-instructions framing for free (see FunnelPlugin below). Direct appends bypass all three.
+
+## Message gating and lifecycle
+
+The `should_process_message` gate fires before a message enters the conversation. Implement it to filter messages by sender, rate limit, or apply channel muting:
+
+```python
+class FilterPlugin(CorvidaePlugin):
+    @hookimpl
+    async def should_process_message(self, channel, sender: str, text: str, exchange_key: str) -> bool | None:
+        if sender in self.muted_users:
+            return False  # Reject
+        return None  # No opinion; other plugins decide
+```
+
+When a message is admitted or rejected, plugins are notified via `on_message_admitted` or `on_message_rejected`. These fires exactly once per message. The `on_message_persisted` hook fires after the exchange-originating message (the initial USER message or a standalone notification) has been written to the database. It receives the database rowid and the message origin ('user', 'reminder', 'critique', 'heartbeat', or 'task'):
+
+```python
+class LogPlugin(CorvidaePlugin):
+    @hookimpl
+    async def on_message_admitted(self, channel, exchange_key: str, sender: str, text: str) -> None:
+        await self.log_event("message_admitted", exchange_key, sender)
+
+    @hookimpl
+    async def on_message_persisted(self, channel, exchange_key: str, rowid: int, origin: str | None) -> None:
+        await self.log_event("message_persisted", exchange_key, rowid, origin)
+```
 
 ## Channels
 
