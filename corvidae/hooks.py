@@ -18,6 +18,7 @@ Exports:
 from __future__ import annotations
 
 import logging
+import warnings
 from enum import Enum
 from typing import TYPE_CHECKING, TypeVar
 
@@ -174,6 +175,103 @@ class _SeedHooksPlugin:
         return result
 
 
+def _check_hook_arg_binding(pm: pluggy.PluginManager) -> None:
+    """Guard against pluggy's silent-drop hookimpl arg-binding bug class.
+
+    pluggy forwards a caller's value to a hookimpl param ONLY when that
+    param has NO default in the hookimpl's own signature. A hookimpl that
+    re-declares a spec-REQUIRED param WITH a default (e.g. ``config=None``)
+    silently receives its own default instead of the caller's value --
+    pluggy raises no error for this, and pluggy's own ``_verify_hook`` does
+    not catch it either, because the impl signature is individually valid;
+    the problem only exists in the *relationship* between the spec and the
+    impl.
+
+    The invariant enforced here: for each hookcaller, the spec's required
+    params are ``spec.argnames`` (spec params with NO default). For each
+    registered impl, the params the impl itself defaults are
+    ``impl.kwargnames``. If a required spec param also appears in an
+    impl's kwargnames, that impl is silently dropping a required
+    caller-supplied value -- raise PluginValidationError naming the
+    plugin, hook, and offending param(s).
+
+    Spec-OPTIONAL params (params the spec itself declares with a default,
+    e.g. ``latency_ms``, ``args_summary``) are not required, so an impl
+    defaulting those is legitimate and must not trigger this guard.
+
+    This function reads pluggy's internal HookCaller/HookSpec/HookImpl
+    attributes (``.spec``, ``.argnames``, ``.kwargnames``,
+    ``.get_hookimpls()``), which are not part of pluggy's public API and
+    could change in a future pluggy release. Any exception raised while
+    walking these internals (other than PluginValidationError raised by
+    this function itself upon finding a real violation) is caught and
+    logged as a warning; the guard degrades to "skipped" rather than
+    crashing app startup.
+
+    Args:
+        pm: The plugin manager to check, after all hookspecs and plugins
+            have been registered.
+
+    Raises:
+        PluginValidationError: if any registered impl defaults a
+            spec-required param for some hook.
+    """
+    try:
+        hookcallers = list(pm.hook.__dict__.values())
+    except Exception as exc:  # noqa: BLE001 - defensive, see docstring
+        warnings.warn(
+            f"hook arg-binding guard skipped: pluggy internals unavailable ({exc})",
+            stacklevel=2,
+        )
+        return
+
+    for caller in hookcallers:
+        try:
+            spec = caller.spec
+            if spec is None:
+                continue
+            required_params = set(spec.argnames)
+            if not required_params:
+                continue
+            hookimpls = caller.get_hookimpls()
+            hook_name = caller.name
+        except Exception as exc:  # noqa: BLE001 - defensive, see docstring
+            warnings.warn(
+                f"hook arg-binding guard skipped for a hookcaller: "
+                f"pluggy internals unavailable ({exc})",
+                stacklevel=2,
+            )
+            continue
+
+        for impl in hookimpls:
+            try:
+                dropped = required_params & set(impl.kwargnames)
+                plugin = impl.plugin
+            except Exception as exc:  # noqa: BLE001 - defensive, see docstring
+                warnings.warn(
+                    f"hook arg-binding guard skipped for a hookimpl: "
+                    f"pluggy internals unavailable ({exc})",
+                    stacklevel=2,
+                )
+                continue
+
+            if dropped:
+                try:
+                    plugin_name = pm.get_name(plugin) or repr(plugin)
+                except Exception:  # noqa: BLE001 - defensive, see docstring
+                    plugin_name = repr(plugin)
+                raise pluggy.PluginValidationError(
+                    plugin,
+                    f"Plugin {plugin_name!r} hookimpl {hook_name!r} "
+                    f"declares spec-required param(s) "
+                    f"{sorted(dropped)!r} with a default value. "
+                    f"pluggy will not forward the caller's value for "
+                    f"these params -- it silently uses the impl's own "
+                    f"default instead. Remove the default(s) from "
+                    f"{sorted(dropped)!r} in this hookimpl's signature.",
+                )
+
+
 def create_plugin_manager() -> pluggy.PluginManager:
     """Create and configure the plugin manager with AgentSpec hooks.
 
@@ -187,6 +285,8 @@ def create_plugin_manager() -> pluggy.PluginManager:
     pm.register(_SeedHooksPlugin(), name="_seed_hooks")
 
     _pm_logger.debug("plugin manager created")
+
+    _check_hook_arg_binding(pm)
 
     return pm
 

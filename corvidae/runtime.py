@@ -22,7 +22,11 @@ from pathlib import Path
 import yaml
 
 from corvidae.channel import ChannelRegistry, load_channel_config
-from corvidae.hooks import create_plugin_manager, validate_dependencies
+from corvidae.hooks import (
+    _check_hook_arg_binding,
+    create_plugin_manager,
+    validate_dependencies,
+)
 from corvidae.logging import configure_logging
 
 logger = logging.getLogger(__name__)
@@ -131,6 +135,12 @@ class Runtime:
 
         # 8. Load entry-point plugins
         self.pm.load_setuptools_entrypoints("corvidae")
+
+        # 8b. Guard the full, real plugin set against pluggy's silent-drop
+        #     arg-binding bug class. create_plugin_manager() only checks the
+        #     seed hooks; the real entry-point plugins are not registered
+        #     until the line above, so this second check covers them.
+        _check_hook_arg_binding(self.pm)
 
         # 9. Validate dependencies
         validate_dependencies(self.pm)
