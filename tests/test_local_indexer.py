@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from corvidae.hooks import create_plugin_manager
 from corvidae.tools.local_indexer import (
     LocalIndexer,
     LocalIndexerPlugin,
@@ -268,5 +269,34 @@ class TestLocalIndexerPlugin:
         result = await tool_fn("test content", mode="text")
         assert isinstance(result, str)
         assert "Test content" in result or "No results" not in result
+
+        await plugin.indexer.close()
+
+    async def test_on_start_receives_config_via_real_hook_broadcast(self, tmp_path):
+        """on_start must actually receive the config dict when invoked through
+        the real pluggy hook broadcast (pm.ahook.on_start(config=...)), the
+        same way runtime.py starts every plugin.
+
+        Regression test: on_start's signature previously declared
+        `config: dict | None = None`. Because the parameter carried a
+        default, pluggy classified it as a kwarg-with-default and never
+        forwarded the caller's config through the broadcast, so the plugin
+        always saw config=None and silently no-op'd (workspace indexing
+        never initialized) despite the caller passing a real config.
+        """
+        pm = create_plugin_manager()
+        plugin = LocalIndexerPlugin(pm)
+        pm.register(plugin, name="local_indexer")
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        config = {"tools": {"workspace_path": str(workspace)}}
+
+        await pm.ahook.on_start(config=config)
+
+        assert plugin.indexer is not None, (
+            "LocalIndexerPlugin.on_start did not receive the config passed "
+            "via the real hook broadcast; indexer was never initialized"
+        )
 
         await plugin.indexer.close()
