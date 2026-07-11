@@ -331,14 +331,35 @@ class AgentSpec:
 
     @hookspec
     async def on_agent_response(
-        self, channel: Channel, request_text: str, response_text: str
+        self,
+        channel: Channel,
+        request_text: str,
+        response_text: str,
+        exchange_key: str | None,
+        origin: str | None,
+        originating_text: str | None,
+        logprobs: dict | None = None,
+        withheld: bool | None = None,
     ) -> None:
         """Called after the agent loop produces a response to a message.
 
         Args:
             channel: The Channel where the conversation occurred.
             request_text: The original user message that triggered the loop.
+                Legacy semantics: for a tool-using exchange this is the last
+                tool-result turn's text, not the exchange's true originating
+                text — kept for backward compatibility. Use originating_text
+                for the true originating message.
             response_text: The final text produced by the agent loop.
+            exchange_key: The exchange this response belongs to (Phase 2).
+            origin: 'user'|'reminder'|'critique'|'heartbeat'|'task'.
+            originating_text: The exchange's true originating message (the
+                USER message or notification text that started the
+                exchange), regardless of how many tool-calling hops
+                occurred. None if unavailable.
+            logprobs: The response's logprobs envelope, or None (WP2.2).
+            withheld: True if the response was withheld from delivery
+                (WP2.9). False in 2A/2B; always populated from WP2.9 on.
 
         Note:
             Extension point for observability plugins (logging, metrics,
@@ -378,18 +399,82 @@ class AgentSpec:
 
     @hookspec
     async def should_process_message(
-        self, channel: Channel, sender: str, text: str
+        self, channel: Channel, sender: str, text: str, exchange_key: str | None
     ) -> bool | None:
         """Gate hook: decide whether to process an incoming message.
 
         Broadcast hook. All implementations run. Any False vetoes (reject-wins).
         Return False to reject, True to accept, None for no opinion.
 
+        Args:
+            channel: The Channel object for this conversation scope.
+            sender: The user or entity that sent the message.
+            text: The message content.
+            exchange_key: The key minted for this message before the gate
+                fires (Phase 2). Present for every USER message.
+
         Note:
             Extension point for message filtering (rate limiting, blocklists,
             channel muting). No built-in plugin implements this hook. Return
             False to reject, True to force-accept, None for no opinion.
             Resolved with REJECT_WINS.
+        """
+
+    @hookspec
+    async def on_message_admitted(
+        self, channel: Channel, exchange_key: str, sender: str, text: str
+    ) -> None:
+        """Broadcast after should_process_message admits a USER message.
+
+        Fired exactly once per admitted message, after REJECT_WINS
+        resolution. Side effects only (e.g. OutcomeLogPlugin's
+        record_exchange).
+
+        Args:
+            channel: The Channel the message arrived on.
+            exchange_key: The key minted for this message before the gate.
+            sender: The user or entity that sent the message.
+            text: The message content.
+        """
+
+    @hookspec
+    async def on_message_rejected(
+        self, channel: Channel, exchange_key: str, sender: str, text: str
+    ) -> None:
+        """Broadcast after should_process_message vetoes a USER message.
+
+        Fired exactly once per rejected message. The exchange_key still
+        lives on in the outcome log — rejected messages' stage-1
+        appraisals are the offline engagement-calibration corpus (§3.2).
+
+        Args:
+            channel: The Channel the message arrived on.
+            exchange_key: The key minted for this message before the gate.
+            sender: The user or entity that sent the message.
+            text: The message content.
+        """
+
+    @hookspec
+    async def on_message_persisted(
+        self, channel: Channel, exchange_key: str, rowid: int, origin: str | None
+    ) -> None:
+        """Broadcast after the exchange-originating message row is persisted.
+
+        Fired only when the current queue item originates its exchange
+        (USER items, and notification items whose key was minted at
+        dequeue) — never for mid-exchange tool-result rows, injected
+        CONTEXT, or assistant rows (per-row firing under one key would
+        overwrite the rowid with each successive row).
+
+        Args:
+            channel: The Channel the message was persisted on.
+            exchange_key: The exchange this row originates.
+            rowid: The message_log rowid of the persisted row.
+            origin: 'user'|'reminder'|'critique'|'heartbeat'|'task'. Carries
+                the origin for notification-born exchanges (a dequeue-minted
+                standalone notification's origin is not otherwise
+                observable from this hook's other params, since it never
+                went through should_process_message/on_message_admitted).
         """
 
     @hookspec(firstresult=True)
@@ -603,7 +688,12 @@ class AgentSpec:
         """
 
     @hookspec
-    async def before_agent_turn(self, channel: "Channel") -> None:
+    async def before_agent_turn(
+        self,
+        channel: "Channel",
+        exchange_key: str | None,
+        origin: str | None,
+    ) -> None:
         """Called before each LLM invocation, after compaction.
 
         Plugins can inject context entries into the conversation log by calling
@@ -618,6 +708,8 @@ class AgentSpec:
         Args:
             channel: The Channel being processed. Use ``channel.conversation``
                 to access the ContextWindow for appending context entries.
+            exchange_key: The current turn's exchange key (Phase 2).
+            origin: 'user'|'reminder'|'critique'|'heartbeat'|'task'.
         """
 
     @hookspec

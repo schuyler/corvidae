@@ -23,14 +23,16 @@ Logging:
 """
 
 import asyncio
+import collections
 import logging
 import time
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field, fields as dc_fields
 from enum import Enum
 
 from corvidae.turn import AgentTurnResult, run_agent_turn
-from corvidae.attribution import reset_attribution, set_attribution
+from corvidae.attribution import get_attribution, reset_attribution, set_attribution
 from corvidae.channel import Channel, ChannelConfig, ChannelRegistry, resolve_system_prompt
 from corvidae.context import ContextWindow, MessageType, DEFAULT_CHARS_PER_TOKEN
 from corvidae.hooks import (
@@ -55,6 +57,22 @@ DEFAULT_LLM_ERROR_MESSAGE = "Sorry, I encountered an error and could not process
 # Note: same text as MAX_ROUNDS_REACHED_MESSAGE in tools/subagent.py — kept in sync.
 MAX_TURNS_FALLBACK_MESSAGE = "(max tool-calling rounds reached)"
 
+# Bound on the originating-text LRU (Agent._originating_text). Keyed by
+# exchange_key, not per-channel — user messages interleave mid-cycle by
+# design (§3.3), so a single per-channel slot would be clobbered.
+ORIGINATING_TEXT_LRU_MAXSIZE = 512
+
+
+def mint_exchange_key() -> str:
+    """Mint a time-sortable, globally-unique exchange key.
+
+    Shape: ``<hex-time>-<hex12>`` (§3.1 timestamp-prefixed-hex convention).
+    The hex-time prefix is monotone-nondecreasing across calls (wall-clock
+    seconds); the uuid4 suffix guarantees distinctness within the same
+    second.
+    """
+    return f"{int(time.time()):x}-{uuid.uuid4().hex[:12]}"
+
 
 class QueueItemRole(Enum):
     USER = "user"
@@ -74,6 +92,15 @@ class QueueItem:
         source: For notifications, the origin (e.g. "task"); None for user messages.
         tool_call_id: For deferred tool results (background task completions).
         meta: Extensible metadata (task_id, etc.).
+        exchange_key: The exchange this item belongs to (Phase 2). None for
+            notifications until dequeue-time resolution runs.
+        origin: 'user'|'reminder'|'critique'|'heartbeat'|'task'. None until
+            dequeue-time resolution runs (for notifications).
+        originates_exchange: True when this item mints/owns the exchange
+            (USER items, and dequeue-minted notifications). False for
+            tool-result notifications that inherited a key from a prior
+            item. Tracked on the item, never re-derived, so
+            on_message_persisted firing discipline stays correct.
     """
 
     role: QueueItemRole
@@ -83,6 +110,9 @@ class QueueItem:
     source: str | None = None
     tool_call_id: str | None = None
     meta: dict = field(default_factory=dict)
+    exchange_key: str | None = None
+    origin: str | None = None
+    originates_exchange: bool = False
 
 
 class Agent(CorvidaePlugin):
@@ -114,6 +144,11 @@ class Agent(CorvidaePlugin):
         self._idle_cooldown: float = 30.0
         self._last_idle_fire: float = 0.0
         self._idle_firing: bool = False
+        # Exchange-keyed LRU of originating text (the exchange's true
+        # originating USER/notification text), bounded so long-running
+        # exchanges don't leak memory. Never a per-channel slot — user
+        # messages interleave mid-cycle by design (§3.3).
+        self._originating_text: collections.OrderedDict[str, str] = collections.OrderedDict()
 
     @property
     def tools(self) -> dict[str, Callable]:
@@ -177,9 +212,13 @@ class Agent(CorvidaePlugin):
             extra={"channel": channel.id, "sender": sender},
         )
 
+        # Mint the exchange key BEFORE the gate fires, so gate plugins can
+        # correlate their decision with the exchange (Phase 2 §4).
+        exchange_key = mint_exchange_key()
+
         # Hook: should_process_message (broadcast, reject-wins)
         results = await self.pm.ahook.should_process_message(
-            channel=channel, sender=sender, text=text,
+            channel=channel, sender=sender, text=text, exchange_key=exchange_key,
         )
         gate_result = resolve_hook_results(results, "should_process_message", HookStrategy.REJECT_WINS)
         if gate_result is False:
@@ -187,13 +226,29 @@ class Agent(CorvidaePlugin):
                 "message rejected by should_process_message hook",
                 extra={"channel": channel.id, "sender": sender},
             )
+            try:
+                await self.pm.ahook.on_message_rejected(
+                    channel=channel, exchange_key=exchange_key, sender=sender, text=text,
+                )
+            except Exception:
+                logger.warning("on_message_rejected hook failed", exc_info=True, extra={"channel": channel.id})
             return
+
+        try:
+            await self.pm.ahook.on_message_admitted(
+                channel=channel, exchange_key=exchange_key, sender=sender, text=text,
+            )
+        except Exception:
+            logger.warning("on_message_admitted hook failed", exc_info=True, extra={"channel": channel.id})
 
         item = QueueItem(
             role=QueueItemRole.USER,
             content=text,
             channel=channel,
             sender=sender,
+            exchange_key=exchange_key,
+            origin="user",
+            originates_exchange=True,
         )
         queue = self._get_or_create_queue(channel)
         await queue.enqueue(item)
@@ -334,6 +389,7 @@ class Agent(CorvidaePlugin):
         channel: Channel,
         max_turns_limit: int,
         request_text: str,
+        item: QueueItem | None = None,
     ) -> None:
         """Dispatch tool calls or send text response.
 
@@ -343,6 +399,10 @@ class Agent(CorvidaePlugin):
           with MAX_TURNS_FALLBACK_MESSAGE, fire on_agent_response, send message.
         - No tool calls: increment counter, resolve display text, fire
           on_agent_response, send message.
+
+        ``item`` provides the current exchange's key/origin (for the
+        enriched on_agent_response call) and, via _dispatch_tool_calls,
+        stamps the tool cycle's Tasks with the same exchange.
         """
         if result.tool_calls and channel.turn_counter < max_turns_limit:
             channel.turn_counter += 1
@@ -380,11 +440,23 @@ class Agent(CorvidaePlugin):
             },
         )
 
+        exchange_key = item.exchange_key if item is not None else None
+        origin = item.origin if item is not None else None
+        originating_text = (
+            self._originating_text.get(exchange_key)
+            if exchange_key is not None
+            else None
+        )
         try:
             await self.pm.ahook.on_agent_response(
                 channel=channel,
                 request_text=request_text,
                 response_text=display_response,
+                exchange_key=exchange_key,
+                origin=origin,
+                originating_text=originating_text,
+                logprobs=None,
+                withheld=False,
             )
         except Exception:
             logger.warning(
@@ -435,11 +507,32 @@ class Agent(CorvidaePlugin):
         )
         channel = item.channel
 
+        # Exchange key/origin resolution MUST happen here, before the
+        # set_attribution call below, so the widened attribution carries
+        # the key into every LLM call in the turn (including tool Tasks
+        # created during dispatch, which snapshot the context at creation).
+        # If resolution ran inside _process_queue_item_attributed instead
+        # (after attribution is set), usage_log.exchange_key would be null
+        # for the whole turn.
+        if item.exchange_key is None:
+            inherited_key = item.meta.get("exchange_key") if item.meta else None
+            if inherited_key is not None:
+                item.exchange_key = inherited_key
+                item.origin = item.meta.get("origin")
+                item.originates_exchange = False
+            else:
+                item.exchange_key = mint_exchange_key()
+                item.origin = (item.meta.get("origin") if item.meta else None) or "task"
+                item.originates_exchange = True
+
         # Attribute all LLM activity in this turn (including tool Tasks
         # created during dispatch, which capture the context at creation)
         # to the turn stage and this channel. Compaction re-labels itself
         # around its own LLM call and restores this attribution after.
-        attribution_token = set_attribution(stage="turn", channel_id=channel.id)
+        attribution_token = set_attribution(
+            stage="turn", channel_id=channel.id,
+            exchange_key=item.exchange_key, origin=item.origin,
+        )
         try:
             await self._process_queue_item_attributed(item, channel)
         finally:
@@ -490,6 +583,7 @@ class Agent(CorvidaePlugin):
         # shallow-copies, so the local dict would not update the window).
         _t_persist_start = _time.monotonic()
         conv.append(conversation_message)
+        rowid = None
         try:
             results = await self.pm.ahook.on_conversation_event(
                 channel=channel,
@@ -502,6 +596,26 @@ class Agent(CorvidaePlugin):
         except Exception:
             logger.warning("on_conversation_event hook failed", exc_info=True)
         _phases["persist"] = _time.monotonic() - _t_persist_start
+
+        # 4c. Fire on_message_persisted only when this item originates its
+        # exchange (USER items, and notification items whose key was minted
+        # at dequeue). Mid-exchange tool-result rows, injected CONTEXT, and
+        # assistant rows never fire it — per-row firing under one key would
+        # overwrite the rowid with each successive row (§4.5). Also record
+        # the exchange's true originating text in the bounded LRU.
+        if item.originates_exchange and item.exchange_key is not None:
+            self._originating_text[item.exchange_key] = request_text
+            self._originating_text.move_to_end(item.exchange_key)
+            while len(self._originating_text) > ORIGINATING_TEXT_LRU_MAXSIZE:
+                self._originating_text.popitem(last=False)
+            if rowid is not None:
+                try:
+                    await self.pm.ahook.on_message_persisted(
+                        channel=channel, exchange_key=item.exchange_key,
+                        rowid=rowid, origin=item.origin,
+                    )
+                except Exception:
+                    logger.warning("on_message_persisted hook failed", exc_info=True, extra={"channel": channel.id})
 
         # 4b. Batch tool results: if this is a tool-result notification and
         # there are still pending tool calls from the current batch, skip the
@@ -534,7 +648,9 @@ class Agent(CorvidaePlugin):
         _t_before_turn_start = _time.monotonic()
         msg_count_before = len(conv.messages)
         try:
-            await self.pm.ahook.before_agent_turn(channel=channel)
+            await self.pm.ahook.before_agent_turn(
+                channel=channel, exchange_key=item.exchange_key, origin=item.origin,
+            )
         except Exception:
             logger.warning(
                 "before_agent_turn hook failed, skipping", exc_info=True
@@ -603,7 +719,7 @@ class Agent(CorvidaePlugin):
         _phases["llm"] = _time.monotonic() - _t_llm_start
 
         # 10. Dispatch tool calls or send text response
-        await self._handle_response(result, channel, max_turns_limit, request_text)
+        await self._handle_response(result, channel, max_turns_limit, request_text, item)
 
         # 11. Push-based idle detection: check if the system became idle
         await self._maybe_fire_idle()
@@ -635,11 +751,21 @@ class Agent(CorvidaePlugin):
 
         Logs an error and returns without enqueuing if the TaskQueue is
         unavailable (TaskPlugin not registered).
+
+        Stamps each Task with the current exchange's key/origin, read from
+        the attribution contextvar set by _process_queue_item at dequeue
+        (this coroutine runs under that attribution). Every turn of a tool
+        cycle inherits its exchange's key and origin this way, however many
+        hops (§3.3).
         """
         task_queue = getattr(self.pm.get_plugin("task"), "task_queue", None)
         if task_queue is None:
             logger.error("tool calls requested but no TaskQueue available")
             return
+
+        current_attribution = get_attribution()
+        exchange_key = current_attribution.get("exchange_key")
+        origin = current_attribution.get("origin")
 
         # Record all call IDs so we can wait for every result before the next LLM call.
         channel.pending_tool_call_ids = {call["id"] for call in tool_calls}
@@ -675,6 +801,8 @@ class Agent(CorvidaePlugin):
                 channel=channel,
                 tool_call_id=call_id,
                 description=f"tool:{fn_name}",
+                exchange_key=exchange_key,
+                origin=origin,
             )
             await task_queue.enqueue(task)
 
