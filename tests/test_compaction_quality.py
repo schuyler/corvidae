@@ -300,6 +300,7 @@ class TestFirstCompactionAgainstFixture:
 
 
 @pytest.mark.eval
+@pytest.mark.timeout(120)
 class TestLiveCompactionEval:
     """Live evaluation against the LLM API. Requires API access.
 
