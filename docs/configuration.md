@@ -139,7 +139,23 @@ The persona is allowed to tune its own gates by default — a deliberate operato
 
 These are recommendations, not hardcoded blocks: `set_settings` writes are channel-influenceable, which is exactly the persistence-of-influence shape the design polices elsewhere — but two-process discipline (agent tunes, operator audits via the outcome log) is the accepted trade-off, with the blocklist as the per-key valve. The full key list accumulates here as later Phase 2 work packages land.
 
-*(Specific tunable keys — `appraisal.*`, `critique.*`, `gate.*` — are documented by the work packages that introduce them, from WP2.4 onward.)*
+#### `appraisal.*` — stage-1 appraisal (WP2.4)
+
+`AppraisalPlugin` scores every inbound message at the gate: surface heuristics plus an FTS5 familiarity probe on a dedicated read-only connection, under a hard latency budget, failing open. All keys resolve per-decision.
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `appraisal.probe.budget_ms` | `50` | Hard latency budget for the FTS5 probe. Timeout ⇒ no probe result ⇒ the vector is built from surface heuristics alone (never blocks the gate). |
+| `appraisal.probe.max_tokens` | `12` | Cap on sanitized tokens in the FTS5 MATCH query. |
+| `appraisal.probe.rank_scale` | `10.0` | bm25 rank normalization: familiarity scales with `min(1, −rank/rank_scale)` (bm25 ranks are negative; more-negative = stronger match). |
+| `appraisal.novelty.no_probe_default` | `0.5` | Novelty when no probe result arrived in budget — a value, never a null. |
+| `appraisal.weights.novelty` | `0.35` | Salience weight for novelty (1 − familiarity). |
+| `appraisal.weights.question` | `0.15` | Salience weight for question density. |
+| `appraisal.weights.disagreement` | `0.20` | Salience weight for max(disagreement markers, negation density). |
+| `appraisal.weights.commitment` | `0.20` | Salience weight for numbers/commitment density. |
+| `appraisal.weights.imperative` | `0.10` | Salience weight for imperative markers (feeds salience only, not the vector). |
+
+*(Remaining tunable keys — `critique.*`, `gate.*`, further `appraisal.*` — are documented by the work packages that introduce them, WP2.5 onward.)*
 
 ### `agent.context_compact` — removed
 
@@ -181,7 +197,7 @@ The retention score formula is `importance × (1 + 0.5 × log1p(retrieval_count)
 
 ## `funnel` — context-admission funnel
 
-`FunnelPlugin` is the single chokepoint for tail CONTEXT admission (dedupe, budgets, injection framing).
+`FunnelPlugin` is the single chokepoint for tail CONTEXT admission (dedupe, budgets, injection framing). Since Phase 2 (WP2.6) it also owns deferred registration: non-tool-call notification payloads queue per `(channel, origin)` via `register_and_wake()`, one stub notification wakes the channel per pending pair, and the drain in `before_agent_turn` admits everything queued for the triggering exchange's origin. The deferred registry is in-memory by design (payloads pending at shutdown are dropped) and adds no config keys — drained payloads spend the same per-source budgets below.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|

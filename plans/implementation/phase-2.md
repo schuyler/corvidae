@@ -41,7 +41,24 @@ thresholds this phase can only guess at.
   missing the `plugin._client = MagicMock()` setup every sibling test in the
   file has and could not pass regardless of implementation; fixed in the
   green session.
-- **2B onward is not started.** The plan below has been through a design
+- **WP2.1's dedicated review gate has PASSED (after one must-fix).** The
+  review found the enriched `on_agent_response` spec declared
+  `logprobs`/`withheld` WITH defaults, exempting them from the arg-binding
+  guard — a consumer mirroring the defaulted signature would silently
+  receive None forever (verified empirically). Fixed: both params are now
+  spec-required (impls that don't care omit them), with regression tests
+  pinning the guard behavior, real end-to-end delivery, and the RFC 7386
+  None-deletes merge contract. Advisories also fixed: hot-reload now runs
+  the arg-binding guard; stale `before_agent_turn(self, channel)` impls in
+  perf_mon/goal_tracker widened; design.md/prompt-guide.md hookspec drift
+  corrected. One standing advisory for 2B+ writers: `on_message_persisted`
+  cannot heal a NULL origin on a row created by an earlier upsert — always
+  pass `origin` to `upsert_exchange` (WP2.4's stage-1 persist does).
+- **Sub-phase 2B is complete.** WP2.4 (`corvidae/appraisal.py`,
+  `tests/test_appraisal_stage1.py`) and WP2.6 (funnel deferred
+  registration, `tests/test_funnel_deferred.py`) are implemented and green.
+  The `appraisal.*` tunables are documented in `docs/configuration.md`.
+- **2C onward is not started.** The plan below has been through a design
   consistency review, a hand-off audit, and multiple cold-review rounds; all
   accepted amendments are folded into the text. It is intended to be
   implementable as written — every threshold, formula, and cross-plugin
