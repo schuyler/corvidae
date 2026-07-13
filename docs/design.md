@@ -63,13 +63,13 @@ class AgentSpec:
     async def on_message(self, channel: Channel, sender: str, text: str) -> None
     async def send_message(self, channel: Channel, text: str, latency_ms: float | None = None) -> None
     def register_tools(self, tool_registry: list) -> None  # sync; plugins append Tool instances or bare callables
-    async def on_agent_response(self, channel: Channel, request_text: str, response_text: str) -> None
+    async def on_agent_response(self, channel: Channel, request_text: str, response_text: str, exchange_key: str | None, origin: str | None, originating_text: str | None, logprobs: dict | None, withheld: bool) -> None
     async def on_notify(self, channel: Channel, source: str, text: str, tool_call_id: str | None, meta: dict | None) -> None
-    async def should_process_message(self, channel: Channel, sender: str, text: str) -> bool | None
+    async def should_process_message(self, channel: Channel, sender: str, text: str, exchange_key: str | None) -> bool | None
     async def on_llm_error(self, channel: Channel, error: Exception) -> str | None
     async def compact_conversation(self, channel: Channel, conversation: ContextWindow, max_tokens: int) -> None
     async def process_tool_result(self, tool_name: str, result: str, channel: Channel | None) -> str | None
-    async def before_agent_turn(self, channel: Channel) -> None
+    async def before_agent_turn(self, channel: Channel, exchange_key: str | None, origin: str | None) -> None
     async def after_persist_assistant(self, channel: Channel, message: dict) -> None
     async def transform_display_text(self, channel: Channel, text: str, result_message: dict) -> str | None
     async def on_idle(self) -> None

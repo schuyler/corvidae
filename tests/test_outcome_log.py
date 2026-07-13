@@ -121,3 +121,32 @@ class TestExchangeLogWriter:
             "valence": 0.2,
             "stage2": {"score": 0.5},
         }
+
+
+class TestRfc7386NoneDeletes:
+    """Pin the RFC 7386 cross-WP contract (WP2.1 review-gate follow-up):
+    a None value inside a merge fragment DELETES that key from the
+    envelope. Every 2B–2E writer must therefore zero/omit fields rather
+    than None them — this test is the executable statement of that rule."""
+
+    async def test_none_in_fragment_deletes_the_key(self, db):
+        import json
+
+        plugin = await _setup(db)
+        await plugin.record_exchange("ex-7386", "cli:local")
+        await plugin.update_exchange(
+            "ex-7386", appraisal={"stage1": {"salience": 0.4}, "entropy": {"mean": 1.0}}
+        )
+
+        # Merging {"entropy": None} removes the entropy key entirely.
+        await plugin.update_exchange("ex-7386", appraisal={"entropy": None})
+
+        async with db.execute(
+            "SELECT appraisal FROM exchange_log WHERE exchange_key = ?",
+            ("ex-7386",),
+        ) as cursor:
+            row = await cursor.fetchone()
+
+        envelope = json.loads(row[0])
+        assert "entropy" not in envelope
+        assert envelope["stage1"] == {"salience": 0.4}

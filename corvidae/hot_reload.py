@@ -17,7 +17,9 @@ import importlib
 import logging
 import os
 
-from corvidae.hooks import CorvidaePlugin, hookimpl
+import apluggy as pluggy
+
+from corvidae.hooks import CorvidaePlugin, _check_hook_arg_binding, hookimpl
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +139,14 @@ class HotReloadPlugin(CorvidaePlugin):
             await new_instance.on_init(pm=pm, config=self.config)
             await new_instance.on_start(config=self.config)
             pm.register(new_instance, name=name)
+            # Guard hot-reloaded impls the same as startup registration: a
+            # reloaded plugin edited to default a spec-required param must
+            # not re-enter the system unchecked (silent-drop trap).
+            try:
+                _check_hook_arg_binding(pm)
+            except pluggy.PluginValidationError:
+                pm.unregister(new_instance)
+                raise
         except Exception:
             logger.exception(
                 "reload_plugin: failed to load new version of %r; rolling back", name

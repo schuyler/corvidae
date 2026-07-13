@@ -156,8 +156,8 @@ class _AgentResponseRecorderPlugin:
         exchange_key,
         origin,
         originating_text,
-        logprobs=None,
-        withheld=None,
+        logprobs,
+        withheld,
     ):
         self.calls.append(
             {
