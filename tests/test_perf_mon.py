@@ -40,13 +40,13 @@ class TestPerfMonHooks:
     async def test_before_agent_turn_records_start(
         self, perf_plugin, channel
     ):
-        await perf_plugin.before_agent_turn(channel)
+        await perf_plugin.before_agent_turn(channel, exchange_key=None, origin=None)
         assert channel.id in perf_plugin._turn_start_times
 
     async def test_after_agent_response_records_metrics(
         self, perf_plugin, channel
     ):
-        await perf_plugin.before_agent_turn(channel)
+        await perf_plugin.before_agent_turn(channel, exchange_key=None, origin=None)
         await asyncio.sleep(0.01)  # ensure time passes for latency
 
         # Simulate LLM response
@@ -72,7 +72,7 @@ class TestPerfMonHooks:
         self, perf_plugin, channel
     ):
         for i in range(5):
-            await perf_plugin.before_agent_turn(channel)
+            await perf_plugin.before_agent_turn(channel, exchange_key=None, origin=None)
             await asyncio.sleep(0.01)  # ensure time passes
             result = {"usage": {"completion_tokens": 20 + i}}
             await perf_plugin.after_agent_response(channel, result)
@@ -96,7 +96,7 @@ class TestPerfMonTool:
     async def test_perf_stats_shows_data(
         self, perf_plugin, channel
     ):
-        await perf_plugin.before_agent_turn(channel)
+        await perf_plugin.before_agent_turn(channel, exchange_key=None, origin=None)
         await asyncio.sleep(0.01)
         result = {"usage": {"completion_tokens": 30}}
         await perf_plugin.after_agent_response(channel, result)
@@ -120,7 +120,7 @@ class TestPerfMonIntegration:
         channel.turn_counter = 0
 
         # 2. before_agent_turn fires
-        await perf_plugin.before_agent_turn(channel)
+        await perf_plugin.before_agent_turn(channel, exchange_key=None, origin=None)
         assert channel.id in perf_plugin._turn_start_times
 
         # 3. Small delay to ensure latency measurement is meaningful

@@ -70,6 +70,7 @@ async def build_appraisal(tmp_path, summaries=(), config=None, with_outcome_log=
         pm.register(persistence, name="persistence")
         outcome = OutcomeLogPlugin()
         pm.register(outcome, name="outcome_log")
+        await outcome.on_init(pm=pm, config={})
         await outcome.on_start(config={})
 
     plugin = AppraisalPlugin()
