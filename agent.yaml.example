@@ -50,8 +50,16 @@ agent:
   #                                    will re-compact every few messages without reducing context.
   # min_messages_to_compact: 5      # skip compaction with this many messages or fewer
   # chars_per_token: 3.5            # deprecated: retained for config compatibility; has no effect on token counting
+  # request_logprobs: false         # ask the LLM for token logprobs on every request (llama-server supports
+  #                                    this; Anthropic-style providers ignore it and logprobs surface as null)
   # immutable_settings:             # keys the agent cannot change via set_settings (system_prompt always blocked)
   #   - max_turns                   # example: prevent the agent from extending its own turn limit
+  #   # Recommended additions for multi-speaker channels with untrusted
+  #   # participants (see docs/configuration.md "Runtime-tunable gate parameters"):
+  #   # - critique.provenance.enabled
+  #   # - critique.sample_below_rate
+  #   # - gate.engagement.enforce
+  #   # - gate.send.enforce
 
 # Built-in tool settings (optional)
 # tools:

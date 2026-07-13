@@ -280,6 +280,7 @@ class TestLogprobsThreadedIntoOnAgentResponse:
         hookspec with a logprobs param; WP2.2's sole agent.py responsibility
         is passing result.logprobs into that call."""
         plugin, channel, db = await build_plugin_and_channel()
+        plugin._client = MagicMock()
 
         turn_result = AgentTurnResult(
             message={"role": "assistant", "content": "answer"},
@@ -306,6 +307,7 @@ class TestLogprobsThreadedIntoOnAgentResponse:
         """When the turn result carries no logprobs, on_agent_response is
         called with logprobs=None (not omitted, not a faked substitute)."""
         plugin, channel, db = await build_plugin_and_channel()
+        plugin._client = MagicMock()
 
         turn_result = AgentTurnResult(
             message={"role": "assistant", "content": "answer"},

@@ -117,6 +117,29 @@ These values apply to all channels. Per-channel overrides in the `channels` sect
 | `agent.min_messages_to_compact` | integer | `5` | Skip compaction if the conversation has this many messages or fewer. |
 | `agent.chars_per_token` | float | `3.5` | **Deprecated.** Accepted for interface and config compatibility. Has no effect on token counting — `count_tokens()` uses the module-level `_FALLBACK_CHARS_PER_TOKEN` constant (3.5) regardless of this value. |
 | `agent.immutable_settings` | list of strings | `[]` | Keys the agent is blocked from changing via the `set_settings` tool. `system_prompt` is always blocked regardless of this list. |
+| `agent.request_logprobs` | boolean | `false` | When `true`, `Agent` merges `"logprobs": true` into every LLM request body. llama-server returns a logprobs envelope (surfaced to plugins via `on_agent_response`); Anthropic-style providers return nothing and the field surfaces as `None`. Static operator-only flag — captured at init and on config reload, not per-channel tunable. |
+
+### Runtime-tunable gate parameters
+
+Phase 2's gate/appraisal/critique parameters use dotted keys (e.g. `critique.sample_below_rate`, `gate.engagement.enforce`) and are adjustable at runtime **without a daemon restart**, through two surfaces resolved per-decision by `corvidae.tuning.resolve_tunable` (operator directive 2, 2026-07-06):
+
+1. **`set_settings` tool** (agent-facing, per-channel) — writes `channel.runtime_overrides`; highest precedence.
+2. **Hot config reload** (operator, global) — edit `agent.yaml`; `ConfigWatcherPlugin` dispatches `on_config_reload` and plugins re-read the dotted path on the next decision.
+
+When neither surface sets a key, the plugin's commented best-guess default applies. Resolution is first-hit-wins: per-channel override → config dotted path → default. Dotted keys never reach the LLM request body — the `extra_body` filter in `agent.py` excludes any key containing a dot.
+
+The persona is allowed to tune its own gates by default — a deliberate operator decision favoring emergence from experience. The per-key safety valve is `agent.immutable_settings`. **Recommended blocklist for multi-speaker channels with untrusted participants:**
+
+| Key | Why block it |
+|-----|--------------|
+| `critique.provenance.enabled` | The correctness gate — a prompt-injected "stop second-guessing yourself" must not be able to disable the confabulation check. |
+| `critique.sample_below_rate` | The standing experiment's integrity — an agent tuning its own sampling to zero blinds the critique false-negative bound. |
+| `gate.engagement.enforce` | An injected message must not be able to silence or un-silence the agent wholesale. |
+| `gate.send.enforce` | Same rationale as `gate.engagement.enforce`, on the output side. |
+
+These are recommendations, not hardcoded blocks: `set_settings` writes are channel-influenceable, which is exactly the persistence-of-influence shape the design polices elsewhere — but two-process discipline (agent tunes, operator audits via the outcome log) is the accepted trade-off, with the blocklist as the per-key valve. The full key list accumulates here as later Phase 2 work packages land.
+
+*(Specific tunable keys — `appraisal.*`, `critique.*`, `gate.*` — are documented by the work packages that introduce them, from WP2.4 onward.)*
 
 ### `agent.context_compact` — removed
 
@@ -267,6 +290,8 @@ No restart is required for the changes listed below. Changes that require restar
 | `agent.compaction_threshold` | `CompactionPlugin` reads the new threshold on its next compaction check. |
 | `agent.chars_per_token` | Deprecated. The value is reloaded into `Agent` and `CompactionPlugin` for config compatibility, but has no effect on token counting — `count_tokens()` uses the module-level constant. |
 | `daemon.idle_cooldown_seconds` | `Agent` uses the new cooldown on the next idle check. |
+| `agent.request_logprobs` | `Agent` re-reads the flag; takes effect on the next LLM call. |
+| Dotted plugin tunables (`appraisal.*`, `critique.*`, `gate.*`, …) | Resolved per-decision via `corvidae.tuning.resolve_tunable`; a reloaded value applies on the next gate/appraisal/critique decision. Per-channel `set_settings` overrides still take precedence. |
 | `agent.immutable_settings` | `RuntimeSettingsPlugin` resets its blocklist and re-applies the new list. Constructor-supplied immutable keys are always retained. |
 | New channel entries in `channels:` | `load_channel_config` registers newly added channels. |
 | `agent` defaults | `ChannelRegistry.agent_defaults` is updated; new channels created after the reload use the new defaults. |

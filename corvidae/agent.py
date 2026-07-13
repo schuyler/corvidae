@@ -142,6 +142,7 @@ class Agent(CorvidaePlugin):
         self._chars_per_token: float = DEFAULT_CHARS_PER_TOKEN
         self._base_dir = None
         self._idle_cooldown: float = 30.0
+        self._request_logprobs: bool = False
         self._last_idle_fire: float = 0.0
         self._idle_firing: bool = False
         # Exchange-keyed LRU of originating text (the exchange's true
@@ -195,6 +196,10 @@ class Agent(CorvidaePlugin):
         await super().on_init(pm, config)
         agent_config = config.get("agent", {})
         self._chars_per_token = agent_config.get("chars_per_token", DEFAULT_CHARS_PER_TOKEN)
+        # Static operator-only flag (not a per-channel runtime tunable, so it
+        # does not go through resolve_tunable). Agent retains no config dict —
+        # on_init extracts derived scalars only — so step 7 reads this scalar.
+        self._request_logprobs = agent_config.get("request_logprobs", False)
         daemon_config = config.get("daemon", {})
         self._idle_cooldown = daemon_config.get("idle_cooldown_seconds", 30.0)
 
@@ -455,7 +460,7 @@ class Agent(CorvidaePlugin):
                 exchange_key=exchange_key,
                 origin=origin,
                 originating_text=originating_text,
-                logprobs=None,
+                logprobs=result.logprobs,
                 withheld=False,
             )
         except Exception:
@@ -678,7 +683,15 @@ class Agent(CorvidaePlugin):
         # 7. Build prompt and call run_agent_turn (single LLM invocation)
         _t_llm_start = _time.monotonic()
         messages = conv.build_prompt()
-        llm_overrides = {k: v for k, v in channel.runtime_overrides.items() if k not in FRAMEWORK_KEYS}
+        # Dotted keys are plugin tunables (see corvidae.tuning), never LLM
+        # inference params — they must not leak into the request body.
+        llm_overrides = {
+            k: v
+            for k, v in channel.runtime_overrides.items()
+            if k not in FRAMEWORK_KEYS and "." not in k
+        }
+        if self._request_logprobs:
+            llm_overrides["logprobs"] = True
 
         result = await self._run_turn(channel, messages, self._tool_schemas, llm_overrides or None)
         if result is None:
@@ -863,6 +876,7 @@ class Agent(CorvidaePlugin):
         # Re-read agent config values.
         agent_config = config.get("agent", {})
         self._chars_per_token = agent_config.get("chars_per_token", DEFAULT_CHARS_PER_TOKEN)
+        self._request_logprobs = agent_config.get("request_logprobs", False)
         daemon_config = config.get("daemon", {})
         self._idle_cooldown = daemon_config.get("idle_cooldown_seconds", 30.0)
 
