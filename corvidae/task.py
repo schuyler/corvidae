@@ -58,6 +58,9 @@ class Task:
             attribution so the tool cycle carries its exchange forward.
         origin: 'user'|'reminder'|'critique'|'heartbeat'|'task'. Stamped
             alongside exchange_key.
+        deliver: When False, the task is silent (Phase 2 §2.3): completion
+            fires no send_tool_status, no on_notify, and therefore no
+            main-model turn. Failures are still logged by the worker.
     """
 
     work: Callable[[], Awaitable[str]]
@@ -69,6 +72,18 @@ class Task:
     ctx: contextvars.Context = field(default_factory=contextvars.copy_context)
     exchange_key: str | None = None
     origin: str | None = None
+    deliver: bool = True
+
+    def __post_init__(self) -> None:
+        # Trap #5: a silent task holding a tool-call id would leave the
+        # channel's pending_tool_call_ids never clearing, stalling its tool
+        # batch forever — reject the combination at construction.
+        if not self.deliver and self.tool_call_id is not None:
+            raise ValueError(
+                "deliver=False requires tool_call_id=None: a silent task "
+                "must not hold a tool-call id (it would never clear from "
+                "pending_tool_call_ids)"
+            )
 
 
 class TaskQueue:
@@ -269,8 +284,13 @@ class TaskPlugin(CorvidaePlugin):
                 "task_id": task.task_id,
                 "channel": task.channel.id,
                 "result_length": len(result),
+                "deliver": task.deliver,
             },
         )
+        # Silent tasks (Phase 2 §2.3): log and stop — no send_tool_status,
+        # no on_notify, no main-model turn.
+        if not task.deliver:
+            return
         # Notify transports that a tool call has completed
         if task.tool_call_id:
             try:

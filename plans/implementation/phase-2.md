@@ -22,17 +22,25 @@ funnel's new deferred/stub machinery; the agent gains the right to silence
 outcome log as the standing experiment that will eventually fit the
 thresholds this phase can only guess at.
 
-## Status (2026-07-12)
+## Status (2026-07-13)
 
+- **Sub-phase 2A is complete.**
 - **WP2.1 is implemented and landed** (`a1e2179`), including its red tests
   (`tests/test_phase2a_wp21.py`). One deviation from the spec below is
   recorded inline as an as-implemented note (`on_message_persisted` carries a
   4th parameter, `origin`). Per the risk register, WP2.1's dedicated review
   gate must pass before any 2B session starts.
-- **WP2.2 and WP2.3 red tests are written and red-gated**
-  (`tests/test_phase2a_wp22.py`, `tests/test_phase2a_wp23.py`); green
-  implementation has not started. WP2.3 lands first — it owns the shared
-  `agent.py` step-7 edit (see sub-phase 2A).
+- **WP2.2 and WP2.3 are implemented and green** against their red tests
+  (`tests/test_phase2a_wp22.py`, `tests/test_phase2a_wp23.py`). WP2.3 landed
+  the shared `agent.py` step-7 edit as owner (dotted-key exclusion +
+  `{"logprobs": True}` merge in one edit); WP2.2 did not touch step 7. One
+  as-implemented note: `agent.request_logprobs` is also re-read in
+  `Agent.on_config_reload` (matching the sibling `chars_per_token` /
+  `idle_cooldown` reload pattern) — still operator-only, never per-channel.
+  Two WP2.2 red tests (`TestLogprobsThreadedIntoOnAgentResponse`) were
+  missing the `plugin._client = MagicMock()` setup every sibling test in the
+  file has and could not pass regardless of implementation; fixed in the
+  green session.
 - **2B onward is not started.** The plan below has been through a design
   consistency review, a hand-off audit, and multiple cold-review rounds; all
   accepted amendments are folded into the text. It is intended to be

@@ -34,12 +34,16 @@ class AgentTurnResult:
             produced only tool calls with no text.
         latency_ms: Wall-clock time for the LLM call in milliseconds,
             rounded to one decimal place.
+        logprobs: The logprobs envelope from the response's choice, or None
+            when the provider returned none (e.g. Anthropic-style providers).
+            Best-effort — never a faked substitute.
     """
 
     message: dict
     tool_calls: list[dict]
     text: str
     latency_ms: float
+    logprobs: dict | None = None
 
 
 async def run_agent_turn(
@@ -72,7 +76,11 @@ async def run_agent_turn(
         kwargs["extra_body"] = extra_body
     response = await client.chat(list(messages), **kwargs)  # Shallow copy: prevents mock assertion issues; client.chat() is read-only.
     latency_ms = round((time.monotonic() - start) * 1000, 1)
-    msg = response["choices"][0]["message"]
+    # Logprobs live on the choice envelope, which is otherwise discarded —
+    # extract them before keeping only the message (Phase 2, WP2.2).
+    choice = response["choices"][0]
+    logprobs = choice.get("logprobs")
+    msg = choice["message"]
     msg.setdefault("role", "assistant")
     messages.append(msg)
     tool_calls = msg.get("tool_calls") or []
@@ -93,7 +101,7 @@ async def run_agent_turn(
             "reasoning_content_length": len(msg["reasoning_content"]) if "reasoning_content" in msg else None,
         },
     )
-    return AgentTurnResult(message=msg, tool_calls=tool_calls, text=text, latency_ms=latency_ms)
+    return AgentTurnResult(message=msg, tool_calls=tool_calls, text=text, latency_ms=latency_ms, logprobs=logprobs)
 
 
 def _truncate(s: str, maxlen: int = LOG_TRUNCATION_LENGTH) -> str:
