@@ -160,10 +160,19 @@ class FunnelPlugin(CorvidaePlugin):
         if origin is None:
             return
         pair = (channel.id, origin)
+        # Clear the pending flag on ANY matching-origin turn, even when
+        # nothing is queued — BEFORE the empty-registry early return. A
+        # payload registered mid-drain (after this flag was discarded) gets
+        # admitted by the in-progress drain, so its own stub's turn arrives
+        # with an empty registry; returning without clearing the flag here
+        # would leave it set forever, and every later register_and_wake
+        # would see it and never fire a stub — wedging the pair until
+        # restart. A spurious extra stub is harmless (this drain
+        # early-returns); a missing stub is not.
+        self._stub_pending.discard(pair)
         payloads = self._deferred.get(pair)
         if not payloads:
             return
-        self._stub_pending.discard(pair)
 
         conv = getattr(channel, "conversation", None)
         if conv is None:

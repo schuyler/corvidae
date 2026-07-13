@@ -168,6 +168,15 @@ class _LRUDict(collections.OrderedDict):
         while len(self) > self._maxsize:
             self.popitem(last=False)
 
+    def get(self, key, default=None):
+        # Route through __getitem__ so reads refresh recency — C-level
+        # dict.get would bypass the override and silently degrade the LRU
+        # to insertion order for pure readers.
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
 
 class AppraisalPlugin(CorvidaePlugin):
     """Stage-1 appraisal: heuristics + FTS5 probe behind a pull API.
@@ -244,9 +253,12 @@ class AppraisalPlugin(CorvidaePlugin):
         if self._probe_db is not None:
             await self._probe_db.close()
             self._probe_db = None
-        # Let in-flight persists finish rather than abandoning writes.
-        if self._persist_tasks:
-            await asyncio.gather(*self._persist_tasks, return_exceptions=True)
+        # Let in-flight persists finish rather than abandoning writes. Loop
+        # until the set drains: a compute finishing between snapshots can
+        # spawn a persist task a single gather would miss (dropped write +
+        # "task destroyed" warning at loop teardown).
+        while self._persist_tasks:
+            await asyncio.gather(*set(self._persist_tasks), return_exceptions=True)
 
     # ------------------------------------------------------------------
     # The thin gate trigger (computes; never decides)
@@ -291,6 +303,17 @@ class AppraisalPlugin(CorvidaePlugin):
 
         Returned vectors are the SAME dict object that lives in the cache —
         treat them as immutable; copy on write if mutation is ever needed.
+
+        Cross-task caller warning (2B review A-1): when the FIRST caller
+        (the owner) is cancelled mid-compute, waiters sharing the in-flight
+        future are woken with CancelledError — a BaseException that will
+        sail through an ``except Exception`` fail-open handler. A caller
+        awaiting from a DIFFERENT task than the owner (e.g. WP2.9's gates)
+        must treat that CancelledError as compute failure, not as its own
+        cancellation. Today owner and waiters only coexist inside one
+        broadcast gather whose children cancel together, so this is
+        unreachable; it stops being so the moment a cross-task caller
+        appears.
         """
         return await self._get_or_compute(channel, exchange_key, text, "in")
 
@@ -472,6 +495,11 @@ class AppraisalPlugin(CorvidaePlugin):
             columns: dict = {"appraisal": {envelope_key: vector}}
             if probe_score is not None:
                 columns["probe_score"] = probe_score
+            # Origin "user" is per-spec while the inbound gate is the only
+            # compute site — but upsert_exchange patches origin on EXISTING
+            # rows too, so any future non-user-origin caller of
+            # get_or_compute must thread the real origin through here or it
+            # will silently relabel the exchange row (2B review A-4).
             await outcome_log.upsert_exchange(
                 exchange_key, channel.id, "user", **columns
             )
