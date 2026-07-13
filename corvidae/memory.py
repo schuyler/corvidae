@@ -112,6 +112,19 @@ def _parse_json_block(text: str) -> dict:
     return json.loads(text[start:end + 1])
 
 
+class _StubChannel:
+    """Minimal duck-typed channel for consolidation when the registry misses.
+
+    Exposes only ``runtime_overrides`` (empty) and ``id`` — enough for
+    ``resolve_tunable`` to fall through to the config/default surfaces
+    (sanctioned by WP2.3's duck-typed resolver).
+    """
+
+    def __init__(self, channel_id: str) -> None:
+        self.id = channel_id
+        self.runtime_overrides: dict = {}
+
+
 def _dialog_transcript(messages: list[dict]) -> str:
     """Render dialog messages as 'role: content' lines for a prompt."""
     return "\n".join(
@@ -150,7 +163,12 @@ class ImportancePrior(Protocol):
     toggle adds a surprise term.
     """
 
-    async def score(self, messages: list[dict]) -> float: ...   # 0.0–1.0
+    async def score(
+        self,
+        messages: list[dict],
+        msg_id_range: tuple[int, int] | None = None,
+        channel=None,
+    ) -> float: ...   # 0.0–1.0
 
 
 class RubricPrior:
@@ -165,7 +183,14 @@ class RubricPrior:
         # resolved at call time (clients can be swapped on config reload).
         self._get_client = get_client
 
-    async def score(self, messages: list[dict]) -> float:
+    async def score(
+        self,
+        messages: list[dict],
+        msg_id_range: tuple[int, int] | None = None,
+        channel=None,
+    ) -> float:
+        # msg_id_range / channel are accepted for protocol conformance
+        # (WP2.5) but the rubric ignores both — it rates the dialog text.
         try:
             client = self._get_client()
             response = await client.chat([
@@ -621,7 +646,33 @@ class MemoryPlugin(CorvidaePlugin):
 
             # One background-model call produces the first-person record.
             record = await self._summarize_range(dialog)
-            importance = await self.importance_prior.score(dialog)
+
+            # The appraisal-driven prior (WP2.5) scores over the consolidated
+            # message-id range; pass the real channel when the registry has
+            # one, else a stub with empty runtime_overrides (sanctioned by
+            # WP2.3's duck-typed resolver) so config/default surfaces apply.
+            msg_id_range = (rows[0][0], rows[-1][0])
+            registry = self.pm.get_plugin("registry")
+            channel = registry.get(channel_id) if registry is not None else None
+            if channel is None:
+                channel = _StubChannel(channel_id)
+            importance = await self.importance_prior.score(
+                dialog, msg_id_range=msg_id_range, channel=channel
+            )
+
+            # Valence: mean stage-2 valence over the range (NULL when none) —
+            # the §4.9-classifier deletion made real: affect is the appraisal
+            # already computed. Fail-soft when appraisal is absent.
+            valence: float | None = None
+            appraisal_plugin = self.pm.get_plugin("appraisal")
+            if appraisal_plugin is not None:
+                try:
+                    valence = await appraisal_plugin.mean_valence(msg_id_range)
+                except Exception:
+                    logger.warning(
+                        "mean-valence lookup failed; storing NULL valence",
+                        exc_info=True, extra={"channel_id": channel_id},
+                    )
 
             # Embed the summary; failure stores embedded=0 for later
             # backfill (trap #10 — degrade, never block).
@@ -655,13 +706,15 @@ class MemoryPlugin(CorvidaePlugin):
                     return
                 cursor = await db.execute(
                     "INSERT INTO memory (channel_id, created_at, summary, "
-                    "importance, topic_tags, participants, msg_id_start, "
-                    "msg_id_end, embedded) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "importance, valence, topic_tags, participants, "
+                    "msg_id_start, msg_id_end, embedded) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         channel_id,
                         time.time(),
                         record["summary"],
                         importance,
+                        valence,
                         json.dumps(record["topic_tags"]),
                         json.dumps(record["participants"]),
                         rows[0][0],
