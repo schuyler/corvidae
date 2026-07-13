@@ -438,10 +438,17 @@ class AgentSpec:
         exchange_key: str | None,
         origin: str | None,
         originating_text: str | None,
-        logprobs: dict | None = None,
-        withheld: bool | None = None,
+        logprobs: dict | None,
+        withheld: bool,
     ) -> None:
         """Called after the agent loop produces a response to a message.
+
+        All parameters are required (no defaults): a default on a spec
+        param exempts it from the arg-binding guard, so an impl mirroring
+        the defaulted signature would silently receive the default instead
+        of the caller's value (the pluggy silent-drop trap). Impls that
+        don't care about a param simply omit it — pluggy passes declared
+        args only.
 
         Args:
             channel: The Channel where the conversation occurred.

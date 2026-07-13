@@ -80,7 +80,7 @@ class PerfMonPlugin:
         pass
 
     async def before_agent_turn(
-        self, channel: "Channel"
+        self, channel: "Channel", exchange_key: str | None, origin: str | None
     ) -> None:
         """Record turn start time and prompt size.
 

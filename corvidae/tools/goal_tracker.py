@@ -256,7 +256,9 @@ class GoalTrackerPlugin:
         """Reset idle timer when a message arrives."""
         self._idle_since = None
 
-    async def before_agent_turn(self, channel: "Channel") -> None:
+    async def before_agent_turn(
+        self, channel: "Channel", exchange_key: str | None, origin: str | None
+    ) -> None:
         """Mark that we're actively responding — no idle work now."""
         self._idle_since = time.monotonic() + 999_999  # effectively infinite
 
