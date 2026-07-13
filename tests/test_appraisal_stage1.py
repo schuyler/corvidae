@@ -501,3 +501,85 @@ class TestCancellation:
         vector = await plugin.get_or_compute(channel, "k-c2", "text")
         assert vector is not None
         await _teardown(plugin, pm)
+
+
+class TestPersistSpyGaps:
+    """2B review-gate test-adequacy follow-ups: (1) the waiter-cancel test
+    asserted the persist via get_appraisal, which the in-memory cache
+    satisfies — spy on _persist_stage1 itself; (2) probe_score must be
+    OMITTED (not nulled) when the probe didn't run."""
+
+    async def test_persist_actually_fires_after_compute(self, tmp_path, monkeypatch):
+        plugin, channel, _, pm = await build_appraisal(tmp_path, summaries=["x"])
+
+        persisted = []
+        original = plugin._persist_stage1
+
+        async def spying_persist(*args, **kwargs):
+            persisted.append(args)
+            return await original(*args, **kwargs)
+
+        monkeypatch.setattr(plugin, "_persist_stage1", spying_persist)
+
+        await plugin.get_or_compute(channel, "k-spy", "some text")
+        for _ in range(20):
+            pending = set(plugin._persist_tasks)
+            if not pending:
+                break
+            await asyncio.gather(*pending, return_exceptions=True)
+
+        assert len(persisted) == 1
+        # Second call is a cache hit — no second persist.
+        await plugin.get_or_compute(channel, "k-spy", "some text")
+        assert len(persisted) == 1
+        await _teardown(plugin, pm)
+
+    async def test_probe_score_omitted_when_probe_did_not_run(self, tmp_path):
+        """No probe (missing DB) → the stage-1 upsert carries NO probe_score
+        column: the row's probe_score stays NULL rather than being written,
+        and the appraisal envelope still lands."""
+        from corvidae.appraisal import AppraisalPlugin
+        from corvidae.outcome_log import OutcomeLogPlugin
+
+        # Session DB exists (for outcome_log/persistence) but has NO
+        # memory_fts — the probe degrades at on_start.
+        db_path = str(tmp_path / "sessions.db")
+        db = await aiosqlite.connect(db_path)
+        await init_db(db)
+
+        pm = create_plugin_manager()
+        persistence = PersistencePlugin()
+        persistence.db = db
+        pm.register(persistence, name="persistence")
+        outcome = OutcomeLogPlugin()
+        pm.register(outcome, name="outcome_log")
+        await outcome.on_init(pm=pm, config={})
+        await outcome.on_start(config={})
+
+        plugin = AppraisalPlugin()
+        pm.register(plugin, name="appraisal")
+        cfg = {"daemon": {"session_db": db_path}}
+        await plugin.on_init(pm=pm, config=cfg)
+        await plugin.on_start(config=cfg)
+        assert plugin._probe_db is None  # probe degraded (no memory_fts)
+
+        channel = _make_channel(scope="no-probe-score")
+        vector = await plugin.get_or_compute(channel, "k-noprobe", "hello")
+        for _ in range(20):
+            pending = set(plugin._persist_tasks)
+            if not pending:
+                break
+            await asyncio.gather(*pending, return_exceptions=True)
+
+        import json as _json
+        async with db.execute(
+            "SELECT appraisal, probe_score FROM exchange_log WHERE exchange_key = ?",
+            ("k-noprobe",),
+        ) as cursor:
+            row = await cursor.fetchone()
+        assert row is not None
+        assert _json.loads(row[0])["stage1"] == vector
+        assert row[1] is None  # probe_score never written
+
+        await plugin.on_stop()
+        await db.close()

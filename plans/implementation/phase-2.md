@@ -54,10 +54,21 @@ thresholds this phase can only guess at.
   corrected. One standing advisory for 2B+ writers: `on_message_persisted`
   cannot heal a NULL origin on a row created by an earlier upsert — always
   pass `origin` to `upsert_exchange` (WP2.4's stage-1 persist does).
-- **Sub-phase 2B is complete.** WP2.4 (`corvidae/appraisal.py`,
-  `tests/test_appraisal_stage1.py`) and WP2.6 (funnel deferred
-  registration, `tests/test_funnel_deferred.py`) are implemented and green.
-  The `appraisal.*` tunables are documented in `docs/configuration.md`.
+- **Sub-phase 2B is complete and its review gate has PASSED (after one
+  must-fix).** WP2.4 (`corvidae/appraisal.py`, `tests/test_appraisal_stage1.py`)
+  and WP2.6 (funnel deferred registration, `tests/test_funnel_deferred.py`)
+  are implemented and green; `appraisal.*` tunables documented in
+  `docs/configuration.md`. The 2B review found one must-fix in WP2.6
+  (fixed, with an end-to-end regression test): the drain early-returned on
+  an empty registry BEFORE discarding the pending stub flag, so a payload
+  registered mid-drain (admitted by the in-progress drain) left its own
+  stub's flag permanently set — wedging deferred delivery for that
+  (channel, origin) pair until restart. WP2.4 conformed to the normative
+  sketch; advisories applied (LRU recency on pure reads, on_stop persist
+  drain loop) or documented in code (cross-task waiters see owner
+  CancelledError — WP2.9 gates must treat it as compute failure;
+  `_persist_stage1`'s hardcoded "user" origin patches existing rows, so
+  future non-user compute sites must thread the real origin).
 - **2C onward is not started.** The plan below has been through a design
   consistency review, a hand-off audit, and multiple cold-review rounds; all
   accepted amendments are folded into the text. It is intended to be

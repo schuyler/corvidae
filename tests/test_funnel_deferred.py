@@ -244,3 +244,62 @@ class TestFailureAndBudget:
         assert "bravo" in window
 
         await db.close()
+
+
+class TestMidDrainRegistrationWedge:
+    """2B review-gate MF-1 regression: a payload registered MID-DRAIN
+    (after the pending flag was discarded) is admitted by the in-progress
+    drain, so its own stub's turn arrives with an empty registry. That turn
+    must still clear the pending flag — otherwise the pair is wedged: every
+    later register_and_wake sees the stale flag and never fires a stub, and
+    critique-origin turns only originate from stubs."""
+
+    async def test_mid_drain_registration_does_not_wedge_the_pair(self):
+        funnel, channel, conv, db = await build_funnel()
+        pm = funnel.pm
+
+        # Interpose on the persistence hook admit() awaits, so a second
+        # registration lands exactly mid-drain (flag already discarded).
+        orig_event = pm.ahook.on_conversation_event
+        fired = {"done": False}
+
+        async def registering_event(**kwargs):
+            if not fired["done"]:
+                fired["done"] = True
+                await funnel.register_and_wake(
+                    channel, origin="critique", source="critique", entries=["payload B"]
+                )
+            return await orig_event(**kwargs)
+
+        pm.ahook.on_conversation_event = registering_event
+
+        # Stub 1 fires for A.
+        await funnel.register_and_wake(
+            channel, origin="critique", source="critique", entries=["payload A"]
+        )
+        assert pm.ahook.on_notify.await_count == 1
+
+        # Stub 1's turn drains; B registers mid-drain (stub 2 fires) and is
+        # consumed by this same drain.
+        await funnel.before_agent_turn(channel=channel, exchange_key="k1", origin="critique")
+        assert pm.ahook.on_notify.await_count == 2
+        window = _window_context_text(conv)
+        assert "payload A" in window
+        assert "payload B" in window
+
+        pm.ahook.on_conversation_event = orig_event
+
+        # Stub 2's turn arrives with an empty registry — it must clear the
+        # stale flag, not early-return past it.
+        await funnel.before_agent_turn(channel=channel, exchange_key="k2", origin="critique")
+
+        # A fresh registration must fire a fresh stub (count 3). Before the
+        # fix this stayed at 2 and payload C sat undeliverable forever.
+        await funnel.register_and_wake(
+            channel, origin="critique", source="critique", entries=["payload C"]
+        )
+        assert pm.ahook.on_notify.await_count == 3
+        await funnel.before_agent_turn(channel=channel, exchange_key="k3", origin="critique")
+        assert "payload C" in _window_context_text(conv)
+
+        await db.close()
