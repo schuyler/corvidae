@@ -26,11 +26,14 @@ import asyncio
 import collections
 import json
 import logging
+import math
 import re
 
 import aiosqlite
 
+from corvidae.attribution import reset_attribution, set_attribution
 from corvidae.hooks import CorvidaePlugin, hookimpl
+from corvidae.task import Task
 from corvidae.tuning import resolve_tunable
 
 logger = logging.getLogger(__name__)
@@ -52,6 +55,70 @@ WEIGHT_IMPERATIVE_DEFAULT = 0.10      # appraisal.weights.imperative
 # In-memory store bound — constant, not tunable (stage 1 runs before enqueue,
 # outside SerialQueue serialization, so per-channel slots would race; §3.2).
 CACHE_MAXSIZE = 512
+
+# Stage-2 importance-prior weights (WP2.5 point 3). Best-guess commented
+# defaults AND runtime tunables (directive 2), resolved at consolidation time.
+PRIOR_W_STAKES_DEFAULT = 0.4      # appraisal.prior.w_stakes
+PRIOR_W_VALENCE_DEFAULT = 0.3     # appraisal.prior.w_valence
+PRIOR_W_NOVELTY_DEFAULT = 0.3     # appraisal.prior.w_novelty
+
+# Documented copy of this text lives in prompts/appraisal.md; the
+# appraisal.stage2_prompt config key overrides it with a literal string.
+DEFAULT_STAGE2_PROMPT = (
+    "You are appraising a completed exchange for the agent's own perception "
+    "system. You are given the originating message, the agent's final "
+    "response, and a summary of what the agent's memory retrieval found for "
+    "this exchange. Score the EXCHANGE (not the agent's performance) on each "
+    "dimension, 0.0-1.0.\n\n"
+    "- valence: the emotional tone of the exchange for the agent. 0.0 = "
+    "strongly negative (conflict, failure, distress), 0.5 = neutral, 1.0 = "
+    "strongly positive (success, warmth, praise).\n"
+    "- stakes: how much depends on this exchange being handled well. "
+    "Commitments, deadlines, personal disclosures, decisions = high; idle "
+    "chat = low.\n"
+    "- ambiguity: how much of the message's intent remained open to "
+    "interpretation. 0.0 = fully explicit; 1.0 = the agent had to guess.\n"
+    "- commitment_density: how many concrete commitments, facts, numbers, or "
+    "promises the exchange contains, relative to its length.\n"
+    "- novelty: how new this exchange's content is relative to what the "
+    "retrieval summary shows the agent already knows. Familiar ground = low.\n"
+    "- correction: true if the user was correcting the agent — telling it "
+    "that something it said, remembered, or did was wrong.\n\n"
+    "Respond with a single JSON object, nothing else:\n"
+    "{\n"
+    '  "valence": 0.5,\n'
+    '  "stakes": 0.0,\n'
+    '  "ambiguity": 0.0,\n'
+    '  "commitment_density": 0.0,\n'
+    '  "novelty": 0.5,\n'
+    '  "correction": false\n'
+    "}"
+)
+
+# JSON schema constraining the stage-2 call on servers that honour it
+# (llama-server grammar / json_schema via extra_body). Providers that ignore
+# it still return the JSON the prompt asks for; _parse_json_block reads it.
+STAGE2_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "valence": {"type": "number"},
+        "stakes": {"type": "number"},
+        "ambiguity": {"type": "number"},
+        "commitment_density": {"type": "number"},
+        "novelty": {"type": "number"},
+        "correction": {"type": "boolean"},
+    },
+    "required": [
+        "valence", "stakes", "ambiguity", "commitment_density",
+        "novelty", "correction",
+    ],
+}
+STAGE2_EXTRA_BODY = {
+    "response_format": {
+        "type": "json_schema",
+        "json_schema": {"name": "stage2_appraisal", "schema": STAGE2_SCHEMA},
+    }
+}
 
 # Surface-heuristic marker sets (tier 1c). Deliberately crude: these are
 # density signals, not NLP — the §6 standing experiment is what tunes the
@@ -87,6 +154,19 @@ _COMMITMENT_SCALE = 5.0    # 20% commitment/number tokens → 1.0
 def clamp01(x: float) -> float:
     """Clamp a float into [0.0, 1.0]."""
     return max(0.0, min(1.0, x))
+
+
+def _parse_json_block(text: str) -> dict:
+    """Extract the first JSON object from LLM output.
+
+    Tolerates surrounding prose and markdown code fences. Raises ValueError
+    when no parseable object is present — callers own their degradation.
+    """
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        raise ValueError(f"no JSON object in LLM output: {text[:200]!r}")
+    return json.loads(text[start:end + 1])
 
 
 def _sentences(text: str) -> list[str]:
@@ -150,6 +230,60 @@ def surface_signals(text: str) -> dict:
     }
 
 
+def entropy_summary(logprobs: dict | None) -> dict | None:
+    """Summarize per-token entropy from an OpenAI-style logprobs envelope.
+
+    Interoceptive, optional, never load-bearing (trap #4). Returns the
+    ``entropy`` envelope value ``{"kind", "mean", "max", "n_tokens"}`` or
+    None when no usable logprobs are present (absent ⇒ omit the key, never
+    null it — RFC 7386).
+
+    Per-token entropy is computed over the returned top-N logprobs plus a
+    residual bucket ``p_resid = max(0, 1 - sum p_i)`` contributing
+    ``-p_resid*log(p_resid)`` (N as provided, no re-request). If the payload
+    lacks per-token alternatives (chosen-token-only), it falls back to
+    ``-chosen_token_logprob`` (NLL) with ``kind == "nll"``.
+    """
+    if not logprobs:
+        return None
+    content = logprobs.get("content") if isinstance(logprobs, dict) else logprobs
+    if not content:
+        return None
+    per_token: list[float] = []
+    any_topn = False
+    for tok in content:
+        if not isinstance(tok, dict):
+            continue
+        tops = tok.get("top_logprobs")
+        if tops:
+            probs = [
+                math.exp(alt["logprob"])
+                for alt in tops
+                if isinstance(alt, dict) and alt.get("logprob") is not None
+            ]
+            if not probs:
+                continue
+            any_topn = True
+            ent = -sum(p * math.log(p) for p in probs if p > 0.0)
+            resid = max(0.0, 1.0 - sum(probs))
+            if resid > 0.0:
+                ent += -resid * math.log(resid)
+            per_token.append(ent)
+        else:
+            lp = tok.get("logprob")
+            if lp is None:
+                continue
+            per_token.append(-lp)  # chosen-token NLL fallback
+    if not per_token:
+        return None
+    return {
+        "kind": "topn" if any_topn else "nll",
+        "mean": sum(per_token) / len(per_token),
+        "max": max(per_token),
+        "n_tokens": len(per_token),
+    }
+
+
 class _LRUDict(collections.OrderedDict):
     """A bounded dict that evicts its least-recently-used entry."""
 
@@ -178,6 +312,39 @@ class _LRUDict(collections.OrderedDict):
             return default
 
 
+class AppraisalPrior:
+    """Consolidation-time importance prior driven by stored appraisals (WP2.5).
+
+    Wraps a fallback prior (the existing RubricPrior at install time). For a
+    consolidation range it scores each covered exchange from its appraisal
+    envelope and takes the max; when no appraisal covers the range — or the
+    lookup fails — it delegates to the wrapped prior. Satisfies the
+    ``ImportancePrior`` protocol with the two additive optional parameters.
+    """
+
+    def __init__(self, appraisal: "AppraisalPlugin", fallback) -> None:
+        self._appraisal = appraisal
+        self._fallback = fallback
+
+    async def score(self, messages, msg_id_range=None, channel=None) -> float:
+        if msg_id_range is not None:
+            try:
+                covered = await self._appraisal.importance_over_range(
+                    channel, msg_id_range
+                )
+            except Exception:
+                logger.warning(
+                    "appraisal importance prior failed; using fallback",
+                    exc_info=True,
+                )
+                covered = None
+            if covered is not None:
+                return covered
+        return await self._fallback.score(
+            messages, msg_id_range=msg_id_range, channel=channel
+        )
+
+
 class AppraisalPlugin(CorvidaePlugin):
     """Stage-1 appraisal: heuristics + FTS5 probe behind a pull API.
 
@@ -200,6 +367,10 @@ class AppraisalPlugin(CorvidaePlugin):
         # GC-dropped write mid-flight (trap #10).
         self._persist_tasks: set[asyncio.Task] = set()
         self._probe_db: aiosqlite.Connection | None = None
+        # Last-completed stage-2 vector per channel — the synchronous
+        # advisory reader (get_last_stage2). Consumers never wait for the
+        # CURRENT exchange's stage-2 (WP2.5 point 2).
+        self._last_stage2: dict[str, dict] = {}
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -246,6 +417,15 @@ class AppraisalPlugin(CorvidaePlugin):
             logger.warning(
                 "appraisal probe disabled: cannot open %s read-only",
                 db_path, exc_info=True,
+            )
+
+        # Install the appraisal-driven importance prior over MemoryPlugin's
+        # default (§3.2 consumer 3). Fail-soft when memory is absent — the
+        # degradation contract keeps the system on the spec rubric.
+        memory = self.pm.get_plugin("memory") if hasattr(self, "pm") else None
+        if memory is not None:
+            memory.importance_prior = AppraisalPrior(
+                appraisal=self, fallback=memory.importance_prior
             )
 
     @hookimpl
@@ -328,6 +508,266 @@ class AppraisalPlugin(CorvidaePlugin):
     async def get_stage2(self, exchange_key: str) -> dict | None:
         """Pure reader for the stage-2 vector (WP2.5 writes it)."""
         return await self._read_vector(exchange_key, None, "stage2")
+
+    def get_last_stage2(self, channel_id: str) -> dict | None:
+        """Synchronous advisory reader for the LAST completed stage-2 vector.
+
+        Advisory context only (WP2.5 point 2): consumers (WP2.7 lens
+        selection, WP2.9 outbound gate) must never wait for the CURRENT
+        exchange's stage-2 to complete — it runs as a silent task that
+        finishes after the turn. Returns None until one stage-2 lands.
+        """
+        return self._last_stage2.get(channel_id)
+
+    # ------------------------------------------------------------------
+    # Stage 2 — LLM appraisal off the response path (WP2.5)
+    # ------------------------------------------------------------------
+
+    @hookimpl
+    async def on_agent_response(
+        self, channel, request_text, response_text, exchange_key, origin,
+        originating_text, logprobs, withheld,
+    ) -> None:
+        """Enqueue the silent stage-2 appraisal task (never on the response path).
+
+        Fires once per exchange-ending turn. Never for ``origin="critique"``
+        exchanges — nothing downstream consumes them and it doubles cost.
+        The task is silent (``deliver=False``): its empty result triggers no
+        on_notify and therefore no main-model turn (trap #10).
+        """
+        if exchange_key is None or origin == "critique":
+            return
+        task_plugin = self.pm.get_plugin("task") if hasattr(self, "pm") else None
+        queue = getattr(task_plugin, "task_queue", None)
+        if queue is None:
+            logger.debug("stage-2 appraisal skipped: task queue unavailable")
+            return
+        text_in = originating_text if originating_text is not None else request_text
+
+        async def _work() -> str:
+            await self._run_stage2(channel, exchange_key, text_in, response_text, logprobs)
+            return ""
+
+        try:
+            await queue.enqueue(Task(
+                work=_work,
+                channel=channel,
+                description="appraisal:stage2",
+                exchange_key=exchange_key,
+                origin=origin,
+                deliver=False,
+                tool_call_id=None,
+            ))
+        except Exception:
+            logger.warning(
+                "failed to enqueue stage-2 appraisal task", exc_info=True,
+                extra={"channel": channel.id, "exchange_key": exchange_key},
+            )
+
+    async def _run_stage2(
+        self, channel, exchange_key: str, originating_text: str | None,
+        response_text: str | None, logprobs: dict | None,
+    ) -> None:
+        """The silent task body: one tier-3 call, merge-persist stage 2.
+
+        Sets attribution inside the body (usage rows join to the exchange for
+        WP2.10's per-band cost report). Malformed model output is logged and
+        the row keeps stage 1 only — no exception escapes (trap #10).
+        """
+        token = set_attribution(
+            stage="appraisal", channel_id=channel.id, exchange_key=exchange_key
+        )
+        try:
+            client = self._appraisal_client()
+            if client is None:
+                logger.debug("stage-2 appraisal skipped: no LLM client available")
+                return
+            profile = await self._retrieval_profile_summary(exchange_key)
+            prompt = resolve_tunable(
+                channel, self.config, "appraisal.stage2_prompt", DEFAULT_STAGE2_PROMPT
+            )
+            user_content = (
+                f"Originating message:\n{originating_text or '(unknown)'}\n\n"
+                f"Agent's final response:\n{response_text or '(none)'}\n\n"
+                f"Memory retrieval for this exchange:\n{profile}"
+            )
+            try:
+                response = await client.chat(
+                    [
+                        {"role": "system", "content": prompt},
+                        {"role": "user", "content": user_content},
+                    ],
+                    extra_body=STAGE2_EXTRA_BODY,
+                )
+                text = response["choices"][0]["message"]["content"]
+                parsed = _parse_json_block(text)
+                stage2 = {
+                    "valence": clamp01(float(parsed["valence"])),
+                    "stakes": clamp01(float(parsed["stakes"])),
+                    "ambiguity": clamp01(float(parsed["ambiguity"])),
+                    "commitment_density": clamp01(float(parsed["commitment_density"])),
+                    "novelty": clamp01(float(parsed["novelty"])),
+                    "correction": bool(parsed.get("correction", False)),
+                }
+            except Exception:
+                logger.warning(
+                    "stage-2 appraisal call/parse failed; row keeps stage 1",
+                    exc_info=True, extra={"exchange_key": exchange_key},
+                )
+                return
+
+            # Merge, never overwrite: a full-column write would erase
+            # WP2.9's stage1_out on every exchange that gets stage 2. Do NOT
+            # re-pass stage1 (already in the envelope from WP2.4). Absent
+            # entropy is omitted, never nulled (RFC 7386).
+            merge: dict = {"stage2": stage2}
+            entropy = entropy_summary(logprobs)
+            if entropy is not None:
+                merge["entropy"] = entropy
+            outcome_log = self.pm.get_plugin("outcome_log")
+            if outcome_log is not None:
+                try:
+                    await outcome_log.update_exchange(exchange_key, appraisal=merge)
+                except Exception:
+                    logger.warning(
+                        "stage-2 appraisal persist failed", exc_info=True,
+                        extra={"exchange_key": exchange_key},
+                    )
+            # Advisory synchronous reader for the last completed stage-2.
+            self._last_stage2[channel.id] = stage2
+        finally:
+            reset_attribution(token)
+
+    def _appraisal_client(self):
+        """Resolve the tier-3 client: appraisal → background → main.
+
+        LLMPlugin.get_client only falls back to main, so the two-step
+        appraisal→background fallback is implemented here (WP2.5 point 2).
+        """
+        llm = self.pm.get_plugin("llm") if hasattr(self, "pm") else None
+        if llm is None:
+            return None
+        clients = getattr(llm, "_clients", {})
+        for role in ("appraisal", "background"):
+            client = clients.get(role)
+            if client is not None:
+                return client
+        try:
+            return llm.get_client("main")
+        except Exception:
+            return None
+
+    async def _retrieval_profile_summary(self, exchange_key: str) -> str:
+        """Render the exchange's retrieval profile as a short prompt line."""
+        db = self._exchange_db()
+        if db is None:
+            return "no retrieval recorded"
+        try:
+            async with db.execute(
+                "SELECT retrieval_top_score, retrieval_hit_count "
+                "FROM exchange_log WHERE exchange_key = ?",
+                (exchange_key,),
+            ) as cursor:
+                row = await cursor.fetchone()
+        except Exception:
+            return "no retrieval recorded"
+        if row is None or (row[0] is None and row[1] is None):
+            return "no retrieval recorded"
+        top, hits = row
+        if top is not None:
+            return f"{hits or 0} memory hit(s); top relevance score {top:.2f}"
+        return f"{hits or 0} memory hit(s)"
+
+    # ------------------------------------------------------------------
+    # Range readers (consolidation-time importance prior + valence, WP2.5)
+    # ------------------------------------------------------------------
+
+    async def importance_over_range(self, channel, msg_id_range) -> float | None:
+        """Max importance over exchanges whose message_rowid is in the range.
+
+        Per-exchange score = max(stage1.salience, stage2_composite) when
+        stage 2 is present, else stage-1 salience alone, else the exchange is
+        skipped. Returns None when no appraisal covers the range (the caller
+        falls back to the wrapped prior).
+        """
+        envelopes = await self._appraisals_in_range(msg_id_range)
+        if not envelopes:
+            return None
+        cfg = self.config
+        w_stakes = resolve_tunable(channel, cfg, "appraisal.prior.w_stakes", PRIOR_W_STAKES_DEFAULT)
+        w_valence = resolve_tunable(channel, cfg, "appraisal.prior.w_valence", PRIOR_W_VALENCE_DEFAULT)
+        w_novelty = resolve_tunable(channel, cfg, "appraisal.prior.w_novelty", PRIOR_W_NOVELTY_DEFAULT)
+        scores: list[float] = []
+        for env in envelopes:
+            stage1 = env.get("stage1") or {}
+            stage2 = env.get("stage2")
+            s1 = stage1.get("salience")
+            s1 = float(s1) if s1 is not None else None
+            if isinstance(stage2, dict):
+                composite = clamp01(
+                    w_stakes * float(stage2.get("stakes", 0.0))
+                    + w_valence * abs(float(stage2.get("valence", 0.5)) - 0.5) * 2
+                    + w_novelty * float(stage2.get("novelty", 0.0))
+                )
+                scores.append(max(s1, composite) if s1 is not None else composite)
+            elif s1 is not None:
+                scores.append(s1)
+        if not scores:
+            return None
+        return max(scores)
+
+    async def mean_valence(self, msg_id_range) -> float | None:
+        """Mean stage-2 valence over the range, or None when none present."""
+        envelopes = await self._appraisals_in_range(msg_id_range)
+        valences: list[float] = []
+        for env in envelopes:
+            stage2 = env.get("stage2")
+            if isinstance(stage2, dict) and stage2.get("valence") is not None:
+                valences.append(float(stage2["valence"]))
+        if not valences:
+            return None
+        return sum(valences) / len(valences)
+
+    async def _appraisals_in_range(self, msg_id_range) -> list[dict]:
+        """Return appraisal envelopes for exchanges whose rowid is in range."""
+        if not msg_id_range:
+            return []
+        lo, hi = msg_id_range
+        db = self._exchange_db()
+        if db is None:
+            return []
+        try:
+            async with db.execute(
+                "SELECT appraisal FROM exchange_log "
+                "WHERE message_rowid IS NOT NULL AND message_rowid >= ? "
+                "AND message_rowid <= ? AND appraisal IS NOT NULL",
+                (lo, hi),
+            ) as cursor:
+                rows = await cursor.fetchall()
+        except Exception:
+            return []
+        envelopes: list[dict] = []
+        for (appraisal_json,) in rows:
+            try:
+                env = json.loads(appraisal_json)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if isinstance(env, dict):
+                envelopes.append(env)
+        return envelopes
+
+    def _exchange_db(self):
+        """Return a connection that can read exchange_log.
+
+        Prefer the persistence write-connection (authoritative for
+        exchange_log, and correct even when it is an in-memory DB the
+        read-only probe file cannot see); fall back to the probe connection.
+        """
+        persistence = self.pm.get_plugin("persistence") if hasattr(self, "pm") else None
+        db = getattr(persistence, "db", None)
+        if db is not None:
+            return db
+        return self._probe_db
 
     # ------------------------------------------------------------------
     # Internals
