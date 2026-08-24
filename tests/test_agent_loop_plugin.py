@@ -1647,7 +1647,7 @@ class TestProcessToolResult:
     async def test_hook_returns_string_replaces_tool_result(self):
         """When process_tool_result returns a string, that string replaces the
         original tool result in the conversation."""
-        from corvidae.hooks import resolve_hook_results, HookStrategy, hookimpl
+        from corvidae.hooks import hookimpl
         from corvidae.tools.subagent import run_agent_loop
 
         tool_fn = AsyncMock(return_value="original tool output")

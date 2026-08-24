@@ -56,6 +56,11 @@ WEIGHT_IMPERATIVE_DEFAULT = 0.10      # appraisal.weights.imperative
 # outside SerialQueue serialization, so per-channel slots would race; §3.2).
 CACHE_MAXSIZE = 512
 
+# Bound on the originating-text LRU (AppraisalPlugin._originating_text).
+# Keyed by correlation_id, not per-channel — user messages interleave
+# mid-cycle by design, so a single per-channel slot would be clobbered.
+ORIGINATING_TEXT_LRU_MAXSIZE = 512
+
 # Stage-2 importance-prior weights (WP2.5 point 3). Best-guess commented
 # defaults AND runtime tunables (directive 2), resolved at consolidation time.
 PRIOR_W_STAKES_DEFAULT = 0.4      # appraisal.prior.w_stakes
@@ -371,6 +376,10 @@ class AppraisalPlugin(CorvidaePlugin):
         # advisory reader (get_last_stage2). Consumers never wait for the
         # CURRENT exchange's stage-2 (WP2.5 point 2).
         self._last_stage2: dict[str, dict] = {}
+        # Correlation-keyed LRU of originating text (the exchange's true
+        # originating USER/notification text), bounded so long-running
+        # exchanges don't leak memory. Fed by on_message_persisted.
+        self._originating_text: collections.OrderedDict[str, str] = collections.OrderedDict()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -445,27 +454,44 @@ class AppraisalPlugin(CorvidaePlugin):
     # ------------------------------------------------------------------
 
     @hookimpl
-    async def should_process_message(self, channel, sender, text, exchange_key):
+    async def should_process_message(self, channel, sender, text, correlation_id):
         """Thin trigger: compute the inbound stage-1 vector, return None.
 
         The try/except is load-bearing, not defensive dressing: this is a
         plain broadcast hook, dispatched concurrently via asyncio.gather
         WITHOUT return_exceptions — a raw exception here would propagate to
         the transport read path, discard sibling impls' results, and
-        prevent REJECT_WINS from resolving. An appraisal failure never
+        prevent reject-wins from resolving. An appraisal failure never
         rejects or crashes the inbound path (traps #1/#10).
         """
-        if exchange_key is None:
+        if correlation_id is None:
             return None
         try:
-            await self.get_or_compute(channel, exchange_key, text)
+            await self.get_or_compute(channel, correlation_id, text)
         except Exception:
             logger.warning(
                 "stage-1 appraisal failed at the gate (failing open)",
                 exc_info=True,
-                extra={"channel": channel.id, "exchange_key": exchange_key},
+                extra={"channel": channel.id, "correlation_id": correlation_id},
             )
         return None
+
+    @hookimpl
+    async def on_message_persisted(self, channel, correlation_id, rowid, text, meta) -> None:
+        """Record the exchange's true originating text in the bounded LRU.
+
+        Fires once per originating item (user messages and
+        notification-born correlations alike), regardless of persistence
+        outcome (rowid may be None).
+        """
+        self._originating_text[correlation_id] = text
+        self._originating_text.move_to_end(correlation_id)
+        while len(self._originating_text) > ORIGINATING_TEXT_LRU_MAXSIZE:
+            self._originating_text.popitem(last=False)
+
+    def get_originating_text(self, correlation_id: str) -> str | None:
+        """Pure reader for the exchange's true originating text, or None."""
+        return self._originating_text.get(correlation_id)
 
     # ------------------------------------------------------------------
     # Pull API
@@ -525,27 +551,28 @@ class AppraisalPlugin(CorvidaePlugin):
 
     @hookimpl
     async def on_agent_response(
-        self, channel, request_text, response_text, exchange_key, origin,
-        originating_text, logprobs, withheld,
+        self, channel, request_text, response_text, correlation_id, meta, logprobs,
     ) -> None:
         """Enqueue the silent stage-2 appraisal task (never on the response path).
 
-        Fires once per exchange-ending turn. Never for ``origin="critique"``
-        exchanges — nothing downstream consumes them and it doubles cost.
-        The task is silent (``deliver=False``): its empty result triggers no
-        on_notify and therefore no main-model turn (trap #10).
+        Fires once per exchange-ending turn. Never for ``meta["origin"] ==
+        "critique"`` exchanges — nothing downstream consumes them and it
+        doubles cost. The task is silent (``deliver=False``): its empty
+        result triggers no on_notify and therefore no main-model turn
+        (trap #10).
         """
-        if exchange_key is None or origin == "critique":
+        origin = (meta or {}).get("origin")
+        if correlation_id is None or origin == "critique":
             return
         task_plugin = self.pm.get_plugin("task") if hasattr(self, "pm") else None
         queue = getattr(task_plugin, "task_queue", None)
         if queue is None:
             logger.debug("stage-2 appraisal skipped: task queue unavailable")
             return
-        text_in = originating_text if originating_text is not None else request_text
+        text_in = self.get_originating_text(correlation_id) or request_text
 
         async def _work() -> str:
-            await self._run_stage2(channel, exchange_key, text_in, response_text, logprobs)
+            await self._run_stage2(channel, correlation_id, text_in, response_text, logprobs)
             return ""
 
         try:
@@ -553,15 +580,15 @@ class AppraisalPlugin(CorvidaePlugin):
                 work=_work,
                 channel=channel,
                 description="appraisal:stage2",
-                exchange_key=exchange_key,
-                origin=origin,
+                correlation_id=correlation_id,
+                meta=meta,
                 deliver=False,
                 tool_call_id=None,
             ))
         except Exception:
             logger.warning(
                 "failed to enqueue stage-2 appraisal task", exc_info=True,
-                extra={"channel": channel.id, "exchange_key": exchange_key},
+                extra={"channel": channel.id, "correlation_id": correlation_id},
             )
 
     async def _run_stage2(
@@ -575,7 +602,7 @@ class AppraisalPlugin(CorvidaePlugin):
         the row keeps stage 1 only — no exception escapes (trap #10).
         """
         token = set_attribution(
-            stage="appraisal", channel_id=channel.id, exchange_key=exchange_key
+            stage="appraisal", channel_id=channel.id, correlation_id=exchange_key
         )
         try:
             client = self._appraisal_client()

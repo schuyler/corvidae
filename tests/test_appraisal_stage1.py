@@ -270,9 +270,9 @@ class TestPullApi:
                 self._appraisal = appraisal
 
             @hookimpl
-            async def should_process_message(self, channel, sender, text, exchange_key):
-                observed[exchange_key] = await self._appraisal.get_or_compute(
-                    channel, exchange_key, text
+            async def should_process_message(self, channel, sender, text, correlation_id):
+                observed[correlation_id] = await self._appraisal.get_or_compute(
+                    channel, correlation_id, text
                 )
                 return None
 
@@ -297,7 +297,7 @@ class TestPullApi:
             key = f"k-order-{consumer_first}"
             # Concurrent broadcast: both hookimpls fire in one gather.
             await pm.ahook.should_process_message(
-                channel=channel, sender="user", text="a seeded memory", exchange_key=key
+                channel=channel, sender="user", text="a seeded memory", correlation_id=key
             )
             assert observed[key] == await plugin.get_appraisal(key)
             await plugin.on_stop()
@@ -346,7 +346,7 @@ class TestStage1Persist:
         vector = await plugin.get_or_compute(channel, key, "a rejected message")
         await self._drain_persists(plugin)
         await pm.ahook.on_message_rejected(
-            channel=channel, exchange_key=key, sender="user", text="a rejected message"
+            channel=channel, correlation_id=key, sender="user", text="a rejected message"
         )
         row = await self._read_row(db_path, key)
         assert row is not None
@@ -362,7 +362,7 @@ class TestStage1Persist:
         )
         key = "k-rej-2"
         await pm.ahook.on_message_rejected(
-            channel=channel, exchange_key=key, sender="user", text="a rejected message"
+            channel=channel, correlation_id=key, sender="user", text="a rejected message"
         )
         vector = await plugin.get_or_compute(channel, key, "a rejected message")
         await self._drain_persists(plugin)
@@ -395,7 +395,7 @@ class TestThinTrigger:
     async def test_gate_hook_computes_and_returns_none(self, tmp_path):
         plugin, channel, _, pm = await build_appraisal(tmp_path, summaries=["x"])
         result = await plugin.should_process_message(
-            channel=channel, sender="user", text="hello", exchange_key="k-thin"
+            channel=channel, sender="user", text="hello", correlation_id="k-thin"
         )
         assert result is None
         assert await plugin.get_appraisal("k-thin") is not None
@@ -418,7 +418,7 @@ class TestThinTrigger:
         monkeypatch.setattr(plugin, "_compute", failing_compute)
 
         result = await plugin.should_process_message(
-            channel=channel, sender="user", text="hello", exchange_key="k-fail"
+            channel=channel, sender="user", text="hello", correlation_id="k-fail"
         )
         assert result is None  # fail-open: never rejects, never raises
         assert await plugin.get_appraisal("k-fail") is None

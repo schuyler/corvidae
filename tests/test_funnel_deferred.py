@@ -85,7 +85,7 @@ class TestStubCoalescing:
         assert kwargs["meta"] == {"origin": "critique"}
 
         # The drain on a critique-origin turn admits all three.
-        await funnel.before_agent_turn(channel=channel, exchange_key="k1", origin="critique")
+        await funnel.before_agent_turn(channel=channel, correlation_id="k1", meta={"origin": "critique"})
         window = _window_context_text(conv)
         assert "verdict one" in window
         assert "verdict two" in window
@@ -93,7 +93,7 @@ class TestStubCoalescing:
 
         # Registry drained: a subsequent same-origin turn admits nothing new.
         msg_count = len(conv.messages)
-        await funnel.before_agent_turn(channel=channel, exchange_key="k2", origin="critique")
+        await funnel.before_agent_turn(channel=channel, correlation_id="k2", meta={"origin": "critique"})
         assert len(conv.messages) == msg_count
 
         await db.close()
@@ -105,7 +105,7 @@ class TestStubCoalescing:
         pm = funnel.pm
 
         await funnel.register_and_wake(channel, origin="critique", source="critique", entries=["first"])
-        await funnel.before_agent_turn(channel=channel, exchange_key="k1", origin="critique")
+        await funnel.before_agent_turn(channel=channel, correlation_id="k1", meta={"origin": "critique"})
 
         await funnel.register_and_wake(channel, origin="critique", source="critique", entries=["second"])
         assert pm.ahook.on_notify.await_count == 2
@@ -133,7 +133,7 @@ class TestStubCoalescing:
         await funnel.register_and_wake(channel, origin="critique", source="critique", entries=[])
         pm.ahook.on_notify.assert_not_awaited()
 
-        await funnel.before_agent_turn(channel=channel, exchange_key="k1", origin="critique")
+        await funnel.before_agent_turn(channel=channel, correlation_id="k1", meta={"origin": "critique"})
         assert _window_context_text(conv) == ""
 
         await db.close()
@@ -147,11 +147,11 @@ class TestPerOriginIsolation:
 
         await funnel.register_and_wake(channel, origin="critique", source="critique", entries=["a verdict"])
 
-        await funnel.before_agent_turn(channel=channel, exchange_key="k1", origin="task")
+        await funnel.before_agent_turn(channel=channel, correlation_id="k1", meta={"origin": "task"})
         assert "a verdict" not in _window_context_text(conv)
 
         # Still registered — the matching-origin turn drains it.
-        await funnel.before_agent_turn(channel=channel, exchange_key="k2", origin="critique")
+        await funnel.before_agent_turn(channel=channel, correlation_id="k2", meta={"origin": "critique"})
         assert "a verdict" in _window_context_text(conv)
 
         await db.close()
@@ -161,7 +161,7 @@ class TestPerOriginIsolation:
 
         await funnel.register_and_wake(channel, origin="critique", source="critique", entries=["a verdict"])
 
-        await funnel.before_agent_turn(channel=channel, exchange_key="k1", origin="user")
+        await funnel.before_agent_turn(channel=channel, correlation_id="k1", meta={"origin": "user"})
         assert "a verdict" not in _window_context_text(conv)
 
         await db.close()
@@ -176,10 +176,10 @@ class TestPerOriginIsolation:
 
         await funnel.register_and_wake(channel_a, origin="critique", source="critique", entries=["a verdict"])
 
-        await funnel.before_agent_turn(channel=channel_b, exchange_key="k1", origin="critique")
+        await funnel.before_agent_turn(channel=channel_b, correlation_id="k1", meta={"origin": "critique"})
         assert "a verdict" not in _window_context_text(conv_b)
         # Still available for channel A.
-        await funnel.before_agent_turn(channel=channel_a, exchange_key="k2", origin="critique")
+        await funnel.before_agent_turn(channel=channel_a, correlation_id="k2", meta={"origin": "critique"})
         assert "a verdict" in _window_context_text(conv_a)
 
         await db.close()
@@ -202,7 +202,7 @@ class TestFailureAndBudget:
         monkeypatch.setattr(funnel, "admit", boom)
         # Drain attempt fails inside admit — must not raise out of the hook,
         # and must not lose the payload.
-        await funnel.before_agent_turn(channel=channel, exchange_key="k1", origin="critique")
+        await funnel.before_agent_turn(channel=channel, correlation_id="k1", meta={"origin": "critique"})
         monkeypatch.undo()
 
         # A fresh registration fires a fresh stub (flag was cleared first).
@@ -210,7 +210,7 @@ class TestFailureAndBudget:
         assert pm.ahook.on_notify.await_count == 2
 
         # The next successful drain admits BOTH the kept and the new payload.
-        await funnel.before_agent_turn(channel=channel, exchange_key="k2", origin="critique")
+        await funnel.before_agent_turn(channel=channel, correlation_id="k2", meta={"origin": "critique"})
         window = _window_context_text(conv)
         assert "kept verdict" in window
         assert "second verdict" in window
@@ -233,13 +233,13 @@ class TestFailureAndBudget:
             channel, origin="critique", source="critique", entries=[long_a.strip(), long_b.strip()]
         )
 
-        await funnel.before_agent_turn(channel=channel, exchange_key="k1", origin="critique")
+        await funnel.before_agent_turn(channel=channel, correlation_id="k1", meta={"origin": "critique"})
         window = _window_context_text(conv)
         assert "alpha" in window
         assert "bravo" not in window
 
         # The dropped entry drains on the next same-origin turn.
-        await funnel.before_agent_turn(channel=channel, exchange_key="k2", origin="critique")
+        await funnel.before_agent_turn(channel=channel, correlation_id="k2", meta={"origin": "critique"})
         window = _window_context_text(conv)
         assert "bravo" in window
 
@@ -281,7 +281,7 @@ class TestMidDrainRegistrationWedge:
 
         # Stub 1's turn drains; B registers mid-drain (stub 2 fires) and is
         # consumed by this same drain.
-        await funnel.before_agent_turn(channel=channel, exchange_key="k1", origin="critique")
+        await funnel.before_agent_turn(channel=channel, correlation_id="k1", meta={"origin": "critique"})
         assert pm.ahook.on_notify.await_count == 2
         window = _window_context_text(conv)
         assert "payload A" in window
@@ -291,7 +291,7 @@ class TestMidDrainRegistrationWedge:
 
         # Stub 2's turn arrives with an empty registry — it must clear the
         # stale flag, not early-return past it.
-        await funnel.before_agent_turn(channel=channel, exchange_key="k2", origin="critique")
+        await funnel.before_agent_turn(channel=channel, correlation_id="k2", meta={"origin": "critique"})
 
         # A fresh registration must fire a fresh stub (count 3). Before the
         # fix this stayed at 2 and payload C sat undeliverable forever.
@@ -299,7 +299,7 @@ class TestMidDrainRegistrationWedge:
             channel, origin="critique", source="critique", entries=["payload C"]
         )
         assert pm.ahook.on_notify.await_count == 3
-        await funnel.before_agent_turn(channel=channel, exchange_key="k3", origin="critique")
+        await funnel.before_agent_turn(channel=channel, correlation_id="k3", meta={"origin": "critique"})
         assert "payload C" in _window_context_text(conv)
 
         await db.close()

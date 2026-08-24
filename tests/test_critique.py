@@ -66,12 +66,19 @@ class FakeAppraisal(CorvidaePlugin):
     def __init__(self, stage1=None, stage2=None):
         self._stage1 = stage1
         self._stage2 = stage2
+        # correlation_id -> originating text, standing in for the LRU
+        # AppraisalPlugin owns (§1.4); CritiquePlugin reads it via
+        # get_originating_text with a request_text fallback.
+        self._originating_text: dict[str, str] = {}
 
     async def get_appraisal(self, exchange_key):
         return self._stage1
 
     def get_last_stage2(self, channel_id):
         return self._stage2
+
+    def get_originating_text(self, correlation_id):
+        return self._originating_text.get(correlation_id)
 
 
 class FixedRng:
@@ -155,6 +162,7 @@ async def build_critique(
     return SimpleNamespace(
         pm=pm, db=db, db_path=db_path, plugin=plugin, task=task_plugin,
         outcome=outcome, llm=llm, stub=stub, funnel=funnel, channel=channel,
+        appraisal=appraisal,
     )
 
 
@@ -177,13 +185,30 @@ async def _read_outcomes(db, key):
     return json.loads(row[0]) if row and row[0] else None
 
 
-async def _fire(env, exchange_key="k", origin="user", response_text="resp",
+async def _fire(env, correlation_id="k", origin="user", response_text="resp",
                 originating_text="orig user text"):
-    await env.outcome.record_exchange(exchange_key, env.channel.id, origin=origin)
+    """Simulates the propagated-origin mechanics (§1.4/§1.5): "user" makes
+    the correlation_id admitted via on_message_admitted (meta carries no
+    origin string -- eligibility is inferred from admitted-LRU membership);
+    "reminder" stamps meta["origin"]; "critique"/"heartbeat" stamp their own
+    exempt origin into meta; "task" is neither admitted nor stamped
+    (background/task-origin default, per §1.4)."""
+    await env.outcome.record_exchange(correlation_id, env.channel.id, origin=origin)
+    if env.appraisal is not None:
+        env.appraisal._originating_text[correlation_id] = originating_text
+    if origin == "user":
+        await env.plugin.on_message_admitted(
+            channel=env.channel, correlation_id=correlation_id,
+            sender="user", text=originating_text,
+        )
+        meta = {}
+    elif origin == "task":
+        meta = {}
+    else:
+        meta = {"origin": origin}
     await env.plugin.on_agent_response(
         channel=env.channel, request_text="req", response_text=response_text,
-        exchange_key=exchange_key, origin=origin,
-        originating_text=originating_text, logprobs=None, withheld=False,
+        correlation_id=correlation_id, meta=meta, logprobs=None,
     )
 
 
@@ -226,7 +251,7 @@ class TestProvenanceSnapshot:
         env.channel.conversation.append(
             {"role": "user", "content": "what is the plan?"}, MessageType.MESSAGE,
         )
-        await env.plugin.before_agent_turn(env.channel, "ks", "user")
+        await env.plugin.before_agent_turn(env.channel, "ks", {})
         async with env.db.execute(
             "SELECT provenance_snapshot FROM exchange_log WHERE exchange_key = ?",
             ("ks",),
@@ -243,7 +268,7 @@ class TestProvenanceSnapshot:
         env.channel.conversation.append(
             {"role": "user", "content": "hi"}, MessageType.MESSAGE,
         )
-        await env.plugin.before_agent_turn(env.channel, "kn", "user")
+        await env.plugin.before_agent_turn(env.channel, "kn", {})
         async with env.db.execute(
             "SELECT provenance_snapshot FROM exchange_log WHERE exchange_key = ?",
             ("kn",),
@@ -408,11 +433,14 @@ class TestProvenanceGate:
         await env.outcome.update_exchange(
             "kpg", retrieval_top_score=0.1, retrieval_hit_count=1,
         )
+        await env.plugin.on_message_admitted(
+            channel=env.channel, correlation_id="kpg",
+            sender="user", text="when is launch?",
+        )
         await env.plugin.on_agent_response(
             channel=env.channel, request_text="req",
             response_text="You told me the launch date was March.",
-            exchange_key="kpg", origin="user",
-            originating_text="when is launch?", logprobs=None, withheld=False,
+            correlation_id="kpg", meta={}, logprobs=None,
         )
         assert env.task.task_queue.queue.qsize() == 1
         await _run_next_task(env.task)
@@ -426,11 +454,14 @@ class TestProvenanceGate:
         await env.outcome.update_exchange(
             "kstrong", retrieval_top_score=0.9, retrieval_hit_count=5,
         )
+        await env.plugin.on_message_admitted(
+            channel=env.channel, correlation_id="kstrong",
+            sender="user", text="when is launch?",
+        )
         await env.plugin.on_agent_response(
             channel=env.channel, request_text="req",
             response_text="You told me the launch date was March.",
-            exchange_key="kstrong", origin="user",
-            originating_text="when is launch?", logprobs=None, withheld=False,
+            correlation_id="kstrong", meta={}, logprobs=None,
         )
         assert env.task.task_queue.queue.qsize() == 0
         await _teardown(env)
@@ -445,11 +476,14 @@ class TestProvenanceGate:
         await env.outcome.update_exchange(
             "kfts", retrieval_top_score=0.1, retrieval_hit_count=0,
         )
+        await env.plugin.on_message_admitted(
+            channel=env.channel, correlation_id="kfts",
+            sender="user", text="when is launch?",
+        )
         await env.plugin.on_agent_response(
             channel=env.channel, request_text="req",
             response_text="You told me the launch date was March.",
-            exchange_key="kfts", origin="user",
-            originating_text="when is launch?", logprobs=None, withheld=False,
+            correlation_id="kfts", meta={}, logprobs=None,
         )
         assert env.task.task_queue.queue.qsize() == 0
         await _teardown(env)
@@ -460,11 +494,14 @@ class TestProvenanceGate:
         await env.outcome.update_exchange(
             "knp", retrieval_top_score=0.1, retrieval_hit_count=0,
         )
+        await env.plugin.on_message_admitted(
+            channel=env.channel, correlation_id="knp",
+            sender="user", text="thoughts?",
+        )
         await env.plugin.on_agent_response(
             channel=env.channel, request_text="req",
             response_text="The launch will be great.",
-            exchange_key="knp", origin="user",
-            originating_text="thoughts?", logprobs=None, withheld=False,
+            correlation_id="knp", meta={}, logprobs=None,
         )
         assert env.task.task_queue.queue.qsize() == 0
         await _teardown(env)
@@ -476,11 +513,14 @@ class TestProvenanceGate:
         await env.outcome.update_exchange(
             "kdis", retrieval_top_score=0.1, retrieval_hit_count=0,
         )
+        await env.plugin.on_message_admitted(
+            channel=env.channel, correlation_id="kdis",
+            sender="user", text="q?",
+        )
         await env.plugin.on_agent_response(
             channel=env.channel, request_text="req",
             response_text="You told me the answer was 42.",
-            exchange_key="kdis", origin="user",
-            originating_text="q?", logprobs=None, withheld=False,
+            correlation_id="kdis", meta={}, logprobs=None,
         )
         assert env.task.task_queue.queue.qsize() == 0
         await _teardown(env)
@@ -505,7 +545,7 @@ class TestExecution:
         # The critic call carried the exchange attribution.
         attr = env.stub.chat_calls[0]["attribution"]
         assert attr.get("stage") == "critique"
-        assert attr.get("exchange_key") == "kempty"
+        assert attr.get("correlation_id") == "kempty"
         await _teardown(env)
 
     async def test_nonempty_verdict_registers_and_delivers_context(self, tmp_path):
@@ -523,7 +563,7 @@ class TestExecution:
         assert notify.await_args.kwargs["meta"] == {"origin": "critique"}
         # Drain on a critique-origin turn → verdict appears as framed CONTEXT.
         await env.funnel.before_agent_turn(
-            env.channel, exchange_key="kfull", origin="critique",
+            env.channel, correlation_id="kfull", meta={"origin": "critique"},
         )
         context_text = "\n".join(
             m.get("content") or ""

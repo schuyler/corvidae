@@ -1,0 +1,73 @@
+# Buster agent config — minimal profile, IRC-only, empirical-run hardening.
+# Rendered to ~/code/llm/buster/state/agent.yaml by run.sh
+# (sed s/@STATE_DIR@/.../ substitution; state dir: @STATE_DIR@).
+# Relative paths below (session_db, logging.file, metrics_jsonl) resolve
+# against _base_dir, which Runtime sets to this rendered file's own
+# directory (state/) — no absolute paths needed for those.
+
+llm:
+  main:
+    base_url: http://127.0.0.1:8080/v1
+    # Model id as reported by GET /v1/models on the standing llama-server.
+    # Verify against the live server before a run if the model has changed
+    # (see "Serving facts" in the design) — llama.cpp's OpenAI-compatible
+    # endpoint is single-model and tolerant of this string drifting, but
+    # keep it accurate for the run report's legibility.
+    model: qwen3.6:35b
+    extra_body:
+      id_slot: 0   # pin main-role requests to KV slot 0 (P5 kv_slot probe)
+    timeout: 300
+
+daemon:
+  session_db: sessions.db
+  metrics_jsonl: metrics.jsonl
+  max_task_workers: 2
+
+agent:
+  system_prompt: >
+    You are Buster, a test agent used for harness probes. Answer plainly
+    and follow instructions exactly, including any tokens or codes you are
+    asked to repeat back.
+  max_context_tokens: 64000
+  request_logprobs: false
+
+# Minimal profile: cognition plugins out (funnel/appraisal/critique/memory/
+# outcome_log), plus Buster-specific hardening (no subagent/mcp/cli — IRC
+# only; no shell tool).
+plugins:
+  disabled:
+    - memory
+    - memory_tools
+    - funnel
+    - appraisal
+    - critique
+    - outcome_log
+    - subagent
+    - mcp
+    - cli
+
+tools:
+  disabled:
+    - shell
+
+irc:
+  host: 127.0.0.1
+  port: 6667
+  nick: buster
+  tls: false
+  channels:
+    - "#p-smoke"
+    - "#p-toolloop"
+    - "#p-interleave"
+    - "#p-compact"
+    - "#p-restart"
+    - "#p-slots"
+    - "#chat"        # free conversation with a human; no probe uses this channel
+
+logging:
+  level: INFO
+  file: corvidae.log
+
+channels:
+  irc:#p-compact:
+    max_context_tokens: 4000
