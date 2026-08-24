@@ -70,6 +70,14 @@ screen -S buster-daemon -X quit >/dev/null 2>&1 || true
 sleep 1
 "$REPO_DIR/harness/snapshot.sh"
 
+# Probe channels are fixed names (#p-interleave etc.) and sessions.db is
+# never truncated on its own — without this, conversation history from
+# every prior run stays loaded, so probes see planted tokens/answers from
+# past runs before the current exchange ever resolves. Reset once here,
+# after the snapshot backed up the prior state; daemon restarts *within*
+# this run (restart_recovery) still read the same fresh sessions.db.
+rm -f "$STATE_DIR/sessions.db" "$STATE_DIR/sessions.db-wal" "$STATE_DIR/sessions.db-shm"
+
 # --- 4. render config --------------------------------------------------------
 sed "s|@STATE_DIR@|$STATE_DIR|g" "$REPO_DIR/harness/buster.yaml.in" > "$STATE_DIR/agent.yaml"
 CONFIG_SHA="$(sha256sum "$STATE_DIR/agent.yaml" | awk '{print $1}')"
