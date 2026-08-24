@@ -15,6 +15,8 @@ Config:
 import json
 import logging
 import time
+from pathlib import Path
+
 import aiosqlite
 
 from corvidae.hooks import CorvidaePlugin, hookimpl
@@ -91,7 +93,8 @@ class PersistencePlugin(CorvidaePlugin):
         # Open SQLite database (only if not already injected for testing)
         if self.db is None:
             db_path = config.get("daemon", {}).get("session_db", "sessions.db")
-            self.db = await aiosqlite.connect(db_path)
+            base_dir = config.get("_base_dir", Path("."))
+            self.db = await aiosqlite.connect(str(Path(base_dir) / db_path))
             await init_db(self.db)
 
         # Set journal mode (WAL by default for concurrent access)

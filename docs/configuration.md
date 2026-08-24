@@ -2,7 +2,9 @@
 
 Corvidae is configured via a single YAML file, `agent.yaml`, passed to the daemon at startup. The full parsed dict is available to every plugin via the `on_start(config: dict)` hook.
 
-The key `_base_dir` (a `pathlib.Path`) is injected by `main.py` alongside the parsed config. It points to the directory containing `agent.yaml` and is used to resolve relative file paths (e.g., `system_prompt` file lists).
+The key `_base_dir` (a `pathlib.Path`) is set by `Runtime.start()` (`runtime.py`) alongside the parsed config. It points to the directory containing `agent.yaml` and is used to resolve relative file paths (e.g., `system_prompt` file lists).
+
+Two example configs ship at the repo root: `agent.yaml.example` (every built-in plugin, most keys commented with their default) and `agent.minimal.yaml.example` (the core agent loop only — long-term memory, appraisal, and critique disabled via `plugins.disabled`; see the `plugins` section below).
 
 ## Minimal example
 
@@ -49,6 +51,16 @@ channels:
     max_turns: 10
     keep_thinking_in_history: false
 ```
+
+---
+
+## `plugins` — enabling and disabling plugins
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `plugins.disabled` | list of strings | `[]` | Entry-point plugin names to block from loading. `Runtime.start()` calls `pm.set_blocked(name)` for each entry before entry points are loaded; blocked plugins are never instantiated. Names must match the entry-point name from `[project.entry-points.corvidae]` in `pyproject.toml` (e.g. `memory`, `funnel`, `appraisal`, `critique`, `outcome_log`, `memory_tools`, `subagent`, `mcp`, `cli`). Only entry-point plugins can be disabled this way — manually registered plugins cannot be blocked via config. |
+
+`agent.minimal.yaml.example` disables `memory`, `memory_tools`, `funnel`, `appraisal`, `critique`, and `outcome_log` — the cognition plugin set — leaving the core agent loop, multi-turn tool calling, compaction, and persistence/restart recovery intact. See the [Plugin Guide](plugin-guide.md#plugin-disable) for the hook-level mechanics.
 
 ---
 
@@ -121,7 +133,7 @@ These values apply to all channels. Per-channel overrides in the `channels` sect
 
 ### Runtime-tunable gate parameters
 
-Phase 2's gate/appraisal/critique parameters use dotted keys (e.g. `critique.sample_below_rate`, `gate.engagement.enforce`) and are adjustable at runtime **without a daemon restart**, through two surfaces resolved per-decision by `corvidae.tuning.resolve_tunable` (operator directive 2, 2026-07-06):
+The gate/appraisal/critique parameters use dotted keys (e.g. `critique.sample_below_rate`, `gate.engagement.enforce`) and are adjustable at runtime **without a daemon restart**, through two surfaces resolved per-decision by `corvidae.tuning.resolve_tunable` (operator directive 2, 2026-07-06):
 
 1. **`set_settings` tool** (agent-facing, per-channel) — writes `channel.runtime_overrides`; highest precedence.
 2. **Hot config reload** (operator, global) — edit `agent.yaml`; `ConfigWatcherPlugin` dispatches `on_config_reload` and plugins re-read the dotted path on the next decision.
@@ -137,9 +149,9 @@ The persona is allowed to tune its own gates by default — a deliberate operato
 | `gate.engagement.enforce` | An injected message must not be able to silence or un-silence the agent wholesale. |
 | `gate.send.enforce` | Same rationale as `gate.engagement.enforce`, on the output side. |
 
-These are recommendations, not hardcoded blocks: `set_settings` writes are channel-influenceable, which is exactly the persistence-of-influence shape the design polices elsewhere — but two-process discipline (agent tunes, operator audits via the outcome log) is the accepted trade-off, with the blocklist as the per-key valve. The full key list accumulates here as later Phase 2 work packages land.
+These are recommendations, not hardcoded blocks: `set_settings` writes are channel-influenceable, which is exactly the persistence-of-influence shape the design polices elsewhere — but two-process discipline (agent tunes, operator audits via the outcome log) is the accepted trade-off, with the blocklist as the per-key valve. This is not the full list of blockable keys — see the `resolve_tunable` call sites in `critique.py` for the complete set.
 
-#### `appraisal.*` — stage-1 appraisal (WP2.4)
+#### `appraisal.*` — stage-1 appraisal
 
 `AppraisalPlugin` scores every inbound message at the gate: surface heuristics plus an FTS5 familiarity probe on a dedicated read-only connection, under a hard latency budget, failing open. All keys resolve per-decision.
 
@@ -155,11 +167,11 @@ These are recommendations, not hardcoded blocks: `set_settings` writes are chann
 | `appraisal.weights.commitment` | `0.20` | Salience weight for numbers/commitment density. |
 | `appraisal.weights.imperative` | `0.10` | Salience weight for imperative markers (feeds salience only, not the vector). |
 
-*(Remaining tunable keys — `critique.*`, `gate.*`, further `appraisal.*` — are documented by the work packages that introduce them, WP2.5 onward.)*
+*(The `critique.*` tunable keys are not individually tabulated here; see the `resolve_tunable` call sites in `corvidae/critique.py` for the complete set. `gate.*` appears in the blocklist above as a naming convention for engagement/send gating; no plugin currently resolves a `gate.*` key.)*
 
 ### `agent.context_compact` — removed
 
-`ContextCompactPlugin` has been removed: superseded by `MemoryPlugin` (memory consolidation and retrieval), with per-turn token stats now in the Phase 0 `usage_log` table. Any `agent.context_compact.*` keys in existing configs are ignored.
+`ContextCompactPlugin` has been removed: superseded by `MemoryPlugin` (memory consolidation and retrieval), with per-turn token stats now in the `usage_log` table. Any `agent.context_compact.*` keys in existing configs are ignored.
 
 ---
 
@@ -182,12 +194,12 @@ These are recommendations, not hardcoded blocks: `set_settings` writes are chann
 
 The retention job runs as a silent background task on daemon startup and after each `on_idle` firing (rate-limited to `memory.retention.interval`). It runs three passes: demotion (remove under-used records from the vector index), re-promotion (restore records whose access stats have risen since demotion), and backfill (embed re-promoted records that are missing vectors). The backfill pass is skipped when embedding is disabled by the `embedding_meta` mismatch guard.
 
-The retention score formula is `importance × (1 + 0.5 × log1p(retrieval_count)) × exp(-age_days / half_life_days)`. All threshold and shape constants are §6-tunable.
+The retention score formula is `importance × (1 + 0.5 × log1p(retrieval_count)) × exp(-age_days / half_life_days)`. All threshold and shape constants are the config keys documented below.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `memory.retention.grace_days` | float | `14` | Records younger than this many days are exempt from demotion regardless of score. Ensures newly consolidated records are not immediately demoted because they have not yet been retrieved. |
-| `memory.retention.importance_floor` | float | `0.8` | Records with `importance ≥ importance_floor` are never demoted for lack of retrieval traffic. The importance prior ranges 0.0–1.0 (Phase 2 appraisal replaces the default `RubricPrior`). |
+| `memory.retention.importance_floor` | float | `0.8` | Records with `importance ≥ importance_floor` are never demoted for lack of retrieval traffic. The importance prior ranges 0.0–1.0 (`AppraisalPlugin` wraps the default `RubricPrior` in `AppraisalPrior` when appraisal is enabled). |
 | `memory.retention.demote_below` | float | `0.15` | Retention score threshold. An indexed record whose score falls below this value (and which passes the grace-period and importance-floor checks) is demoted: `indexed=0`, `embedded=0`, vec row deleted. The `memory` row and its FTS entry are preserved. Re-promotion requires the score to rise back to or above this threshold, which happens when the record is accessed via `recall_raw`. |
 | `memory.retention.half_life_days` | float | `90` | Recency half-life for the retention score. Distinct from `memory.half_life_days` (retrieval scoring, default 30). The longer retention half-life gives passive retrieval time to re-warm a record before it demotes. |
 | `memory.retention.interval` | float | `21600` | Minimum seconds between retention job runs (default 6 hours). The last-run timestamp is persisted in the `retention_meta` table so daemon restarts do not reset the interval. A daemon idle longer than `interval` since its last run will still run the job on next start (zero-traffic guarantee). |
@@ -197,7 +209,7 @@ The retention score formula is `importance × (1 + 0.5 × log1p(retrieval_count)
 
 ## `funnel` — context-admission funnel
 
-`FunnelPlugin` is the single chokepoint for tail CONTEXT admission (dedupe, budgets, injection framing). Since Phase 2 (WP2.6) it also owns deferred registration: non-tool-call notification payloads queue per `(channel, origin)` via `register_and_wake()`, one stub notification wakes the channel per pending pair, and the drain in `before_agent_turn` admits everything queued for the triggering exchange's origin. The deferred registry is in-memory by design (payloads pending at shutdown are dropped) and adds no config keys — drained payloads spend the same per-source budgets below.
+`FunnelPlugin` is the single chokepoint for tail CONTEXT admission (dedupe, budgets, injection framing). It also owns deferred registration: non-tool-call notification payloads queue per `(channel, origin)` via `register_and_wake()`, one stub notification wakes the channel per pending pair, and the drain in `before_agent_turn` admits everything queued for the triggering exchange's origin. The deferred registry is in-memory by design (payloads pending at shutdown are dropped) and adds no config keys — drained payloads spend the same per-source budgets below.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
@@ -218,6 +230,7 @@ Configured by `CoreToolsPlugin`. `tools.max_result_chars` is read by `ToolCollec
 | `tools.web_max_response_bytes` | integer | `50000` | Maximum bytes of HTTP response body returned by `web_fetch`. Content beyond this limit is truncated with `[truncated]`. This limit is independent of `tools.max_result_chars`. |
 | `tools.max_file_read_bytes` | integer | `1048576` | Maximum file size in bytes that `read_file` will return. Files larger than this limit return an error string. Default is 1 MB (1,048,576 bytes). |
 | `tools.web_search_max_results` | integer | `8` | Maximum number of DuckDuckGo results returned by the `web_search` tool. |
+| `tools.disabled` | list of strings | `[]` | Tool names dropped after collection, in `ToolCollectionPlugin.rebuild_registry`. The single chokepoint every registered tool passes through — no per-plugin opt-outs. |
 
 ---
 

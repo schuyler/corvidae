@@ -209,6 +209,50 @@ class TestProbe:
         assert vector["novelty"] == 0.5
         await plugin.on_stop()
 
+    async def test_relative_session_db_resolves_against_base_dir(self, tmp_path, monkeypatch):
+        """A relative daemon.session_db resolves against config['_base_dir'],
+        not the process cwd -- the same mechanism MetricsJsonlPlugin already
+        uses (persistence.py resolves session_db the same way).
+
+        Regression test: previously the raw relative path was passed
+        straight to aiosqlite.connect(), so once PersistencePlugin started
+        resolving session_db against _base_dir, this probe connection
+        pointed at a different (nonexistent) file and silently degraded to
+        no-probe -- proven here by a familiar/unseen novelty comparison
+        that only holds when the probe actually reads the seeded content.
+        """
+        from corvidae.appraisal import AppraisalPlugin
+
+        config_dir = tmp_path / "config_dir"
+        config_dir.mkdir()
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+
+        db_path = str(config_dir / "sessions.db")
+        await _seed_probe_db(db_path, ["I helped Schuyler debug the corvidae funnel budget"])
+
+        monkeypatch.chdir(elsewhere)
+
+        pm = create_plugin_manager()
+        plugin = AppraisalPlugin()
+        pm.register(plugin, name="appraisal")
+        cfg = {"_base_dir": config_dir, "daemon": {"session_db": "sessions.db"}}
+        await plugin.on_init(pm=pm, config=cfg)
+        await plugin.on_start(config=cfg)
+
+        channel = _make_channel()
+        familiar = await plugin.get_or_compute(
+            channel, "k-fam", "tell me about the corvidae funnel budget"
+        )
+        unseen = await plugin.get_or_compute(
+            channel, "k-new", "quantum harpsichord marmalade festival"
+        )
+        assert familiar["novelty"] < unseen["novelty"], (
+            "probe found no distinction between familiar/unseen text -- "
+            "the relative session_db path did not resolve against _base_dir"
+        )
+        await plugin.on_stop()
+
 
 # ---------------------------------------------------------------------------
 # 3. Direction-keyed store: distinct keys, single probe under concurrency

@@ -36,6 +36,7 @@ import json
 import logging
 import random
 import re
+from pathlib import Path
 
 import aiosqlite
 
@@ -260,6 +261,8 @@ class CritiquePlugin(CorvidaePlugin):
         fires — the conservative choice (no false confabulation objections).
         """
         db_path = config.get("daemon", {}).get("session_db", "sessions.db")
+        base_dir = config.get("_base_dir", Path("."))
+        db_path = str(Path(base_dir) / db_path)
         try:
             self._probe_db = await aiosqlite.connect(
                 f"file:{db_path}?mode=ro", uri=True

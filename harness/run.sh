@@ -80,7 +80,13 @@ curl -sf "$LLAMA_URL/props" > "$RUN_DIR/server_props.json" \
 curl -sf "$LLAMA_URL/v1/models" > "$RUN_DIR/server_models.json" \
     || echo '{"error":"GET /v1/models failed"}' > "$RUN_DIR/server_models.json"
 
-# --- 6. start buster-daemon --------------------------------------------------
+# --- 6. warm the uv environment, then start buster-daemon ------------------
+# First provisioning on a fresh checkout (interpreter + dependency fetch)
+# takes ~21s observed — do it here, synchronously, so that cost lands
+# before the daemon-startup/driver-join windows instead of eating into
+# them from inside the screen session.
+uv sync --project "$REPO_DIR"
+
 screen -dmS buster-daemon bash -c "
     cd '$REPO_DIR' &&
     exec uv run corvidae serve --config '$STATE_DIR/agent.yaml' >> '$RUN_DIR/daemon.log' 2>&1

@@ -213,6 +213,51 @@ async def _fire(env, correlation_id="k", origin="user", response_text="resp",
 
 
 # ---------------------------------------------------------------------------
+# Session-db base-dir resolution (config consistency regression)
+# ---------------------------------------------------------------------------
+
+
+class TestSessionDbBaseDirResolution:
+    async def test_relative_session_db_resolves_against_base_dir(
+        self, tmp_path, monkeypatch
+    ):
+        """A relative daemon.session_db resolves against config['_base_dir'],
+        not the process cwd -- the same mechanism MetricsJsonlPlugin already
+        uses (persistence.py resolves session_db the same way).
+
+        Regression test: previously the raw relative path was passed
+        straight to aiosqlite.connect(), so the message_fts probe pointed
+        at a nonexistent file and silently degraded to no-probe.
+        """
+        from corvidae.critique import CritiquePlugin
+
+        config_dir = tmp_path / "config_dir"
+        config_dir.mkdir()
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+
+        db_path = str(config_dir / "sessions.db")
+        await _seed_fts(db_path, ["some raw dialog content"])
+
+        monkeypatch.chdir(elsewhere)
+
+        pm = create_plugin_manager()
+        plugin = CritiquePlugin()
+        pm.register(plugin, name="critique")
+        cfg = {"_base_dir": config_dir, "daemon": {"session_db": "sessions.db"}}
+        await plugin.on_init(pm=pm, config=cfg)
+        await plugin.on_start(config=cfg)
+
+        try:
+            assert plugin._probe_db is not None, (
+                "message_fts probe failed to open -- the relative "
+                "session_db path did not resolve against _base_dir"
+            )
+        finally:
+            await plugin.on_stop()
+
+
+# ---------------------------------------------------------------------------
 # 0. Pure detector units (part of the red-test spec)
 # ---------------------------------------------------------------------------
 

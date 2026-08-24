@@ -254,7 +254,9 @@ class TestMainLoggingConfiguration:
         )
 
     async def test_cli_mode_default_is_file(self, tmp_path):
-        """Runtime with cli overrides (logging.file='corvidae.log') passes that to configure_logging."""
+        """Runtime with cli overrides (logging.file='corvidae.log') passes that
+        to configure_logging, resolved against the config file's directory
+        (_base_dir) -- same mechanism as daemon.metrics_jsonl."""
         config_path = _make_minimal_config(tmp_path)
         mock_configure = await self._run_runtime(
             config_path,
@@ -263,12 +265,13 @@ class TestMainLoggingConfiguration:
 
         mock_configure.assert_called_once()
         _, kwargs = mock_configure.call_args
-        assert kwargs.get("file") == "corvidae.log", (
-            f"Expected file='corvidae.log' in cli_mode, got: {kwargs}"
+        assert kwargs.get("file") == str(tmp_path / "corvidae.log"), (
+            f"Expected file={tmp_path / 'corvidae.log'} in cli_mode, got: {kwargs}"
         )
 
     async def test_yaml_file_overrides_cli_default(self, tmp_path):
-        """YAML logging.file='custom.log' with a logging override — override wins (deep_merge)."""
+        """YAML logging.file='custom.log' with a logging override — override wins
+        (deep_merge), resolved against the config file's directory (_base_dir)."""
         config_path = _make_minimal_config(
             tmp_path, extra={"logging": {"file": "custom.log"}}
         )
@@ -280,8 +283,8 @@ class TestMainLoggingConfiguration:
 
         mock_configure.assert_called_once()
         _, kwargs = mock_configure.call_args
-        assert kwargs.get("file") == "custom.log", (
-            f"Expected file='custom.log' from YAML, got: {kwargs}"
+        assert kwargs.get("file") == str(tmp_path / "custom.log"), (
+            f"Expected file={tmp_path / 'custom.log'} from YAML, got: {kwargs}"
         )
 
     async def test_yaml_level_passed_through(self, tmp_path):

@@ -48,6 +48,10 @@ class IRCMessage:
     text: str
 
 
+class IRCRegistrationError(Exception):
+    """Server rejected NICK/USER registration (432/433) before we got a nick."""
+
+
 class IRCClient:
     """Plain-socket IRC client: NICK/USER registration, JOIN, PRIVMSG, PING.
 
@@ -63,7 +67,8 @@ class IRCClient:
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._listen_task: asyncio.Task | None = None
-        self._ready = asyncio.Event()
+        # Resolved on 001 (success) or 432/433 (rejected) — see connect().
+        self._registration: asyncio.Future[None] | None = None
         # channel -> list of received PRIVMSGs
         self.messages: dict[str, list[IRCMessage]] = {}
         # channel -> list of (ts, nick) JOINs observed on that channel
@@ -71,10 +76,20 @@ class IRCClient:
 
     async def connect(self, timeout: float = 30) -> None:
         self._reader, self._writer = await asyncio.open_connection(self.host, self.port)
+        self._registration = asyncio.get_event_loop().create_future()
         self._send(f"NICK {self.nick}")
         self._send(f"USER {self.nick} 0 * :Buster harness driver")
         self._listen_task = asyncio.create_task(self._listen())
-        await asyncio.wait_for(self._ready.wait(), timeout=timeout)
+        try:
+            await asyncio.wait_for(self._registration, timeout=timeout)
+        except asyncio.TimeoutError:
+            # A bare TimeoutError tells you nothing; say what was being
+            # waited for so an abort report is legible without re-deriving
+            # it from scratch.
+            raise TimeoutError(
+                f"IRC registration timed out after {timeout}s waiting for "
+                f"nick {self.nick!r} on {self.host}:{self.port}"
+            ) from None
 
     def _send(self, line: str) -> None:
         assert self._writer is not None
@@ -102,7 +117,14 @@ class IRCClient:
         parts = rest.split(" ", 2)
         command = parts[0] if parts else ""
         if command == "001":
-            self._ready.set()
+            if self._registration is not None and not self._registration.done():
+                self._registration.set_result(None)
+        elif command in ("432", "433"):
+            # ERR_ERRONEUSNICKNAME / ERR_NICKNAMEINUSE — registration can
+            # never complete with this nick. Fail immediately with the
+            # server's own text instead of waiting out the connect timeout.
+            if self._registration is not None and not self._registration.done():
+                self._registration.set_exception(IRCRegistrationError(f"{command} {rest}"))
         elif command == "JOIN" and prefix:
             nick = prefix.split("!", 1)[0]
             chan = (parts[1] if len(parts) > 1 else "").lstrip(":")
@@ -163,6 +185,16 @@ class IRCClient:
 # ---------------------------------------------------------------------------
 # Pure helper functions (importable for unit tests without a live IRC/DB)
 # ---------------------------------------------------------------------------
+
+
+def derive_driver_nick(bot_nick: str, max_len: int = 9) -> str:
+    """A nick for the driver's own IRC connection, distinct from `bot_nick`
+    and within ngircd's default NICKLEN (9) — a literal f"{bot_nick}-driver"
+    overflows that for any bot_nick longer than 3 chars (e.g. "buster" ->
+    "buster-driver", 13 chars), which ngircd rejects with 432/433.
+    """
+    suffix = "d"
+    return (bot_nick[: max_len - len(suffix)] + suffix)[:max_len]
 
 
 def reply_from(messages: list[IRCMessage], nick: str, token: str) -> IRCMessage | None:
@@ -664,7 +696,7 @@ async def async_main(args: argparse.Namespace, run_dims: dict) -> int:
     run_dims["server_props"] = json.loads(args.server_props_file.read_text())
     run_dims["server_models"] = json.loads(args.server_models_file.read_text())
 
-    driver_nick = f"{args.bot_nick}-driver"
+    driver_nick = derive_driver_nick(args.bot_nick)
     client = IRCClient(args.irc_host, args.irc_port, driver_nick)
     await client.connect()
     for channel in ALL_CHANNELS:

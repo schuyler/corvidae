@@ -113,6 +113,44 @@ class TestOnStart:
 
         await pre_injected.close()
 
+    async def test_relative_session_db_resolves_against_base_dir(
+        self, tmp_path, monkeypatch
+    ):
+        """A relative daemon.session_db path resolves against config['_base_dir'],
+        not the process cwd -- the same mechanism MetricsJsonlPlugin already
+        uses for daemon.metrics_jsonl (mirrored in
+        tests/test_metrics.py::TestMetricsJsonlPlugin).
+
+        Regression test: previously the raw relative path was passed
+        straight to aiosqlite.connect(), so the DB landed next to the
+        process cwd instead of next to agent.yaml.
+        """
+        from corvidae.persistence import PersistencePlugin
+
+        pm = create_plugin_manager()
+        registry = _make_registry()
+        pm.register(registry, name="registry")
+
+        plugin = PersistencePlugin(pm)
+
+        config_dir = tmp_path / "config_dir"
+        config_dir.mkdir()
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        monkeypatch.chdir(elsewhere)
+
+        config = {"_base_dir": config_dir, "daemon": {"session_db": "sessions.db"}}
+        try:
+            await plugin.on_start(config=config)
+
+            assert (config_dir / "sessions.db").exists(), (
+                f"expected sessions.db in {config_dir}, cwd was {elsewhere}"
+            )
+            assert not (elsewhere / "sessions.db").exists()
+        finally:
+            if plugin.db is not None:
+                await plugin.db.close()
+
     # base_dir tests removed: system prompt resolution moves to Agent
 
 
