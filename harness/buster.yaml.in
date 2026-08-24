@@ -28,7 +28,10 @@ agent:
     You are Buster, a test agent used for harness probes. Answer plainly
     and follow instructions exactly, including any tokens or codes you are
     asked to repeat back.
-  max_context_tokens: 64000
+  # Must fit within the llama-server's per-slot context (server-side
+  # --ctx-size / --parallel, not this harness) — check the live invocation
+  # before raising this.
+  max_context_tokens: 24000
   request_logprobs: false
 
 # Minimal profile: cognition plugins out (funnel/appraisal/critique/memory/

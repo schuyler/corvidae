@@ -32,7 +32,10 @@ from pathlib import Path
 from typing import Callable
 
 SLOW_SERVER_PORT = 8931
-SLOW_SERVER_DELAY_S = 20
+# Must stay comfortably inside web_fetch's 15s default per-request timeout
+# (corvidae/tools/web.py:20) — at 20s the tool always abandoned the request
+# before the response existed, so the token could never arrive.
+SLOW_SERVER_DELAY_S = 10
 SLOW_SERVER_TOKEN = "TOKEN-EELGRASS-71"
 
 
