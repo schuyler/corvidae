@@ -244,7 +244,7 @@ def any_reply_from(messages: list[IRCMessage], nick: str) -> IRCMessage | None:
     return None
 
 
-def build_filler_paragraph(index: int, planted_token: str) -> str:
+def build_filler_paragraph(index: int, planted_token: str, repeat: int = 6) -> str:
     """Deterministic, verbose filler paragraph ending in a planted token.
 
     Used to inflate a channel's context past its max_context_tokens so the
@@ -256,7 +256,7 @@ def build_filler_paragraph(index: int, planted_token: str) -> str:
         "several times so that the channel's token count grows steadily "
         "without depending on any external content. "
     )
-    body = sentence * 6
+    body = sentence * repeat
     return f"{body}Planted marker: {planted_token}"
 
 
@@ -440,7 +440,7 @@ async def probe_smoke_echo(ctx: RunContext) -> ProbeResult:
     t0 = time.monotonic()
     await _send(ctx, channel, "The anchovy code is 7291. Reply with that code.", sent)
     matched = await ctx.client.wait_until(
-        channel, lambda msgs: reply_from(msgs, ctx.bot_nick, "7291") is not None, timeout=300
+        channel, lambda msgs: reply_from(msgs, ctx.bot_nick, "7291") is not None, timeout=90
     )
     return ProbeResult(
         "smoke_echo",
@@ -475,7 +475,7 @@ async def probe_tool_loop(ctx: RunContext) -> ProbeResult:
         sent,
     )
     matched = await ctx.client.wait_until(
-        channel, lambda msgs: reply_from(msgs, ctx.bot_nick, "QRT-9083") is not None, timeout=300
+        channel, lambda msgs: reply_from(msgs, ctx.bot_nick, "QRT-9083") is not None, timeout=90
     )
     duration = time.monotonic() - t0
     if not matched:
@@ -520,7 +520,7 @@ async def probe_interleave(ctx: RunContext) -> ProbeResult:
             and any(m.nick == ctx.bot_nick and eelgrass_re.search(m.text) for m in ctx.client.messages.get(channel, []))
         )
 
-    matched = await ctx.client.wait_until(channel, both_seen, timeout=300)
+    matched = await ctx.client.wait_until(channel, both_seen, timeout=90)
     duration = time.monotonic() - t0
     if not matched:
         forty_two = await find_reply(forty_two_re)
@@ -550,13 +550,18 @@ async def probe_compaction(ctx: RunContext) -> ProbeResult:
     t0 = time.monotonic()
     ts0 = time.time() - 5  # small buffer against clock/DB timestamp skew
 
-    for i in range(1, 16):
-        await _send(ctx, channel, build_filler_paragraph(i, f"FILLER-PLANT-{i:02d}"), sent)
+    # Fewer, larger messages reach the same context-token inflation as 15
+    # small ones (§ build_filler_paragraph) with a fraction of the round
+    # trips — each queued message is its own serial LLM turn (corvidae.agent
+    # processes one queue item at a time), so message *count* dominates this
+    # probe's wall-clock time, not paragraph size.
+    for i in range(1, 5):
+        await _send(ctx, channel, build_filler_paragraph(i, f"FILLER-PLANT-{i:02d}", repeat=24), sent)
         await asyncio.sleep(0.3)
 
     await _send(ctx, channel, "Reply with the word CHECKPOINT-OK.", sent)
     matched = await ctx.client.wait_until(
-        channel, lambda msgs: reply_from(msgs, ctx.bot_nick, "CHECKPOINT-OK") is not None, timeout=900
+        channel, lambda msgs: reply_from(msgs, ctx.bot_nick, "CHECKPOINT-OK") is not None, timeout=90
     )
     duration = time.monotonic() - t0
     if not matched:
@@ -582,7 +587,7 @@ async def probe_restart_recovery(ctx: RunContext) -> ProbeResult:
 
     await _send(ctx, channel, "My door code is 8814. Acknowledge.", sent)
     acked = await ctx.client.wait_until(
-        channel, lambda msgs: any_reply_from(msgs, ctx.bot_nick) is not None, timeout=300
+        channel, lambda msgs: any_reply_from(msgs, ctx.bot_nick) is not None, timeout=90
     )
     if not acked:
         return ProbeResult(
@@ -596,7 +601,7 @@ async def probe_restart_recovery(ctx: RunContext) -> ProbeResult:
     subprocess.run([str(restart_script), str(daemon_log)], cwd=ctx.repo_dir, check=True, timeout=120)
 
     rejoined = await ctx.client.wait_for_nick_join(
-        channel, ctx.bot_nick, timeout=180, after_ts=restart_ts
+        channel, ctx.bot_nick, timeout=90, after_ts=restart_ts
     )
     if not rejoined:
         return ProbeResult(
@@ -608,7 +613,7 @@ async def probe_restart_recovery(ctx: RunContext) -> ProbeResult:
     matched = await ctx.client.wait_until(
         channel,
         lambda msgs: any(m.nick == ctx.bot_nick and m.ts > restart_ts and "8814" in m.text for m in msgs),
-        timeout=300,
+        timeout=90,
     )
     duration = time.monotonic() - t0
     details = (
@@ -633,7 +638,7 @@ async def probe_kv_slot(ctx: RunContext) -> ProbeResult:
     turn2_samples: list[list[dict]] = []
 
     async def poll_until_reply(text_marker: str, sink: list[list[dict]]) -> bool:
-        deadline = time.monotonic() + 300
+        deadline = time.monotonic() + 90
         while True:
             if reply_from(ctx.client.messages.get(channel, []), ctx.bot_nick, text_marker) is not None:
                 return True
