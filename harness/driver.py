@@ -31,6 +31,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+IRC_MAX_LINE_BYTES = 512  # RFC 1459 §2.3, including the trailing CRLF
+
 SLOW_SERVER_PORT = 8931
 # Must stay comfortably inside web_fetch's 15s default per-request timeout
 # (corvidae/tools/web.py:20) — at 20s the tool always abandoned the request
@@ -142,7 +144,10 @@ class IRCClient:
         self._send(f"JOIN {channel}")
 
     async def privmsg(self, channel: str, text: str) -> None:
-        self._send(f"PRIVMSG {channel} :{text}")
+        prefix_bytes = len(f"PRIVMSG {channel} :".encode("utf-8"))
+        max_text_bytes = IRC_MAX_LINE_BYTES - prefix_bytes - len("\r\n")
+        for chunk in split_irc_text(text, max_text_bytes):
+            self._send(f"PRIVMSG {channel} :{chunk}")
 
     async def close(self) -> None:
         if self._writer is not None:
@@ -198,6 +203,30 @@ def derive_driver_nick(bot_nick: str, max_len: int = 9) -> str:
     """
     suffix = "d"
     return (bot_nick[: max_len - len(suffix)] + suffix)[:max_len]
+
+
+def split_irc_text(text: str, max_bytes: int) -> list[str]:
+    """Split `text` into chunks whose UTF-8 encoding is each at most `max_bytes`,
+    without splitting a multi-byte character across chunks.
+
+    Probe text (e.g. build_filler_paragraph's output) can run well past IRC's
+    512-byte line limit; sending it unsplit gets the connection killed by the
+    server ("Request too long") instead of delivered.
+    """
+    chunks = []
+    current: list[str] = []
+    current_bytes = 0
+    for ch in text:
+        ch_bytes = len(ch.encode("utf-8"))
+        if current and current_bytes + ch_bytes > max_bytes:
+            chunks.append("".join(current))
+            current = []
+            current_bytes = 0
+        current.append(ch)
+        current_bytes += ch_bytes
+    if current:
+        chunks.append("".join(current))
+    return chunks
 
 
 def reply_from(messages: list[IRCMessage], nick: str, token: str) -> IRCMessage | None:
