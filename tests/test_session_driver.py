@@ -44,6 +44,17 @@ def test_inbox_processed_in_numeric_order_and_stop_wins(tmp_path):
     assert next_inbox_action(inbox) == "STOP"
 
 
+def test_inbox_order_survives_the_move_past_three_digits(tmp_path):
+    from harness.session_driver import next_inbox_action
+
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    (inbox / "999.txt").write_text("nine ninety-nine")
+    (inbox / "1000.txt").write_text("one thousand")
+
+    assert next_inbox_action(inbox).name == "999.txt"
+
+
 # ---------------------------------------------------------------------------
 # Turn-record building: latency anchoring, timeout, settle-window grouping
 # ---------------------------------------------------------------------------
@@ -60,7 +71,7 @@ def test_turn_latency_is_first_bot_reply_after_send():
     ]
     record = build_turn_record(
         seq=1, text="hi", sent_at=sent_at, messages=messages,
-        bot_nick="buster", timeout=90.0, settle=2.0, now=sent_at + 5.0,
+        bot_nick="buster", settle=2.0,
     )
     assert record["timed_out"] is False
     assert record["first_reply_at"] == sent_at + 2
@@ -73,7 +84,7 @@ def test_turn_times_out_with_empty_reply():
     sent_at = 1000.0
     record = build_turn_record(
         seq=1, text="hello?", sent_at=sent_at, messages=[],
-        bot_nick="buster", timeout=90.0, settle=2.0, now=sent_at + 90.0,
+        bot_nick="buster", settle=2.0,
     )
     assert record["timed_out"] is True
     assert record["reply"] == []
@@ -90,7 +101,7 @@ def test_reply_collects_multiline_bot_reply_within_settle_window():
     ]
     record = build_turn_record(
         seq=1, text="hi", sent_at=sent_at, messages=messages,
-        bot_nick="buster", timeout=90.0, settle=2.0, now=sent_at + 10.0,
+        bot_nick="buster", settle=2.0,
     )
     assert record["reply"] == ["buster: part one", "buster: part two"]
 
