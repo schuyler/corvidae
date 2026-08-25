@@ -143,7 +143,9 @@ rollback point.
 A session is a recorded, turn-by-turn conversation with Buster — for
 exercising things a scripted probe can't, like conversational drift or
 compaction under human-paced exchanges — driven from the Mac one turn at a
-time via `harness/session.sh`:
+time via `harness/session.sh`. See `docs/shakedown-findings.md` for the
+campaign methodology and the historical record of what's been run and
+found.
 
 ```
 harness/session.sh start ['#channel']       # default #chat; prints a session id
