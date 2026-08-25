@@ -26,7 +26,7 @@ tokens grepped from replies, or facts read straight out of `sessions.db`):
 | `restart_recovery` | `#p-restart` | Conversation history survives a daemon restart |
 | `kv_slot` | `#p-slots` | A follow-up turn reuses the cached prompt prefix instead of reprocessing it |
 
-Full pass criteria: `.claude/plans/disentangle-buster.md` §5.5.
+Full pass criteria: the probe functions' verdict logic in `harness/driver.py`.
 
 The harness introduces concurrency only where concurrency is the thing under
 test. Every probe but `interleave` sends one line and waits for the bot's
@@ -137,6 +137,69 @@ message there will confuse a probe's reply-matching.
 Chatting mutates Buster's persistent state (`sessions.db` and friends)
 just like a probe run does. Run `harness/snapshot.sh` first if you want a
 rollback point.
+
+## Shakedown sessions
+
+A session is a recorded, turn-by-turn conversation with Buster — for
+exercising things a scripted probe can't, like conversational drift or
+compaction under human-paced exchanges — driven from the Mac one turn at a
+time via `harness/session.sh`:
+
+```
+harness/session.sh start ['#channel']       # default #chat; prints a session id
+harness/session.sh send  <id> <text...>     # one turn; prints the reply + latency
+harness/session.sh stop  <id>                # stop the driver, collect artifacts
+```
+
+`start` requires `buster-daemon` already running (`harness/chat.sh` first);
+it never starts the daemon itself. It launches
+`harness/session_driver.py serve` on sagan under a `buster-session-<id>`
+screen session, which holds one continuous IRC connection to the channel
+for the whole session — no join/part churn between turns. Each `send` is
+one blocking ssh call to sagan; the driver replies with the turn's outbox
+record (reply text, per-turn latency, timeout status) as JSON.
+
+Two channels are available:
+
+- `#chat` — the default 24000-token budget, for free-form conversation.
+- `#s-compact` — a reduced 3000-token budget, for exercising compaction
+  within a human-scale sitting (roughly 20-35 exchanges) instead of the
+  probe corpus's paced filler.
+
+Two sessions can run concurrently by starting them on different channels —
+each gets its own screen session, session directory, and IRC nick (derived
+from the channel name); nothing is shared between them but the daemon.
+
+`stop` writes the stop sentinel, waits for the driver to exit cleanly, and
+copies `sessions.db`, `metrics.jsonl`, and `corvidae.log*` from `state/`
+into the session's own directory — a snapshot of what the session actually
+saw, independent of whatever `run.sh` does to `state/` afterward. **Stop and
+collect before running probes**: `run.sh` wipes `sessions.db*` and
+`corvidae.log*` at the start of every run, and anything not collected first
+is gone.
+
+Sessions land under `~/code/llm/buster/sessions/<UTC-ts>/`, a sibling of
+`runs/`:
+
+```
+sessions/<UTC-ts>/
+  session.json        # channel, nick, bot_nick, started_at, stopped_at
+  transcript.log      # timestamped >>/<</-- lines, appended live
+  inbox/, outbox/      # the send/reply protocol's spool — inspectable mid-session
+  sessions.db, metrics.jsonl, corvidae.log*   # copied in at stop time
+```
+
+The sagan checkout at `~/code/llm/buster/repo` needs the session tooling
+deployed to it — same path as probes (`harness/run-remote.sh` pushes a
+rev; a plain `git pull` on sagan works too since sessions don't need
+`run.sh`'s setup steps).
+
+Adding or changing a channel's `max_context_tokens` override in
+`harness/buster.yaml.in` takes effect only after `state/agent.yaml` is
+re-rendered and the daemon is bounced — `chat.sh` only renders
+`agent.yaml` when it's missing, so after an override change, re-render it
+by hand (the same `sed` `harness/chat.sh` uses) and run
+`harness/restart-daemon.sh`.
 
 ## Manual state management
 

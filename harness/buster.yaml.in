@@ -66,6 +66,7 @@ irc:
     - "#p-restart"
     - "#p-slots"
     - "#chat"        # free conversation with a human; no probe uses this channel
+    - "#s-compact"   # shakedown session, reduced budget so compaction is human-reachable
 
 logging:
   level: INFO
@@ -74,3 +75,8 @@ logging:
 channels:
   irc:#p-compact:
     max_context_tokens: 1500
+  irc:#s-compact:
+    # Trigger is 0.8x budget = 2400 tokens; at human-scale exchanges
+    # (~60-120 tokens round trip over a ~2-sentence system prompt) that
+    # lands within roughly 20-35 exchanges — one sitting.
+    max_context_tokens: 3000
