@@ -20,3 +20,4 @@ apluggy
 # artifacts
 .superpowers/
 eval_results.json
+.venv/
