@@ -1,12 +1,13 @@
 """Outcome log — the per-exchange record table and its writer API.
 
-Phase 0 ships the ``exchange_log`` schema and the writer methods only.
-The retrieval-profile columns are populated from Phase 1a (there is no
-retrieval to profile before then); origin/appraisal/provenance/outcomes
-columns are populated from Phase 2. Nothing writes rows in Phase 0.
+``OutcomeLogPlugin`` owns the ``exchange_log`` schema and writes the
+identity row (origin, channel, originating message rowid) via its
+message-lifecycle hookimpls. The retrieval-profile, appraisal, and
+provenance/outcomes columns are filled in by ``MemoryPlugin``,
+``AppraisalPlugin``, and ``CritiquePlugin`` through the writer API below.
 
-The table accumulates one row per exchange so later phases can correlate
-retrieval quality, appraisal, and critique/engagement outcomes — the
+The table accumulates one row per exchange so retrieval quality,
+appraisal, and critique/engagement outcomes can be correlated — the
 calibration data for the memory system's evals.
 """
 
@@ -24,7 +25,7 @@ logger = logging.getLogger(__name__)
 # rather than overwritten. Concurrent fire-and-forget writers touch these
 # columns with disjoint or overlapping top-level keys; the merge must be a
 # single atomic SQL statement (no read-then-write) so no writer's key is
-# lost to a lost update (WP2.1 point 7).
+# lost to a lost update.
 MERGE_COLUMNS = frozenset({"outcomes", "appraisal"})
 
 EXCHANGE_LOG_DDL = """
@@ -49,7 +50,7 @@ EXCHANGE_LOG_INDEX_DDL = (
 
 # Columns update_exchange may touch. The identity columns (exchange_key,
 # channel_id, created_at) are immutable after record_exchange; everything
-# else is a nullable profile/outcome column filled in by later phases.
+# else is a nullable profile/outcome column filled in by other plugins.
 UPDATABLE_COLUMNS = frozenset(
     {
         "origin",
@@ -108,35 +109,41 @@ class OutcomeLogPlugin(CorvidaePlugin):
             logger.warning("exchange_log table creation deferred", exc_info=True)
 
     # ------------------------------------------------------------------
-    # Hook consumers (WP2.1 point 7) — all fail-soft (log + continue),
-    # since these are hooks now, not explicit writer calls; exceptions
-    # must not propagate into the turn.
+    # Hook consumers — all fail-soft (log + continue), since these are
+    # hooks, not explicit writer calls; exceptions must not propagate
+    # into the turn.
     # ------------------------------------------------------------------
 
     @hookimpl
-    async def on_message_admitted(self, channel, exchange_key: str, sender: str, text: str) -> None:
+    async def on_message_admitted(self, channel, correlation_id: str, sender: str, text: str) -> None:
         try:
-            await self.record_exchange(exchange_key, channel.id, origin="user")
+            await self.record_exchange(correlation_id, channel.id, origin="user")
         except Exception:
             logger.warning("on_message_admitted: record_exchange failed", exc_info=True)
 
     @hookimpl
-    async def on_message_rejected(self, channel, exchange_key: str, sender: str, text: str) -> None:
+    async def on_message_rejected(self, channel, correlation_id: str, sender: str, text: str) -> None:
         try:
-            await self.record_exchange(exchange_key, channel.id, origin="user")
-            await self.update_exchange(exchange_key, outcomes={"gate": "rejected"})
+            await self.record_exchange(correlation_id, channel.id, origin="user")
+            await self.update_exchange(correlation_id, outcomes={"gate": "rejected"})
         except Exception:
             logger.warning("on_message_rejected: record_exchange failed", exc_info=True)
 
     @hookimpl
     async def on_message_persisted(
-        self, channel, exchange_key: str, rowid: int, origin: str | None
+        self, channel, correlation_id: str, rowid: int | None, text: str, meta: dict,
     ) -> None:
         try:
             # INSERT OR IGNORE covers notification-born exchanges (no prior
             # on_message_admitted for those) — origin lands on first insert.
-            await self.record_exchange(exchange_key, channel.id, origin=origin)
-            await self.update_exchange(exchange_key, message_rowid=rowid)
+            # meta["origin"] normalizes to "task" for the background-origin
+            # default (reproduces core's old dequeue-mint default); the
+            # admitted-time INSERT OR IGNORE row (origin="user") already
+            # exists for user messages by the time this hook fires.
+            origin = meta.get("origin") or "task"
+            await self.record_exchange(correlation_id, channel.id, origin=origin)
+            if rowid is not None:
+                await self.update_exchange(correlation_id, message_rowid=rowid)
         except Exception:
             logger.warning("on_message_persisted: record_exchange failed", exc_info=True)
 
@@ -150,10 +157,10 @@ class OutcomeLogPlugin(CorvidaePlugin):
         """Insert a new exchange row. Idempotent (INSERT OR IGNORE).
 
         Args:
-            exchange_key: Unique key for the exchange (minted in Phase 2).
+            exchange_key: The correlation id minted for this exchange.
             channel_id: The channel the exchange happened on.
-            origin: 'user'|'reminder'|'critique'|'heartbeat'|'task'; None
-                until Phase 2 populates it.
+            origin: 'user'|'reminder'|'critique'|'heartbeat'|'task', or
+                None if the producer didn't stamp one.
             message_rowid: message_log.id of the originating message; None
                 for gate-rejected exchanges.
         """

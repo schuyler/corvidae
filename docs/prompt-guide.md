@@ -109,7 +109,7 @@ Before every LLM call, Corvidae fires the `before_agent_turn` hook. Plugins use 
 
 ```python
 # corvidae/hooks.py (hookspec)
-async def before_agent_turn(self, channel, exchange_key, origin) -> None: ...
+async def before_agent_turn(self, channel, correlation_id, meta) -> None: ...
 ```
 
 Example plugin (impls may omit parameters they don't use — pluggy passes declared args only — but must never re-declare a spec-required parameter with a default):
@@ -120,7 +120,7 @@ from corvidae.hooks import CorvidaePlugin, hookimpl
 
 class MemoryPlugin(CorvidaePlugin):
     @hookimpl
-    async def before_agent_turn(self, channel, exchange_key, origin) -> None:
+    async def before_agent_turn(self, channel, correlation_id, meta) -> None:
         notes = await self.fetch_relevant_notes(channel.id)
         if notes:
             channel.conversation.append(
@@ -131,7 +131,7 @@ class MemoryPlugin(CorvidaePlugin):
 
 `CONTEXT` entries survive compaction — `CompactionPlugin` only summarizes `MESSAGE` entries.
 
-Each message injected during `before_agent_turn` is individually persisted by `Agent` via `on_conversation_event`, in a loop that runs after the hook completes (agent.py:516–524).
+Each message injected during `before_agent_turn` is individually persisted by `Agent` via `on_conversation_event`, in a loop that runs after the hook completes (agent.py:633–650).
 
 ### Avoiding duplicate injections
 
@@ -189,7 +189,7 @@ A typical prompt for a CLI session with a composable system prompt:
 
 ## Note on ContextCompactPlugin (removed)
 
-`ContextCompactPlugin` was a disabled-by-default background-block system that summarized older conversation segments and injected them via `before_agent_turn`. It has been removed: it is superseded by `MemoryPlugin` (memory consolidation and retrieval — see [design.md](design.md)), and per-turn token stats now live in the Phase 0 `usage_log` table.
+`ContextCompactPlugin` was a disabled-by-default background-block system that summarized older conversation segments and injected them via `before_agent_turn`. It has been removed: it is superseded by `MemoryPlugin` (memory consolidation and retrieval — see [design.md](design.md)), and per-turn token stats now live in the `usage_log` table.
 
 ## Memory calibration fragment
 
@@ -210,10 +210,10 @@ Retrieval quality depends on `llm.embedding.document_prefix` and `llm.embedding.
 | `count_tokens()` | `corvidae/context.py:32` | Tiktoken-based token count (cl100k_base); char-based fallback |
 | `ContextWindow.token_estimate()` | `corvidae/context.py:131` | Token count for all messages; delegates to `count_tokens()` |
 | `ContextWindow.remove_by_type()` | `corvidae/context.py:146` | Clears in-memory entries of a given type |
-| Lazy initialization | `corvidae/agent.py:442` | First-message conversation setup |
-| `before_agent_turn` hook | `corvidae/agent.py:506` | Context injection point |
-| `compact_conversation` hook | `corvidae/agent.py:495` | Compaction trigger |
-| `after_persist_assistant` hook | `corvidae/agent.py:555` | Post-LLM in-memory message post-processing |
+| Lazy initialization | `corvidae/agent.py:538` | First-message conversation setup |
+| `before_agent_turn` hook | `corvidae/agent.py:626` | Context injection point |
+| `compact_conversation` hook | `corvidae/agent.py:614` | Compaction trigger |
+| `after_persist_assistant` hook | `corvidae/agent.py:695` | Post-LLM in-memory message post-processing |
 | `ThinkingPlugin` | `corvidae/thinking.py` | Strips `reasoning_content` from in-memory history |
 
 For full configuration details, see [configuration.md](configuration.md).

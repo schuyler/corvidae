@@ -353,6 +353,51 @@ class TestSendMessage:
 
 
 # ---------------------------------------------------------------------------
+# Section 3b — send_progress (R2: progress text must not be silently
+# dropped — IRCPlugin implements no send_progress hook today, so a turn's
+# intermediate text vanishes when the plugin manager calls it.)
+# ---------------------------------------------------------------------------
+
+
+class TestSendProgress:
+    async def test_send_progress_irc_channel_writes_to_client(self):
+        """send_progress on an IRC channel delivers the text like send_message."""
+        pm, registry = _make_pm_with_registry()
+        plugin = IRCPlugin(pm)
+        pm.register(plugin, name="irc")
+
+        with patch('corvidae.channels.irc.IRCClient') as mock_client_class:
+            mock_client = MagicMock()
+            mock_client_class.return_value = mock_client
+            plugin.client = mock_client
+            plugin.client.connected = True
+            plugin.client.message = AsyncMock()
+
+            channel = registry.get_or_create("irc", "#test")
+            await plugin.send_progress(channel=channel, text="let me look that up")
+
+            plugin.client.message.assert_awaited_once_with("#test", "let me look that up")
+
+    async def test_send_progress_non_irc_channel_writes_nothing(self):
+        """send_progress on a non-IRC channel is a no-op, like send_message."""
+        pm, registry = _make_pm_with_registry()
+        plugin = IRCPlugin(pm)
+        pm.register(plugin, name="irc")
+
+        with patch('corvidae.channels.irc.IRCClient') as mock_client_class:
+            mock_client = MagicMock()
+            mock_client_class.return_value = mock_client
+            plugin.client = mock_client
+            plugin.client.connected = True
+            plugin.client.message = AsyncMock()
+
+            cli_channel = registry.get_or_create("cli", "local")
+            await plugin.send_progress(channel=cli_channel, text="ignored")
+
+            plugin.client.message.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
 # Section 4 — split_message (6 tests)
 # ---------------------------------------------------------------------------
 

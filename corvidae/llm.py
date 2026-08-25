@@ -22,6 +22,7 @@ import uuid
 import aiohttp
 
 TRANSIENT_STATUS_CODES = {429, 500, 502, 503, 504}
+ERROR_BODY_CHARS = 2000
 
 logger = logging.getLogger(__name__)
 
@@ -324,13 +325,18 @@ class LLMClient:
                             await asyncio.sleep(delay)
                             continue
 
+                        error_body = ""
                         try:
+                            if resp.status >= 400:
+                                # raise_for_status() releases the connection; read
+                                # the body first or lose it.
+                                error_body = (await resp.text())[:ERROR_BODY_CHARS]
                             resp.raise_for_status()
                             response = await resp.json()
                         except aiohttp.ClientResponseError:
                             logger.error(
                                 "%s failed", label,
-                                extra={"status": resp.status},
+                                extra={"status": resp.status, "body": error_body},
                             )
                             raise
 

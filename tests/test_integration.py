@@ -640,6 +640,42 @@ class TestGroupBRoundTrip:
         roles = [m["role"] for m in msgs]
         assert roles == ["user", "assistant", "user", "assistant", "tool", "assistant"]
 
+        # R1: the second chat() call (msg2's turn) runs while g1 is still
+        # in flight — its prompt must not carry an assistant tool_calls
+        # message with no matching tool entry for the same id (the shape
+        # that made the model re-issue the call in root cause B).
+        second_call_messages = harness.mock_client.chat.call_args_list[1].args[0]
+        for i, msg in enumerate(second_call_messages):
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                ids = [c["id"] for c in msg["tool_calls"]]
+                following = second_call_messages[i + 1: i + 1 + len(ids)]
+                found_ids = [
+                    m.get("tool_call_id") for m in following if m.get("role") == "tool"
+                ]
+                assert found_ids == ids, (
+                    f"assistant tool_calls message not immediately followed by "
+                    f"its results: {second_call_messages}"
+                )
+
+        # I2 pin (requirement A): the third chat() call is the tool-result
+        # turn — the one that returned 400 on sagan. Its prompt must not
+        # end on an assistant message (llama.cpp reads a trailing
+        # assistant message as a prefill and rejects it under
+        # enable_thinking), and I1 adjacency must still hold.
+        third_call_messages = harness.mock_client.chat.call_args_list[2].args[0]
+        assert third_call_messages[-1]["role"] != "assistant"
+        for i, msg in enumerate(third_call_messages):
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                ids = [c["id"] for c in msg["tool_calls"]]
+                following = third_call_messages[i + 1: i + 1 + len(ids)]
+                found_ids = [
+                    m.get("tool_call_id") for m in following if m.get("role") == "tool"
+                ]
+                assert found_ids == ids, (
+                    f"assistant tool_calls message not immediately followed by "
+                    f"its results: {third_call_messages}"
+                )
+
 
 async def channel_queue_drain(harness: IntegrationHarness, channel: Channel) -> None:
     """Drain just the queue for one specific channel."""
@@ -748,6 +784,77 @@ class TestGroupCPersistence:
         # Find tool result message
         tool_msgs = [m for m in msgs if m.get("role") == "tool"]
         assert len(tool_msgs) >= 1
+
+        await h2.agent.on_stop()
+        await h2.pm.ahook.on_stop()
+
+    async def test_c1b_dangling_tool_call_reloads_as_abandoned(self, tmp_path):
+        """R1 crash/resume: a tool_calls message persisted with no matching
+        tool result (daemon killed mid-cycle) must not reload as a dangling
+        call — the next prompt on that channel would be malformed forever
+        otherwise (claude-code#3003's shape). A fresh Channel after restart
+        has no pending_tool_call_ids, so the reload renders it abandoned."""
+        db_path = str(tmp_path / "crash.db")
+        config = make_config(db_path=db_path)
+
+        h1 = await _build_harness(config)
+
+        async def never_returns(x: str) -> str:
+            """A tool whose result never arrives before the simulated crash."""
+            await asyncio.Event().wait()
+
+        h1.agent._tools["never_returns"] = never_returns
+        h1.agent._tool_schemas.append({
+            "type": "function",
+            "function": {
+                "name": "never_returns",
+                "description": "A tool that never completes.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"x": {"type": "string"}},
+                    "required": ["x"],
+                },
+            },
+        })
+
+        h1.mock_client.chat = AsyncMock(
+            return_value=_make_tool_call_response(
+                [_make_tool_call("dangling1", "never_returns", {"x": "v"})]
+            )
+        )
+
+        channel1 = h1.registry.get_or_create("test", "crash")
+        await h1.inject_message("test:crash", "user", "go")
+        # Drain only the channel queue: the tool call is dispatched but its
+        # Task is never awaited to completion, simulating a kill mid-cycle.
+        await channel_queue_drain(h1, channel1)
+
+        await h1.agent.on_stop()
+        await h1.pm.ahook.on_stop()
+
+        from corvidae.context import TOOL_RESULT_ABANDONED
+
+        captured_prompts = []
+
+        async def capturing_chat(messages, tools=None, extra_body=None):
+            captured_prompts.append(messages)
+            return _make_text_response("ok")
+
+        h2 = await _build_harness(config)
+        h2.mock_client.chat = capturing_chat
+
+        await h2.inject_message("test:crash", "user", "are you there")
+        await h2.drain_all()
+
+        assert captured_prompts, "expected at least one LLM call on reload"
+        prompt = captured_prompts[0]
+        dangling_entries = [
+            m for m in prompt
+            if m.get("role") == "tool" and m.get("tool_call_id") == "dangling1"
+        ]
+        assert dangling_entries == [
+            {"role": "tool", "tool_call_id": "dangling1", "content": TOOL_RESULT_ABANDONED}
+        ]
 
         await h2.agent.on_stop()
         await h2.pm.ahook.on_stop()

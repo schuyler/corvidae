@@ -12,6 +12,8 @@ All tests are expected to fail with AttributeError until the helpers are
 implemented (Item 2 of corvidae-cleanup.md).
 """
 
+import logging
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -23,7 +25,8 @@ from corvidae.agent import (
 )
 from corvidae.turn import AgentTurnResult
 
-from helpers import build_plugin_and_channel
+from helpers import build_plugin_and_channel, drain
+from llm_response_fixtures import _make_text_response
 
 
 # ---------------------------------------------------------------------------
@@ -154,6 +157,41 @@ class TestBuildConversationMessage:
             plugin._build_conversation_message(item)
 
         assert any(r.levelno >= logging.ERROR for r in caplog.records)
+
+    async def test_conversation_message_role_is_never_assistant(self, plugin_and_channel):
+        """Regression anchor (green at HEAD): pins fact 1 of the I2 argument
+        (design §A) — step 4 never appends an assistant message, across all
+        three item shapes _build_conversation_message handles. This is the
+        test that fails if someone later teaches step 4 to append an
+        assistant message without reading design §A."""
+        plugin, channel, db = plugin_and_channel
+        items = [
+            QueueItem(
+                role=QueueItemRole.USER,
+                content="hello world",
+                channel=channel,
+                sender="alice",
+            ),
+            QueueItem(
+                role=QueueItemRole.NOTIFICATION,
+                content="tool output",
+                channel=channel,
+                source="task",
+                tool_call_id="call-abc",
+            ),
+            QueueItem(
+                role=QueueItemRole.NOTIFICATION,
+                content="something happened",
+                channel=channel,
+                source="scheduler",
+            ),
+        ]
+
+        for item in items:
+            result = plugin._build_conversation_message(item)
+            assert result is not None
+            msg, _ = result
+            assert msg["role"] in {"user", "tool", "system"}
 
 
 # ===========================================================================
@@ -556,3 +594,34 @@ class TestHandleResponse:
         plugin.pm.ahook.send_message.assert_called_once()
         call_kwargs = plugin.pm.ahook.send_message.call_args.kwargs
         assert call_kwargs.get("latency_ms") == 123.4
+
+
+# ===========================================================================
+# R5: "queue item timing" log line carries real prompt_tokens
+# ===========================================================================
+
+
+class TestQueueItemTimingPromptTokens:
+    async def test_prompt_tokens_from_response_usage_reaches_timing_log(
+        self, plugin_and_channel, caplog
+    ):
+        """R5: agent.py currently reads result.message['usage'], but usage
+        lives at the top level of the response, never on the message — so
+        the logged prompt_tokens is structurally always None today."""
+        plugin, channel, db = plugin_and_channel
+        response = _make_text_response("hi")
+        response["usage"] = {"prompt_tokens": 896, "completion_tokens": 5, "total_tokens": 901}
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(return_value=response)
+        plugin._client = mock_client
+
+        with caplog.at_level(logging.INFO, logger="corvidae.agent"):
+            await plugin.on_message(channel=channel, sender="user", text="hi")
+            await drain(plugin, channel)
+
+        timing_records = [
+            r for r in caplog.records
+            if r.name == "corvidae.agent" and r.getMessage() == "queue item timing"
+        ]
+        assert timing_records, "expected a 'queue item timing' log record"
+        assert timing_records[0].prompt_tokens == 896

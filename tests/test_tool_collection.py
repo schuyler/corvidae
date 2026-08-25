@@ -138,3 +138,93 @@ async def test_tool_collection_plugin_on_start_builds_registry():
     assert plugin.registry is not None
     assert isinstance(plugin.registry, ToolRegistry)
     assert "my_test_tool" in plugin.registry.as_dict()
+
+
+# ---------------------------------------------------------------------------
+# 9. tools.disabled: drops named tools from the built registry (red phase,
+#    disentangle-buster.md Design §2 "new small feature riding this stream")
+# ---------------------------------------------------------------------------
+
+
+def _fake_register_two_tools(pm):
+    """Wire pm.hook.register_tools to collect tool_a and tool_b."""
+    from corvidae.tool import Tool
+
+    async def tool_a(x: str) -> str:
+        """Tool A."""
+        return x
+
+    async def tool_b(x: str) -> str:
+        """Tool B."""
+        return x
+
+    def fake_register_tools(tool_registry):
+        tool_registry.append(Tool.from_function(tool_a))
+        tool_registry.append(Tool.from_function(tool_b))
+
+    pm.hook.register_tools = MagicMock(side_effect=fake_register_tools)
+
+
+@pytest.mark.asyncio
+async def test_tools_disabled_filters_named_tools():
+    """A tool named in tools.disabled is dropped from the built registry;
+    unnamed tools survive. This is the single chokepoint every registered
+    tool passes through -- no per-plugin opt-outs."""
+    from corvidae.tool_collection import ToolCollectionPlugin
+
+    pm = MagicMock()
+    pm.hook = MagicMock()
+    _fake_register_two_tools(pm)
+
+    plugin = ToolCollectionPlugin(pm)
+    config = {"tools": {"disabled": ["tool_b"]}}
+    await plugin.on_init(pm=pm, config=config)
+    await plugin.on_start(config=config)
+
+    tools = plugin.registry.as_dict()
+    assert "tool_a" in tools
+    assert "tool_b" not in tools
+
+
+@pytest.mark.asyncio
+async def test_tools_disabled_logs_dropped_count_at_info(caplog):
+    """Dropping disabled tools logs at INFO (design: "log the count at INFO")."""
+    import logging
+
+    from corvidae.tool_collection import ToolCollectionPlugin
+
+    pm = MagicMock()
+    pm.hook = MagicMock()
+    _fake_register_two_tools(pm)
+
+    plugin = ToolCollectionPlugin(pm)
+    config = {"tools": {"disabled": ["tool_b"]}}
+    await plugin.on_init(pm=pm, config=config)
+    with caplog.at_level(logging.INFO, logger="corvidae.tool_collection"):
+        await plugin.on_start(config=config)
+
+    assert any(
+        record.levelno == logging.INFO and "disabled" in record.getMessage().lower()
+        for record in caplog.records
+    ), f"expected an INFO log mentioning disabled tools; got: {[r.getMessage() for r in caplog.records]}"
+
+
+@pytest.mark.asyncio
+async def test_tools_disabled_absent_key_is_noop():
+    """No tools.disabled key at all -> every collected tool survives
+    (the filter step is skipped, not applied with an empty allowlist that
+    happens to keep everything)."""
+    from corvidae.tool_collection import ToolCollectionPlugin
+
+    pm = MagicMock()
+    pm.hook = MagicMock()
+    _fake_register_two_tools(pm)
+
+    plugin = ToolCollectionPlugin(pm)
+    config = {}  # no "tools" key at all
+    await plugin.on_init(pm=pm, config=config)
+    await plugin.on_start(config=config)
+
+    tools = plugin.registry.as_dict()
+    assert "tool_a" in tools
+    assert "tool_b" in tools

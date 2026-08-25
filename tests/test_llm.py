@@ -25,13 +25,17 @@ MOCK_COMPLETION = {
 }
 
 
-def _make_mock_response(status: int = 200, json_body: dict | None = None):
+def _make_mock_response(
+    status: int = 200, json_body: dict | None = None, body_text: str | None = None
+):
     """Build a mock aiohttp response."""
     response = AsyncMock()
     response.status = status
     response.json = AsyncMock(return_value=json_body or MOCK_COMPLETION)
     response.raise_for_status = MagicMock()
     response.headers = {}
+    if body_text is not None:
+        response.text = AsyncMock(return_value=body_text)
     if status >= 400:
         from aiohttp import ClientResponseError
         response.raise_for_status.side_effect = ClientResponseError(
@@ -411,3 +415,48 @@ class TestLLMClientChatExtraBody:
         payload = call_args[1]["json"]
         assert payload["id_slot"] == 1
         assert payload["cache_prompt"] == True
+
+
+class TestLLMClientErrorBody:
+    """Requirement D: a 4xx/5xx from the LLM logs the response body."""
+
+    async def test_error_body_is_logged_on_4xx(self, caplog):
+        import logging
+
+        import aiohttp
+
+        error_body = (
+            '{"error":{"code":400,"message":"Assistant response prefill is '
+            'incompatible with enable_thinking.","type":"invalid_request_error"}}'
+        )
+        client = LLMClient(base_url=BASE_URL, model=MODEL, max_retries=0)
+        response = _make_mock_response(status=400, body_text=error_body)
+        client.session = _make_mock_session(response)
+
+        with caplog.at_level(logging.ERROR, logger="corvidae.llm"):
+            with pytest.raises(aiohttp.ClientResponseError):
+                await client.chat(MESSAGES)
+
+        records_with_body = [r for r in caplog.records if hasattr(r, "body")]
+        assert records_with_body, "no log record carried a body attribute"
+        assert error_body in records_with_body[0].body
+
+    async def test_error_body_is_truncated(self, caplog):
+        import logging
+
+        import aiohttp
+
+        from corvidae.llm import ERROR_BODY_CHARS
+
+        huge_body = "x" * 10_000
+        client = LLMClient(base_url=BASE_URL, model=MODEL, max_retries=0)
+        response = _make_mock_response(status=400, body_text=huge_body)
+        client.session = _make_mock_session(response)
+
+        with caplog.at_level(logging.ERROR, logger="corvidae.llm"):
+            with pytest.raises(aiohttp.ClientResponseError):
+                await client.chat(MESSAGES)
+
+        records_with_body = [r for r in caplog.records if hasattr(r, "body")]
+        assert records_with_body, "no log record carried a body attribute"
+        assert len(records_with_body[0].body) <= ERROR_BODY_CHARS

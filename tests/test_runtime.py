@@ -510,6 +510,56 @@ class TestRuntimeStart:
         finally:
             os.unlink(config_path)
 
+    async def test_relative_logging_file_resolves_against_config_dir(
+        self, tmp_path, monkeypatch
+    ):
+        """A relative logging.file path resolves against the config file's
+        directory (_base_dir), not the process cwd -- the same mechanism
+        MetricsJsonlPlugin already uses for daemon.metrics_jsonl.
+
+        Regression test: previously the raw relative path was passed to
+        configure_logging() unresolved, so the log file landed next to the
+        process cwd instead of next to agent.yaml.
+        """
+        from corvidae.runtime import Runtime
+
+        config_dir = tmp_path / "config_dir"
+        config_dir.mkdir()
+        config_path = config_dir / "agent.yaml"
+        _write_config(
+            str(config_path),
+            {
+                "llm": {"main": {"base_url": "http://localhost:8080", "model": "test-model"}},
+                "logging": {"file": "corvidae.log"},
+            },
+        )
+
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        monkeypatch.chdir(elsewhere)
+
+        captured_kwargs: list[dict] = []
+
+        def record_configure_logging(**kwargs):
+            captured_kwargs.append(kwargs)
+
+        mock_pm, mock_agent = _make_mock_pm_and_agent()
+        with patch(
+            "corvidae.runtime.configure_logging",
+            side_effect=record_configure_logging,
+        ), patch(
+            "corvidae.runtime.create_plugin_manager", return_value=mock_pm
+        ), patch("corvidae.runtime.validate_dependencies"):
+            rt = Runtime(config_path=str(config_path))
+            await rt.start()
+
+        assert len(captured_kwargs) == 1
+        resolved_file = captured_kwargs[0]["file"]
+        assert Path(resolved_file) == config_dir / "corvidae.log", (
+            f"expected the log file resolved against the config dir "
+            f"({config_dir}), got {resolved_file!r} (cwd was {elsewhere})"
+        )
+
     async def test_start_validates_dependencies(self):
         """start() calls validate_dependencies after loading plugins."""
         from corvidae.runtime import Runtime

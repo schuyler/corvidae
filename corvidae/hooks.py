@@ -10,8 +10,7 @@ Exports:
     AgentSpec       — hook specifications for all lifecycle, messaging,
                       and extension-point hooks
     create_plugin_manager()     — create and configure the PluginManager
-    HookStrategy                — enum with REJECT_WINS for gate hooks
-    resolve_hook_results()      — resolve broadcast gate-hook result lists
+    resolve_reject_wins()       — resolve broadcast gate-hook result lists
     get_dependency()            — typed plugin lookup
     validate_dependencies()     — dependency graph verification at startup
 """
@@ -19,7 +18,6 @@ from __future__ import annotations
 
 import logging
 import warnings
-from enum import Enum
 from typing import TYPE_CHECKING, TypeVar
 
 import apluggy as pluggy
@@ -38,34 +36,24 @@ _pm_logger = logging.getLogger("corvidae.plugin_manager")
 _resolve_logger = logging.getLogger("corvidae.hooks")
 
 
-class HookStrategy(Enum):
-    """Strategy for resolving a list of broadcast hook results into a single value."""
+def resolve_reject_wins(results: list) -> bool | None:
+    """Resolve a list of broadcast gate-hook results with reject-wins semantics.
 
-    REJECT_WINS = "reject_wins"
-
-
-def resolve_hook_results(
-    results: list,
-    hook_name: str,
-    strategy: HookStrategy,
-) -> object | None:
-    """Resolve a list of broadcast hook results into a single value.
+    Any False vetoes; else any True accepts; else None (no opinion).
 
     Args:
         results: The list returned by ``await pm.ahook.<hook_name>(...)``.
-        hook_name: The hook method name (used for logging).
-        strategy: One of HookStrategy.REJECT_WINS.
 
     Returns:
-        A single resolved value, or None.
+        False if any result is False, True if any result is True (and none
+        is False), else None.
     """
-    if strategy is HookStrategy.REJECT_WINS:
-        non_none = [r for r in results if r is not None]
-        if any(r is False for r in non_none):
-            return False
-        if any(r is True for r in non_none):
-            return True
-        return None
+    non_none = [r for r in results if r is not None]
+    if any(r is False for r in non_none):
+        return False
+    if any(r is True for r in non_none):
+        return True
+    return None
 
 
 def resolve_single_result(results: list, hook_name: str) -> object | None:
@@ -435,11 +423,9 @@ class AgentSpec:
         channel: Channel,
         request_text: str,
         response_text: str,
-        exchange_key: str | None,
-        origin: str | None,
-        originating_text: str | None,
+        correlation_id: str | None,
+        meta: dict,
         logprobs: dict | None,
-        withheld: bool,
     ) -> None:
         """Called after the agent loop produces a response to a message.
 
@@ -453,20 +439,15 @@ class AgentSpec:
         Args:
             channel: The Channel where the conversation occurred.
             request_text: The original user message that triggered the loop.
-                Legacy semantics: for a tool-using exchange this is the last
-                tool-result turn's text, not the exchange's true originating
-                text — kept for backward compatibility. Use originating_text
-                for the true originating message.
+                For a tool-using exchange this is the last tool-result
+                turn's text, never the exchange's true originating text.
             response_text: The final text produced by the agent loop.
-            exchange_key: The exchange this response belongs to (Phase 2).
-            origin: 'user'|'reminder'|'critique'|'heartbeat'|'task'.
-            originating_text: The exchange's true originating message (the
-                USER message or notification text that started the
-                exchange), regardless of how many tool-calling hops
-                occurred. None if unavailable.
-            logprobs: The response's logprobs envelope, or None (WP2.2).
-            withheld: True if the response was withheld from delivery
-                (WP2.9). False in 2A/2B; always populated from WP2.9 on.
+            correlation_id: The correlation id this response belongs to,
+                or None.
+            meta: The correlation metadata dict; producers of notifications
+                may stamp keys into it via ``on_notify`` meta, and the dict
+                travels with the correlation id through task cycles.
+            logprobs: The response's logprobs envelope, or None.
 
         Note:
             Extension point for observability plugins (logging, metrics,
@@ -506,7 +487,7 @@ class AgentSpec:
 
     @hookspec
     async def should_process_message(
-        self, channel: Channel, sender: str, text: str, exchange_key: str | None
+        self, channel: Channel, sender: str, text: str, correlation_id: str | None
     ) -> bool | None:
         """Gate hook: decide whether to process an incoming message.
 
@@ -517,71 +498,73 @@ class AgentSpec:
             channel: The Channel object for this conversation scope.
             sender: The user or entity that sent the message.
             text: The message content.
-            exchange_key: The key minted for this message before the gate
-                fires (Phase 2). Present for every USER message.
+            correlation_id: The id minted for this message before the gate
+                fires. Present for every USER message.
 
         Note:
             Extension point for message filtering (rate limiting, blocklists,
             channel muting). No built-in plugin implements this hook. Return
             False to reject, True to force-accept, None for no opinion.
-            Resolved with REJECT_WINS.
+            Resolved with resolve_reject_wins.
         """
 
     @hookspec
     async def on_message_admitted(
-        self, channel: Channel, exchange_key: str, sender: str, text: str
+        self, channel: Channel, correlation_id: str, sender: str, text: str
     ) -> None:
         """Broadcast after should_process_message admits a USER message.
 
-        Fired exactly once per admitted message, after REJECT_WINS
+        Fired exactly once per admitted message, after reject-wins
         resolution. Side effects only (e.g. OutcomeLogPlugin's
         record_exchange).
 
         Args:
             channel: The Channel the message arrived on.
-            exchange_key: The key minted for this message before the gate.
+            correlation_id: The id minted for this message before the gate.
             sender: The user or entity that sent the message.
             text: The message content.
         """
 
     @hookspec
     async def on_message_rejected(
-        self, channel: Channel, exchange_key: str, sender: str, text: str
+        self, channel: Channel, correlation_id: str, sender: str, text: str
     ) -> None:
         """Broadcast after should_process_message vetoes a USER message.
 
-        Fired exactly once per rejected message. The exchange_key still
-        lives on in the outcome log — rejected messages' stage-1
-        appraisals are the offline engagement-calibration corpus (§3.2).
+        Fired exactly once per rejected message.
 
         Args:
             channel: The Channel the message arrived on.
-            exchange_key: The key minted for this message before the gate.
+            correlation_id: The id minted for this message before the gate.
             sender: The user or entity that sent the message.
             text: The message content.
         """
 
     @hookspec
     async def on_message_persisted(
-        self, channel: Channel, exchange_key: str, rowid: int, origin: str | None
+        self,
+        channel: Channel,
+        correlation_id: str,
+        rowid: int | None,
+        text: str,
+        meta: dict,
     ) -> None:
-        """Broadcast after the exchange-originating message row is persisted.
+        """Broadcast after the correlation-originating message row is persisted.
 
-        Fired only when the current queue item originates its exchange
-        (USER items, and notification items whose key was minted at
+        Fired only when the current queue item originates its correlation
+        (USER items, and notification items whose id was minted at
         dequeue) — never for mid-exchange tool-result rows, injected
-        CONTEXT, or assistant rows (per-row firing under one key would
-        overwrite the rowid with each successive row).
+        CONTEXT, or assistant rows (per-row firing under one id would
+        overwrite the rowid with each successive row). Fires once per
+        originating item regardless of persistence outcome, so ``rowid``
+        may be None.
 
         Args:
             channel: The Channel the message was persisted on.
-            exchange_key: The exchange this row originates.
-            rowid: The message_log rowid of the persisted row.
-            origin: 'user'|'reminder'|'critique'|'heartbeat'|'task'. Carries
-                the origin for notification-born exchanges (a dequeue-minted
-                standalone notification's origin is not otherwise
-                observable from this hook's other params, since it never
-                went through should_process_message/on_message_admitted).
+            correlation_id: The correlation id this row originates.
+            rowid: The message_log rowid of the persisted row, or None.
+            text: The originating row's content.
+            meta: The correlation metadata dict carried by the item.
         """
 
     @hookspec(firstresult=True)
@@ -798,8 +781,8 @@ class AgentSpec:
     async def before_agent_turn(
         self,
         channel: "Channel",
-        exchange_key: str | None,
-        origin: str | None,
+        correlation_id: str | None,
+        meta: dict,
     ) -> None:
         """Called before each LLM invocation, after compaction.
 
@@ -815,8 +798,10 @@ class AgentSpec:
         Args:
             channel: The Channel being processed. Use ``channel.conversation``
                 to access the ContextWindow for appending context entries.
-            exchange_key: The current turn's exchange key (Phase 2).
-            origin: 'user'|'reminder'|'critique'|'heartbeat'|'task'.
+            correlation_id: The current turn's correlation id, or None.
+            meta: The correlation metadata dict; producers of notifications
+                may stamp keys into it via ``on_notify`` meta, and the dict
+                travels with the correlation id through task cycles.
         """
 
     @hookspec
@@ -859,23 +844,6 @@ class AgentSpec:
 
         Returns:
             A transformed string, or None to leave text unchanged.
-        """
-
-    @hookspec
-    async def on_plugin_added(self, name: str, plugin: object) -> None:
-        """Broadcast after a plugin is registered and initialized at runtime.
-
-        Args:
-            name: The registered name of the plugin.
-            plugin: The plugin instance that was added.
-        """
-
-    @hookspec
-    async def on_plugin_removed(self, name: str) -> None:
-        """Broadcast after a plugin is unregistered at runtime.
-
-        Args:
-            name: The registered name of the plugin that was removed.
         """
 
     @hookspec

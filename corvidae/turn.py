@@ -37,6 +37,9 @@ class AgentTurnResult:
         logprobs: The logprobs envelope from the response's choice, or None
             when the provider returned none (e.g. Anthropic-style providers).
             Best-effort — never a faked substitute.
+        usage: The response's top-level usage envelope verbatim (prompt_tokens,
+            completion_tokens, prompt_tokens_details, ...), or None when the
+            provider returned none.
     """
 
     message: dict
@@ -44,6 +47,7 @@ class AgentTurnResult:
     text: str
     latency_ms: float
     logprobs: dict | None = None
+    usage: dict | None = None
 
 
 async def run_agent_turn(
@@ -80,6 +84,7 @@ async def run_agent_turn(
     # extract them before keeping only the message (Phase 2, WP2.2).
     choice = response["choices"][0]
     logprobs = choice.get("logprobs")
+    usage = response.get("usage")
     msg = choice["message"]
     msg.setdefault("role", "assistant")
     messages.append(msg)
@@ -101,7 +106,7 @@ async def run_agent_turn(
             "reasoning_content_length": len(msg["reasoning_content"]) if "reasoning_content" in msg else None,
         },
     )
-    return AgentTurnResult(message=msg, tool_calls=tool_calls, text=text, latency_ms=latency_ms, logprobs=logprobs)
+    return AgentTurnResult(message=msg, tool_calls=tool_calls, text=text, latency_ms=latency_ms, logprobs=logprobs, usage=usage)
 
 
 def _truncate(s: str, maxlen: int = LOG_TRUNCATION_LENGTH) -> str:

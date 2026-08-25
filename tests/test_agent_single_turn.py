@@ -242,6 +242,40 @@ class TestMaxTurnsResetsOnUserMessage:
 
 
 # ---------------------------------------------------------------------------
+# Test 4b: R4 — a user message mid-cycle charges the turn budget instead of
+# resetting it (agent.py:553-555); one that starts a fresh cycle still resets.
+# ---------------------------------------------------------------------------
+
+
+class TestMaxTurnsNotResetWhileToolsPending:
+    async def test_pending_tools_charge_budget_instead_of_resetting(self, plugin_and_channel):
+        """R4: a user message landing while channel.pending_tool_call_ids is
+        non-empty is another turn of the running cycle, not a new one — it
+        must increment turn_counter, not reset it. A message with no pending
+        tools still resets, as before."""
+        plugin, channel, db = plugin_and_channel
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(return_value=_make_text_response("ok"))
+        plugin._client = mock_client
+
+        channel.pending_tool_call_ids = {"x"}
+        channel.turn_counter = 3
+        await plugin.on_message(channel=channel, sender="user", text="mid-cycle question")
+        await drain(plugin, channel)
+        assert channel.turn_counter == 4, (
+            "a mid-cycle user message must charge, not reset, the turn budget"
+        )
+
+        channel.pending_tool_call_ids = set()
+        channel.turn_counter = 3
+        await plugin.on_message(channel=channel, sender="user", text="fresh question")
+        await drain(plugin, channel)
+        assert channel.turn_counter == 1, (
+            "a message starting a fresh cycle (no pending tools) still resets"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Test 5: notification-triggered turn increments counter
 # ---------------------------------------------------------------------------
 

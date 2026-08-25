@@ -1,8 +1,7 @@
-"""Runtime-tunable settings resolution — the two-surface seam (Phase 2, WP2.3).
+"""Runtime-tunable settings resolution — the two-surface seam.
 
-Every gate/appraisal/critique parameter in Phase 2 must be adjustable at
-runtime without a daemon restart, through BOTH tuning surfaces (operator
-directive 2, 2026-07-06):
+Any plugin parameter must be adjustable at runtime without a daemon
+restart, through BOTH tuning surfaces (operator directive 2, 2026-07-06):
 
   1. the agent-facing ``set_settings`` tool (``RuntimeSettingsPlugin`` →
      ``channel.runtime_overrides``) — per-channel;
@@ -11,9 +10,9 @@ directive 2, 2026-07-06):
 
 Plugins call :func:`resolve_tunable` at decision time — never caching the
 resolved value at init — so both surfaces take effect immediately (trap #8).
-Dotted keys (``"critique.sample_below_rate"``) are the namespace convention
-for plugin tunables; the step-7 ``extra_body`` filter in ``agent.py``
-excludes any dotted key from the LLM request body.
+Dotted keys (``"memory.retrieval_k"``) are the namespace convention for
+plugin tunables; the step-7 ``extra_body`` filter in ``agent.py`` excludes
+any dotted key from the LLM request body.
 """
 
 from typing import Any

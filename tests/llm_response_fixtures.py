@@ -3,15 +3,34 @@
 import json
 
 
-def _make_text_response(text: str, reasoning: str | None = None) -> dict:
+def _usage(prompt: int = 100, completion: int = 20, cached: int = 0) -> dict:
+    """Top-level `usage` envelope, shaped like llama-server's response.
+
+    Real responses carry `usage` at the top level, never on the message —
+    fixtures attach it there by default so tests exercise the real shape.
+    """
+    return {
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "total_tokens": prompt + completion,
+        "prompt_tokens_details": {"cached_tokens": cached},
+    }
+
+
+def _make_text_response(
+    text: str, reasoning: str | None = None, include_usage: bool = True
+) -> dict:
     msg: dict = {"role": "assistant", "content": text}
     if reasoning is not None:
         msg["reasoning_content"] = reasoning
-    return {"choices": [{"message": msg}]}
+    response: dict = {"choices": [{"message": msg}]}
+    if include_usage:
+        response["usage"] = _usage()
+    return response
 
 
-def _make_tool_call_response(calls: list[dict]) -> dict:
-    return {
+def _make_tool_call_response(calls: list[dict], include_usage: bool = True) -> dict:
+    response: dict = {
         "choices": [
             {
                 "message": {
@@ -22,6 +41,9 @@ def _make_tool_call_response(calls: list[dict]) -> dict:
             }
         ]
     }
+    if include_usage:
+        response["usage"] = _usage()
+    return response
 
 
 def _make_tool_call(call_id: str, name: str, args: dict) -> dict:
@@ -34,9 +56,11 @@ def _make_tool_call(call_id: str, name: str, args: dict) -> dict:
     }
 
 
-def _make_mixed_response(text: str, calls: list[dict]) -> dict:
+def _make_mixed_response(
+    text: str, calls: list[dict], include_usage: bool = True
+) -> dict:
     """Response with both text content and tool calls."""
-    return {
+    response: dict = {
         "choices": [
             {
                 "message": {
@@ -46,11 +70,16 @@ def _make_mixed_response(text: str, calls: list[dict]) -> dict:
             }
         ]
     }
+    if include_usage:
+        response["usage"] = _usage()
+    return response
 
 
-def _make_null_content_tool_call_response(calls: list[dict]) -> dict:
+def _make_null_content_tool_call_response(
+    calls: list[dict], include_usage: bool = True
+) -> dict:
     """Response with content=null and tool calls — as some LLMs emit."""
-    return {
+    response: dict = {
         "choices": [
             {
                 "message": {
@@ -60,6 +89,9 @@ def _make_null_content_tool_call_response(calls: list[dict]) -> dict:
             }
         ]
     }
+    if include_usage:
+        response["usage"] = _usage()
+    return response
 
 
 def _make_tool_call_malformed_args(call_id: str, name: str, raw_args: str) -> dict:

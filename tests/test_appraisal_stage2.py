@@ -141,6 +141,87 @@ async def _read_appraisal(db, key):
 
 
 # ---------------------------------------------------------------------------
+# 0. Originating-text LRU (moved from Agent to AppraisalPlugin, §1.4/§1.5).
+# Fed by a new on_message_persisted hookimpl; read via get_originating_text.
+# ---------------------------------------------------------------------------
+
+
+class TestOriginatingTextLRU:
+    async def test_on_message_persisted_populates_the_lru(self, tmp_path):
+        env = await build_env(tmp_path)
+        await env.appraisal.on_message_persisted(
+            channel=env.channel, correlation_id="k-lru-1", rowid=5,
+            text="the original user text", meta={},
+        )
+        assert env.appraisal.get_originating_text("k-lru-1") == "the original user text"
+        await _teardown(env)
+
+    async def test_on_message_persisted_accepts_nullable_rowid(self, tmp_path):
+        """on_message_persisted fires for originating items regardless of
+        persistence outcome (rowid nullable, §1.1/§1.2) -- the LRU write
+        does not depend on rowid being non-None."""
+        env = await build_env(tmp_path)
+        await env.appraisal.on_message_persisted(
+            channel=env.channel, correlation_id="k-lru-none", rowid=None,
+            text="text with no rowid yet", meta={},
+        )
+        assert env.appraisal.get_originating_text("k-lru-none") == "text with no rowid yet"
+        await _teardown(env)
+
+    async def test_get_originating_text_returns_none_for_unknown_id(self, tmp_path):
+        env = await build_env(tmp_path)
+        assert env.appraisal.get_originating_text("never-seen") is None
+        await _teardown(env)
+
+    async def test_lru_bounded_at_512_evicts_oldest(self, tmp_path):
+        from corvidae.appraisal import ORIGINATING_TEXT_LRU_MAXSIZE
+        assert ORIGINATING_TEXT_LRU_MAXSIZE == 512
+
+        env = await build_env(tmp_path)
+        for i in range(ORIGINATING_TEXT_LRU_MAXSIZE + 1):
+            await env.appraisal.on_message_persisted(
+                channel=env.channel, correlation_id=f"k-{i}", rowid=i,
+                text=f"text {i}", meta={},
+            )
+        # The oldest entry (k-0) was evicted once the 513th arrived; the
+        # newest MAXSIZE entries survive.
+        assert env.appraisal.get_originating_text("k-0") is None
+        assert env.appraisal.get_originating_text("k-1") == "text 1"
+        assert env.appraisal.get_originating_text(
+            f"k-{ORIGINATING_TEXT_LRU_MAXSIZE}"
+        ) == f"text {ORIGINATING_TEXT_LRU_MAXSIZE}"
+        await _teardown(env)
+
+    async def test_stage2_prompt_recovers_originating_text_through_a_tool_cycle(
+        self, tmp_path
+    ):
+        """The exchange's true originating text is recoverable through a
+        tool cycle: on_message_persisted records it once, at the
+        originating USER row. on_agent_response's request_text is the last
+        tool-result turn's text (never the true originating text, per its
+        legacy semantics -- see test_phase2a_wp21.py's
+        test_final_on_agent_response_request_text_stays_last_turn_text),
+        yet the stage-2 prompt is still built from the recovered text."""
+        env = await build_env(tmp_path)
+        await env.appraisal.on_message_persisted(
+            channel=env.channel, correlation_id="k-cycle", rowid=1,
+            text="the original user text", meta={},
+        )
+        await env.appraisal.on_agent_response(
+            channel=env.channel, request_text="tool result: done",
+            response_text="final response", correlation_id="k-cycle",
+            meta={}, logprobs=None,
+        )
+        await _run_next_task(env.task)
+
+        assert len(env.stub.chat_calls) == 1
+        user_message = env.stub.chat_calls[0]["messages"][1]["content"]
+        assert "the original user text" in user_message
+        assert "tool result: done" not in user_message
+        await _teardown(env)
+
+
+# ---------------------------------------------------------------------------
 # 1. Trigger: exactly one silent task, stamped, attributed
 # ---------------------------------------------------------------------------
 
@@ -150,16 +231,16 @@ class TestTrigger:
         env = await build_env(tmp_path)
         await env.appraisal.on_agent_response(
             channel=env.channel, request_text="req", response_text="resp",
-            exchange_key="k1", origin="user", originating_text="hi there",
-            logprobs=None, withheld=False,
+            correlation_id="k1", meta={},
+            logprobs=None,
         )
         queue = env.task.task_queue
         assert queue.queue.qsize() == 1
         task = queue.queue.get_nowait()
         assert task.deliver is False
         assert task.tool_call_id is None
-        assert task.exchange_key == "k1"
-        assert task.origin == "user"
+        assert task.correlation_id == "k1"
+        assert task.meta == {}
         assert "appraisal" in task.description
         await _teardown(env)
 
@@ -167,8 +248,8 @@ class TestTrigger:
         env = await build_env(tmp_path)
         await env.appraisal.on_agent_response(
             channel=env.channel, request_text="req", response_text="resp",
-            exchange_key="kc", origin="critique", originating_text="hi",
-            logprobs=None, withheld=False,
+            correlation_id="kc", meta={"origin": "critique"},
+            logprobs=None,
         )
         assert env.task.task_queue.queue.qsize() == 0
         await _teardown(env)
@@ -192,8 +273,8 @@ class TestTrigger:
 
         await env.appraisal.on_agent_response(
             channel=env.channel, request_text="req", response_text="resp",
-            exchange_key="k2", origin="user", originating_text="hi",
-            logprobs=None, withheld=False,
+            correlation_id="k2", meta={},
+            logprobs=None,
         )
         # Let the worker drain.
         import asyncio
@@ -210,14 +291,14 @@ class TestTrigger:
         await env.outcome.record_exchange("k3", env.channel.id, origin="user")
         await env.appraisal.on_agent_response(
             channel=env.channel, request_text="req", response_text="resp",
-            exchange_key="k3", origin="user", originating_text="hi",
-            logprobs=None, withheld=False,
+            correlation_id="k3", meta={},
+            logprobs=None,
         )
         await _run_next_task(env.task)
         assert len(env.stub.chat_calls) == 1
         attr = env.stub.chat_calls[0]["attribution"]
         assert attr.get("stage") == "appraisal"
-        assert attr.get("exchange_key") == "k3"
+        assert attr.get("correlation_id") == "k3"
         await _teardown(env)
 
 
@@ -232,8 +313,8 @@ class TestStage2Persist:
         await env.outcome.record_exchange("kp", env.channel.id, origin="user")
         await env.appraisal.on_agent_response(
             channel=env.channel, request_text="req", response_text="resp",
-            exchange_key="kp", origin="user", originating_text="hi",
-            logprobs=None, withheld=False,
+            correlation_id="kp", meta={},
+            logprobs=None,
         )
         await _run_next_task(env.task)
         env_appraisal = await _read_appraisal(env.db, "kp")
@@ -254,8 +335,8 @@ class TestStage2Persist:
         )
         await env.appraisal.on_agent_response(
             channel=env.channel, request_text="req", response_text="resp",
-            exchange_key="km", origin="user", originating_text="hi",
-            logprobs=None, withheld=False,
+            correlation_id="km", meta={},
+            logprobs=None,
         )
         await _run_next_task(env.task)
         envelope = await _read_appraisal(env.db, "km")
@@ -271,8 +352,8 @@ class TestStage2Persist:
         )
         await env.appraisal.on_agent_response(
             channel=env.channel, request_text="req", response_text="resp",
-            exchange_key="kbad", origin="user", originating_text="hi",
-            logprobs=None, withheld=False,
+            correlation_id="kbad", meta={},
+            logprobs=None,
         )
         # Must not raise.
         await _run_next_task(env.task)
@@ -294,8 +375,8 @@ class TestStage2Persist:
         ]}
         await env.appraisal.on_agent_response(
             channel=env.channel, request_text="req", response_text="resp",
-            exchange_key="ke", origin="user", originating_text="hi",
-            logprobs=logprobs, withheld=False,
+            correlation_id="ke", meta={},
+            logprobs=logprobs,
         )
         await _run_next_task(env.task)
         envelope = await _read_appraisal(env.db, "ke")

@@ -313,6 +313,38 @@ class TestWebFetchStreaming:
             f"Expected Unicode replacement character in result, got: {result!r}"
         )
 
+    async def test_web_fetch_no_charset_falls_back_to_utf8(self):
+        """get_encoding() raises RuntimeError when the server sends no charset in
+        Content-Type and the body was consumed via .content.readexactly (aiohttp
+        can only compute the fallback encoding after its own read() API runs).
+        This must not propagate out of web_fetch_with_session.
+        """
+        from corvidae.tools.web import web_fetch_with_session
+
+        partial_data = b"short response, no charset"
+        error = asyncio.IncompleteReadError(partial_data, None)
+        mock_content = MagicMock()
+        mock_content.readexactly = AsyncMock(side_effect=error)
+
+        mock_response = MagicMock()
+        mock_response.status = 200
+        mock_response.content = mock_content
+        mock_response.get_encoding = MagicMock(
+            side_effect=RuntimeError("Cannot compute fallback encoding of a not yet read body")
+        )
+
+        mock_response_ctx = AsyncMock()
+        mock_response_ctx.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_response_ctx.__aexit__ = AsyncMock(return_value=False)
+
+        mock_session = MagicMock()
+        mock_session.get = MagicMock(return_value=mock_response_ctx)
+
+        result = await web_fetch_with_session(
+            mock_session, "http://example.com", max_response_bytes=50_000
+        )
+        assert result == "short response, no charset"
+
 
 # ---------------------------------------------------------------------------
 # TestCoreToolsPlugin

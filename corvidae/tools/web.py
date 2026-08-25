@@ -39,6 +39,16 @@ async def web_fetch(
         )
 
 
+def _get_encoding(response: aiohttp.ClientResponse) -> str:
+    # aiohttp can only compute the fallback charset after its own read() API has
+    # consumed the body; since we read via response.content directly, it raises
+    # RuntimeError whenever the server sent no charset in Content-Type.
+    try:
+        return response.get_encoding()
+    except RuntimeError:
+        return "utf-8"
+
+
 async def web_fetch_with_session(
     session: aiohttp.ClientSession,
     url: str,
@@ -65,11 +75,11 @@ async def web_fetch_with_session(
                 return f"HTTP {response.status}"
             try:
                 raw = await response.content.readexactly(max_response_bytes)
-                encoding = response.get_encoding()
+                encoding = _get_encoding(response)
                 text = raw.decode(encoding, errors="replace")
                 return text + TRUNCATION_INDICATOR
             except asyncio.IncompleteReadError as e:
-                encoding = response.get_encoding()
+                encoding = _get_encoding(response)
                 return e.partial.decode(encoding, errors="replace")
     except asyncio.TimeoutError:
         return TIMEOUT_ERROR_TEMPLATE.format(timeout=timeout)

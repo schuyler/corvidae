@@ -869,18 +869,17 @@ class MemoryPlugin(CorvidaePlugin):
     # ------------------------------------------------------------------
 
     @hookimpl
-    async def before_agent_turn(self, channel, exchange_key, origin) -> None:
+    async def before_agent_turn(self, channel, correlation_id, meta) -> None:
         """Retrieve memories for the inbound user text and admit them.
 
         Runs only when the window tail is a plain user MESSAGE — retrieval
-        is skipped entirely on notification-triggered turns for now
-        (Phase 2's origin machinery refines this). Everything here is
-        fail-soft: retrieval trouble must never break the turn.
+        is skipped entirely on notification-triggered turns. Everything
+        here is fail-soft: retrieval trouble must never break the turn.
 
-        ``exchange_key``/``origin`` (Phase 2, WP2.1 point 8): when present,
-        the retrieval profile is written into retrieval_log.exchange_key
-        and copied into exchange_log via the OutcomeLogPlugin's
-        update_exchange (retrieval_top_score, retrieval_hit_count).
+        ``correlation_id``: when present, the retrieval profile is written
+        into retrieval_log.exchange_key and copied into exchange_log via
+        the OutcomeLogPlugin's update_exchange (retrieval_top_score,
+        retrieval_hit_count).
         """
         try:
             conv = getattr(channel, "conversation", None)
@@ -951,7 +950,7 @@ class MemoryPlugin(CorvidaePlugin):
                 (
                     time.time(),
                     channel.id,
-                    exchange_key,
+                    correlation_id,
                     top_score,
                     hit_count,
                     len(admitted_ids),
@@ -960,15 +959,15 @@ class MemoryPlugin(CorvidaePlugin):
             )
             await db.commit()
 
-            # Copy the retrieval profile into exchange_log under the key
-            # (WP2.1 point 8) — best-effort; OutcomeLogPlugin may not be
-            # registered, or the row may not exist yet.
-            if exchange_key is not None:
+            # Copy the retrieval profile into exchange_log under the key —
+            # best-effort; OutcomeLogPlugin may not be registered, or the
+            # row may not exist yet.
+            if correlation_id is not None:
                 outcome_log = self.pm.get_plugin("outcome_log")
                 if outcome_log is not None:
                     try:
                         await outcome_log.update_exchange(
-                            exchange_key,
+                            correlation_id,
                             retrieval_top_score=top_score,
                             retrieval_hit_count=hit_count,
                         )

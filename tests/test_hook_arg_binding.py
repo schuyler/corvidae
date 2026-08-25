@@ -201,24 +201,25 @@ class TestRuntimeStartupCoverage:
 
 
 class TestEnrichedOnAgentResponseParams:
-    """WP2.1 review-gate regression: logprobs/withheld are spec-REQUIRED.
+    """WP2.1 review-gate regression: logprobs is spec-REQUIRED.
 
     The enriched on_agent_response params were originally declared with
     defaults, which exempts them from this guard — an impl mirroring the
-    defaulted signature would silently receive None forever (e.g. WP2.9's
-    withheld=True on an enforce-on veto, seen as None by every consumer).
-    The spec is now default-free; these tests pin both the guard behavior
-    and the real end-to-end delivery.
+    defaulted signature would silently receive None forever. The spec is
+    default-free; these tests pin both the guard behavior and the real
+    end-to-end delivery. ``correlation_id``/``meta`` replace the deleted
+    ``exchange_key``/``origin``/``originating_text`` params; ``withheld``
+    is gone entirely (returns generically in a later phase).
     """
 
-    def test_impl_defaulting_logprobs_or_withheld_is_flagged(self):
+    def test_impl_defaulting_logprobs_is_flagged(self):
         pm = create_plugin_manager()
 
         class MirroringPlugin:
             @hookimpl
             async def on_agent_response(
-                self, channel, request_text, response_text, exchange_key,
-                origin, originating_text, logprobs=None, withheld=None,
+                self, channel, request_text, response_text, correlation_id,
+                meta, logprobs=None,
             ):
                 pass
 
@@ -229,9 +230,8 @@ class TestEnrichedOnAgentResponseParams:
 
         message = str(excinfo.value)
         assert "logprobs" in message
-        assert "withheld" in message
 
-    async def test_default_free_consumer_receives_logprobs_and_withheld(self):
+    async def test_default_free_consumer_receives_logprobs_and_meta(self):
         """A real default-free hookimpl receives the caller's values through
         actual pluggy dispatch — not an AsyncMock'd hookcaller."""
         pm = create_plugin_manager()
@@ -240,10 +240,12 @@ class TestEnrichedOnAgentResponseParams:
         class Consumer:
             @hookimpl
             async def on_agent_response(
-                self, channel, request_text, response_text, exchange_key,
-                origin, originating_text, logprobs, withheld,
+                self, channel, request_text, response_text, correlation_id,
+                meta, logprobs,
             ):
-                received.update(logprobs=logprobs, withheld=withheld)
+                received.update(
+                    logprobs=logprobs, meta=meta, correlation_id=correlation_id
+                )
 
         pm.register(Consumer(), name="consumer")
         _check_hook_arg_binding(pm)  # sanity: the consumer passes the guard
@@ -252,12 +254,11 @@ class TestEnrichedOnAgentResponseParams:
             channel=None,
             request_text="req",
             response_text="resp",
-            exchange_key="ek-1",
-            origin="user",
-            originating_text="req",
+            correlation_id="cid-1",
+            meta={"origin": "user"},
             logprobs={"content": [{"token": "resp", "logprob": -0.1}]},
-            withheld=True,
         )
 
         assert received["logprobs"] == {"content": [{"token": "resp", "logprob": -0.1}]}
-        assert received["withheld"] is True
+        assert received["correlation_id"] == "cid-1"
+        assert received["meta"] == {"origin": "user"}
