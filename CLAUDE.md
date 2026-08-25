@@ -43,6 +43,16 @@ Things that are easy to get wrong and won't fail loudly:
   orphans existing history.
 - Hook params with defaults can be silently dropped by pluggy — see
   `tests/test_hook_arg_binding.py` for the guard.
+- **Plugins can be switched off** via `plugins.disabled` in `agent.yaml`.
+  `agent.minimal.yaml.example` uses it to run the core loop without the
+  cognition set (memory, appraisal, critique, funnel, outcome_log), which is
+  the fastest config to reproduce a core-loop bug against.
+
+`harness/` drives the agent end-to-end over local IRC against a real
+llama-server and greps mechanical pass criteria out of the replies and
+`sessions.db` (`harness/README.md`). Behavior that only shows up across a
+restart, a compaction, or two interleaved messages is proven there, not in
+pytest.
 
 ## Documentation
 

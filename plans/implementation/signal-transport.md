@@ -22,15 +22,21 @@ break other things.
   `split_message`, which WP-S5 moves.
 - `corvidae/channels/cli.py` — the four `send_*` hooks a transport may
   implement and how each opens with `matches_transport`.
-- `corvidae/hooks.py:508` — `should_process_message`, the gate WP-S4 uses.
+- `corvidae/hooks.py:489` — `should_process_message`, the gate WP-S4 uses.
   No built-in plugin implements it today; this is the first.
-- `corvidae/persistence.py:34` — the `message_log` DDL that WP-S9 alters.
+- `corvidae/persistence.py:36` — the `message_log` DDL that WP-S9 alters.
 - `corvidae/memory.py:622` — the consolidation range query WP-S10 must
   exclude private rows from without stalling the watermark.
 - `corvidae/compaction.py:126` — `compact_conversation`, where WP-S10 makes
   summaries inherit the flag.
 - `tests/test_irc_plugin.py` — the transport test pattern. Signal's is easier:
   a fake JSON-RPC server on a unix socket in `tmp_path`, no library mocking.
+- `harness/README.md` and `harness/session_driver.py` — the Buster shakedown
+  harness, IRC-driven today. Its existing probes already cover several
+  requirements end-to-end that unit tests can only approximate: `interleave`
+  (R8), `restart_recovery` (R4), `compaction` (R27c's blast radius). A Signal
+  equivalent is out of scope here, but R4, R8, R15, and R34 are only really
+  proven at that level — note the gap rather than claiming unit coverage.
 
 ## Requirements
 
@@ -78,8 +84,8 @@ Numbered as agreed. Tests in the work packages cite these.
 - **R15** Reconnects on its own after connectivity loss, without a daemon
   restart or human intervention.
 - **R16** Optional in the sense every corvidae plugin is: omitting its config
-  disables it, and its failure or absence neither crashes the daemon nor
-  affects other transports.
+  disables it — as does listing it in `plugins.disabled` — and its failure or
+  absence neither crashes the daemon nor affects other transports.
 - **R17** Bringing the daemon up requires no interactive step. Interactive
   setup is one-time, out of band, and documented.
 - **R18** Ongoing operation requires no recurring human maintenance task.
@@ -195,10 +201,13 @@ seven days.
   IRC uses — 10s initial, x2, 300s cap (R15).
 - `on_stop` cancels the read task and closes the socket, logging rather than
   swallowing on the way out.
-- `send_message` is the only `send_*` hook implemented. `send_thinking`,
-  `send_tool_status`, and `send_progress` are deliberately not implemented —
-  nobody wants tool traces in their DMs. Liveness is the typing indicator
-  instead (WP-S6).
+- `send_message` and `send_progress` are implemented; `send_thinking` and
+  `send_tool_status` are deliberately not. Nobody wants raw tool traces in a
+  DM, but intermediate assistant text before a tool dispatch reads as an
+  ordinary message ("let me check that") and is real liveness, so
+  `send_progress` forwards to `send_message` — the same choice `IRCPlugin`
+  made in 20a3b79. It is part of a reply, so the R31 unprompted rate bound
+  does not apply to it.
 
 Every implemented `send_*` hook opens with
 `if not channel.matches_transport("signal"): return`.
@@ -420,8 +429,8 @@ Entry point, config parsing and validation, documentation.
 Red tests: the entry point loads the plugin; a malformed `signal:` block
 raises with a clear message; `agent.yaml.example` parses.
 
-Docs: `docs/design.md` gains a Transports subsection and the privacy-flag
-schema; `docs/configuration.md` gains the `signal:` block and a plain
+Docs: `docs/design.md` gains a Signal subsection under Transports
+(`design.md:1223`, beside CLI and IRC) and the privacy-flag schema; `docs/configuration.md` gains the `signal:` block and a plain
 statement of R19 — that E2EE content lands in plaintext on this host, and the
 channel key contains a phone-derived identifier; `docs/plugin-guide.md` gains
 the transport's config block beside IRC's; `agent.yaml.example` gains the
