@@ -56,7 +56,7 @@ def next_inbox_action(inbox_dir: Path) -> Path | str | None:
     """
     if (inbox_dir / "STOP").exists():
         return "STOP"
-    turns = sorted(inbox_dir.glob("*.txt"), key=lambda p: p.name)
+    turns = sorted(inbox_dir.glob("*.txt"), key=lambda p: int(p.stem))
     return turns[0] if turns else None
 
 
@@ -71,16 +71,13 @@ def build_turn_record(
     sent_at: float,
     messages: list[IRCMessage],
     bot_nick: str,
-    timeout: float,
     settle: float,
-    now: float,
 ) -> dict:
     """Pure post-hoc summary over an already-final message list.
 
     Assumes the caller only invokes this once its own wait-for-reply polling
     has already resolved as reply-or-timeout — it does not itself model a
-    "still waiting" state, so `timeout` and `now` are accepted for the
-    outbox record's shape but not evaluated here.
+    "still waiting" state.
     """
     bot_msgs = [m for m in messages if m.nick == bot_nick and m.ts > sent_at]
     if not bot_msgs:
@@ -200,12 +197,13 @@ async def _process_turn(
     bot_nick: str,
     turn_timeout: float,
     settle: float,
+    flush_transcript,
 ) -> None:
     text = turn_path.read_text()
     sent_at = time.time()
     for line in text.splitlines():
         await client.privmsg(channel, line)
-        _append_line(transcript_path, format_sent_line(sent_at, line))
+        _append_line(transcript_path, format_sent_line(time.time(), line))
 
     # Empty token: existence-after-send is load-bearing, not content — same
     # reasoning as driver.py's send_and_await_any_reply.
@@ -227,15 +225,17 @@ async def _process_turn(
                 break
             await asyncio.sleep(0.5)
 
+    # Flush before the latency line so the transcript reads in the order a
+    # human watching it would expect: received reply lines, then the summary.
+    flush_transcript()
+
     record = build_turn_record(
         seq=seq,
         text=text,
         sent_at=sent_at,
         messages=client.messages.get(channel, []),
         bot_nick=bot_nick,
-        timeout=turn_timeout,
         settle=settle,
-        now=time.time(),
     )
     _write_json_atomic(outbox_dir / f"{seq:03d}.json", record)
     if not record["timed_out"]:
@@ -301,6 +301,7 @@ async def _serve_async(args: argparse.Namespace) -> int:
                 await _process_turn(
                     client, args.channel, transcript_path, action, outbox,
                     seq, args.bot_nick, args.turn_timeout, args.settle,
+                    flush_transcript,
                 )
                 last_seq = seq
                 continue
