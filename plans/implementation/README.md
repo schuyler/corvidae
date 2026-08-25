@@ -17,6 +17,15 @@ Phase 2 is planned, gated, and underway (`phase-2.md`). Phases 3+ remain
 unplanned at this level — plan them once Phase 2 is further along and their
 scope is known.
 
+## Off-sequence plans
+
+Not every plan derives from `bootstrap-mapping.md`. Documents here follow the
+same conventions but sit outside the phase ordering and can land beside it.
+
+| Document | Scope | Effort | Status |
+|---|---|---|---|
+| `signal-transport.md` | Signal DM transport: signal-cli JSON-RPC, ACI-keyed channels, authorization gate, liveness, and a privacy flag for disappearing-message content | M | PLANNED |
+
 ## Shared conventions (apply to every phase)
 
 - **Red/green TDD** (AGENTS.md): write the failing tests named in each work
