@@ -209,6 +209,50 @@ class TestProbe:
         assert vector["novelty"] == 0.5
         await plugin.on_stop()
 
+    async def test_relative_session_db_resolves_against_base_dir(self, tmp_path, monkeypatch):
+        """A relative daemon.session_db resolves against config['_base_dir'],
+        not the process cwd -- the same mechanism MetricsJsonlPlugin already
+        uses (persistence.py resolves session_db the same way).
+
+        Regression test: previously the raw relative path was passed
+        straight to aiosqlite.connect(), so once PersistencePlugin started
+        resolving session_db against _base_dir, this probe connection
+        pointed at a different (nonexistent) file and silently degraded to
+        no-probe -- proven here by a familiar/unseen novelty comparison
+        that only holds when the probe actually reads the seeded content.
+        """
+        from corvidae.appraisal import AppraisalPlugin
+
+        config_dir = tmp_path / "config_dir"
+        config_dir.mkdir()
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+
+        db_path = str(config_dir / "sessions.db")
+        await _seed_probe_db(db_path, ["I helped Schuyler debug the corvidae funnel budget"])
+
+        monkeypatch.chdir(elsewhere)
+
+        pm = create_plugin_manager()
+        plugin = AppraisalPlugin()
+        pm.register(plugin, name="appraisal")
+        cfg = {"_base_dir": config_dir, "daemon": {"session_db": "sessions.db"}}
+        await plugin.on_init(pm=pm, config=cfg)
+        await plugin.on_start(config=cfg)
+
+        channel = _make_channel()
+        familiar = await plugin.get_or_compute(
+            channel, "k-fam", "tell me about the corvidae funnel budget"
+        )
+        unseen = await plugin.get_or_compute(
+            channel, "k-new", "quantum harpsichord marmalade festival"
+        )
+        assert familiar["novelty"] < unseen["novelty"], (
+            "probe found no distinction between familiar/unseen text -- "
+            "the relative session_db path did not resolve against _base_dir"
+        )
+        await plugin.on_stop()
+
 
 # ---------------------------------------------------------------------------
 # 3. Direction-keyed store: distinct keys, single probe under concurrency
@@ -270,9 +314,9 @@ class TestPullApi:
                 self._appraisal = appraisal
 
             @hookimpl
-            async def should_process_message(self, channel, sender, text, exchange_key):
-                observed[exchange_key] = await self._appraisal.get_or_compute(
-                    channel, exchange_key, text
+            async def should_process_message(self, channel, sender, text, correlation_id):
+                observed[correlation_id] = await self._appraisal.get_or_compute(
+                    channel, correlation_id, text
                 )
                 return None
 
@@ -297,7 +341,7 @@ class TestPullApi:
             key = f"k-order-{consumer_first}"
             # Concurrent broadcast: both hookimpls fire in one gather.
             await pm.ahook.should_process_message(
-                channel=channel, sender="user", text="a seeded memory", exchange_key=key
+                channel=channel, sender="user", text="a seeded memory", correlation_id=key
             )
             assert observed[key] == await plugin.get_appraisal(key)
             await plugin.on_stop()
@@ -346,7 +390,7 @@ class TestStage1Persist:
         vector = await plugin.get_or_compute(channel, key, "a rejected message")
         await self._drain_persists(plugin)
         await pm.ahook.on_message_rejected(
-            channel=channel, exchange_key=key, sender="user", text="a rejected message"
+            channel=channel, correlation_id=key, sender="user", text="a rejected message"
         )
         row = await self._read_row(db_path, key)
         assert row is not None
@@ -362,7 +406,7 @@ class TestStage1Persist:
         )
         key = "k-rej-2"
         await pm.ahook.on_message_rejected(
-            channel=channel, exchange_key=key, sender="user", text="a rejected message"
+            channel=channel, correlation_id=key, sender="user", text="a rejected message"
         )
         vector = await plugin.get_or_compute(channel, key, "a rejected message")
         await self._drain_persists(plugin)
@@ -395,7 +439,7 @@ class TestThinTrigger:
     async def test_gate_hook_computes_and_returns_none(self, tmp_path):
         plugin, channel, _, pm = await build_appraisal(tmp_path, summaries=["x"])
         result = await plugin.should_process_message(
-            channel=channel, sender="user", text="hello", exchange_key="k-thin"
+            channel=channel, sender="user", text="hello", correlation_id="k-thin"
         )
         assert result is None
         assert await plugin.get_appraisal("k-thin") is not None
@@ -418,7 +462,7 @@ class TestThinTrigger:
         monkeypatch.setattr(plugin, "_compute", failing_compute)
 
         result = await plugin.should_process_message(
-            channel=channel, sender="user", text="hello", exchange_key="k-fail"
+            channel=channel, sender="user", text="hello", correlation_id="k-fail"
         )
         assert result is None  # fail-open: never rejects, never raises
         assert await plugin.get_appraisal("k-fail") is None

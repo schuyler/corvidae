@@ -106,10 +106,14 @@ class Runtime:
         config["_config_path"] = Path(self.config_path)
         config["_cli_overrides"] = self.overrides
 
-        # 4. Configure logging — must be first operational step
+        # 4. Configure logging — must be first operational step. Relative
+        # paths resolve against _base_dir, same mechanism as
+        # MetricsJsonlPlugin's daemon.metrics_jsonl.
         log_section = config.get("logging", {})
         log_level = log_section.get("level", "INFO")
         log_file = log_section.get("file")
+        if log_file is not None:
+            log_file = str(config["_base_dir"] / log_file)
         configure_logging(level=log_level, file=log_file)
         logger.info(
             "logging configured",

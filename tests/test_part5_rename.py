@@ -1,8 +1,7 @@
-"""Failing tests for Part 5: AgentPlugin → Agent rename.
+"""Agent must be the primary export and entry-point name for the agent loop plugin.
 
-These tests are written to FAIL with the current code (where the class is
-named AgentPlugin and registered as "agent_loop") and PASS after the rename
-is implemented.
+`corvidae.agent.Agent` is importable directly and registers under the
+entry-point name `"agent"` — not `AgentPlugin`/`"agent_loop"`.
 """
 
 import inspect
@@ -61,17 +60,4 @@ def test_main_registers_as_agent_not_agent_loop():
     loaded = eps["agent"].load()
     assert loaded is Agent, (
         f"Entry point 'agent' must load corvidae.agent.Agent, got {loaded!r}"
-    )
-
-
-# ---------------------------------------------------------------------------
-# Test 4: Backward-compat alias AgentPlugin still works and is Agent
-# ---------------------------------------------------------------------------
-
-def test_agentplugin_alias_is_agent():
-    """AgentPlugin must be an alias for Agent (same object)."""
-    from corvidae.agent import Agent, AgentPlugin
-
-    assert AgentPlugin is Agent, (
-        "AgentPlugin must be the same object as Agent (backward-compat alias)"
     )

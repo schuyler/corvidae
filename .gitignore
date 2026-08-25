@@ -7,6 +7,8 @@ __pycache__/
 dist/
 build/
 *.db
+sessions.db*
+corvidae.log
 agent.yaml
 *.swp
 uv.lock

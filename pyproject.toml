@@ -56,7 +56,6 @@ appraisal = "corvidae.appraisal:AppraisalPlugin"
 critique = "corvidae.critique:CritiquePlugin"
 agent = "corvidae.agent:Agent"
 idle_monitor = "corvidae.idle:IdleMonitorPlugin"
-hot_reload = "corvidae.hot_reload:HotReloadPlugin"
 config_watcher = "corvidae.config_watcher:ConfigWatcherPlugin"
 
 [tool.setuptools.packages.find]

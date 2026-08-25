@@ -5,7 +5,6 @@ from pluggy import HookimplMarker, HookspecMarker
 from corvidae.hooks import AgentSpec, hookimpl, hookspec
 from corvidae.hooks import create_plugin_manager
 from corvidae.hooks import get_dependency, validate_dependencies
-from corvidae.hooks import resolve_hook_results, HookStrategy
 
 
 def test_hookspec_marker_exists():
@@ -199,39 +198,37 @@ def test_agentspec_has_on_idle():
 
 
 # ---------------------------------------------------------------------------
-# resolve_hook_results (red phase)
+# resolve_reject_wins (red phase). Imported lazily inside each test — the
+# symbol does not exist yet, and a module-level import would fail collection
+# for the whole file.
 # ---------------------------------------------------------------------------
 
 
-def test_resolve_hook_results_reject_wins_false_vetoes():
+def test_resolve_reject_wins_false_vetoes():
     """REJECT_WINS: any False in results returns False."""
-    result = resolve_hook_results(
-        [None, True, False], "should_process_message", HookStrategy.REJECT_WINS
-    )
+    from corvidae.hooks import resolve_reject_wins
+    result = resolve_reject_wins([None, True, False])
     assert result is False
 
 
-def test_resolve_hook_results_reject_wins_true_when_no_false():
+def test_resolve_reject_wins_true_when_no_false():
     """REJECT_WINS: True when no False is present."""
-    result = resolve_hook_results(
-        [None, True, None], "should_process_message", HookStrategy.REJECT_WINS
-    )
+    from corvidae.hooks import resolve_reject_wins
+    result = resolve_reject_wins([None, True, None])
     assert result is True
 
 
-def test_resolve_hook_results_reject_wins_none_when_all_none():
+def test_resolve_reject_wins_none_when_all_none():
     """REJECT_WINS: None when all results are None."""
-    result = resolve_hook_results(
-        [None, None], "should_process_message", HookStrategy.REJECT_WINS
-    )
+    from corvidae.hooks import resolve_reject_wins
+    result = resolve_reject_wins([None, None])
     assert result is None
 
 
-def test_resolve_hook_results_reject_wins_empty_list():
+def test_resolve_reject_wins_empty_list():
     """REJECT_WINS: empty list returns None."""
-    result = resolve_hook_results(
-        [], "should_process_message", HookStrategy.REJECT_WINS
-    )
+    from corvidae.hooks import resolve_reject_wins
+    result = resolve_reject_wins([])
     assert result is None
 
 

@@ -54,7 +54,12 @@ pyyaml           # YAML config parsing
 ## Hook Specifications
 
 Defined in `hooks.py`. All hooks are async (called via `pm.ahook`)
-except `register_tools` which is sync.
+except `register_tools` which is sync. This is a representative subset of
+`AgentSpec` covering the turn-loop and message-lifecycle hooks; the
+[Hook reference](#hook-reference) table below is the complete, authoritative
+list of every hook (including lifecycle hooks like `on_init` and the
+outbound-display hooks `send_thinking`/`send_tool_status`/`send_progress`
+not shown here).
 
 ```python
 class AgentSpec:
@@ -63,19 +68,22 @@ class AgentSpec:
     async def on_message(self, channel: Channel, sender: str, text: str) -> None
     async def send_message(self, channel: Channel, text: str, latency_ms: float | None = None) -> None
     def register_tools(self, tool_registry: list) -> None  # sync; plugins append Tool instances or bare callables
-    async def on_agent_response(self, channel: Channel, request_text: str, response_text: str, exchange_key: str | None, origin: str | None, originating_text: str | None, logprobs: dict | None, withheld: bool) -> None
+    async def on_agent_response(self, channel: Channel, request_text: str, response_text: str, correlation_id: str | None, meta: dict, logprobs: dict | None) -> None
     async def on_notify(self, channel: Channel, source: str, text: str, tool_call_id: str | None, meta: dict | None) -> None
-    async def should_process_message(self, channel: Channel, sender: str, text: str, exchange_key: str | None) -> bool | None
+    async def should_process_message(self, channel: Channel, sender: str, text: str, correlation_id: str | None) -> bool | None
+    async def on_message_admitted(self, channel: Channel, correlation_id: str, sender: str, text: str) -> None
+    async def on_message_rejected(self, channel: Channel, correlation_id: str, sender: str, text: str) -> None
+    async def on_message_persisted(self, channel: Channel, correlation_id: str, rowid: int | None, text: str, meta: dict) -> None
     async def on_llm_error(self, channel: Channel, error: Exception) -> str | None
     async def compact_conversation(self, channel: Channel, conversation: ContextWindow, max_tokens: int) -> None
     async def process_tool_result(self, tool_name: str, result: str, channel: Channel | None) -> str | None
-    async def before_agent_turn(self, channel: Channel, exchange_key: str | None, origin: str | None) -> None
+    async def before_agent_turn(self, channel: Channel, correlation_id: str | None, meta: dict) -> None
     async def after_persist_assistant(self, channel: Channel, message: dict) -> None
     async def transform_display_text(self, channel: Channel, text: str, result_message: dict) -> str | None
     async def on_idle(self) -> None
     async def load_conversation(self, channel: Channel) -> list[dict] | None
-    async def on_conversation_event(self, channel: Channel, message: dict, message_type: MessageType) -> None
-    async def on_compaction(self, channel: Channel, summary_msg: dict, retain_count: int) -> None
+    async def on_conversation_event(self, channel: Channel, message: dict, message_type: MessageType) -> int | None
+    async def on_compaction(self, channel: Channel, summary_msg: dict, retain_count: int, compacted_ids: list[int]) -> None
 ```
 
 `create_plugin_manager()` in `hooks.py` creates the manager and adds
@@ -84,47 +92,56 @@ hookspecs.
 ### Broadcast dispatch and result resolution
 
 All hooks are called via `pm.ahook.<hook_name>(...)`, which broadcasts to
-every registered implementation and returns a list of results. For hooks
-that need a single resolved value, the caller passes the result list to
-`resolve_hook_results(results, hook_name, strategy, pm=pm)` from `hooks.py`.
+every registered implementation and returns a list of results. Gate hooks
+that need a single resolved value pass the result list to
+`resolve_reject_wins(results)` from `hooks.py`: any `False` in the results
+returns `False`; otherwise any `True` returns `True`; otherwise `None`.
+`should_process_message` is the only hook resolved this way.
 
-`HookStrategy` defines three resolution strategies:
+Hooks marked `firstresult=True` in the hookspec (`on_llm_error`,
+`compact_conversation`, `process_tool_result`, `transform_display_text`,
+`load_conversation`) use pluggy's own first-non-None-wins dispatch — the
+first handler to return a non-None value stops the chain; no separate
+resolver function is involved. `process_tool_result` and
+`transform_display_text` are wrapper chains: `@hookimpl(wrapper=True)`
+implementations compose transforms over an identity seed.
 
-- **REJECT_WINS** — any `False` in the results returns `False`; otherwise
-  any `True` returns `True`; otherwise `None`.
-- **ACCEPT_WINS** — any `True` in the results returns `True`; otherwise `None`.
-- **VALUE_FIRST** — returns the first non-`None` result. If multiple plugins
-  return non-`None`, the alphabetically-first plugin name's result is used
-  and a warning is logged.
-
-Pure broadcast hooks (e.g. `on_start`, `on_idle`) do not call
-`resolve_hook_results`; their return values are ignored.
+Pure broadcast hooks (e.g. `on_start`, `on_idle`) resolve neither way;
+their return values are ignored.
 
 ### Hook reference
 
 | Hook | Semantics | Call site |
 |------|-----------|-----------|
+| `on_init` | broadcast | `Runtime.start()`, after all plugins are registered, before `on_start`; store `pm`/`config`, resolve other plugins — no runtime resources |
 | `on_start` | broadcast | daemon startup, after config load |
 | `on_stop` | broadcast | SIGINT/SIGTERM |
 | `on_message` | broadcast | inbound message from any transport |
 | `send_message` | broadcast | outbound message delivery |
+| `send_thinking` | broadcast | `Agent`, when the LLM response carries `reasoning_content` |
+| `send_tool_status` | broadcast | `Agent`/`TaskPlugin`, tool call dispatched and completed |
+| `send_progress` | broadcast | `Agent`, intermediate LLM text alongside tool calls |
 | `register_tools` | broadcast (sync) | startup tool collection |
 | `on_agent_response` | broadcast | after agent loop produces a text response; no default implementation |
 | `on_notify` | broadcast | inject a notification into a channel queue |
-| `should_process_message` | broadcast / REJECT_WINS | `on_message`, before enqueue; no default implementation; None from empty broadcast allows all messages |
-| `on_llm_error` | broadcast / VALUE_FIRST | `_run_turn`, after LLM exception; return error string or None for default |
+| `should_process_message` | broadcast / resolve_reject_wins | `on_message`, before enqueue; no default implementation; None from empty broadcast allows all messages |
+| `on_message_admitted` | broadcast | `on_message`, after a USER message is admitted; fires exactly once per admitted message |
+| `on_message_rejected` | broadcast | `on_message`, after a USER message is vetoed; fires exactly once per rejected message |
+| `on_message_persisted` | broadcast | dequeue, after the correlation-originating row is persisted; fires once per originating item regardless of outcome (`rowid` may be None) |
+| `on_llm_error` | firstresult=True | `_run_turn`, after LLM exception; return error string or None for default |
 | `compact_conversation` | broadcast | `_process_queue_item`, step 5; all implementations run for side effects |
-| `process_tool_result` | broadcast / VALUE_FIRST | `dispatch_tool_call` (both subagent and main agent paths), after tool execution; return replacement string or None for default |
+| `process_tool_result` | firstresult=True wrapper chain | `dispatch_tool_call` (both subagent and main agent paths), after tool execution; return replacement string or None for default |
 | `before_agent_turn` | broadcast | `_process_queue_item`, before LLM call; plugins inject context into conversation log |
 | `after_persist_assistant` | broadcast | `_process_queue_item`, after assistant message is persisted; plugins may mutate the in-memory dict |
-| `transform_display_text` | broadcast / VALUE_FIRST | `_resolve_display_text`, before `send_message`; return transformed text or None to leave unchanged |
+| `transform_display_text` | firstresult=True wrapper chain | `_resolve_display_text`, before `send_message`; return transformed text or None to leave unchanged |
 | `on_idle` | broadcast | `IdleMonitor`, when all queues empty and cooldown elapsed |
-| `load_conversation` | broadcast / VALUE_FIRST | `_process_queue_item`, when `channel.conversation is None`; return list of tagged message dicts or None to defer |
+| `load_conversation` | firstresult=True | `_process_queue_item`, when `channel.conversation is None`; return list of tagged message dicts or None to defer |
 | `on_conversation_event` | broadcast | `_process_queue_item`, after every `conv.append()`; side effects only (persistence, JSONL logging) |
 | `on_compaction` | broadcast | `CompactionPlugin`, after `replace_with_summary()`; side effects only (persistence) |
 | `on_llm_request` | broadcast | `LLMClient.chat()` via LLMPlugin's injected observer, before the retry loop; side effects only (observability) |
 | `on_llm_response` | broadcast | `LLMClient.chat()` via the observer, exactly once per call (success or terminal failure); side effects only (metrics, usage log) |
 | `on_metrics` | broadcast | any plugin via `pm.ahook.on_metrics(...)`; built-in emission from `MetricsPlugin.on_llm_response`; never emit from inside an `on_metrics` implementation (recursion) |
+| `on_config_reload` | broadcast | `ConfigWatcherPlugin`, when `agent.yaml`'s mtime changes; per-plugin error isolation |
 
 ## Channel System
 
@@ -208,11 +225,11 @@ Retries apply to transient HTTP status codes (429, 500, 502, 503, 504) and conne
 errors. Honors `Retry-After` response headers. `timeout` is the total HTTP timeout per
 request in seconds; `None` uses aiohttp's session default (300s).
 
-### Observability (Phase 0)
+### Observability
 
 Every LLM call is metered at the `LLMClient` chokepoint — not the turn
-loop — so compaction, subagent, and future background calls (critique,
-consolidation, appraisal) are all covered.
+loop — so compaction, subagent, consolidation, appraisal, and critique
+background calls are all covered.
 
 **Observer seam.** `LLMClient.observer` (default `None`) is any object
 with async `request(**kwargs)`/`response(**kwargs)` methods. `chat()`
@@ -228,7 +245,7 @@ hooks with the client's role ("main"/"background") and the current
 attribution snapshot.
 
 **Attribution.** `attribution.py` holds a single ContextVar dict
-(`stage`, `channel_id`, later `exchange_key`). Callers set it at the top
+(`stage`, `channel_id`, `correlation_id`, `meta`). Callers set it at the top
 of a logical operation and reset in a `finally`: the Agent turn loop
 (`stage="turn"`), CompactionPlugin around its summary call
 (`stage="compaction"`, shadowing the turn), and the subagent work loop
@@ -242,9 +259,11 @@ captures `contextvars.copy_context()` at creation and the worker runs
 `on_llm_response` into `on_metrics` events: `llm.tokens.*`,
 `llm.latency_ms`, `llm.errors`), `UsageLogPlugin` (one `usage_log` row
 per call), and `MetricsJsonlPlugin` (JSONL event sink, config
-`daemon.metrics_jsonl`). `outcome_log.py` owns the `exchange_log` table
-(schema + guarded writer API only in Phase 0; rows are written from
-Phase 1a/2). All sinks are fail-soft.
+`daemon.metrics_jsonl`). `outcome_log.py` owns the `exchange_log` table:
+one row per exchange, written by `OutcomeLogPlugin`'s hookimpls at
+message admission/rejection/persistence and updated in place as memory
+retrieval, appraisal, and critique record their outcomes. All sinks are
+fail-soft.
 
 ```sql
 CREATE TABLE usage_log (
@@ -255,7 +274,7 @@ CREATE TABLE usage_log (
     model TEXT NOT NULL,
     stage TEXT,
     channel_id TEXT,
-    exchange_key TEXT,          -- NULL until Phase 2
+    correlation_id TEXT,        -- NULL when the call ran outside any correlated turn
     prompt_tokens INTEGER,
     completion_tokens INTEGER,
     total_tokens INTEGER,
@@ -264,17 +283,17 @@ CREATE TABLE usage_log (
 );
 
 CREATE TABLE exchange_log (
-    exchange_key TEXT PRIMARY KEY,
+    exchange_key TEXT PRIMARY KEY,  -- the correlation id (outcome_log.py keeps its own vocabulary; see plugin-guide.md's Correlation section)
     channel_id TEXT NOT NULL,
-    origin TEXT,                    -- 'user'|'reminder'|'critique'|'heartbeat'|'task'; NULL until Phase 2
+    origin TEXT,                    -- convention: 'user'|'reminder'|'critique'|'heartbeat'|'task'
     message_rowid INTEGER,          -- message_log.id of the originating message
     created_at REAL NOT NULL,
-    retrieval_top_score REAL,       -- Phase 1a
-    retrieval_hit_count INTEGER,    -- Phase 1a
-    probe_score REAL,               -- Phase 2
-    appraisal TEXT,                 -- JSON; Phase 2
-    provenance_snapshot TEXT,       -- JSON; Phase 2
-    outcomes TEXT                   -- JSON; Phase 2
+    retrieval_top_score REAL,       -- written by MemoryPlugin retrieval
+    retrieval_hit_count INTEGER,    -- written by MemoryPlugin retrieval
+    probe_score REAL,               -- written by AppraisalPlugin stage 1
+    appraisal TEXT,                 -- JSON; written by AppraisalPlugin stage 2
+    provenance_snapshot TEXT,       -- JSON; written by CritiquePlugin
+    outcomes TEXT                   -- JSON; merged by multiple writers
 );
 ```
 
@@ -374,15 +393,24 @@ Tools that don't declare `_ctx` work without modification.
 All operations are synchronous; no database access:
 
 - `append(message, message_type=MessageType.MESSAGE)` — appends to in-memory list with `_message_type` tag
-- `build_prompt()` — returns `[system_msg, *messages]` with `_message_type` stripped
-- `token_estimate()` — rough count via `chars / chars_per_token`
+- `build_prompt()` — returns `[system_msg, *messages]` with `_message_type` stripped.
+  Every assistant `tool_calls` message is emitted contiguously with its results,
+  at the arrival position of its *last* result (in place, with placeholders, if
+  any call is still unanswered) — a corvidae convention, not compliance with a
+  documented rule, since the OpenAI and Anthropic formats make tool-result
+  adjacency normative but say nothing about a user turn arriving inside a tool
+  cycle. The consequence this ordering secures: the emitted prompt never ends on
+  an assistant message, which llama.cpp reads as a prefill and rejects under
+  `enable_thinking`.
+- `token_estimate()` — token count via tiktoken (`cl100k_base`), with a
+  character-based fallback when tiktoken is unavailable
 - `replace_with_summary(summary_msg, retain_count)` — replaces older messages
   with a summary in-memory, retaining the `retain_count` most-recent entries.
   Raises `ValueError` if `retain_count` exceeds `len(messages)`.
 - `remove_by_type(message_type)` — removes all entries of the given `MessageType`
   from the in-memory list. Returns the number removed. Raises `ValueError` if called
   with `MessageType.MESSAGE` or `MessageType.SUMMARY`. Plugins use this to clean up
-  previously injected `CONTEXT` entries before re-injecting fresh ones.
+  stale `CONTEXT` entries from an earlier turn before re-injecting fresh ones.
 
 After each `conv.append()`, `Agent` fires `on_conversation_event` (broadcast)
 so persistence plugins can write to their storage. After `replace_with_summary()`,
@@ -459,8 +487,8 @@ Retrieves `ChannelRegistry` during `on_start` via
 
 DB lifecycle (open/close) is delegated to `PersistencePlugin`. Conversation
 initialization is handled directly in `Agent._process_queue_item`: a
-`ContextWindow` is created, then `load_conversation` (VALUE_FIRST) is called
-so persistence plugins can populate history. `Agent` reads `_chars_per_token`
+`ContextWindow` is created, then `load_conversation` (firstresult=True) is
+called so persistence plugins can populate history. `Agent` reads `_chars_per_token`
 and `_base_dir` from config in `_start_plugin`.
 
 The LLM client is borrowed from `LLMPlugin` (`get_dependency(pm, "llm", LLMPlugin)`)
@@ -475,9 +503,9 @@ to this dict because the reference is live.
 ### Message processing
 
 `on_message` broadcasts `should_process_message` and passes the result
-list to `resolve_hook_results` with `HookStrategy.REJECT_WINS`. If the
-resolved result is `False` (identity check, not falsiness), the message
-is dropped. Any other result (`True` or `None`) proceeds to enqueue.
+list to `resolve_reject_wins`. If the resolved result is `False` (identity
+check, not falsiness), the message is dropped. Any other result (`True`
+or `None`) proceeds to enqueue.
 
 `on_message` and `on_notify` both enqueue a `QueueItem` onto a
 per-channel `SerialQueue`. The queue's consumer calls
@@ -487,7 +515,7 @@ per-channel `SerialQueue`. The queue's consumer calls
    conversation message dict and `request_text`. Returns `None` on
    unrecognized role (logged, item dropped).
 2. When `channel.conversation is None`, creates a `ContextWindow`, calls
-   `load_conversation` (VALUE_FIRST) to populate history, and assigns
+   `load_conversation` (firstresult=True) to populate history, and assigns
    `channel.conversation`
 3. Resets `turn_counter` to 0 on user messages
 4. Resolves channel config (including `max_turns`)
@@ -504,9 +532,9 @@ per-channel `SerialQueue`. The queue's consumer calls
 7. Calls `before_agent_turn` hook (broadcast); fires `on_conversation_event`
    for any messages injected by the hook
 8. **`_run_turn`** — calls `run_agent_turn` (single LLM invocation).
-   On exception, broadcasts `on_llm_error` (resolved with
-   `HookStrategy.VALUE_FIRST`), sends the error message to the channel,
-   and returns `None` to abort processing.
+   On exception, broadcasts `on_llm_error` (`firstresult=True`), sends
+   the error message to the channel, and returns `None` to abort
+   processing.
 9. Appends the assistant message to conversation; fires `on_conversation_event`
 10. Calls `after_persist_assistant` hook (broadcast); `ThinkingPlugin`
     uses this to strip `reasoning_content` from the in-memory copy
@@ -521,17 +549,27 @@ per-channel `SerialQueue`. The queue's consumer calls
       `_resolve_display_text`, fires `on_agent_response`, sends text
       response
 
+Step 7's `conv.build_prompt(...)` never returns a prompt ending on an
+assistant message. Three facts compose to guarantee it: step 4 only ever
+appends a message produced by `_build_conversation_message`, which emits
+`role: "user"`, `"tool"`, or `"system"` and never `"assistant"`; compaction's
+`replace_with_summary` always retains at least one message
+(`retain_count >= 1`), so it cannot strand step 4's append; and
+`build_prompt`'s deferral never leaves an assistant `tool_calls` message
+last — its call+results block always ends on a `tool` message, real or
+placeholder. This matters because llama.cpp reads a trailing assistant
+message as a prefill and rejects it under `enable_thinking`.
+
 After `_handle_response` completes, `_process_queue_item` calls
 `_maybe_fire_idle()`. This is the push-based idle detection mechanism:
 after each queue item finishes, `Agent` checks whether all `SerialQueue`
 instances in `self.queues` are empty and `TaskQueue.is_idle` is `True`
 (skipped if `TaskPlugin` is not registered). If so, and if at least
 `idle_cooldown_seconds` have elapsed since the last `on_idle` firing,
-it broadcasts the `on_idle` hook. This replaces the former polling-based
-`IdleMonitor` background task.
+it broadcasts the `on_idle` hook.
 
-**`_resolve_display_text`** broadcasts `transform_display_text` and
-resolves with `HookStrategy.VALUE_FIRST`. If the hook returns a value,
+**`_resolve_display_text`** broadcasts `transform_display_text`
+(`firstresult=True` wrapper chain). If the hook returns a value,
 that value is used; otherwise falls back to `result.text`. When a
 `fallback` is provided and the resolved text is falsy, the fallback is
 returned instead. Hook exceptions are caught, logged, and the input text
@@ -587,8 +625,8 @@ class QueueItem:
 ## PersistencePlugin
 
 `persistence.py` — manages the SQLite database lifecycle and conversation
-persistence. Registered as `"persistence"` in `main.py`, immediately after
-`ChannelRegistry`. Declares `depends_on = set()`.
+persistence. Registered as the `"persistence"` entry point. Declares
+`depends_on = set()`.
 
 `PersistencePlugin.on_start` reads `daemon.session_db` from config (default
 `"sessions.db"`), opens the database with `aiosqlite.connect`, and runs schema
@@ -599,7 +637,7 @@ before `on_start` causes the `if self.db is None:` guard to skip the open.
 
 ### load_conversation
 
-Implements `load_conversation` (VALUE_FIRST). Called by `Agent` when
+Implements `load_conversation` (firstresult=True). Called by `Agent` when
 `channel.conversation is None`. Queries `message_log` for the channel, applying
 the timestamp filter so only the compaction boundary and newer rows are returned.
 Returns a list of tagged message dicts (with `_message_type` set). Logs an INFO
@@ -622,7 +660,7 @@ no history and conversation events are not persisted.
 ## JsonlLogPlugin
 
 `jsonl_log.py` — writes an append-only JSONL log alongside the SQLite
-conversation store. Registered as `"jsonl_log"` in `main.py`.
+conversation store. Registered as the `"jsonl_log"` entry point.
 
 Configured via `daemon.jsonl_log_dir` in `agent.yaml`. If the key is
 absent, the plugin is a complete no-op — all hookimpls return early.
@@ -649,8 +687,8 @@ open for the plugin lifetime. Channel IDs are sanitized (`/` and `:` →
 ## IdleMonitorPlugin
 
 `idle.py` — a no-op stub that declares `depends_on = set()`. It implements
-the `on_idle` hook with a pass-through body. Registered as `"idle_monitor"`
-in `main.py` after `Agent`.
+the `on_idle` hook with a pass-through body. Registered as the
+`"idle_monitor"` entry point.
 
 Idle detection is push-based, not polling-based. After each queue item
 finishes, `Agent._maybe_fire_idle()` checks whether all queues are empty and
@@ -674,7 +712,7 @@ daemon:
 ## ThinkingPlugin
 
 `thinking.py` — strips `<think>` blocks and `reasoning_content` for
-display. Registered as `"thinking"` in `main.py` before `agent`.
+display. Registered as the `"thinking"` entry point.
 
 Implements two hooks:
 
@@ -694,12 +732,12 @@ in-memory history regardless of `keep_thinking_in_history`.
 
 `compaction.py` — implements the `compact_conversation` hook to keep
 conversation history within the configured token budget. Registered as
-`"compaction"` in `main.py` before `Agent`. Declares `depends_on = {"llm"}`.
+the `"compaction"` entry point. Declares `depends_on = {"llm"}`.
 Logger name: `corvidae.compaction`.
 
 **ContextCompactPlugin** (`context_compact.py`) has been removed: superseded
 by `MemoryPlugin` (compaction-time memory consolidation plus retrieval), and
-per-turn token stats now live in Phase 0's `usage_log` table.
+per-turn token stats now live in the `usage_log` table.
 
 ### compact_conversation
 
@@ -725,8 +763,8 @@ for side effects; its return value is not used by the caller.
    This method is a separate public method so tests can patch it via
    `patch.object`.
 7. Call `conversation.replace_with_summary(summary_msg, retain_count)`.
-8. Fire `on_compaction(channel, summary_msg, retain_count)` (broadcast) so
-   persistence plugins can update the DB.
+8. Fire `on_compaction(channel, summary_msg, retain_count, compacted_ids)`
+   (broadcast) so persistence plugins can update the DB.
 9. Return `True`.
 
 **Graceful degradation:** without `CompactionPlugin`, the
@@ -768,8 +806,8 @@ history bound. Starts/stops the worker on lifecycle hooks. Registers the
 
 ## LLMPlugin
 
-`llm_plugin.py` — owns `LLMClient` instance lifecycle. Registered as `"llm"`
-in `main.py` after `McpClientPlugin`. Declares `depends_on = set()`.
+`llm_plugin.py` — owns `LLMClient` instance lifecycle. Registered as the
+`"llm"` entry point. Declares `depends_on = set()`.
 
 ### Lifecycle
 
@@ -810,16 +848,20 @@ if absent.
 ## ToolCollectionPlugin
 
 `tool_collection.py` — collects tools from all plugins at startup. Registered as
-`"tools"` in `main.py`. Declares `depends_on = set()`. Its `on_start` is decorated
-with `@hookimpl(trylast=True)` so it fires after all other `on_start` hooks have
-run, ensuring every tool-providing plugin has had a chance to finish setup.
+the `"tools"` entry point. Declares `depends_on = set()`. Its `on_start` is
+decorated with `@hookimpl(trylast=True)` so it fires after all other `on_start`
+hooks have run, ensuring every tool-providing plugin has had a chance to finish
+setup.
 
 ### Lifecycle
 
 - `on_start` — reads `tools.max_result_chars` from config (default 100,000).
   Falls back to `agent.max_tool_result_chars` with a deprecation warning.
   Calls `pm.hook.register_tools(tool_registry=collected)` (sync broadcast) to
-  collect tools from all plugins, then builds a `ToolRegistry`.
+  collect tools from all plugins, then builds a `ToolRegistry`. Tools whose
+  name is in `tools.disabled` are dropped from the registry here — the
+  single chokepoint every registered tool passes through, so there are no
+  per-plugin opt-outs.
 
 ### Tool access
 
@@ -846,7 +888,7 @@ validation fails at startup.
 
 ## MemoryPlugin
 
-`memory.py` — autobiographical memory (bootstrap-mapping §3.1). Entry point
+`memory.py` — autobiographical memory. Entry point
 name: `"memory"`; `depends_on = {"persistence", "llm"}`. Absorbs the former
 `DreamPlugin` embryo (removed): compaction becomes memory formation instead
 of file-based fact scraping.
@@ -870,7 +912,8 @@ range, makes one `llm.background` call (first-person summary with
 epistemic framing, JSON out — see `prompts/memory_consolidation.md`),
 scores an importance prior through the pluggable
 `MemoryPlugin.importance_prior` (default: cheap-model `RubricPrior`,
-0.5 on failure; Phase 2 appraisal replaces it), embeds the summary via
+0.5 on failure; `AppraisalPlugin` wraps it in `AppraisalPrior` when
+appraisal is enabled), embeds the summary via
 `llm.embedding`, and commits the memory row together with the watermark
 advance in one compare-and-set section. Overlapping triggers on the same
 range discard the loser's record — no duplicates. Embedding failure
@@ -881,8 +924,7 @@ calls carry `stage="consolidation"` attribution in `usage_log`.
 ### Retrieval (read path)
 
 `before_agent_turn` runs when the window tail is a plain user MESSAGE
-(notification-triggered turns skip retrieval until Phase 2's origin
-machinery). The inbound text is embedded and matched against `memory_vec`
+(notification-triggered turns skip retrieval entirely). The inbound text is embedded and matched against `memory_vec`
 (sqlite-vec exact KNN, cosine distance); candidates are filtered to
 `indexed=1 AND redacted=0` and channel-compartmentalized (`channel_id`
 match, or shared scope via `memory.channel_groups`). Scores are
@@ -904,8 +946,8 @@ encoders. Nothing in the memory path raises into the turn loop.
 
 ### Schema
 
-`memory` (records + Phase 1b columns: `indexed`, `superseded_by`,
-`redacted`, `embedded`), `consolidation_watermark`, `embedding_meta`,
+`memory` (records, with `indexed`, `superseded_by`, `redacted`, and
+`embedded` columns), `consolidation_watermark`, `embedding_meta`,
 `memory_fts` (external-content FTS5 with insert/update sync triggers; no
 delete trigger — memory rows are never deleted), `memory_vec` (vec0,
 created only when the extension loads), `retrieval_log`, `retention_meta`
@@ -942,10 +984,10 @@ the mode is not WAL, it aborts with a message naming the current mode and
 how to convert. The `corvidae` daemon configures WAL on startup; a
 daemon-created DB is always WAL.
 
-**Schema-presence probe (pre-Phase-1b DBs).** Before touching any surface,
-the CLI probes `sqlite_master` for the tables and triggers it needs. If
-`message_fts` is absent, the message tombstone is still written but the FTS
-surface is skipped with a printed notice — safe because the Phase 1b
+**Schema-presence probe (pre-memory-schema DBs).** Before touching any
+surface, the CLI probes `sqlite_master` for the tables and triggers it
+needs. If `message_fts` is absent, the message tombstone is still written
+but the FTS surface is skipped with a printed notice — safe because the
 `message_log_ai`/`message_log_au` triggers will index the tombstone (not
 the original content) the next time the daemon runs its `message_fts`
 backfill. If `memory` or `memory_vec` are absent, the memory cascade is
@@ -986,7 +1028,7 @@ sample token can be extracted.
 
 ## FunnelPlugin
 
-`funnel.py` — the context-admission funnel (bootstrap-mapping §2.2). Entry
+`funnel.py` — the context-admission funnel. Entry
 point name: `"funnel"`. The single chokepoint for tail CONTEXT admission:
 
 1. **Dedupe** against CONTEXT already in the window.
@@ -999,9 +1041,12 @@ point name: `"funnel"`. The single chokepoint for tail CONTEXT admission:
    `on_conversation_event`, with the rowid attached, so the window matches
    its reload. Stale CONTEXT retires by aging past the compaction boundary.
 
-Phase 1a callers: memory retrieval (and optionally date/time grounding).
-The deferred registration/stub machinery for notification payloads is
-Phase 2+.
+Callers: memory retrieval (and optionally date/time grounding). The
+funnel also owns deferred registration: non-tool-call notification
+payloads queue per `(channel, origin)` via `register_and_wake()`, one
+stub notification wakes the channel per pending pair, and the drain in
+`before_agent_turn` admits everything queued for the triggering
+exchange's origin.
 
 ## Subagent Tool
 
@@ -1175,15 +1220,6 @@ registers `task_status` as tool closures during `on_start`.
 | `subagent(instructions, description)` | `tools/subagent.py` | Launch background subagent using shared LLM client |
 | `task_status()` | `task.py` | Report task queue status |
 
-The following tool files exist but are not registered in the current `main.py`:
-
-| File | Status |
-|------|--------|
-| `tools/goal_tracker.py` | Experimental; not registered |
-| `tools/perf_mon.py` | Experimental; not registered |
-| `tools/local_indexer.py` | Experimental; not registered |
-| `tools/index.py` | Disabled via commented-out registration in `main.py` |
-
 ## Transports
 
 ### CLI (`channels/cli.py`)
@@ -1278,39 +1314,41 @@ Relative paths resolve against the directory containing `agent.yaml`.
 
 ## Plugin Registration Order
 
-Defined in `main.py`:
+`Runtime.start()` (`runtime.py`) registers plugins in two stages, not a
+fixed hand-written order:
 
-1. `ChannelRegistry` — registered as a named plugin (`"registry"`) on the PM
-2. `PersistencePlugin` — DB lifecycle and conversation persistence (after registry)
-3. `JsonlLogPlugin` — JSONL conversation logging (peer persistence hook consumer)
-4. `CoreToolsPlugin` — registers core tools (shell, read_file, write_file, web_fetch, web_search, task_pipeline)
-5. `CLIPlugin` — stdin/stdout transport
-6. `IRCPlugin` — IRC transport
-7. `TaskPlugin` — task queue
-8. `SubagentPlugin` — registers the `subagent` tool
-9. `McpClientPlugin` — MCP server connections and tool forwarding
-10. `LLMPlugin` — owns LLM client lifecycle (after mcp, before compaction and agent)
-11. `CompactionPlugin` — provides default `compact_conversation` implementation
-12. `ThinkingPlugin` — handles `<think>` stripping and `reasoning_content` removal
-13. `RuntimeSettingsPlugin` — registers the `set_settings` tool
-14. `ToolCollectionPlugin` — collects tools from all plugins via `register_tools` hook; `on_start` is `trylast=True` so it fires after all other `on_start` hooks
-15. `MemoryPlugin` — consolidation (`on_compaction`/`on_idle`) and retrieval (`before_agent_turn`)
-16. `MemoryToolsPlugin` — registers `search_memory` and `recall_raw` agent tools; `depends_on = {"memory"}`
-17. `FunnelPlugin` — context-admission funnel for tail CONTEXT entries
-18. `Agent` — agent loop (after all tools, transports, and support plugins)
-19. `IdleMonitorPlugin` — no-op stub; registered after `Agent`
+1. `ChannelRegistry` is the only manually registered plugin —
+   `self.pm.register(self.registry, name="registry")` (runtime.py:124).
+2. Every other plugin loads from the `corvidae` setuptools entry-point
+   group: `self.pm.load_setuptools_entrypoints("corvidae")`
+   (runtime.py:137), reading `[project.entry-points.corvidae]` in
+   `pyproject.toml:34-59`. Names listed in `plugins.disabled` are blocked
+   via `pm.set_blocked(name)` before this call, so disabled plugins are
+   never instantiated.
 
-After all registrations, `validate_dependencies(pm)` runs to verify that
-every plugin's `depends_on` set names a registered plugin. Startup aborts
-with `RuntimeError` if any dependency is missing.
+The full entry-point plugin set (`pyproject.toml:35-59`): `persistence`,
+`jsonl_log`, `core_tools`, `cli`, `irc`, `task`, `subagent`, `mcp`, `llm`,
+`compaction`, `memory`, `memory_tools`, `funnel`, `thinking`,
+`runtime_settings`, `tools`, `metrics`, `usage_log`, `metrics_jsonl`,
+`outcome_log`, `appraisal`, `critique`, `agent`, `idle_monitor`,
+`config_watcher`.
+
+Entry-point loading does not guarantee a meaningful cross-plugin order;
+plugins that need another plugin's state resolve it lazily via
+`get_dependency`/`on_start` ordering (`trylast=True`), not registration
+sequence.
+
+After entry points load, `validate_dependencies(pm)` runs (runtime.py:146)
+to verify every plugin's `depends_on` set names a registered plugin.
+Startup aborts with `RuntimeError` if any dependency is missing.
 
 ## Plugin Dependencies
 
 Plugins declare dependencies using a class-level `depends_on` attribute (a
 set of plugin name strings). `validate_dependencies(pm)` in `hooks.py`
 iterates all registered plugins and raises `RuntimeError` if any declared
-dependency is not found in the PM. It runs in `main.py` after all plugins
-are registered, before `on_start`.
+dependency is not found in the PM. It runs in `Runtime.start()`
+(`runtime.py`) after all plugins are registered, before `on_start`.
 
 **`get_dependency(pm, name, expected_type)`** — typed lookup via
 `pm.get_plugin(name)`. Raises `RuntimeError` if the plugin is not
@@ -1331,13 +1369,19 @@ IRCPlugin           → "registry"    (ChannelRegistry)
 SubagentPlugin      → "llm", "tools"
 CompactionPlugin    → "llm"         (LLMPlugin)
 ThinkingPlugin      → "registry"    (ChannelRegistry)
+MemoryPlugin        → "persistence", "llm"
 MemoryToolsPlugin   → "memory"      (MemoryPlugin)
+CritiquePlugin      → "task", "llm"
+OutcomeLogPlugin    → "persistence"
+AppraisalPlugin     → "persistence"
+UsageLogPlugin      → "persistence"
 ```
 
 Plugins with `depends_on = set()` (declared but empty):
 `LLMPlugin`, `ToolCollectionPlugin`, `PersistencePlugin`, `IdleMonitorPlugin`,
 `CoreToolsPlugin`, `McpClientPlugin`, `RuntimeSettingsPlugin`, `JsonlLogPlugin`,
-`TaskPlugin`.
+`TaskPlugin`, `MetricsPlugin`, `MetricsJsonlPlugin`, `ConfigWatcherPlugin`,
+`FunnelPlugin`.
 
 Transport plugins use `get_dependency(pm, "registry", ChannelRegistry)` in
 `on_start` to retrieve the shared `ChannelRegistry`. `SubagentPlugin` calls
@@ -1367,14 +1411,14 @@ corvidae/
 ├── task.py               # Task, TaskQueue, TaskPlugin
 ├── mcp_client.py         # McpClientPlugin (MCP server bridge)
 ├── memory.py             # MemoryPlugin (consolidation + retrieval + message_fts schema)
-├── retention.py          # run_retention_job(), retention_score() (WP1b.1)
+├── retention.py          # run_retention_job(), retention_score()
 ├── funnel.py             # FunnelPlugin (context-admission funnel)
 ├── main.py               # daemon entry point
 ├── channels/
 │   ├── cli.py            # CLIPlugin
 │   └── irc.py            # IRCPlugin
 ├── commands/
-│   └── redact.py         # corvidae redact CLI (operator-only; WP1b.4)
+│   └── redact.py         # corvidae redact CLI (operator-only)
 └── tools/
     ├── __init__.py       # CoreToolsPlugin
     ├── shell.py
@@ -1382,12 +1426,8 @@ corvidae/
     ├── web.py            # web_fetch, web_search
     ├── subagent.py       # SubagentPlugin, subagent tool, run_agent_loop()
     ├── settings.py       # RuntimeSettingsPlugin, set_settings tool
-    ├── memory_tools.py   # MemoryToolsPlugin, search_memory, recall_raw (WP1b.3)
-    ├── task_pipeline.py  # TaskPipelinePlugin, task_pipeline tool
-    ├── goal_tracker.py   # experimental; not registered
-    ├── perf_mon.py       # experimental; not registered
-    ├── local_indexer.py  # experimental; not registered
-    └── index.py          # WorkspaceIndexerPlugin (disabled in main.py)
+    ├── memory_tools.py   # MemoryToolsPlugin, search_memory, recall_raw
+    └── task_pipeline.py  # TaskPipelinePlugin, task_pipeline tool
 ```
 
 ## Known Risks
@@ -1424,20 +1464,8 @@ implemented. Each needs discussion before proceeding.
 The original design included a `ComponentLoader` with watchdog
 filesystem watcher for hot-reloading plugin modules from a
 `components/` directory. Not implemented. The current transport plugins
-are registered statically in `main.py`.
-
-### Memory retrieval
-
-**Implemented** (Phases 1a and 1b) — see the MemoryPlugin section above.
-Consolidation turns compaction into memory formation; retrieval injects
-framed CONTEXT blocks through the admission funnel; sqlite-vec provides
-exact-KNN similarity with an FTS5 degradation path. Phase 1b added
-retention scoring and demotion (usage-weighted, grace period, importance
-floor), near-duplicate merge at consolidation time, the `search_memory`
-and `recall_raw` agent tools (via `MemoryToolsPlugin`), `message_fts` for
-full-text search over raw message history, and the `corvidae redact`
-operator CLI with its full FTS cascade and verification pass. See Operator
-redaction in the MemoryPlugin section.
+load via the `cli`/`irc` setuptools entry points, like every other
+built-in plugin.
 
 ### Double-buffer compaction
 

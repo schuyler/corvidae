@@ -59,6 +59,13 @@ class MessageType(str, enum.Enum):
 #: Default characters-per-token estimate for rough token counting.
 DEFAULT_CHARS_PER_TOKEN: float = 3.5
 
+TOOL_RESULT_PENDING = "[still running — the result will arrive in a later message]"
+TOOL_RESULT_ABANDONED = "[did not complete — no result was returned]"
+
+
+def _visible(msg: dict) -> dict:
+    return {k: v for k, v in msg.items() if not k.startswith("_")}
+
 
 class ContextWindow:
     """In-memory conversation context window.
@@ -116,20 +123,64 @@ class ContextWindow:
         tagged = {**summary_msg, "_message_type": MessageType.SUMMARY}
         self.messages = [tagged] + retained
 
-    def build_prompt(self) -> list[dict]:
+    def build_prompt(self, pending_tool_call_ids: frozenset = frozenset()) -> list[dict]:
         """Return [system_message, *self.messages] with internal tags stripped.
 
         Does not modify self.messages. Strips every _-prefixed key
         (_message_type, _db_id, ...) from each message dict before
         returning — internal tags must never reach the LLM
         (bootstrap-mapping §4.8).
+
+        An assistant tool_calls message is deferred to the arrival index of
+        the last of its results, so call+results emit as one contiguous
+        block there (synthesizing a placeholder for any call with no result
+        yet). If any call in the message is unanswered, the block emits in
+        place instead. A tool message whose call is not in the window (e.g.
+        compaction dropped it) stays where it is.
         """
-        cleaned = []
-        for msg in self.messages:
-            if any(k.startswith("_") for k in msg):
-                msg = {k: v for k, v in msg.items() if not k.startswith("_")}
-            cleaned.append(msg)
-        return [{"role": "system", "content": self.system_prompt}] + cleaned
+        result_at = {}
+        for i, m in enumerate(self.messages):
+            if m.get("role") == "tool" and m.get("tool_call_id") and m["tool_call_id"] not in result_at:
+                result_at[m["tool_call_id"]] = i
+
+        emit_at = {}
+        for i, msg in enumerate(self.messages):
+            calls = msg.get("tool_calls") or []
+            if not calls:
+                continue
+            if all(c["id"] in result_at for c in calls):
+                emit_at[i] = max(result_at[c["id"]] for c in calls)
+            else:
+                emit_at[i] = i
+        anchored = {j: i for i, j in emit_at.items()}
+        claimed = {c["id"] for m in self.messages for c in (m.get("tool_calls") or [])}
+
+        def block(i: int) -> list[dict]:
+            msg = self.messages[i]
+            out = [_visible(msg)]
+            for call in msg.get("tool_calls") or []:
+                result = self.messages[result_at[call["id"]]] if call["id"] in result_at else None
+                out.append(_visible(result) if result is not None else {
+                    "role": "tool",
+                    "tool_call_id": call["id"],
+                    "content": (
+                        TOOL_RESULT_PENDING
+                        if call["id"] in pending_tool_call_ids
+                        else TOOL_RESULT_ABANDONED
+                    ),
+                })
+            return out
+
+        out = [{"role": "system", "content": self.system_prompt}]
+        for i, msg in enumerate(self.messages):
+            if i in anchored:
+                out += block(anchored[i])
+            if msg.get("role") == "tool" and msg.get("tool_call_id") in claimed:
+                continue
+            if i in emit_at:
+                continue
+            out.append(_visible(msg))
+        return out
 
     def token_estimate(self) -> int:
         """Token count using tiktoken (cl100k_base), with character-based fallback.

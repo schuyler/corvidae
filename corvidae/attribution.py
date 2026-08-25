@@ -5,12 +5,13 @@ path is doing on whose behalf. LLMPlugin's observer reads it when a call
 fires; callers set it at the top of a logical operation and reset it in
 a ``finally`` block using the returned token.
 
-Recognized fields (the dict is open — plugins may add their own):
+Recognized fields (the dict is open — plugins add their own stage values
+and metadata):
     stage: str — what kind of operation is running. Built-in values:
-        "turn", "compaction", "subagent"; later phases add
-        "consolidation", "appraisal", "critique".
+        "turn", "compaction", "subagent".
     channel_id: str — the Channel.id the operation is running on behalf of.
-    exchange_key: str — the exchange this call belongs to (Phase 2).
+    correlation_id: str — the correlation this call belongs to.
+    meta: dict — the correlation metadata dict.
 
 Propagation rule: contextvars snapshot at ``asyncio.create_task`` time.
 A task created before ``set_attribution`` was called never sees the

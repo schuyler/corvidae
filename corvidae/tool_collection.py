@@ -7,6 +7,7 @@ need tool access declare depends_on = {"tools"}.
 Config:
     tools:
       max_result_chars: 100000  # optional, default 100_000
+      disabled: [shell]         # optional; tool names dropped after collection
 
     # Legacy (deprecated):
     agent:
@@ -29,11 +30,13 @@ class ToolCollectionPlugin(CorvidaePlugin):
             self.pm = pm
         self.registry: ToolRegistry | None = None
         self.max_result_chars: int = 100_000
+        self._disabled: list[str] = []
 
     @hookimpl
     async def on_init(self, pm, config: dict) -> None:
         await super().on_init(pm, config)
         tools_config = config.get("tools", {})
+        self._disabled = list(tools_config.get("disabled", []))
         fallback = config.get("agent", {}).get("max_tool_result_chars")
         if "max_result_chars" in tools_config:
             self.max_result_chars = tools_config["max_result_chars"]
@@ -64,18 +67,17 @@ class ToolCollectionPlugin(CorvidaePlugin):
             else:
                 tool_registry.add(Tool.from_function(item))
 
+        # tools.disabled is the single chokepoint every registered tool
+        # passes through -- drop named tools here, not per-plugin opt-outs.
+        if self._disabled:
+            before = len(tool_registry)
+            tool_registry = tool_registry.exclude(*self._disabled)
+            dropped = before - len(tool_registry)
+            if dropped:
+                logger.info("Tools disabled by config: %d", dropped)
+
         self.registry = tool_registry
         logger.info("Tools collected: %d", len(tool_registry))
-
-    @hookimpl
-    async def on_plugin_added(self, name: str, plugin: object) -> None:
-        """Rebuild the tool registry when a plugin is added at runtime."""
-        await self.rebuild_registry()
-
-    @hookimpl
-    async def on_plugin_removed(self, name: str) -> None:
-        """Rebuild the tool registry when a plugin is removed at runtime."""
-        await self.rebuild_registry()
 
     def get_tools(self) -> tuple[dict, list[dict]]:
         """Return (tools_dict, tool_schemas) for the agent loop."""

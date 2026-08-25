@@ -1039,18 +1039,3 @@ async def test_config_watcher_on_start_creates_watcher_task(tmp_path):
         await plugin._watcher_task
     except (asyncio.CancelledError, Exception):
         pass
-
-
-# ---------------------------------------------------------------------------
-# 20. HotReloadPlugin.on_config_reload updates self.config
-# ---------------------------------------------------------------------------
-
-
-async def test_hot_reload_plugin_on_config_reload_updates_config():
-    """HotReloadPlugin.on_config_reload must update self.config for newly loaded plugins."""
-    from corvidae.hot_reload import HotReloadPlugin
-    plugin = HotReloadPlugin()
-    plugin.config = {"old": "config"}
-    new_config = {"new": "config", "llm": {"main": {"model": "test"}}}
-    await plugin.on_config_reload(config=new_config)
-    assert plugin.config == new_config

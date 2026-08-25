@@ -279,6 +279,88 @@ class TestBatchedToolResults:
         await task_plugin.on_stop()
         await db.close()
 
+    async def test_overlapping_batches_union_pending_ids_and_deliver_all_results(self):
+        """R3 (agent.py:753): a second dispatch batch while the first is still
+        outstanding must union into pending_tool_call_ids, not overwrite it —
+        otherwise the first batch's ids are silently dropped from tracking."""
+        plugin, channel, db = await build_plugin_and_channel()
+
+        gate_a = asyncio.Event()
+        gate_b = asyncio.Event()
+
+        async def tool_a(x: str) -> str:
+            await gate_a.wait()
+            return "result_a"
+
+        async def tool_b(x: str) -> str:
+            await gate_b.wait()
+            return "result_b"
+
+        from corvidae.tool import tool_to_schema
+        plugin._tools = {"tool_a": tool_a, "tool_b": tool_b}
+        plugin._tool_schemas = [tool_to_schema(tool_a), tool_to_schema(tool_b)]
+
+        llm_call_count = 0
+
+        async def counting_chat(messages, **kwargs):
+            nonlocal llm_call_count
+            llm_call_count += 1
+            if llm_call_count == 1:
+                return _make_tool_call_response([
+                    _make_tool_call("a1", "tool_a", {"x": "1"}),
+                    _make_tool_call("a2", "tool_a", {"x": "2"}),
+                ])
+            elif llm_call_count == 2:
+                return _make_tool_call_response([
+                    _make_tool_call("b1", "tool_b", {"x": "3"}),
+                ])
+            else:
+                return _make_text_response("all done")
+
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(side_effect=counting_chat)
+        plugin._client = mock_client
+
+        # Batch A dispatched, both calls gated open.
+        await plugin.on_message(channel=channel, sender="user", text="go")
+        await drain(plugin, channel)
+        assert channel.pending_tool_call_ids == {"a1", "a2"}
+
+        # An interleaved message arrives while A is still outstanding and
+        # dispatches batch B.
+        await plugin.on_message(channel=channel, sender="user", text="also do this")
+        await drain(plugin, channel)
+        assert channel.pending_tool_call_ids == {"a1", "a2", "b1"}, (
+            "batch B's dispatch must union into the pending set, not "
+            f"replace it: got {channel.pending_tool_call_ids}"
+        )
+
+        # TaskQueue.queue is one shared asyncio.Queue across every batch, so
+        # queue.join() blocks until ALL enqueued tasks are done, not just
+        # the ones from the batch whose gate was just opened. b1 is already
+        # enqueued (dispatched while A was outstanding) by this point, so
+        # both gates must be released before joining — otherwise join()
+        # waits on b1, which nothing here has unblocked yet.
+        gate_a.set()
+        gate_b.set()
+        task_plugin = plugin.pm.get_plugin("task")
+        await task_plugin.task_queue.queue.join()
+        await asyncio.sleep(0)
+        await drain(plugin, channel)
+
+        assert llm_call_count == 3, (
+            f"expected exactly one final LLM call after all three results "
+            f"land, got {llm_call_count} total calls"
+        )
+        tool_msgs = {
+            m["tool_call_id"] for m in channel.conversation.messages
+            if m.get("role") == "tool"
+        }
+        assert tool_msgs == {"a1", "a2", "b1"}
+
+        await task_plugin.on_stop()
+        await db.close()
+
     async def test_fresh_results_still_trigger_llm_after_user_message(self):
         """After a user message clears pending IDs, new tool dispatches from
         the user's response use the new generation and work normally."""

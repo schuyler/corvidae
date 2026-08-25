@@ -171,6 +171,36 @@ class TestUsageLogPlugin:
 
         assert row == (None, None, "boom")
 
+    async def test_cached_tokens_written_from_usage_details(self, db):
+        """R6: usage.prompt_tokens_details.cached_tokens must land in a
+        cached_tokens column so the harness can detect lost KV-cache reuse."""
+        pm, plugin = await self._setup(db)
+        usage = {
+            "prompt_tokens": 820, "completion_tokens": 10, "total_tokens": 830,
+            "prompt_tokens_details": {"cached_tokens": 803},
+        }
+        await _fire_response(pm, request_id="req-cached", usage=usage)
+
+        async with db.execute(
+            "SELECT cached_tokens FROM usage_log WHERE request_id = ?",
+            ("req-cached",),
+        ) as cursor:
+            row = await cursor.fetchone()
+
+        assert row == (803,)
+
+    async def test_cached_tokens_null_when_usage_lacks_the_field(self, db):
+        pm, plugin = await self._setup(db)
+        await _fire_response(pm, request_id="req-nocache", usage={"prompt_tokens": 100})
+
+        async with db.execute(
+            "SELECT cached_tokens FROM usage_log WHERE request_id = ?",
+            ("req-nocache",),
+        ) as cursor:
+            row = await cursor.fetchone()
+
+        assert row == (None,)
+
 
 class TestMetricsJsonlPlugin:
     async def _setup(self, tmp_path, configured=True):

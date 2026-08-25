@@ -29,8 +29,8 @@ from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 
 logger = logging.getLogger(__name__)
 
-# DDL for the per-call usage log. The exchange_key column stays NULL until
-# Phase 2 mints exchange keys into the attribution context.
+# DDL for the per-call usage log. correlation_id is NULL when the call
+# ran outside any correlated turn.
 USAGE_LOG_DDL = """
 CREATE TABLE IF NOT EXISTS usage_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -40,10 +40,11 @@ CREATE TABLE IF NOT EXISTS usage_log (
     model TEXT NOT NULL,
     stage TEXT,
     channel_id TEXT,
-    exchange_key TEXT,
+    correlation_id TEXT,
     prompt_tokens INTEGER,
     completion_tokens INTEGER,
     total_tokens INTEGER,
+    cached_tokens INTEGER,
     latency_ms REAL,
     error TEXT
 )
@@ -127,6 +128,19 @@ class UsageLogPlugin(CorvidaePlugin):
         if not self._table_ready:
             await db.execute(USAGE_LOG_DDL)
             await db.execute(USAGE_LOG_INDEX_DDL)
+            # Lazy in-place upgrade: a usage_log table created under the old
+            # exchange_key schema is renamed on first use (same pattern as
+            # memory.py's _ensure_table ADD COLUMN sweep).
+            async with db.execute("PRAGMA table_info(usage_log)") as cursor:
+                columns = {row[1] for row in await cursor.fetchall()}
+            if "exchange_key" in columns and "correlation_id" not in columns:
+                await db.execute(
+                    "ALTER TABLE usage_log RENAME COLUMN exchange_key TO correlation_id"
+                )
+            if "cached_tokens" not in columns:
+                await db.execute(
+                    "ALTER TABLE usage_log ADD COLUMN cached_tokens INTEGER"
+                )
             await db.commit()
             self._table_ready = True
         return db
@@ -155,9 +169,9 @@ class UsageLogPlugin(CorvidaePlugin):
             usage = usage or {}
             await db.execute(
                 "INSERT INTO usage_log (ts, request_id, role, model, stage, "
-                "channel_id, exchange_key, prompt_tokens, completion_tokens, "
-                "total_tokens, latency_ms, error) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "channel_id, correlation_id, prompt_tokens, completion_tokens, "
+                "total_tokens, cached_tokens, latency_ms, error) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     time.time(),
                     request_id,
@@ -165,10 +179,11 @@ class UsageLogPlugin(CorvidaePlugin):
                     model,
                     attribution.get("stage"),
                     attribution.get("channel_id"),
-                    attribution.get("exchange_key"),
+                    attribution.get("correlation_id"),
                     usage.get("prompt_tokens"),
                     usage.get("completion_tokens"),
                     usage.get("total_tokens"),
+                    (usage.get("prompt_tokens_details") or {}).get("cached_tokens"),
                     latency_ms,
                     error,
                 ),

@@ -157,10 +157,10 @@ The `config` parameter is optional in `on_config_reload` hookimpls. Pluggy forwa
 | Hook | Type | When |
 |------|------|------|
 | `on_message(channel, sender: str, text: str)` | async broadcast | Inbound message arrives |
-| `should_process_message(channel, sender: str, text: str, exchange_key: str)` | async broadcast, `REJECT_WINS` | Gate: decide whether to process a message (Phase 2). Return False to reject, True to accept, None for no opinion. |
-| `on_message_admitted(channel, exchange_key: str, sender: str, text: str)` | async broadcast | After should_process_message admits a USER message |
-| `on_message_rejected(channel, exchange_key: str, sender: str, text: str)` | async broadcast | After should_process_message vetoes a USER message |
-| `on_message_persisted(channel, exchange_key: str, rowid: int, origin: str \| None)` | async broadcast | After the exchange-originating message is persisted to the database (Phase 2). Origin is 'user', 'reminder', 'critique', 'heartbeat', or 'task'. |
+| `should_process_message(channel, sender: str, text: str, correlation_id: str \| None)` | async broadcast, reject-wins | Gate: decide whether to process a message. Return False to reject, True to accept, None for no opinion. |
+| `on_message_admitted(channel, correlation_id: str, sender: str, text: str)` | async broadcast | After should_process_message admits a USER message |
+| `on_message_rejected(channel, correlation_id: str, sender: str, text: str)` | async broadcast | After should_process_message vetoes a USER message |
+| `on_message_persisted(channel, correlation_id: str, rowid: int \| None, text: str, meta: dict)` | async broadcast | After the correlation-originating message is persisted to the database. Fires once per originating item regardless of persistence outcome (`rowid` may be None). |
 | `send_message(channel, text: str, latency_ms: float \| None)` | async broadcast | Outbound delivery request |
 | `on_notify(channel, source: str, text: str, tool_call_id: str \| None, meta: dict \| None)` | async broadcast | Notification injected into channel |
 
@@ -181,8 +181,8 @@ async def send_message(self, channel, text: str) -> None:
 | Hook | Type | When |
 |------|------|------|
 | `register_tools(tool_registry: list)` | sync broadcast | During `on_start`, to collect tools |
-| `on_agent_response(channel, request_text: str, response_text: str, exchange_key: str \| None, origin: str \| None, originating_text: str \| None, logprobs: dict \| None, withheld: bool \| None)` | async broadcast | After agent produces a response (Phase 2 enriched with exchange metadata) |
-| `before_agent_turn(channel, exchange_key: str \| None, origin: str \| None)` | async broadcast | Before each LLM invocation (Phase 2 enriched with exchange metadata) |
+| `on_agent_response(channel, request_text: str, response_text: str, correlation_id: str \| None, meta: dict, logprobs: dict \| None)` | async broadcast | After agent produces a response |
+| `before_agent_turn(channel, correlation_id: str \| None, meta: dict)` | async broadcast | Before each LLM invocation |
 | `after_persist_assistant(channel, message: dict)` | async broadcast | After assistant message is written to DB; plugins may mutate the in-memory dict |
 | `on_conversation_event(channel, message: dict, message_type: MessageType) -> int \| None` | async broadcast | After every `conv.append()` call; message is the untagged dict (no `_message_type` key). Persistence returns the inserted `message_log` rowid; **exactly one implementation may return non-None** (all others return None). Callers resolve with `resolve_single_result` and attach the rowid to the in-window message as `_db_id`. |
 | `on_compaction(channel, summary_msg: dict, retain_count: int, compacted_ids: list[int])` | async broadcast | After compaction replaces older messages with a summary; `summary_msg` is the untagged summary dict. `compacted_ids` carries the `message_log` rowids of exactly the removed messages (empty when unknown) — the consolidation range consumed by `MemoryPlugin`. |
@@ -192,9 +192,15 @@ async def send_message(self, channel, text: str) -> None:
 hook fires. Mutations to `message` affect in-memory prompt construction
 only; they do not update the persisted record.
 
-`before_agent_turn` — messages injected via `channel.conversation.append()` inside this hook are passed through `on_conversation_event` and persisted to the DB, unless they already carry a `_db_id` (i.e. their producer — such as the admission funnel — persisted them itself).
+`before_agent_turn` — messages injected via `channel.conversation.append()` inside this hook are passed through `on_conversation_event` and persisted to the DB, unless they already carry a `_db_id` (i.e. their producer persisted them itself).
 
 Window messages carry internal `_`-prefixed tags (`_message_type`, `_db_id`). Every serialization boundary (prompt build, compaction summarizer prep, persistence, JSONL log) strips all `_`-prefixed keys — internal tags never reach the LLM or the DB.
+
+### Correlation
+
+An opaque `correlation_id` is minted for every inbound user message and for every notification-born queue item that isn't itself a continuation of an existing correlation. It travels alongside a `meta` dict — an extensible, framework-opaque metadata bag — through the messaging and extension-point hooks above, into `Task.correlation_id`/`Task.meta`, and back out through the completion notification's `meta` (`TaskPlugin._on_task_complete` merges `{"task_id", "correlation_id", **task.meta}`). This is how a tool cycle several hops deep still carries the correlation and metadata its originating message started with.
+
+The framework itself never stamps meaning into `meta` — it is a pass-through. Cognition plugins (see below) use the convention `meta["origin"]` to record where a queue item came from ("user" recognized by subscribing to `on_message_admitted`, or an explicit string like `"reminder"` stamped by a producer); that convention is plugin-side, not a core concept.
 
 ### Observability
 
@@ -246,11 +252,11 @@ recurses forever.
 
 ### Hook result resolution
 
-These hooks return a value. Hooks marked `firstresult=True` (sequential) stop at the first non-None return. Wrapper chain hooks use `firstresult=True` with an identity seed; implementations use `@hookimpl(wrapper=True)` to compose transforms. Broadcast hooks use `resolve_hook_results` for result resolution.
+These hooks return a value. Hooks marked `firstresult=True` (sequential) stop at the first non-None return. Wrapper chain hooks use `firstresult=True` with an identity seed; implementations use `@hookimpl(wrapper=True)` to compose transforms. Broadcast gate hooks use `resolve_reject_wins` for result resolution.
 
 | Hook | Strategy | Returns | Behavior |
 |------|----------|---------|----------|
-| `should_process_message(channel, sender, text, exchange_key)` | `REJECT_WINS` (broadcast) | `bool \| None` | Any `False` vetoes the message; any `True` (with no `False`) accepts; `None` if all defer |
+| `should_process_message(channel, sender, text, correlation_id)` | reject-wins (broadcast) | `bool \| None` | Any `False` vetoes the message; any `True` (with no `False`) accepts; `None` if all defer |
 | `on_llm_error(channel, error)` | `firstresult=True` | `str \| None` | First non-None string wins; chain stops. If all return None, default error message is used. |
 | `compact_conversation(channel, conversation, max_tokens)` | `firstresult=True` | `bool \| None` | First non-None return stops the chain. `CompactionPlugin` uses `trylast` (returns True). Third-party plugins run at default priority. |
 | `process_tool_result(tool_name, result, channel)` | `firstresult=True` wrapper chain | `str \| None` | Wrappers compose transforms in LIFO order. The seed returns the input unchanged. Non-wrapper hookimpls short-circuit the seed via firstresult. |
@@ -267,7 +273,7 @@ Example hook returning a value:
 
 ```python
 @hookimpl
-async def should_process_message(self, channel, sender: str, text: str, exchange_key: str) -> bool | None:
+async def should_process_message(self, channel, sender: str, text: str, correlation_id: str | None) -> bool | None:
     if sender in self.blocklist:
         return False
     return None  # no opinion
@@ -383,7 +389,7 @@ registry = tools_plugin.get_registry()
 
 ## Injecting context before agent turns
 
-`before_agent_turn` fires before every LLM call. Use it to inject contextual information (memory retrieval, current state, etc.) into the conversation. The hook receives the current exchange key and origin (Phase 2):
+`before_agent_turn` fires before every LLM call. Use it to inject contextual information (memory retrieval, current state, etc.) into the conversation. The hook receives the current turn's correlation id and metadata dict:
 
 ```python
 from corvidae.context import MessageType
@@ -391,8 +397,8 @@ from corvidae.hooks import CorvidaePlugin, hookimpl
 
 class MemoryPlugin(CorvidaePlugin):
     @hookimpl
-    async def before_agent_turn(self, channel, exchange_key: str | None, origin: str | None) -> None:
-        notes = await self.fetch_relevant_notes(channel.id, exchange_key)
+    async def before_agent_turn(self, channel, correlation_id: str | None, meta: dict) -> None:
+        notes = await self.fetch_relevant_notes(channel.id, correlation_id)
         if notes:
             channel.conversation.append(
                 {"role": "user", "content": f"[Context]\n{notes}"},
@@ -411,23 +417,23 @@ The `should_process_message` gate fires before a message enters the conversation
 ```python
 class FilterPlugin(CorvidaePlugin):
     @hookimpl
-    async def should_process_message(self, channel, sender: str, text: str, exchange_key: str) -> bool | None:
+    async def should_process_message(self, channel, sender: str, text: str, correlation_id: str | None) -> bool | None:
         if sender in self.muted_users:
             return False  # Reject
         return None  # No opinion; other plugins decide
 ```
 
-When a message is admitted or rejected, plugins are notified via `on_message_admitted` or `on_message_rejected`. These fires exactly once per message. The `on_message_persisted` hook fires after the exchange-originating message (the initial USER message or a standalone notification) has been written to the database. It receives the database rowid and the message origin ('user', 'reminder', 'critique', 'heartbeat', or 'task'):
+When a message is admitted or rejected, plugins are notified via `on_message_admitted` or `on_message_rejected`. These fire exactly once per message. The `on_message_persisted` hook fires after the correlation-originating message (the initial USER message or a standalone notification) has been written to the database, regardless of persistence outcome — it receives the database rowid (nullable), the originating text, and the correlation's metadata dict:
 
 ```python
 class LogPlugin(CorvidaePlugin):
     @hookimpl
-    async def on_message_admitted(self, channel, exchange_key: str, sender: str, text: str) -> None:
-        await self.log_event("message_admitted", exchange_key, sender)
+    async def on_message_admitted(self, channel, correlation_id: str, sender: str, text: str) -> None:
+        await self.log_event("message_admitted", correlation_id, sender)
 
     @hookimpl
-    async def on_message_persisted(self, channel, exchange_key: str, rowid: int, origin: str | None) -> None:
-        await self.log_event("message_persisted", exchange_key, rowid, origin)
+    async def on_message_persisted(self, channel, correlation_id: str, rowid: int | None, text: str, meta: dict) -> None:
+        await self.log_event("message_persisted", correlation_id, rowid, meta)
 ```
 
 ## Channels
@@ -526,7 +532,7 @@ For `firstresult=True` hooks (`compact_conversation`, `load_conversation`, `on_l
 - `load_conversation` — not wrapped; an exception propagates to `_process_queue_item`, which will fail the queue item.
 - `on_llm_error` — called inside the existing try/except in `_run_turn`; an exception from the hook itself is not separately caught (it propagates up from `_run_turn`).
 
-For `should_process_message` (broadcast with `resolve_hook_results`), exceptions propagate to the call site.
+For `should_process_message` (broadcast, resolved with `resolve_reject_wins`), exceptions propagate to the call site.
 
 For `transform_display_text` and `process_tool_result` (wrapper chain hooks), pluggy propagates exceptions from wrapper implementations to the call site. `transform_display_text` is wrapped in try/except in `_resolve_display_text`.
 
@@ -553,13 +559,13 @@ def transform_display_text(self, **kwargs):
     return result
 ```
 
-For the `should_process_message` broadcast hook, call `pm.ahook.<hook>(...)` and pass the result list to `resolve_hook_results`:
+For the `should_process_message` broadcast hook, call `pm.ahook.<hook>(...)` and pass the result list to `resolve_reject_wins`:
 
 ```python
-from corvidae.hooks import resolve_hook_results, HookStrategy
+from corvidae.hooks import resolve_reject_wins
 
 results = await pm.ahook.should_process_message(channel=channel, ...)
-result = resolve_hook_results(results, "should_process_message", HookStrategy.REJECT_WINS)
+result = resolve_reject_wins(results)
 ```
 
 `@hookimpl(tryfirst=True)` and `@hookimpl(trylast=True)` markers are respected by apluggy's dispatch and affect execution order. For `firstresult=True` hooks, `tryfirst` handlers run before default-priority handlers, which run before `trylast` handlers. The chain stops at the first non-None return.
@@ -768,7 +774,8 @@ logged with a traceback and never breaks an LLM call.
   `"persistence"`) — consumes `on_llm_response` and writes one row per LLM
   call into the `usage_log` SQLite table (in the persistence plugin's
   database): timestamp, request id, role, model, stage, channel id,
-  exchange key (NULL until Phase 2), token counts, latency, and error.
+  correlation id (NULL for calls outside any correlated turn), token
+  counts, latency, and error.
   The table is created lazily on first use (`CREATE TABLE IF NOT EXISTS`).
 - **`MetricsJsonlPlugin`** (entry point `"metrics_jsonl"`) — consumes
   `on_metrics` and appends one JSON line per event
@@ -787,19 +794,33 @@ still fire from LLMPlugin's observer; nothing records them.
 ### OutcomeLogPlugin (`corvidae/outcome_log.py`)
 
 Owns the `exchange_log` table — one row per exchange, accumulating the
-retrieval/appraisal/outcome profile later phases correlate for
-calibration. Entry point name: `"outcome_log"`; depends on
-`"persistence"`. Phase 0 ships schema and writer API only; nothing writes
-rows yet (retrieval-profile columns populate from Phase 1a, the rest from
-Phase 2).
+retrieval/appraisal/outcome profile used to correlate memory retrieval,
+appraisal, and critique for calibration. Entry point name:
+`"outcome_log"`; depends on `"persistence"`.
 
-Writer API (used by later phases, not hooks):
+Implements the message-lifecycle hooks (`on_message_admitted`,
+`on_message_rejected`, `on_message_persisted`) to record the identity row
+for every exchange (origin, channel, originating message rowid). The
+remaining columns — retrieval score/hit count, appraisal probe score and
+stage-2 JSON, critique's provenance snapshot, and merged outcomes — are
+filled in by `MemoryPlugin`, `AppraisalPlugin`, and `CritiquePlugin`
+through the writer API below, not by `OutcomeLogPlugin` itself.
+
+Writer API (used by other plugins, not hooks):
 
 - `record_exchange(exchange_key, channel_id, origin=None, message_rowid=None)`
   — idempotent insert (`INSERT OR IGNORE`).
 - `update_exchange(exchange_key, **columns)` — guarded update of the
   nullable profile columns only; unknown or immutable column names raise
   `ValueError` (SQL is never built from arbitrary kwargs).
+- `upsert_exchange(exchange_key, channel_id, origin=None, **columns)` —
+  create-or-update in one call: `INSERT OR IGNORE` the identity row, then
+  a guarded update applying `**columns`. For gate-time writers (e.g.
+  `AppraisalPlugin`'s stage 1, `appraisal.py:970`) that run before or race
+  `on_message_admitted`/`on_message_persisted`'s own inserts — without it,
+  those hooks' `INSERT OR IGNORE` would no-op against a row that doesn't
+  exist yet, silently dropping the gate-path columns. Idempotent and
+  write-order independent.
 
 ### LLMPlugin (`corvidae/llm_plugin.py`)
 
@@ -893,7 +914,9 @@ Implements one hook:
 
 - `on_start` (trylast=True) — calls the sync `register_tools` broadcast after
   all other `on_start` hooks have completed. Builds a `ToolRegistry` from the
-  collected items. Reads `tools.max_result_chars` (or the deprecated
+  collected items, then drops any tool named in `tools.disabled` — the
+  single chokepoint every registered tool passes through, so there are no
+  per-plugin opt-outs. Reads `tools.max_result_chars` (or the deprecated
   `agent.max_tool_result_chars`) to configure the per-call result truncation
   limit.
 
@@ -937,9 +960,9 @@ Implements five hooks:
 - `on_stop` — cancels in-flight background tasks.
 
 The importance prior is pluggable (`MemoryPlugin.importance_prior`,
-default `RubricPrior`); Phase 2's appraisal replaces it. Configuration is
-documented in [configuration.md](configuration.md) (`memory.*`,
-`llm.embedding`).
+default `RubricPrior`); `AppraisalPlugin` wraps it in `AppraisalPrior`
+when appraisal is enabled. Configuration is documented in
+[configuration.md](configuration.md) (`memory.*`, `llm.embedding`).
 
 **Without this plugin:** no memory records form and no retrieval happens;
 compaction remains plain lossy summarization.
@@ -947,7 +970,7 @@ compaction remains plain lossy summarization.
 ### MemoryToolsPlugin (`corvidae/tools/memory_tools.py`)
 
 Registers the `search_memory` and `recall_raw` agent tools — the active
-memory surface ("remember harder", bootstrap-mapping §3.1). Entry point
+memory surface ("remember harder"). Entry point
 name: `"memory_tools"`; `depends_on = frozenset({"memory"})`. Reaches the
 DB and channel-scope logic through `get_dependency(pm, "memory",
 MemoryPlugin)`.
@@ -998,6 +1021,19 @@ message at the tail, and persists it with the rowid attached.
 
 **Without this plugin:** sources that route through the funnel (memory
 retrieval) log a warning and admit nothing.
+
+`register_and_wake(channel, origin, source, entries)` is the deferred
+admission path for notification producers without a `tool_call_id`:
+`origin` is stamped into the wake stub's `meta["origin"]` (see
+[Correlation](#correlation)) so `before_agent_turn`'s drain, and any
+plugin gating eligibility off that origin, never has to infer it from
+stub text. The `'user'|'reminder'|'critique'|'heartbeat'|'task'`
+taxonomy is a convention cognition plugins (AppraisalPlugin,
+CritiquePlugin, OutcomeLogPlugin) share over this key — not a core
+concept. `'user'` is recognized by subscribing to `on_message_admitted`
+rather than by a value in `meta`; `'task'` is the default OutcomeLogPlugin
+applies when `meta["origin"]` is absent on a notification-born
+correlation.
 
 ### IdleMonitorPlugin (`corvidae/idle.py`)
 

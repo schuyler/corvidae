@@ -218,11 +218,8 @@ async def test_load_conversation_firstresult_none_when_no_handlers_return():
 async def test_on_llm_error_firstresult_first_non_none_wins():
     """First handler returning a non-None string wins; second handler is never called.
 
-    With firstresult=False (current): both handlers run and the call site uses
-    resolve_hook_results(VALUE_FIRST) to pick a winner.
-    With firstresult=True (target): the chain stops after the first non-None result.
-
-    This test fails now because on_llm_error lacks firstresult=True.
+    `on_llm_error` is declared `firstresult=True`: pluggy stops the chain
+    after the first non-None result, so a later handler never runs.
     """
     call_log: list[str] = []
 

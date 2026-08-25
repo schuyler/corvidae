@@ -166,6 +166,10 @@ class IRCPlugin(CorvidaePlugin):
                 await self.client.message(channel.scope, line)
 
     @hookimpl
+    async def send_progress(self, channel: Channel, text: str) -> None:
+        await self.send_message(channel, text)
+
+    @hookimpl
     async def on_stop(self) -> None:
         task = self._connect_task
         self._connect_task = None  # shutdown signal

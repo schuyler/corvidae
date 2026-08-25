@@ -5,10 +5,10 @@ temperature, top_p) and framework parameters (e.g. max_turns) for the current
 channel at runtime. An operator-configurable blocklist prevents mutation of
 sensitive keys. "system_prompt" is always blocked regardless of operator config.
 
-Dotted keys (e.g. "critique.sample_below_rate") are plugin tunables resolved
+Dotted keys (e.g. "memory.retrieval_k") are plugin tunables resolved
 per-decision by ``corvidae.tuning.resolve_tunable`` — they take effect on the
-next gate/appraisal/critique decision without restart and are NEVER forwarded
-to the LLM request body (agent.py step 7 excludes any key containing a dot).
+next plugin decision without restart and are NEVER forwarded to the LLM
+request body (agent.py step 7 excludes any key containing a dot).
 set_settings is per-channel; the config-reload surface is global. Operators
 can block individual tunables from agent self-tuning via
 ``agent.immutable_settings`` (see docs/configuration.md for the recommended

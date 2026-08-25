@@ -147,16 +147,17 @@ class FunnelPlugin(CorvidaePlugin):
             )
 
     @hookimpl
-    async def before_agent_turn(self, channel, exchange_key, origin) -> None:
-        """Drain deferred payloads matching the triggering exchange's origin.
+    async def before_agent_turn(self, channel, correlation_id, meta) -> None:
+        """Drain deferred payloads matching the triggering turn's origin.
 
-        The origin comes from the enriched hook parameter, never parsed
-        from stub text (§2.2/§4.7 no-inference rule). The pending flag is
+        The origin comes from ``meta["origin"]``, never parsed from stub
+        text (§2.2/§4.7 no-inference rule). The pending flag is
         cleared FIRST: a failure inside admission leaves payloads
         registered, and the next producer's stub re-arms the channel rather
         than wedging it. Payloads unregister at successful admission;
         entries the budget dropped stay registered for the next stub.
         """
+        origin = (meta or {}).get("origin")
         if origin is None:
             return
         pair = (channel.id, origin)

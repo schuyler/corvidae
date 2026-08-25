@@ -53,7 +53,7 @@ uv run pytest
 
 ## Configuration
 
-Corvidae reads `agent.yaml` from the current working directory. The file configures the LLM backend, daemon settings, agent defaults, transports, and per-channel overrides.
+Corvidae reads `agent.yaml` from the current working directory. The file configures the LLM backend, daemon settings, agent defaults, transports, and per-channel overrides. `agent.yaml.example` covers every built-in plugin; `agent.minimal.yaml.example` disables the memory/appraisal/critique plugins and runs just the core agent loop.
 
 See [docs/configuration.md](docs/configuration.md) for the full reference.
 

@@ -1,0 +1,31 @@
+# Minimal profile — the cognition plugin set (long-term memory, appraisal,
+# and critique) disabled. What this profile gives up: no memory retrieval
+# or consolidation across sessions, no appraisal scoring, and no deferred
+# self-critique. What it keeps: the core agent loop, multi-turn tool
+# calling, compaction, and persistence/restart recovery.
+
+llm:
+  main:
+    base_url: http://localhost:8080/v1   # llama-server, vLLM, OpenAI, etc.
+    model: llama3                        # model name as the backend expects it
+    # api_key: sk-...                    # omit for local servers
+
+daemon:
+  session_db: sessions.db                # SQLite path for conversation history
+
+agent:
+  system_prompt: "You are a helpful assistant."
+  max_context_tokens: 64000
+
+channels:
+  cli:local:
+    system_prompt: "You are a helpful assistant running in CLI mode."
+
+plugins:
+  disabled:
+    - memory
+    - memory_tools
+    - funnel
+    - appraisal
+    - critique
+    - outcome_log

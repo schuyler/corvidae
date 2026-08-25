@@ -329,6 +329,241 @@ class TestContextWindowTokenEstimate:
         )
 
 
+class TestBuildPromptToolResultPlacement:
+    """R1/R2 (design §"R1: the interleaved turn's prompt is well-formed"):
+    build_prompt() synthesizes a placeholder tool result for any assistant
+    tool_calls message with no matching tool message yet, so a call is
+    never left dangling in the prompt sent to the LLM.
+    """
+
+    def _window_with_dangling_call(self) -> "ContextWindow":
+        cw = ContextWindow("test:scope")
+        cw.append({"role": "user", "content": "go fetch it"})
+        cw.append({
+            "role": "assistant", "content": "",
+            "tool_calls": [{"id": "c1", "function": {"name": "f", "arguments": "{}"}}],
+        })
+        return cw
+
+    def test_pending_call_synthesizes_pending_placeholder(self):
+        from corvidae.context import TOOL_RESULT_PENDING
+        cw = self._window_with_dangling_call()
+        prompt = cw.build_prompt(frozenset({"c1"}))
+        assert prompt[-1] == {
+            "role": "tool", "tool_call_id": "c1", "content": TOOL_RESULT_PENDING,
+        }
+
+    def test_non_pending_call_synthesizes_abandoned_placeholder(self):
+        from corvidae.context import TOOL_RESULT_ABANDONED
+        cw = self._window_with_dangling_call()
+        prompt = cw.build_prompt(frozenset())
+        assert prompt[-1] == {
+            "role": "tool", "tool_call_id": "c1", "content": TOOL_RESULT_ABANDONED,
+        }
+
+    def test_real_result_suppresses_placeholder_under_either_pending_set(self):
+        cw = self._window_with_dangling_call()
+        cw.append({"role": "tool", "tool_call_id": "c1", "content": "the real result"})
+        for pending in (frozenset({"c1"}), frozenset()):
+            prompt = cw.build_prompt(pending)
+            tool_msgs = [m for m in prompt if m.get("role") == "tool"]
+            assert tool_msgs == [
+                {"role": "tool", "tool_call_id": "c1", "content": "the real result"}
+            ]
+
+    def test_pending_param_does_not_mutate_messages(self):
+        cw = self._window_with_dangling_call()
+        before = [dict(m) for m in cw.messages]
+        cw.build_prompt(frozenset({"c1"}))
+        assert cw.messages == before
+
+    def test_every_tool_calls_message_immediately_followed_by_its_results(self):
+        """Format invariant: with one call answered and one still open in the
+        same batch, every id in an assistant tool_calls message has exactly
+        one tool message right after it, with nothing in between."""
+        cw = ContextWindow("test:scope")
+        cw.append({"role": "user", "content": "do two things"})
+        cw.append({
+            "role": "assistant", "content": "",
+            "tool_calls": [
+                {"id": "c1", "function": {"name": "f", "arguments": "{}"}},
+                {"id": "c2", "function": {"name": "g", "arguments": "{}"}},
+            ],
+        })
+        cw.append({"role": "tool", "tool_call_id": "c1", "content": "result1"})
+
+        prompt = cw.build_prompt(frozenset({"c2"}))
+
+        for i, msg in enumerate(prompt):
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                ids = [c["id"] for c in msg["tool_calls"]]
+                following = prompt[i + 1: i + 1 + len(ids)]
+                assert [m.get("role") for m in following] == ["tool"] * len(ids)
+                assert [m.get("tool_call_id") for m in following] == ids
+
+
+class TestBuildPromptResumedTurnOrdering:
+    """R1 (design §"the interleaved turn's prompt is well-formed"): the
+    prompt reorders a tool result to sit immediately after the call that
+    produced it, even when other messages arrived between them in real time.
+    Stored arrival order (self.messages) is untouched — only the prompt.
+    """
+
+    def test_interleaved_arrival_reorders_result_next_to_its_call(self):
+        cw = ContextWindow("test:scope")
+        cw.system_prompt = "sys"
+        cw.append({"role": "user", "content": "M1"})
+        cw.append({
+            "role": "assistant", "content": "",
+            "tool_calls": [{"id": "c1", "function": {"name": "f", "arguments": "{}"}}],
+        })
+        cw.append({"role": "user", "content": "M2"})
+        cw.append({"role": "assistant", "content": "answer to M2"})
+        cw.append({"role": "tool", "tool_call_id": "c1", "content": "fetched"})
+
+        prompt = cw.build_prompt(frozenset())
+
+        # The tool_calls message is deferred to the arrival index of its
+        # result, not hoisted up to the call — keeps the prompt from ending
+        # on an assistant message.
+        assert [(m["role"], m.get("content")) for m in prompt] == [
+            ("system", "sys"),
+            ("user", "M1"),
+            ("user", "M2"),
+            ("assistant", "answer to M2"),
+            ("assistant", ""),
+            ("tool", "fetched"),
+        ]
+        # Stored order is untouched — only the prompt view is reordered.
+        assert cw.messages[-1]["role"] == "tool"
+
+    def test_ordinary_cycle_prompt_order_is_unaffected(self):
+        """No-op companion: when the result already immediately follows its
+        call, the walk emits exactly what arrival order emits."""
+        cw = ContextWindow("test:scope")
+        cw.system_prompt = "sys"
+        cw.append({"role": "user", "content": "go"})
+        cw.append({
+            "role": "assistant", "content": "",
+            "tool_calls": [{"id": "c1", "function": {"name": "f", "arguments": "{}"}}],
+        })
+        cw.append({"role": "tool", "tool_call_id": "c1", "content": "result"})
+
+        prompt = cw.build_prompt(frozenset())
+
+        assert [m["role"] for m in prompt] == ["system", "user", "assistant", "tool"]
+
+    def test_orphaned_tool_message_stays_in_place(self):
+        """A tool message whose call fell out of the window (e.g. compaction
+        dropped it) has no home to be reordered into, so it stays put rather
+        than being dropped."""
+        cw = ContextWindow("test:scope")
+        cw.system_prompt = "sys"
+        cw.append({"role": "user", "content": "hi"})
+        cw.append({"role": "tool", "tool_call_id": "orphan", "content": "leftover"})
+
+        prompt = cw.build_prompt(frozenset())
+
+        assert prompt[-1] == {"role": "tool", "tool_call_id": "orphan", "content": "leftover"}
+
+
+class TestBuildPromptRun8Interleave:
+    """Requirement A (design §A): the run-8 stored sequence — M1 triggers a
+    web_fetch tool call, M2 arrives and is answered before the tool result,
+    then the tool result arrives. Both invariants (I1 pairing, I2 no
+    trailing assistant) must hold on the emitted prompt at once.
+    """
+
+    def _run8_window(self) -> "ContextWindow":
+        cw = ContextWindow("test:scope")
+        cw.system_prompt = "sys"
+        cw.append({"role": "user", "content": "fetch https://example.com/token"})
+        cw.append({
+            "role": "assistant", "content": "",
+            "reasoning_content": "I should fetch that URL.",
+            "tool_calls": [{
+                "id": "c1",
+                "function": {
+                    "name": "web_fetch",
+                    "arguments": '{"url": "https://example.com/token"}',
+                },
+            }],
+        })
+        cw.append({"role": "user", "content": "what is 6*7"})
+        cw.append({
+            "role": "assistant", "content": "42",
+            "reasoning_content": "6 times 7 is 42.",
+        })
+        cw.append({"role": "tool", "tool_call_id": "c1", "content": "TOKEN-EELGRASS-71"})
+        return cw
+
+    def test_run8_sequence_satisfies_both_invariants(self):
+        """RED at HEAD: fails on I2. The hoist puts the tool result right
+        after its call, leaving assistant("42") as the prompt's last
+        message — the shape that earned the run-8 400 (enable_thinking
+        rejects a trailing assistant message as a prefill)."""
+        cw = self._run8_window()
+        prompt = cw.build_prompt(frozenset())
+
+        for i, msg in enumerate(prompt):
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                ids = [c["id"] for c in msg["tool_calls"]]
+                following = prompt[i + 1: i + 1 + len(ids)]
+                assert [m.get("role") for m in following] == ["tool"] * len(ids)
+                assert [m.get("tool_call_id") for m in following] == ids
+
+        assert prompt[-1]["role"] != "assistant"
+
+    def test_run8_sequence_emits_the_call_block_at_the_result(self):
+        """RED at HEAD: the hoist emits the call block at M1's position
+        instead of deferring it to the arrival index of its result."""
+        cw = self._run8_window()
+        prompt = cw.build_prompt(frozenset())
+
+        assert [(m["role"], m.get("content")) for m in prompt] == [
+            ("system", "sys"),
+            ("user", "fetch https://example.com/token"),
+            ("user", "what is 6*7"),
+            ("assistant", "42"),
+            ("assistant", ""),
+            ("tool", "TOKEN-EELGRASS-71"),
+        ]
+
+    def test_run8_sequence_drops_no_message(self):
+        """Regression anchor (green at HEAD): fences deferral against
+        becoming a drop — every stored message's content survives into
+        the prompt, whatever position it lands at."""
+        cw = self._run8_window()
+        prompt = cw.build_prompt(frozenset())
+
+        prompt_contents = [m.get("content") for m in prompt]
+        for stored in cw.messages:
+            assert stored.get("content") in prompt_contents
+
+
+class TestBuildPromptCallBlockInvariant:
+    """Regression anchor (green at HEAD): pins fact 3 of the I2 argument
+    (design §A) — a call block always ends on a tool message (real result
+    or placeholder), so an assistant tool_calls message can never be the
+    last element of a prompt. The agent.py half of the same argument is
+    pinned by test_conversation_message_role_is_never_assistant in
+    tests/test_agent_helpers.py.
+    """
+
+    def test_call_block_always_ends_on_a_tool_message(self):
+        cw = ContextWindow("test:scope")
+        cw.system_prompt = "sys"
+        cw.append({"role": "user", "content": "go fetch it"})
+        cw.append({
+            "role": "assistant", "content": "",
+            "tool_calls": [{"id": "c1", "function": {"name": "f", "arguments": "{}"}}],
+        })
+
+        prompt = cw.build_prompt(frozenset())
+
+        assert prompt[-1]["role"] == "tool"
+
+
 class TestContextWindowRemoveByType:
     def test_remove_by_type_removes_context(self):
         """remove_by_type(CONTEXT) removes CONTEXT entries from self.messages."""

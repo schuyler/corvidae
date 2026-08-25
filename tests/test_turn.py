@@ -280,6 +280,35 @@ async def test_run_agent_turn_reasoning_content_debug_log(caplog):
     assert rec.reasoning_content_length > 0
 
 
+# R5: AgentTurnResult must surface the response's top-level `usage` envelope
+# (agent.py currently reads it off result.message, but usage is never on the
+# message — it is a sibling of "choices" — so that read is structurally
+# always None; see turn.py:81-104).
+async def test_run_agent_turn_returns_usage_from_response():
+    """A response carrying top-level usage surfaces it on the result."""
+    client = MagicMock()
+    response = _make_text_response("hi")
+    response["usage"] = {"prompt_tokens": 718, "completion_tokens": 12, "total_tokens": 730}
+    client.chat = AsyncMock(return_value=response)
+
+    messages = [{"role": "user", "content": "hi"}]
+    result = await run_agent_turn(client, messages, tool_schemas=[])
+
+    assert result.usage is not None
+    assert result.usage["prompt_tokens"] == 718
+
+
+async def test_run_agent_turn_missing_usage_yields_none():
+    """A response with no top-level usage must not raise — usage is None."""
+    client = MagicMock()
+    client.chat = AsyncMock(return_value=_make_text_response("hi", include_usage=False))
+
+    messages = [{"role": "user", "content": "hi"}]
+    result = await run_agent_turn(client, messages, tool_schemas=[])
+
+    assert result.usage is None
+
+
 # Case 11: exception from client.chat() → messages unchanged, exception propagates
 async def test_run_agent_turn_exception_leaves_messages_unchanged():
     """When client.chat() raises, messages must be left unchanged and the exception
