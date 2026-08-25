@@ -44,6 +44,22 @@ def test_inbox_processed_in_numeric_order_and_stop_wins(tmp_path):
     assert next_inbox_action(inbox) == "STOP"
 
 
+def test_inbox_action_skips_already_processed_turns(tmp_path):
+    """Turn files are never removed, so the caller must pass last_seq —
+    else the lowest-numbered file (turn 1) would be "next" forever."""
+    from harness.session_driver import next_inbox_action
+
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    (inbox / "001.txt").write_text("first")
+
+    assert next_inbox_action(inbox, last_seq=0).name == "001.txt"
+
+    (inbox / "002.txt").write_text("second")
+    assert next_inbox_action(inbox, last_seq=1).name == "002.txt"
+    assert next_inbox_action(inbox, last_seq=2) is None
+
+
 def test_inbox_order_survives_the_move_past_three_digits(tmp_path):
     from harness.session_driver import next_inbox_action
 

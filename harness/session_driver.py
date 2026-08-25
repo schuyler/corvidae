@@ -50,13 +50,21 @@ def next_seq(inbox_dir: Path) -> int:
     return max(seqs, default=0) + 1
 
 
-def next_inbox_action(inbox_dir: Path) -> Path | str | None:
+def next_inbox_action(inbox_dir: Path, last_seq: int = 0) -> Path | str | None:
     """`"STOP"` if inbox/STOP exists (wins over any numbered turn file),
-    else the lowest-numbered `NNN.txt`, else None if nothing is pending.
+    else the lowest-numbered `NNN.txt` with seq > `last_seq`, else None if
+    nothing new is pending.
+
+    Turn files are never removed once written, so a plain "lowest-numbered
+    file" scan would return the same already-processed file forever —
+    `last_seq` is what lets the caller ask for the next *unprocessed* turn.
     """
     if (inbox_dir / "STOP").exists():
         return "STOP"
-    turns = sorted(inbox_dir.glob("*.txt"), key=lambda p: int(p.stem))
+    turns = sorted(
+        (p for p in inbox_dir.glob("*.txt") if int(p.stem) > last_seq),
+        key=lambda p: int(p.stem),
+    )
     return turns[0] if turns else None
 
 
@@ -281,7 +289,7 @@ async def _serve_async(args: argparse.Namespace) -> int:
 
     while True:
         flush_transcript()
-        action = next_inbox_action(inbox)
+        action = next_inbox_action(inbox, last_seq)
 
         if action == "STOP":
             await client.close()
@@ -292,19 +300,13 @@ async def _serve_async(args: argparse.Namespace) -> int:
 
         if action is not None:
             seq = int(action.stem)
-            # Turns are single-sender and processed strictly in order (send
-            # blocks for the prior outbox record before writing the next
-            # one), so the lowest-numbered file is only ever new the first
-            # time we see it — last_seq is what tells "already handled"
-            # apart from "next up", since turn files are never removed.
-            if seq > last_seq:
-                await _process_turn(
-                    client, args.channel, transcript_path, action, outbox,
-                    seq, args.bot_nick, args.turn_timeout, args.settle,
-                    flush_transcript,
-                )
-                last_seq = seq
-                continue
+            await _process_turn(
+                client, args.channel, transcript_path, action, outbox,
+                seq, args.bot_nick, args.turn_timeout, args.settle,
+                flush_transcript,
+            )
+            last_seq = seq
+            continue
 
         await asyncio.sleep(0.5)
 
