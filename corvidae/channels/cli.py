@@ -33,6 +33,10 @@ class CLIPlugin(CorvidaePlugin):
     @hookimpl
     async def on_start(self, config: dict) -> None:
         """Start the stdin read loop if any cli channels are configured."""
+        # ACP owns stdin/stdout exclusively - never compete with the JSON-RPC agent.
+        if config.get("_acp_mode"):
+            logger.debug("CLIPlugin: _acp_mode set, skipping CLI stdin loop")
+            return
         self._registry = get_dependency(self.pm, "registry", ChannelRegistry)
         if not self._registry.by_transport("cli"):
             logger.debug("CLIPlugin: no cli channels configured, skipping read loop")
@@ -43,12 +47,12 @@ class CLIPlugin(CorvidaePlugin):
         """Read lines from stdin and dispatch as on_message events.
 
         Always routes to the cli:local channel. CLI is single-user/single-scope
-        by design — only cli:local receives stdin input.
+        by design â only cli:local receives stdin input.
         """
         channel = self._registry.get_or_create("cli", "local")
         print("Agent ready. Type a message, or Ctrl-D to quit.\n")
 
-        # Print initial prompt — subsequent prompts appear in send_message
+        # Print initial prompt â subsequent prompts appear in send_message
         # after each response, since on_message is now fire-and-enqueue
         # and returns immediately before the agent loop runs.
         sys.stdout.write("> ")
@@ -61,7 +65,7 @@ class CLIPlugin(CorvidaePlugin):
             except asyncio.CancelledError:
                 raise
             if not line:
-                # EOF (Ctrl-D or closed pipe) — trigger graceful shutdown
+                # EOF (Ctrl-D or closed pipe) â trigger graceful shutdown
                 # by sending SIGINT to ourselves, reusing the signal handler
                 # in main().
                 logger.info("EOF received, initiating shutdown")
@@ -120,12 +124,12 @@ class CLIPlugin(CorvidaePlugin):
                     args_display = " " + json.dumps(parsed, ensure_ascii=False)[:120]
                 except (json.JSONDecodeError, ValueError):
                     args_display = " " + args_summary[:120]
-            print(f"\033[95m⚙ {tool_name}{args_display}\033[0m")
+            print(f"\033[95mâ {tool_name}{args_display}\033[0m")
         elif status == "completed":
             result_display = ""
             if result_summary:
-                result_display = f" → {result_summary[:80]}"
-            print(f"\033[95m✓ {tool_name}{result_display}\033[0m")
+                result_display = f" â {result_summary[:80]}"
+            print(f"\033[95mâ {tool_name}{result_display}\033[0m")
         sys.stdout.flush()
 
     @hookimpl

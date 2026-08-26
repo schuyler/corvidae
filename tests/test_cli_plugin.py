@@ -80,15 +80,26 @@ class TestOnStart:
 
         await plugin.on_start(config=BASE_CONFIG)
 
+        assert plugin._task is not None
+        assert not plugin._task.done()
+
+        # Clean up the hanging task.
+        plugin._task.cancel()
         try:
-            assert plugin._task is not None
-            assert isinstance(plugin._task, asyncio.Task)
-        finally:
-            plugin._task.cancel()
-            try:
-                await plugin._task
-            except (asyncio.CancelledError, Exception):
-                pass
+            await plugin._task
+        except asyncio.CancelledError:
+            pass
+
+    async def test_on_start_skips_under_acp_mode(self):
+        """ACP mode owns stdio — CLI must not print banners or read stdin."""
+        pm, _registry = _make_pm_with_registry(transport="cli")
+
+        plugin = CLIPlugin(pm)
+        pm.register(plugin, name="cli")
+
+        await plugin.on_start(config={"_acp_mode": True})
+
+        assert plugin._task is None
 
 
 # ---------------------------------------------------------------------------
