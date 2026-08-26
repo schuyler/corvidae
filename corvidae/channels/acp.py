@@ -128,8 +128,10 @@ class CorvidaeAcpAgent:
         return await future
 
     async def cancel(self, session_id: str, **kwargs: Any) -> None:
-        """Cancel is implemented in WP-A1.2; no-op stub for now."""
-        return None
+        """Cancel an in-flight prompt for this session (A10)."""
+        if self._plugin is None:
+            return
+        self._plugin.cancel_prompt(session_id)
 
 
 def _flatten_prompt_text(prompt: list[Any]) -> str:
@@ -165,6 +167,21 @@ class AcpPlugin(CorvidaePlugin):
         future: asyncio.Future = loop.create_future()
         self._active_prompts[session_id] = future
         return future
+
+    def cancel_prompt(self, session_id: str) -> None:
+        """Resolve an in-flight prompt as cancelled; no-op if none is active."""
+        from acp import PromptResponse
+
+        # Clear pending tools so a late send_message cannot race to end_turn.
+        if self._registry is not None:
+            channel = self._registry.get(f"acp:{session_id}")
+            if channel is not None:
+                channel.pending_tool_call_ids.clear()
+
+        future = self._active_prompts.pop(session_id, None)
+        if future is None or future.done():
+            return
+        future.set_result(PromptResponse(stop_reason="cancelled"))
 
     def _complete_prompt_if_idle(self, channel) -> None:
         """Resolve the active prompt when no tool calls remain for this session."""
