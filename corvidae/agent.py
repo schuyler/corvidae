@@ -32,7 +32,13 @@ from enum import Enum
 
 from corvidae.turn import AgentTurnResult, run_agent_turn
 from corvidae.attribution import get_attribution, reset_attribution, set_attribution
-from corvidae.channel import Channel, ChannelConfig, ChannelRegistry, resolve_system_prompt
+from corvidae.channel import (
+    Channel,
+    ChannelConfig,
+    ChannelRegistry,
+    RUNTIME_META_KEYS,
+    resolve_system_prompt,
+)
 from corvidae.context import ContextWindow, MessageType, DEFAULT_CHARS_PER_TOKEN
 from corvidae.hooks import (
     CorvidaePlugin,
@@ -663,7 +669,9 @@ class Agent(CorvidaePlugin):
         llm_overrides = {
             k: v
             for k, v in channel.runtime_overrides.items()
-            if k not in FRAMEWORK_KEYS and "." not in k
+            if k not in FRAMEWORK_KEYS
+            and k not in RUNTIME_META_KEYS
+            and "." not in k
         }
         if self._request_logprobs:
             llm_overrides["logprobs"] = True
