@@ -1259,7 +1259,8 @@ not LLM config). Tool calls on ACP channels go through a swappable
 `end_turn` after tool drain; `session/cancel` yields `cancelled`.
 
 Design of record: `plans/acp-transport-design.md`. Gate B harness:
-`tests/test_acp_conformance.py`.
+`tests/test_acp_conformance.py`. Subprocess stdio smoke (mocked LLM, no
+live API): `tests/test_acp_stdio_smoke.py`.
 
 ## Configuration
 
