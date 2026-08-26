@@ -79,6 +79,16 @@ agent:
 #     - "#general"
 #     - "#random"
 
+# Signal transport connection settings (optional — omit to disable Signal;
+# corvidae connects to an already-running signal-cli daemon, it does not
+# spawn or supervise one — see docs/signal-ops.md for registration)
+# signal:
+#   socket: /run/corvidae/signal.sock  # signal-cli JSON-RPC daemon socket
+#   account: "+15550001111"            # the bot's own number
+#   allow:                             # ACIs or E.164; default-deny
+#     - "+15551234567"
+#   message_chunk_size: 2000           # max UTF-8 bytes per outbound message
+
 # Logging (optional)
 # logging:
 #   level: INFO                # DEBUG | INFO | WARNING | ERROR | CRITICAL
@@ -92,5 +102,5 @@ channels:
   # irc:#lex:
   #   system_prompt: "You are Sherman, an IRC bot in #lex."
   #   max_context_tokens: 8000
-  # signal:+15551234567:
-  #   keep_thinking_in_history: true
+  # signal:8f2c1c9a-3e21-4b77-9c3f-1a2b3c4d5e6f:   # ACI-keyed form (signal:<aci>) is recommended
+  #   system_prompt: "You are Sherman, a Signal DM bot."

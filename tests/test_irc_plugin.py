@@ -398,91 +398,12 @@ class TestSendProgress:
 
 
 # ---------------------------------------------------------------------------
-# Section 4 — split_message (6 tests)
+# split_message's own algorithm (paragraph/sentence/word ladder, UTF-8
+# byte-length behavior) is tested against its relocated home in
+# tests/test_message_split.py. What stays here is IRC-specific: that
+# IRCPlugin.send_message correctly consumes split_message's output (chunk
+# delivery, whitespace-only-chunk filtering) — see TestSendMessage above.
 # ---------------------------------------------------------------------------
-
-class TestSplitMessage:
-    def test_split_short_message_unchanged(self):
-        """Under 400 bytes returns single-element list."""
-        result = split_message("short message", max_len=400)
-        assert result == ["short message"]
-
-    def test_split_on_paragraph_boundaries(self):
-        """Splits on \\n\\n boundaries, preserving separators for reassembly."""
-        text = "First paragraph.\n\nSecond paragraph.\n\nThird paragraph."
-        # With small max_len to force splitting
-        result = split_message(text, max_len=30)
-        # Should split at paragraph boundaries
-        assert len(result) > 1
-        assert all(len(part.encode('utf-8')) <= 30 for part in result)
-        # Content should be preserved when reassembled
-        reassembled = ''.join(result)
-        assert reassembled == text
-
-    def test_split_on_sentence_boundaries(self):
-        """Splits on .!? + whitespace when no paragraph boundary fits."""
-        text = "This is sentence one. This is sentence two! This is sentence three?"
-        # With max_len that doesn't fit full paragraphs but fits sentences
-        result = split_message(text, max_len=25)
-        assert len(result) > 1
-        assert all(len(part.encode('utf-8')) <= 25 for part in result)
-        # CRITICAL: Splits should occur at sentence boundaries where possible
-        # A sentence boundary is .!? followed by space
-        for part in result:
-            # Each chunk should be valid UTF-8
-            part.encode('utf-8')  # Should not raise
-        # Verify content is preserved when reassembled
-        reassembled = ''.join(result)
-        assert reassembled == text
-
-    def test_split_on_word_boundaries(self):
-        """Word-level splitting when no paragraph/sentence boundary fits."""
-        text = "This is a verylongwordthatwontfit and another word"
-        # With max_len that doesn't fit sentences
-        result = split_message(text, max_len=20)
-        assert len(result) > 1
-        assert all(len(part.encode('utf-8')) <= 20 for part in result)
-        # CRITICAL: Splits should happen at word boundaries (spaces), not mid-word
-        # when possible. Oversized words get split across chunks.
-        # Check that chunks either end at word boundaries or contain oversized word parts
-        for i, part in enumerate(result):
-            # Each chunk should be valid UTF-8
-            part.encode('utf-8')  # Should not raise
-            # Content should be preserved when reassembled
-        reassembled = ''.join(result)
-        assert reassembled == text
-
-    def test_split_hard_truncates_long_word(self):
-        """Oversized word gets split across multiple chunks."""
-        text = "a" * 500  # Single very long word
-        result = split_message(text, max_len=400)
-        # Should split into multiple chunks
-        assert len(result) > 1
-        # All chunks should be <= max_len
-        assert all(len(part.encode('utf-8')) <= 400 for part in result)
-        # Reassembling should give original text
-        reassembled = ''.join(result)
-        assert reassembled == text
-        # First chunk should be close to max_len (not truncated arbitrarily short)
-        byte_len = len(result[0].encode('utf-8'))
-        assert byte_len >= 390, f"First chunk should be close to max_len, got {byte_len} bytes"
-
-    def test_split_preserves_content(self):
-        """Reassembling all chunks produces the original text (minus truncation markers)."""
-        text = "Para one. Para two!\n\nNew paragraph. Another sentence.\n\nFinal para."
-        result = split_message(text, max_len=30)
-        # Reassemble by joining with nothing (paragraph/sentence boundaries preserved)
-        reassembled = ''.join(result)
-        # Should equal original since no truncation occurred
-        assert reassembled == text
-
-    def test_split_uses_utf8_byte_length(self):
-        """Multi-byte chars counted by UTF-8 byte length, not character count."""
-        # Mix of ASCII and multi-byte chars
-        text = "Hello 世界 " * 100  # Each Chinese char is 3 bytes
-        result = split_message(text, max_len=400)
-        # All parts should be under 400 bytes
-        assert all(len(part.encode('utf-8')) <= 400 for part in result)
 
 
 # ---------------------------------------------------------------------------

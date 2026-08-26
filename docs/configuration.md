@@ -249,6 +249,44 @@ The `irc` section is optional. If absent, `IRCPlugin` does not connect.
 
 ---
 
+## `signal` — Signal transport
+
+The `signal` section is optional. If absent, `SignalPlugin` loads but stays inert: no socket, no channels, nothing logged above `DEBUG`. If present, it must be well-formed — a missing `socket` or `account`, or an `allow` that is not a list, raises at startup naming the offending field.
+
+corvidae talks JSON-RPC to a `signal-cli daemon` that is already running; it does not start or supervise one. Registering the bot's number and running the daemon are covered in [signal-ops.md](signal-ops.md).
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `signal.socket` | string | *required* | Path to the `signal-cli daemon --socket` unix socket. |
+| `signal.account` | string | *required* | The bot's own number, E.164, e.g. `"+15550001111"`. Quote it — bare `+…` is not valid YAML. Used to recognize and ignore the account's own traffic. |
+| `signal.allow` | list of strings | `[]` | Senders permitted to drive the agent. Each entry is either an E.164 number or an ACI (the account UUID). Default-deny: an empty or absent list refuses everyone, silently — no reply, no typing indicator, no read receipt. |
+| `signal.message_chunk_size` | integer | `2000` | Maximum UTF-8 bytes per outbound Signal message. Longer replies are split paragraphs → sentences → words and sent as several messages; nothing is truncated. |
+
+```yaml
+signal:
+  socket: /run/corvidae/signal.sock
+  account: "+15550001111"
+  allow:
+    - "+15551234567"
+  message_chunk_size: 2000
+```
+
+E.164 entries in `allow` are resolved to ACIs by a batched `getUserStatus` call after the transport connects. A number that does not resolve — not registered on Signal, or a rate-limited lookup — is logged at `ERROR` and that entry simply never matches. Channels, however, are always keyed on the ACI: `sessions.db` rows and log lines show `signal:<aci>` whatever form the config used.
+
+**Signal content is stored in plaintext on this host.** Messages are end-to-end encrypted in transit and then written to `sessions.db`, to the JSONL conversation log (`<daemon.jsonl_log_dir>/signal_<aci>.jsonl`, when that is enabled), and into consolidated memory records, all as ordinary text — and the channel id itself contains a personal identifier. File permissions and whatever disk encryption the host has are all that protect them. Disappearing messages are stored the same way as any other message; the transport does not treat them differently.
+
+To remove a conversation's stored content, find its message ids and tombstone them with `corvidae redact` (content is overwritten in place; rows and ids remain):
+
+```sh
+sqlite3 sessions.db \
+  "SELECT id FROM message_log WHERE channel_id = 'signal:<aci>' ORDER BY id"
+uv run corvidae redact --db sessions.db message <id> [<id> ...]
+```
+
+Pass the ids explicitly rather than using the `range` form: `message_log` ids are global across all channels, so an id range spans whatever other channels were active in the same window. The redaction cascades to intersecting memory records and to both FTS surfaces; see "Operator redaction" in [design.md](design.md). The jsonl logs are separate files and are not touched — delete them yourself.
+
+---
+
 ## `channels` — per-channel overrides
 
 Keys are `transport:scope` identifiers (e.g., `irc:#general`, `cli:local`). Each value is a mapping of overrides applied on top of `agent` defaults. Any key absent from the channel block uses the `agent`-level default.
@@ -273,6 +311,8 @@ channels:
       - prompts/cli-addendum.txt
     keep_thinking_in_history: true
 ```
+
+Signal channels accept either form of key. `signal:<aci>` is the real channel id and matches directly. `signal:+15551234567` is an alias: its overrides are copied onto the ACI-keyed channel the first time that person writes, once the number has resolved. The alias entry itself never becomes a live channel, and an alias naming someone absent from `signal.allow` is simply inert — an unauthorized sender never gets a turn for the overrides to apply to.
 
 ---
 

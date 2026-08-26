@@ -469,6 +469,19 @@ irc:
   message_chunk_size: 400      # Max UTF-8 bytes per IRC message (default 400)
 ```
 
+The `signal` transport is provided by `SignalPlugin` (same entry point group). It speaks JSON-RPC to a `signal-cli daemon` that is already running — corvidae never starts one. Its config block:
+
+```yaml
+signal:
+  socket: /run/corvidae/signal.sock   # signal-cli daemon socket (required)
+  account: "+15550001111"             # the bot's own number (required)
+  allow:                              # default-deny; E.164 or ACI
+    - "+15551234567"
+  message_chunk_size: 2000            # Max UTF-8 bytes per message (default 2000)
+```
+
+Omitting the block leaves the plugin loaded but inert. Signal channel scopes are always the sender's ACI (`signal:8f2c1c9a-…`), never a phone number — `sourceNumber` is absent under phone-number privacy, and a scope that can vanish would fork the channel's persisted history. Numbers in config are resolved forward to ACIs after the transport connects. See [signal-ops.md](signal-ops.md) for provisioning and [configuration.md](configuration.md) for the full key reference.
+
 ## Registration order
 
 Plugins are loaded via `pm.load_setuptools_entrypoints("corvidae")`. The entry point loading order is non-deterministic — it is not guaranteed to match any specific sequence. The following plugins are registered:
@@ -480,6 +493,7 @@ jsonl_log         (JsonlLogPlugin)      — entry point
 core_tools        (CoreToolsPlugin)     — entry point
 cli               (CLIPlugin)           — entry point
 irc               (IRCPlugin)           — entry point
+signal            (SignalPlugin)        — entry point
 task              (TaskPlugin)          — entry point
 subagent          (SubagentPlugin)      — entry point
 mcp               (McpClientPlugin)     — entry point

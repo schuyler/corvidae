@@ -1236,6 +1236,111 @@ Forwards both channel and private messages. `split_message` splits
 outgoing text into 400-byte chunks preserving paragraph/sentence
 boundaries.
 
+`split_message` itself lives in `channels/split.py`, not in the IRC
+plugin, so a transport can size its own chunks without importing IRC.
+
+### Signal (`channels/signal.py`)
+
+`SignalPlugin` — Signal DM transport, speaking newline-delimited JSON-RPC
+2.0 to an already-running `signal-cli daemon` over a unix socket. corvidae
+connects to that daemon; it never spawns or supervises it. Registering the
+account and running the daemon are covered in [signal-ops.md](signal-ops.md).
+
+With no `signal:` block in config the plugin loads, resolves its registry
+dependency, and does nothing else — no socket, no channels, nothing logged
+above DEBUG. A block that is present but missing `socket` or `account`, or
+whose `allow` is not a list, raises in `on_init` and aborts startup.
+Silence is for absence; errors are loud.
+
+**Connection.** `on_start` launches two long-lived tasks: a connection loop
+and a notification processor. The connection loop opens the socket and
+reads frames until EOF, retrying on the same ladder IRC uses — 10s,
+doubling, capped at 300s, reset to the initial delay after any successful
+connect. A disconnect fails every outstanding request with
+`ConnectionError` rather than leaving it hung, and a malformed frame is
+logged and skipped rather than killing the connection.
+
+Frames are routed by shape: one carrying a `method` is an unsolicited
+notification and goes onto a queue; one carrying an `id` and no `method` is
+a response and resolves the future its request is awaiting. Notifications
+are never handled inline in the read loop. Handling one sends further
+JSON-RPC requests (typing, receipts) and awaits their responses, and those
+responses can only arrive by the read loop reading the next line —
+inline handling would deadlock the transport against its own request. The
+single-consumer processor also keeps rapid-succession messages in arrival
+order.
+
+**Identity.** A channel's scope is the sender's ACI — `signal:<aci>` —
+never their phone number. `sourceNumber` is absent whenever a sender has
+phone-number privacy on, and channel ids are the persistence key for
+`sessions.db`, the jsonl logs, and memory; keying on a field that can
+vanish would fork one sender's history into two.
+
+Config may still name senders by E.164 number, both in `allow:` and as
+`channels:` keys. Those are resolved forward to ACIs by a single batched
+`getUserStatus` call — batched because it is a CDS lookup with a
+server-side rate limit — issued after each successful connect, never at
+`on_init`/`on_start`, so an unreachable daemon at boot leaves the plugin
+inert instead of blocking startup. A resolved alias is cached for the
+process lifetime; one that failed to resolve is retried after the next
+connect. Reverse ACI→number resolution is not used anywhere: signal-cli's
+contact store answers an unknown ACI with a phantom entry carrying a null
+number, which is indistinguishable from "not found".
+
+**Inbound filtering.** An envelope is dropped unless it carries a
+`dataMessage` with non-empty text from someone other than the bot's own
+account, outside a group. Dropping non-`dataMessage` envelopes is what
+keeps a `syncMessage` — the account's own traffic echoed from another
+device signed into it — from being read as input and driving the agent in
+a loop. Attachments are logged and discarded; any text accompanying them is
+still processed. Reactions, quotes, edits, and remote deletes all fall out
+of the empty-text rule, since none of them carry a `message` field. An
+envelope whose send timestamp is more than five minutes old gets a
+`[sent YYYY-MM-DD HH:MM UTC]` prefix prepended, so backlog delivered after
+a reconnect reads as backlog rather than as current.
+
+**Authorization.** `should_process_message` is a default-deny gate: the
+sender's ACI must appear in `allow:` directly, or be what a configured
+E.164 `allow` entry resolved to. A refusal is logged at INFO naming the
+sender's ACI, and nothing is sent back. The transport fires `on_message`
+for every decoded envelope regardless: the gate is the one place that
+vetoes and the one place that logs the attempt.
+
+**Liveness.** Two indicators, both gated on the allowlist — an
+unauthorized sender gets no evidence that the account is live and
+monitored.
+
+- *Typing.* On the first outstanding message for a channel the transport
+  sends `sendTyping` immediately, covering queueing delay, and starts a
+  refresh loop that re-sends every 10s while the channel's outstanding
+  count stays positive (Signal clients expire an indicator after roughly
+  15s). `send_message` and `on_message_rejected` each give one outstanding
+  slot back; a second gate plugin vetoing a message this transport already
+  counted is why the rejection path decrements too. No explicit stop is
+  ever sent — once the loop exits, the indicator expires on its own.
+- *Read receipt.* Sent from `on_message_persisted` — processing start —
+  not on arrival. A message can sit queued behind contended local
+  inference, and a "read" marker followed by a long silence is worse than
+  no marker. Envelope timestamps are held FIFO per channel and popped when
+  the matching turn starts; only correlation ids this transport itself
+  admitted are eligible, since `on_message_persisted` also fires for
+  notification-originated turns that never pushed a timestamp. That
+  `sendReceipt`'s `targetTimestamp` takes the inbound envelope's
+  `timestamp` is convention, not documented by signal-cli — it matches
+  `sendReaction`, `remoteDelete`, and `quoteTimestamp`, but it has not been
+  confirmed against the upstream spec.
+
+**Outbound.** `send_message` and `send_progress` both split through
+`split_message` at `message_chunk_size` bytes and deliver every chunk —
+text is never truncated, and chunks go out verbatim, without the newline
+stripping IRC needs. `send_progress` uses the same delivery path but skips
+the outstanding-count bookkeeping: it is mid-turn liveness, not the reply.
+Outbound is text only.
+
+Group conversations are out of scope; agent-initiated (unprompted) sends
+and any privacy handling specific to disappearing messages are not
+implemented.
+
 ## Configuration
 
 ```yaml
@@ -1327,7 +1432,7 @@ fixed hand-written order:
    never instantiated.
 
 The full entry-point plugin set (`pyproject.toml:35-59`): `persistence`,
-`jsonl_log`, `core_tools`, `cli`, `irc`, `task`, `subagent`, `mcp`, `llm`,
+`jsonl_log`, `core_tools`, `cli`, `irc`, `signal`, `task`, `subagent`, `mcp`, `llm`,
 `compaction`, `memory`, `memory_tools`, `funnel`, `thinking`,
 `runtime_settings`, `tools`, `metrics`, `usage_log`, `metrics_jsonl`,
 `outcome_log`, `appraisal`, `critique`, `agent`, `idle_monitor`,
@@ -1416,7 +1521,9 @@ corvidae/
 ├── main.py               # daemon entry point
 ├── channels/
 │   ├── cli.py            # CLIPlugin
-│   └── irc.py            # IRCPlugin
+│   ├── irc.py            # IRCPlugin
+│   ├── signal.py         # SignalPlugin (signal-cli JSON-RPC transport)
+│   └── split.py          # split_message() — shared outbound chunking
 ├── commands/
 │   └── redact.py         # corvidae redact CLI (operator-only)
 └── tools/
@@ -1463,9 +1570,8 @@ implemented. Each needs discussion before proceeding.
 
 The original design included a `ComponentLoader` with watchdog
 filesystem watcher for hot-reloading plugin modules from a
-`components/` directory. Not implemented. The current transport plugins
-load via the `cli`/`irc` setuptools entry points, like every other
-built-in plugin.
+`components/` directory. Not implemented. Transport plugins load via
+setuptools entry points, like every other built-in plugin.
 
 ### Double-buffer compaction
 
@@ -1475,5 +1581,5 @@ seamlessly. Not implemented; current compaction is stop-the-world.
 
 ### Additional transports
 
-Signal, BlueSky, and other transports were noted as future work. The
-hook system supports them; none are implemented beyond IRC and CLI.
+BlueSky and other transports are future work. The hook system supports
+them; the implemented transports are CLI, IRC, and Signal.
