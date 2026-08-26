@@ -125,6 +125,8 @@ async def test_send_and_await_any_reply_advances_on_mismatched_reply_content():
 
 
 def test_filler_corpus_crosses_the_compact_threshold_with_margin():
+    import json
+
     import yaml
 
     from corvidae.context import count_tokens
@@ -138,7 +140,11 @@ def test_filler_corpus_crosses_the_compact_threshold_with_margin():
     cumulative = 0
     k = None
     for i in range(1, MAX_FILLERS + 1):
-        cumulative += count_tokens(build_filler_line(i))
+        # Sized the way production measures a message: the JSON-serialized
+        # {"role": ..., "content": ...} dict, not raw content alone -- a
+        # bare content-length sum understates what actually gets sent.
+        line = json.dumps({"role": "user", "content": build_filler_line(i)})
+        cumulative += count_tokens(line)
         if cumulative >= trigger:
             k = i
             break

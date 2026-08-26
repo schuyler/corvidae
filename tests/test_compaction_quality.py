@@ -189,7 +189,7 @@ class TestDeathSpiralCompaction:
         captured_prior = []
         captured_new = []
 
-        async def mock_summarize(messages, prior_summaries=None):
+        async def mock_summarize(messages, prior_summaries=None, max_tokens=None):
             captured_new.extend(messages)
             if prior_summaries:
                 captured_prior.extend(prior_summaries)
@@ -229,7 +229,7 @@ class TestDeathSpiralCompaction:
         plugin = CompactionPlugin(pm=None)
         channel = _make_channel()
 
-        async def mock_summarize(messages, prior_summaries=None):
+        async def mock_summarize(messages, prior_summaries=None, max_tokens=None):
             # Simulate what a good LLM would do: preserve prior context
             if prior_summaries:
                 return (
@@ -278,7 +278,7 @@ class TestFirstCompactionAgainstFixture:
 
         captured_prior = None
 
-        async def mock_summarize(messages, prior_summaries=None):
+        async def mock_summarize(messages, prior_summaries=None, max_tokens=None):
             nonlocal captured_prior
             captured_prior = prior_summaries
             return "First compaction summary"

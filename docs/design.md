@@ -402,8 +402,12 @@ All operations are synchronous; no database access:
   cycle. The consequence this ordering secures: the emitted prompt never ends on
   an assistant message, which llama.cpp reads as a prefill and rejects under
   `enable_thinking`.
-- `token_estimate()` — token count via tiktoken (`cl100k_base`), with a
-  character-based fallback when tiktoken is unavailable
+- `token_estimate()` — sums the token count of every message via tiktoken
+  (`cl100k_base`), with a character-based fallback when tiktoken is
+  unavailable. Each message is sized by its JSON-serialized visible fields
+  (role, content, `tool_calls`, `reasoning_content`, etc.), not just the
+  `content` string, so a message whose size is mostly in tool-call
+  arguments or reasoning content is still counted accurately.
 - `replace_with_summary(summary_msg, retain_count)` — replaces older messages
   with a summary in-memory, retaining the `retain_count` most-recent entries.
   Raises `ValueError` if `retain_count` exceeds `len(messages)`.
@@ -746,7 +750,10 @@ for side effects; its return value is not used by the caller.
 
 **Algorithm:**
 
-1. If `conversation.token_estimate() < 80% of max_tokens`, return `None` (skip).
+1. If `conversation.token_estimate()` — the same JSON-serialized
+   per-message measure described above, applied consistently across the
+   trigger check, the retain-walk, and `_summarize`'s truncation below —
+   is less than 80% of `max_tokens`, return `None` (skip).
 2. If `len(conversation.messages) <= 5`, return `None` (skip — too few messages to compact).
 3. Backward walk: starting from the most recent message, accumulate messages
    until their token estimate would exceed 50% of `max_tokens`. The count
@@ -754,14 +761,23 @@ for side effects; its return value is not used by the caller.
 4. If `retain_count >= len(conversation.messages)`, return `None` (all messages fit — no-op).
 5. Filter the older (non-retained) messages to `MESSAGE` type only, excluding
    any `SUMMARY` entries. Strip `_message_type` metadata before passing to LLM.
-6. Call `_summarize(older_clean)` — sends the older messages to the LLM
-   with a system prompt asking for a concise summary. Resolves the LLM
-   client lazily via `get_dependency(pm, "llm", LLMPlugin)` on first call
-   (not in `on_start`, because `on_start` hooks run in LIFO order and
-   `CompactionPlugin.on_start` fires before `LLMPlugin.on_start`). Caps
-   input to 100 messages (first 50 + last 50 with a truncation marker).
-   This method is a separate public method so tests can patch it via
-   `patch.object`.
+6. Call `_summarize(new_messages_clean, prior_summaries_clean,
+   max_tokens=max_tokens)` — sends the older messages to the LLM with a
+   system prompt asking for a concise summary, incorporating any prior
+   summaries carried forward from earlier compaction rounds. Resolves the
+   LLM client lazily via `get_dependency(pm, "llm", LLMPlugin)` on first
+   call (not in `on_start`, because `on_start` hooks run in LIFO order and
+   `CompactionPlugin.on_start` fires before `LLMPlugin.on_start`). The
+   carried-forward prior-summary text is itself capped to a fraction of
+   `max_tokens` (keeping the most recent portion) so it cannot grow
+   unbounded across repeated compaction rounds. Derives a token budget for
+   the messages being summarized as `max_tokens` minus the system prompt's
+   own size minus a fixed reserve for the LLM's response and JSON overhead,
+   then bounds the head and tail of the input against that budget — each
+   side capped by both a message count (50) and half the token budget —
+   inserting a `[...N messages omitted...]` marker between them when
+   anything is dropped. This method is a separate method so tests can patch
+   it via `patch.object`.
 7. Call `conversation.replace_with_summary(summary_msg, retain_count)`.
 8. Fire `on_compaction(channel, summary_msg, retain_count, compacted_ids)`
    (broadcast) so persistence plugins can update the DB.

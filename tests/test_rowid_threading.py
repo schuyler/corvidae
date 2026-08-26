@@ -217,7 +217,7 @@ class TestCompactionCarriesCompactedIds:
         plugin.pm.ahook.on_compaction = AsyncMock()
         seen: list[list[dict]] = []
 
-        async def fake_summarize(messages, prior_summaries=None):
+        async def fake_summarize(messages, prior_summaries=None, max_tokens=None):
             seen.append(messages)
             return "a summary"
 

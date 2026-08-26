@@ -21,7 +21,7 @@ import logging
 import time
 
 from corvidae.attribution import reset_attribution, set_attribution
-from corvidae.context import DEFAULT_CHARS_PER_TOKEN, MessageType, count_tokens
+from corvidae.context import DEFAULT_CHARS_PER_TOKEN, MessageType, count_tokens, message_tokens
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 
 logger = logging.getLogger(__name__)
@@ -40,6 +40,16 @@ class CompactionPlugin(CorvidaePlugin):
         "In 1000 words or less. Preserve specific details: file paths, variable names, "
         "error messages, discoveries made, and the current line of investigation."
     )
+
+    # Reserve for the LLM's own summary response (prompt caps it at ~1000
+    # words, ~1300-1500 tokens for English) plus JSON structure overhead.
+    _SUMMARY_RESPONSE_RESERVE_TOKENS = 2000
+
+    # Cap on the carried-forward prior-summary text, as a fraction of
+    # max_tokens — bounds growth across repeated compaction rounds, since
+    # the prior-summaries system-prompt branch carries no length cap of its
+    # own.
+    _PRIOR_SUMMARIES_MAX_FRACTION = 0.5
 
     def __init__(self, pm=None) -> None:
         self.pm = pm  # May be None; on_init will set it via CorvidaePlugin.on_init
@@ -164,10 +174,7 @@ class CompactionPlugin(CorvidaePlugin):
         retain_count = 0
         retain_tokens = 0
         for msg in reversed(conversation.messages):
-            content = msg.get("content") or ""
-            if not isinstance(content, str):
-                content = ""
-            msg_tokens = count_tokens(content)
+            msg_tokens = message_tokens(msg)
             if retain_tokens + msg_tokens > retain_budget and retain_count > 0:
                 break
             retain_tokens += msg_tokens
@@ -215,7 +222,7 @@ class CompactionPlugin(CorvidaePlugin):
         # and restores it afterwards.
         attribution_token = set_attribution(stage="compaction", channel_id=channel_id)
         try:
-            summary_text = await self._summarize(new_messages_clean, prior_summaries_clean)
+            summary_text = await self._summarize(new_messages_clean, prior_summaries_clean, max_tokens=max_tokens)
         except Exception:
             # Record failure time for cooldown
             self._last_failed_compaction[channel_id] = time.monotonic()
@@ -258,7 +265,19 @@ class CompactionPlugin(CorvidaePlugin):
 
         return True
 
-    async def _summarize(self, messages: list[dict], prior_summaries: list[dict] | None = None) -> str:
+    def _bound_prior_summaries_text(self, prior_summaries: list[dict], max_tokens: int) -> str:
+        """Join prior-summary content and cap it to a fixed fraction of
+        max_tokens, keeping the most recent (tail) portion. Without this, the
+        single carried-forward summary can grow across compaction rounds until
+        it alone exceeds the budget."""
+        text = "\n".join(s.get("content", "") for s in prior_summaries)
+        cap_tokens = int(max_tokens * self._PRIOR_SUMMARIES_MAX_FRACTION)
+        if count_tokens(text) <= cap_tokens:
+            return text
+        cap_chars = int(cap_tokens * DEFAULT_CHARS_PER_TOKEN)
+        return "[...earlier summary content truncated...]\n" + text[-cap_chars:]
+
+    async def _summarize(self, messages: list[dict], prior_summaries: list[dict] | None = None, *, max_tokens: int) -> str:
         """Ask the LLM to summarize a list of messages.
 
         Sends the messages to the LLM with a system prompt asking for a
@@ -275,6 +294,8 @@ class CompactionPlugin(CorvidaePlugin):
             messages: List of message dicts (role/content, no _message_type).
             prior_summaries: Optional list of prior summary message dicts to
                 carry forward.
+            max_tokens: The channel's max context tokens, used to derive the
+                truncation budget for this summarization call.
 
         Returns:
             Summary text string from the LLM.
@@ -291,22 +312,9 @@ class CompactionPlugin(CorvidaePlugin):
         if self._llm_client is None:
             raise RuntimeError("LLM client not available for compaction")
 
-        # Cap the summarization input to avoid sending hundreds of thousands
-        # of tokens to the LLM. Take the first 50 messages (early context)
-        # and the last 50 messages (recent context), with a truncation marker.
-        max_messages = 100
-        if len(messages) > max_messages:
-            head = messages[:50]
-            tail = messages[-50:]
-            truncated_count = len(messages) - max_messages
-            truncated_marker = {
-                "role": "user",
-                "content": f"[...{truncated_count} messages omitted...]",
-            }
-            messages = head + [truncated_marker] + tail
-
-        # Build system prompt — if there are prior summaries, instruct the LLM
-        # to incorporate their content into the new summary.
+        # Build system prompt before truncation — the token budget depends on
+        # its size. If there are prior summaries, instruct the LLM to
+        # incorporate their (bounded) content into the new summary.
         if prior_summaries:
             system_content = (
                 "You are summarizing a conversation for an AI agent that will continue it. "
@@ -316,12 +324,43 @@ class CompactionPlugin(CorvidaePlugin):
                 "decisions, discoveries, or user instructions from the new messages. "
                 "Do NOT discard information from the prior summaries — carry it forward.\n\n"
                 "PRIOR SUMMARIES:\n"
-                + "\n".join(
-                    s.get("content", "") for s in prior_summaries
-                )
+                + self._bound_prior_summaries_text(prior_summaries, max_tokens)
             )
         else:
             system_content = self._summary_prompt
+
+        budget = max(max_tokens - count_tokens(system_content) - self._SUMMARY_RESPONSE_RESERVE_TOKENS, 0)
+
+        # Cap the summarization input by both message count (cheap first
+        # filter) and half the token budget, head and tail, in one pass over
+        # the original list — avoids double-processing and head/tail overlap
+        # bookkeeping.
+        max_head_tail = 50
+        half_budget = budget // 2
+
+        head, head_tokens, i = [], 0, 0
+        while i < len(messages) and len(head) < max_head_tail:
+            t = message_tokens(messages[i])
+            if head and head_tokens + t > half_budget:
+                break
+            head.append(messages[i])
+            head_tokens += t
+            i += 1
+
+        tail, tail_tokens, j = [], 0, len(messages) - 1
+        while j >= i and len(tail) < max_head_tail:
+            t = message_tokens(messages[j])
+            if tail and tail_tokens + t > half_budget:
+                break
+            tail.append(messages[j])
+            tail_tokens += t
+            j -= 1
+        tail.reverse()
+
+        omitted = len(messages) - len(head) - len(tail)
+        if omitted > 0:
+            marker = {"role": "user", "content": f"[...{omitted} messages omitted...]"}
+            messages = head + [marker] + tail
 
         response = await self._llm_client.chat([
             {"role": "system", "content": system_content},

@@ -292,25 +292,38 @@ class TestContextWindowTokenEstimate:
             assert cw.token_estimate() == 0
 
     def test_token_estimate_none_content(self):
-        """token_estimate() treats None content as 0 tokens."""
+        """token_estimate() serializes the full visible message, so a
+        message with None content is counted via its JSON representation,
+        not skipped."""
         cw = ContextWindow("test:scope")
         cw.messages = [
             {"role": "assistant", "content": None, "_message_type": MessageType.MESSAGE},
         ]
-        # Only system_prompt is passed to count_tokens (None content is skipped / treated as "").
-        # count_tokens returns 0 for the empty system_prompt; None content contributes 0.
-        with patch("corvidae.context.count_tokens", return_value=0):
-            assert cw.token_estimate() == 0
+        # count_tokens mocked to len(text): system_prompt="" contributes 0;
+        # json.dumps({"role": "assistant", "content": None}) is 38 chars.
+        with patch("corvidae.context.count_tokens", side_effect=lambda t: len(t)):
+            result = cw.token_estimate()
+        assert result == 38, (
+            f"token_estimate() must count the JSON-serialized message, "
+            f"including a None content field, got {result}"
+        )
 
     def test_token_estimate_list_content(self):
-        """token_estimate() treats non-string content as 0 tokens."""
+        """token_estimate() serializes the full visible message, so
+        non-string (e.g. list) content is counted via its JSON
+        representation, not skipped."""
         cw = ContextWindow("test:scope")
         cw.messages = [
             {"role": "assistant", "content": [{"type": "text", "text": "hi"}], "_message_type": MessageType.MESSAGE},
         ]
-        # Non-string content is skipped; only the empty system_prompt hits count_tokens.
-        with patch("corvidae.context.count_tokens", return_value=0):
-            assert cw.token_estimate() == 0
+        # count_tokens mocked to len(text): system_prompt="" contributes 0;
+        # json.dumps({"role": "assistant", "content": [...]}) is 66 chars.
+        with patch("corvidae.context.count_tokens", side_effect=lambda t: len(t)):
+            result = cw.token_estimate()
+        assert result == 66, (
+            f"token_estimate() must count the JSON-serialized message, "
+            f"including list content, got {result}"
+        )
 
     def test_token_estimate_delegates_to_count_tokens(self):
         """token_estimate() uses count_tokens(), not chars_per_token arithmetic."""

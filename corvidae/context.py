@@ -13,6 +13,7 @@ Logging:
 """
 
 import enum
+import json
 import logging
 
 logger = logging.getLogger(__name__)
@@ -65,6 +66,16 @@ TOOL_RESULT_ABANDONED = "[did not complete — no result was returned]"
 
 def _visible(msg: dict) -> dict:
     return {k: v for k, v in msg.items() if not k.startswith("_")}
+
+
+def message_tokens(msg: dict) -> int:
+    """Token count of a message the way it actually gets sent: the
+    JSON-serialized visible dict, not just `content`. Catches size hiding in
+    `tool_calls` and `reasoning_content` that content-only counting misses.
+    Accepts messages in tagged or already-clean form — `_visible()` strips
+    any `_`-prefixed keys itself, and is a no-op on a dict with none.
+    """
+    return count_tokens(json.dumps(_visible(msg)))
 
 
 class ContextWindow:
@@ -185,16 +196,13 @@ class ContextWindow:
     def token_estimate(self) -> int:
         """Token count using tiktoken (cl100k_base), with character-based fallback.
 
-        Includes system prompt plus all message content. Non-string content
-        (None, lists) is treated as 0 tokens. Falls back to character-based
-        estimation if tiktoken is unavailable.
+        Includes system prompt plus every message's JSON-serialized visible
+        fields (see message_tokens) — not just content. Falls back to
+        character-based estimation if tiktoken is unavailable.
         """
         total = count_tokens(self.system_prompt)
         for msg in self.messages:
-            content = msg.get("content") or ""
-            if not isinstance(content, str):
-                continue
-            total += count_tokens(content)
+            total += message_tokens(msg)
         return total
 
     def remove_by_type(self, message_type: MessageType) -> int:
