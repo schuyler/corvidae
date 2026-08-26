@@ -336,10 +336,12 @@ class TestContextWindowCharsPerToken:
         # Mock count_tokens to return len(text) so the result is deterministic.
         with patch("corvidae.context.count_tokens", side_effect=lambda t: len(t)):
             estimate = conv.token_estimate()
-        # system_prompt="" → 0, "a"*40 → 40; total = 40.
-        # Under old char-based math, int(40 / 4.0) = 10.  The new value is 40.
-        assert estimate == 40, (
-            f"token_estimate must delegate to count_tokens (expected 40 with len mock), got {estimate}"
+        # system_prompt="" → 0; the message is sized by its JSON-serialized
+        # visible form, not raw content: json.dumps({"role": "user",
+        # "content": "a"*40}) is 71 chars, not the 40-char content alone.
+        assert estimate == 71, (
+            f"token_estimate must delegate to count_tokens over the JSON-serialized "
+            f"message (expected 71 with len mock), got {estimate}"
         )
 
 

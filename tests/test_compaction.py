@@ -44,7 +44,7 @@ class TestCompactCarriesForwardSummaries:
         captured_new = []
         captured_prior = []
 
-        async def capture_summarize(messages, prior_summaries=None):
+        async def capture_summarize(messages, prior_summaries=None, max_tokens=None):
             captured_new.extend(messages)
             if prior_summaries:
                 captured_prior.extend(prior_summaries)
@@ -89,7 +89,7 @@ class TestCompactCarriesForwardSummaries:
         captured_new = []
         captured_prior = []
 
-        async def capture_summarize(messages, prior_summaries=None):
+        async def capture_summarize(messages, prior_summaries=None, max_tokens=None):
             captured_new.extend(messages)
             if prior_summaries:
                 captured_prior.extend(prior_summaries)
@@ -316,7 +316,7 @@ class TestDeathSpiralPrevention:
         captured_new = []
         captured_prior = []
 
-        async def capture_summarize(messages, prior_summaries=None):
+        async def capture_summarize(messages, prior_summaries=None, max_tokens=None):
             captured_new.extend(messages)
             if prior_summaries:
                 captured_prior.extend(prior_summaries)
@@ -361,7 +361,7 @@ class TestDeathSpiralPrevention:
 
         captured_prior = None
 
-        async def capture_summarize(messages, prior_summaries=None):
+        async def capture_summarize(messages, prior_summaries=None, max_tokens=None):
             nonlocal captured_prior
             captured_prior = prior_summaries
             return "first summary"
@@ -400,7 +400,7 @@ class TestSummarizeTruncation:
             return {"choices": [{"message": {"content": "summary"}}]}
 
         plugin._llm_client.chat = fake_chat
-        await plugin._summarize(messages)
+        await plugin._summarize(messages, max_tokens=20000)
 
         user_msg = captured_payload["payload"][1]  # index 0 is system prompt
         import json
@@ -428,7 +428,7 @@ class TestSummarizeTruncation:
             return {"choices": [{"message": {"content": "summary"}}]}
 
         plugin._llm_client.chat = fake_chat
-        await plugin._summarize(messages)
+        await plugin._summarize(messages, max_tokens=20000)
 
         import json
         sent = json.loads(captured_payload["payload"][1]["content"])
@@ -452,4 +452,94 @@ class TestSummarizeTruncation:
         assert "client" not in param_names, (
             f"compact_conversation hookimpl must not have a 'client' parameter "
             f"after Part 3. Current parameters: {param_names}"
+        )
+
+
+class TestSizingUnifiesAcrossSites:
+    """Compaction must see size that hides in reasoning_content/tool_calls,
+    not just visible content -- and the fix must actually bound what gets
+    sent to the LLM, not merely trigger.
+    """
+
+    def _reasoning_shaped_conversation(self, count: int = 16) -> ContextWindow:
+        """Messages shaped like a thinking-model channel: small `content`
+        per message, but assistant turns also carry a large persisted
+        `reasoning_content` field -- invisible to content-only sizing.
+        """
+        conv = ContextWindow("chan1")
+        conv.system_prompt = ""
+        messages = []
+        for i in range(count):
+            role = "assistant" if i % 2 == 0 else "user"
+            msg = {
+                "role": role,
+                "content": f"short reply {i}",
+                "_message_type": MessageType.MESSAGE,
+            }
+            if role == "assistant":
+                # ~3200 chars of persisted reasoning, invisible to
+                # content-only sizing but present in what's actually stored
+                # and sent.
+                msg["reasoning_content"] = "reasoning filler text " * 140
+            messages.append(msg)
+        conv.messages = messages
+        return conv
+
+    async def test_compaction_succeeds_despite_large_reasoning_content(self):
+        """compact_conversation must trigger and complete without raising
+        when content is small but reasoning_content is large, and the
+        payload it sends to the LLM must stay within budget.
+        """
+        import json
+
+        from corvidae.compaction import CompactionPlugin
+        from corvidae.context import count_tokens
+
+        conv = self._reasoning_shaped_conversation()
+        plugin = CompactionPlugin(pm=None)
+        plugin._llm_client = AsyncMock()
+
+        captured_payload = {}
+
+        async def fake_chat(payload):
+            captured_payload["payload"] = payload
+            return {"choices": [{"message": {"content": "summary"}}]}
+
+        plugin._llm_client.chat = fake_chat
+        channel = _make_channel()
+
+        max_tokens = 4000
+        result = await plugin.compact_conversation(
+            channel=channel, conversation=conv, max_tokens=max_tokens
+        )
+
+        # Content alone is tiny (16 short strings) -- a content-only trigger
+        # check would never fire even though the persisted messages are
+        # large once reasoning_content is included. Compaction must trigger
+        # and succeed, not silently skip while the real, oversized window
+        # keeps growing.
+        assert result is True, (
+            "compaction must trigger and succeed when size is hidden in "
+            "reasoning_content, not just visible content"
+        )
+
+        # The payload actually sent to the LLM inside _summarize must be
+        # bounded by a budget derived from max_tokens -- proving the fix
+        # bounds what gets sent, not just that the call returned.
+        system_msg, user_msg = captured_payload["payload"]
+        sent_tokens = count_tokens(system_msg["content"]) + count_tokens(user_msg["content"])
+        summary_response_reserve = 2000
+        assert sent_tokens <= max_tokens - summary_response_reserve, (
+            f"summarize payload ({sent_tokens} tokens) exceeds the budget "
+            f"derived from max_tokens={max_tokens}"
+        )
+
+        # Documentary: content-only sizing of the same messages radically
+        # understates the real payload -- this is the blind spot that lets
+        # reasoning_content-heavy channels overflow undetected.
+        sent_messages = json.loads(user_msg["content"])
+        content_only = sum(count_tokens(m.get("content") or "") for m in sent_messages)
+        assert content_only < sent_tokens / 2, (
+            "content-only sizing should badly understate the real, "
+            "reasoning_content-inclusive payload size"
         )

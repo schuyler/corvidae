@@ -879,7 +879,7 @@ class TestGroupCPersistence:
         # Patch _summarize to return a canned summary without making an LLM call.
         # This keeps the side_effect list deterministic: one response per user message,
         # no ordering dependency on when compaction happens to trigger.
-        async def fake_summarize(self, messages, prior_summaries=None):
+        async def fake_summarize(self, messages, prior_summaries=None, max_tokens=None):
             return "test summary"
 
         # We need >5 messages to trigger compaction.
@@ -1055,27 +1055,31 @@ class TestGroupDMultiChannel:
         # Build a custom harness with calibrated max_context_tokens to trigger
         # compaction exactly at the 6th user message (phase 3), not before.
         #
-        # Token math (count_tokens mocked to return len(text)):
+        # Token math (message sizing is the JSON-serialized visible message
+        # dict, e.g. {"role": "user", "content": "..."}; count_tokens is
+        # mocked to return len(text) so this is deterministic):
         #   system_prompt = "You are a test agent." = 21 chars/tokens
-        #   long_text = "a_msg_" + "x"*50 = 56 chars/tokens per user msg
-        #   assistant response = "a response" = 10 chars/tokens per assistant msg
+        #   long_text = "a_msg_" + "x"*50 = 56 content chars, but 87 tokens
+        #     once JSON-serialized as a full message dict
+        #   assistant response = "a response" = 10 content chars, but 46
+        #     tokens once JSON-serialized as a full message dict
         #
         #   After 5 round-trips (10 msgs):
-        #     tokens = 21 + 5*56 + 5*10 = 351
+        #     tokens = 21 + 5*87 + 5*46 = 686
         #
         #   After 6th user msg appended (11 msgs, phase 3):
-        #     tokens = 21 + 6*56 + 5*10 = 407
+        #     tokens = 21 + 6*87 + 5*46 = 773
         #
-        #   With max_context_tokens=500, threshold = 0.8*500 = 400:
-        #     351 < 400 → no compaction after phase 1 ✓
-        #     407 > 400 AND len(msgs)=11 > 5 → compaction fires in phase 3 ✓
+        #   With max_context_tokens=900, threshold = 0.8*900 = 720:
+        #     686 < 720 → no compaction after phase 1 ✓
+        #     773 > 720 AND len(msgs)=11 > 5 → compaction fires in phase 3 ✓
         #
         # count_tokens is mocked to return len(text) for deterministic results
         # regardless of the actual tiktoken encoding used.
         config = make_config(extra={
             "agent": {
                 "system_prompt": "You are a test agent.",
-                "max_context_tokens": 500,
+                "max_context_tokens": 900,
             },
         })
         h = await _build_harness(config)
@@ -1135,17 +1139,25 @@ class TestGroupDMultiChannel:
 
         long_text = "a_msg_" + ("x" * 50)
 
-        async def fake_summarize(self_inner, messages, prior_summaries=None):
+        async def fake_summarize(self_inner, messages, prior_summaries=None, max_tokens=None):
             return "channel A summary"
 
+        import json as _json
+
+        def _message_tokens(msg: dict) -> int:
+            # Mirrors message_tokens(): JSON length of the visible (non
+            # "_"-prefixed) message dict, with count_tokens mocked to len(t).
+            visible = {k: v for k, v in msg.items() if not k.startswith("_")}
+            return len(_json.dumps(visible))
+
         with patch("corvidae.context.count_tokens", side_effect=lambda t: len(t)), \
-             patch("corvidae.compaction.count_tokens", side_effect=lambda t: len(t)), \
+             patch("corvidae.compaction.message_tokens", side_effect=_message_tokens), \
              patch.object(CompactionPlugin, "_summarize", fake_summarize):
             # Phase 1: Build up channel A's conversation history (5 round-trips).
             # After 5 user messages + 5 assistant responses, the token estimate
-            # is 351 tokens (mocked as len(text)), which is below the 400-token
-            # threshold (80% of 500).
-            # The 6th message (phase 3) pushes it to 407 tokens and triggers compaction.
+            # is 686 tokens (JSON-serialized message size, mocked as len(text)),
+            # which is below the 720-token threshold (80% of 900).
+            # The 6th message (phase 3) pushes it to 773 tokens and triggers compaction.
             for i in range(5):
                 await h.pm.ahook.on_message(
                     channel=chan_a, sender="user", text=long_text
