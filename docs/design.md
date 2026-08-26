@@ -1391,6 +1391,7 @@ dependency and the plugin that declared it. Runs once at startup.
 Agent               → "registry", "task", "llm", "tools"
 CLIPlugin           → "registry"    (ChannelRegistry)
 IRCPlugin           → "registry"    (ChannelRegistry)
+AcpPlugin           → "registry"    (ChannelRegistry)
 SubagentPlugin      → "llm", "tools"
 CompactionPlugin    → "llm"         (LLMPlugin)
 ThinkingPlugin      → "registry"    (ChannelRegistry)
@@ -1441,7 +1442,8 @@ corvidae/
 ├── main.py               # daemon entry point
 ├── channels/
 │   ├── cli.py            # CLIPlugin
-│   └── irc.py            # IRCPlugin
+│   ├── irc.py            # IRCPlugin
+│   └── acp.py            # AcpPlugin + corvidae acp command
 ├── commands/
 │   └── redact.py         # corvidae redact CLI (operator-only)
 └── tools/
