@@ -332,20 +332,32 @@ async def dispatch_tool_call(
             error=True,
         )
 
-    # Step 4: Execute the tool
-    tool_fn = tools[fn_name]
+    # Step 4: Execute the tool (ACP / overrides go through ToolBackend; else inline)
+    from corvidae.tools.backends import resolve_tool_backend
+
+    backend = resolve_tool_backend(
+        channel,
+        tools,
+        tool_call_id=call_id,
+        task_queue=task_queue,
+        max_result_chars=max_result_chars,
+    )
     latency_ms: float | None = None
     error = False
     tool_start = time.monotonic()
     try:
-        content = await execute_tool_call(
-            tool_fn,
-            args,
-            channel=channel,
-            tool_call_id=call_id,
-            task_queue=task_queue,
-            max_result_chars=max_result_chars,
-        )
+        if backend is not None:
+            content = await backend.run(fn_name, args, channel)
+        else:
+            tool_fn = tools[fn_name]
+            content = await execute_tool_call(
+                tool_fn,
+                args,
+                channel=channel,
+                tool_call_id=call_id,
+                task_queue=task_queue,
+                max_result_chars=max_result_chars,
+            )
         latency_ms = round((time.monotonic() - tool_start) * 1000, 1)
         logger.info(
             "tool call result",
@@ -364,7 +376,7 @@ async def dispatch_tool_call(
         content = f"Error: tool '{fn_name}' failed"
         error = True
 
-    # Step 5: Fire process_tool_result hook (only when execute_tool_call was invoked)
+    # Step 5: Fire process_tool_result hook (only when the tool was invoked)
     if pm is not None:
         hook_result = await pm.ahook.process_tool_result(
             tool_name=fn_name, result=content, channel=channel,

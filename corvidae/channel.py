@@ -21,6 +21,9 @@ from time import time
 from typing import TYPE_CHECKING
 
 from corvidae.fork import parse_forks_config
+# Transport/session metadata parked on Channel.runtime_overrides — never
+# merge into resolved ChannelConfig or forward to the LLM request body.
+RUNTIME_META_KEYS = frozenset({"cwd", "tool_backend"})
 
 if TYPE_CHECKING:
     from corvidae.context import ContextWindow
@@ -143,7 +146,10 @@ class ChannelConfig:
         }
 
         if runtime_overrides:
-            resolved.update(runtime_overrides)
+            # Skip transport metadata (cwd, tool_backend) — not config fields.
+            resolved.update(
+                {k: v for k, v in runtime_overrides.items() if k not in RUNTIME_META_KEYS}
+            )
 
         # Normalize the reasoning policy to the enum after every layer has
         # applied, so a bad value from any layer raises here.
