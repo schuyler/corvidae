@@ -19,7 +19,7 @@ Three layers:
    dispatch: one LLM call per queue item, tool calls dispatched as
    background tasks, results arrive as notifications.
 
-3. **Transport plugins** — IRC, CLI. Each transport converts
+3. **Transport plugins** — IRC, CLI, ACP (stdio). Each transport converts
    platform-specific messages to/from a common Channel abstraction.
 
 ```
@@ -1235,6 +1235,31 @@ backoff retry (10s→300s cap). Joins configured channels on connect.
 Forwards both channel and private messages. `split_message` splits
 outgoing text into 400-byte chunks preserving paragraph/sentence
 boundaries.
+
+### ACP (`channels/acp.py`)
+
+`AcpPlugin` + `corvidae acp` — Agent Client Protocol **v1** over stdio for
+editors (bb `customAcpAgents`, Zed, …). Requires the optional
+`agent-client-protocol` extra (`uv sync --extra acp`).
+
+**Process model.** ACP is a dedicated subprocess (`corvidae acp`), not
+attached to long-lived `corvidae serve`. The command sets
+`config["_acp_mode"]`; without that flag the plugin is inert (no stdin/
+stdout ownership under `serve` / `cli`). Stdout is ACP JSON-RPC only;
+logs go to stderr or a log file.
+
+**Channels.** Sessions are `acp:<sessionId>`. `session/new` stores the
+client `cwd` on `channel.runtime_overrides["cwd"]` (transport metadata,
+not LLM config). Tool calls on ACP channels go through a swappable
+`ToolBackend` (`LocalToolBackend` by default; see
+`corvidae/tools/backends.py`).
+
+**Hooks.** Every `send_*` broadcast-filters with
+`channel.matches_transport("acp")`. `session/prompt` completes with
+`end_turn` after tool drain; `session/cancel` yields `cancelled`.
+
+Design of record: `plans/acp-transport-design.md`. Gate B harness:
+`tests/test_acp_conformance.py`.
 
 ## Configuration
 

@@ -79,6 +79,11 @@ agent:
 #     - "#general"
 #     - "#random"
 
+# ACP stdio transport (optional — does not enable ACP by itself).
+# Start with: uv sync --extra acp && uv run corvidae acp
+# For bb: customAcpAgents → `uv run corvidae acp` (see docs/plugin-guide.md).
+# acp: {}
+
 # Logging (optional)
 # logging:
 #   level: INFO                # DEBUG | INFO | WARNING | ERROR | CRITICAL

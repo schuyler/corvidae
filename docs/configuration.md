@@ -249,6 +249,26 @@ The `irc` section is optional. If absent, `IRCPlugin` does not connect.
 
 ---
 
+## `acp` — ACP stdio transport
+
+The `acp` section is optional and does not enable ACP by itself. ACP mode
+starts only via `corvidae acp`, which sets an internal `_acp_mode` flag.
+Install the SDK with `uv sync --extra acp`.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| *(reserved)* | — | — | Future agent capability / logging hints. Omit the block until needed. |
+
+Channel ids use `acp:<sessionId>`. Per-session `cwd` from `session/new` is
+stored on the channel as transport metadata (not merged into LLM request
+bodies).
+
+**bb:** register Corvidae under `customAcpAgents` with command
+`uv run corvidae acp` (from a checkout with the `acp` extra). See
+[plugin-guide.md](plugin-guide.md#acp-transport) for the smoke checklist.
+
+---
+
 ## `channels` — per-channel overrides
 
 Keys are `transport:scope` identifiers (e.g., `irc:#general`, `cli:local`). Each value is a mapping of overrides applied on top of `agent` defaults. Any key absent from the channel block uses the `agent`-level default.
