@@ -32,7 +32,7 @@ def _package_version() -> str:
 
 
 class CorvidaeAcpAgent:
-    """ACP Agent adapter (initialize only in WP-A0.2; sessions in WP-A1.x)."""
+    """ACP Agent adapter bridging JSON-RPC sessions to Corvidae channels."""
 
     def __init__(
         self,
@@ -82,6 +82,68 @@ class CorvidaeAcpAgent:
             auth_methods=[],
         )
 
+    async def new_session(
+        self,
+        cwd: str,
+        additional_directories: list[str] | None = None,
+        mcp_servers: list[Any] | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Create an ``acp:<sessionId>`` channel and record the workspace cwd."""
+        from uuid import uuid4
+
+        from acp import NewSessionResponse
+
+        if self._plugin is None or self._plugin._registry is None:
+            raise RuntimeError("CorvidaeAcpAgent.new_session requires an AcpPlugin with registry")
+
+        session_id = uuid4().hex
+        channel = self._plugin._registry.get_or_create("acp", session_id)
+        channel.runtime_overrides["cwd"] = cwd
+        return NewSessionResponse(session_id=session_id)
+
+    async def prompt(
+        self,
+        session_id: str,
+        prompt: list[Any],
+        **kwargs: Any,
+    ) -> Any:
+        """Enqueue user text via on_message and wait for the turn to finish."""
+        from acp import PromptResponse
+
+        if self._plugin is None or self._plugin._registry is None:
+            raise RuntimeError("CorvidaeAcpAgent.prompt requires an AcpPlugin with registry")
+
+        channel = self._plugin._registry.get(f"acp:{session_id}")
+        if channel is None:
+            raise RuntimeError(f"unknown ACP session {session_id!r}")
+
+        text = _flatten_prompt_text(prompt)
+        future = self._plugin.begin_prompt(session_id)
+        await self._plugin.pm.ahook.on_message(
+            channel=channel,
+            sender="user",
+            text=text,
+        )
+        return await future
+
+    async def cancel(self, session_id: str, **kwargs: Any) -> None:
+        """Cancel is implemented in WP-A1.2; no-op stub for now."""
+        return None
+
+
+def _flatten_prompt_text(prompt: list[Any]) -> str:
+    """Join text content blocks from an ACP prompt into one user message."""
+    parts: list[str] = []
+    for block in prompt:
+        if isinstance(block, dict):
+            text = block.get("text") or ""
+        else:
+            text = getattr(block, "text", None) or ""
+        if text:
+            parts.append(str(text))
+    return "\n".join(parts)
+
 
 class AcpPlugin(CorvidaePlugin):
     """Transport plugin for Agent Client Protocol sessions (``acp:<sessionId>``)."""
@@ -92,6 +154,30 @@ class AcpPlugin(CorvidaePlugin):
         self._task: asyncio.Task | None = None
         self._conn: Any = None
         self._registry = None
+        # session_id -> Future[PromptResponse] for the in-flight ACP prompt (A9).
+        self._active_prompts: dict[str, asyncio.Future] = {}
+        # (channel.id, tool_name) -> synthetic toolCallId for ACP updates.
+        self._tool_call_ids: dict[tuple[str, str], str] = {}
+
+    def begin_prompt(self, session_id: str) -> asyncio.Future:
+        """Register a Future that send_message resolves when the turn is idle."""
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future = loop.create_future()
+        self._active_prompts[session_id] = future
+        return future
+
+    def _complete_prompt_if_idle(self, channel) -> None:
+        """Resolve the active prompt when no tool calls remain for this session."""
+        from acp import PromptResponse
+
+        session_id = channel.scope
+        future = self._active_prompts.get(session_id)
+        if future is None or future.done():
+            return
+        if channel.pending_tool_call_ids:
+            return
+        future.set_result(PromptResponse(stop_reason="end_turn"))
+        self._active_prompts.pop(session_id, None)
 
     @hookimpl
     async def on_init(self, pm, config: dict) -> None:
@@ -129,25 +215,89 @@ class AcpPlugin(CorvidaePlugin):
             logger.exception("ACP stdio server exited with error")
             raise
 
+    async def _session_update(self, channel, update: Any) -> None:
+        """Send a session/update if we have a live ACP connection."""
+        if self._conn is None:
+            logger.debug("AcpPlugin: no ACP connection for session_update")
+            return
+        await self._conn.session_update(session_id=channel.scope, update=update)
+
     @hookimpl
     async def send_message(
         self, channel, text: str, latency_ms: float | None = None
     ) -> None:
-        """Forward assistant text to the ACP client for acp channels only."""
+        """Forward final assistant text and complete the ACP prompt when idle."""
         # Broadcast-filter: ignore other transports (A11).
         if not channel.matches_transport("acp"):
             return
-        # Session/prompt streaming lands in WP-A1.1; filter is enough for A0.2.
         if self._conn is None:
             logger.debug("AcpPlugin.send_message: no ACP connection yet")
+            # Still allow tests / prompt completion without a live client.
+            self._complete_prompt_if_idle(channel)
             return
         from acp import text_block, update_agent_message
 
-        session_id = channel.scope
-        await self._conn.session_update(
-            session_id=session_id,
-            update=update_agent_message(text_block(text)),
-        )
+        await self._session_update(channel, update_agent_message(text_block(text)))
+        self._complete_prompt_if_idle(channel)
+
+    @hookimpl
+    async def send_thinking(self, channel, text: str) -> None:
+        """Map reasoning content to agent_thought_chunk updates."""
+        if not channel.matches_transport("acp"):
+            return
+        from acp import update_agent_thought_text
+
+        await self._session_update(channel, update_agent_thought_text(text))
+
+    @hookimpl
+    async def send_progress(self, channel, text: str) -> None:
+        """Map intermediate assistant text to agent_message_chunk updates."""
+        if not channel.matches_transport("acp"):
+            return
+        from acp import text_block, update_agent_message
+
+        await self._session_update(channel, update_agent_message(text_block(text)))
+
+    @hookimpl
+    async def send_tool_status(
+        self,
+        channel,
+        tool_name: str,
+        status: str,
+        args_summary: str | None = None,
+        result_summary: str | None = None,
+    ) -> None:
+        """Map tool lifecycle events to tool_call / tool_call_update."""
+        if not channel.matches_transport("acp"):
+            return
+        from uuid import uuid4
+
+        from acp import start_tool_call, tool_content, text_block, update_tool_call
+
+        key = (channel.id, tool_name)
+        if status == "dispatched":
+            tool_call_id = uuid4().hex
+            self._tool_call_ids[key] = tool_call_id
+            update = start_tool_call(
+                tool_call_id,
+                tool_name,
+                kind="other",
+                status="pending",
+                raw_input=args_summary,
+            )
+            await self._session_update(channel, update)
+        elif status == "completed":
+            tool_call_id = self._tool_call_ids.pop(key, uuid4().hex)
+            content = None
+            if result_summary:
+                content = [tool_content(text_block(result_summary))]
+            update = update_tool_call(
+                tool_call_id,
+                status="completed",
+                raw_output=result_summary,
+                content=content,
+            )
+            await self._session_update(channel, update)
 
     @hookimpl
     async def on_stop(self) -> None:
