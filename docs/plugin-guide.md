@@ -115,6 +115,8 @@ The existing `corvidae` entry point group (for plugins) and the `corvidae.comman
 
 The built-in subcommand `scaffold` is registered by corvidae itself under `corvidae.commands`. Do not register an entry point named `scaffold` in the `corvidae.commands` group — a collision will silently overwrite the built-in command, causing unpredictable behavior.
 
+Built-in `corvidae acp` (from `corvidae.channels.acp:acp_command`) starts an ACP v1 agent on stdio. It boots `Runtime` with `overrides={"_acp_mode": True}` so `AcpPlugin` owns the connection; without that flag the plugin stays inert. Install the optional extra first: `uv sync --extra acp`.
+
 ## Available hooks
 
 ### Lifecycle
@@ -567,6 +569,33 @@ async def resolve_channel(self, channel_id: str) -> Channel | None:
 ```
 
 `SignalPlugin` implements it so an ACI it has not seen since startup still gets its E.164 alias's `ChannelConfig`. IRC and CLI don't need it; the registry fallback is already correct for them. Channels no transport owns (`internal:heartbeat`) also take the fallback, and since every `send_*` hook filters on `matches_transport`, replies there go only to the log and `sessions.db`.
+### ACP transport
+
+`AcpPlugin` (`corvidae` entry point `acp`) speaks Agent Client Protocol v1
+over stdio when launched via `corvidae acp`. It does **not** connect under
+`serve` / `cli` unless `config["_acp_mode"]` is set (only the `acp`
+command does that).
+
+Optional YAML block (all keys optional today; presence is enough to
+document intent):
+
+```yaml
+# acp:
+#   # Reserved for future agentCapabilities / logging hints.
+#   # Mode is not enabled by YAML alone — use `corvidae acp`.
+```
+
+**bb smoke (`customAcpAgents`):**
+
+1. `uv sync --extra acp --extra dev`
+2. Point bb at Corvidae, e.g. command `uv` with args
+   `run --directory /path/to/corvidae corvidae acp` (or a wrapper script).
+3. `bb thread spawn --provider acp-corvidae --prompt "…" ` (provider name
+   per your bb config).
+4. Confirm a reply and any tool rows in the timeline.
+
+Channel ids are `acp:<sessionId>`. Disable the plugin with
+`plugins.disabled: [acp]` if needed.
 
 ## Registration order
 
@@ -580,6 +609,7 @@ core_tools        (CoreToolsPlugin)     — entry point
 cli               (CLIPlugin)           — entry point
 irc               (IRCPlugin)           — entry point
 signal            (SignalPlugin)        — entry point
+acp               (AcpPlugin)           — entry point (inert unless `_acp_mode`)
 task              (TaskPlugin)          — entry point
 subagent          (SubagentPlugin)      — entry point
 mcp               (McpClientPlugin)     — entry point

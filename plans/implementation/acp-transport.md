@@ -13,10 +13,10 @@ for TDD and exception discipline.
 plugin so editors (bb via `customAcpAgents`, Zed, …) can drive it; full v1
 conformance is the destination, bb usability is the first product milestone.
 
-**Status:** PLANNED — Phases 0–1 work packages below are executable
-(signal-transport bar: files, signatures, named red tests). Fill Phase 2+
-only after Phase 1 green. Deferred milestones M-CLIENT-TOOLS / M-REMOTE /
-M-REGISTRY / M-V2 stay in the design until their trigger fires.
+**Status:** PHASE 1 DONE — Phases 0–1 work packages green (Gate B in
+`tests/test_acp_conformance.py`). Pause for review / bb smoke before
+Phase 2. Deferred milestones M-CLIENT-TOOLS / M-REMOTE / M-REGISTRY /
+M-V2 stay in the design until their trigger fires.
 
 If this document and `acp-transport-design.md` disagree, **the design wins** —
 update this file after.
@@ -315,11 +315,11 @@ implement.
 
 ## Docs checklist (before declaring Phase 1 done)
 
-- [ ] `docs/design.md` — ACP transport, channel id form, process model
-- [ ] `docs/plugin-guide.md` — `AcpPlugin`, command registration, inert rules
-- [ ] `docs/configuration.md` + `agent.yaml.example` — `acp:` keys + bb
+- [x] `docs/design.md` — ACP transport, channel id form, process model
+- [x] `docs/plugin-guide.md` — `AcpPlugin`, command registration, inert rules
+- [x] `docs/configuration.md` + `agent.yaml.example` — `acp:` keys + bb
       `customAcpAgents` pointer
-- [ ] `plans/implementation/README.md` — status → in progress / done
+- [x] `plans/implementation/README.md` — status → in progress / done
 
 ## Execution order
 

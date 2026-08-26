@@ -173,6 +173,10 @@ agent:
 #       every: 1d
 #       at: "08:30"
 #       prompt: "Good-morning check-in: ask how they slept and what is on today."
+# ACP stdio transport (optional — does not enable ACP by itself).
+# Start with: uv sync --extra acp && uv run corvidae acp
+# For bb: customAcpAgents → `uv run corvidae acp` (see docs/plugin-guide.md).
+# acp: {}
 
 # Logging (optional)
 # logging:
