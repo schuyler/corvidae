@@ -2317,6 +2317,7 @@ Agent               → "registry", "task", "llm", "tools"
 CLIPlugin           → "registry"    (ChannelRegistry)
 IRCPlugin           → "registry"    (ChannelRegistry)
 WebPlugin           → "registry"    (ChannelRegistry); looks up "agent" and "persistence" lazily
+AcpPlugin           → "registry"    (ChannelRegistry)
 SubagentPlugin      → "llm", "tools"
 CompactionPlugin    → "llm"         (LLMPlugin); soft-uses "agent" for forks
 ThinkingPlugin      → "registry"    (ChannelRegistry)
@@ -2378,6 +2379,7 @@ corvidae/
 │   ├── discord.py        # DiscordPlugin (discord.py gateway transport)
 │   ├── web.py            # WebPlugin (browser chat UI over aiohttp)
 │   ├── web_static/       # its page, script, styles, vendored marked + DOMPurify
+│   ├── acp.py            # AcpPlugin + corvidae acp command
 │   └── split.py          # split_message() — shared outbound chunking
 ├── commands/
 │   └── redact.py         # corvidae redact CLI (operator-only)
