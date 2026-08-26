@@ -231,6 +231,17 @@ class AcpPlugin(CorvidaePlugin):
         except Exception:
             logger.exception("ACP stdio server exited with error")
             raise
+        else:
+            # Client closed the connection — ask Runtime.run() to shut down
+            # (same pattern as CLI EOF).
+            logger.info("ACP client disconnected, initiating shutdown")
+            try:
+                import os
+                import signal
+
+                os.kill(os.getpid(), signal.SIGINT)
+            except OSError:
+                logger.exception("failed to signal shutdown after ACP disconnect")
 
     async def _session_update(self, channel, update: Any) -> None:
         """Send a session/update if we have a live ACP connection."""
