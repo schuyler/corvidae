@@ -177,3 +177,35 @@ class TestAcpSessionsAndPrompt:
         gate.set()
         response = await prompt_task
         assert response.stop_reason == "end_turn"
+
+
+class TestAcpCancel:
+    async def test_cancel_during_prompt_yields_cancelled_stop_reason(self, tmp_path):
+        """cancel resolves an in-flight prompt with stop_reason cancelled."""
+        from acp import text_block
+
+        plugin, _registry, agent = await _init_acp_plugin()
+        created = await agent.new_session(cwd=str(tmp_path))
+        session_id = created.session_id
+
+        async def _fake_on_message(channel, sender: str, text: str) -> None:
+            # Enqueue-style: leave the prompt future pending (tools in flight).
+            channel.pending_tool_call_ids.add("call_1")
+
+        plugin.pm.ahook.on_message = _fake_on_message
+
+        prompt_task = asyncio.create_task(
+            agent.prompt(session_id=session_id, prompt=[text_block("go")])
+        )
+        await asyncio.sleep(0)
+        assert not prompt_task.done()
+
+        await agent.cancel(session_id=session_id)
+        response = await asyncio.wait_for(prompt_task, timeout=2)
+        assert response.stop_reason == "cancelled"
+
+    async def test_cancel_unknown_session_is_safe(self, tmp_path):
+        """cancel on an unknown session_id must not raise."""
+        _plugin, _registry, agent = await _init_acp_plugin()
+        await agent.new_session(cwd=str(tmp_path))
+        await agent.cancel(session_id="does-not-exist")
