@@ -452,7 +452,7 @@ class MemoryPlugin(CorvidaePlugin):
         """
         if not compacted_ids:
             return
-        self._spawn(self._consolidate_range(channel.id, max(compacted_ids)))
+        self._spawn(self._consolidate_range(channel.id, max(compacted_ids), "compaction"))
 
     @hookimpl
     async def on_idle(self) -> None:
@@ -485,7 +485,7 @@ class MemoryPlugin(CorvidaePlugin):
                     last_active = channel.last_active
                 if now - last_active < self._idle_consolidate_after:
                     continue
-                self._spawn(self._consolidate_range(channel_id, max_id))
+                self._spawn(self._consolidate_range(channel_id, max_id, "idle"))
         except Exception:
             logger.warning("idle consolidation scan failed", exc_info=True)
 
@@ -597,7 +597,7 @@ class MemoryPlugin(CorvidaePlugin):
     # The consolidation task (single code path for both triggers)
     # ------------------------------------------------------------------
 
-    async def _consolidate_range(self, channel_id: str, range_end: int) -> None:
+    async def _consolidate_range(self, channel_id: str, range_end: int, trigger: str) -> None:
         """Consolidate message_log rows (watermark, range_end] into one record.
 
         Overlap safety (trap #6): both triggers WILL race to the same
@@ -607,7 +607,7 @@ class MemoryPlugin(CorvidaePlugin):
         task's record.
         """
         attribution_token = set_attribution(
-            stage="consolidation", channel_id=channel_id
+            stage="consolidation", channel_id=channel_id, trigger=trigger
         )
         try:
             db = await self._ensure_schema()
@@ -829,6 +829,7 @@ class MemoryPlugin(CorvidaePlugin):
                     "msg_id_start": rows[0][0],
                     "msg_id_end": rows[-1][0],
                     "embedded": embedding is not None,
+                    "trigger": trigger,
                 },
             )
         except asyncio.CancelledError:

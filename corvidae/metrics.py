@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS usage_log (
     stage TEXT,
     channel_id TEXT,
     correlation_id TEXT,
+    trigger TEXT,
     prompt_tokens INTEGER,
     completion_tokens INTEGER,
     total_tokens INTEGER,
@@ -82,6 +83,7 @@ class MetricsPlugin(CorvidaePlugin):
             "model": model,
             "stage": attribution.get("stage", ""),
             "channel": attribution.get("channel_id", ""),
+            "trigger": attribution.get("trigger", ""),
         }
         # Token metrics: emit only the fields the usage dict actually has.
         if usage:
@@ -141,6 +143,10 @@ class UsageLogPlugin(CorvidaePlugin):
                 await db.execute(
                     "ALTER TABLE usage_log ADD COLUMN cached_tokens INTEGER"
                 )
+            if "trigger" not in columns:
+                await db.execute(
+                    "ALTER TABLE usage_log ADD COLUMN trigger TEXT"
+                )
             await db.commit()
             self._table_ready = True
         return db
@@ -169,9 +175,9 @@ class UsageLogPlugin(CorvidaePlugin):
             usage = usage or {}
             await db.execute(
                 "INSERT INTO usage_log (ts, request_id, role, model, stage, "
-                "channel_id, correlation_id, prompt_tokens, completion_tokens, "
+                "channel_id, correlation_id, trigger, prompt_tokens, completion_tokens, "
                 "total_tokens, cached_tokens, latency_ms, error) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     time.time(),
                     request_id,
@@ -180,6 +186,7 @@ class UsageLogPlugin(CorvidaePlugin):
                     attribution.get("stage"),
                     attribution.get("channel_id"),
                     attribution.get("correlation_id"),
+                    attribution.get("trigger"),
                     usage.get("prompt_tokens"),
                     usage.get("completion_tokens"),
                     usage.get("total_tokens"),

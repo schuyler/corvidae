@@ -391,3 +391,122 @@ class TestEmbedCallSiteKinds:
             f"expected kind='document', got {tracker.embed_kind_calls[0]!r}"
         )
         await db.close()
+
+
+# ---------------------------------------------------------------------------
+# Trigger attribution: which trigger initiated a completed consolidation
+# ---------------------------------------------------------------------------
+
+
+async def drive_compaction_consolidation(memory, persistence, channel):
+    """Seed dialog, run the compaction trigger to completion."""
+    rowids = await seed_dialog(persistence, channel, [
+        ("user", "the weather station keeps dropping off wifi"),
+        ("assistant", "try WIFI_PS_NONE"),
+    ])
+    await memory.on_compaction(
+        channel=channel,
+        summary_msg={"role": "assistant", "content": "[Summary] wifi"},
+        retain_count=0,
+        compacted_ids=rowids,
+    )
+    await memory.wait_for_background_tasks()
+
+
+async def drive_idle_consolidation(memory, persistence, channel, db):
+    """Seed dialog, age it past the idle threshold, run the idle trigger."""
+    await seed_dialog(persistence, channel, [
+        ("user", "old talk"),
+        ("assistant", "old reply"),
+    ])
+    # Timestamps drive inactivity when the channel is not in a registry.
+    await db.execute("UPDATE message_log SET timestamp = timestamp - 4000")
+    await db.commit()
+    await memory.on_idle()
+    await memory.wait_for_background_tasks()
+
+
+def find_consolidated_record(caplog):
+    """Return the single 'memory consolidated' log record."""
+    matches = [
+        record
+        for record in caplog.records
+        if record.getMessage() == "memory consolidated"
+    ]
+    assert len(matches) == 1, (
+        "expected exactly one 'memory consolidated' record; got "
+        f"{[r.getMessage() for r in caplog.records]!r}"
+    )
+    return matches[0]
+
+
+class TestConsolidationTriggerAttribution:
+    """The initiating trigger rides the attribution contextvar in-flight.
+
+    Observed at the summarize call, so it is snapshotted into the hook
+    payloads for that LLM call rather than only appearing after the fact.
+    """
+
+    async def test_compaction_trigger_visible_during_consolidation(self):
+        memory, persistence, stub, channel, db = await build_consolidation_env()
+        try:
+            await drive_compaction_consolidation(memory, persistence, channel)
+
+            assert stub.chat_calls, "consolidation never called the LLM"
+            attribution = stub.chat_calls[0]["attribution"]
+            assert attribution.get("trigger") == "compaction", (
+                f"expected trigger='compaction' in attribution, got {attribution!r}"
+            )
+            # The existing attribution fields must survive alongside it.
+            assert attribution.get("stage") == "consolidation"
+            assert attribution.get("channel_id") == channel.id
+        finally:
+            # aiosqlite holds a non-daemon thread; leaking it wedges the run.
+            await db.close()
+
+    async def test_idle_trigger_visible_during_consolidation(self):
+        memory, persistence, stub, channel, db = await build_consolidation_env()
+        try:
+            await drive_idle_consolidation(memory, persistence, channel, db)
+
+            assert stub.chat_calls, "consolidation never called the LLM"
+            attribution = stub.chat_calls[0]["attribution"]
+            assert attribution.get("trigger") == "idle", (
+                f"expected trigger='idle' in attribution, got {attribution!r}"
+            )
+            assert attribution.get("stage") == "consolidation"
+            assert attribution.get("channel_id") == channel.id
+        finally:
+            await db.close()
+
+
+class TestConsolidationTriggerLogging:
+    """The completion log line names the trigger that initiated the run."""
+
+    async def test_compaction_trigger_named_in_completion_log(self, caplog):
+        memory, persistence, stub, channel, db = await build_consolidation_env()
+        try:
+            with caplog.at_level(logging.INFO, logger="corvidae.memory"):
+                await drive_compaction_consolidation(memory, persistence, channel)
+
+            record = find_consolidated_record(caplog)
+            assert getattr(record, "trigger", None) == "compaction", (
+                f"expected trigger='compaction' on the log record, got "
+                f"{getattr(record, 'trigger', None)!r}"
+            )
+        finally:
+            await db.close()
+
+    async def test_idle_trigger_named_in_completion_log(self, caplog):
+        memory, persistence, stub, channel, db = await build_consolidation_env()
+        try:
+            with caplog.at_level(logging.INFO, logger="corvidae.memory"):
+                await drive_idle_consolidation(memory, persistence, channel, db)
+
+            record = find_consolidated_record(caplog)
+            assert getattr(record, "trigger", None) == "idle", (
+                f"expected trigger='idle' on the log record, got "
+                f"{getattr(record, 'trigger', None)!r}"
+            )
+        finally:
+            await db.close()
