@@ -245,8 +245,9 @@ hooks with the client's role ("main"/"background") and the current
 attribution snapshot.
 
 **Attribution.** `attribution.py` holds a single ContextVar dict
-(`stage`, `channel_id`, `correlation_id`, `meta`). Callers set it at the top
-of a logical operation and reset in a `finally`: the Agent turn loop
+(`stage`, `channel_id`, `correlation_id`, `meta`, plus stage-specific
+extras such as `trigger` on consolidation calls). Callers set it at the
+top of a logical operation and reset in a `finally`: the Agent turn loop
 (`stage="turn"`), CompactionPlugin around its summary call
 (`stage="compaction"`, shadowing the turn), and the subagent work loop
 (`stage="subagent"`). Contextvars snapshot at `asyncio.create_task`
@@ -275,9 +276,11 @@ CREATE TABLE usage_log (
     stage TEXT,
     channel_id TEXT,
     correlation_id TEXT,        -- NULL when the call ran outside any correlated turn
+    trigger TEXT,               -- 'compaction' or 'idle' for consolidation calls, else NULL
     prompt_tokens INTEGER,
     completion_tokens INTEGER,
     total_tokens INTEGER,
+    cached_tokens INTEGER,
     latency_ms REAL,
     error TEXT
 );
@@ -935,7 +938,12 @@ advance in one compare-and-set section. Overlapping triggers on the same
 range discard the loser's record — no duplicates. Embedding failure
 stores the record with `embedded=0` for later backfill; the summary text
 is canonical and vectors are a rebuildable cache. All consolidation LLM
-calls carry `stage="consolidation"` attribution in `usage_log`.
+calls carry `stage="consolidation"` attribution, along with the `trigger`
+that started the run (`"compaction"` or `"idle"`) — set once at
+`_consolidate_range`'s entry, so it rides into the `on_llm_response`
+attribution snapshot for that call, into `MetricsPlugin`'s emitted tags,
+the `usage_log.trigger` column, and the `memory consolidated` completion
+log line.
 
 ### Retrieval (read path)
 
@@ -1439,10 +1447,10 @@ Relative paths resolve against the directory containing `agent.yaml`.
 fixed hand-written order:
 
 1. `ChannelRegistry` is the only manually registered plugin —
-   `self.pm.register(self.registry, name="registry")` (runtime.py:124).
+   `self.pm.register(self.registry, name="registry")` (runtime.py:128).
 2. Every other plugin loads from the `corvidae` setuptools entry-point
    group: `self.pm.load_setuptools_entrypoints("corvidae")`
-   (runtime.py:137), reading `[project.entry-points.corvidae]` in
+   (runtime.py:141), reading `[project.entry-points.corvidae]` in
    `pyproject.toml:34-59`. Names listed in `plugins.disabled` are blocked
    via `pm.set_blocked(name)` before this call, so disabled plugins are
    never instantiated.
@@ -1459,7 +1467,15 @@ plugins that need another plugin's state resolve it lazily via
 `get_dependency`/`on_start` ordering (`trylast=True`), not registration
 sequence.
 
-After entry points load, `validate_dependencies(pm)` runs (runtime.py:146)
+Immediately after entry points load, `Runtime.start()` logs `"plugins
+loaded"` with `loaded` (the sorted names `pm.list_name_plugin()` actually
+returns) and `blocked` (the configured `plugins.disabled` list, verbatim
+— not narrowed to names that matched a real plugin). A misspelled disable
+entry shows up under `blocked` while the plugin it was meant to block
+still shows up under `loaded`; that mismatch is the operator-visible
+signal of the typo. It is not an error and does not stop the daemon.
+
+After entry points load, `validate_dependencies(pm)` runs (runtime.py:159)
 to verify every plugin's `depends_on` set names a registered plugin.
 Startup aborts with `RuntimeError` if any dependency is missing.
 

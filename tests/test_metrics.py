@@ -22,6 +22,9 @@ class _MetricsRecorder:
 
 USAGE = {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120}
 ATTRIBUTION = {"stage": "turn", "channel_id": "irc:#general"}
+CONSOLIDATION_ATTRIBUTION = {
+    "stage": "consolidation", "channel_id": "irc:#general", "trigger": "compaction",
+}
 
 
 async def _fire_response(pm, *, usage=USAGE, error=None, attribution=ATTRIBUTION,
@@ -67,6 +70,7 @@ class TestMetricsPlugin:
                 "model": "m1",
                 "stage": "turn",
                 "channel": "irc:#general",
+                "trigger": "",
             }
         assert "llm.errors" not in by_name
 
@@ -100,6 +104,13 @@ class TestMetricsPlugin:
         _, _, tags = recorder.events[0]
         assert tags["stage"] == ""
         assert tags["channel"] == ""
+
+    async def test_consolidation_trigger_carried_into_tags(self):
+        pm, recorder = await self._setup()
+        await _fire_response(pm, attribution=CONSOLIDATION_ATTRIBUTION)
+
+        _, _, tags = recorder.events[0]
+        assert tags["trigger"] == "compaction"
 
     async def test_broadcast_reaches_two_consumers(self):
         from corvidae.metrics import MetricsPlugin
@@ -200,6 +211,43 @@ class TestUsageLogPlugin:
             row = await cursor.fetchone()
 
         assert row == (None,)
+
+    async def test_trigger_written_from_attribution(self, db):
+        pm, plugin = await self._setup(db)
+        await _fire_response(
+            pm, request_id="req-trigger", attribution=CONSOLIDATION_ATTRIBUTION
+        )
+
+        async with db.execute(
+            "SELECT trigger FROM usage_log WHERE request_id = ?",
+            ("req-trigger",),
+        ) as cursor:
+            row = await cursor.fetchone()
+
+        assert row == ("compaction",)
+
+    async def test_table_predating_trigger_column_is_upgraded_in_place(self, db):
+        """A usage_log table created before the trigger column existed gets
+        the column added on next write, with prior rows preserved."""
+        from corvidae.metrics import USAGE_LOG_DDL
+
+        old_ddl = USAGE_LOG_DDL.replace("    trigger TEXT,\n", "")
+        await db.execute(old_ddl)
+        await db.execute(
+            "INSERT INTO usage_log (ts, request_id, role, model) "
+            "VALUES (1.0, 'req-old', 'main', 'm1')"
+        )
+        await db.commit()
+
+        pm, plugin = await self._setup(db)
+        await _fire_response(pm, request_id="req-new", attribution=CONSOLIDATION_ATTRIBUTION)
+
+        async with db.execute(
+            "SELECT request_id, trigger FROM usage_log ORDER BY id"
+        ) as cursor:
+            rows = await cursor.fetchall()
+
+        assert rows == [("req-old", None), ("req-new", "compaction")]
 
 
 class TestMetricsJsonlPlugin:

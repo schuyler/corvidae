@@ -13,6 +13,7 @@ Patch targets:
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import signal
 import tempfile
@@ -1176,3 +1177,117 @@ class TestConfigMergeSemantics:
             assert config["logging"]["file"] == "important.log"
         finally:
             os.unlink(config_path)
+
+
+# ---------------------------------------------------------------------------
+# Section 7 — Startup plugin-set log line
+# ---------------------------------------------------------------------------
+
+
+def _find_plugin_log_record(caplog) -> logging.LogRecord:
+    """Return the single 'plugins loaded' record captured during startup."""
+    matches = [
+        record
+        for record in caplog.records
+        if record.getMessage() == "plugins loaded"
+    ]
+    assert len(matches) == 1, (
+        "expected exactly one 'plugins loaded' startup log record; got "
+        f"{[r.getMessage() for r in caplog.records]!r}"
+    )
+    return matches[0]
+
+
+async def _start_with_plugin_set(
+    config_data: dict, loaded_names: list[str], caplog
+) -> logging.LogRecord:
+    """Run Runtime.start() with a PM reporting loaded_names; return the log record.
+
+    The plugin manager is mocked, so the loaded set is whatever the test
+    declares — which is what lets the typo case assert a name under
+    'blocked' while the plugin it was meant to disable is still loaded.
+    """
+    from corvidae.runtime import Runtime
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        yaml.dump(config_data, f)
+        config_path = f.name
+
+    try:
+        mock_pm, mock_agent = _make_mock_pm_and_agent()
+        mock_pm.list_name_plugin.return_value = [
+            (name, MagicMock()) for name in loaded_names
+        ]
+
+        with patch(
+            "corvidae.runtime.create_plugin_manager", return_value=mock_pm
+        ), patch("corvidae.runtime.validate_dependencies"), patch(
+            "corvidae.runtime.configure_logging"
+        ):
+            with caplog.at_level(logging.INFO, logger="corvidae.runtime"):
+                rt = Runtime(config_path=config_path)
+                await rt.start()
+
+        # Startup must have run to completion for the record to mean anything.
+        mock_agent.on_start.assert_awaited_once()
+        return _find_plugin_log_record(caplog)
+    finally:
+        os.unlink(config_path)
+
+
+class TestStartupPluginSetLogging:
+    """Startup logs the plugin set in effect and the configured disable list."""
+
+    async def test_logs_loaded_plugins_and_configured_disable_list(self, caplog):
+        """The startup line names every loaded plugin and the disabled config."""
+        config_data = {
+            "llm": {"main": {"base_url": "http://localhost:8080", "model": "m"}},
+            "plugins": {"disabled": ["compaction", "critique"]},
+        }
+        # The PM reports the set that survived blocking.
+        record = await _start_with_plugin_set(
+            config_data, ["registry", "memory", "agent", "llm"], caplog
+        )
+
+        assert list(record.loaded) == ["agent", "llm", "memory", "registry"], (
+            f"expected the sorted loaded plugin names, got {record.loaded!r}"
+        )
+        assert list(record.blocked) == ["compaction", "critique"], (
+            f"expected the configured plugins.disabled list, got {record.blocked!r}"
+        )
+
+    async def test_logs_empty_disable_list_when_config_omits_it(self, caplog):
+        """With no plugins.disabled key the line still reports an empty list."""
+        config_data = {
+            "llm": {"main": {"base_url": "http://localhost:8080", "model": "m"}},
+        }
+        record = await _start_with_plugin_set(
+            config_data, ["agent", "registry"], caplog
+        )
+
+        assert list(record.loaded) == ["agent", "registry"]
+        assert list(record.blocked) == []
+
+    async def test_misspelled_disable_name_is_visible_against_loaded_set(
+        self, caplog
+    ):
+        """A disable name matching no plugin shows up verbatim under 'blocked'.
+
+        The plugin it was meant to disable is still present under 'loaded',
+        which is what makes the typo legible rather than a silent no-op.
+        Startup itself must complete normally.
+        """
+        config_data = {
+            "llm": {"main": {"base_url": "http://localhost:8080", "model": "m"}},
+            "plugins": {"disabled": ["compation"]},  # typo for "compaction"
+        }
+        record = await _start_with_plugin_set(
+            config_data, ["agent", "compaction", "registry"], caplog
+        )
+
+        assert "compation" in record.blocked, (
+            f"the operator's configured name must appear verbatim; got {record.blocked!r}"
+        )
+        assert "compaction" in record.loaded, (
+            f"the real plugin is still loaded and must show it; got {record.loaded!r}"
+        )

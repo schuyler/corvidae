@@ -170,7 +170,7 @@ async def run_live_evaluation(args) -> None:
                 segments.setdefault(channel_id, []).append(cursor.lastrowid)
         await db.commit()
         for channel_id, ids in segments.items():
-            await memory_plugin._consolidate_range(channel_id, max(ids))
+            await memory_plugin._consolidate_range(channel_id, max(ids), "eval")
         await memory_plugin.wait_for_background_tasks()
         print(f"   ingested {sum(len(v) for v in segments.values())} messages "
               f"across {len(segments)} channels via consolidation")

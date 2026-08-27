@@ -223,13 +223,20 @@ wholesale. Observer failures are logged and never break the LLM call.
 `attribution` is a snapshot of `corvidae.attribution.get_attribution()` —
 a contextvar dict describing what the current code path is doing on whose
 behalf. Built-in callers set `stage` (`"turn"`, `"compaction"`,
-`"subagent"`) and `channel_id`; the dict is open for plugin-defined fields.
-Set it around a logical operation and always reset in a `finally`:
+`"subagent"`, `"consolidation"`) and `channel_id`; the dict is open for
+plugin-defined fields. `MemoryPlugin`'s consolidation stage adds `trigger`
+(`"compaction"` or `"idle"`), naming which of the two consolidation
+triggers is driving the current `on_llm_request`/`on_llm_response` pair —
+a plugin consuming the attribution snapshot on a `stage="consolidation"`
+call can rely on `trigger` being present. Set it around a logical
+operation and always reset in a `finally`:
 
 ```python
 from corvidae.attribution import reset_attribution, set_attribution
 
-token = set_attribution(stage="consolidation", channel_id=channel.id)
+token = set_attribution(
+    stage="consolidation", channel_id=channel.id, trigger="idle"
+)
 try:
     await client.chat(messages)
 finally:
@@ -535,6 +542,14 @@ Names must match the entry-point name from `[project.entry-points.corvidae]` in 
 Only entry-point plugins can be disabled this way. Manually registered plugins (e.g., `ChannelRegistry`) cannot be blocked via config.
 
 This is a startup-time mechanism. It does not interact with hot-reload.
+
+Right after entry points load, `Runtime.start()` logs a `"plugins loaded"`
+line with `loaded` (the sorted names that actually registered) and
+`blocked` (the `plugins.disabled` list from config, verbatim). Compare the
+two to confirm a disable took effect: a misspelled name lands in
+`blocked` while the plugin it was meant to block still appears in
+`loaded` — `pm.set_blocked` on a name that matches nothing is silent
+otherwise.
 
 ## Hook exception safety
 

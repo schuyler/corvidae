@@ -140,6 +140,15 @@ class Runtime:
         # 8. Load entry-point plugins
         self.pm.load_setuptools_entrypoints("corvidae")
 
+        # 8a. Record the effective plugin set: what actually loaded and what
+        # the operator asked to disable, verbatim (a typo must still show up
+        # here even though the plugin it was meant to block still loaded).
+        loaded_names = sorted(name for name, _plugin in self.pm.list_name_plugin())
+        logger.info(
+            "plugins loaded",
+            extra={"loaded": loaded_names, "blocked": disabled_plugins},
+        )
+
         # 8b. Guard the full, real plugin set against pluggy's silent-drop
         #     arg-binding bug class. create_plugin_manager() only checks the
         #     seed hooks; the real entry-point plugins are not registered

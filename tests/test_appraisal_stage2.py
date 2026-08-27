@@ -564,7 +564,7 @@ class TestAppraisalPrior:
         )
         await outcome.update_exchange("x2", message_rowid=rowids[1])
 
-        await memory._consolidate_range(channel.id, rowids[-1])
+        await memory._consolidate_range(channel.id, rowids[-1], "test")
 
         async with db.execute(
             "SELECT importance, valence FROM memory WHERE channel_id = ?",

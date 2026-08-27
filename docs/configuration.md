@@ -62,6 +62,8 @@ channels:
 
 `agent.minimal.yaml.example` disables `memory`, `memory_tools`, `funnel`, `appraisal`, `critique`, and `outcome_log` — the cognition plugin set — leaving the core agent loop, multi-turn tool calling, compaction, and persistence/restart recovery intact. See the [Plugin Guide](plugin-guide.md#plugin-disable) for the hook-level mechanics.
 
+A misspelled entry is not an error — `pm.set_blocked` on a name that matches nothing simply blocks nothing, and the daemon starts normally with the plugin still loaded. To confirm a disable took effect, check the `"plugins loaded"` line the daemon logs at startup: it carries `loaded` (the plugins that actually registered) and `blocked` (this list, verbatim). A name present in `blocked` but still showing up in `loaded` is a typo.
+
 ---
 
 ## `llm` — LLM backend
