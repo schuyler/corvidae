@@ -6,7 +6,9 @@
 # Usage: restore.sh <snapshot.tgz | snapshot-timestamp>
 set -euo pipefail
 
-BUSTER_ROOT="$HOME/code/llm/buster"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[ -f "$SCRIPT_DIR/config.local.sh" ] && source "$SCRIPT_DIR/config.local.sh"
+BUSTER_ROOT="${BUSTER_ROOT:-$HOME/code/llm/buster}"
 STATE_DIR="$BUSTER_ROOT/state"
 SNAPSHOT_DIR="$BUSTER_ROOT/snapshots"
 

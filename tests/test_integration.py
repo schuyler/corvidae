@@ -658,7 +658,7 @@ class TestGroupBRoundTrip:
                 )
 
         # I2 pin (requirement A): the third chat() call is the tool-result
-        # turn — the one that returned 400 on buster-host. Its prompt must not
+        # turn — the one that returned 400 on the harness host. Its prompt must not
         # end on an assistant message (llama.cpp reads a trailing
         # assistant message as a prefill and rejects it under
         # enable_thinking), and I1 adjacency must still hold.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Buster harness — buster-host-side entry point. The single SSH command's target
+# Buster harness — remote-host entry point. The single SSH command's target
 # (harness/run-remote.sh invokes this via ssh). Ensures services are up,
 # snapshots state, runs the probe driver, and writes a self-contained
 # run-report directory. No mid-run cross-network puppeteering.
@@ -9,7 +9,9 @@
 # It never launches, stops, or restarts llama-server.
 set -euo pipefail
 
-BUSTER_ROOT="$HOME/code/llm/buster"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[ -f "$SCRIPT_DIR/config.local.sh" ] && source "$SCRIPT_DIR/config.local.sh"
+BUSTER_ROOT="${BUSTER_ROOT:-$HOME/code/llm/buster}"
 REPO_DIR="$BUSTER_ROOT/repo"
 STATE_DIR="$BUSTER_ROOT/state"
 RUN_DIR="$BUSTER_ROOT/runs/$(date -u +%Y%m%dT%H%M%SZ)"

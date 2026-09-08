@@ -1,0 +1,19 @@
+# Harness host configuration. Copy to harness/config.local.sh and edit.
+#
+# config.local.sh is gitignored: it names a machine on your network, which is
+# nobody else's business and would otherwise end up in a public repo.
+
+# Host the Buster instance runs on, as ssh addresses it (an ssh_config alias
+# is fine, and usually easier than a hostname or IP).
+BUSTER_HOST=buster-host
+
+# Where the instance lives ON THAT HOST: repo checkout, rendered config,
+# sessions.db, run artifacts, snapshots.
+#
+# Write it absolute, as it appears on the Buster host. Do not use $HOME — this
+# file is read on your workstation, so $HOME would expand to your workstation's
+# home and send a path the Buster host does not have.
+#
+# If this is not $HOME/code/llm/buster on the host, put a copy of this file
+# there too — see "One-time setup" in README.md for why.
+BUSTER_ROOT=/path/on/the/buster/host/code/llm/buster

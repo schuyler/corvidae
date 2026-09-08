@@ -37,7 +37,7 @@ the native archive is a single binary but its layout is the upstream's to
 change.
 
 Take the `-Linux-native` build (GraalVM-compiled) rather than the JVM one and
-you need no JRE at all. buster-host has OpenJDK 25 installed anyway; the native
+you need no JRE at all — whatever Java the host happens to have, the native
 build means signal-cli doesn't care.
 
 **Pin the version.** corvidae's JSON-RPC calls are verified against 0.14.7.

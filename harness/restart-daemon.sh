@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 # Stop and restart the buster-daemon screen session, no snapshot taken.
 # Used directly by run.sh (steps 3+5) and shelled out to by the restart
-# probe (P4) mid-run — everything here is local to buster-host, no cross-network
-# puppeteering.
+# probe (P4) mid-run — everything here is local to the Buster host, no
+# cross-network puppeteering.
 #
 # Usage: restart-daemon.sh [daemon-log-path]
 #   daemon-log-path defaults to state/daemon-restart.log so this script
 #   also works as a standalone manual restart outside a harness run.
 set -euo pipefail
 
-BUSTER_ROOT="$HOME/code/llm/buster"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[ -f "$SCRIPT_DIR/config.local.sh" ] && source "$SCRIPT_DIR/config.local.sh"
+BUSTER_ROOT="${BUSTER_ROOT:-$HOME/code/llm/buster}"
 REPO_DIR="$BUSTER_ROOT/repo"
 STATE_DIR="$BUSTER_ROOT/state"
 DAEMON_LOG="${1:-$STATE_DIR/daemon-restart.log}"

@@ -3,7 +3,7 @@
 Pins the maildir-style inbox/outbox protocol, transcript line format, and
 artifact collection described in .claude/plans/shakedown-session-driver.md
 so the implementation is checkable without a live IRC connection, ssh, or
-buster-host. All fixtures are static (fake clocks / precomputed message lists) —
+the harness host. All fixtures are static (fake clocks / precomputed message lists) —
 none of these tests waits on real time, matching the project's concurrency
 caution about tests that could hang once the implementation lands.
 """

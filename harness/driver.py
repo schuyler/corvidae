@@ -9,7 +9,7 @@ Every probe is objectively checkable: planted exact tokens grepped out of
 IRC replies, or mechanical facts read from sessions.db. No LLM-judge
 assertions.
 
-Runs on buster-host, invoked by harness/run.sh after the buster-daemon screen
+Runs on the Buster host, invoked by harness/run.sh after the buster-daemon screen
 session is (re)started. See harness/README.md for prerequisites.
 """
 from __future__ import annotations

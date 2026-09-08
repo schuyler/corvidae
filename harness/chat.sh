@@ -5,7 +5,9 @@
 # leaves it alone and just prints how to join.
 set -euo pipefail
 
-BUSTER_ROOT="$HOME/code/llm/buster"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[ -f "$SCRIPT_DIR/config.local.sh" ] && source "$SCRIPT_DIR/config.local.sh"
+BUSTER_ROOT="${BUSTER_ROOT:-$HOME/code/llm/buster}"
 REPO_DIR="$BUSTER_ROOT/repo"
 STATE_DIR="$BUSTER_ROOT/state"
 
@@ -25,9 +27,9 @@ else
     "$REPO_DIR/harness/restart-daemon.sh" "$STATE_DIR/chat.log"
 fi
 
-cat <<'EOF'
+cat <<EOF
 
-Join Buster: any IRC client -> buster-host:6667 (no password), then /join #chat
+Join Buster: any IRC client -> ${BUSTER_HOST:-this host}:6667 (no password), then /join #chat
 
 Stop the daemon:
   screen -S buster-daemon -X quit

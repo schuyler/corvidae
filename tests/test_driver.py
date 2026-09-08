@@ -120,7 +120,7 @@ async def test_send_and_await_any_reply_advances_on_mismatched_reply_content():
 # C: filler-corpus determinism — the token-dense filler must provably cross
 # the compaction trigger, pinned against the real config and the real token
 # counter so a future filler change that silently stops crossing the
-# threshold fails here instead of on buster-host.
+# threshold fails here instead of on the harness host.
 # ---------------------------------------------------------------------------
 
 

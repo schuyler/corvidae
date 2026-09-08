@@ -1,5 +1,5 @@
 # Buster agent config — minimal profile, IRC-only, empirical-run hardening.
-# Rendered to ~/code/llm/buster/state/agent.yaml by run.sh
+# Rendered to $BUSTER_ROOT/state/agent.yaml by run.sh
 # (sed s/@STATE_DIR@/.../ substitution; state dir: @STATE_DIR@).
 # Relative paths below (session_db, logging.file, metrics_jsonl) resolve
 # against _base_dir, which Runtime sets to this rendered file's own

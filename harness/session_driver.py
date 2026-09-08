@@ -10,11 +10,12 @@ Three modes sharing one maildir-style file protocol (see
 
 `serve` holds one IRC connection to one channel for the whole session and
 drains numbered `inbox/NNN.txt` files one at a time, writing `outbox/NNN.json`
-per turn and appending to `transcript.log`. `send`/`stop` are the buster-host-side
+per turn and appending to `transcript.log`. `send`/`stop` are the remote-host
 halves of harness/session.sh's ssh calls — they never touch IRC directly.
 
-Stdlib-only, Python 3.10-compatible: runs under buster-host's system python3, same
-as driver.py.
+Stdlib-only, Python 3.10-compatible: runs under the harness host's system
+python3, not the project venv, so it cannot import project dependencies —
+same as driver.py.
 """
 from __future__ import annotations
 

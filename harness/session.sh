@@ -9,15 +9,29 @@
 #   harness/session.sh stop  <id>                # stop driver, collect artifacts
 set -euo pipefail
 
-# Remote path setup shared by every verb, evaluated on buster-host (its $HOME, not
-# the Mac's) inside each ssh command body below.
-REMOTE_PREAMBLE='
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$SCRIPT_DIR/config.local.sh" ]; then
+    source "$SCRIPT_DIR/config.local.sh"
+fi
+for v in BUSTER_HOST BUSTER_ROOT; do
+    if [ -z "${!v:-}" ]; then
+        echo "$v is not set. Copy harness/config.local.sh.example to" >&2
+        echo "harness/config.local.sh and fill it in." >&2
+        exit 1
+    fi
+done
+
+# Remote path setup shared by every verb, inside each ssh command body below.
+# BUSTER_ROOT is baked in as a literal because it names a path on the Buster
+# host: re-deriving it from the remote $HOME would break any layout that is
+# not directly under it.
+REMOTE_PREAMBLE="
 set -euo pipefail
-export PATH="$HOME/.local/bin:$PATH"
-BUSTER_ROOT="$HOME/code/llm/buster"
-REPO_DIR="$BUSTER_ROOT/repo"
-STATE_DIR="$BUSTER_ROOT/state"
-'
+export PATH=\"\$HOME/.local/bin:\$PATH\"
+BUSTER_ROOT='$BUSTER_ROOT'
+REPO_DIR=\"\$BUSTER_ROOT/repo\"
+STATE_DIR=\"\$BUSTER_ROOT/state\"
+"
 
 usage() {
     echo "usage: harness/session.sh start ['#channel'] | send <id> <text...> | stop <id>" >&2
@@ -31,7 +45,7 @@ shift
 case "$VERB" in
 start)
     CHANNEL="${1:-#chat}"
-    ssh buster-host "$REMOTE_PREAMBLE"'
+    ssh "$BUSTER_HOST" "$REMOTE_PREAMBLE"'
         if ! screen -list 2>/dev/null | grep -q buster-daemon; then
             echo "buster-daemon is not running -- run harness/chat.sh first" >&2
             exit 1
@@ -49,7 +63,7 @@ send)
     [ $# -ge 2 ] || usage
     ID="$1"
     shift
-    printf '%s' "$*" | ssh buster-host "$REMOTE_PREAMBLE"'
+    printf '%s' "$*" | ssh "$BUSTER_HOST" "$REMOTE_PREAMBLE"'
         python3 "$REPO_DIR/harness/session_driver.py" send \
             --session-dir "$BUSTER_ROOT/sessions/'"$ID"'"
     '
@@ -57,7 +71,7 @@ send)
 stop)
     [ $# -ge 1 ] || usage
     ID="$1"
-    ssh buster-host "$REMOTE_PREAMBLE"'
+    ssh "$BUSTER_HOST" "$REMOTE_PREAMBLE"'
         python3 "$REPO_DIR/harness/session_driver.py" stop \
             --session-dir "$BUSTER_ROOT/sessions/'"$ID"'" --state-dir "$STATE_DIR"
         screen -S "buster-session-'"$ID"'" -X quit >/dev/null 2>&1 || true

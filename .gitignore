@@ -24,3 +24,6 @@ eval_results.json
 
 # local identities / secrets, never committed
 *.local.md
+
+# harness host config — names a machine, never committed
+config.local.sh

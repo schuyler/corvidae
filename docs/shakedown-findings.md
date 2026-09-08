@@ -10,11 +10,11 @@ looked at directly before anyone decides whether it's worth a probe.
 
 This document is the durable record. Per-session artifacts (transcripts,
 `sessions.db` snapshots, `corvidae.log`) live under
-`~/code/llm/buster/sessions/<UTC-ts>/` on buster-host. That tree is
+`$BUSTER_ROOT/sessions/<UTC-ts>/` on the Buster host. That tree is
 harness-owned and disposable — `run.sh` wipes instance state, and the
 directories are not guaranteed to survive a re-provision of the test
-instance. (Buster-host itself is a real machine that runs other things; only
-the buster instance under it is disposable.) This file is what should
+instance. (The host itself is a real machine that runs other things; only
+the Buster instance on it is disposable.) This file is what should
 still be true after those directories are gone.
 
 ## Method
@@ -35,12 +35,12 @@ still be true after those directories are gone.
   as a bounded finding instead.
 - Before driving a session against a channel that hasn't been exercised
   on the currently-running daemon, confirm the channel is actually in the
-  *deployed* `state/agent.yaml` on buster-host, not just committed in
+  *deployed* `state/agent.yaml` on the Buster host, not just committed in
   `harness/buster.yaml.in` — `chat.sh` only renders `agent.yaml` when the
   file is missing, so a template change silently has no effect on a
   long-lived instance until someone re-renders and bounces the daemon.
-- Query `state/sessions.db` directly (the `sqlite3` CLI is installed on
-  buster-host) to verify what actually happened — what a summary retained vs.
+- Query `state/sessions.db` directly on the Buster host to verify what
+  actually happened — what a summary retained vs.
   dropped, whether a message was persisted before a crash — rather than
   inferring it from a reply's content or from latency alone.
 
@@ -133,8 +133,8 @@ Four sessions, run against the cognition profile (minimal profile plus
 `memory`, `memory_tools`, `funnel`, `appraisal`, `critique`, `outcome_log`
 enabled — `subagent`, `mcp`, `cli`, and the `shell` tool stayed disabled,
 Buster-specific hardening rather than part of the cognition profile).
-Pre-flight brought buster-host's checkout up to `f8324f9` (with Schuyler's
-approval), since that commit's `"plugins loaded"` startup log line and
+Pre-flight brought the Buster host's checkout up to `f8324f9`, since
+that commit's `"plugins loaded"` startup log line and
 `usage_log.trigger` attribution are exactly what this campaign's
 verification steps depend on. `#s-compact` already carried 70 messages from
 the minimal-profile campaign (two unrelated prior conversations: a
@@ -264,7 +264,7 @@ calibration fragment has no path into that call.
 
 Sample size is one session and five probes — suggestive, not a settled
 rate. Full message-id-level detail is in
-`~/code/llm/buster/sessions/20260827T033822Z/observations.md` on buster-host.
+`$BUSTER_ROOT/sessions/20260827T033822Z/observations.md` on the Buster host.
 
 ## What's next
 

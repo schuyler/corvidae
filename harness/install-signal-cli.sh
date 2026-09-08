@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Provision signal-cli on buster-host and install the systemd unit that supervises
-# its JSON-RPC daemon. Run on buster-host as root; idempotent.
+# Provision signal-cli on the Buster host and install the systemd unit that
+# supervises its JSON-RPC daemon. Run on the Buster host as root; idempotent.
 #
 #   sudo harness/install-signal-cli.sh
 #
@@ -16,9 +16,10 @@ BIN_LINK="/usr/local/bin/signal-cli"
 DATA_DIR="/var/lib/signal-cli"
 SOCKET_PATH="/run/corvidae/signal.sock"
 # The JSON-RPC socket is writable only by its owner, so this must be the same
-# user corvidae runs as — on buster-host the daemon runs under screen as sderle, not
-# as a dedicated service account. A fresh system user here would own a socket
-# corvidae cannot write to, which fails silently at the first inbound message.
+# user corvidae runs as — on the Buster host the daemon runs under screen as
+# sderle, not as a dedicated service account. A fresh system user here would
+# own a socket corvidae cannot write to, which fails silently at the first
+# inbound message.
 SERVICE_USER="${SERVICE_USER:-sderle}"
 UNIT_PATH="${UNIT_PATH:-/etc/systemd/system/signal-cli.service}"
 

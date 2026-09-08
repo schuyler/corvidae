@@ -1,9 +1,10 @@
-"""RED TDD tests for parameterize-hardcoded-values design.
+"""Limits and buffers come from config, not from constants in the code.
 
-These tests FAIL because production code has not been changed yet.
-They prove the specification is testable before implementation begins.
-
-Design: /Users/sderle/code/sherman/plans/parameterize-hardcoded-values.md
+Each class pins one value a caller can set — shell timeout, web_fetch and
+read_file size caps, compaction thresholds, the chars-per-token estimate,
+tool-result truncation, task queue buffers, IRC chunk size — against the
+default that applies when config is silent. A value that regresses to a
+literal fails here.
 """
 
 import asyncio
