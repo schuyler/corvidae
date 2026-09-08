@@ -232,6 +232,16 @@ printf '{"jsonrpc":"2.0","id":1,"method":"listAccounts"}\n' | nc -U /run/corvida
 A result array naming the bot's number means it's usable. An empty result
 array means up-but-unusable — the daemon is fine, the account isn't there.
 
+**This check is not read-only if corvidae is down or misconfigured.** Under
+`--receive-mode=on-connection`, *any* JSON-RPC client attaching starts the
+receive thread — not just corvidae. If messages are queued because corvidae
+hasn't been connecting (e.g. a missing `signal:` config block), running this
+`nc` command delivers that backlog to `nc` instead of corvidae and acks it to
+the Signal server. It does not come back: JSON-RPC notifications are a
+one-shot push, not stored per-subscriber. Fix the underlying config/connection
+problem first and let corvidae reconnect on its own before probing the socket
+by hand.
+
 ## Troubleshooting
 
 All three of these arrive as ordinary JSON-RPC error responses on a perfectly
