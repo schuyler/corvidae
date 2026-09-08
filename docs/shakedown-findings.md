@@ -10,9 +10,12 @@ looked at directly before anyone decides whether it's worth a probe.
 
 This document is the durable record. Per-session artifacts (transcripts,
 `sessions.db` snapshots, `corvidae.log`) live under
-`~/code/llm/buster/sessions/<UTC-ts>/` on buster-host, which is a disposable,
-harness-owned box — those directories are not guaranteed to survive a
-re-provision. This file is what should still be true after they're gone.
+`~/code/llm/buster/sessions/<UTC-ts>/` on buster-host. That tree is
+harness-owned and disposable — `run.sh` wipes instance state, and the
+directories are not guaranteed to survive a re-provision of the test
+instance. (Buster-host itself is a real machine that runs other things; only
+the buster instance under it is disposable.) This file is what should
+still be true after those directories are gone.
 
 ## Method
 
