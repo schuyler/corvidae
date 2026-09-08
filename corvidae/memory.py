@@ -132,6 +132,32 @@ def _dialog_transcript(messages: list[dict]) -> str:
     )
 
 
+async def fetch_range_rows(
+    db: aiosqlite.Connection, channel_id: str, after_id: int, through_id: int
+) -> list[tuple]:
+    """Raw message_log rows for (after_id, through_id], id-ordered."""
+    async with db.execute(
+        "SELECT id, message, message_type FROM message_log "
+        "WHERE channel_id = ? AND id > ? AND id <= ? ORDER BY id",
+        (channel_id, after_id, through_id),
+    ) as cursor:
+        return await cursor.fetchall()
+
+
+def dialog_from_rows(rows: list[tuple]) -> list[dict]:
+    """The consolidation working set: real user/assistant dialog only."""
+    dialog = []
+    for _rowid, message_json, message_type in rows:
+        if message_type != "message":
+            continue
+        message = json.loads(message_json)
+        content = message.get("content")
+        if message.get("role") in ("user", "assistant") and \
+                isinstance(content, str) and content.strip():
+            dialog.append(message)
+    return dialog
+
+
 def _format_age(seconds: float) -> str:
     """Compact human age for retrieval lines: 'now', '12m', '5h', '3d'."""
     if seconds < 60:
@@ -618,21 +644,8 @@ class MemoryPlugin(CorvidaePlugin):
                 return
 
             # Fetch the working range and keep only real dialog.
-            async with db.execute(
-                "SELECT id, message, message_type FROM message_log "
-                "WHERE channel_id = ? AND id > ? AND id <= ? ORDER BY id",
-                (channel_id, watermark, range_end),
-            ) as cursor:
-                rows = await cursor.fetchall()
-            dialog = []
-            for _rowid, message_json, message_type in rows:
-                if message_type != "message":
-                    continue
-                message = json.loads(message_json)
-                content = message.get("content")
-                if message.get("role") in ("user", "assistant") and \
-                        isinstance(content, str) and content.strip():
-                    dialog.append(message)
+            rows = await fetch_range_rows(db, channel_id, watermark, range_end)
+            dialog = dialog_from_rows(rows)
 
             if not dialog:
                 # Pure CONTEXT/system segments advance the watermark
