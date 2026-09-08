@@ -21,3 +21,6 @@ apluggy
 .superpowers/
 eval_results.json
 .venv/
+
+# local identities / secrets, never committed
+*.local.md

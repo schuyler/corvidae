@@ -116,6 +116,11 @@ signal: rejected message from unauthorized sender 8f2c1c9a-3e21-4b77-9c3f-1a2b3c
 That's your ACI, and you've just confirmed default-deny works. Put the ACI
 (or, more readably, your E.164 number) in `allow:` and restart.
 
+Once derived, record it — `harness/signal-identity.local.md` is gitignored
+and exists for exactly this. Real numbers and ACIs never go in tracked
+files; every identifier in this document and in `agent.yaml.example` is a
+placeholder.
+
 The alternative is to read it straight off the wire, **before** you start the
 daemon:
 
