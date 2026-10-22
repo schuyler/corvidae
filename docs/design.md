@@ -1190,11 +1190,14 @@ async def set_settings(settings: dict, _ctx: ToolContext) -> str
 
 ### Parameters
 
-The `settings` dict accepts:
+The `settings` dict is intended for:
 
 - LLM inference keys: `temperature`, `top_p`, `top_k`, `frequency_penalty`,
   `presence_penalty`, `max_tokens`
 - Framework keys: `max_turns`, `max_context_tokens`, `keep_thinking_in_history`
+- Dotted plugin tunables (`critique.*`, `appraisal.*`; see configuration.md)
+
+Keys are not validated; see the Blocklist note below for what that means.
 
 Pass `null` for a key to clear that override and revert to the static config value.
 
@@ -1214,6 +1217,13 @@ agent:
   immutable_settings:   # keys the agent must not change (system_prompt always added)
     - max_turns
 ```
+
+Note the limit of what this buys: any undotted key that is neither a
+framework key nor blocklisted is forwarded verbatim into the LLM request
+body, where it can override `model` and `messages`, so blocking
+`system_prompt` does not by itself protect the system prompt. Blocklisting
+`messages`, `model`, `tools` and `tool_choice` covers the known cases; see
+[threat-model.md](threat-model.md), finding 1.
 
 ### Persistence
 
@@ -1585,13 +1595,20 @@ results are still pending, the conversation may interleave user
 messages with tool results. The SerialQueue serializes processing (no
 races), but ordering depends on arrival time.
 
-**Shell sandboxing.** The `shell` tool runs commands without any
-sandbox or privilege restriction. This is intentional: Corvidae is a
-personal agent daemon running on the user's own machine, not a
-multi-tenant service. Sandboxing would add complexity while providing
-no security benefit in the single-user deployment model. This would
-need to change before deploying Corvidae in any shared or untrusted
-environment.
+**Tool sandboxing.** The `shell` tool runs commands without any
+sandbox or privilege restriction, and `task_pipeline` (which calls the
+same shell implementation), `read_file`, `write_file`, and `web_fetch`
+are likewise unconfined. This was a scoping decision for the MVP:
+Corvidae is a personal agent daemon on the user's own machine, and
+sandboxing was not a priority for getting the loop working. It still
+matters. The agent reads text it did not write (IRC, web pages, MCP
+results), and an injected instruction runs with the daemon's full
+privilege — the attacker is whoever can post in a channel the bot sits
+in, not another tenant. [threat-model.md](threat-model.md) lays out the
+exposure and an ordered fix list; `tools.disabled` and
+`plugins.disabled` are the current per-deployment valves.
+`harness/buster.yaml.in` is a partially narrowed profile (no subagent,
+no MCP, no `shell`) but still carries `task_pipeline` and `write_file`.
 
 ## Unimplemented
 

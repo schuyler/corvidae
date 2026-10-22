@@ -130,28 +130,40 @@ These values apply to all channels. Per-channel overrides in the `channels` sect
 | `agent.compaction_retention` | float | `0.5` | After compaction, retain messages that fit within `compaction_retention × max_context_tokens` tokens, counting from the most recent. |
 | `agent.min_messages_to_compact` | integer | `5` | Skip compaction if the conversation has this many messages or fewer. |
 | `agent.chars_per_token` | float | `3.5` | **Deprecated.** Accepted for interface and config compatibility. Has no effect on token counting — `count_tokens()` uses the module-level `_FALLBACK_CHARS_PER_TOKEN` constant (3.5) regardless of this value. |
-| `agent.immutable_settings` | list of strings | `[]` | Keys the agent is blocked from changing via the `set_settings` tool. `system_prompt` is always blocked regardless of this list. |
+| `agent.immutable_settings` | list of strings | `[]` | Keys the agent is blocked from changing via the `set_settings` tool. `system_prompt` is always blocked regardless of this list, but see the note under "Runtime-tunable gate parameters" for what that does and does not protect. |
 | `agent.request_logprobs` | boolean | `false` | When `true`, `Agent` merges `"logprobs": true` into every LLM request body. llama-server returns a logprobs envelope (surfaced to plugins via `on_agent_response`); Anthropic-style providers return nothing and the field surfaces as `None`. Static operator-only flag — captured at init and on config reload, not per-channel tunable. |
 
 ### Runtime-tunable gate parameters
 
-The gate/appraisal/critique parameters use dotted keys (e.g. `critique.sample_below_rate`, `gate.engagement.enforce`) and are adjustable at runtime **without a daemon restart**, through two surfaces resolved per-decision by `corvidae.tuning.resolve_tunable` (operator directive 2, 2026-07-06):
+The appraisal/critique parameters use dotted keys (e.g. `critique.sample_below_rate`, `appraisal.probe.budget_ms`) and are adjustable at runtime **without a daemon restart**, through two surfaces resolved per-decision by `corvidae.tuning.resolve_tunable` (operator directive 2, 2026-07-06):
 
 1. **`set_settings` tool** (agent-facing, per-channel) — writes `channel.runtime_overrides`; highest precedence.
 2. **Hot config reload** (operator, global) — edit `agent.yaml`; `ConfigWatcherPlugin` dispatches `on_config_reload` and plugins re-read the dotted path on the next decision.
 
 When neither surface sets a key, the plugin's commented best-guess default applies. Resolution is first-hit-wins: per-channel override → config dotted path → default. Dotted keys never reach the LLM request body — the `extra_body` filter in `agent.py` excludes any key containing a dot.
 
-The persona is allowed to tune its own gates by default — a deliberate operator decision favoring emergence from experience. The per-key safety valve is `agent.immutable_settings`. **Recommended blocklist for multi-speaker channels with untrusted participants:**
+The persona is allowed to tune its own gates by default — a deliberate operator decision favoring emergence from experience. The per-key safety valve is `agent.immutable_settings`.
+
+**Always block**, on every deployment: `messages`, `model`, `tools`, `tool_choice`. These are not tunables; they are undotted keys the LLM request body honors, and they override the conversation itself (see the note below the key list).
+
+**Recommended blocklist for multi-speaker channels with untrusted participants:**
 
 | Key | Why block it |
 |-----|--------------|
 | `critique.provenance.enabled` | The correctness gate — a prompt-injected "stop second-guessing yourself" must not be able to disable the confabulation check. |
 | `critique.sample_below_rate` | The standing experiment's integrity — an agent tuning its own sampling to zero blinds the critique false-negative bound. |
-| `gate.engagement.enforce` | An injected message must not be able to silence or un-silence the agent wholesale. |
-| `gate.send.enforce` | Same rationale as `gate.engagement.enforce`, on the output side. |
+| `critique.prompt.provenance`, `critique.prompt.adversarial`, `critique.prompt.constrained`, `critique.prompt.predictive` | These are the critic's *system prompts*. An agent that can rewrite its own critic's instructions has no critic. |
+| `appraisal.stage2_prompt` | Same shape: the stage-2 appraisal system prompt. |
+| `critique.provenance.weak_score`, `critique.provenance.max_terms` | Setting `max_terms` to 0 disables the provenance gate's second tier outright; setting `weak_score` to 0 stops it firing whenever memory retrieved anything. Either guts the gate without touching `enabled`. |
 
-These are recommendations, not hardcoded blocks: `set_settings` writes are channel-influenceable, which is exactly the persistence-of-influence shape the design polices elsewhere — but two-process discipline (agent tunes, operator audits via the outcome log) is the accepted trade-off, with the blocklist as the per-key valve. This is not the full list of blockable keys — see the `resolve_tunable` call sites in `critique.py` for the complete set.
+These are recommendations, not hardcoded blocks: `set_settings` writes are channel-influenceable, which is exactly the persistence-of-influence shape the design polices elsewhere — but two-process discipline (agent tunes, operator audits via the outcome log) is the accepted trade-off, with the blocklist as the per-key valve.
+
+The complete set of runtime-tunable keys (anything passed to `resolve_tunable`) as of this writing:
+
+- `appraisal.novelty.no_probe_default`, `appraisal.prior.w_novelty`, `appraisal.prior.w_stakes`, `appraisal.prior.w_valence`, `appraisal.probe.budget_ms`, `appraisal.probe.max_tokens`, `appraisal.probe.rank_scale`, `appraisal.stage2_prompt`, `appraisal.weights.commitment`, `appraisal.weights.disagreement`, `appraisal.weights.imperative`, `appraisal.weights.novelty`, `appraisal.weights.question`
+- `critique.lens.ambiguity`, `critique.lens.commitment`, `critique.lens.disagreement`, `critique.lens.neg_valence`, `critique.prompt.<lens>`, `critique.provenance.enabled`, `critique.provenance.max_terms`, `critique.provenance.weak_score`, `critique.sample_below_rate`
+
+Any *dotted* key not on that list is operator-only: it is read once at init or reload, and while `set_settings` can write it into `runtime_overrides`, nothing reads the override. Undotted keys are a different matter: `set_settings` keys *without* a dot are forwarded verbatim into the LLM request body, where they override `model` and `messages` — see [threat-model.md](threat-model.md), finding 1. `immutable_settings` can block the known-dangerous keys (`messages`, `model`, `tools`, `tool_choice`) as a stopgap, but a blocklist cannot be complete; the real fix is an allowlist in code. If you don't need agent self-tuning, `tools.disabled: [set_settings]` removes the surface altogether.
 
 #### `appraisal.*` — stage-1 appraisal
 
@@ -169,7 +181,7 @@ These are recommendations, not hardcoded blocks: `set_settings` writes are chann
 | `appraisal.weights.commitment` | `0.20` | Salience weight for numbers/commitment density. |
 | `appraisal.weights.imperative` | `0.10` | Salience weight for imperative markers (feeds salience only, not the vector). |
 
-*(The `critique.*` tunable keys are not individually tabulated here; see the `resolve_tunable` call sites in `corvidae/critique.py` for the complete set. `gate.*` appears in the blocklist above as a naming convention for engagement/send gating; no plugin currently resolves a `gate.*` key.)*
+*(The `critique.*` tunable keys are not individually tabulated here; the complete list is under "Runtime-tunable gate parameters" above. No plugin resolves a `gate.*` key.)*
 
 ### `agent.context_compact` — removed
 
@@ -232,6 +244,7 @@ Configured by `CoreToolsPlugin`. `tools.max_result_chars` is read by `ToolCollec
 | `tools.web_max_response_bytes` | integer | `50000` | Maximum bytes of HTTP response body returned by `web_fetch`. Content beyond this limit is truncated with `[truncated]`. This limit is independent of `tools.max_result_chars`. |
 | `tools.max_file_read_bytes` | integer | `1048576` | Maximum file size in bytes that `read_file` will return. Files larger than this limit return an error string. Default is 1 MB (1,048,576 bytes). |
 | `tools.web_search_max_results` | integer | `8` | Maximum number of DuckDuckGo results returned by the `web_search` tool. |
+| `tools.disabled` | list of strings | `[]` | Tool names dropped after collection, from any plugin (built-in or MCP). Read by `ToolCollectionPlugin`; this is the single chokepoint, so a disabled tool is absent from the schema the LLM sees and from subagents. Note `task_pipeline` is a separate tool that shells out on its own; disabling `shell` does not disable it. Not hot-reloaded. See [threat-model.md](threat-model.md). |
 | `tools.disabled` | list of strings | `[]` | Tool names dropped after collection, in `ToolCollectionPlugin.rebuild_registry`. The single chokepoint every registered tool passes through — no per-plugin opt-outs. |
 
 ---
@@ -362,7 +375,7 @@ No restart is required for the changes listed below. Changes that require restar
 | `agent.chars_per_token` | Deprecated. The value is reloaded into `Agent` and `CompactionPlugin` for config compatibility, but has no effect on token counting — `count_tokens()` uses the module-level constant. |
 | `daemon.idle_cooldown_seconds` | `Agent` uses the new cooldown on the next idle check. |
 | `agent.request_logprobs` | `Agent` re-reads the flag; takes effect on the next LLM call. |
-| Dotted plugin tunables (`appraisal.*`, `critique.*`, `gate.*`, …) | Resolved per-decision via `corvidae.tuning.resolve_tunable`; a reloaded value applies on the next gate/appraisal/critique decision. Per-channel `set_settings` overrides still take precedence. |
+| Dotted plugin tunables (`appraisal.*`, `critique.*`) | Resolved per-decision via `corvidae.tuning.resolve_tunable`; a reloaded value applies on the next appraisal/critique decision. Per-channel `set_settings` overrides still take precedence. |
 | `agent.immutable_settings` | `RuntimeSettingsPlugin` resets its blocklist and re-applies the new list. Constructor-supplied immutable keys are always retained. |
 | New channel entries in `channels:` | `load_channel_config` registers newly added channels. |
 | `agent` defaults | `ChannelRegistry.agent_defaults` is updated; new channels created after the reload use the new defaults. |

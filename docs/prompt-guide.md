@@ -60,7 +60,7 @@ The lookup priority is:
 2. Agent-level `system_prompt` (fallback)
 3. Built-in default: `"You are a helpful assistant."`
 
-Runtime overrides (via the `set_settings` tool) can change many channel settings, but the system prompt is **always blocked** — it cannot be changed mid-session. See `agent.immutable_settings` in [configuration.md](configuration.md) for related controls.
+Runtime overrides (via the `set_settings` tool) can change many channel settings, and the `system_prompt` key is always blocked. That block is narrower than it sounds: an undotted key such as `messages` is forwarded into the LLM request body and replaces the whole conversation, system prompt included. See [threat-model.md](threat-model.md), finding 1, and `agent.immutable_settings` in [configuration.md](configuration.md) for the stopgap.
 
 ### When it is resolved
 

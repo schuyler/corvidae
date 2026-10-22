@@ -67,6 +67,11 @@ Key sections:
 - `mcp` — MCP server connections (optional)
 - `logging` — simplified options (`level`, `file`); see docs/configuration.md
 
+Before pointing the bot at a channel with people you don't trust, read
+[docs/threat-model.md](docs/threat-model.md). The built-in tools run
+unsandboxed as the daemon user, and prompt injection is the threat, not
+other tenants.
+
 ## Features
 
 - IRC transport via pydle; CLI transport (stdin/stdout) built in
@@ -113,8 +118,10 @@ The LLM has access to these tools out of the box:
 - `read_file` — read a file from the local filesystem
 - `write_file` — write or overwrite a file
 - `web_fetch` — fetch a URL and return the response body
+- `web_search` — DuckDuckGo search, results as title/URL/snippet
+- `task_pipeline` — run a YAML/JSON DAG of shell commands in dependency order
 - `task_status` — check status of background tasks
-- `set_settings` — adjust agent parameters (system prompt excluded; other keys configurable as immutable)
+- `set_settings` — adjust agent parameters (the `system_prompt` key is blocked, but read docs/threat-model.md finding 1 before trusting that; other keys configurable as immutable)
 - `subagent` — launch a background agent with its own LLM session
 
 MCP servers add their tools to this list at startup.
