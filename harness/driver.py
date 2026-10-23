@@ -896,10 +896,12 @@ async def probe_memory_role(ctx: RunContext) -> ProbeResult:
 
     # Warm-up turn: the first user turn on the channel is what makes
     # MemoryPlugin create its schema when on_start deferred it.
-    ready = await send_and_await(ctx, channel, MEMROLE_WARMUP, "READY", sent, TURN_TIMEOUT_S)
-    if ready is None:
+    # Any reply will do: the turn only has to happen, and a "Ready." must
+    # not fail the probe on capitalization.
+    ready = await send_and_await_any_reply(ctx, channel, MEMROLE_WARMUP, sent, TURN_TIMEOUT_S)
+    if not ready:
         return ProbeResult(
-            "memory_role", False, "no READY reply to the warm-up turn",
+            "memory_role", False, "no reply to the warm-up turn",
             time.monotonic() - t0, _transcript(ctx, channel, sent),
         )
 
