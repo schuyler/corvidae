@@ -1022,8 +1022,9 @@ retrieval uses). `_channel_scope` returns a `ChannelScope`, not a list:
 group members may be `*` / `?` globs, so test membership with
 `scope.contains(channel_id)` and build SQL with
 `scope.sql("m.channel_id")`, which emits `IN (...)` for literal ids and
-`GLOB ?` for patterns. `search_memory`'s `channel=` argument narrows by
-equality and is never treated as a pattern. The calling channel comes from `_ctx.channel`; when
+`GLOB ?` for patterns (an empty `ChannelScope` emits `(0)` and matches
+nothing). `search_memory`'s `channel=` argument narrows by equality and is
+never treated as a pattern. The calling channel comes from `_ctx.channel`; when
 `_ctx.channel is None` both tools return an error string and never fall
 back to unscoped access. The tools are broader than passive retrieval in
 *status* (they reach demoted, superseded, and redacted-tombstone records)

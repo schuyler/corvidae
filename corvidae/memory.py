@@ -193,7 +193,9 @@ def _retrieval_choice(retrieval_cfg: dict, key: str, choices: tuple[str, ...]) -
 
 # Wildcards a memory.channel_groups member may use. These are the only
 # metacharacters fnmatchcase and SQLite GLOB agree on; '[' / ']' (character
-# classes) differ between the two and are rejected (GitHub issue #50).
+# classes) differ between the two and are rejected in pattern members
+# (GitHub issue #50). Wildcard-free members match by equality, so a
+# literal id may contain brackets (IRC nicks can).
 _GLOB_WILDCARDS = frozenset("*?")
 _GLOB_REJECTED = frozenset("[]")
 
@@ -204,7 +206,7 @@ def _is_pattern(member: str) -> bool:
 
 
 def _validate_channel_groups(groups: object) -> dict[str, list[str]]:
-    """Check memory.channel_groups is {name: [str]} with no bracket members.
+    """Check memory.channel_groups is {name: [str]} with no bracket patterns.
 
     Raises ValueError rather than dropping a bad member: silently narrowing
     or reshaping a memory compartment is worse than refusing to start.
@@ -221,10 +223,10 @@ def _validate_channel_groups(groups: object) -> dict[str, list[str]]:
                 f"memory.channel_groups.{name} must be a list of channel ids"
             )
         for member in members:
-            if not _GLOB_REJECTED.isdisjoint(member):
+            if _is_pattern(member) and not _GLOB_REJECTED.isdisjoint(member):
                 raise ValueError(
                     f"memory.channel_groups.{name} member {member!r}: "
-                    "'[' and ']' are not supported; use '*' or '?'"
+                    "'[' and ']' are not supported in a '*' / '?' pattern"
                 )
     return groups
 
@@ -249,7 +251,10 @@ class ChannelScope:
 
     def sql(self, column: str) -> tuple[str, list[str]]:
         """A parenthesized WHERE fragment restricting column to this scope,
-        with its bind parameters (ids first, then patterns)."""
+        with its bind parameters (ids first, then patterns). An empty scope
+        yields "(0)", which matches nothing."""
+        if not self.ids and not self.patterns:
+            return "(0)", []
         clauses = []
         if self.ids:
             placeholders = ",".join("?" for _ in self.ids)
