@@ -976,7 +976,7 @@ class TestRuntimeRun:
         finally:
             os.unlink(config_path)
 
-    async def test_signal_during_start_still_stops_cleanly(self):
+    async def test_signal_during_start_still_stops_cleanly(self, caplog):
         """A SIGINT sent while start() is running (the CLI read loop does
         this when stdin is already at EOF) must reach run()'s handler, so
         startup finishes and stop() runs, instead of hitting the default
@@ -996,7 +996,9 @@ class TestRuntimeRun:
 
             async def signal_during_start(**kwargs):
                 os.kill(os.getpid(), signal.SIGINT)
-                await asyncio.sleep(0)
+                # Stay in startup long enough for the loop to deliver the
+                # signal (wakeup fd -> reader -> handler takes a few turns).
+                await asyncio.sleep(0.1)
                 return []
 
             mock_pm.ahook.on_start = AsyncMock(side_effect=signal_during_start)
@@ -1007,14 +1009,54 @@ class TestRuntimeRun:
                 "corvidae.runtime.configure_logging"
             ):
                 rt = Runtime(config_path=config_path)
-                await asyncio.wait_for(rt.run(), timeout=3)
+                with caplog.at_level("INFO", logger="corvidae.runtime"):
+                    await asyncio.wait_for(rt.run(), timeout=3)
 
             assert stray == []
             mock_agent.on_stop.assert_awaited_once()
+            assert any(
+                "waiting for startup" in r.getMessage() for r in caplog.records
+            )
         finally:
             asyncio.get_running_loop().remove_signal_handler(signal.SIGINT)
             asyncio.get_running_loop().remove_signal_handler(signal.SIGTERM)
             signal.signal(signal.SIGINT, previous)
+            os.unlink(config_path)
+
+    async def test_sigterm_during_start_keeps_default_action(self):
+        """SIGTERM keeps its default action until startup finishes, so
+        `systemctl stop` during a hung startup still kills the process at
+        once instead of waiting out TimeoutStopSec."""
+        from corvidae.runtime import Runtime
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            _write_config(f.name)
+            config_path = f.name
+
+        seen: list = []
+        try:
+            mock_pm, mock_agent = _make_mock_pm_and_agent()
+
+            async def record_sigterm_disposition(**kwargs):
+                seen.append(signal.getsignal(signal.SIGTERM))
+                return []
+
+            mock_pm.ahook.on_start = AsyncMock(side_effect=record_sigterm_disposition)
+            loop = asyncio.get_running_loop()
+
+            with patch(
+                "corvidae.runtime.create_plugin_manager", return_value=mock_pm
+            ), patch("corvidae.runtime.validate_dependencies"), patch(
+                "corvidae.runtime.configure_logging"
+            ):
+                loop.call_later(0.05, os.kill, os.getpid(), signal.SIGINT)
+                rt = Runtime(config_path=config_path)
+                await asyncio.wait_for(rt.run(), timeout=3)
+
+            assert seen == [signal.SIG_DFL]
+        finally:
+            loop.remove_signal_handler(signal.SIGINT)
+            loop.remove_signal_handler(signal.SIGTERM)
             os.unlink(config_path)
 
     async def test_double_sigint_calls_os_exit(self):
