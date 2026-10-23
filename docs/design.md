@@ -831,8 +831,10 @@ for side effects; its return value is not used by the caller.
    keeping its results, and makes the dropped prefix render differently
    from the start of the full window, which a compaction fork needs.
    First choice: back up with `snap_cut_to_tool_boundary` to keep the
-   cycle, if the retained tail stays at or below the midpoint between
-   `compaction_retention` and `compaction_threshold`. Otherwise (a
+   cycle, if that drops some dialog (not just the previous summary) and
+   the window after compaction (system prompt, a 2000-token summary
+   allowance, and the kept messages) stays at or below the midpoint
+   between `compaction_retention` and `compaction_threshold`. Otherwise (a
    long-running call near the head with chat interleaved behind it) move
    forward with `snap_cut_forward` to drop the cycle whole, if at least
    half the retention budget survives. Otherwise keep the walk's cut, as
@@ -924,7 +926,7 @@ runtime overrides, so `set_settings` can't re-enable tool calls on a fork.
 
 **Invariants.** A fork mutates nothing, persists nothing, fires no hooks,
 and never dispatches tools: a reply carrying `tool_calls`, or a tool call
-written out as text (`<tool_call>`, `<function…`, a bare
+written out as text (`<tool_call>`, `<function=`, a bare
 `{"name", "arguments"}` object), raises `ForkRefused`. No live window or
 no main client raises `ForkUnavailable`.
 Every caller treats any fork exception, or an empty or unparseable reply,

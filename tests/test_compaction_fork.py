@@ -14,7 +14,7 @@ from corvidae.hooks import create_plugin_manager, hookimpl
 from helpers import FakeForkAgent, build_plugin_and_channel
 from llm_response_fixtures import _make_text_response
 
-MAX_TOKENS = 200
+MAX_TOKENS = 20000
 
 
 def _msg(role, content, db_id, **extra):
@@ -27,13 +27,15 @@ def _call(call_id):
 
 
 def _straddling_window() -> ContextWindow:
-    """Ten messages; at MAX_TOKENS the retain walk keeps the last three,
-    cutting between the call (index 6) and its result (index 7)."""
+    """Ten messages, ~16.9k tokens. At MAX_TOKENS the retain walk keeps the
+    last three, cutting between the large call message (index 6, ~10k
+    tokens) and its result (index 7); backing up to keep the cycle leaves
+    the window well under the trigger, summary allowance included."""
     conv = ContextWindow("test:scope")
     conv.system_prompt = "You are Lex."
-    big = "x" * 120
+    big = "word " * 1100
     conv.messages = [_msg("user" if i % 2 == 0 else "assistant", big, i + 1) for i in range(6)] + [
-        _msg("assistant", "checking " + "y" * 150, 7, tool_calls=[_call("c1")]),
+        _msg("assistant", "checking " + "word " * 10100, 7, tool_calls=[_call("c1")]),
         _msg("tool", "short", 8, tool_call_id="c1"),
         _msg("assistant", "ok", 9),
         _msg("user", "next", 10),
@@ -127,6 +129,34 @@ async def test_short_tail_keeps_the_planned_cut(trailing):
     result, _, _ = await _compact(conv, max_tokens=max_tokens)
     assert result
     assert 0.3 * max_tokens < conv.token_estimate() < 0.8 * max_tokens
+
+
+async def test_large_system_prompt_does_not_stall_compaction():
+    """Repeated rounds with a long-span call behind the summary and a system
+    prompt of ~22% of max_tokens: the back-snap has to count the system
+    prompt and the summary, or it keeps dropping only the old summary while
+    the window climbs toward max_tokens."""
+    pm = create_plugin_manager()
+    plugin = CompactionPlugin(pm=pm)
+    conv = ContextWindow("test:scope")
+    conv.system_prompt = "w " * 1800
+    channel = MagicMock()
+    channel.id = "test:scope"
+    rounds = []
+    for step in range(1, 261):
+        if step == 16:
+            conv.messages.append(_msg("assistant", "", step, tool_calls=[_call("c1")]))
+        elif step == 61:
+            conv.messages.append(_msg("tool", "done", step, tool_call_id="c1"))
+        else:
+            conv.messages.append(_msg("user" if step % 2 else "assistant", "word " * 60, step))
+        before, count = conv.token_estimate(), len(conv.messages)
+        with patch.object(plugin, "_summarize", AsyncMock(return_value="s " * 600)):
+            if await plugin.compact_conversation(channel=channel, conversation=conv, max_tokens=8192):
+                rounds.append((count - len(conv.messages) + 1, before / 8192))
+    assert rounds
+    assert all(dropped > 2 for dropped, _ in rounds)
+    assert max(ratio for _, ratio in rounds) < 0.9
 
 
 @pytest.mark.parametrize("summary", ["", "  ", RuntimeError("down")])

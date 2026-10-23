@@ -219,7 +219,7 @@ class CompactionPlugin(CorvidaePlugin):
         # keeping its results orphans them, and a fork of the prefix would
         # render the call differently from the main turn (#51).
         cut = self._clean_cut(
-            conversation.messages, len(conversation.messages) - retain_count, max_tokens
+            conversation, len(conversation.messages) - retain_count, max_tokens
         )
         retain_count = len(conversation.messages) - cut
 
@@ -335,12 +335,15 @@ class CompactionPlugin(CorvidaePlugin):
 
         return True
 
-    def _clean_cut(self, messages: list[dict], planned: int, max_tokens: int) -> int:
+    def _clean_cut(self, conversation, planned: int, max_tokens: int) -> int:
         """The cut to compact at, given the retain walk's ``planned`` cut.
 
         Prefers backing up to keep a straddling tool cycle whole, but only
-        while the retained tail stays well under the trigger (halfway from
-        compaction_retention to compaction_threshold). A long-running call
+        while the window after compaction stays well under the trigger
+        (halfway from compaction_retention to compaction_threshold), counted
+        the way the trigger counts it: system prompt, a summary allowance,
+        and the kept messages. The back-up must also drop some dialog, not
+        just the previous summary. A long-running call
         near the head with chat interleaved behind it would otherwise pull
         the cut back so far that compaction drops almost nothing and runs
         again every few messages. Then the cut moves forward past the
@@ -349,6 +352,7 @@ class CompactionPlugin(CorvidaePlugin):
         near the newest message) the planned cut stands, orphaned result
         and all, as before #51: never worse than the unsnapped walk.
         """
+        messages = conversation.messages
         back = snap_cut_to_tool_boundary(messages, planned)
         if back == planned:
             return planned
@@ -357,7 +361,12 @@ class CompactionPlugin(CorvidaePlugin):
             return sum(message_tokens(m) for m in messages[cut:])
 
         ceiling = max_tokens * (self._compaction_retention + self._compaction_threshold) / 2
-        if back > 0 and tail_tokens(back) <= ceiling:
+        fixed = count_tokens(conversation.system_prompt) + self._SUMMARY_RESPONSE_RESERVE_TOKENS
+        drops_dialog = any(
+            m.get("_message_type", MessageType.MESSAGE) == MessageType.MESSAGE
+            for m in messages[:back]
+        )
+        if drops_dialog and fixed + tail_tokens(back) <= ceiling:
             return back
         forward = snap_cut_forward(messages, planned)
         if forward < len(messages) and tail_tokens(forward) >= max_tokens * self._compaction_retention / 2:

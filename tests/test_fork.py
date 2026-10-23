@@ -214,6 +214,7 @@ async def test_tool_calls_raise_fork_refused(forking_agent, response):
 @pytest.mark.parametrize("text", [
     '{"summary": "I helped", "topic_tags": []}', '{"objections": []}',
     "We debugged the name and arguments of a function.",
+    "<functional> components came up; I summarized them.",
 ])
 async def test_ordinary_replies_are_not_refused(forking_agent, text):
     plugin, channel, client = forking_agent

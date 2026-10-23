@@ -237,7 +237,7 @@ def looks_like_tool_call(text: str) -> bool:
     object would even parse as a reply with nothing to report.
     """
     stripped = text.strip()
-    if stripped.startswith(("<tool_call>", "<function")):
+    if stripped.startswith(("<tool_call>", "<function=", "<function>", "<function_calls>")):
         return True
     if stripped.startswith("{"):
         try:
