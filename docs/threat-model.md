@@ -117,6 +117,15 @@ For a poisoned-model scenario this is the finding that matters most after
 the first one: the only runtime check on confabulation can be switched off
 by the thing being checked.
 
+The fork instructions added for #51 (`appraisal.stage2_fork_prompt`,
+`critique.fork_prompt.<lens>`, `memory.consolidation_fork_prompt`,
+`agent.compaction_fork_prompt`) and `agent.forks.*` are read from config
+only (`tuning.config_value`), so `set_settings` can't rewrite them. That
+covers only calls that actually fork: every fork miss (forks off for the
+stage, the exchange has left the window, a refused or unparseable fork)
+falls back to the standalone prompts above, which are still runtime
+tunables. Keep them in `immutable_settings` with forks on too.
+
 ### 3. Untrusted text is promoted to the `system` role
 
 Two places:
@@ -154,7 +163,10 @@ IRC messages and raw tool output and are stored as `role: assistant`
 (`compaction.py`), so the model reads whatever was injected as something
 it said itself, and that persists across restarts too. The obvious
 candidate is a `user`-role summary with the same data framing; it hasn't
-been tried.
+been tried. With `agent.forks` on for compaction (finding 8) this changes
+character: the summary is then genuinely the agent's own words about what
+it read, written under its own persona, not a neutral paraphrase stored
+under `role: assistant`. The `user`-role experiment is still worth running.
 
 ### 4. Tools are unsandboxed and the exfil path is open
 
@@ -265,7 +277,37 @@ lands it needs an allowlist of target channels, a send budget, and its
 own entry here. Recurring reminders by tool are deferred for a related
 reason: they need a per-channel budget of their own.
 
-### 8. Smaller things
+### 8. Forks put background instructions after untrusted text (opt-in)
+
+With `agent.forks.enabled` (off by default, #51), compaction,
+consolidation, appraisal and critique don't build their own prompts. Each
+appends its instruction as a `user` turn to the channel's rendered window,
+after whatever untrusted text the window holds, under the agent's own
+persona, with the agent's tool schemas in the prompt. Injection that could
+already steer the summarizer or critic as pasted content can now address
+it as the agent, in the agent's voice, and the outputs are persistence: a
+memory record, a summary the agent later reads as its own words, a score
+or objection in `exchange_log`.
+
+What bounds it:
+
+- A fork never dispatches tools. It sends `tool_choice: "none"` after the
+  runtime overrides (so a `set_settings` `tool_choice` can't undo it), and
+  a reply that carries `tool_calls` anyway, or writes a call out as text,
+  raises `ForkRefused`. The fork code has no path to `dispatch_tool_call`.
+- Fork output is parsed, not executed: JSON for consolidation, appraisal
+  and critique, plain text for the summary.
+- The fork instructions and `agent.forks.*` are static config (finding 2).
+- A fork mutates nothing in the window and fires no hooks; only the
+  stage's existing write (memory row, summary, `exchange_log` merge)
+  happens, as it would standalone.
+
+Critique independence is the open question: a critic that shares the
+agent's context and persona may share its blind spots. #73 measures it
+behaviorally (planted-defect recall, fork vs standalone) before the
+default flips.
+
+### 9. Smaller things
 
 - `read_file` has a stat-then-read race and follows symlinks. Irrelevant
   while finding 4 stands.

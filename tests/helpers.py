@@ -94,3 +94,53 @@ async def drain_task_queue(plugin):
     if task_plugin and task_plugin.task_queue:
         await task_plugin.task_queue.queue.join()
         await asyncio.sleep(0)
+
+
+class FakeForkAgent:
+    """Stands in for Agent in fork tests (GitHub issue #51).
+
+    Forks are enabled for ``stages``; each fork is recorded with its
+    attribution and answers ``text``, or raises ``error``. ``fail_marker``
+    limits the error to instructions containing it.
+    """
+
+    def __init__(self, stages, text="", error=None, fail_marker=None):
+        self.stages = set(stages)
+        self.text = text
+        self.error = error
+        self.fail_marker = fail_marker
+        self.calls = []
+
+    def fork_enabled(self, stage):
+        return stage in self.stages
+
+    async def fork(self, channel, instruction, *, cut=None, extra_body=None):
+        from corvidae.attribution import get_attribution
+        from corvidae.fork import ForkResult
+
+        self.calls.append({
+            "instruction": instruction, "cut": cut, "extra_body": extra_body,
+            "attribution": dict(get_attribution()),
+        })
+        if self.error is not None and (self.fail_marker is None or self.fail_marker in instruction):
+            raise self.error
+        return ForkResult(text=self.text, message={"role": "assistant", "content": self.text})
+
+
+def window_of(channel_id, rowids, summary=False, contents=None):
+    """A ContextWindow of alternating user/assistant MESSAGE rows tagged with
+    ``rowids`` (contents default to "m<rowid>"), optionally after a summary."""
+    from corvidae.context import ContextWindow, MessageType
+
+    conv = ContextWindow(channel_id)
+    conv.system_prompt = "You are Lex."
+    if summary:
+        conv.messages.append({"role": "assistant", "content": "[Summary of earlier conversation]\nold",
+                              "_message_type": MessageType.SUMMARY})
+    for i, rid in enumerate(rowids):
+        conv.messages.append({
+            "role": "user" if i % 2 == 0 else "assistant",
+            "content": contents[i] if contents else f"m{rid}",
+            "_db_id": rid, "_message_type": MessageType.MESSAGE,
+        })
+    return conv

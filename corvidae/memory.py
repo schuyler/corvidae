@@ -34,11 +34,14 @@ Config:
           moderate: 0.60             # value >= moderate → hedged
       channel_groups: {}             # {group_name: [channel ids or * ? globs]}
                                      # shared memory
+      consolidation_fork_prompt: ... # instruction for forked consolidation
+                                     # (agent.forks, #51); static config
 """
 
 from __future__ import annotations
 
 import asyncio
+import collections
 import json
 import logging
 import math
@@ -52,6 +55,8 @@ from typing import Protocol
 import aiosqlite
 
 from corvidae.attribution import reset_attribution, set_attribution
+from corvidae.context import MessageType
+from corvidae.fork import fork_agent, quote, window_db_ids
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 from corvidae.persistence import add_column_if_missing
 
@@ -99,6 +104,34 @@ DEFAULT_CONSOLIDATION_PROMPT = (
     "}"
 )
 
+# Default fork instruction for consolidation (GitHub issue #51). With
+# agent.forks on, the record is written by a fork of the live window: this
+# text is appended to it as a user turn, followed by a sentence naming where
+# the range starts. prompts/memory_consolidation_fork.md is the documented
+# copy; memory.consolidation_fork_prompt (static config, not a runtime
+# tunable) overrides it. The agent's own system prompt is above it, so it
+# doesn't need to explain who "I" is.
+DEFAULT_CONSOLIDATION_FORK_PROMPT = (
+    "[Memory consolidation] Pause the conversation here and write a record "
+    "of part of it for your long-term autobiographical memory, in the first "
+    "person, as yourself.\n\n"
+    "Keep what you were told apart from what you inferred or speculated "
+    "(\"Schuyler told me...\", \"I speculated that...\", \"I suggested...\"). "
+    "Keep concrete details that would matter later: names, decisions, "
+    "commitments, corrections, and outcomes. Omit filler. Do not call tools.\n\n"
+    "Respond with a single JSON object, nothing else:\n"
+    "{\n"
+    '  "summary": "<first-person summary, a few sentences>",\n'
+    '  "topic_tags": ["<short topic tag>", ...],\n'
+    '  "participants": ["<sender name>", ...]\n'
+    "}"
+)
+
+# Bound on fork records waiting for their on_compaction task (keyed by
+# (channel_id, range end)). An entry is consumed by the task that follows
+# its compaction; the bound only matters if that task never runs.
+FORK_STASH_MAXSIZE = 64
+
 # Rubric for the default importance prior (Persyn-style cheap-model rating).
 RUBRIC_PROMPT = (
     "Rate the lasting importance of remembering this conversation segment "
@@ -139,6 +172,56 @@ def _dialog_transcript(messages: list[dict]) -> str:
     """Render dialog messages as 'role: content' lines for a prompt."""
     return "\n".join(
         f"{m.get('role', '?')}: {m.get('content', '')}" for m in messages
+    )
+
+
+def _record_from_text(text: str) -> dict:
+    """Parse a consolidation reply into the record dict.
+
+    Returns {"summary": str, "topic_tags": list, "participants": list};
+    raises ValueError on unusable output (no JSON, or no summary).
+    """
+    data = _parse_json_block(text)
+    summary = data.get("summary")
+    if not isinstance(summary, str) or not summary.strip():
+        raise ValueError("consolidation output has no usable summary")
+    return {
+        "summary": summary.strip(),
+        "topic_tags": [str(t) for t in data.get("topic_tags") or []],
+        "participants": [str(p) for p in data.get("participants") or []],
+    }
+
+
+def _fork_range_sentence(prefix: list[dict], dialog_ids: set[int]) -> str:
+    """Name where a consolidation range starts, for a fork instruction.
+
+    ``prefix`` is the window the fork sees; ``dialog_ids`` the rowids of the
+    range's dialog rows. When nothing but a summary precedes the first of
+    them, the range is everything after the summary (or everything). Else
+    rows below the watermark (already consolidated by an earlier idle run)
+    are in view, so the first new dialog message is quoted. Near-dup merge
+    is the backstop if the model draws the line a little wrong.
+    """
+    first = next(
+        (i for i, m in enumerate(prefix) if m.get("_db_id") in dialog_ids), len(prefix)
+    )
+    before = prefix[:first]
+    if all(m.get("_message_type") == MessageType.SUMMARY for m in before):
+        if before:
+            return "Record the conversation above that follows the summary at its top."
+        return "Record the whole conversation above."
+    opener = next(
+        (
+            m for m in prefix[first:]
+            if m.get("role") in ("user", "assistant")
+            and isinstance(m.get("content"), str) and m["content"].strip()
+        ),
+        prefix[first] if first < len(prefix) else {},
+    )
+    return (
+        "Record the conversation above from the message that begins "
+        f"«{quote(opener.get('content'))}» onward. Earlier messages are "
+        "already in your memory; do not restate them."
     )
 
 
@@ -508,6 +591,12 @@ class MemoryPlugin(CorvidaePlugin):
         self._memory_cfg: dict = {}
         self._idle_consolidate_after: float = DEFAULT_IDLE_CONSOLIDATE_AFTER
         self._consolidation_prompt: str = DEFAULT_CONSOLIDATION_PROMPT
+        self._consolidation_fork_prompt: str = DEFAULT_CONSOLIDATION_FORK_PROMPT
+        # Fork records made in before_compaction, waiting for the
+        # on_compaction task: (channel_id, range_end) -> (watermark, record).
+        self._fork_stash: collections.OrderedDict[tuple[str, int], tuple[int, dict]] = (
+            collections.OrderedDict()
+        )
         self._retrieval_k: int = DEFAULT_RETRIEVAL_K
         self._band_strong: float = DEFAULT_BAND_STRONG
         self._band_moderate: float = DEFAULT_BAND_MODERATE
@@ -545,6 +634,9 @@ class MemoryPlugin(CorvidaePlugin):
         )
         self._consolidation_prompt = self._memory_cfg.get(
             "consolidation_prompt", DEFAULT_CONSOLIDATION_PROMPT
+        )
+        self._consolidation_fork_prompt = self._memory_cfg.get(
+            "consolidation_fork_prompt", DEFAULT_CONSOLIDATION_FORK_PROMPT
         )
         retrieval_cfg = self._memory_cfg.get("retrieval", {}) or {}
         self._retrieval_k = retrieval_cfg.get("k", DEFAULT_RETRIEVAL_K)
@@ -596,6 +688,88 @@ class MemoryPlugin(CorvidaePlugin):
     # ------------------------------------------------------------------
     # Consolidation triggers (bootstrap-mapping §3.1)
     # ------------------------------------------------------------------
+
+    @hookimpl
+    async def before_compaction(self, channel, compacted_ids: list[int], cut: int) -> None:
+        """Fork the compaction-time record while the prefix is still live.
+
+        With forks on for "consolidation", runs the record fork over the
+        window's dropped prefix (``cut``) and stashes it under
+        ``(channel_id, max(compacted_ids))`` for the on_compaction task.
+        Runs inline (the hook is awaited before replace_with_summary), so
+        it costs the response path one more generation. Fail-soft: any
+        miss leaves no stash and the task makes the standalone call.
+        """
+        if not compacted_ids:
+            return
+        agent = fork_agent(self.pm, "consolidation")
+        if agent is None:
+            return
+        range_end = max(compacted_ids)
+        attribution_token = set_attribution(
+            stage="consolidation", channel_id=channel.id, trigger="compaction"
+        )
+        try:
+            db = await self._ensure_schema()
+            if db is None:
+                return
+            watermark = await self._get_watermark(db, channel.id)
+            if range_end <= watermark:
+                return
+            rows = await fetch_range_rows(db, channel.id, watermark, range_end)
+            if not dialog_from_rows(rows):
+                return
+            record = await self._fork_record(agent, channel, rows, cut)
+            if record is not None:
+                self._stash_put((channel.id, range_end), (watermark, record))
+        except Exception:
+            logger.warning(
+                "consolidation fork at compaction failed", exc_info=True,
+                extra={"channel_id": channel.id},
+            )
+        finally:
+            reset_attribution(attribution_token)
+
+    def _stash_put(self, key: tuple[str, int], value: tuple[int, dict]) -> None:
+        """Stash a fork record, evicting the oldest past the bound."""
+        self._fork_stash[key] = value
+        self._fork_stash.move_to_end(key)
+        while len(self._fork_stash) > FORK_STASH_MAXSIZE:
+            self._fork_stash.popitem(last=False)
+
+    async def _fork_record(self, agent, channel, rows: list[tuple], cut: int | None) -> dict | None:
+        """The memory record from a fork of ``channel``'s window, or None.
+
+        Forks only when every dialog row of the range is in the window the
+        fork sees (``messages[:cut]``): the record must be about rows the
+        model can read. Summary rows are skipped (summaries are never
+        consolidated, and a live window's summary has no rowid). Any fork
+        failure or unusable reply is logged and returns None.
+        """
+        conv = getattr(channel, "conversation", None)
+        if conv is None:
+            return None
+        prefix = conv.messages if cut is None else conv.messages[:cut]
+        dialog_ids = {row_id for row_id, _msg, mtype in rows if mtype == "message"}
+        if not dialog_ids <= window_db_ids(prefix):
+            logger.debug(
+                "consolidation range not in the window; using the standalone call",
+                extra={"channel_id": channel.id},
+            )
+            return None
+        instruction = (
+            self._consolidation_fork_prompt + "\n\n"
+            + _fork_range_sentence(prefix, dialog_ids)
+        )
+        try:
+            result = await agent.fork(channel, instruction, cut=cut)
+            return _record_from_text(result.text)
+        except Exception:
+            logger.warning(
+                "consolidation fork failed; using the standalone call",
+                exc_info=True, extra={"channel_id": channel.id},
+            )
+            return None
 
     @hookimpl
     async def on_compaction(
@@ -795,8 +969,12 @@ class MemoryPlugin(CorvidaePlugin):
                         await db.commit()
                 return
 
-            # One background-model call produces the first-person record.
-            record = await self._summarize_range(dialog)
+            # The first-person record: a fork of the live window when one
+            # is available (stashed at compaction, or run now for idle),
+            # else one standalone background-model call.
+            record = await self._consolidation_record(
+                channel_id, rows, dialog, watermark, range_end, trigger
+            )
 
             # The appraisal-driven prior (WP2.5) scores over the consolidated
             # message-id range; pass the real channel when the registry has
@@ -1023,6 +1201,37 @@ class MemoryPlugin(CorvidaePlugin):
         finally:
             reset_attribution(attribution_token)
 
+    async def _consolidation_record(
+        self, channel_id: str, rows: list[tuple], dialog: list[dict],
+        watermark: int, range_end: int, trigger: str,
+    ) -> dict:
+        """Produce the record for (watermark, range_end].
+
+        Compaction trigger: the record before_compaction stashed, if it was
+        built against this same watermark (otherwise it covers a different
+        range and is dropped). Idle trigger: a fork of the channel's live
+        window when forks are on and the range is in it. Everything else,
+        and every miss, is the standalone call.
+        """
+        record: dict | None = None
+        if trigger == "compaction":
+            stashed = self._fork_stash.pop((channel_id, range_end), None)
+            if stashed is not None and stashed[0] == watermark:
+                record = stashed[1]
+        elif trigger == "idle":
+            agent = fork_agent(self.pm, "consolidation")
+            registry = self.pm.get_plugin("registry")
+            channel = registry.get(channel_id) if registry is not None else None
+            if agent is not None and channel is not None:
+                record = await self._fork_record(agent, channel, rows, None)
+        if record is not None:
+            return record
+        token = set_attribution(mode="standalone")
+        try:
+            return await self._summarize_range(dialog)
+        finally:
+            reset_attribution(token)
+
     async def _summarize_range(self, dialog: list[dict]) -> dict:
         """One llm.background call producing the first-person record.
 
@@ -1035,15 +1244,7 @@ class MemoryPlugin(CorvidaePlugin):
             {"role": "user", "content": _dialog_transcript(dialog)},
         ])
         text = response["choices"][0]["message"]["content"]
-        data = _parse_json_block(text)
-        summary = data.get("summary")
-        if not isinstance(summary, str) or not summary.strip():
-            raise ValueError("consolidation output has no usable summary")
-        return {
-            "summary": summary.strip(),
-            "topic_tags": [str(t) for t in data.get("topic_tags") or []],
-            "participants": [str(p) for p in data.get("participants") or []],
-        }
+        return _record_from_text(text)
 
     # ------------------------------------------------------------------
     # Retrieval read path (§3.1)

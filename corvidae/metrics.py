@@ -26,6 +26,7 @@ from typing import IO
 import aiosqlite
 
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
+from corvidae.persistence import add_column_if_missing
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,7 @@ CREATE TABLE IF NOT EXISTS usage_log (
     channel_id TEXT,
     correlation_id TEXT,
     trigger TEXT,
+    mode TEXT,
     prompt_tokens INTEGER,
     completion_tokens INTEGER,
     total_tokens INTEGER,
@@ -147,6 +149,8 @@ class UsageLogPlugin(CorvidaePlugin):
                 await db.execute(
                     "ALTER TABLE usage_log ADD COLUMN trigger TEXT"
                 )
+            # fork | standalone for stages that can fork (#51); NULL otherwise.
+            await add_column_if_missing(db, "usage_log", "mode", "TEXT")
             await db.commit()
             self._table_ready = True
         return db
@@ -175,9 +179,9 @@ class UsageLogPlugin(CorvidaePlugin):
             usage = usage or {}
             await db.execute(
                 "INSERT INTO usage_log (ts, request_id, role, model, stage, "
-                "channel_id, correlation_id, trigger, prompt_tokens, completion_tokens, "
-                "total_tokens, cached_tokens, latency_ms, error) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "channel_id, correlation_id, trigger, mode, prompt_tokens, "
+                "completion_tokens, total_tokens, cached_tokens, latency_ms, error) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     time.time(),
                     request_id,
@@ -187,6 +191,7 @@ class UsageLogPlugin(CorvidaePlugin):
                     attribution.get("channel_id"),
                     attribution.get("correlation_id"),
                     attribution.get("trigger"),
+                    attribution.get("mode"),
                     usage.get("prompt_tokens"),
                     usage.get("completion_tokens"),
                     usage.get("total_tokens"),

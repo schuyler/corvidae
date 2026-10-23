@@ -33,9 +33,10 @@ from pathlib import Path
 import aiosqlite
 
 from corvidae.attribution import reset_attribution, set_attribution
+from corvidae.fork import fork_agent, quote, window_db_ids
 from corvidae.hooks import CorvidaePlugin, hookimpl
 from corvidae.task import Task
-from corvidae.tuning import resolve_tunable
+from corvidae.tuning import config_value, resolve_tunable
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +92,43 @@ DEFAULT_STAGE2_PROMPT = (
     "- correction: true if the user was correcting the agent — telling it "
     "that something it said, remembered, or did was wrong.\n\n"
     "Respond with a single JSON object, nothing else:\n"
+    "{\n"
+    '  "valence": 0.5,\n'
+    '  "stakes": 0.0,\n'
+    '  "ambiguity": 0.0,\n'
+    '  "commitment_density": 0.0,\n'
+    '  "novelty": 0.5,\n'
+    '  "correction": false\n'
+    "}"
+)
+
+# Fork instruction for stage 2 (GitHub issue #51). With agent.forks on, the
+# appraisal is a fork of the live window: this text is appended as a user
+# turn, followed by a quote of the exchange's opening message and the
+# retrieval profile. Second person: the fork is the agent appraising its own
+# exchange. Documented copy in prompts/appraisal_fork.md; the static config
+# key appraisal.stage2_fork_prompt (not a runtime tunable) overrides it.
+DEFAULT_STAGE2_FORK_PROMPT = (
+    "[Appraisal] Pause the conversation here and appraise, for your own "
+    "perception system, the exchange you just completed: from the message "
+    "quoted below through your final response. Score the EXCHANGE (not your "
+    "performance) on each dimension, 0.0-1.0.\n\n"
+    "- valence: the emotional tone of the exchange for you. 0.0 = strongly "
+    "negative (conflict, failure, distress), 0.5 = neutral, 1.0 = strongly "
+    "positive (success, warmth, praise).\n"
+    "- stakes: how much depends on this exchange being handled well. "
+    "Commitments, deadlines, personal disclosures, decisions = high; idle "
+    "chat = low.\n"
+    "- ambiguity: how much of the message's intent remained open to "
+    "interpretation. 0.0 = fully explicit; 1.0 = you had to guess.\n"
+    "- commitment_density: how many concrete commitments, facts, numbers, or "
+    "promises the exchange contains, relative to its length.\n"
+    "- novelty: how new this exchange's content is relative to what you "
+    "already knew, going by the memory retrieval note below. Familiar "
+    "ground = low.\n"
+    "- correction: true if the user was correcting you, telling you that "
+    "something you said, remembered, or did was wrong.\n\n"
+    "Do not call tools. Respond with a single JSON object, nothing else:\n"
     "{\n"
     '  "valence": 0.5,\n'
     '  "stakes": 0.0,\n'
@@ -173,6 +211,19 @@ def _parse_json_block(text: str) -> dict:
     if start == -1 or end == -1 or end <= start:
         raise ValueError(f"no JSON object in LLM output: {text[:200]!r}")
     return json.loads(text[start:end + 1])
+
+
+def _stage2_from_text(text: str) -> dict:
+    """Parse a stage-2 reply into the clamped vector; raises on bad output."""
+    parsed = _parse_json_block(text)
+    return {
+        "valence": clamp01(float(parsed["valence"])),
+        "stakes": clamp01(float(parsed["stakes"])),
+        "ambiguity": clamp01(float(parsed["ambiguity"])),
+        "commitment_density": clamp01(float(parsed["commitment_density"])),
+        "novelty": clamp01(float(parsed["novelty"])),
+        "correction": bool(parsed.get("correction", False)),
+    }
 
 
 def _sentences(text: str) -> list[str]:
@@ -381,6 +432,9 @@ class AppraisalPlugin(CorvidaePlugin):
         # originating USER/notification text), bounded so long-running
         # exchanges don't leak memory. Fed by on_message_persisted.
         self._originating_text: collections.OrderedDict[str, str] = collections.OrderedDict()
+        # Same discipline for the originating row's message_log rowid: a
+        # stage-2 fork runs only while that row is still in the window.
+        self._originating_rowid: collections.OrderedDict[str, int] = collections.OrderedDict()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -491,10 +545,20 @@ class AppraisalPlugin(CorvidaePlugin):
         self._originating_text.move_to_end(correlation_id)
         while len(self._originating_text) > ORIGINATING_TEXT_LRU_MAXSIZE:
             self._originating_text.popitem(last=False)
+        # The rowid, when persistence produced one (the fork containment check).
+        if rowid is not None:
+            self._originating_rowid[correlation_id] = rowid
+            self._originating_rowid.move_to_end(correlation_id)
+            while len(self._originating_rowid) > ORIGINATING_TEXT_LRU_MAXSIZE:
+                self._originating_rowid.popitem(last=False)
 
     def get_originating_text(self, correlation_id: str) -> str | None:
         """Pure reader for the exchange's true originating text, or None."""
         return self._originating_text.get(correlation_id)
+
+    def get_originating_rowid(self, correlation_id: str) -> int | None:
+        """Pure reader for the originating row's message_log rowid, or None."""
+        return self._originating_rowid.get(correlation_id)
 
     # ------------------------------------------------------------------
     # Pull API
@@ -608,43 +672,43 @@ class AppraisalPlugin(CorvidaePlugin):
             stage="appraisal", channel_id=channel.id, correlation_id=exchange_key
         )
         try:
-            client = self._appraisal_client()
-            if client is None:
-                logger.debug("stage-2 appraisal skipped: no LLM client available")
-                return
             profile = await self._retrieval_profile_summary(exchange_key)
-            prompt = resolve_tunable(
-                channel, self.config, "appraisal.stage2_prompt", DEFAULT_STAGE2_PROMPT
+            # A fork of the live window when one is available; else (and
+            # on any fork miss) the standalone tier-3 call.
+            stage2 = await self._fork_stage2(
+                channel, exchange_key, originating_text, response_text, profile
             )
-            user_content = (
-                f"Originating message:\n{originating_text or '(unknown)'}\n\n"
-                f"Agent's final response:\n{response_text or '(none)'}\n\n"
-                f"Memory retrieval for this exchange:\n{profile}"
-            )
-            try:
-                response = await client.chat(
-                    [
-                        {"role": "system", "content": prompt},
-                        {"role": "user", "content": user_content},
-                    ],
-                    extra_body=STAGE2_EXTRA_BODY,
+            if stage2 is None:
+                client = self._appraisal_client()
+                if client is None:
+                    logger.debug("stage-2 appraisal skipped: no LLM client available")
+                    return
+                prompt = resolve_tunable(
+                    channel, self.config, "appraisal.stage2_prompt", DEFAULT_STAGE2_PROMPT
                 )
-                text = response["choices"][0]["message"]["content"]
-                parsed = _parse_json_block(text)
-                stage2 = {
-                    "valence": clamp01(float(parsed["valence"])),
-                    "stakes": clamp01(float(parsed["stakes"])),
-                    "ambiguity": clamp01(float(parsed["ambiguity"])),
-                    "commitment_density": clamp01(float(parsed["commitment_density"])),
-                    "novelty": clamp01(float(parsed["novelty"])),
-                    "correction": bool(parsed.get("correction", False)),
-                }
-            except Exception:
-                logger.warning(
-                    "stage-2 appraisal call/parse failed; row keeps stage 1",
-                    exc_info=True, extra={"exchange_key": exchange_key},
+                user_content = (
+                    f"Originating message:\n{originating_text or '(unknown)'}\n\n"
+                    f"Agent's final response:\n{response_text or '(none)'}\n\n"
+                    f"Memory retrieval for this exchange:\n{profile}"
                 )
-                return
+                standalone_token = set_attribution(mode="standalone")
+                try:
+                    response = await client.chat(
+                        [
+                            {"role": "system", "content": prompt},
+                            {"role": "user", "content": user_content},
+                        ],
+                        extra_body=STAGE2_EXTRA_BODY,
+                    )
+                    stage2 = _stage2_from_text(response["choices"][0]["message"]["content"])
+                except Exception:
+                    logger.warning(
+                        "stage-2 appraisal call/parse failed; row keeps stage 1",
+                        exc_info=True, extra={"exchange_key": exchange_key},
+                    )
+                    return
+                finally:
+                    reset_attribution(standalone_token)
 
             # Merge, never overwrite: a full-column write would erase
             # WP2.9's stage1_out on every exchange that gets stage 2. Do NOT
@@ -667,6 +731,51 @@ class AppraisalPlugin(CorvidaePlugin):
             self._last_stage2[channel.id] = stage2
         finally:
             reset_attribution(token)
+
+    async def _fork_stage2(
+        self, channel, exchange_key: str, originating_text: str | None,
+        response_text: str | None, profile: str,
+    ) -> dict | None:
+        """Stage 2 from a fork of the channel's live window, or None.
+
+        Forks only when forks are on for "appraisal" and the exchange's
+        originating row is still in the window (compaction hasn't dropped
+        it). Reads the window at run time: if the user has said more since,
+        the fork still sees the exchange, named by its opening message and
+        the response the user was sent (which can differ from the window's
+        last assistant message, e.g. the max-turns fallback). The check and
+        Agent.fork's prompt render run with no await between them.
+        Any fork failure or unusable reply is logged and returns None.
+        """
+        agent = fork_agent(self.pm if hasattr(self, "pm") else None, "appraisal")
+        if agent is None:
+            return None
+        rowid = self.get_originating_rowid(exchange_key)
+        conv = getattr(channel, "conversation", None)
+        if rowid is None or conv is None or rowid not in window_db_ids(conv.messages):
+            logger.debug(
+                "stage-2 exchange not in the window; using the standalone call",
+                extra={"exchange_key": exchange_key},
+            )
+            return None
+        prompt = config_value(
+            self.config, "appraisal.stage2_fork_prompt", DEFAULT_STAGE2_FORK_PROMPT
+        )
+        instruction = (
+            f"{prompt}\n\n"
+            f"The exchange began with the message «{quote(originating_text)}», "
+            f"and the response you sent began «{quote(response_text)}».\n"
+            f"Memory retrieval for this exchange: {profile}"
+        )
+        try:
+            result = await agent.fork(channel, instruction, extra_body=STAGE2_EXTRA_BODY)
+            return _stage2_from_text(result.text)
+        except Exception:
+            logger.warning(
+                "stage-2 appraisal fork failed; using the standalone call",
+                exc_info=True, extra={"exchange_key": exchange_key},
+            )
+            return None
 
     def _appraisal_client(self):
         """Resolve the tier-3 client: appraisal → background → main.

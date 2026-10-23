@@ -185,6 +185,7 @@ async def send_message(self, channel, text: str) -> None:
 | `before_agent_turn(channel, correlation_id: str \| None, meta: dict)` | async broadcast | Before each LLM invocation |
 | `after_persist_assistant(channel, message: dict)` | async broadcast | After assistant message is written to DB; plugins may mutate the in-memory dict |
 | `on_conversation_event(channel, message: dict, message_type: MessageType) -> int \| None` | async broadcast | After every `conv.append()` call; message is the untagged dict (no `_message_type` key). Persistence returns the inserted `message_log` rowid; **exactly one implementation may return non-None** (all others return None). Callers resolve with `resolve_single_result` and attach the rowid to the in-window message as `_db_id`. |
+| `before_compaction(channel, compacted_ids: list[int], cut: int)` | async broadcast, awaited | After the compaction summary succeeded and before `replace_with_summary`. The window still holds the messages about to be dropped (`channel.conversation.messages[:cut]`; `cut` is moved off tool cycles where compaction can afford it, see design.md), so this is where to fork over that prefix (see "Forking the window"). Runs on the response path; failures are logged and never block compaction. |
 | `on_compaction(channel, summary_msg: dict, retain_count: int, compacted_ids: list[int])` | async broadcast | After compaction replaces older messages with a summary; `summary_msg` is the untagged summary dict. `compacted_ids` carries the `message_log` rowids of exactly the removed messages (empty when unknown) — the consolidation range consumed by `MemoryPlugin`. |
 | `on_idle()` | async broadcast | All queues empty and cooldown elapsed; only fires when `IdleMonitorPlugin` is registered |
 | `resolve_channel(channel_id: str) -> Channel \| None` | async firstresult | A caller holding only a persisted `transport:scope` id (`SchedulerPlugin` firing a row after a restart) asks transports for the live channel. Return it for ids your transport owns, else None. See [Channels](#channels). |
@@ -430,6 +431,55 @@ class MemoryPlugin(CorvidaePlugin):
 `MessageType.CONTEXT` entries survive compaction — compaction only summarizes `MESSAGE` entries.
 
 Prefer routing CONTEXT through the admission funnel instead of appending directly: `pm.get_plugin("funnel").admit(channel, conv, "<source>", entries)` gives you window dedupe, per-source token budgets, and the mandatory data-not-instructions framing for free (see FunnelPlugin below). Direct appends bypass all three.
+
+## Forking the window
+
+A background process that wants the agent's own context and voice, and on
+a single-slot llama-server wants to reuse the cached prompt instead of
+evicting it, can run as a **fork** of the channel's window (GitHub issue
+#51, [design.md](design.md#forks)). A fork is one LLM call: the main
+turn's render of the window, up to a cut, plus one `user` instruction.
+
+```python
+from corvidae.fork import fork_agent, window_db_ids
+
+class MyPlugin(CorvidaePlugin):
+    async def review(self, channel, rowid: int) -> str | None:
+        agent = fork_agent(self.pm, "review")   # None unless agent.forks enables "review"
+        conv = channel.conversation
+        if agent is None or conv is None or rowid not in window_db_ids(conv.messages):
+            return None                         # caller makes its standalone call
+        try:
+            result = await agent.fork(
+                channel, "Pause here and review your last answer. Reply in JSON.",
+                extra_body={"response_format": {...}},
+            )
+        except Exception:
+            logger.warning("review fork failed; using the standalone call", exc_info=True)
+            return None
+        return result.text
+```
+
+- `Agent.fork(channel, instruction, *, cut=None, extra_body=None)` returns
+  `ForkResult(text, message, usage)`. `cut=None` forks the whole window;
+  `cut=k` forks `messages[:k]` (use `snap_cut_to_tool_boundary` if `k`
+  might split a tool cycle, or the prefix won't match the cache).
+- It uses `llm.main`, the agent's tool schemas with `tool_choice: "none"`,
+  and the channel's runtime overrides, so the prefix matches the main
+  turn. Don't pass `reasoning_effort` or anything else the chat template
+  renders into the prompt: that breaks the cached prefix. Bound cost with
+  `agent.forks.reasoning_budget_tokens` instead.
+- It mutates nothing, persists nothing, fires no hooks and never runs
+  tools: a reply with `tool_calls` (or a call written out as text) raises `ForkRefused`; no window or no
+  client raises `ForkUnavailable`. Always keep a standalone fallback.
+- Set your own `stage` attribution around the call; `Agent.fork` adds
+  `mode="fork"`. Tag your standalone call `mode="standalone"`.
+- Check containment yourself: a fork only makes sense while the rows your
+  process is about are still in the window (`window_db_ids`).
+- Read the instruction from static config (`corvidae.tuning.config_value`),
+  not `resolve_tunable`, unless you want the agent to be able to rewrite it.
+- Stage names are opaque strings. List yours in `agent.forks.stages` (or
+  leave it null for all stages).
 
 ## Message gating and lifecycle
 
@@ -771,7 +821,7 @@ Compacts conversation history when it approaches the channel's
 
 Implements one hook:
 
-- `compact_conversation` (`trylast=True`) — fires before each LLM call. Checks whether the token estimate exceeds `compaction_threshold * max_tokens`. If so, and if the conversation has more than `min_messages_to_compact` messages, summarizes older messages to fit within `compaction_retention * max_tokens`. Returns True to stop the `firstresult` chain. Runs after any third-party handlers at default priority.
+- `compact_conversation` (`trylast=True`) — fires before each LLM call. Checks whether the token estimate exceeds `compaction_threshold * max_tokens`. If so, and if the conversation has more than `min_messages_to_compact` messages, summarizes older messages to fit within `compaction_retention * max_tokens`, moving the cut off any tool cycle that straddles it where that still leaves a useful compaction (design.md, CompactionPlugin step 3). With `agent.forks` on for `compaction`, the summary comes from a fork of the dropped prefix (`agent.compaction_fork_prompt`); otherwise, or if the fork fails, from the standalone summarizer. Fires `before_compaction` before truncating and `on_compaction` after. Returns True to stop the `firstresult` chain. Runs after any third-party handlers at default priority.
 
 Token counting uses tiktoken (cl100k_base encoding) via `count_tokens()` in `corvidae/context.py`. When tiktoken is unavailable, a character-based fallback is used (3.5 chars per token). `agent.chars_per_token` is deprecated and only takes effect in the fallback path.
 
@@ -846,8 +896,9 @@ logged with a traceback and never breaks an LLM call.
   `"persistence"`) — consumes `on_llm_response` and writes one row per LLM
   call into the `usage_log` SQLite table (in the persistence plugin's
   database): timestamp, request id, role, model, stage, channel id,
-  correlation id (NULL for calls outside any correlated turn), token
-  counts, latency, and error.
+  correlation id (NULL for calls outside any correlated turn), trigger,
+  mode (`fork`/`standalone` for stages that can fork, else NULL), token
+  counts, cached tokens, latency, and error.
   The table is created lazily on first use (`CREATE TABLE IF NOT EXISTS`).
 - **`MetricsJsonlPlugin`** (entry point `"metrics_jsonl"`) — consumes
   `on_metrics` and appends one JSON line per event
@@ -1021,14 +1072,20 @@ memory records (SQLite + sqlite-vec + FTS5) and retrieves them into the
 prompt through the admission funnel. Entry point name: `"memory"`;
 `depends_on = {"persistence", "llm"}`. Absorbs the removed `DreamPlugin`.
 
-Implements five hooks:
+Implements six hooks:
 
 - `on_start` — creates the memory schema on the persistence connection
   (retried lazily on first use; on_start ordering is LIFO across plugins).
+- `before_compaction` — with `agent.forks` on for `consolidation`, forks
+  the memory record from the prefix about to be dropped (when every
+  dialog row of the range is in it) and stashes it for the task below.
 - `on_compaction` — spawns a tracked background task consolidating the
-  `compacted_ids` range above the per-channel watermark.
+  `compacted_ids` range above the per-channel watermark, using the stashed
+  fork record when there is one for that range and watermark, else one
+  standalone `llm.background` call.
 - `on_idle` — consolidates the un-consolidated tail of channels inactive
-  past `memory.idle_consolidate_after` seconds.
+  past `memory.idle_consolidate_after` seconds, forking the live window
+  when forks are on and the range is in it.
 - `before_agent_turn` — embeds the inbound user text, scores candidates
   (`similarity × exp(-age_days / half_life)`, with age from `created_at` or,
   under `memory.retrieval.recency_from: last_used`, from the last

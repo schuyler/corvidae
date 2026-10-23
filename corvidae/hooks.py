@@ -775,6 +775,37 @@ class AgentSpec:
         """
 
     @hookspec
+    async def before_compaction(
+        self,
+        channel: "Channel",
+        compacted_ids: list[int],
+        cut: int,
+    ) -> None:
+        """Fired just before compaction drops the head of the window.
+
+        Broadcast, awaited (it runs on the response path). Fired by
+        CompactionPlugin after the summary succeeded and before
+        replace_with_summary, so the window still holds every message about
+        to be dropped and the server still holds their rendered prefix. A
+        plugin that wants a fork over that prefix runs it here, with
+        ``Agent.fork(channel, instruction, cut=cut)`` (GitHub issue #51).
+        Failures are logged and never block compaction.
+
+        Args:
+            channel: The Channel being compacted.
+            compacted_ids: The ``message_log`` rowids of the messages about
+                to be dropped, in window order (same list on_compaction
+                receives). Empty when none were persisted.
+            cut: Window index of the first retained message; the dropped
+                messages are ``channel.conversation.messages[:cut]``.
+                Normally no tool cycle straddles it; the exception is a
+                long-span cycle whose result is near the tail, where
+                compaction keeps its planned cut (CompactionPlugin
+                ._clean_cut) and the fork prefix renders that call with a
+                placeholder result.
+        """
+
+    @hookspec
     async def on_compaction(
         self,
         channel: "Channel",

@@ -132,10 +132,57 @@ These values apply to all channels. Per-channel overrides in the `channels` sect
 | `agent.compaction_retention` | float | `0.5` | After compaction, retain messages that fit within `compaction_retention × max_context_tokens` tokens, counting from the most recent. |
 | `agent.min_messages_to_compact` | integer | `5` | Skip compaction if the conversation has this many messages or fewer. |
 | `agent.compaction_prompt` | string | built-in | System prompt for the compaction summarizer. Used in every compaction round; when earlier summaries exist, an instruction to carry them forward and the (bounded) prior-summary text are appended after it. |
+| `agent.compaction_fork_prompt` | string | built-in | Instruction a compaction *fork* appends to the dropped prefix, used instead of `compaction_prompt` when forks are on for `compaction` (see [`agent.forks`](#agentforks--background-processes-as-forks)). Documented copy: `prompts/compaction_fork.md`. |
+| `agent.forks` | mapping | off | Run compaction, consolidation, appraisal and critique as forks of the main window. See [`agent.forks`](#agentforks--background-processes-as-forks). |
 | `agent.chars_per_token` | float | `3.5` | **Deprecated.** Accepted for interface and config compatibility. Has no effect on token counting — `count_tokens()` uses the module-level `_FALLBACK_CHARS_PER_TOKEN` constant (3.5) regardless of this value. |
 | `agent.immutable_settings` | list of strings | `[]` | Keys the agent is blocked from changing via the `set_settings` tool. `system_prompt` is always blocked regardless of this list, but see the note under "Runtime-tunable gate parameters" for what that does and does not protect. |
 | `agent.request_logprobs` | boolean | `false` | When `true`, `Agent` merges `"logprobs": true` into every LLM request body. llama-server returns a logprobs envelope (surfaced to plugins via `on_agent_response`); Anthropic-style providers return nothing and the field surfaces as `None`. Static operator-only flag — captured at init and on config reload, not per-channel tunable. |
 | `agent.mid_conversation_system_role` | `system` \| `user` | `system` | Role under which every `system` message *after the leading system prompt* is sent to the LLM: funnel CONTEXT and notifications without a `tool_call_id`. Strict chat templates (Qwen 3.8, Swift-1.5) raise "System message must be at the beginning" on those; `user` satisfies them and also keeps untrusted text out of the `system` role ([threat-model.md](threat-model.md), finding 3). Applied when the prompt is built: the in-memory window and `sessions.db` keep `role: system`, and the rewrite is deterministic, so the cached prompt prefix stays stable. Any other value logs a warning and uses `system`. Static operator-only flag, re-read on config reload. Scheduled firings (`scheduler` reminders and jobs) are notifications without a `tool_call_id`, so they follow this key too; a strict template needs `user` for them to render at all. |
+
+### `agent.forks` — background processes as forks
+
+Off by default (GitHub issue #51; the evals that gate turning it on are
+#73). With forks on, a background stage doesn't build its own prompt. It
+renders the channel's window exactly as the main turn does, appends one
+`user` instruction, and makes one call on `llm.main`. On a single-slot
+llama-server that reuses the cached prefix instead of evicting it, and the
+agent's own system prompt is in view, so records and summaries are written
+in its voice. Any fork failure falls back to the stage's standalone call,
+as does a stage whose rows have left the window. See [design.md](design.md#forks).
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `agent.forks.enabled` | boolean | `false` | Master switch. `false` leaves every stage on its standalone call. |
+| `agent.forks.reasoning_budget_tokens` | integer or null | `2048` | Sent as `reasoning_budget_tokens` on every fork. A fork keeps the main reasoning effort, because the chat template renders it into the system block and changing it would break the cached prefix; this per-request budget bounds the fork's think instead. `null` sends nothing (server default). llama-server applies it only when the template declares thinking tags. |
+| `agent.forks.stages` | list of strings or null | `null` | Which stages fork: `compaction`, `consolidation`, `appraisal`, `critique`. `null` means all of them. A name no plugin uses matches nothing. |
+
+Any other key under `agent.forks`, a non-boolean `enabled`, a negative or
+non-integer budget, or `stages` that isn't a list of strings fails at
+startup, and a reload carrying one is rejected.
+
+Each stage has a fork instruction next to its standalone prompt:
+
+| Key | Default copy | Notes |
+|-----|--------------|-------|
+| `agent.compaction_fork_prompt` | `prompts/compaction_fork.md` | Appended to the dropped prefix. |
+| `memory.consolidation_fork_prompt` | `prompts/memory_consolidation_fork.md` | Followed by a sentence naming where the range starts. Restart-only, like the rest of `memory.*`. |
+| `appraisal.stage2_fork_prompt` | `prompts/appraisal_fork.md` | Followed by quotes of the exchange's opening message and of the response sent, and the retrieval profile. |
+| `critique.fork_prompt.<lens>` | `prompts/critique_<lens>_fork.md` | Followed by quotes of the exchange's opening message and of the response sent; provenance also gets the CONTEXT snapshot. |
+
+These are static config, read with `corvidae.tuning.config_value`. Unlike
+`appraisal.stage2_prompt` and `critique.prompt.<lens>`, they aren't runtime
+tunables: `set_settings` can write the key, but nothing reads the override.
+
+Forks always run on `llm.main`, because only the main model shares the
+window's cache. If `llm.background` names a different model, enabling
+forks moves those stages' cost onto the main model, and the daemon logs a
+warning at startup saying so.
+
+Each forkable stage tags its own LLM call (the summary, the record, the
+stage-2 appraisal, each critique lens) `mode = 'fork'` or `'standalone'`
+in `usage_log`, so `cached_tokens` per fork row shows whether the prefix
+was reused. Other calls the stage makes, such as consolidation's
+importance prior, leave `mode` NULL.
 
 ### `reasoning_history: exchange` and `preserve_thinking`
 
@@ -190,6 +237,8 @@ The complete set of runtime-tunable keys (anything passed to `resolve_tunable`) 
 - `appraisal.novelty.no_probe_default`, `appraisal.prior.w_novelty`, `appraisal.prior.w_stakes`, `appraisal.prior.w_valence`, `appraisal.probe.budget_ms`, `appraisal.probe.max_tokens`, `appraisal.probe.rank_scale`, `appraisal.stage2_prompt`, `appraisal.weights.commitment`, `appraisal.weights.disagreement`, `appraisal.weights.imperative`, `appraisal.weights.novelty`, `appraisal.weights.question`
 - `critique.lens.ambiguity`, `critique.lens.commitment`, `critique.lens.disagreement`, `critique.lens.neg_valence`, `critique.prompt.<lens>`, `critique.provenance.enabled`, `critique.provenance.max_terms`, `critique.provenance.weak_score`, `critique.sample_below_rate`
 
+The fork instruction keys (`appraisal.stage2_fork_prompt`, `critique.fork_prompt.<lens>`) are deliberately not on that list: they are read from config only, so they need no `immutable_settings` entry.
+
 Any *dotted* key not on that list is operator-only: it is read once at init or reload, and while `set_settings` can write it into `runtime_overrides`, nothing reads the override. Undotted keys are a different matter: `set_settings` keys *without* a dot are forwarded verbatim into the LLM request body, where they override `model` and `messages` — see [threat-model.md](threat-model.md), finding 1. `immutable_settings` can block the known-dangerous keys (`messages`, `model`, `tools`, `tool_choice`) as a stopgap, but a blocklist cannot be complete; the real fix is an allowlist in code. If you don't need agent self-tuning, `tools.disabled: [set_settings]` removes the surface altogether.
 
 #### `appraisal.*` — stage-1 appraisal
@@ -233,6 +282,7 @@ A record's `created_at` is the `sessions.db` timestamp of the last message in it
 | `memory.retrieval.recency_from` | `created` \| `last_used` | `created` | Where the ranking age is measured from. `last_used` uses `max(created_at, last_retrieved_at)`, the same rule retention uses, so a memory stays fresh while it keeps being recalled. The `(age)` shown to the model is always measured from `created_at`. Any other value logs a warning and uses `created`. |
 | `memory.channel_groups` | mapping | `{}` | `{group_name: [channel ids]}` — channels in the same group share retrieval scope (passive retrieval, `search_memory`, and `recall_raw`) and near-duplicate merging (see `dup_threshold`). Memory is otherwise compartmentalized per channel. A member may be a glob using `*` (any run of characters, including none) and `?` (exactly one character), matched case-sensitively against the full `transport:scope` id, so `signal:*` covers Signal channels created at runtime. A group applies to a calling channel that equals one of its literal members or matches one of its patterns; the caller's own id is always in scope by equality. A member containing `*` or `?` is a pattern, even when you meant it literally (`irc:#what?` also matches `irc:#whats`), and there is no escape syntax. A pattern containing `[` or `]` fails startup with a `ValueError`; a member with no wildcard is matched exactly, so a bracketed IRC nick such as `irc:[bob]` is fine. A group containing `*` alone makes memory global across every channel. |
 | `memory.consolidation_prompt` | string | built-in | Overrides the consolidation system prompt (documented copy: `prompts/memory_consolidation.md`). |
+| `memory.consolidation_fork_prompt` | string | built-in | Overrides the instruction a consolidation *fork* appends to the window when `agent.forks` is on for `consolidation` (documented copy: `prompts/memory_consolidation_fork.md`). Static config, not a runtime tunable. |
 | `memory.dup_threshold` | float | `0.95` | Near-duplicate merge threshold. When a new consolidation embedding has cosine similarity ≥ this value against an existing record in the channel's memory scope, the older record is superseded: its statistics are folded into the new record and its vec row is deleted. A record on another channel qualifies only when both channels' scopes reach the same channels (always true within a single `*` group; see `channel_groups`), so no channel loses sight of a merged fact. Applied only when sqlite-vec is available and the new record's embedding succeeded; silently skipped otherwise. |
 
 ### `memory.retention` — Retention job
@@ -447,7 +497,9 @@ No restart is required for the changes listed below. Changes that require restar
 | `daemon.idle_cooldown_seconds` | `Agent` uses the new cooldown on the next idle check. |
 | `agent.request_logprobs` | `Agent` re-reads the flag; takes effect on the next LLM call. |
 | `agent.mid_conversation_system_role` | `Agent` re-reads the role; takes effect on the next prompt build. The changed rendering of earlier turns costs one full prompt-cache miss. |
-| `agent.compaction_prompt` | `CompactionPlugin` uses the new prompt on its next compaction. |
+| `agent.compaction_prompt`, `agent.compaction_fork_prompt` | `CompactionPlugin` uses the new prompt on its next compaction. |
+| `agent.forks.*` | `Agent` re-reads the section; takes effect on the next fork. A reload with an invalid section is rejected whole. |
+| `appraisal.stage2_fork_prompt`, `critique.fork_prompt.<lens>` | Read from the reloaded config on the next appraisal/critique fork. |
 | `scheduler.*` | `SchedulerPlugin` re-reads its settings and re-syncs `jobs` by name (insert, update, disable removed), then wakes its timer so the change takes effect immediately. |
 | Dotted plugin tunables (`appraisal.*`, `critique.*`) | Resolved per-decision via `corvidae.tuning.resolve_tunable`; a reloaded value applies on the next appraisal/critique decision. Per-channel `set_settings` overrides still take precedence. |
 | `agent.immutable_settings` | `RuntimeSettingsPlugin` resets its blocklist and re-applies the new list. Constructor-supplied immutable keys are always retained. |
@@ -461,6 +513,7 @@ No restart is required for the changes listed below. Changes that require restar
 | `irc.host`, `irc.port`, `irc.nick` | IRC transport is connected at startup; changing connection parameters requires reconnection. |
 | Existing channel config in `channels:` | Channels already registered retain their original `ChannelConfig` until restart. |
 | `llm.background` | Not updated on reload. |
+| `memory.*` (including `memory.consolidation_prompt` and `memory.consolidation_fork_prompt`) | `MemoryPlugin` reads its section at init only. |
 | `tools.max_result_chars`, `tools.shell_timeout`, `tools.web_fetch_timeout` | Deferred; not currently implemented in hot-reload path. |
 
 ### Error handling

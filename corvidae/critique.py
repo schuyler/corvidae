@@ -41,9 +41,10 @@ from pathlib import Path
 import aiosqlite
 
 from corvidae.attribution import reset_attribution, set_attribution
+from corvidae.fork import fork_agent, quote, window_db_ids
 from corvidae.hooks import CorvidaePlugin, hookimpl
 from corvidae.task import Task
-from corvidae.tuning import resolve_tunable
+from corvidae.tuning import config_value, resolve_tunable
 
 logger = logging.getLogger(__name__)
 
@@ -190,6 +191,93 @@ DEFAULT_PROMPTS = {
 }
 
 
+# Fork instructions (GitHub issue #51). With agent.forks on, a lens runs as a
+# fork of the live window: the agent reviews its own response with the
+# lens's adversarial brief, the instruction appended as a user turn and
+# followed by a quote of the exchange's opening message (and, for
+# provenance, the CONTEXT snapshot inline). Documented copies live in
+# prompts/critique_*_fork.md; critique.fork_prompt.<lens> overrides them
+# from static config only (not runtime tunables), so set_settings can't
+# soften the critic it is checked by.
+_JSON_TAIL = (
+    "Do not call tools. Respond with a single JSON object, nothing else:\n"
+    '{"objections": [{"claim": "...", "objection": "...", "severity": 0.5}]}'
+)
+_FORK_PROMPT_PREDICTIVE = (
+    "[Self-critique: predictive] Pause the conversation here. Review the "
+    "response you gave in the exchange that began with the message quoted "
+    "below, as a critical outside reviewer would, not as its defender. That "
+    "message was ambiguous: you had to interpret what was wanted. Predict how "
+    "the user will receive your response:\n\n"
+    "- Did you address the interpretation the user most plausibly intended, "
+    "or a more convenient one?\n"
+    "- Is there a reading of the message under which your response misses "
+    "the point entirely?\n"
+    "- Did you silently resolve an ambiguity you should have surfaced or "
+    "asked about?\n\n"
+    "Only object where a misreading is plausible and consequential. An empty "
+    "objections list is a good outcome, not a failure.\n\n" + _JSON_TAIL
+)
+_FORK_PROMPT_CONSTRAINED = (
+    "[Self-critique: constrained] Pause the conversation here. Review the "
+    "response you gave in the exchange that began with the message quoted "
+    "below, as a critical outside reviewer would, not as its defender. The "
+    "exchange contains concrete commitments, facts, numbers, dates, or "
+    "constraints. Check your response against them mechanically:\n\n"
+    "- Does every number, date, and name in your response agree with the "
+    "ones given in the conversation?\n"
+    "- Did you make a commitment you cannot keep, or contradict a commitment "
+    "already on record?\n"
+    "- Did you drop a stated constraint (a budget, a deadline, an exclusion) "
+    "when forming your answer?\n\n"
+    "Only object to concrete violations you can point at. An empty "
+    "objections list is a good outcome, not a failure.\n\n" + _JSON_TAIL
+)
+_FORK_PROMPT_ADVERSARIAL = (
+    "[Self-critique: adversarial] Pause the conversation here. In the "
+    "exchange that began with the message quoted below, the user disagreed "
+    "with or pushed back on you. Take the USER's side and steelman it, "
+    "against your own response:\n\n"
+    "- Assume the user's objection is correct. What would that imply you "
+    "got wrong?\n"
+    "- Did you defend your earlier statement instead of checking it?\n"
+    "- Did you concede rhetorically ('you're right, but...') while actually "
+    "repeating the same claim?\n"
+    "- Is there evidence in the conversation that supports the user's "
+    "version over yours?\n\n"
+    "Only object where the user's side genuinely holds up under the "
+    "steelman. An empty objections list is a good outcome, not a "
+    "failure.\n\n" + _JSON_TAIL
+)
+_FORK_PROMPT_PROVENANCE = (
+    "[Self-critique: provenance] Pause the conversation here. Audit the "
+    "response you gave in the exchange that began with the message quoted "
+    "below for confabulated memory. You asserted something about past "
+    "events, statements, or commitments. The memory system reports that "
+    "retrieval for this exchange was weak and a search of the raw "
+    "conversation log found nothing matching. Below is a snapshot of ALL "
+    "the retrieved context that was in your window when you wrote the "
+    "response.\n\n"
+    "For each claim about the past in your response:\n\n"
+    "- Is the claim supported by the conversation above or by the context "
+    "snapshot?\n"
+    "- If not, you asserted a recollection with no record behind it: "
+    "object, quoting the unsupported claim exactly.\n"
+    "- Claims explicitly framed as uncertainty or inference ('I don't "
+    "recall', 'I would guess...') are correctly calibrated: do not object "
+    "to them.\n\n"
+    "Confident phrasing is not evidence. A claim is supported by records, "
+    "not by how sure you sounded. An empty objections list is a good "
+    "outcome.\n\n" + _JSON_TAIL
+)
+DEFAULT_FORK_PROMPTS = {
+    "predictive": _FORK_PROMPT_PREDICTIVE,
+    "constrained": _FORK_PROMPT_CONSTRAINED,
+    "adversarial": _FORK_PROMPT_ADVERSARIAL,
+    "provenance": _FORK_PROMPT_PROVENANCE,
+}
+
+
 def _parse_json_block(text: str) -> dict:
     """Extract the first JSON object from LLM output (see appraisal.py)."""
     start = text.find("{")
@@ -237,6 +325,10 @@ class CritiquePlugin(CorvidaePlugin):
         # Bounded set of correlation ids admitted via on_message_admitted —
         # the plugin-side definition of "user" origin (R1).
         self._admitted: collections.OrderedDict[str, None] = collections.OrderedDict()
+        # Bounded map of correlation id -> originating row's message_log
+        # rowid, fed by on_message_persisted: a lens forks only while that
+        # row is still in the window (#51).
+        self._originating_rowid: collections.OrderedDict[str, int] = collections.OrderedDict()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -306,6 +398,17 @@ class CritiquePlugin(CorvidaePlugin):
         self._admitted.move_to_end(correlation_id)
         while len(self._admitted) > ADMITTED_LRU_MAXSIZE:
             self._admitted.popitem(last=False)
+
+    @hookimpl
+    async def on_message_persisted(self, channel, correlation_id, rowid, text, meta) -> None:
+        """Record the exchange's originating rowid for the fork containment
+        check. Unpersisted exchanges (rowid None) are never forked."""
+        if rowid is None:
+            return
+        self._originating_rowid[correlation_id] = rowid
+        self._originating_rowid.move_to_end(correlation_id)
+        while len(self._originating_rowid) > ADMITTED_LRU_MAXSIZE:
+            self._originating_rowid.popitem(last=False)
 
     # ------------------------------------------------------------------
     # Provenance snapshot (§3.3, §4.7)
@@ -533,8 +636,16 @@ class CritiquePlugin(CorvidaePlugin):
         try:
             client = self._critic_client()
             objections: list[dict] = []
-            if client is not None:
-                for lens in lenses:
+            for lens in lenses:
+                # A fork of the live window when one is available; a lens
+                # whose fork misses falls back to its standalone call.
+                objs = await self._fork_lens(
+                    channel, lens, exchange_key, originating_text, response_text,
+                )
+                if objs is None:
+                    if client is None:
+                        continue
+                    standalone_token = set_attribution(mode="standalone")
                     try:
                         objs = await self._run_lens(
                             client, channel, lens, exchange_key,
@@ -546,7 +657,9 @@ class CritiquePlugin(CorvidaePlugin):
                             extra={"exchange_key": exchange_key},
                         )
                         continue
-                    objections.extend(objs)
+                    finally:
+                        reset_attribution(standalone_token)
+                objections.extend(objs)
 
             # Record the outcome via the ATOMIC merge (never read-merge-write):
             # the critique outcome can interleave with WP2.9's send-gate record
@@ -613,7 +726,76 @@ class CritiquePlugin(CorvidaePlugin):
             ],
             extra_body=OBJECTION_EXTRA_BODY,
         )
-        text = response["choices"][0]["message"]["content"]
+        return self._objections_from_text(response["choices"][0]["message"]["content"], lens)
+
+    def _fork_target(self, channel, exchange_key):
+        """The Agent to fork through, or None for the standalone path.
+
+        None when forks are off for "critique", the channel has no live
+        window, or the exchange's originating row has left the window.
+        """
+        agent = fork_agent(self.pm if hasattr(self, "pm") else None, "critique")
+        if agent is None:
+            return None
+        rowid = self._originating_rowid.get(exchange_key)
+        conv = getattr(channel, "conversation", None)
+        if rowid is None or conv is None or rowid not in window_db_ids(conv.messages):
+            logger.debug(
+                "critique exchange not in the window; using the standalone call",
+                extra={"exchange_key": exchange_key},
+            )
+            return None
+        return agent
+
+    async def _fork_lens(
+        self, channel, lens, exchange_key, originating_text, response_text,
+    ) -> list[dict] | None:
+        """One lens as a fork of the full window; None for the standalone path.
+
+        The exchange is named by its opening message and the response the
+        user was sent (which can differ from the window's last assistant
+        message, e.g. the max-turns fallback). Provenance keeps passing the
+        CONTEXT snapshot inline: it is the exact set admitted for that
+        exchange, which the window alone doesn't pin down.
+
+        Containment is checked per lens, after the last await that builds
+        the instruction: an earlier lens's fork is an await, during which
+        the agent loop can compact the exchange out of the window.
+        Agent.fork renders the prompt before its own first await, so the
+        check and the render see the same window.
+        """
+        if fork_agent(self.pm if hasattr(self, "pm") else None, "critique") is None:
+            return None
+        prompt = config_value(
+            self.config, f"critique.fork_prompt.{lens}", DEFAULT_FORK_PROMPTS[lens]
+        )
+        instruction = (
+            f"{prompt}\n\nThe exchange began with the message "
+            f"«{quote(originating_text)}», and the response you sent began "
+            f"«{quote(response_text)}»."
+        )
+        if lens == "provenance":
+            snapshot = await self._read_provenance_snapshot(exchange_key)
+            instruction += (
+                "\n\nRetrieved context snapshot (all CONTEXT in your window "
+                f"when you wrote the response):\n{snapshot or '(no context was retrieved)'}"
+            )
+        agent = self._fork_target(channel, exchange_key)
+        if agent is None:
+            return None
+        try:
+            result = await agent.fork(channel, instruction, extra_body=OBJECTION_EXTRA_BODY)
+            return self._objections_from_text(result.text, lens)
+        except Exception:
+            logger.warning(
+                "critique lens %s fork failed; using the standalone call", lens,
+                exc_info=True, extra={"exchange_key": exchange_key},
+            )
+            return None
+
+    @staticmethod
+    def _objections_from_text(text: str, lens: str) -> list[dict]:
+        """Parse a lens reply into lens-tagged objections; raises on bad output."""
         parsed = _parse_json_block(text)
         objs = parsed.get("objections") or []
         result: list[dict] = []
