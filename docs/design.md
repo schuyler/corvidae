@@ -82,6 +82,7 @@ class AgentSpec:
     async def transform_display_text(self, channel: Channel, text: str, result_message: dict) -> str | None
     async def on_idle(self) -> None
     async def load_conversation(self, channel: Channel) -> list[dict] | None
+    async def resolve_channel(self, channel_id: str) -> Channel | None
     async def on_conversation_event(self, channel: Channel, message: dict, message_type: MessageType) -> int | None
     async def on_compaction(self, channel: Channel, summary_msg: dict, retain_count: int, compacted_ids: list[int]) -> None
 ```
@@ -100,7 +101,7 @@ returns `False`; otherwise any `True` returns `True`; otherwise `None`.
 
 Hooks marked `firstresult=True` in the hookspec (`on_llm_error`,
 `compact_conversation`, `process_tool_result`, `transform_display_text`,
-`load_conversation`) use pluggy's own first-non-None-wins dispatch — the
+`load_conversation`, `resolve_channel`) use pluggy's own first-non-None-wins dispatch — the
 first handler to return a non-None value stops the chain; no separate
 resolver function is involved. `process_tool_result` and
 `transform_display_text` are wrapper chains: `@hookimpl(wrapper=True)`
@@ -136,6 +137,7 @@ their return values are ignored.
 | `transform_display_text` | firstresult=True wrapper chain | `_resolve_display_text`, before `send_message`; return transformed text or None to leave unchanged |
 | `on_idle` | broadcast | `IdleMonitor`, when all queues empty and cooldown elapsed |
 | `load_conversation` | firstresult=True | `_process_queue_item`, when `channel.conversation is None`; return list of tagged message dicts or None to defer |
+| `resolve_channel` | firstresult=True | `SchedulerPlugin`, for a persisted channel id the registry does not hold (e.g. a reminder due after a restart); a transport returns the live Channel for ids it owns, created with transport-specific config, or None to defer. `SignalPlugin` implements it; callers fall back to `registry.get_or_create` from the split id |
 | `on_conversation_event` | broadcast | `_process_queue_item`, after every `conv.append()`; side effects only (persistence, JSONL logging) |
 | `on_compaction` | broadcast | `CompactionPlugin`, after `replace_with_summary()`; side effects only (persistence) |
 | `on_llm_request` | broadcast | `LLMClient.chat()` via LLMPlugin's injected observer, before the retry loop; side effects only (observability) |
@@ -510,6 +512,12 @@ CREATE TABLE message_log (
 CREATE INDEX idx_log_channel ON message_log(channel_id, timestamp);
 ```
 
+Plugins keep their own tables on the same connection, created lazily on
+first use because the `on_start` broadcast is concurrent: `memory` and
+friends ([MemoryPlugin](#memoryplugin)), `exchange_log` (OutcomeLogPlugin),
+`usage_log` (UsageLogPlugin), and `schedule`
+([SchedulerPlugin](#schedulerplugin)).
+
 ## Agent
 
 `agent.py` — the central plugin. Implements `on_start`, `on_message`,
@@ -528,6 +536,13 @@ The LLM client is borrowed from `LLMPlugin` (`get_dependency(pm, "llm", LLMPlugi
 in `_start_plugin`. The tool registry and `max_result_chars` are borrowed from
 `ToolCollectionPlugin` (`get_dependency(pm, "tools", ToolCollectionPlugin)`).
 Agent does not own either lifecycle.
+
+`Agent.started` is True from the end of `on_start` until `on_stop`.
+`Runtime.start()` broadcasts `on_start` to every plugin concurrently and
+calls `Agent.on_start` only afterwards, so a producer whose background
+task begins in its own `on_start` (`SchedulerPlugin`) waits for this flag
+before calling `on_notify`; otherwise the queue consumer could run before
+`Agent` has a registry and client.
 
 `Agent.queues` is a public `dict[str, SerialQueue]` (keyed by channel ID).
 Queues added after startup are visible to other plugins that hold a reference
@@ -550,7 +565,16 @@ per-channel `SerialQueue`. The queue's consumer calls
 2. When `channel.conversation is None`, creates a `ContextWindow`, calls
    `load_conversation` (firstresult=True) to populate history, and assigns
    `channel.conversation`
-3. Resets `turn_counter` to 0 on user messages
+3. Resets `turn_counter` to 0 when the item originates a new correlation
+   (`item.originating`, set during correlation resolution: every USER
+   item, and a notification with no inherited `meta["correlation_id"]`)
+   **and** no tool cycle is in flight (`channel.pending_tool_call_ids` is
+   empty). An item arriving mid-cycle is charged to the running cycle
+   instead (R4), so a chatty channel cannot extend `max_turns`. Keying on
+   `originating` rather than the USER role makes `max_turns` a
+   per-exchange budget for clock-driven exchanges too: a channel fed only
+   by scheduler notifications would otherwise exhaust it after ten
+   responses and have every later tool call suppressed.
 4. Resolves channel config (including `max_turns`)
 5. Appends the inbound message to conversation; fires `on_conversation_event`
    (broadcast, side effects only — persistence plugins write to storage)
@@ -1146,6 +1170,124 @@ stub notification wakes the channel per pending pair, and the drain in
 `before_agent_turn` admits everything queued for the triggering
 exchange's origin.
 
+## SchedulerPlugin
+
+`scheduler.py` — the clock-driven producer: reminders, operator-declared
+periodic jobs, and the heartbeat (#59; design rationale in
+`plans/scheduler.md`). Entry point name: `"scheduler"`;
+`depends_on = {"registry", "persistence"}`. `on_idle` is no substitute:
+it is push-based, so a daemon with no traffic never fires it.
+
+**Rows.** One `schedule` table on the persistence connection. A row is a
+due time, an optional interval, a target channel id, the text, and an
+origin (`reminder` or `heartbeat`). Reminders come from the `remind_me`
+tool and are pinned to the calling channel. Jobs come from
+`scheduler.jobs` in `agent.yaml` and are synced by `name`.
+
+```sql
+CREATE TABLE schedule (
+  id INTEGER PRIMARY KEY,
+  name TEXT UNIQUE,            -- config jobs only; NULL for tool-created rows
+  channel_id TEXT NOT NULL,    -- "transport:scope", the persistence key
+  origin TEXT NOT NULL,        -- 'reminder' | 'heartbeat'
+  text TEXT NOT NULL,          -- the objective, as the agent or operator wrote it
+  next_fire_at REAL NOT NULL,  -- unix seconds, UTC
+  interval_seconds REAL,       -- NULL means one-shot
+  created_at REAL NOT NULL,
+  created_by TEXT NOT NULL,    -- 'config' | 'tool'
+  last_fired_at REAL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  disabled_reason TEXT,        -- 'fired' | 'cancelled' | 'missed' | 'removed_from_config'
+  schedule_spec TEXT           -- config jobs: canonical every/at/timezone, to detect changes
+);
+CREATE INDEX schedule_due ON schedule (enabled, next_fire_at);
+```
+
+There is no firing log: a firing is a persisted conversation row, and its
+`meta["schedule_id"]` travels with the correlation.
+
+**Timer.** One asyncio task sleeps until the earliest enabled row is due
+(at most an hour, so a wall-clock jump is noticed). An `asyncio.Event`
+wakes it early whenever a row is added, cancelled, or re-synced. Before
+firing anything it waits until the persistence DB is open and
+`Agent.started` is True. Clock and sleeper are constructor arguments, so
+tests inject fakes and never sleep.
+
+**Firing.** A due row is first advanced (recurring) or disabled as
+`fired` (one-shot): at most once. Then the channel is resolved
+(`registry.get`, then the `resolve_channel` hook, then
+`registry.get_or_create` from the split id), `channel.touch()` runs so
+MemoryPlugin's inactivity check does not consolidate mid-exchange, and
+the plugin calls:
+
+```python
+await pm.ahook.on_notify(
+    channel=channel, source=row.origin, text=framed_text,
+    tool_call_id=None, meta={"origin": row.origin, "schedule_id": row.id},
+)
+```
+
+From there the normal pipeline runs: serial queue, persistence,
+origin-keyed consumers, attribution, and `send_message`, whose reply on
+the row's channel is the unprompted message. A heartbeat on a channel no
+transport owns (`internal:heartbeat`) reaches the log and persistence
+only, because every transport's `send_*` hooks filter on
+`matches_transport`. The originating notification resets `turn_counter`
+(step 3 of [Message processing](#message-processing)).
+
+**Framing and role.** Reminder text is framed as data:
+
+> A reminder you set on 2026-10-23 14:02 (PDT) for this conversation is
+> due. Reminder text: «...». Decide whether and how to act on it.
+
+`«` and `»` inside the text are replaced, so the text cannot close the
+quote. Config jobs read `Scheduled job "<name>" (set by the operator,
+every <interval>) is due. Job prompt: «...». ...`. A late catch-up firing
+is prefixed `[overdue by 42m, daemon was down]`. The row is stored as
+`role: system` with the `[reminder]`/`[heartbeat]` prefix like any
+notification, and rendered under `agent.mid_conversation_system_role`
+(`user` on templates that reject a non-leading system message). No role
+parameter was added to `on_notify`.
+
+**Recurrence.** A fixed interval with an optional anchor (`at`: `HH:MM`,
+or an ISO datetime for a weekday anchor). The next slot is computed from
+the scheduled time, not the fire time, so there is no drift; a row more
+than one interval behind skips to the next future slot. Steps are taken in
+local wall-clock time in `scheduler.timezone`, so `every: 1d` at 08:30
+stays at 08:30 across DST.
+
+**Startup.** `on_start` (or the timer's first pass, if the DB was not
+open yet) syncs config jobs and then applies the catch-up policy. A
+one-shot overdue by less than `catch_up_window` fires once with the stale
+prefix; an older one is disabled as `missed`. A recurring row less than
+one interval behind fires once with the prefix; one further behind skips
+ahead without firing. Startup never fires directly; the timer does, once
+it is ready.
+
+**Job sync.** On `on_start` and `on_config_reload`, by `name`. A new name
+is inserted. An existing name updates text, channel, and origin, and
+recomputes `next_fire_at` only when `schedule_spec` changed or the row
+was disabled. A name no longer configured is disabled as
+`removed_from_config`, a durable stop. An invalid entry is logged at
+ERROR and its existing row is left alone, so a typo does not stop a
+running job. A reload wakes the timer.
+
+**Tools.** `remind_me(when, text)`, `list_reminders()`, and
+`cancel_reminder(id)` act on `_ctx.channel` only and take no channel
+argument. The tool, not the model, parses `when` against
+`scheduler.timezone`: a relative duration (`20m`, `1h30m`), ISO 8601 with
+or without an offset, or bare `HH:MM` for the next occurrence; a bare
+number is refused as ambiguous. It returns the resolved absolute time.
+`scheduler.max_reminders_per_channel` caps pending tool rows per channel,
+and text is capped at 2000 characters. `cancel_reminder` refuses config
+jobs, and treats another channel's row as not found.
+
+**Shutdown.** `on_stop` cancels the timer task; firings already enqueued
+drain with the channel queues.
+
+**Not in phase one:** a `send_to_channel` tool, recurring reminders by
+tool, cron syntax, hook-kind jobs (see `plans/scheduler.md`).
+
 ## Subagent Tool
 
 `tools/subagent.py` — `SubagentPlugin` registers the `subagent` tool, which
@@ -1331,6 +1473,15 @@ registers `task_status` as tool closures during `on_start`.
 | `subagent(instructions, description)` | `tools/subagent.py` | Launch background subagent using shared LLM client |
 | `task_status()` | `task.py` | Report task queue status |
 
+`SchedulerPlugin` registers three tools scoped to the calling channel
+(see [SchedulerPlugin](#schedulerplugin)):
+
+| Tool | File | Purpose |
+|------|------|---------|
+| `remind_me(when, text)` | `scheduler.py` | Create a one-shot reminder on this channel; returns the resolved time |
+| `list_reminders()` | `scheduler.py` | Pending rows on this channel, config jobs flagged read-only |
+| `cancel_reminder(id)` | `scheduler.py` | Cancel a tool-created reminder on this channel |
+
 ## Transports
 
 ### CLI (`channels/cli.py`)
@@ -1413,6 +1564,16 @@ process lifetime; one that failed to resolve is retried after the next
 connect. Reverse ACI→number resolution is not used anywhere: signal-cli's
 contact store answers an unknown ACI with a phantom entry carrying a null
 number, which is indistinguishable from "not found".
+
+**`resolve_channel`.** For a `signal:<aci>` id the registry does not hold
+(a reminder due after a restart, before the sender has written again),
+`SignalPlugin.resolve_channel` goes through the same alias path as an
+inbound message under phone-number privacy: ACI as scope, no
+`sourceNumber`, so an E.164-keyed `channels:` override is applied through
+forward resolution. It returns None for ids it does not own. Known gap:
+forward resolution starts only after a connect, so a call that lands
+before the first connect finds no alias and creates the channel with the
+default config, which the registry then keeps for the process lifetime.
 
 **Inbound filtering.** An envelope is dropped unless it carries a
 `dataMessage` with non-empty text from someone other than the bot's own
@@ -1520,6 +1681,18 @@ memory:
       moderate: 0.60            # hedge at or above this value
   channel_groups: {}            # {group: [channel ids or * ? globs]} shared memory scopes
 
+scheduler:
+  timezone: UTC                 # IANA name; resolves offset-less times (default UTC)
+  catch_up_window: 3600         # seconds a missed one-shot may be late and still fire
+  max_reminders_per_channel: 50 # pending tool-created reminders per channel
+  jobs:                         # operator-declared recurring jobs, synced by name
+    - name: heartbeat
+      channel: internal:heartbeat
+      origin: heartbeat         # reminder (default) | heartbeat
+      every: 6h                 # required
+      at: "08:00"               # optional anchor: HH:MM or ISO datetime
+      prompt: "..."             # or prompt_file: prompts/heartbeat.md
+
 funnel:
   default_budget: 512           # tokens per admission-funnel call
   budgets:
@@ -1558,16 +1731,16 @@ fixed hand-written order:
 2. Every other plugin loads from the `corvidae` setuptools entry-point
    group: `self.pm.load_setuptools_entrypoints("corvidae")`
    (runtime.py:141), reading `[project.entry-points.corvidae]` in
-   `pyproject.toml:34-59`. Names listed in `plugins.disabled` are blocked
+   `pyproject.toml:35-62`. Names listed in `plugins.disabled` are blocked
    via `pm.set_blocked(name)` before this call, so disabled plugins are
    never instantiated.
 
-The full entry-point plugin set (`pyproject.toml:35-59`): `persistence`,
+The full entry-point plugin set (`pyproject.toml:36-62`): `persistence`,
 `jsonl_log`, `core_tools`, `cli`, `irc`, `signal`, `task`, `subagent`, `mcp`, `llm`,
 `compaction`, `memory`, `memory_tools`, `funnel`, `thinking`,
 `runtime_settings`, `tools`, `metrics`, `usage_log`, `metrics_jsonl`,
-`outcome_log`, `appraisal`, `critique`, `agent`, `idle_monitor`,
-`config_watcher`.
+`outcome_log`, `appraisal`, `critique`, `scheduler`, `agent`,
+`idle_monitor`, `config_watcher`.
 
 Entry-point loading does not guarantee a meaningful cross-plugin order;
 plugins that need another plugin's state resolve it lazily via
@@ -1619,6 +1792,7 @@ CritiquePlugin      → "task", "llm"
 OutcomeLogPlugin    → "persistence"
 AppraisalPlugin     → "persistence"
 UsageLogPlugin      → "persistence"
+SchedulerPlugin     → "registry", "persistence"
 ```
 
 Plugins with `depends_on = set()` (declared but empty):

@@ -126,7 +126,7 @@ These values apply to all channels. Per-channel overrides in the `channels` sect
 |-----|------|---------|-------------|
 | `agent.system_prompt` | string or list of strings | `"You are a helpful assistant."` | System prompt prepended to each LLM call. A list of strings is treated as file paths; each file is read and concatenated with double newlines. Relative paths are resolved against `_base_dir`. |
 | `agent.max_context_tokens` | integer | `24000` | Token budget for conversation history. `CompactionPlugin` compacts when the estimated token count exceeds `compaction_threshold` × this value. |
-| `agent.max_turns` | integer | `10` | Maximum consecutive tool-calling turns per user message before tool dispatch is suppressed. |
+| `agent.max_turns` | integer | `10` | Maximum consecutive tool-calling turns per exchange before tool dispatch is suppressed. The counter resets when an item starts a new exchange with no tool cycle in flight: a user message, or a notification that originates its own correlation (a scheduler reminder or heartbeat). |
 | `agent.reasoning_history` | `drop` \| `exchange` \| `keep` | `drop` | `drop` strips `reasoning_content` from every in-memory assistant message. `exchange` strips it only from completed exchanges (assistant messages before the last `role: user` message), so a tool chain in progress keeps its reasoning — the trained distribution for Qwen-family models. `keep` never strips it. Applied to the whole window before each LLM call, so history reloaded after a restart follows it too. The DB record always keeps reasoning. Any other value, or the removed `keep_thinking_in_history` key, fails at startup. Use `exchange` with the server's `preserve_thinking` off (see below). |
 | `agent.compaction_threshold` | float | `0.8` | Compaction triggers when `token_estimate / max_context_tokens` exceeds this value. |
 | `agent.compaction_retention` | float | `0.5` | After compaction, retain messages that fit within `compaction_retention × max_context_tokens` tokens, counting from the most recent. |
@@ -135,7 +135,7 @@ These values apply to all channels. Per-channel overrides in the `channels` sect
 | `agent.chars_per_token` | float | `3.5` | **Deprecated.** Accepted for interface and config compatibility. Has no effect on token counting — `count_tokens()` uses the module-level `_FALLBACK_CHARS_PER_TOKEN` constant (3.5) regardless of this value. |
 | `agent.immutable_settings` | list of strings | `[]` | Keys the agent is blocked from changing via the `set_settings` tool. `system_prompt` is always blocked regardless of this list, but see the note under "Runtime-tunable gate parameters" for what that does and does not protect. |
 | `agent.request_logprobs` | boolean | `false` | When `true`, `Agent` merges `"logprobs": true` into every LLM request body. llama-server returns a logprobs envelope (surfaced to plugins via `on_agent_response`); Anthropic-style providers return nothing and the field surfaces as `None`. Static operator-only flag — captured at init and on config reload, not per-channel tunable. |
-| `agent.mid_conversation_system_role` | `system` \| `user` | `system` | Role under which every `system` message *after the leading system prompt* is sent to the LLM: funnel CONTEXT and notifications without a `tool_call_id`. Strict chat templates (Qwen 3.8, Swift-1.5) raise "System message must be at the beginning" on those; `user` satisfies them and also keeps untrusted text out of the `system` role ([threat-model.md](threat-model.md), finding 3). Applied when the prompt is built: the in-memory window and `sessions.db` keep `role: system`, and the rewrite is deterministic, so the cached prompt prefix stays stable. Any other value logs a warning and uses `system`. Static operator-only flag, re-read on config reload. |
+| `agent.mid_conversation_system_role` | `system` \| `user` | `system` | Role under which every `system` message *after the leading system prompt* is sent to the LLM: funnel CONTEXT and notifications without a `tool_call_id`. Strict chat templates (Qwen 3.8, Swift-1.5) raise "System message must be at the beginning" on those; `user` satisfies them and also keeps untrusted text out of the `system` role ([threat-model.md](threat-model.md), finding 3). Applied when the prompt is built: the in-memory window and `sessions.db` keep `role: system`, and the rewrite is deterministic, so the cached prompt prefix stays stable. Any other value logs a warning and uses `system`. Static operator-only flag, re-read on config reload. Scheduled firings (`scheduler` reminders and jobs) are notifications without a `tool_call_id`, so they follow this key too; a strict template needs `user` for them to render at all. |
 
 ### `reasoning_history: exchange` and `preserve_thinking`
 
@@ -249,6 +249,46 @@ The retention score formula is `importance × (1 + 0.5 × log1p(retrieval_count)
 | `memory.retention.half_life_days` | float | `90` | Recency half-life for the retention score. Distinct from `memory.half_life_days` (retrieval scoring, default 30). The longer retention half-life gives passive retrieval time to re-warm a record before it demotes. |
 | `memory.retention.interval` | float | `21600` | Minimum seconds between retention job runs (default 6 hours). The last-run timestamp is persisted in the `retention_meta` table so daemon restarts do not reset the interval. A daemon idle longer than `interval` since its last run will still run the job on next start (zero-traffic guarantee). |
 | `memory.retention.backfill_batch` | integer | `32` | Maximum number of unembedded indexed records the retention job embeds per run (backfill pass). Bounds embedding API usage when many records need vectors, such as after a re-promotion wave or a period during which embedding was disabled. |
+
+---
+
+## `scheduler` — reminders, periodic jobs, heartbeat
+
+`SchedulerPlugin` fires due rows of its `schedule` table into their channels as notifications (see [design.md](design.md#schedulerplugin)). The agent creates one-shot reminders with the `remind_me` tool, always on the channel it is talking on; the operator declares recurring jobs, including the heartbeat, here. The block is optional: without it the tools still work, in UTC, with the defaults below.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `scheduler.timezone` | IANA name | `UTC` | Timezone for `when` values with no offset (ISO without offset, bare `HH:MM`), for `at` anchors, for day-step recurrence (a daily job keeps its wall-clock time across DST), and for times shown to the model. An unknown name logs a warning and uses UTC. |
+| `scheduler.catch_up_window` | float (seconds) | `3600` | On startup, a one-shot reminder that came due while the daemon was down fires once (prefixed `[overdue by …, daemon was down]`) if it is late by less than this; older ones are disabled as `missed`. |
+| `scheduler.max_reminders_per_channel` | integer | `50` | Pending tool-created reminders allowed per channel. `remind_me` refuses beyond it. Bounds what a hostile speaker can park in the table ([threat-model.md](threat-model.md)). |
+| `scheduler.jobs` | list | `[]` | Operator jobs, synced by `name` on startup and on every reload. See below. |
+
+Each job:
+
+| Key | Required | Description |
+|-----|----------|-------------|
+| `name` | yes | Unique; the sync key. Renaming a job disables the old row and creates a new one. |
+| `channel` | yes | `transport:scope` to fire into. Any channel, including one no transport owns, such as `internal:heartbeat`, whose replies go to the log and `sessions.db` only. |
+| `origin` | no | `reminder` (default) or `heartbeat`; becomes the `[origin]` notification prefix and `meta["origin"]`. |
+| `every` | yes | Interval: `30s`, `20m`, `6h`, `1d`, `7d`, `1h30m`, or a number of seconds. |
+| `at` | no | Anchor. `HH:MM`: the first fire is the next such time, then every `every`. An ISO datetime: slots are that instant plus multiples of `every` (`every: 7d` with `at: "2026-10-16T09:00"`, a Friday, is every Friday at 09:00). Without it, the first fire is one interval after the job is first synced. |
+| `prompt` / `prompt_file` | one of them | The job's text. `prompt_file` is relative to the directory holding `agent.yaml`. |
+
+The next fire time is computed from the scheduled time, not the fire time, so jobs do not drift; a job more than one interval behind (after downtime) skips to the next slot rather than replaying. On reload, a changed `every`, `at`, or `timezone` reschedules a job from now; a changed `prompt`, `channel`, or `origin` keeps its schedule. A job removed from the list is disabled (`removed_from_config`), which survives restart. An invalid entry logs an ERROR and leaves its existing row as it was.
+
+```yaml
+scheduler:
+  timezone: America/Los_Angeles
+  jobs:
+    - name: heartbeat
+      channel: internal:heartbeat
+      origin: heartbeat
+      every: 6h
+      at: "08:00"
+      prompt_file: prompts/heartbeat.md
+```
+
+A heartbeat costs a main-model turn per beat on the shared backend; keep the interval in hours. The firing text is framed as data for the model to judge ("Decide whether and how to act on it"), not as an order.
 
 ---
 
@@ -408,6 +448,7 @@ No restart is required for the changes listed below. Changes that require restar
 | `agent.request_logprobs` | `Agent` re-reads the flag; takes effect on the next LLM call. |
 | `agent.mid_conversation_system_role` | `Agent` re-reads the role; takes effect on the next prompt build. The changed rendering of earlier turns costs one full prompt-cache miss. |
 | `agent.compaction_prompt` | `CompactionPlugin` uses the new prompt on its next compaction. |
+| `scheduler.*` | `SchedulerPlugin` re-reads its settings and re-syncs `jobs` by name (insert, update, disable removed), then wakes its timer so the change takes effect immediately. |
 | Dotted plugin tunables (`appraisal.*`, `critique.*`) | Resolved per-decision via `corvidae.tuning.resolve_tunable`; a reloaded value applies on the next appraisal/critique decision. Per-channel `set_settings` overrides still take precedence. |
 | `agent.immutable_settings` | `RuntimeSettingsPlugin` resets its blocklist and re-applies the new list. Constructor-supplied immutable keys are always retained. |
 | New channel entries in `channels:` | `load_channel_config` registers newly added channels. |

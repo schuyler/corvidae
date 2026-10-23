@@ -65,6 +65,7 @@ Key sections:
 - `irc` — omit entirely to disable IRC
 - `channels` — per-channel overrides keyed by `transport:scope` (e.g., `irc:#general`, `cli:local`)
 - `mcp` — MCP server connections (optional)
+- `scheduler` — reminder timezone, per-channel reminder cap, and operator jobs such as a heartbeat (optional)
 - `logging` — simplified options (`level`, `file`); see docs/configuration.md
 
 Before pointing the bot at a channel with people you don't trust, read
@@ -99,6 +100,7 @@ other tenants.
 | ThinkingPlugin | Strips `<thinking>` blocks from display, optionally from prompt history |
 | RuntimeSettingsPlugin | Lets the LLM adjust its own per-channel parameters mid-session |
 | IdleMonitorPlugin | Fires `on_idle` when all queues are quiescent |
+| SchedulerPlugin | Reminders the agent sets with `remind_me`, operator-scheduled jobs, and a heartbeat, fired into channels on the clock |
 
 ## CLI subcommands
 

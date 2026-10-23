@@ -187,6 +187,7 @@ async def send_message(self, channel, text: str) -> None:
 | `on_conversation_event(channel, message: dict, message_type: MessageType) -> int \| None` | async broadcast | After every `conv.append()` call; message is the untagged dict (no `_message_type` key). Persistence returns the inserted `message_log` rowid; **exactly one implementation may return non-None** (all others return None). Callers resolve with `resolve_single_result` and attach the rowid to the in-window message as `_db_id`. |
 | `on_compaction(channel, summary_msg: dict, retain_count: int, compacted_ids: list[int])` | async broadcast | After compaction replaces older messages with a summary; `summary_msg` is the untagged summary dict. `compacted_ids` carries the `message_log` rowids of exactly the removed messages (empty when unknown) — the consolidation range consumed by `MemoryPlugin`. |
 | `on_idle()` | async broadcast | All queues empty and cooldown elapsed; only fires when `IdleMonitorPlugin` is registered |
+| `resolve_channel(channel_id: str) -> Channel \| None` | async firstresult | A caller holding only a persisted `transport:scope` id (`SchedulerPlugin` firing a row after a restart) asks transports for the live channel. Return it for ids your transport owns, else None. See [Channels](#channels). |
 
 `after_persist_assistant` — the DB row is already written when this
 hook fires. Mutations to `message` affect in-memory prompt construction
@@ -201,6 +202,19 @@ Window messages carry internal `_`-prefixed tags (`_message_type`, `_db_id`). Ev
 An opaque `correlation_id` is minted for every inbound user message and for every notification-born queue item that isn't itself a continuation of an existing correlation. It travels alongside a `meta` dict — an extensible, framework-opaque metadata bag — through the messaging and extension-point hooks above, into `Task.correlation_id`/`Task.meta`, and back out through the completion notification's `meta` (`TaskPlugin._on_task_complete` merges `{"task_id", "correlation_id", **task.meta}`). This is how a tool cycle several hops deep still carries the correlation and metadata its originating message started with.
 
 The framework itself never stamps meaning into `meta` — it is a pass-through. Cognition plugins (see below) use the convention `meta["origin"]` to record where a queue item came from ("user" recognized by subscribing to `on_message_admitted`, or an explicit string like `"reminder"` stamped by a producer); that convention is plugin-side, not a core concept.
+
+`SchedulerPlugin` is the producer that stamps it for clock-driven items. A due reminder fires as
+
+```python
+await self.pm.ahook.on_notify(
+    channel=channel, source="reminder", text=framed_text, tool_call_id=None,
+    meta={"origin": "reminder", "schedule_id": row_id},
+)
+```
+
+and core carries `meta` untouched to `on_message_persisted`, `before_agent_turn`, `on_agent_response`, every tool Task in the cycle, and the usage-log attribution. A notification like this, with no inherited `meta["correlation_id"]`, originates its own correlation, so it also gets a fresh `max_turns` budget (reset only when no tool cycle is in flight).
+
+Producers that start a background task in `on_start` and inject notifications should wait for `pm.get_plugin("agent").started` before calling `on_notify`: `on_start` is broadcast to every plugin concurrently, and `Agent` starts after the broadcast.
 
 ### Observability
 
@@ -489,6 +503,21 @@ signal:
 
 Omitting the block leaves the plugin loaded but inert. Signal channel scopes are always the sender's ACI (`signal:8f2c1c9a-…`), never a phone number — `sourceNumber` is absent under phone-number privacy, and a scope that can vanish would fork the channel's persisted history. Numbers in config are resolved forward to ACIs after the transport connects. See [signal-ops.md](signal-ops.md) for provisioning and [configuration.md](configuration.md) for the full key reference.
 
+### `resolve_channel` for transport authors
+
+Something other than an inbound message sometimes needs a channel: `SchedulerPlugin` fires a reminder after a restart, holding only the persisted id. It calls `registry.get(channel_id)`, then the `resolve_channel` hook, then `registry.get_or_create(transport, scope)` from the split id. If your transport creates channels with config a bare `get_or_create` would miss, implement the hook, and keep it default-free (the startup arg-binding guard, `tests/test_hook_arg_binding.py`, rejects a defaulted `channel_id`: pluggy would silently pass your default instead of the caller's id):
+
+```python
+@hookimpl
+async def resolve_channel(self, channel_id: str) -> Channel | None:
+    transport, sep, scope = channel_id.partition(":")
+    if transport != "mytransport" or not sep or not scope:
+        return None          # not ours: defer to the next implementation
+    return self._channel_for(scope)   # the same path inbound messages take
+```
+
+`SignalPlugin` implements it so an ACI it has not seen since startup still gets its E.164 alias's `ChannelConfig`. IRC and CLI don't need it; the registry fallback is already correct for them. Channels no transport owns (`internal:heartbeat`) also take the fallback, and since every `send_*` hook filters on `matches_transport`, replies there go only to the log and `sessions.db`.
+
 ## Registration order
 
 Plugins are loaded via `pm.load_setuptools_entrypoints("corvidae")`. The entry point loading order is non-deterministic — it is not guaranteed to match any specific sequence. The following plugins are registered:
@@ -655,6 +684,16 @@ Registered by `RuntimeSettingsPlugin` (entry point name: `runtime_settings`).
 | Tool | Parameters | What it does |
 |------|------------|--------------|
 | `set_settings` | `settings: dict` | Updates per-channel runtime settings. Accepts LLM inference parameters and framework parameters. Pass `null` for a key to revert it to the static config value. Returns the current overrides after the update. |
+
+### SchedulerPlugin tools
+
+Registered by `SchedulerPlugin` (entry point name: `scheduler`). All three act on `_ctx.channel` only and take no channel argument, so a speaker on one channel cannot schedule a message to another ([threat-model.md](threat-model.md)).
+
+| Tool | Parameters | What it does |
+|------|------------|--------------|
+| `remind_me` | `when: str`, `text: str` | Creates a one-shot reminder on the calling channel. `when` is a relative duration (`20m`, `2h`, `3d`, `1h30m`), an ISO 8601 time (no offset means `scheduler.timezone`), or `HH:MM` for the next occurrence; a bare number is refused as ambiguous. The tool does the date arithmetic and returns the resolved absolute time, e.g. `Reminder #12 set for Fri 2026-10-23 14:22 PDT (in 20m).` Refuses past times, empty text, text over 2000 characters, and more than `scheduler.max_reminders_per_channel` pending reminders. |
+| `list_reminders` | — | Pending rows on the calling channel, earliest first, with ids and due times. Operator jobs targeting the channel are listed as read-only. |
+| `cancel_reminder` | `id: int` | Cancels a tool-created reminder on the calling channel. Refuses operator jobs; another channel's row reads as not found. |
 
 ## Bundled plugins
 
@@ -1103,6 +1142,14 @@ daemon:
 ```
 
 **Without this plugin:** the `on_idle` hook is never fired. Plugins that implement `on_idle` (such as `MemoryPlugin`) will not receive calls.
+
+### SchedulerPlugin (`corvidae/scheduler.py`)
+
+Clock-driven producer of reminders, operator jobs, and the heartbeat. Entry point name: `"scheduler"`; `depends_on = {"registry", "persistence"}`. Owns the `schedule` table in `sessions.db` (created on first use) and one timer task, which sleeps until the earliest due row and is woken early whenever a row changes. A due row fires through `on_notify` with `source` and `meta["origin"]` set to `reminder` or `heartbeat`, so persistence, critique eligibility, attribution, and the outbound send work unchanged. Jobs under `scheduler.jobs` sync by name on start and on every reload. Full behaviour: [design.md](design.md#schedulerplugin); keys: [configuration.md](configuration.md#scheduler--reminders-periodic-jobs-heartbeat).
+
+It follows the two patterns a plugin owning persistent state and a background task needs. Schema creation is lazy on first use (`PersistencePlugin.db` may not be open during its `on_start`, as with `MemoryPlugin`). The timer is an `asyncio.Task` cancelled in `on_stop` (as with `ConfigWatcherPlugin`). Clock and sleeper are constructor arguments, so its tests never sleep.
+
+**Without this plugin:** no reminders and no scheduled jobs; the three tools are absent.
 
 ### ConfigWatcherPlugin (`corvidae/config_watcher.py`)
 

@@ -124,7 +124,10 @@ Two places:
 - Funnel-admitted CONTEXT (memories distilled from channel participants,
   critique objections) is appended as `role: system` (`funnel.py`).
 - Notifications without a `tool_call_id` are wrapped as `role: system` in
-  `Agent._build_conversation_message`.
+  `Agent._build_conversation_message`. Scheduler firings are among them:
+  a reminder's text is whatever the model wrote into `remind_me`, possibly
+  at an untrusted speaker's request, and it comes back later as a system
+  row. See finding 7.
 
 The "retrieved data, not instructions" wrapper is the right instinct. But
 message role is a stronger signal to an instruction-tuned model than a
@@ -218,7 +221,51 @@ sanitization is shallow by design. An MCP server is therefore a supply-chain
 vector for tool-description injection. `process_tool_result` exists as a
 hook for exactly this and has only a pass-through default.
 
-### 7. Smaller things
+### 7. The scheduler re-enters text later
+
+`SchedulerPlugin` (#59) adds a delay to finding 3. On IRC anyone can ask
+the bot to "remind me in 6 hours to …"; the model calls `remind_me`, and
+six hours later that text re-enters the same channel as a `[reminder]`
+notification, stored as `role: system`. By then the exchange that set it
+may have been compacted away, so the model sees an instruction-shaped
+string with little memory of who wanted it. What bounds it:
+
+- **Framing.** The firing text says a reminder "you set" is due and quotes
+  the stored text as `Reminder text: «…»`, ending "Decide whether and how
+  to act on it." Any `«` or `»` inside the text is replaced, so it cannot
+  close the quote and continue as framing. Rendering follows
+  `agent.mid_conversation_system_role`, so `user` keeps it out of the
+  system role as for every other notification. The framing is a soft
+  mitigation in the same sense as the funnel's.
+- **Scoping.** The three tools act on `_ctx.channel` and take no channel
+  argument. A reminder fires on the channel it was set on and nowhere
+  else, so a stranger on IRC cannot use one to make the bot message a
+  Signal contact. `cancel_reminder` refuses operator jobs and treats
+  another channel's row as not found; `list_reminders` shows only the
+  calling channel's rows.
+- **Volume.** `scheduler.max_reminders_per_channel` (default 50) caps
+  pending reminders per channel, and text is capped at 2000 characters.
+  The cap is per channel, and finding 5 lets a stranger open new IRC PM
+  channels at will, so the total is not bounded on IRC. Each firing costs
+  a main-model turn. A reminder fires once, so a burst is bounded, but 50
+  per channel across many channels is still load.
+
+`scheduler.jobs` in `agent.yaml` is the operator-only surface. A job can
+target any channel id, including a Signal contact, and recur, and its
+prompt is framed as the operator's. It is hot-reloaded, so it joins the
+`write_file` → `agent.yaml` path in finding 4. A model that can write
+`agent.yaml` can now schedule messages to any channel within seconds, not
+just at the next restart. The mitigation is the one finding 4 already
+gives: keep `agent.yaml` unwritable by the daemon user.
+
+Deferred on purpose: a `send_to_channel(channel_id, text)` tool, so the
+heartbeat could message people. It would be a new exfil and spam path
+from any channel, model, or injected text to any other channel. Before it
+lands it needs an allowlist of target channels, a send budget, and its
+own entry here. Recurring reminders by tool are deferred for a related
+reason: they need a per-channel budget of their own.
+
+### 8. Smaller things
 
 - `read_file` has a stat-then-read race and follows symlinks. Irrelevant
   while finding 4 stands.
