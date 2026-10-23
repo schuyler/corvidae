@@ -53,6 +53,7 @@ import aiosqlite
 
 from corvidae.attribution import reset_attribution, set_attribution
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
+from corvidae.persistence import add_column_if_missing
 
 logger = logging.getLogger("corvidae.memory")
 
@@ -435,7 +436,8 @@ CREATE TABLE IF NOT EXISTS retrieval_log (
     ts REAL NOT NULL,
     channel_id TEXT NOT NULL,
     exchange_key TEXT,              -- NULL until Phase 2 wires the key
-    top_score REAL,
+    top_score REAL,                 -- recency-decayed score of the top-ranked candidate
+    top_similarity REAL,            -- raw similarity of that same candidate
     hit_count INTEGER NOT NULL,
     admitted_count INTEGER NOT NULL,
     degraded_to_fts INTEGER NOT NULL DEFAULT 0
@@ -1058,7 +1060,7 @@ class MemoryPlugin(CorvidaePlugin):
         ``correlation_id``: when present, the retrieval profile is written
         into retrieval_log.exchange_key and copied into exchange_log via
         the OutcomeLogPlugin's update_exchange (retrieval_top_score,
-        retrieval_hit_count).
+        retrieval_top_similarity, retrieval_hit_count).
         """
         try:
             conv = getattr(channel, "conversation", None)
@@ -1120,17 +1122,22 @@ class MemoryPlugin(CorvidaePlugin):
                 )
 
             # Persist the retrieval profile (§3.7's day-one raw stream).
+            # Both values describe the top-ranked candidate: the decayed
+            # score it was ranked by, and the raw similarity that
+            # band_on: similarity compares against the band thresholds.
             top_score = candidates[0]["score"] if candidates else None
+            top_similarity = candidates[0]["similarity"] if candidates else None
             hit_count = len(candidates)
             await db.execute(
                 "INSERT INTO retrieval_log (ts, channel_id, exchange_key, top_score, "
-                "hit_count, admitted_count, degraded_to_fts) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "top_similarity, hit_count, admitted_count, degraded_to_fts) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     time.time(),
                     channel.id,
                     correlation_id,
                     top_score,
+                    top_similarity,
                     hit_count,
                     len(admitted_ids),
                     1 if degraded else 0,
@@ -1148,6 +1155,7 @@ class MemoryPlugin(CorvidaePlugin):
                         await outcome_log.update_exchange(
                             correlation_id,
                             retrieval_top_score=top_score,
+                            retrieval_top_similarity=top_similarity,
                             retrieval_hit_count=hit_count,
                         )
                     except Exception:
@@ -1433,6 +1441,9 @@ class MemoryPlugin(CorvidaePlugin):
         await db.execute(MEMORY_FTS_INSERT_TRIGGER)
         await db.execute(MEMORY_FTS_UPDATE_TRIGGER)
         await db.execute(RETRIEVAL_LOG_DDL)
+        # Schema upgrade: retrieval_log tables from before top_similarity
+        # (#66) gain it as a nullable column; old rows read NULL.
+        await add_column_if_missing(db, "retrieval_log", "top_similarity", "REAL")
         # Phase 1b: message_fts and retention_meta
         await db.execute(MESSAGE_FTS_DDL)
         await db.execute(MESSAGE_FTS_INSERT_TRIGGER)

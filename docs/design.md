@@ -301,7 +301,8 @@ CREATE TABLE exchange_log (
     origin TEXT,                    -- convention: 'user'|'reminder'|'critique'|'heartbeat'|'task'
     message_rowid INTEGER,          -- message_log.id of the originating message
     created_at REAL NOT NULL,
-    retrieval_top_score REAL,       -- written by MemoryPlugin retrieval
+    retrieval_top_score REAL,       -- written by MemoryPlugin retrieval (decayed score)
+    retrieval_top_similarity REAL,  -- written by MemoryPlugin retrieval (raw similarity, same candidate)
     retrieval_hit_count INTEGER,    -- written by MemoryPlugin retrieval
     probe_score REAL,               -- written by AppraisalPlugin stage 1
     appraisal TEXT,                 -- JSON; written by AppraisalPlugin stage 2
@@ -1021,7 +1022,8 @@ not presented as a guess. The `(age)` shown always runs from
 direct CONTEXT append. Admitted memories get their access statistics
 bumped (`retrieval_count`, `last_retrieved_at` — the write half of
 reconsolidation), and every retrieval writes a `retrieval_log` row
-(top score, hit/admitted counts, degradation flag).
+(the top-ranked candidate's decayed score and raw similarity,
+hit/admitted counts, degradation flag).
 
 **Graceful degradation:** encoder down → FTS5 keyword retrieval over
 `memory_fts` (flagged `degraded_to_fts=1`); sqlite-vec unloadable → FTS5

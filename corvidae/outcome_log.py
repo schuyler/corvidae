@@ -18,6 +18,7 @@ import time
 import aiosqlite
 
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
+from corvidae.persistence import add_column_if_missing
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,7 @@ CREATE TABLE IF NOT EXISTS exchange_log (
     message_rowid INTEGER,
     created_at REAL NOT NULL,
     retrieval_top_score REAL,
+    retrieval_top_similarity REAL,
     retrieval_hit_count INTEGER,
     probe_score REAL,
     appraisal TEXT,
@@ -56,6 +58,7 @@ UPDATABLE_COLUMNS = frozenset(
         "origin",
         "message_rowid",
         "retrieval_top_score",
+        "retrieval_top_similarity",
         "retrieval_hit_count",
         "probe_score",
         "appraisal",
@@ -94,6 +97,11 @@ class OutcomeLogPlugin(CorvidaePlugin):
             raise RuntimeError("persistence DB not available for exchange_log")
         if not self._table_ready:
             await db.execute(EXCHANGE_LOG_DDL)
+            # Schema upgrade: exchange_log tables from before #66 gain
+            # retrieval_top_similarity as a nullable column.
+            await add_column_if_missing(
+                db, "exchange_log", "retrieval_top_similarity", "REAL"
+            )
             await db.execute(EXCHANGE_LOG_INDEX_DDL)
             await db.commit()
             self._table_ready = True
