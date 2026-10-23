@@ -47,8 +47,8 @@ class CompactionPlugin(CorvidaePlugin):
 
     # Cap on the carried-forward prior-summary text, as a fraction of
     # max_tokens — bounds growth across repeated compaction rounds, since
-    # the prior-summaries system-prompt branch carries no length cap of its
-    # own.
+    # the summary length limit lives only in the (configurable) prompt text
+    # and a custom agent.compaction_prompt need not set one.
     _PRIOR_SUMMARIES_MAX_FRACTION = 0.5
 
     def __init__(self, pm=None) -> None:

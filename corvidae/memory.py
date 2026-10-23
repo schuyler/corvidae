@@ -24,12 +24,14 @@ Config:
     memory:
       idle_consolidate_after: 1800   # seconds of channel inactivity before
                                      # idle-triggered consolidation
-      half_life_days: 30             # retrieval recency half-life
+      half_life_days: 30             # retrieval recency decay (e-folding days)
       retrieval:
         k: 8                         # KNN candidate count
+        band_on: score               # score | similarity — what bands compare
+        recency_from: created        # created | last_used — ranking age origin
         bands:
-          strong: 0.75               # score >= strong → asserted confidently
-          moderate: 0.60             # score >= moderate → hedged
+          strong: 0.75               # value >= strong → asserted confidently
+          moderate: 0.60             # value >= moderate → hedged
       channel_groups: {}             # {group_name: [channel ids]} shared memory
 """
 
