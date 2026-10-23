@@ -213,6 +213,7 @@ class LLMClient:
         retry_base_delay: float = 2.0,
         retry_max_delay: float = 60.0,
         timeout: float | None = None,
+        model_not_loaded_wait: float = 60.0,
     )
     async def start(self)
     async def stop(self)
@@ -224,6 +225,15 @@ Retry parameters: `max_retries` (default 3, set to 0 to disable), `retry_base_de
 Retries apply to transient HTTP status codes (429, 500, 502, 503, 504) and connection
 errors. Honors `Retry-After` response headers. `timeout` is the total HTTP timeout per
 request in seconds; `None` uses aiohttp's session default (300s).
+
+A llama-server router started with `--no-models-autoload` answers a request
+for an unloaded model with HTTP 400 `"model is not loaded"` (#55). That
+response is retried with the same backoff until a total of
+`model_not_loaded_wait` seconds has been slept (the last sleep is clamped to
+fit), independently of `max_retries`; `0` disables it. Any terminal non-2xx
+response raises `LLMHTTPError`, a `ClientResponseError` subclass carrying the
+response `body` (truncated to 2000 characters) and the client's `model`;
+`is_model_not_loaded(error)` recognizes the unloaded-model case.
 
 ### Observability
 
@@ -551,7 +561,9 @@ per-channel `SerialQueue`. The queue's consumer calls
 8. **`_run_turn`** — calls `run_agent_turn` (single LLM invocation).
    On exception, broadcasts `on_llm_error` (`firstresult=True`), sends
    the error message to the channel, and returns `None` to abort
-   processing.
+   processing. `LLMPlugin` implements it `trylast`: for an unloaded
+   backend model it returns a message naming the model, and it defers
+   (`None`) on every other error, so the generic message still applies.
 9. Appends the assistant message to conversation; fires `on_conversation_event`
 10. Calls `after_persist_assistant` hook (broadcast); `ThinkingPlugin`
     uses this to strip `reasoning_content` from the in-memory copy
@@ -874,6 +886,7 @@ llm:
     max_retries: 3
     retry_base_delay: 2.0
     retry_max_delay: 60.0
+    model_not_loaded_wait: 60.0
     timeout: null             # optional; aiohttp default (300s) if absent
   background:                 # optional; absent means use llm.main
     base_url: "..."
@@ -1423,6 +1436,7 @@ llm:
     max_retries: 3              # retry attempts on transient errors (default 3)
     retry_base_delay: 2.0       # base exponential backoff delay in seconds
     retry_max_delay: 60.0       # maximum retry delay cap in seconds
+    model_not_loaded_wait: 60.0 # seconds to wait out an unloaded router model
     timeout: null               # HTTP timeout per request; null = aiohttp default (300s)
   background:                   # optional separate LLM for subagent tasks
     base_url: "..."

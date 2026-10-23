@@ -14,6 +14,7 @@ Config:
         max_retries: 3      # optional
         retry_base_delay: 2.0
         retry_max_delay: 60.0
+        model_not_loaded_wait: 60.0  # seconds to wait out an unloaded model
         timeout: ...        # optional
       background:     # optional — absent means use llm.main
         (same keys)
@@ -29,7 +30,7 @@ import logging
 
 from corvidae.attribution import get_attribution
 from corvidae.hooks import CorvidaePlugin, hookimpl
-from corvidae.llm import LLMClient
+from corvidae.llm import LLMClient, is_model_not_loaded
 
 logger = logging.getLogger(__name__)
 
@@ -208,6 +209,23 @@ class LLMPlugin(CorvidaePlugin):
         if old_client is not None:
             asyncio.create_task(_close_after(old_client, delay=5.0))
 
+    @hookimpl(trylast=True)
+    async def on_llm_error(self, channel, error: Exception) -> str | None:
+        """Explain an unloaded backend model instead of the generic error.
+
+        A llama-server router with --no-models-autoload rejects requests for
+        an unloaded model (GitHub issue #55); LLMClient has already waited
+        model_not_loaded_wait seconds by the time this runs. trylast so any
+        other plugin's message takes precedence; other errors defer (None).
+        """
+        if not is_model_not_loaded(error):
+            return None
+        return (
+            f"The model `{error.model}` isn't loaded on the LLM server "
+            "(another model may be swapped in). Load it and send your "
+            "message again."
+        )
+
     def get_client(self, role: str = "main") -> LLMClient:
         """Return the client for the given role.
 
@@ -236,6 +254,7 @@ class LLMPlugin(CorvidaePlugin):
             timeout=cfg.get("timeout"),
             document_prefix=cfg.get("document_prefix", ""),
             query_prefix=cfg.get("query_prefix", ""),
+            model_not_loaded_wait=cfg.get("model_not_loaded_wait", 60.0),
         )
         pm = getattr(self, "pm", None)
         if pm is not None:

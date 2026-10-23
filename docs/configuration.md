@@ -79,6 +79,7 @@ The `llm.main` block is required. Every other key under `llm:` is an optional **
 | `llm.main.max_retries` | integer | `3` | Maximum retry attempts on transient HTTP errors (429, 500, 502, 503, 504) and connection failures. Set to 0 to disable retries. |
 | `llm.main.retry_base_delay` | float | `2.0` | Base delay in seconds for exponential backoff between retry attempts. |
 | `llm.main.retry_max_delay` | float | `60.0` | Maximum delay cap in seconds for exponential backoff. |
+| `llm.main.model_not_loaded_wait` | float | `60.0` | Total seconds to keep retrying when the server answers HTTP 400 "model is not loaded" (a llama-server router running `--no-models-autoload` with another model swapped in). Separate from `max_retries`. The turn waits for this long before replying, so set it a little longer than a model swap takes. `0` disables. When it runs out, the reply names the unloaded model instead of the generic error. |
 | `llm.main.timeout` | float | `null` | Total HTTP timeout in seconds per LLM request. `null` uses aiohttp's 300-second default. |
 | `llm.background.base_url` | string | — | Base URL for the background (subagent) LLM endpoint. Optional. |
 | `llm.background.model` | string | — | Model identifier for subagent calls. Optional. |
@@ -87,6 +88,7 @@ The `llm.main` block is required. Every other key under `llm:` is an optional **
 | `llm.background.max_retries` | integer | `3` | Maximum retry attempts for background LLM calls. |
 | `llm.background.retry_base_delay` | float | `2.0` | Base delay in seconds for background LLM retry backoff. |
 | `llm.background.retry_max_delay` | float | `60.0` | Maximum delay cap in seconds for background LLM retries. |
+| `llm.background.model_not_loaded_wait` | float | `60.0` | As `llm.main.model_not_loaded_wait`, for background LLM calls. |
 | `llm.background.timeout` | float | `null` | HTTP timeout in seconds for background LLM requests. |
 | `llm.embedding.base_url` | string | — | Base URL for an OpenAI-compatible `/embeddings` endpoint (embedding servers are usually separate from generation servers). Optional. |
 | `llm.embedding.model` | string | — | Embedding model identifier. Recorded in `embedding_meta`; changing it against an existing store logs an ERROR and disables embedding. Config revert is the only remediation. |
