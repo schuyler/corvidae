@@ -1326,6 +1326,12 @@ registers `task_status` as tool closures during `on_start`.
 Reads stdin line-by-line in a background task. Prints responses to
 stdout with latency timing.
 
+EOF ends the session only at an interactive terminal: Ctrl-D sends SIGINT
+to the process for a graceful shutdown. When stdin is not a TTY (systemd's
+`/dev/null`, a closed pipe), EOF stops just the CLI transport with a
+warning and the daemon keeps running; with no stdin at all the read loop
+never starts. So a service-managed config may keep a `cli:` channel.
+
 ### IRC (`channels/irc.py`)
 
 `IRCPlugin` — IRC transport via pydle. Connects with exponential

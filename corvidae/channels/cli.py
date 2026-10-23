@@ -37,6 +37,14 @@ class CLIPlugin(CorvidaePlugin):
         if not self._registry.by_transport("cli"):
             logger.debug("CLIPlugin: no cli channels configured, skipping read loop")
             return
+        # Some service managers start the process with fd 0 closed, which
+        # leaves sys.stdin None. The CLI transport has nothing to read, but
+        # the other transports still run (#53).
+        if sys.stdin is None:
+            logger.warning(
+                "CLIPlugin: no stdin; cli transport disabled, daemon continues"
+            )
+            return
         self._task = asyncio.create_task(self._read_loop(), name="cli-read-loop")
 
     async def _read_loop(self) -> None:
@@ -61,11 +69,20 @@ class CLIPlugin(CorvidaePlugin):
             except asyncio.CancelledError:
                 raise
             if not line:
-                # EOF (Ctrl-D or closed pipe) — trigger graceful shutdown
-                # by sending SIGINT to ourselves, reusing the signal handler
-                # in main().
-                logger.info("EOF received, initiating shutdown")
-                os.kill(os.getpid(), signal.SIGINT)
+                # EOF at an interactive terminal (Ctrl-D) means quit: trigger
+                # graceful shutdown by sending SIGINT to ourselves, reusing
+                # the signal handler in main().
+                if sys.stdin.isatty():
+                    logger.info("EOF received, initiating shutdown")
+                    os.kill(os.getpid(), signal.SIGINT)
+                    return
+                # EOF on a non-interactive stdin (/dev/null under systemd,
+                # a closed pipe) ends only the CLI transport; the daemon and
+                # its other transports keep running (#53).
+                logger.warning(
+                    "CLIPlugin: stdin is not a terminal and reached EOF; "
+                    "cli transport stopped, daemon continues"
+                )
                 return
             text = line.strip()
             if not text:
