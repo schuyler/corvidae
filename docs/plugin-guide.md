@@ -1018,7 +1018,12 @@ Implements one hook:
 **Compartment scoping:** both tools enforce the calling channel's
 `_channel_scope` (the channel itself plus any group siblings configured in
 `memory.channel_groups` — identical to the scope `MemoryPlugin`'s passive
-retrieval uses). The calling channel comes from `_ctx.channel`; when
+retrieval uses). `_channel_scope` returns a `ChannelScope`, not a list:
+group members may be `*` / `?` globs, so test membership with
+`scope.contains(channel_id)` and build SQL with
+`scope.sql("m.channel_id")`, which emits `IN (...)` for literal ids and
+`GLOB ?` for patterns. `search_memory`'s `channel=` argument narrows by
+equality and is never treated as a pattern. The calling channel comes from `_ctx.channel`; when
 `_ctx.channel is None` both tools return an error string and never fall
 back to unscoped access. The tools are broader than passive retrieval in
 *status* (they reach demoted, superseded, and redacted-tombstone records)

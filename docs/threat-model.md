@@ -193,7 +193,12 @@ bot is a private conversation with full tool access, for anyone who can
 reach the server. Because that channel is keyed on the nick, whoever holds
 the nick later inherits the earlier conversation's history and memory
 compartment, so "memory is compartmentalized per channel" means less on
-IRC than it does on Signal. At minimum, PMs should be off by default or
+IRC than it does on Signal. Glob members in `memory.channel_groups`
+(`irc:*`, or `*` alone) widen this further: every channel the pattern
+matches, including ones a stranger creates later by sending a PM, shares
+one memory compartment with every other member of the group. Only
+Signal's allowlist bounds which channels can come into existence under
+`signal:*`. At minimum, PMs should be off by default or
 gated by an `irc.allow` list, bringing it in line with Signal.
 
 The Signal plugin also carries a documented latent bug (`on_message_rejected`

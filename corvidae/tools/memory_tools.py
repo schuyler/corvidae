@@ -18,7 +18,7 @@ import time
 from datetime import datetime, timezone
 
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
-from corvidae.memory import _format_age, _fts_match_query
+from corvidae.memory import ChannelScope, _format_age, _fts_match_query
 from corvidae.tool import Tool, tool_to_schema
 
 logger = logging.getLogger("corvidae.tools.memory_tools")
@@ -76,8 +76,8 @@ class MemoryToolsPlugin(CorvidaePlugin):
             scope = memory._channel_scope(calling_channel.id)
 
             # Validate channel argument if supplied
-            if channel is not None and channel not in scope:
-                visible = ", ".join(sorted(scope))
+            if channel is not None and not scope.contains(channel):
+                visible = scope.describe()
                 return (
                     f"Error: channel '{channel}' is outside your visible scope. "
                     f"Visible channels: {visible}"
@@ -118,12 +118,16 @@ class MemoryToolsPlugin(CorvidaePlugin):
             if match is None:
                 return "No results: query has no searchable terms."
 
-            # Scope: restrict to channel arg (narrowing) or calling channel's full scope
-            scope_to_use = [channel] if channel is not None else scope
-            placeholders = ",".join("?" for _ in scope_to_use)
+            # Scope: restrict to channel arg (narrowing) or calling channel's
+            # full scope. The channel arg matches by equality, never as a
+            # glob, so a model passing a pattern cannot widen its reach.
+            scope_to_use = (
+                ChannelScope(frozenset({channel})) if channel is not None else scope
+            )
+            scope_sql, scope_params = scope_to_use.sql("m.channel_id")
 
-            conditions = [f"m.channel_id IN ({placeholders})"]
-            params: list = list(scope_to_use)
+            conditions = [scope_sql]
+            params: list = list(scope_params)
 
             if not include_demoted:
                 # indexed=1 excludes demoted (indexed=0), superseded (indexed=0),
@@ -230,10 +234,10 @@ class MemoryToolsPlugin(CorvidaePlugin):
             mid, channel_id, _summary, msg_id_start, msg_id_end, participants_json = row
 
             # Scope check — no stat bump on rejection
-            if channel_id not in scope:
+            if not scope.contains(channel_id):
                 return (
                     f"Error: memory {memory_id} (channel '{channel_id}') is outside "
-                    f"your scope. Visible channels: {', '.join(sorted(scope))}"
+                    f"your scope. Visible channels: {scope.describe()}"
                 )
 
             # Fetch raw messages with channel_id predicate.

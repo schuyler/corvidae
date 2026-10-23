@@ -971,7 +971,8 @@ log line.
 (notification-triggered turns skip retrieval entirely). The inbound text is embedded and matched against `memory_vec`
 (sqlite-vec exact KNN, cosine distance); candidates are filtered to
 `indexed=1 AND redacted=0` and channel-compartmentalized (`channel_id`
-match, or shared scope via `memory.channel_groups`). Scores are
+match, or shared scope via `memory.channel_groups`, whose members may be
+`*` / `?` globs matched with SQLite `GLOB`). Scores are
 `cosine_similarity × exp(-age_days / memory.half_life_days)`, where
 `age_days` runs from `created_at`, or from `max(created_at,
 last_retrieved_at)` under `memory.retrieval.recency_from: last_used`.
@@ -1450,7 +1451,7 @@ memory:
     bands:
       strong: 0.75              # assert confidently at or above this value (score or similarity, per band_on)
       moderate: 0.60            # hedge at or above this value
-  channel_groups: {}            # {group: [channel ids]} shared memory scopes
+  channel_groups: {}            # {group: [channel ids or * ? globs]} shared memory scopes
 
 funnel:
   default_budget: 512           # tokens per admission-funnel call

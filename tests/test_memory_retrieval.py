@@ -220,6 +220,110 @@ class TestCompartmentalization:
         await db.close()
 
 
+def glob_config(*members: str) -> dict:
+    """EMBED_CONFIG plus one channel group with the given members."""
+    return {**EMBED_CONFIG, "memory": {"channel_groups": {"g": list(members)}}}
+
+
+class TestGlobChannelGroups:
+    """memory.channel_groups members may be * / ? patterns (issue #50)."""
+
+    async def test_glob_member_shares_with_runtime_channel(self):
+        # A Signal channel id that appears only at runtime is covered by
+        # the pattern, both as the caller and as the memory's owner.
+        memory, embedder, channel, conv, db = await build_retrieval_env(
+            glob_config("irc:#electronics", "signal:*")
+        )
+        await seed_memory(
+            db, "signal:a1b2-runtime-aci",
+            "the solar charge controller logs power data to MQTT",
+        )
+        await ask(memory, channel, conv,
+                  "where does the solar charge controller log power data?")
+        contexts = context_messages(conv)
+        assert len(contexts) == 1
+        assert "MQTT" in contexts[0]["content"]
+        await db.close()
+
+    async def test_glob_caller_sees_literal_member(self):
+        memory, embedder, _channel, _conv, db = await build_retrieval_env(
+            glob_config("irc:#electronics", "signal:*")
+        )
+        await seed_memory(db, "irc:#electronics", "the rain gauge is on the north fence")
+        caller = Channel(transport="signal", scope="new-aci")
+        conv = ContextWindow(caller.id)
+        caller.conversation = conv
+        await ask(memory, caller, conv, "where is the rain gauge?")
+        contexts = context_messages(conv)
+        assert len(contexts) == 1
+        assert "north fence" in contexts[0]["content"]
+        await db.close()
+
+    async def test_non_matching_channel_stays_compartmentalized(self):
+        memory, embedder, channel, conv, db = await build_retrieval_env(
+            glob_config("signal:*")
+        )
+        await seed_memory(db, "signal:some-aci", "the wifi password is hunter2")
+        await ask(memory, channel, conv, "what is the wifi password?")
+        assert context_messages(conv) == []
+        await db.close()
+
+    async def test_glob_scope_applies_in_fts_degraded_path(self):
+        memory, embedder, channel, conv, db = await build_retrieval_env(
+            glob_config("irc:#electronics", "signal:*")
+        )
+        await seed_memory(db, "signal:some-aci",
+                          "kestrel's weather station uses an ESP32 board")
+        embedder.fail = True
+        await ask(memory, channel, conv, "what board does the weather station use?")
+        contexts = context_messages(conv)
+        assert len(contexts) == 1
+        assert "ESP32" in contexts[0]["content"]
+        await db.close()
+
+
+class TestChannelScopeResolver:
+    """Unit tests for MemoryPlugin._channel_scope and group validation."""
+
+    async def test_question_mark_matches_exactly_one_character(self):
+        memory, *_rest, db = await build_retrieval_env(glob_config("irc:#a?"))
+        scope = memory._channel_scope("irc:#ab")
+        assert scope.contains("irc:#ac")
+        assert not scope.contains("irc:#a")
+        assert not scope.contains("irc:#abc")
+        # A non-member caller gets only itself.
+        assert not memory._channel_scope("irc:#abc").contains("irc:#ab")
+        await db.close()
+
+    async def test_match_is_case_sensitive(self):
+        # SQLite GLOB is case-sensitive; the Python check must agree.
+        memory, *_rest, db = await build_retrieval_env(glob_config("irc:#Lex*"))
+        assert not memory._channel_scope("irc:#lex").contains("irc:#Lex")
+        await db.close()
+
+    async def test_own_id_matches_by_equality(self):
+        # A caller whose own id contains a literal '*' must not have it
+        # treated as a pattern that widens its scope.
+        memory, *_rest, db = await build_retrieval_env()
+        scope = memory._channel_scope("irc:#a*")
+        assert scope.contains("irc:#a*")
+        assert not scope.contains("irc:#abc")
+        await db.close()
+
+    @pytest.mark.parametrize("member", ["signal:[ab]*", "irc:#x]", "irc:#[y"])
+    async def test_bracket_members_rejected(self, member):
+        with pytest.raises(ValueError, match="channel_groups"):
+            await MemoryPlugin().on_init(
+                pm=create_plugin_manager(), config=glob_config(member)
+            )
+
+    async def test_non_list_group_rejected(self):
+        config = {**EMBED_CONFIG,
+                  "memory": {"channel_groups": {"g": "signal:*"}}}
+        with pytest.raises(ValueError, match="channel_groups"):
+            await MemoryPlugin().on_init(pm=create_plugin_manager(), config=config)
+
+
 class TestDedupeAndStats:
     async def test_reasking_does_not_duplicate_context(self):
         memory, embedder, channel, conv, db = await build_retrieval_env()
