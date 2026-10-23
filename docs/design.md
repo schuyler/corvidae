@@ -784,12 +784,7 @@ for side effects; its return value is not used by the caller.
 2. If `len(conversation.messages) <= 5`, return `None` (skip — too few messages to compact).
 3. Backward walk: starting from the most recent message, accumulate messages
    until their token estimate would exceed 50% of `max_tokens`. The count
-   of accumulated messages is `retain_count`. Then anchor the retained
-   block at a `user` message, because the summary is an assistant message
-   and strict chat templates reject a prompt with no user query (#56):
-   trim forward to the first user message inside the tail, or, if the tail
-   holds none (a long tool loop), extend backward to the nearest earlier
-   user message, which may exceed the budget and logs a warning.
+   of accumulated messages is `retain_count`.
 4. If `retain_count >= len(conversation.messages)`, return `None` (all messages fit — no-op).
 5. Filter the older (non-retained) messages to `MESSAGE` type only, excluding
    any `SUMMARY` entries. Strip `_message_type` metadata before passing to LLM.
@@ -813,7 +808,13 @@ for side effects; its return value is not used by the caller.
    inserting a `[...N messages omitted...]` marker between them when
    anything is dropped. This method is a separate method so tests can patch
    it via `patch.object`.
-7. Call `conversation.replace_with_summary(summary_msg, retain_count)`.
+7. Build the summary message (`[Summary of earlier conversation]\n…`).
+   Its role is `assistant`, unless the retained tail holds no `user`
+   message (a long tool loop); then it is `user`, because strict chat
+   templates (Swift-1.5 / Qwen 3.8) reject a prompt with no user query
+   (#56). The role is persisted with the summary row, so a reload renders
+   the same prompt. Call
+   `conversation.replace_with_summary(summary_msg, retain_count)`.
 8. Fire `on_compaction(channel, summary_msg, retain_count, compacted_ids)`
    (broadcast) so persistence plugins can update the DB.
 9. Return `True`.

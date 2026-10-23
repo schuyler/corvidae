@@ -760,8 +760,8 @@ class TestScopeAwareMerge:
         assert sum(m["indexed"] for m in memories) == 2
         await db.close()
 
-    async def test_out_of_scope_nearest_does_not_block_in_scope_match(self):
-        """An out-of-scope record nearer than the in-scope duplicate is skipped, not fatal."""
+    async def test_out_of_scope_record_ignored(self):
+        """An identical record outside the caller's scope is neither merged nor blocks a merge."""
         memory, persistence, stub, _, db = await build_dedup_env(
             _with_groups({"home": ["irc:#a", "irc:#b"]})
         )
@@ -769,7 +769,7 @@ class TestScopeAwareMerge:
             pytest.skip("sqlite-vec unavailable")
         _same_summary(stub)
 
-        # Out-of-scope record first, then the in-scope one, then the new record.
+        # Out-of-scope record, then an in-scope one, then the new record.
         await _consolidate(memory, persistence, Channel(transport="irc", scope="#other"), [
             ("user", "solar data"), ("assistant", "MQTT topic"),
         ])
@@ -783,4 +783,36 @@ class TestScopeAwareMerge:
         other, rec_a, rec_b = await fetch_all_memories(db)
         assert other["superseded_by"] is None and other["indexed"] == 1
         assert rec_a["superseded_by"] == rec_b["id"]
+        await db.close()
+
+    async def test_nearer_different_reach_candidate_is_skipped(self):
+        """A nearer in-scope record with a different reach is passed over for a farther valid one."""
+        memory, persistence, stub, _, db = await build_dedup_env(
+            _with_groups({"g1": ["irc:#a", "irc:#b"], "g2": ["irc:#a", "irc:#c"]})
+        )
+        if not memory._vec_available:
+            pytest.skip("sqlite-vec unavailable")
+        b = Channel(transport="irc", scope="#b")
+        a = Channel(transport="irc", scope="#a")
+
+        def produce(summary: str, vector: list[float]) -> None:
+            # Next consolidation yields this summary, embedded as vector.
+            stub.chat_text = json.dumps({
+                "summary": summary, "topic_tags": [], "participants": [],
+            })
+            stub.fixed_embeddings[summary] = vector
+
+        # Old record on #b: similarity 0.99 to the new one (above 0.95).
+        produce("old fact on b", [0.99, (1 - 0.99 ** 2) ** 0.5, 0.0, 0.0])
+        await _consolidate(memory, persistence, b, [("user", "x1"), ("assistant", "y1")])
+        # Record on #a: similarity 1.0, in #b's scope, but #a also sees #c.
+        produce("fact on a", [1.0, 0.0, 0.0, 0.0])
+        await _consolidate(memory, persistence, a, [("user", "x2"), ("assistant", "y2")])
+        # New record on #b.
+        produce("new fact on b", [1.0, 0.0, 0.0, 0.0])
+        await _consolidate(memory, persistence, b, [("user", "x3"), ("assistant", "y3")])
+
+        old_b, rec_a, new_b = await fetch_all_memories(db)
+        assert rec_a["superseded_by"] is None and rec_a["indexed"] == 1
+        assert old_b["superseded_by"] == new_b["id"]
         await db.close()

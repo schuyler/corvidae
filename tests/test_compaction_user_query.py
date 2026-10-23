@@ -1,9 +1,10 @@
-"""Tests for anchoring the post-compaction window at a user message (GitHub issue #56).
+"""Tests for keeping a user query in the post-compaction prompt (GitHub issue #56).
 
 The compaction summary is an assistant message. If the retained tail is all
 tool traffic, the rebuilt prompt has no user message and strict chat
 templates (Swift-1.5 / Qwen 3.8) raise "No user query found in messages."
-Compaction must start the retained block at a user message.
+Compaction then renders the summary as a user message instead, leaving the
+budgeted cut where it is.
 """
 
 import json
@@ -97,20 +98,20 @@ def _long_turn() -> list[dict]:
     ]
 
 
-class TestRetainedBlockStartsAtUser:
-    async def test_tool_only_tail_extends_back_to_user(self):
-        """Budget covers only tool traffic: retention extends back to the user turn."""
+class TestSummaryRoleKeepsUserQuery:
+    async def test_tool_only_tail_gets_user_role_summary(self):
+        """Budget covers only tool traffic: the cut stays put; the summary becomes user."""
         conv = _window(_long_turn())
         max_tokens = conv.token_estimate()
         plugin = _plugin_retaining(conv, tail=4, max_tokens=max_tokens)
 
         assert await _compact(plugin, conv, max_tokens) is True
 
-        # Summary first, then the retained block opening at the user message.
+        # Summary first, then exactly the budgeted tail.
+        assert len(conv.messages) == 1 + 4
         assert conv.messages[0]["_message_type"] == MessageType.SUMMARY
-        assert conv.messages[1]["role"] == "user"
-        assert conv.messages[1]["content"] == "list the files"
-        assert len(conv.messages) == 1 + 9
+        assert conv.messages[0]["role"] == "user"
+        assert conv.messages[0]["content"].startswith("[Summary of earlier conversation]")
 
     async def test_compacted_prompt_renders_through_strict_template(self):
         """The rebuilt prompt passes the Swift-1.5 template's user-query check."""
@@ -122,8 +123,8 @@ class TestRetainedBlockStartsAtUser:
 
         render_swift(_as_server_renders(conv.build_prompt()))  # must not raise
 
-    async def test_tail_containing_user_trims_forward_to_it(self):
-        """Budget starts mid tool loop but includes a later user turn: trim to that user."""
+    async def test_tail_with_user_keeps_assistant_summary_and_budget(self):
+        """A tail containing a user message is untouched; the summary stays assistant."""
         conv = _window([
             {"role": "user", "content": "hello " * 40},
             {"role": "assistant", "content": "hi " * 40},
@@ -135,28 +136,29 @@ class TestRetainedBlockStartsAtUser:
             {"role": "assistant", "content": "ok"},
         ])
         max_tokens = conv.token_estimate()
-        # Last 5 messages: result(2), "done", "second task", "ok" plus call(2).
+        tail = conv.messages[-5:]
         plugin = _plugin_retaining(conv, tail=5, max_tokens=max_tokens)
 
         assert await _compact(plugin, conv, max_tokens) is True
 
-        assert [m["role"] for m in conv.messages] == ["assistant", "user", "assistant"]
-        assert conv.messages[1]["content"] == "second task"
+        assert conv.messages[0]["role"] == "assistant"
+        assert conv.messages[1:] == tail
 
-    async def test_only_user_at_start_skips_compaction(self):
-        """If anchoring would retain everything, compaction is a no-op."""
-        conv = _window([
-            {"role": "user", "content": "do a long job"},
-            _call(1), _result(1),
-            _call(2), _result(2),
-            _call(3), _result(3),
-        ])
-        before = list(conv.messages)
-        max_tokens = conv.token_estimate()
-        plugin = _plugin_retaining(conv, tail=2, max_tokens=max_tokens)
+    async def test_single_turn_tool_loop_still_shrinks(self):
+        """One request followed by a long tool loop is compacted, not skipped."""
+        conv = _window(
+            [{"role": "user", "content": "do a long job"}]
+            + [m for n in range(1, 13) for m in (_call(n), _result(n))]
+        )
+        before = conv.token_estimate()
+        max_tokens = before
+        plugin = _plugin_retaining(conv, tail=4, max_tokens=max_tokens)
 
-        assert await _compact(plugin, conv, max_tokens) is None
-        assert conv.messages == before
+        assert await _compact(plugin, conv, max_tokens) is True
+
+        assert conv.token_estimate() < before
+        assert conv.messages[0]["role"] == "user"
+        render_swift(_as_server_renders(conv.build_prompt()))  # must not raise
 
 
 class TestTemplateReproduction:

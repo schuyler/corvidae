@@ -71,6 +71,18 @@ class _HookObserver:
         )
 
 
+def _model_not_loaded_wait(cfg: dict, role: str) -> float:
+    """Validate llm.<role>.model_not_loaded_wait: a non-negative number of seconds."""
+    value = cfg.get("model_not_loaded_wait", 60.0)
+    # bool is an int subclass; reject it along with None and strings.
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+        raise ValueError(
+            f"llm.{role}.model_not_loaded_wait must be a non-negative number "
+            f"of seconds, got {value!r}"
+        )
+    return float(value)
+
+
 async def _close_after(client: LLMClient, delay: float = 5.0) -> None:
     """Close an old LLM client after a delay, allowing in-flight requests to finish."""
     await asyncio.sleep(delay)
@@ -254,7 +266,7 @@ class LLMPlugin(CorvidaePlugin):
             timeout=cfg.get("timeout"),
             document_prefix=cfg.get("document_prefix", ""),
             query_prefix=cfg.get("query_prefix", ""),
-            model_not_loaded_wait=cfg.get("model_not_loaded_wait", 60.0),
+            model_not_loaded_wait=_model_not_loaded_wait(cfg, role),
         )
         pm = getattr(self, "pm", None)
         if pm is not None:

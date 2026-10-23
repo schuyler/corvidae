@@ -23,6 +23,9 @@ import aiohttp
 
 TRANSIENT_STATUS_CODES = {429, 500, 502, 503, 504}
 ERROR_BODY_CHARS = 2000
+# Minimum sleep between "model is not loaded" retries, so a zero backoff
+# config cannot spin without spending the wait budget.
+MODEL_NOT_LOADED_MIN_DELAY = 1.0
 # llama-server router's 400 body when the requested model is unloaded and
 # --no-models-autoload is set (tools/server/server-models.cpp,
 # router_validate_model).
@@ -164,7 +167,9 @@ class LLMClient:
                 return min(float(retry_after), self.retry_max_delay)
             except ValueError:
                 pass
-        return min(self.retry_base_delay * (2 ** attempt), self.retry_max_delay)
+        # Cap the exponent: past 2**30 the delay is pinned at the max anyway,
+        # and an unbounded one overflows float conversion on long waits.
+        return min(self.retry_base_delay * (2 ** min(attempt, 30)), self.retry_max_delay)
 
     async def start(self) -> None:
         """Create the aiohttp session with optional auth header.
@@ -380,7 +385,10 @@ class LLMClient:
                         # model_not_loaded_wait, clamping the last sleep.
                         remaining = self.model_not_loaded_wait - not_loaded_waited
                         if _body_says_not_loaded(resp.status, error_body) and remaining > 0:
-                            delay = min(self._retry_delay(not_loaded_attempt), remaining)
+                            delay = min(
+                                max(self._retry_delay(not_loaded_attempt), MODEL_NOT_LOADED_MIN_DELAY),
+                                remaining,
+                            )
                             logger.warning(
                                 "LLM model not loaded, waiting",
                                 extra={

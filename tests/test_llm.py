@@ -563,3 +563,27 @@ class TestModelNotLoaded:
 
         assert not is_model_not_loaded(RuntimeError("model is not loaded"))
 
+
+
+class TestModelNotLoadedRobustness:
+    async def test_zero_backoff_still_spends_the_budget(self):
+        """retry_base_delay=0 must not loop without sleeping: each wait is at least 1s."""
+        from corvidae.llm import LLMHTTPError
+
+        client = LLMClient(
+            base_url=BASE_URL, model=MODEL, retry_base_delay=0.0,
+            model_not_loaded_wait=3.0,
+        )
+        responses = [_make_mock_response(status=400, body_text=NOT_LOADED_BODY) for _ in range(10)]
+        client.session = _session_returning(*responses)
+
+        with patch("asyncio.sleep", new_callable=AsyncMock) as sleep:
+            with pytest.raises(LLMHTTPError):
+                await client.chat(MESSAGES)
+
+        assert [c.args[0] for c in sleep.call_args_list] == [1.0, 1.0, 1.0]
+        assert client.session.post.call_count == 4
+
+    def test_retry_delay_does_not_overflow(self):
+        client = LLMClient(base_url=BASE_URL, model=MODEL, retry_max_delay=5.0)
+        assert client._retry_delay(5000) == 5.0

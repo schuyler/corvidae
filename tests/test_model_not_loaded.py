@@ -90,3 +90,19 @@ class TestEndToEnd:
 
         assert plugin.pm.ahook.send_message.call_args.kwargs["text"] == "custom"
         await db.close()
+
+
+class TestWaitValidation:
+    def test_rejects_non_numeric_wait(self):
+        import pytest
+
+        cfg = {"base_url": "http://x", "model": "m", "model_not_loaded_wait": None}
+        with pytest.raises(ValueError, match="model_not_loaded_wait"):
+            LLMPlugin()._create_client(cfg)
+
+    def test_rejects_negative_wait(self):
+        import pytest
+
+        cfg = {"base_url": "http://x", "model": "m", "model_not_loaded_wait": -1}
+        with pytest.raises(ValueError, match="model_not_loaded_wait"):
+            LLMPlugin()._create_client(cfg)
