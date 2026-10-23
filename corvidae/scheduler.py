@@ -789,11 +789,18 @@ class SchedulerPlugin(CorvidaePlugin):
 
         now = self._clock()
         due = await self._fetch(db, "enabled = 1 AND next_fire_at <= ? ORDER BY next_fire_at", (now,))
+        failed = False
         for row in due:
             try:
                 await self._fire(db, row, now)
             except Exception:
+                failed = True
                 logger.exception("scheduler: firing failed", extra={"schedule_id": row.id})
+
+        # A firing that failed before its row was advanced leaves the row
+        # due; re-arming at zero would spin, so back off instead.
+        if failed:
+            return ERROR_RETRY_SECONDS
 
         # Re-arm on the earliest remaining enabled row.
         async with db.execute(
@@ -813,21 +820,28 @@ class SchedulerPlugin(CorvidaePlugin):
         """
         overdue = self._stale_overdue.pop(row.id, None)
 
-        # Record the firing first.
+        # Record the firing first. The update is conditional on the row
+        # still being enabled, so a cancel or config removal that landed
+        # after the due rows were fetched wins and nothing fires.
         async with self._db_lock:
             if row.interval_seconds is None:
-                await db.execute(
+                cursor = await db.execute(
                     "UPDATE schedule SET enabled = 0, disabled_reason = 'fired', "
-                    "last_fired_at = ? WHERE id = ?",
+                    "last_fired_at = ? WHERE id = ? AND enabled = 1",
                     (now, row.id),
                 )
             else:
                 next_fire = advance(row.next_fire_at, row.interval_seconds, now, self._tz)
-                await db.execute(
-                    "UPDATE schedule SET next_fire_at = ?, last_fired_at = ? WHERE id = ?",
+                cursor = await db.execute(
+                    "UPDATE schedule SET next_fire_at = ?, last_fired_at = ? "
+                    "WHERE id = ? AND enabled = 1",
                     (next_fire, now, row.id),
                 )
             await db.commit()
+        if cursor.rowcount == 0:
+            logger.info("scheduler: row disabled before it fired; skipped",
+                        extra={"schedule_id": row.id})
+            return
 
         # Resolve the target channel; an unresolvable id is logged and dropped.
         channel = await self._channel_for(row.channel_id)
@@ -1007,7 +1021,12 @@ class SchedulerPlugin(CorvidaePlugin):
             channel = _ctx.channel
             if channel is None:
                 return "Error: no channel context available"
-            return await plugin.cancel_reminder_on(int(id), channel.id)
+            # Tool args are not type-checked; accept "12" and "#12" as well.
+            try:
+                row_id = int(str(id).strip().lstrip("#"))
+            except ValueError:
+                return f"Error: {id!r} is not a reminder id; use the number from list_reminders"
+            return await plugin.cancel_reminder_on(row_id, channel.id)
 
         for fn in (remind_me, list_reminders, cancel_reminder):
             tool_registry.append(Tool(name=fn.__name__, fn=fn, schema=tool_to_schema(fn)))

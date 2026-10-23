@@ -604,3 +604,44 @@ class TestWithAgent:
         finally:
             await agent.pm.get_plugin("task").on_stop()
             await db.close()
+
+
+# ---------------------------------------------------------------------------
+# Robustness: failure back-off, fire/cancel race, sloppy tool ids
+# ---------------------------------------------------------------------------
+
+
+class TestRobustness:
+    async def test_failed_firing_backs_off_instead_of_spinning(self, env, monkeypatch):
+        """A firing whose DB update raises leaves the row due; the timer
+        must back off rather than re-arm at zero and spin."""
+        from corvidae.scheduler import ERROR_RETRY_SECONDS
+
+        ch = env.registry.get_or_create("irc", "#lex")
+        await env.tools["remind_me"]("1m", "x", _ctx=env.ctx(ch))
+        env.clock.advance(60)
+
+        async def broken_fire(db, row, now):
+            raise RuntimeError("database is locked")
+
+        monkeypatch.setattr(env.sched, "_fire", broken_fire)
+        assert await env.sched._tick() == ERROR_RETRY_SECONDS
+
+    async def test_row_disabled_after_fetch_does_not_fire(self, env):
+        """A cancel landing between the due-row fetch and the firing wins."""
+        ch = env.registry.get_or_create("irc", "#lex")
+        await env.tools["remind_me"]("1m", "x", _ctx=env.ctx(ch))
+        (row,) = await env.rows()
+        await env.tools["cancel_reminder"](row.id, _ctx=env.ctx(ch))
+        env.clock.advance(60)
+        await env.sched._fire(env.db, row, env.clock.now)
+        assert env.recorder.calls == []
+        (after,) = await env.rows()
+        assert after.disabled_reason == "cancelled"
+
+    async def test_cancel_accepts_hash_and_string_ids(self, env):
+        ch = env.registry.get_or_create("irc", "#lex")
+        await env.tools["remind_me"]("1m", "x", _ctx=env.ctx(ch))
+        (row,) = await env.rows()
+        assert await env.tools["cancel_reminder"](f"#{row.id}", _ctx=env.ctx(ch)) == f"Cancelled reminder #{row.id}."
+        assert "not a reminder id" in await env.tools["cancel_reminder"]("soon", _ctx=env.ctx(ch))
