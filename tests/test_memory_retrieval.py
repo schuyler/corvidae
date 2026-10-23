@@ -310,12 +310,36 @@ class TestChannelScopeResolver:
         assert not scope.contains("irc:#abc")
         await db.close()
 
-    @pytest.mark.parametrize("member", ["signal:[ab]*", "irc:#x]", "irc:#[y"])
-    async def test_bracket_members_rejected(self, member):
+    @pytest.mark.parametrize("member", ["signal:[ab]*", "irc:#x]?", "irc:[y*"])
+    async def test_bracket_pattern_members_rejected(self, member):
         with pytest.raises(ValueError, match="channel_groups"):
             await MemoryPlugin().on_init(
                 pm=create_plugin_manager(), config=glob_config(member)
             )
+
+    async def test_bracket_literal_member_accepted_by_equality(self):
+        # IRC nicks may contain '[' / ']'; a wildcard-free member never
+        # reaches GLOB, so it is allowed and matched exactly.
+        memory, *_rest, db = await build_retrieval_env(
+            glob_config("irc:[bob]", "irc:#lex")
+        )
+        scope = memory._channel_scope("irc:#lex")
+        assert scope.contains("irc:[bob]")
+        assert not scope.contains("irc:b")
+        assert memory._channel_scope("irc:[bob]").contains("irc:#lex")
+        await db.close()
+
+    async def test_empty_scope_sql_matches_nothing(self):
+        # A directly constructed empty scope must still be valid SQL.
+        import aiosqlite
+        from corvidae.memory import ChannelScope
+        fragment, params = ChannelScope(frozenset()).sql("c")
+        assert params == []
+        async with aiosqlite.connect(":memory:") as db:
+            await db.execute("CREATE TABLE t (c TEXT)")
+            await db.execute("INSERT INTO t VALUES ('irc:#lex')")
+            async with db.execute(f"SELECT c FROM t WHERE {fragment}") as cur:
+                assert await cur.fetchall() == []
 
     async def test_non_list_group_rejected(self):
         config = {**EMBED_CONFIG,
