@@ -971,8 +971,24 @@ advance in one compare-and-set section. The row's `created_at` is the
 `message_log.timestamp` of the last row in the source range, i.e. when
 the conversation happened, not when consolidation ran, so history
 consolidated long after the fact is aged correctly by retrieval and
-retention. A near-duplicate merge keeps the later of the two records'
-dates. Overlapping triggers on the same
+retention.
+
+**Near-duplicate merge.** Before inserting the new vector, consolidation
+looks for the nearest indexed record with cosine similarity
+≥ `memory.dup_threshold` among the records in the channel's retrieval
+scope (#58). A record on another channel qualifies only if that channel's
+scope has the same reach (`ChannelScope.same_reach`), because groups are
+not transitive: with groups {A, B} and {A, C}, folding C's record into one
+owned by A, and later A's into one owned by B, would hide the fact from C.
+Equal reach keeps the survivor visible to exactly the channels that could
+see the superseded record. Under a single `*` group every channel
+qualifies. The old record is superseded (`superseded_by`, `indexed=0`,
+vector deleted); the survivor takes the summed retrieval count, the
+higher importance, and the later of the two records' dates. Message
+ranges fold only within one channel: `message_log` ids are global, and
+`recall_raw` and `/redact` read a record's range on its own channel, so on
+a cross-channel merge each record keeps its own range and the superseded
+record still leads to its channel's source dialog. Overlapping triggers on the same
 range discard the loser's record — no duplicates. Embedding failure
 stores the record with `embedded=0` for later backfill; the summary text
 is canonical and vectors are a rebuildable cache. All consolidation LLM

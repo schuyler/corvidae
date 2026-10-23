@@ -262,6 +262,25 @@ class ChannelScope:
         clauses.extend(f"{column} GLOB ?" for _ in self.patterns)
         return "(" + " OR ".join(clauses) + ")", [*sorted(self.ids), *self.patterns]
 
+    def same_reach(self, other: "ChannelScope") -> bool:
+        """Whether two scopes admit exactly the same channels.
+
+        Ids already matched by one of the scope's own patterns are dropped
+        before comparing, so the scopes of two members of a "*" group (each
+        holding its own id plus "*") compare equal. Syntactically different
+        patterns compare unequal even if they match the same channels; that
+        errs toward "different", which only forgoes a merge.
+        """
+        def normal(scope: "ChannelScope") -> tuple[frozenset[str], frozenset[str]]:
+            # Drop ids a pattern in the same scope already covers.
+            ids = frozenset(
+                i for i in scope.ids
+                if not any(fnmatchcase(i, p) for p in scope.patterns)
+            )
+            return ids, frozenset(scope.patterns)
+
+        return normal(self) == normal(other)
+
     def describe(self) -> str:
         """Human-readable listing for scope errors shown to the model."""
         return ", ".join([*sorted(self.ids), *self.patterns])
@@ -860,13 +879,17 @@ class MemoryPlugin(CorvidaePlugin):
                 memory_id = cursor.lastrowid
 
                 # WP1b.2 — near-dup check: query BEFORE inserting the new vec row
-                # so the new record is naturally excluded from the top-1 result.
-                # Scoped to same channel_id (not group scope): groups grant shared
-                # retrieval, not shared ownership; cross-channel merge is a
-                # compartment leak and cross-channel msg-id ranges can't be folded.
+                # so the new record is naturally excluded from the results.
+                # Candidates come from this channel's retrieval scope (GitHub
+                # issue #58), but a record on another channel merges only if
+                # that channel's scope reaches exactly the same channels:
+                # the survivor must stay visible to every channel that could
+                # see the superseded record, and groups are not transitive.
                 # Skip entirely when embedding is unavailable or the new record
                 # has no vector (embed failed — no vector to compare).
                 dup_old_id: int | None = None
+                dup_cross_channel = False
+                own_scope = self._channel_scope(channel_id)
                 if (
                     embedding is not None
                     and self._vec_available
@@ -874,24 +897,33 @@ class MemoryPlugin(CorvidaePlugin):
                 ):
                     try:
                         import sqlite_vec as _sv
+                        scope_sql, scope_params = own_scope.sql("m.channel_id")
                         async with db.execute(
-                            "SELECT v.memory_id, (1.0 - v.distance) as similarity "
+                            "SELECT v.memory_id, (1.0 - v.distance) as similarity, "
+                            "m.channel_id "
                             "FROM (SELECT memory_id, distance FROM memory_vec "
                             "      WHERE embedding MATCH ? AND k = ?) AS v "
                             "JOIN memory m ON m.id = v.memory_id "
-                            "WHERE m.channel_id = ? AND m.indexed = 1 "
-                            "ORDER BY v.distance LIMIT 1",
+                            f"WHERE {scope_sql} AND m.indexed = 1 "
+                            "ORDER BY v.distance",
                             (
                                 _sv.serialize_float32(embedding),
                                 VEC_OVERFETCH * 2,
-                                channel_id,
+                                *scope_params,
                             ),
                         ) as dup_cursor:
-                            dup_row = await dup_cursor.fetchone()
-                        if dup_row is not None:
-                            dup_candidate_id, dup_similarity = dup_row
-                            if dup_similarity >= self._dup_threshold:
+                            dup_rows = await dup_cursor.fetchall()
+                        # Nearest first: take the first candidate over the
+                        # threshold whose owner has the same reach.
+                        for dup_candidate_id, dup_similarity, dup_channel in dup_rows:
+                            if dup_similarity < self._dup_threshold:
+                                break
+                            if dup_channel == channel_id or own_scope.same_reach(
+                                self._channel_scope(dup_channel)
+                            ):
                                 dup_old_id = dup_candidate_id
+                                dup_cross_channel = dup_channel != channel_id
+                                break
                     except Exception:
                         logger.debug(
                             "dup detection query failed; skipping for this record",
@@ -921,8 +953,15 @@ class MemoryPlugin(CorvidaePlugin):
                         inherited_rc = (old_rc or 0)  # old record's count to fold in
                         new_importance = max(importance, old_importance or 0.0)
                         new_lra = old_lra  # new record has None; old may have a value
-                        new_start = min(old_start, rows[0][0])
-                        new_end = max(old_end, rows[-1][0])
+                        # Fold the message range only within one channel:
+                        # message_log ids are global, and recall_raw and
+                        # /redact read a record's range on its own channel.
+                        # A superseded record keeps its own range.
+                        if dup_cross_channel:
+                            new_start, new_end = rows[0][0], rows[-1][0]
+                        else:
+                            new_start = min(old_start, rows[0][0])
+                            new_end = max(old_end, rows[-1][0])
                         # The merged record spans both conversations; date it
                         # from the later one. Imported history has newer ids
                         # but older timestamps, so this is not new_end's date.
