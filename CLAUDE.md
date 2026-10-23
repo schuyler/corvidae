@@ -21,6 +21,13 @@ uv run corvidae                  # run the daemon; reads ./agent.yaml
 it — this is the hang safety net AGENTS.md calls for, so don't disable it. If a
 test legitimately needs longer, mark that test rather than raising the global.
 
+The timeout covers test bodies, not interpreter shutdown. An aiosqlite
+connection left open by the last test to fail would hang pytest at exit
+(its worker thread is non-daemon), so `tests/aiosqlite_guard.py`, imported by
+`tests/conftest.py`, closes every connection a test opened through
+`aiosqlite.connect` at teardown (#64). Prefer `async with` or the `db`
+fixture anyway; the guard is a backstop.
+
 ## Architecture pointers
 
 Three layers: an apluggy plugin system, the agent loop, and transport plugins.

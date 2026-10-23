@@ -7,6 +7,10 @@ import pytest
 import pytest_asyncio
 import aiosqlite
 
+# Autouse: closes aiosqlite connections a failing test left open, which would
+# otherwise hang pytest at exit (GitHub issue #64).
+from aiosqlite_guard import close_leaked_aiosqlite_connections  # noqa: F401
+
 # Suppress iscoroutinefunction deprecation warning that can trigger SIGINT in pytest async runner.
 # conftest-level suppression ensures the filter is active before any test module imports happen.
 warnings.filterwarnings("ignore", message=".*iscoroutinefunction.*deprecated.*")
