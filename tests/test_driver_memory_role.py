@@ -3,26 +3,31 @@
 The probe checks that the model still answers the person when the memory
 block is the last "user" message it sees (agent.mid_conversation_system_role:
 user). The live run needs llama-server; these tests cover the pieces that
-don't: the seeded memory row is one real retrieval finds, the profile
-template turns on what the probe needs, and the verdict logic.
+don't: the probe's warm-up → seed → ask sequence works against a daemon
+started the real way, the profile template turns on what the probe needs,
+and the verdict logic.
 """
 from pathlib import Path
 
-import aiosqlite
 import pytest
 import yaml
 
+from corvidae.channel import Channel
+from corvidae.context import ContextWindow
+from corvidae.funnel import FunnelPlugin
 from corvidae.hooks import create_plugin_manager
 from corvidae.llm_plugin import LLMPlugin
 from corvidae.memory import MemoryPlugin
-from corvidae.persistence import PersistencePlugin, init_db
+from corvidae.persistence import PersistencePlugin
 
 from harness.driver import (
     MEMROLE_CHANNEL,
     MEMROLE_FACT,
     MEMROLE_QUERY,
+    MEMROLE_WARMUP,
     PROFILES,
     memory_role_verdict,
+    memory_schema_ready,
     seed_memory_row,
 )
 
@@ -35,47 +40,63 @@ def _render(name: str) -> dict:
     return yaml.safe_load(text.replace("@STATE_DIR@", "/state"))
 
 
-# The profile's own llm and memory sections, so retrieval here runs with the
-# settings the live probe does (FTS-only, band_on: similarity).
-_MEMROLE = _render("buster-memrole")
-FTS_ONLY_CONFIG = {"llm": _MEMROLE["llm"], "memory": _MEMROLE["memory"]}
+async def _start_daemon_plugins(state_dir: Path):
+    """persistence + llm + funnel + memory, started through pm.ahook.on_start
+    with the rendered buster-memrole config, as the daemon starts them.
 
-
-async def _memory_on(db_path: Path) -> tuple[MemoryPlugin, aiosqlite.Connection]:
-    """A MemoryPlugin with no embedding role (FTS-only, as in the profile)."""
-    db = await aiosqlite.connect(db_path)
-    await init_db(db)
+    on_start hooks run concurrently, so MemoryPlugin may find no database yet
+    and defer its schema to first use; the probe has to cope with that.
+    Returns (pm, memory, persistence).
+    """
+    config = _render("buster-memrole")
+    config["_base_dir"] = state_dir
     pm = create_plugin_manager()
     persistence = PersistencePlugin()
-    persistence.db = db
     pm.register(persistence, name="persistence")
     llm = LLMPlugin()
     pm.register(llm, name="llm")
-    await llm.on_init(pm=pm, config=FTS_ONLY_CONFIG)
+    funnel = FunnelPlugin()
+    pm.register(funnel, name="funnel")
     memory = MemoryPlugin()
     pm.register(memory, name="memory")
-    await memory.on_init(pm=pm, config=FTS_ONLY_CONFIG)
-    await memory.on_start(config=FTS_ONLY_CONFIG)
-    return memory, db
+    for plugin in (llm, funnel, memory):
+        await plugin.on_init(pm=pm, config=config)
+    await pm.ahook.on_start(config=config)
+    return pm, memory, persistence
 
 
-class TestSeedMemoryRow:
-    async def test_seeded_row_is_retrieved_for_the_probe_query(self, tmp_path):
-        """The driver writes the row with stdlib sqlite3 while the daemon
-        holds the DB; real FTS retrieval must find it for the probe query,
-        or the probe would pass without a memory block ever being shown."""
-        path = tmp_path / "sessions.db"
-        memory, db = await _memory_on(path)
+async def _turn(memory: MemoryPlugin, channel: Channel, text: str) -> None:
+    """The turn-loop entry: append the user message, fire retrieval."""
+    channel.conversation.append({"role": "user", "content": text})
+    await memory.before_agent_turn(channel=channel, correlation_id=None, meta={})
+
+
+class TestProbeSequence:
+    async def test_warmup_seed_ask_puts_memory_block_last(self, tmp_path):
+        """The probe's sequence against a really-started daemon: a warm-up
+        turn makes the memory schema exist, the driver's seeded row is
+        retrieved for the probe question, and with role: user the built
+        prompt ends on the memory block as a user message."""
+        pm, memory, persistence = await _start_daemon_plugins(tmp_path)
+        db_path = tmp_path / "sessions.db"
+        channel = Channel(transport="irc", scope=MEMROLE_CHANNEL)
+        channel.conversation = ContextWindow(channel.id)
+        channel.conversation.system_prompt = "You are Buster."
         try:
-            seed_memory_row(path, f"irc:{MEMROLE_CHANNEL}", MEMROLE_FACT)
-            candidates, degraded = await memory.retrieve(
-                f"irc:{MEMROLE_CHANNEL}", MEMROLE_QUERY
-            )
+            await _turn(memory, channel, MEMROLE_WARMUP)
+            assert memory_schema_ready(db_path)
+
+            seed_memory_row(db_path, channel.id, MEMROLE_FACT)
+            await _turn(memory, channel, MEMROLE_QUERY)
+            prompt = channel.conversation.build_prompt(mid_conversation_system_role="user")
         finally:
-            await db.close()
-        assert degraded is True  # no embedding role: keyword retrieval
-        assert [c["summary"] for c in candidates] == [MEMROLE_FACT]
-        assert candidates[0]["band"] != "weak"  # admitted, not dropped
+            # Closes the DB and the LLM client sessions on_start opened.
+            await pm.ahook.on_stop()
+
+        assert prompt[-2] == {"role": "user", "content": MEMROLE_QUERY}
+        assert prompt[-1]["role"] == "user"
+        assert MEMROLE_FACT in prompt[-1]["content"]
+        assert "[weak]" not in prompt[-1]["content"]
 
 
 class TestProfileTemplate:

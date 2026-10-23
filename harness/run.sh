@@ -150,6 +150,14 @@ sleep 1
 # it the copy can race the daemon's shutdown records.
 cp "$STATE_DIR"/corvidae.log* "$RUN_DIR"/ 2>/dev/null || true
 
+# chat.sh reuses state/agent.yaml when it exists, rendering
+# the default profile only when it's missing. After a non-default profile
+# run, keep that config in the run dir and remove it from state/, so the
+# next chat starts the default profile rather than this one.
+if [ "$HARNESS_PROFILE" != "buster" ]; then
+    mv "$STATE_DIR/agent.yaml" "$RUN_DIR/agent.yaml"
+fi
+
 FINISHED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 RUN_DIR="$RUN_DIR" DAEMON_CRASHED="$DAEMON_CRASHED" FINISHED_AT="$FINISHED_AT" python3 - <<'PYEOF'

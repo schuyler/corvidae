@@ -45,20 +45,23 @@ MAX_FILLERS = 12
 # memory_role probe (buster-memrole profile). The seeded fact shares
 # "weather station" with both questions, so FTS retrieval admits it; the
 # first question's answer is not in it, so only a reply to the person
-# carries MEMROLE_ANSWER.
+# carries MEMROLE_ANSWER. The question says nothing about the memory, so it
+# doesn't steer the model past the block.
 MEMROLE_CHANNEL = "#p-memrole"
 MEMROLE_CODENAME = "PLOVER-48"
 MEMROLE_FACT = (
     "Kestrel's weather station runs on an ESP32-C6 board, "
     f"codename {MEMROLE_CODENAME}."
 )
-MEMROLE_QUERY = "Weather station aside, what is 17 plus 25? Reply with the number only."
+MEMROLE_WARMUP = "Reply with the word READY."
+MEMROLE_QUERY = "I'm logging weather station readings: what is 17 plus 25? Reply with the number only."
 MEMROLE_ANSWER = "42"
 MEMROLE_RECALL_QUERY = (
     "What codename does the weather station board have? Reply with the codename only."
 )
-# The memory table is created by MemoryPlugin.on_start; the bot joining IRC
-# normally means it exists, this bounds the wait if it doesn't.
+# MemoryPlugin creates its schema on first use when its on_start ran before
+# the database opened (on_start hooks run concurrently). The warm-up turn is
+# that first use; this bounds the wait for the schema to land after it.
 MEMROLE_SCHEMA_TIMEOUT_S = 30
 
 # Ordinary single turn. Observed 2-7s (run 7), worst observed 35s on an
@@ -432,16 +435,21 @@ def seed_memory_row(db_path: Path, channel_id: str, summary: str) -> int:
         conn.close()
 
 
-def memory_table_exists(db_path: Path) -> bool:
-    """Whether MemoryPlugin has created its schema in sessions.db yet."""
+def memory_schema_ready(db_path: Path) -> bool:
+    """Whether MemoryPlugin's memory table and its FTS insert trigger exist.
+
+    The trigger matters: a row seeded before it exists never reaches
+    memory_fts, so keyword retrieval could not find it.
+    """
     if not db_path.exists():
         return False
     rows = _query(
         db_path,
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memory'",
+        "SELECT name FROM sqlite_master WHERE (type = 'table' AND name = 'memory') "
+        "OR (type = 'trigger' AND name = 'memory_ai')",
         (),
     )
-    return bool(rows)
+    return len(rows) == 2
 
 
 def first_admitted_count_since(db_path: Path, channel_id: str, since_ts: float) -> int | None:
@@ -872,8 +880,10 @@ async def probe_memory_role(ctx: RunContext) -> ProbeResult:
     """With mid_conversation_system_role: user, the memory block is the last
     "user" message the model sees. Check it still answers the person.
 
-    Turn 1 asks a question the memory doesn't answer, while sharing keywords
-    with it so retrieval admits the block; retrieval_log confirms it did.
+    A warm-up turn first makes MemoryPlugin create its schema, then the
+    driver seeds the memory. Turn 1 asks a question the memory doesn't
+    answer, while sharing keywords with it so retrieval admits the block;
+    retrieval_log confirms it did.
     Turn 2 asks for the remembered codename, so a block the model ignored
     entirely also fails.
     """
@@ -884,14 +894,24 @@ async def probe_memory_role(ctx: RunContext) -> ProbeResult:
     sent: list[tuple[float, str]] = []
     t0 = time.monotonic()
 
+    # Warm-up turn: the first user turn on the channel is what makes
+    # MemoryPlugin create its schema when on_start deferred it.
+    ready = await send_and_await(ctx, channel, MEMROLE_WARMUP, "READY", sent, TURN_TIMEOUT_S)
+    if ready is None:
+        return ProbeResult(
+            "memory_role", False, "no READY reply to the warm-up turn",
+            time.monotonic() - t0, _transcript(ctx, channel, sent),
+        )
+
     # Seed the memory once MemoryPlugin's schema exists.
     deadline = time.monotonic() + MEMROLE_SCHEMA_TIMEOUT_S
-    while not memory_table_exists(ctx.session_db):
+    while not memory_schema_ready(ctx.session_db):
         if time.monotonic() > deadline:
             return ProbeResult(
                 "memory_role", False,
-                "memory table never appeared in sessions.db — is the memory plugin enabled?",
-                time.monotonic() - t0, [],
+                "memory schema never appeared in sessions.db after the warm-up turn "
+                "— is the memory plugin enabled?",
+                time.monotonic() - t0, _transcript(ctx, channel, sent),
             )
         await asyncio.sleep(1)
     seed_memory_row(ctx.session_db, channel_id, MEMROLE_FACT)
