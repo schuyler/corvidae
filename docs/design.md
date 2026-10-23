@@ -941,9 +941,13 @@ fork's prefill is just its instruction. Containment for consolidation is
 exact: every `message`-type row in the range must be a `_db_id` in the
 fork's window (summary rows are skipped; a live window's summary has no
 rowid and summaries are never consolidated). Appraisal and critique check
-the originating rowid recorded by their own `on_message_persisted`, and
-read the window at run time, so a fork after the user has said more still
-sees the exchange, named by a quote of its opening message.
+the originating rowid recorded by their own `on_message_persisted`
+(critique per lens, right before each fork, since an earlier lens's fork
+is an await during which compaction can drop the exchange), and read the
+window at run time, so a fork after the user has said more still sees the
+exchange. The instruction names it by quoting its opening message and the
+response the user was sent, which can differ from the window's last
+assistant message (the max-turns fallback).
 
 **Instructions.** Each stage has a fork instruction beside its standalone
 prompt, written to the agent in the second person:
@@ -954,8 +958,8 @@ copies in `prompts/*_fork.md`). They are read from static config with
 write them. Consolidation appends a sentence naming where the range
 starts ("the whole conversation above", "what follows the summary at its
 top", or a quote of the first new message when rows below the watermark
-are still in view). Appraisal appends the exchange's opening message and
-the retrieval profile. Critique appends the opening message, and the
+are still in view). Appraisal appends the exchange quotes and the
+retrieval profile. Critique appends the exchange quotes, and the
 provenance lens still passes the CONTEXT snapshot inline.
 
 **Configuration** (`agent.forks`, validated at startup and on reload by

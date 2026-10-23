@@ -167,6 +167,37 @@ class TestCritiqueFork:
         finally:
             await _teardown(env)
 
+    async def test_instruction_quotes_the_delivered_response(self, tmp_path):
+        """The window's last assistant message can differ from what the user
+        was sent (max-turns fallback), so the sent response is quoted."""
+        agent = FakeAgent()
+        env = await _env(tmp_path, agent)
+        try:
+            await _run(env, ["predictive"])
+            assert "«It was Tuesday, as you said.»" in agent.calls[0]["instruction"]
+        finally:
+            await _teardown(env)
+
+    async def test_containment_rechecked_per_lens(self, tmp_path):
+        """Compaction can drop the exchange while an earlier lens's fork is
+        in flight; later lenses must then go standalone."""
+        agent = FakeAgent()
+        env = await _env(tmp_path, agent)
+        original_fork = agent.fork
+
+        async def fork_then_compact(channel, instruction, *, cut=None, extra_body=None):
+            result = await original_fork(channel, instruction, cut=cut, extra_body=extra_body)
+            channel.conversation.messages = channel.conversation.messages[1:]
+            return result
+
+        agent.fork = fork_then_compact
+        try:
+            await _run(env, ["predictive", "provenance"])
+            assert len(agent.calls) == 1
+            assert len(env.stub.chat_calls) == 1
+        finally:
+            await _teardown(env)
+
     async def test_unparseable_fork_reply_falls_back(self, tmp_path):
         agent = FakeAgent(text="I think it's fine.")
         env = await _env(tmp_path, agent)

@@ -92,6 +92,7 @@ class TestStage2Fork:
             assert call["instruction"].startswith(DEFAULT_STAGE2_FORK_PROMPT)
             assert "«is the heater the culprit?" in call["instruction"]
             assert "no retrieval recorded" in call["instruction"]
+            assert "«yes, brownout»" in call["instruction"]
             assert call["attribution"]["stage"] == "appraisal"
             assert call["attribution"]["correlation_id"] == "k"
 

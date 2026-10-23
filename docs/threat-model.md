@@ -120,9 +120,11 @@ by the thing being checked.
 The fork instructions added for #51 (`appraisal.stage2_fork_prompt`,
 `critique.fork_prompt.<lens>`, `memory.consolidation_fork_prompt`,
 `agent.compaction_fork_prompt`) and `agent.forks.*` are read from config
-only (`tuning.config_value`), so `set_settings` can't rewrite them. With
-forks on, the critic's and appraiser's instructions are out of the agent's
-reach; the standalone prompts above still aren't.
+only (`tuning.config_value`), so `set_settings` can't rewrite them. That
+covers only calls that actually fork: every fork miss (forks off for the
+stage, the exchange has left the window, a refused or unparseable fork)
+falls back to the standalone prompts above, which are still runtime
+tunables. Keep them in `immutable_settings` with forks on too.
 
 ### 3. Untrusted text is promoted to the `system` role
 

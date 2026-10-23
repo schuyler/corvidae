@@ -635,16 +635,13 @@ class CritiquePlugin(CorvidaePlugin):
         )
         try:
             client = self._critic_client()
-            agent = self._fork_target(channel, exchange_key)
             objections: list[dict] = []
             for lens in lenses:
                 # A fork of the live window when one is available; a lens
                 # whose fork misses falls back to its standalone call.
-                objs = None
-                if agent is not None:
-                    objs = await self._fork_lens(
-                        agent, channel, lens, exchange_key, originating_text,
-                    )
+                objs = await self._fork_lens(
+                    channel, lens, exchange_key, originating_text, response_text,
+                )
                 if objs is None:
                     if client is None:
                         continue
@@ -751,21 +748,31 @@ class CritiquePlugin(CorvidaePlugin):
         return agent
 
     async def _fork_lens(
-        self, agent, channel, lens, exchange_key, originating_text,
+        self, channel, lens, exchange_key, originating_text, response_text,
     ) -> list[dict] | None:
-        """One lens as a fork of the full window; None on any failure.
+        """One lens as a fork of the full window; None for the standalone path.
 
-        The fork sees the response in the window, so only the exchange's
-        opening message is quoted to name it. Provenance keeps passing the
+        The exchange is named by its opening message and the response the
+        user was sent (which can differ from the window's last assistant
+        message, e.g. the max-turns fallback). Provenance keeps passing the
         CONTEXT snapshot inline: it is the exact set admitted for that
         exchange, which the window alone doesn't pin down.
+
+        Containment is checked per lens, after the last await that builds
+        the instruction: an earlier lens's fork is an await, during which
+        the agent loop can compact the exchange out of the window.
+        Agent.fork renders the prompt before its own first await, so the
+        check and the render see the same window.
         """
+        if fork_agent(self.pm if hasattr(self, "pm") else None, "critique") is None:
+            return None
         prompt = config_value(
             self.config, f"critique.fork_prompt.{lens}", DEFAULT_FORK_PROMPTS[lens]
         )
         instruction = (
             f"{prompt}\n\nThe exchange began with the message "
-            f"«{quote(originating_text)}»."
+            f"«{quote(originating_text)}», and the response you sent began "
+            f"«{quote(response_text)}»."
         )
         if lens == "provenance":
             snapshot = await self._read_provenance_snapshot(exchange_key)
@@ -773,6 +780,9 @@ class CritiquePlugin(CorvidaePlugin):
                 "\n\nRetrieved context snapshot (all CONTEXT in your window "
                 f"when you wrote the response):\n{snapshot or '(no context was retrieved)'}"
             )
+        agent = self._fork_target(channel, exchange_key)
+        if agent is None:
+            return None
         try:
             result = await agent.fork(channel, instruction, extra_body=OBJECTION_EXTRA_BODY)
             return self._objections_from_text(result.text, lens)

@@ -166,8 +166,8 @@ Each stage has a fork instruction next to its standalone prompt:
 |-----|--------------|-------|
 | `agent.compaction_fork_prompt` | `prompts/compaction_fork.md` | Appended to the dropped prefix. |
 | `memory.consolidation_fork_prompt` | `prompts/memory_consolidation_fork.md` | Followed by a sentence naming where the range starts. Restart-only, like the rest of `memory.*`. |
-| `appraisal.stage2_fork_prompt` | `prompts/appraisal_fork.md` | Followed by a quote of the exchange's opening message and the retrieval profile. |
-| `critique.fork_prompt.<lens>` | `prompts/critique_<lens>_fork.md` | Followed by a quote of the exchange's opening message; provenance also gets the CONTEXT snapshot. |
+| `appraisal.stage2_fork_prompt` | `prompts/appraisal_fork.md` | Followed by quotes of the exchange's opening message and of the response sent, and the retrieval profile. |
+| `critique.fork_prompt.<lens>` | `prompts/critique_<lens>_fork.md` | Followed by quotes of the exchange's opening message and of the response sent; provenance also gets the CONTEXT snapshot. |
 
 These are static config, read with `corvidae.tuning.config_value`. Unlike
 `appraisal.stage2_prompt` and `critique.prompt.<lens>`, they aren't runtime
@@ -178,9 +178,11 @@ window's cache. If `llm.background` names a different model, enabling
 forks moves those stages' cost onto the main model, and the daemon logs a
 warning at startup saying so.
 
-Every LLM call a forkable stage makes is tagged `mode = 'fork'` or
-`'standalone'` in `usage_log`, so `cached_tokens` per fork row shows
-whether the prefix was reused.
+Each forkable stage tags its own LLM call (the summary, the record, the
+stage-2 appraisal, each critique lens) `mode = 'fork'` or `'standalone'`
+in `usage_log`, so `cached_tokens` per fork row shows whether the prefix
+was reused. Other calls the stage makes, such as consolidation's
+importance prior, leave `mode` NULL.
 
 ### `reasoning_history: exchange` and `preserve_thinking`
 

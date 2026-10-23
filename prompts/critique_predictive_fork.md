@@ -9,8 +9,9 @@ followed by this text as a `user` turn (GitHub issue #51). It runs on
 
 Selected when the exchange's ambiguity crosses `critique.lens.ambiguity`.
 
-`CritiquePlugin` appends the exchange's opening message, quoted to its
-first 120 characters ("The exchange began with the message «…»."). The
+`CritiquePlugin` appends the exchange's opening message and the response
+the user was sent, each quoted to its first 120 characters ("The exchange
+began with the message «…», and the response you sent began «…»."). The
 standalone prompt (`critique.prompt.predictive`,
 `prompts/critique_predictive.md`) is still used when forks are off, the
 exchange's originating row has left the window, or this lens's fork fails.

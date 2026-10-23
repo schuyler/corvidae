@@ -675,7 +675,9 @@ class AppraisalPlugin(CorvidaePlugin):
             profile = await self._retrieval_profile_summary(exchange_key)
             # A fork of the live window when one is available; else (and
             # on any fork miss) the standalone tier-3 call.
-            stage2 = await self._fork_stage2(channel, exchange_key, originating_text, profile)
+            stage2 = await self._fork_stage2(
+                channel, exchange_key, originating_text, response_text, profile
+            )
             if stage2 is None:
                 client = self._appraisal_client()
                 if client is None:
@@ -731,14 +733,18 @@ class AppraisalPlugin(CorvidaePlugin):
             reset_attribution(token)
 
     async def _fork_stage2(
-        self, channel, exchange_key: str, originating_text: str | None, profile: str,
+        self, channel, exchange_key: str, originating_text: str | None,
+        response_text: str | None, profile: str,
     ) -> dict | None:
         """Stage 2 from a fork of the channel's live window, or None.
 
         Forks only when forks are on for "appraisal" and the exchange's
         originating row is still in the window (compaction hasn't dropped
         it). Reads the window at run time: if the user has said more since,
-        the fork still sees the exchange, quoted by its opening message.
+        the fork still sees the exchange, named by its opening message and
+        the response the user was sent (which can differ from the window's
+        last assistant message, e.g. the max-turns fallback). The check and
+        Agent.fork's prompt render run with no await between them.
         Any fork failure or unusable reply is logged and returns None.
         """
         agent = fork_agent(self.pm if hasattr(self, "pm") else None, "appraisal")
@@ -757,7 +763,8 @@ class AppraisalPlugin(CorvidaePlugin):
         )
         instruction = (
             f"{prompt}\n\n"
-            f"The exchange began with the message «{quote(originating_text)}».\n"
+            f"The exchange began with the message «{quote(originating_text)}», "
+            f"and the response you sent began «{quote(response_text)}».\n"
             f"Memory retrieval for this exchange: {profile}"
         )
         try:

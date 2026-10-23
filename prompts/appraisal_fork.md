@@ -8,9 +8,11 @@ render of the whole window, followed by this text as a `user` turn (GitHub
 issue #51). It runs on `llm.main` with the stage's `response_format` and
 `tool_choice: "none"`.
 
-`AppraisalPlugin` appends two lines: the exchange's opening message, quoted
-to its first 120 characters ("The exchange began with the message «…»."),
-and the retrieval profile ("Memory retrieval for this exchange: …").
+`AppraisalPlugin` appends two lines: the exchange's opening message and
+the response the user was sent, each quoted to its first 120 characters
+("The exchange began with the message «…», and the response you sent
+began «…»."), and the retrieval profile ("Memory retrieval for this
+exchange: …").
 
 The standalone prompt (`appraisal.stage2_prompt`) is still used when forks
 are off, the exchange's originating row has left the window, or the fork
