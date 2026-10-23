@@ -198,11 +198,10 @@ def snap_cut_to_tool_boundary(messages: list[dict], cut: int) -> int:
         cut = new_cut
 
 
-def window_db_ids(conv: ContextWindow | None) -> set[int]:
-    """The ``message_log`` rowids (``_db_id`` tags) present in a window."""
-    if conv is None:
-        return set()
-    return {m["_db_id"] for m in conv.messages if isinstance(m.get("_db_id"), int)}
+def window_db_ids(messages: list[dict]) -> set[int]:
+    """The ``message_log`` rowids (``_db_id`` tags) present in a window's
+    messages (or a slice of them)."""
+    return {m["_db_id"] for m in messages if isinstance(m.get("_db_id"), int)}
 
 
 def quote(text: str | None, limit: int = QUOTE_CHARS) -> str:
