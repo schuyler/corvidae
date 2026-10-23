@@ -830,7 +830,7 @@ appraisal, and critique for calibration. Entry point name:
 Implements the message-lifecycle hooks (`on_message_admitted`,
 `on_message_rejected`, `on_message_persisted`) to record the identity row
 for every exchange (origin, channel, originating message rowid). The
-remaining columns — retrieval score/hit count, appraisal probe score and
+remaining columns — retrieval score, raw similarity, and hit count, appraisal probe score and
 stage-2 JSON, critique's provenance snapshot, and merged outcomes — are
 filled in by `MemoryPlugin`, `AppraisalPlugin`, and `CritiquePlugin`
 through the writer API below, not by `OutcomeLogPlugin` itself.

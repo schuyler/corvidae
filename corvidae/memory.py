@@ -53,6 +53,7 @@ import aiosqlite
 
 from corvidae.attribution import reset_attribution, set_attribution
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
+from corvidae.persistence import add_column_if_missing
 
 logger = logging.getLogger("corvidae.memory")
 
@@ -1442,12 +1443,7 @@ class MemoryPlugin(CorvidaePlugin):
         await db.execute(RETRIEVAL_LOG_DDL)
         # Schema upgrade: retrieval_log tables from before top_similarity
         # (#66) gain it as a nullable column; old rows read NULL.
-        async with db.execute("PRAGMA table_info(retrieval_log)") as cursor:
-            retrieval_cols = {row[1] for row in await cursor.fetchall()}
-        if "top_similarity" not in retrieval_cols:
-            await db.execute(
-                "ALTER TABLE retrieval_log ADD COLUMN top_similarity REAL"
-            )
+        await add_column_if_missing(db, "retrieval_log", "top_similarity", "REAL")
         # Phase 1b: message_fts and retention_meta
         await db.execute(MESSAGE_FTS_DDL)
         await db.execute(MESSAGE_FTS_INSERT_TRIGGER)

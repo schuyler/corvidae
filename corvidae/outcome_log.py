@@ -18,6 +18,7 @@ import time
 import aiosqlite
 
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
+from corvidae.persistence import add_column_if_missing
 
 logger = logging.getLogger(__name__)
 
@@ -98,13 +99,9 @@ class OutcomeLogPlugin(CorvidaePlugin):
             await db.execute(EXCHANGE_LOG_DDL)
             # Schema upgrade: exchange_log tables from before #66 gain
             # retrieval_top_similarity as a nullable column.
-            async with db.execute("PRAGMA table_info(exchange_log)") as cursor:
-                existing_cols = {row[1] for row in await cursor.fetchall()}
-            if "retrieval_top_similarity" not in existing_cols:
-                await db.execute(
-                    "ALTER TABLE exchange_log ADD COLUMN "
-                    "retrieval_top_similarity REAL"
-                )
+            await add_column_if_missing(
+                db, "exchange_log", "retrieval_top_similarity", "REAL"
+            )
             await db.execute(EXCHANGE_LOG_INDEX_DDL)
             await db.commit()
             self._table_ready = True

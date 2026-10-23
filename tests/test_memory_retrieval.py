@@ -652,3 +652,28 @@ class TestRetrievalLogSimilarity:
             rows = await cursor.fetchall()
         assert rows == [("irc:#old", 0.42, None), (channel.id, None, None)]
         await db.close()
+
+    async def test_concurrent_upgrade_does_not_fail(self, tmp_path):
+        """Two first retrievals racing the retrieval_log upgrade both succeed."""
+        import asyncio
+        path = tmp_path / "sessions.db"
+        async with aiosqlite.connect(path) as legacy:
+            await legacy.execute(
+                "CREATE TABLE retrieval_log (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "ts REAL NOT NULL, channel_id TEXT NOT NULL, exchange_key TEXT, "
+                "top_score REAL, hit_count INTEGER NOT NULL, "
+                "admitted_count INTEGER NOT NULL, "
+                "degraded_to_fts INTEGER NOT NULL DEFAULT 0)"
+            )
+            await legacy.commit()
+        memory, embedder, channel, conv, db = await build_retrieval_env(db_path=path)
+        # on_start's schema pass is what a deferred start would skip.
+        memory._schema_ready = False
+        async with db.execute("PRAGMA table_info(retrieval_log)") as cursor:
+            cols = {row[1] for row in await cursor.fetchall()}
+        if "top_similarity" in cols:
+            await db.execute("ALTER TABLE retrieval_log DROP COLUMN top_similarity")
+            await db.commit()
+        results = await asyncio.gather(memory._ensure_schema(), memory._ensure_schema())
+        assert all(r is db for r in results)
+        await db.close()

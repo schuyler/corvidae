@@ -165,6 +165,32 @@ class TestRetrievalTopSimilarity:
         assert rows == [("old", 0.4, None), ("new", None, 0.9)]
 
 
+    async def test_concurrent_upgrade_does_not_fail(self, db):
+        """Two first writers racing the upgrade both succeed: the loser of
+        the ALTER race sees 'duplicate column name', which means done."""
+        import asyncio
+        from corvidae.outcome_log import OutcomeLogPlugin
+        from corvidae.persistence import PersistencePlugin
+
+        await db.execute(
+            "CREATE TABLE exchange_log (exchange_key TEXT PRIMARY KEY, "
+            "channel_id TEXT NOT NULL, origin TEXT, message_rowid INTEGER, "
+            "created_at REAL NOT NULL, retrieval_top_score REAL, "
+            "retrieval_hit_count INTEGER, probe_score REAL, appraisal TEXT, "
+            "provenance_snapshot TEXT, outcomes TEXT)"
+        )
+        await db.commit()
+        pm = create_plugin_manager()
+        persistence = PersistencePlugin()
+        persistence.db = db
+        pm.register(persistence, name="persistence")
+        plugin = OutcomeLogPlugin()
+        pm.register(plugin, name="outcome_log")
+        await plugin.on_init(pm, {})
+
+        await asyncio.gather(plugin._ensure_table(), plugin._ensure_table())
+
+
 class TestRfc7386NoneDeletes:
     """Pin the RFC 7386 cross-WP contract (WP2.1 review-gate follow-up):
     a None value inside a merge fragment DELETES that key from the
