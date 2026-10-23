@@ -772,7 +772,12 @@ for side effects; its return value is not used by the caller.
 2. If `len(conversation.messages) <= 5`, return `None` (skip — too few messages to compact).
 3. Backward walk: starting from the most recent message, accumulate messages
    until their token estimate would exceed 50% of `max_tokens`. The count
-   of accumulated messages is `retain_count`.
+   of accumulated messages is `retain_count`. Then anchor the retained
+   block at a `user` message, because the summary is an assistant message
+   and strict chat templates reject a prompt with no user query (#56):
+   trim forward to the first user message inside the tail, or, if the tail
+   holds none (a long tool loop), extend backward to the nearest earlier
+   user message, which may exceed the budget and logs a warning.
 4. If `retain_count >= len(conversation.messages)`, return `None` (all messages fit — no-op).
 5. Filter the older (non-retained) messages to `MESSAGE` type only, excluding
    any `SUMMARY` entries. Strip `_message_type` metadata before passing to LLM.

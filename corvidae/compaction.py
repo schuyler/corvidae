@@ -7,7 +7,8 @@ Agent so it runs as the default compaction strategy.
 Algorithm:
     1. Skip if token_estimate < 80% of max_tokens.
     2. Skip if len(messages) <= 5.
-    3. Backward walk retaining messages within 50% of max_tokens.
+    3. Backward walk retaining messages within 50% of max_tokens, then
+       anchor the retained block at a user message (#56).
     4. Skip if all messages fit (retain_count >= len(messages)).
     5. Extract existing summaries from older, then filter remaining to MESSAGE type.
     6. Summarize via LLM: pass existing summaries as context + new messages.
@@ -25,6 +26,28 @@ from corvidae.context import DEFAULT_CHARS_PER_TOKEN, MessageType, count_tokens,
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 
 logger = logging.getLogger(__name__)
+
+
+def _anchor_to_user(messages: list[dict], retain_count: int) -> int:
+    """Adjust retain_count so the retained block starts at a user message.
+
+    Prefers trimming forward to the first user message inside the retained
+    tail (stays within budget). If the tail holds none (a long tool loop),
+    extends backward to the nearest earlier user message, which may exceed
+    the budget. If there is no user message at all, returns retain_count
+    unchanged.
+    """
+    n = len(messages)
+    start = n - retain_count
+    # Forward: first user message inside the retained tail.
+    for i in range(start, n):
+        if messages[i].get("role") == "user":
+            return n - i
+    # Backward: nearest user message before the tail.
+    for i in range(start - 1, -1, -1):
+        if messages[i].get("role") == "user":
+            return n - i
+    return retain_count
 
 
 class CompactionPlugin(CorvidaePlugin):
@@ -179,6 +202,21 @@ class CompactionPlugin(CorvidaePlugin):
                 break
             retain_tokens += msg_tokens
             retain_count += 1
+
+        # Start the retained block at a user message (GitHub issue #56): the
+        # summary is an assistant message, and strict chat templates reject
+        # a prompt with no user query.
+        anchored_count = _anchor_to_user(conversation.messages, retain_count)
+        if anchored_count > retain_count:
+            logger.warning(
+                "compaction retaining past budget to keep a user message",
+                extra={
+                    "channel_id": channel_id,
+                    "retain_count": retain_count,
+                    "anchored_count": anchored_count,
+                },
+            )
+        retain_count = anchored_count
 
         # All-fit guard: no-op compaction would accomplish nothing.
         if retain_count >= len(conversation.messages):

@@ -127,7 +127,7 @@ These values apply to all channels. Per-channel overrides in the `channels` sect
 | `agent.max_turns` | integer | `10` | Maximum consecutive tool-calling turns per user message before tool dispatch is suppressed. |
 | `agent.keep_thinking_in_history` | boolean | `false` | When `false`, `ThinkingPlugin` strips `reasoning_content` from in-memory assistant messages after they are persisted. Does not affect the DB record. |
 | `agent.compaction_threshold` | float | `0.8` | Compaction triggers when `token_estimate / max_context_tokens` exceeds this value. |
-| `agent.compaction_retention` | float | `0.5` | After compaction, retain messages that fit within `compaction_retention × max_context_tokens` tokens, counting from the most recent. |
+| `agent.compaction_retention` | float | `0.5` | After compaction, retain messages that fit within `compaction_retention × max_context_tokens` tokens, counting from the most recent. The retained block always starts at a user message, so it can be slightly smaller, or larger when the latest turn is a long tool loop. |
 | `agent.min_messages_to_compact` | integer | `5` | Skip compaction if the conversation has this many messages or fewer. |
 | `agent.compaction_prompt` | string | built-in | System prompt for the compaction summarizer. Used in every compaction round; when earlier summaries exist, an instruction to carry them forward and the (bounded) prior-summary text are appended after it. |
 | `agent.chars_per_token` | float | `3.5` | **Deprecated.** Accepted for interface and config compatibility. Has no effect on token counting — `count_tokens()` uses the module-level `_FALLBACK_CHARS_PER_TOKEN` constant (3.5) regardless of this value. |
