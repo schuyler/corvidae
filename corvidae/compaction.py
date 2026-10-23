@@ -7,14 +7,21 @@ Agent so it runs as the default compaction strategy.
 Algorithm:
     1. Skip if token_estimate < 80% of max_tokens.
     2. Skip if len(messages) <= 5.
-    3. Backward walk retaining messages within 50% of max_tokens.
+    3. Backward walk retaining messages within 50% of max_tokens, then back
+       the cut up so no tool cycle straddles it (a call is never dropped
+       while its results are kept).
     4. Skip if all messages fit (retain_count >= len(messages)).
-    5. Extract existing summaries from older, then filter remaining to MESSAGE type.
-    6. Summarize via LLM: pass existing summaries as context + new messages.
-    7. Summary role is assistant, or user if the retained tail holds no
-       user message (#56). Call conversation.replace_with_summary(summary_msg, retain_count) (sync).
-    8. Fire on_compaction hook if pm is set.
-    9. Return True.
+    5. Summarize. With forks on for "compaction" (agent.forks, #51), fork
+       the window at the cut and append agent.compaction_fork_prompt: the
+       server reuses the cached prefix and the agent summarizes in its own
+       voice. Otherwise, or if the fork fails, the standalone call: existing
+       summaries as context + the older MESSAGE entries.
+    6. Summary role is assistant, or user if the retained tail holds no
+       user message (#56).
+    7. Fire before_compaction (awaited) while the window is still whole.
+    8. Call conversation.replace_with_summary(summary_msg, retain_count) (sync).
+    9. Fire on_compaction hook if pm is set.
+    10. Return True.
 """
 
 import json
@@ -23,6 +30,7 @@ import time
 
 from corvidae.attribution import reset_attribution, set_attribution
 from corvidae.context import DEFAULT_CHARS_PER_TOKEN, MessageType, count_tokens, message_tokens
+from corvidae.fork import fork_agent, snap_cut_to_tool_boundary
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 
 logger = logging.getLogger(__name__)
@@ -40,6 +48,26 @@ class CompactionPlugin(CorvidaePlugin):
         "will contain your summary followed by the second half of the conversation to this point.\n\n"
         "In 1000 words or less. Preserve specific details: file paths, variable names, "
         "error messages, discoveries made, and the current line of investigation."
+    )
+
+    # The instruction a compaction fork appends to the dropped prefix.
+    # prompts/compaction_fork.md is the documented copy; the static config
+    # key agent.compaction_fork_prompt overrides it. Written to the agent in
+    # the second person: in a fork it is the agent summarizing its own
+    # conversation, not a neutral summarizer reading a transcript.
+    DEFAULT_FORK_PROMPT = (
+        "[Compaction] Pause the conversation here. Everything above this "
+        "message is about to leave your context window. Only your summary of "
+        "it will remain, followed by the more recent conversation, so write "
+        "the summary that lets you carry on naturally from it.\n\n"
+        "Explain at a high level what you were working on or trying to "
+        "achieve. If the conversation above opens with a summary of earlier "
+        "conversation, carry its key information forward; do not discard it. "
+        "Preserve specific details: names, file paths, variable names, error "
+        "messages, decisions, commitments, what you were asked to do or not "
+        "do, discoveries made, and the current line of investigation. Keep "
+        "what you were told apart from what you inferred.\n\n"
+        "In 1000 words or less. Reply with the summary only. Do not call tools."
     )
 
     # Reserve for the LLM's own summary response (prompt caps it at ~1000
@@ -60,6 +88,7 @@ class CompactionPlugin(CorvidaePlugin):
         self._chars_per_token: float = DEFAULT_CHARS_PER_TOKEN
         self._llm_client = None
         self._summary_prompt: str = self.DEFAULT_SUMMARY_PROMPT
+        self._fork_prompt: str = self.DEFAULT_FORK_PROMPT
         self._min_messages_between_compactions: int = 6
         self._last_compaction_msg_count: dict[str, int] = {}  # channel_id -> message_count at last compaction
         self._failed_compaction_cooldown: float = 30.0  # seconds
@@ -74,6 +103,7 @@ class CompactionPlugin(CorvidaePlugin):
         self._min_messages = agent_config.get("min_messages_to_compact", 5)
         self._chars_per_token = agent_config.get("chars_per_token", DEFAULT_CHARS_PER_TOKEN)
         self._summary_prompt = agent_config.get("compaction_prompt", self.DEFAULT_SUMMARY_PROMPT)
+        self._fork_prompt = agent_config.get("compaction_fork_prompt", self.DEFAULT_FORK_PROMPT)
 
         self._validate_config()
 
@@ -124,6 +154,7 @@ class CompactionPlugin(CorvidaePlugin):
         self._min_messages = agent_config.get("min_messages_to_compact", 5)
         self._chars_per_token = agent_config.get("chars_per_token", DEFAULT_CHARS_PER_TOKEN)
         self._summary_prompt = agent_config.get("compaction_prompt", self.DEFAULT_SUMMARY_PROMPT)
+        self._fork_prompt = agent_config.get("compaction_fork_prompt", self.DEFAULT_FORK_PROMPT)
 
         # Invalidate cached LLM client so it is re-borrowed from LLMPlugin.
         # LLMPlugin may have swapped the client during this same reload cycle.
@@ -181,11 +212,19 @@ class CompactionPlugin(CorvidaePlugin):
             retain_tokens += msg_tokens
             retain_count += 1
 
+        # Back the cut up so no tool cycle straddles it: dropping a call
+        # while keeping its results orphans them, and a fork of the prefix
+        # would render the call differently from the main turn (#51).
+        cut = snap_cut_to_tool_boundary(
+            conversation.messages, len(conversation.messages) - retain_count
+        )
+        retain_count = len(conversation.messages) - cut
+
         # All-fit guard: no-op compaction would accomplish nothing.
         if retain_count >= len(conversation.messages):
             return None
 
-        older = conversation.messages[:-retain_count]
+        older = conversation.messages[:cut]
 
         # Separate existing summaries from new messages.
         # Summaries are carried forward as context so that repeated compaction
@@ -223,7 +262,15 @@ class CompactionPlugin(CorvidaePlugin):
         # and restores it afterwards.
         attribution_token = set_attribution(stage="compaction", channel_id=channel_id)
         try:
-            summary_text = await self._summarize(new_messages_clean, prior_summaries_clean, max_tokens=max_tokens)
+            summary_text = await self._fork_summary(channel, cut)
+            if summary_text is None:
+                standalone_token = set_attribution(mode="standalone")
+                try:
+                    summary_text = await self._summarize(
+                        new_messages_clean, prior_summaries_clean, max_tokens=max_tokens
+                    )
+                finally:
+                    reset_attribution(standalone_token)
         except Exception:
             # Record failure time for cooldown
             self._last_failed_compaction[channel_id] = time.monotonic()
@@ -255,6 +302,16 @@ class CompactionPlugin(CorvidaePlugin):
             "content": f"[Summary of earlier conversation]\n{summary_text}",
         }
 
+        # The window still holds everything about to be dropped, and the
+        # server still holds its prefix: last chance for a fork over it.
+        if self.pm is not None:
+            try:
+                await self.pm.ahook.before_compaction(
+                    channel=channel, compacted_ids=compacted_ids, cut=cut,
+                )
+            except Exception:
+                logger.warning("before_compaction hook failed", exc_info=True)
+
         conversation.replace_with_summary(summary_msg, retain_count)
 
         # Record successful compaction for cooldown tracking.
@@ -274,6 +331,33 @@ class CompactionPlugin(CorvidaePlugin):
                 logger.warning("on_compaction hook failed", exc_info=True)
 
         return True
+
+    async def _fork_summary(self, channel, cut: int) -> str | None:
+        """The summary from a fork of the window at ``cut``, or None.
+
+        None means use the standalone summarizer: forks are off for
+        compaction, or the fork failed or came back empty (logged). The
+        fork's prefix already holds any prior summary at its head, so the
+        instruction carries it forward without a bounded copy.
+        """
+        agent = fork_agent(self.pm, "compaction")
+        if agent is None:
+            return None
+        try:
+            result = await agent.fork(channel, self._fork_prompt, cut=cut)
+        except Exception:
+            logger.warning(
+                "compaction fork failed; falling back to the standalone summary",
+                exc_info=True, extra={"channel_id": channel.id},
+            )
+            return None
+        if not result.text.strip():
+            logger.warning(
+                "compaction fork returned no text; falling back to the standalone summary",
+                extra={"channel_id": channel.id},
+            )
+            return None
+        return result.text
 
     def _bound_prior_summaries_text(self, prior_summaries: list[dict], max_tokens: int) -> str:
         """Join prior-summary content and cap it to a fixed fraction of
