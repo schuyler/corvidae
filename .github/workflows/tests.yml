@@ -31,8 +31,9 @@ jobs:
 
       # The dev extra (pytest, pytest-asyncio) and the dev dependency group
       # (pytest-timeout), which the pytest config needs; see CLAUDE.md.
+      # --locked fails the run if uv.lock is out of date with pyproject.toml.
       - name: Install dependencies
-        run: uv sync --extra dev
+        run: uv sync --locked --extra dev
 
       # About 26 test sites skip when sqlite-vec can't load, which would turn
       # the vector-retrieval tests into silent skips on a green run. Fail

@@ -17,6 +17,12 @@ uv run corvidae                  # run the daemon; reads ./agent.yaml
 
 `agent.yaml` is gitignored. Copy `agent.yaml.example` to create one.
 
+`uv.lock` is committed and pins every dependency, including the apluggy git
+commit (`pyproject.toml` tracks its `main` branch). Upgrade deliberately and
+commit the lock change: `uv lock --upgrade-package apluggy` for one package,
+`uv lock --upgrade` for all. After editing dependencies in `pyproject.toml`,
+run `uv lock`; CI syncs with `--locked` and fails on a stale lock.
+
 CI (`.github/workflows/tests.yml`) runs `uv run pytest -q` on every push to `main`
 and every PR, after checking that sqlite-vec loads. It doesn't run the harness
 or `--run-eval`.
