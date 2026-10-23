@@ -129,9 +129,11 @@ These values apply to all channels. Per-channel overrides in the `channels` sect
 | `agent.compaction_threshold` | float | `0.8` | Compaction triggers when `token_estimate / max_context_tokens` exceeds this value. |
 | `agent.compaction_retention` | float | `0.5` | After compaction, retain messages that fit within `compaction_retention × max_context_tokens` tokens, counting from the most recent. |
 | `agent.min_messages_to_compact` | integer | `5` | Skip compaction if the conversation has this many messages or fewer. |
+| `agent.compaction_prompt` | string | built-in | System prompt for the compaction summarizer. Used in every compaction round; when earlier summaries exist, an instruction to carry them forward and the (bounded) prior-summary text are appended after it. |
 | `agent.chars_per_token` | float | `3.5` | **Deprecated.** Accepted for interface and config compatibility. Has no effect on token counting — `count_tokens()` uses the module-level `_FALLBACK_CHARS_PER_TOKEN` constant (3.5) regardless of this value. |
 | `agent.immutable_settings` | list of strings | `[]` | Keys the agent is blocked from changing via the `set_settings` tool. `system_prompt` is always blocked regardless of this list, but see the note under "Runtime-tunable gate parameters" for what that does and does not protect. |
 | `agent.request_logprobs` | boolean | `false` | When `true`, `Agent` merges `"logprobs": true` into every LLM request body. llama-server returns a logprobs envelope (surfaced to plugins via `on_agent_response`); Anthropic-style providers return nothing and the field surfaces as `None`. Static operator-only flag — captured at init and on config reload, not per-channel tunable. |
+| `agent.mid_conversation_system_role` | `system` \| `user` | `system` | Role under which every `system` message *after the leading system prompt* is sent to the LLM: funnel CONTEXT and notifications without a `tool_call_id`. Strict chat templates (Qwen 3.8, Swift-1.5) raise "System message must be at the beginning" on those; `user` satisfies them and also keeps untrusted text out of the `system` role ([threat-model.md](threat-model.md), finding 3). Applied when the prompt is built: the in-memory window and `sessions.db` keep `role: system`, and the rewrite is deterministic, so the cached prompt prefix stays stable. Any other value logs a warning and uses `system`. Static operator-only flag, re-read on config reload. |
 
 ### Runtime-tunable gate parameters
 
@@ -193,13 +195,17 @@ Any *dotted* key not on that list is operator-only: it is read once at init or r
 
 `MemoryPlugin` consolidates compacted dialog into first-person memory records and retrieves them into the prompt (see [design.md](design.md)). The former `dream.*` keys are gone with `DreamPlugin` (absorbed by this plugin).
 
+A record's `created_at` is the `sessions.db` timestamp of the last message in its source range, i.e. when the conversation happened, not when consolidation ran. Everything that ages a record (the retrieval score, the displayed `(age)`, retention decay and `memory.retention.grace_days`, and the `search_memory` date filters) measures from that date, so history consolidated long after the fact is aged correctly.
+
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `memory.idle_consolidate_after` | float | `1800` | Seconds of channel inactivity before the `on_idle` trigger consolidates that channel's un-consolidated tail. |
-| `memory.half_life_days` | float | `30` | Recency half-life of the retrieval score (`similarity × exp(-age_days / half_life)`). |
+| `memory.half_life_days` | float | `30` | Recency decay constant of the retrieval score (`similarity × exp(-age_days / half_life)`). It is an e-folding time: the factor is `1/e`, not `1/2`, at `half_life_days`. |
 | `memory.retrieval.k` | integer | `8` | Vector-KNN candidate count per retrieval. |
 | `memory.retrieval.bands.strong` | float | `0.75` | Score at or above which a retrieved memory is banded `[strong]`. |
 | `memory.retrieval.bands.moderate` | float | `0.60` | Score at or above which a retrieved memory is banded `[moderate]`; below is `[weak]` (dropped unless nothing else matched). |
+| `memory.retrieval.band_on` | `score` \| `similarity` | `score` | What the bands are applied to. `score` bands the recency-decayed score, so with the default half-life nothing older than about 9 days can be `[strong]`. `similarity` bands raw relevance, so an old, apt memory reads `[strong] (6 months ago)` rather than as a guess; candidates are still ranked by the decayed score. In FTS5-degraded retrieval every keyword hit carries the similarity proxy (0.6), so under `similarity` each one bands `[moderate]`. Any other value logs a warning and uses `score`. |
+| `memory.retrieval.recency_from` | `created` \| `last_used` | `created` | Where the ranking age is measured from. `last_used` uses `max(created_at, last_retrieved_at)`, the same rule retention uses, so a memory stays fresh while it keeps being recalled. The `(age)` shown to the model is always measured from `created_at`. Any other value logs a warning and uses `created`. |
 | `memory.channel_groups` | mapping | `{}` | `{group_name: [channel ids]}` — channels in the same group share retrieval scope. Memory is otherwise compartmentalized per channel. |
 | `memory.consolidation_prompt` | string | built-in | Overrides the consolidation system prompt (documented copy: `prompts/memory_consolidation.md`). |
 | `memory.dup_threshold` | float | `0.95` | Near-duplicate merge threshold. When a new consolidation embedding has cosine similarity ≥ this value against an existing same-channel record, the older record is superseded: its statistics are folded into the new record and its vec row is deleted. Applied only when sqlite-vec is available and the new record's embedding succeeded; silently skipped otherwise. |
@@ -375,6 +381,8 @@ No restart is required for the changes listed below. Changes that require restar
 | `agent.chars_per_token` | Deprecated. The value is reloaded into `Agent` and `CompactionPlugin` for config compatibility, but has no effect on token counting — `count_tokens()` uses the module-level constant. |
 | `daemon.idle_cooldown_seconds` | `Agent` uses the new cooldown on the next idle check. |
 | `agent.request_logprobs` | `Agent` re-reads the flag; takes effect on the next LLM call. |
+| `agent.mid_conversation_system_role` | `Agent` re-reads the role; takes effect on the next prompt build. The changed rendering of earlier turns costs one full prompt-cache miss. |
+| `agent.compaction_prompt` | `CompactionPlugin` uses the new prompt on its next compaction. |
 | Dotted plugin tunables (`appraisal.*`, `critique.*`) | Resolved per-decision via `corvidae.tuning.resolve_tunable`; a reloaded value applies on the next appraisal/critique decision. Per-channel `set_settings` overrides still take precedence. |
 | `agent.immutable_settings` | `RuntimeSettingsPlugin` resets its blocklist and re-applies the new list. Constructor-supplied immutable keys are always retained. |
 | New channel entries in `channels:` | `load_channel_config` registers newly added channels. |

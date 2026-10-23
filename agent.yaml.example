@@ -49,9 +49,13 @@ agent:
   #                                    If retention ≥ threshold, compaction is a no-op and the agent
   #                                    will re-compact every few messages without reducing context.
   # min_messages_to_compact: 5      # skip compaction with this many messages or fewer
+  # compaction_prompt: "..."        # summarizer system prompt, used in every compaction round
   # chars_per_token: 3.5            # deprecated: retained for config compatibility; has no effect on token counting
   # request_logprobs: false         # ask the LLM for token logprobs on every request (llama-server supports
   #                                    this; Anthropic-style providers ignore it and logprobs surface as null)
+  # mid_conversation_system_role: system  # system | user. Role for system messages after the first
+  #                                    (memory CONTEXT, notifications). Set user for strict chat templates
+  #                                    (Qwen 3.8, Swift-1.5) that reject a non-leading system message.
   # immutable_settings:             # keys the agent cannot change via set_settings (system_prompt always blocked)
   #   - max_turns                   # example: prevent the agent from extending its own turn limit
   #   # Block these everywhere: undotted keys are forwarded into the LLM
@@ -72,6 +76,13 @@ agent:
   #   # - critique.prompt.constrained
   #   # - critique.prompt.predictive
   #   # - appraisal.stage2_prompt
+
+# Autobiographical memory (optional; see docs/configuration.md)
+# memory:
+#   half_life_days: 30                # retrieval recency decay (e-folding time, days)
+#   retrieval:
+#     band_on: score                  # score | similarity: what strong/moderate/weak is applied to
+#     recency_from: created           # created | last_used: where ranking age is measured from
 
 # Built-in tool settings (optional)
 # tools:

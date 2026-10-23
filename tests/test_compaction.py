@@ -543,3 +543,49 @@ class TestSizingUnifiesAcrossSites:
             "content-only sizing should badly understate the real, "
             "reasoning_content-inclusive payload size"
         )
+
+
+class TestCompactionPromptHonored:
+    """agent.compaction_prompt applies to every compaction, including the
+    prior-summary branch (GitHub issue #51's related bug)."""
+
+    async def _system_content(self, prompt: str | None, prior: list[dict] | None) -> str:
+        """Run _summarize with a capturing client; return the system message."""
+        from corvidae.compaction import CompactionPlugin
+
+        plugin = CompactionPlugin(pm=None)
+        if prompt is not None:
+            plugin._summary_prompt = prompt
+        captured = {}
+
+        async def fake_chat(payload):
+            captured["payload"] = payload
+            return {"choices": [{"message": {"content": "summary"}}]}
+
+        plugin._llm_client = AsyncMock()
+        plugin._llm_client.chat = fake_chat
+        await plugin._summarize(
+            [{"role": "user", "content": "new"}], prior, max_tokens=20000,
+        )
+        system = captured["payload"][0]
+        assert system["role"] == "system"
+        return system["content"]
+
+    async def test_custom_prompt_used_on_first_compaction(self):
+        assert await self._system_content("CUSTOM PROMPT", None) == "CUSTOM PROMPT"
+
+    async def test_custom_prompt_used_with_prior_summaries(self):
+        prior = [{"role": "assistant", "content": "[Summary] earlier facts"}]
+        content = await self._system_content("CUSTOM PROMPT", prior)
+        assert content.startswith("CUSTOM PROMPT")
+        # The carry-forward instruction and the prior summary still follow.
+        assert "PRIOR SUMMARIES" in content
+        assert content.endswith("[Summary] earlier facts")
+
+    async def test_default_prompt_used_with_prior_summaries(self):
+        from corvidae.compaction import CompactionPlugin
+
+        prior = [{"role": "assistant", "content": "[Summary] earlier facts"}]
+        content = await self._system_content(None, prior)
+        assert content.startswith(CompactionPlugin.DEFAULT_SUMMARY_PROMPT)
+        assert content.endswith("[Summary] earlier facts")

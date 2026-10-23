@@ -105,6 +105,24 @@ class QueueItem:
     originating: bool = False
 
 
+
+#: Roles agent.mid_conversation_system_role accepts (GitHub issue #49).
+MID_CONVERSATION_SYSTEM_ROLES = ("system", "user")
+
+
+def _resolve_mid_conversation_system_role(agent_config: dict) -> str:
+    """Read agent.mid_conversation_system_role, warning on and ignoring an
+    unsupported value so a typo degrades to today's behavior."""
+    role = agent_config.get("mid_conversation_system_role", "system")
+    if role not in MID_CONVERSATION_SYSTEM_ROLES:
+        logger.warning(
+            "agent.mid_conversation_system_role %r is not one of %s; using 'system'",
+            role, ", ".join(MID_CONVERSATION_SYSTEM_ROLES),
+        )
+        return "system"
+    return role
+
+
 class Agent(CorvidaePlugin):
     """Plugin that wires the agent loop into the hook system.
 
@@ -133,6 +151,7 @@ class Agent(CorvidaePlugin):
         self._base_dir = None
         self._idle_cooldown: float = 30.0
         self._request_logprobs: bool = False
+        self._mid_conversation_system_role: str = "system"
         self._last_idle_fire: float = 0.0
         self._idle_firing: bool = False
 
@@ -185,6 +204,8 @@ class Agent(CorvidaePlugin):
         # does not go through resolve_tunable). Agent retains no config dict —
         # on_init extracts derived scalars only — so step 7 reads this scalar.
         self._request_logprobs = agent_config.get("request_logprobs", False)
+        # Role for non-leading system messages at prompt build (issue #49).
+        self._mid_conversation_system_role = _resolve_mid_conversation_system_role(agent_config)
         daemon_config = config.get("daemon", {})
         self._idle_cooldown = daemon_config.get("idle_cooldown_seconds", 30.0)
 
@@ -657,7 +678,10 @@ class Agent(CorvidaePlugin):
 
         # 7. Build prompt and call run_agent_turn (single LLM invocation)
         _t_llm_start = _time.monotonic()
-        messages = conv.build_prompt(frozenset(channel.pending_tool_call_ids))
+        messages = conv.build_prompt(
+            frozenset(channel.pending_tool_call_ids),
+            mid_conversation_system_role=self._mid_conversation_system_role,
+        )
         # Dotted keys are plugin tunables (see corvidae.tuning), never LLM
         # inference params — they must not leak into the request body.
         llm_overrides = {
@@ -847,6 +871,7 @@ class Agent(CorvidaePlugin):
         agent_config = config.get("agent", {})
         self._chars_per_token = agent_config.get("chars_per_token", DEFAULT_CHARS_PER_TOKEN)
         self._request_logprobs = agent_config.get("request_logprobs", False)
+        self._mid_conversation_system_role = _resolve_mid_conversation_system_role(agent_config)
         daemon_config = config.get("daemon", {})
         self._idle_cooldown = daemon_config.get("idle_cooldown_seconds", 30.0)
 

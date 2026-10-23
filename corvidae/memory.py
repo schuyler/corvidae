@@ -62,6 +62,10 @@ DEFAULT_RETRIEVAL_K = 8
 DEFAULT_HALF_LIFE_DAYS = 30.0
 DEFAULT_BAND_STRONG = 0.75
 DEFAULT_BAND_MODERATE = 0.60
+# What the relevance band is computed from, and where ranking age is
+# measured from (GitHub issue #52). The first entry is the default.
+BAND_ON_CHOICES = ("score", "similarity")
+RECENCY_FROM_CHOICES = ("created", "last_used")
 # Honest similarity stand-in for FTS5-degraded retrieval, where cosine
 # similarity cannot be measured: keyword hits enter at the moderate band.
 FTS_SIMILARITY_PROXY = 0.6
@@ -144,6 +148,17 @@ async def fetch_range_rows(
         return await cursor.fetchall()
 
 
+async def source_timestamp(db: aiosqlite.Connection, message_id: int) -> float:
+    """When a message_log row was logged — the date a memory record built
+    from a range ending at that row carries (GitHub issue #52). Falls back
+    to now when the row is gone."""
+    async with db.execute(
+        "SELECT timestamp FROM message_log WHERE id = ?", (message_id,)
+    ) as cursor:
+        row = await cursor.fetchone()
+    return row[0] if row is not None and row[0] is not None else time.time()
+
+
 def dialog_from_rows(rows: list[tuple]) -> list[dict]:
     """The consolidation working set: real user/assistant dialog only."""
     dialog = []
@@ -156,6 +171,19 @@ def dialog_from_rows(rows: list[tuple]) -> list[dict]:
                 isinstance(content, str) and content.strip():
             dialog.append(message)
     return dialog
+
+
+def _retrieval_choice(retrieval_cfg: dict, key: str, choices: tuple[str, ...]) -> str:
+    """Read an enum-valued memory.retrieval key, warning on and ignoring an
+    unsupported value so a typo degrades to the default (choices[0])."""
+    value = retrieval_cfg.get(key, choices[0])
+    if value not in choices:
+        logger.warning(
+            "memory.retrieval.%s %r is not one of %s; using %r",
+            key, value, ", ".join(choices), choices[0],
+        )
+        return choices[0]
+    return value
 
 
 def _format_age(seconds: float) -> str:
@@ -382,6 +410,8 @@ class MemoryPlugin(CorvidaePlugin):
         self._band_strong: float = DEFAULT_BAND_STRONG
         self._band_moderate: float = DEFAULT_BAND_MODERATE
         self._half_life_days: float = DEFAULT_HALF_LIFE_DAYS
+        self._band_on: str = BAND_ON_CHOICES[0]
+        self._recency_from: str = RECENCY_FROM_CHOICES[0]
         self._channel_groups: dict[str, list[str]] = {}
         # Phase 1b: near-dup merge threshold (WP1b.2)
         self._dup_threshold: float = 0.95
@@ -421,6 +451,10 @@ class MemoryPlugin(CorvidaePlugin):
         self._band_moderate = bands.get("moderate", DEFAULT_BAND_MODERATE)
         self._half_life_days = self._memory_cfg.get(
             "half_life_days", DEFAULT_HALF_LIFE_DAYS
+        )
+        self._band_on = _retrieval_choice(retrieval_cfg, "band_on", BAND_ON_CHOICES)
+        self._recency_from = _retrieval_choice(
+            retrieval_cfg, "recency_from", RECENCY_FROM_CHOICES
         )
         self._channel_groups = self._memory_cfg.get("channel_groups", {}) or {}
         # Phase 1b: near-dup merge threshold (WP1b.2)
@@ -687,6 +721,11 @@ class MemoryPlugin(CorvidaePlugin):
                         exc_info=True, extra={"channel_id": channel_id},
                     )
 
+            # Date the record from when its source conversation happened,
+            # not from when consolidation ran — imported history would
+            # otherwise be dated at import time (issue #52).
+            created_at = await source_timestamp(db, rows[-1][0])
+
             # Embed the summary; failure stores embedded=0 for later
             # backfill (trap #10 — degrade, never block).
             embedding: list[float] | None = None
@@ -724,7 +763,7 @@ class MemoryPlugin(CorvidaePlugin):
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         channel_id,
-                        time.time(),
+                        created_at,
                         record["summary"],
                         importance,
                         valence,
@@ -1037,16 +1076,28 @@ class MemoryPlugin(CorvidaePlugin):
             rows = await self._fts_candidates(db, text, scope, k)
 
         candidates = []
-        for memory_id, summary, created_at, similarity in rows:
+        for memory_id, summary, created_at, last_retrieved_at, similarity in rows:
+            # Displayed age is always when the memory was formed.
             age_seconds = max(0.0, now - created_at)
+            # Ranking age: from formation, or (recency_from: last_used)
+            # from the latest use, matching retention's last_activity.
+            if self._recency_from == "last_used":
+                last_activity = max(created_at, last_retrieved_at or 0.0)
+            else:
+                last_activity = created_at
+            ranking_age = max(0.0, now - last_activity)
             # Relevance × recency decay; participant-match arrives with
             # Phase 4 (channel scope is the proxy until then, §3.1).
             score = similarity * math.exp(
-                -(age_seconds / 86400.0) / self._half_life_days
+                -(ranking_age / 86400.0) / self._half_life_days
             )
-            if score >= self._band_strong:
+            # The band says how relevant a memory is: from the decayed
+            # score (default) or, with band_on: similarity, from relevance
+            # alone so an old, apt memory is not presented as a guess.
+            band_value = similarity if self._band_on == "similarity" else score
+            if band_value >= self._band_strong:
                 band = "strong"
-            elif score >= self._band_moderate:
+            elif band_value >= self._band_moderate:
                 band = "moderate"
             else:
                 band = "weak"
@@ -1078,7 +1129,8 @@ class MemoryPlugin(CorvidaePlugin):
         self, db: aiosqlite.Connection, query_vector: list[float],
         scope: list[str], k: int,
     ) -> list[tuple]:
-        """Exact-KNN candidates: (id, summary, created_at, cosine_similarity).
+        """Exact-KNN candidates:
+        (id, summary, created_at, last_retrieved_at, cosine_similarity).
 
         sqlite-vec is brute-force exact KNN (no ANN index), so the KNN scan
         costs the same regardless of k; we over-fetch and filter by scope
@@ -1087,7 +1139,7 @@ class MemoryPlugin(CorvidaePlugin):
         import sqlite_vec
         placeholders = ",".join("?" for _ in scope)
         async with db.execute(
-            "SELECT m.id, m.summary, m.created_at, v.distance "
+            "SELECT m.id, m.summary, m.created_at, m.last_retrieved_at, v.distance "
             "FROM (SELECT memory_id, distance FROM memory_vec "
             "      WHERE embedding MATCH ? AND k = ?) AS v "
             "JOIN memory m ON m.id = v.memory_id "
@@ -1103,20 +1155,21 @@ class MemoryPlugin(CorvidaePlugin):
             rows = await cursor.fetchall()
         # vec0 cosine distance = 1 - cosine similarity.
         return [
-            (memory_id, summary, created_at, 1.0 - distance)
-            for memory_id, summary, created_at, distance in rows
+            (memory_id, summary, created_at, last_retrieved_at, 1.0 - distance)
+            for memory_id, summary, created_at, last_retrieved_at, distance in rows
         ]
 
     async def _fts_candidates(
         self, db: aiosqlite.Connection, text: str, scope: list[str], k: int
     ) -> list[tuple]:
-        """FTS5 keyword candidates with a fixed similarity proxy."""
+        """FTS5 keyword candidates with a fixed similarity proxy:
+        (id, summary, created_at, last_retrieved_at, FTS_SIMILARITY_PROXY)."""
         match = _fts_match_query(text)
         if match is None:
             return []
         placeholders = ",".join("?" for _ in scope)
         async with db.execute(
-            "SELECT m.id, m.summary, m.created_at "
+            "SELECT m.id, m.summary, m.created_at, m.last_retrieved_at "
             "FROM memory_fts JOIN memory m ON m.id = memory_fts.rowid "
             f"WHERE memory_fts MATCH ? AND m.indexed = 1 AND m.redacted = 0 "
             f"AND m.channel_id IN ({placeholders}) "
@@ -1125,8 +1178,8 @@ class MemoryPlugin(CorvidaePlugin):
         ) as cursor:
             rows = await cursor.fetchall()
         return [
-            (memory_id, summary, created_at, FTS_SIMILARITY_PROXY)
-            for memory_id, summary, created_at in rows
+            (memory_id, summary, created_at, last_retrieved_at, FTS_SIMILARITY_PROXY)
+            for memory_id, summary, created_at, last_retrieved_at in rows
         ]
 
     # ------------------------------------------------------------------
