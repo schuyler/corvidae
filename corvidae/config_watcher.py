@@ -27,7 +27,7 @@ from pathlib import Path
 
 import yaml
 
-from corvidae.channel import ChannelRegistry, load_channel_config
+from corvidae.channel import ChannelRegistry, load_channel_config, validate_agent_config
 from corvidae.hooks import CorvidaePlugin, hookimpl
 from corvidae.runtime import deep_merge
 
@@ -175,6 +175,15 @@ class ConfigWatcherPlugin(CorvidaePlugin):
                 "config reload failed: llm.main is absent from %s after merge",
                 self._config_path,
             )
+            return
+
+        # Step 3b: Validate the agent section before it becomes agent_defaults —
+        # an invalid reasoning_history would otherwise make every later
+        # resolve_config raise.
+        try:
+            validate_agent_config(new_config.get("agent", {}))
+        except ValueError:
+            logger.exception("config reload failed: invalid agent config in %s", self._config_path)
             return
 
         # Step 4: Update agent_defaults on both the class and the registered instance.

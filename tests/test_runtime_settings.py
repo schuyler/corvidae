@@ -377,6 +377,32 @@ class TestDefaultBlocklist:
 # ---------------------------------------------------------------------------
 
 
+class TestSetSettingsReasoningHistory:
+    async def test_valid_reasoning_history_applied(self):
+        """A valid reasoning_history value lands in runtime_overrides."""
+        set_settings = _get_set_settings_fn()
+        channel = _make_channel()
+
+        await set_settings(settings={"reasoning_history": "exchange"}, _ctx=_make_tool_context(channel))
+
+        assert channel.runtime_overrides["reasoning_history"] == "exchange"
+
+    async def test_invalid_reasoning_history_rejected_without_mutation(self):
+        """An invalid value is refused up front: stored, it would make every
+        later resolve_config raise and wedge the channel."""
+        set_settings = _get_set_settings_fn()
+        channel = _make_channel()
+
+        result = await set_settings(
+            settings={"temperature": 0.3, "reasoning_history": True},
+            _ctx=_make_tool_context(channel),
+        )
+
+        assert result.startswith("Error")
+        assert "reasoning_history" in result
+        assert channel.runtime_overrides == {}
+
+
 class TestSetSettingsValid:
     async def test_valid_settings_applied_to_runtime_overrides(self):
         """Valid settings must be merged into channel.runtime_overrides."""

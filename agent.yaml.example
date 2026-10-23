@@ -42,7 +42,9 @@ daemon:
 agent:
   system_prompt: "You are a helpful assistant."
   max_context_tokens: 64000
-  keep_thinking_in_history: false
+  reasoning_history: drop         # drop | exchange | keep — reasoning_content kept in history.
+                                  # exchange: keep it only for the current exchange (since the
+                                  # last user message); pair with the server's preserve_thinking off.
   # max_turns: 10                   # max consecutive tool-calling turns per message
   # max_tool_result_chars: 100000   # truncate tool results beyond this length
   # compaction_threshold: 0.8       # compact when token estimate exceeds this × max_context_tokens

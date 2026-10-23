@@ -154,15 +154,18 @@ their return values are ignored.
 class ChannelConfig:
     system_prompt: str | list[str] | None = None
     max_context_tokens: int | None = None
-    keep_thinking_in_history: bool | None = None
+    reasoning_history: str | None = None   # drop | exchange | keep
     max_turns: int | None = None
 ```
 
 `resolve(agent_defaults, runtime_overrides=None)` returns a dict with all
 values resolved. Resolution order: built-in defaults → agent-level YAML →
 per-channel YAML → runtime overrides (set by `set_settings` tool).
-Defaults: `max_context_tokens=24000`, `keep_thinking_in_history=False`,
-`max_turns=10`.
+Defaults: `max_context_tokens=24000`, `reasoning_history="drop"`,
+`max_turns=10`. `resolve` normalizes `reasoning_history` to the
+`ReasoningHistory` enum and raises `ValueError` on any other value.
+`validate_agent_config` (startup and config reload) and `load_channel_config`
+reject an invalid value or the removed `keep_thinking_in_history` key up front.
 
 **Channel** — identifies a transport + scope combination:
 
@@ -465,9 +468,11 @@ become invisible after the next compaction (their timestamps fall below the boun
 - Display: `ThinkingPlugin.transform_display_text` calls `strip_thinking()`
   to remove `<think>` blocks before text is sent to the channel
 - Persistent log: full message dict preserved (including `reasoning_content`)
-- Active prompt: `ThinkingPlugin.after_persist_assistant` calls
-  `strip_reasoning_content()` on the in-memory message when
-  `keep_thinking_in_history=false`
+- Active prompt: `ThinkingPlugin.before_agent_turn` applies the channel's
+  `reasoning_history` policy to the whole in-memory window before each LLM
+  call (`drop`: strip all; `exchange`: strip assistant messages before the
+  last `role: user` message; `keep`: nothing). Under `drop`,
+  `after_persist_assistant` also strips the just-appended message.
 
 If `ThinkingPlugin` is not registered, `<think>` blocks pass through to the channel
 and `reasoning_content` remains in the in-memory history.
@@ -746,19 +751,24 @@ daemon:
 `thinking.py` — strips `<think>` blocks and `reasoning_content` for
 display. Registered as the `"thinking"` entry point.
 
-Implements two hooks:
+Implements three hooks, driven by the resolved `reasoning_history`:
 
-- `after_persist_assistant`: reads `keep_thinking_in_history` from the
-  resolved channel config. If `False`, calls `strip_reasoning_content`
-  on the in-memory message dict. The DB copy is already written; this
-  only affects subsequent prompt builds.
+- `before_agent_turn`: applies the policy to the whole in-memory window.
+  `drop` strips every assistant message; `exchange` strips those before
+  `completed_exchange_end()` (the last `role: user` message; tool results
+  and system notifications do not end an exchange); `keep` is a no-op.
+  Covering the whole window is what makes the policy hold for history
+  reloaded from the DB, which always carries `reasoning_content`.
+- `after_persist_assistant`: under `drop`, strips the just-appended
+  message. The DB copy is already written; this only affects subsequent
+  prompt builds.
 - `transform_display_text`: calls `strip_thinking` on the response text.
   Returns the stripped string if it differs from the input, or `None`
   if no `<think>` tags were present.
 
 **Graceful degradation:** without `ThinkingPlugin`, `<think>` blocks
 pass through to the channel and `reasoning_content` remains in the
-in-memory history regardless of `keep_thinking_in_history`.
+in-memory history regardless of `reasoning_history`.
 
 ## CompactionPlugin
 
@@ -1258,10 +1268,13 @@ The `settings` dict is intended for:
 
 - LLM inference keys: `temperature`, `top_p`, `top_k`, `frequency_penalty`,
   `presence_penalty`, `max_tokens`
-- Framework keys: `max_turns`, `max_context_tokens`, `keep_thinking_in_history`
+- Framework keys: `max_turns`, `max_context_tokens`, `reasoning_history`
 - Dotted plugin tunables (`critique.*`, `appraisal.*`; see configuration.md)
 
-Keys are not validated; see the Blocklist note below for what that means.
+Keys are not validated, except `reasoning_history`, which is rejected
+(with no overrides applied) unless it is `drop`, `exchange`, or `keep` — a
+stored bad value would make every later config resolve raise. See the
+Blocklist note below for what the lack of validation means.
 
 Pass `null` for a key to clear that override and revert to the static config value.
 
@@ -1481,7 +1494,7 @@ llm:
 agent:
   system_prompt: "..."          # string or list of file paths
   max_context_tokens: 24000
-  keep_thinking_in_history: false
+  reasoning_history: drop       # drop | exchange | keep
   max_turns: 10
   mid_conversation_system_role: system  # system | user — role for non-leading system messages
   immutable_settings:           # keys the agent must not change (system_prompt always added)

@@ -47,7 +47,7 @@ BASE_CONFIG = {
 AGENT_DEFAULTS = {
     "system_prompt": "You are a test assistant.",
     "max_context_tokens": 8000,
-    "keep_thinking_in_history": False,
+    "reasoning_history": "drop",
 }
 
 
@@ -638,10 +638,10 @@ class TestOnMessageThinkingTokens:
         await db.close()
 
     async def test_on_message_strips_reasoning_content_from_history(self):
-        """When keep_thinking_in_history is False, reasoning_content is
-        removed from the newly appended in-memory assistant messages.
-        Pre-existing assistant messages are not touched."""
-        # keep_thinking_in_history=False is the default in AGENT_DEFAULTS
+        """When reasoning_history is "drop", reasoning_content is
+        removed from every in-memory assistant message — the newly appended
+        one and pre-existing ones (e.g. history reloaded from the DB, #57)."""
+        # reasoning_history="drop" is the default in AGENT_DEFAULTS
         plugin, channel, db = await build_plugin_and_channel()
 
         # Pre-existing message already in the conversation (simulated prior turn)
@@ -668,8 +668,8 @@ class TestOnMessageThinkingTokens:
         await plugin.on_message(channel=channel, sender="user", text="query")
         await drain(plugin, channel)
 
-        # Prior message still has reasoning_content (not touched)
-        assert conv.messages[0].get("reasoning_content") == "prior thinking"
+        # Prior message is stripped too, before the LLM call sees it
+        assert "reasoning_content" not in conv.messages[0]
 
         # New assistant message should have reasoning_content stripped
         new_assistant = [m for m in conv.messages[1:] if m.get("role") == "assistant"]
@@ -679,12 +679,12 @@ class TestOnMessageThinkingTokens:
         await db.close()
 
     async def test_on_message_preserves_reasoning_content_in_history(self):
-        """When keep_thinking_in_history is True, reasoning_content stays
+        """When reasoning_history is "keep", reasoning_content stays
         in the in-memory messages."""
         agent_defaults_with_thinking = {
             "system_prompt": "You are a test assistant.",
             "max_context_tokens": 8000,
-            "keep_thinking_in_history": True,
+            "reasoning_history": "keep",
         }
         plugin, channel, db = await build_plugin_and_channel(
             agent_defaults=agent_defaults_with_thinking
@@ -712,12 +712,12 @@ class TestOnMessageThinkingTokens:
         await db.close()
 
     async def test_on_message_preserves_reasoning_content_in_persistent_log(self):
-        """Regardless of keep_thinking_in_history, the persisted record in
+        """Regardless of reasoning_history, the persisted record in
         the message_log SQLite table must contain reasoning_content.
 
         Queries message_log directly — does NOT rely on conv.messages, which
         may have been stripped in memory."""
-        # keep_thinking_in_history=False (default) strips in-memory, not on disk
+        # reasoning_history="drop" (default) strips in-memory, not on disk
         plugin, channel, db = await build_plugin_and_channel()
 
         response_msg = {
@@ -819,7 +819,7 @@ class TestOnMessageCompactionAndConfig:
         registry = ChannelRegistry({
             "system_prompt": "Default system prompt.",
             "max_context_tokens": 8000,
-            "keep_thinking_in_history": False,
+            "reasoning_history": "drop",
         })
         pm.register(registry, name="registry")
         pm.ahook.send_message = AsyncMock()
@@ -998,7 +998,7 @@ class TestConversationInitPromptResolution:
         agent_defaults = {
             "system_prompt": ["soul.md", "irc.md"],
             "max_context_tokens": 8000,
-            "keep_thinking_in_history": False,
+            "reasoning_history": "drop",
         }
         plugin, channel, db = await build_plugin_and_channel(
             agent_defaults=agent_defaults
@@ -1051,7 +1051,7 @@ class TestConversationInitPromptResolution:
         agent_defaults = {
             "system_prompt": ["soul.md"],
             "max_context_tokens": 8000,
-            "keep_thinking_in_history": False,
+            "reasoning_history": "drop",
         }
         channel_cfg = ChannelConfig(system_prompt="Channel string wins.")
         plugin, channel, db = await build_plugin_and_channel(
@@ -1084,7 +1084,7 @@ class TestConversationInitPromptResolution:
         agent_defaults = {
             "system_prompt": "Agent string.",
             "max_context_tokens": 8000,
-            "keep_thinking_in_history": False,
+            "reasoning_history": "drop",
         }
         channel_cfg = ChannelConfig(system_prompt=["channel.md"])
         plugin, channel, db = await build_plugin_and_channel(

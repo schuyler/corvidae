@@ -21,7 +21,7 @@ from pathlib import Path
 
 import yaml
 
-from corvidae.channel import ChannelRegistry, load_channel_config
+from corvidae.channel import ChannelRegistry, load_channel_config, validate_agent_config
 from corvidae.hooks import (
     _check_hook_arg_binding,
     create_plugin_manager,
@@ -126,6 +126,7 @@ class Runtime:
         # 6. Create ChannelRegistry and register with PM
         self.registry = ChannelRegistry()
         self.pm.register(self.registry, name="registry")
+        validate_agent_config(config.get("agent", {}))
         self.registry.agent_defaults = config.get("agent", {})
 
         # 7. Load channel config

@@ -13,6 +13,7 @@ Logging:
 
 from __future__ import annotations
 
+import enum
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -26,6 +27,73 @@ logger = logging.getLogger(__name__)
 _prompt_logger = logging.getLogger("corvidae.prompt")
 
 
+class ReasoningHistory(str, enum.Enum):
+    """What happens to ``reasoning_content`` in the in-memory history.
+
+    DROP: strip it from every assistant message.
+    EXCHANGE: keep it only on assistant messages after the last user message
+        (the current exchange, including a tool chain in progress); strip it
+        from completed exchanges. Pair with the server's
+        ``preserve_thinking`` off.
+    KEEP: never strip it.
+
+    The DB record always keeps it regardless of policy.
+    """
+
+    DROP = "drop"
+    EXCHANGE = "exchange"
+    KEEP = "keep"
+
+
+#: Config key replaced by ``reasoning_history``; rejected so a stale
+#: agent.yaml fails loudly instead of silently getting the default.
+_REMOVED_REASONING_KEY = "keep_thinking_in_history"
+
+
+def parse_reasoning_history(value: object) -> ReasoningHistory:
+    """Return ``value`` as a ReasoningHistory, or raise ValueError.
+
+    Only the exact strings "drop", "exchange", and "keep" are accepted —
+    booleans from the removed keep_thinking_in_history key are rejected
+    rather than mapped.
+    """
+    # Only strings can name a policy; anything else falls through to the error.
+    if isinstance(value, str):
+        try:
+            return ReasoningHistory(value)
+        except ValueError:
+            pass
+    choices = ", ".join(m.value for m in ReasoningHistory)
+    raise ValueError(
+        f"reasoning_history must be one of {choices}; got {value!r}"
+    )
+
+
+def _check_reasoning_keys(section: dict, where: str) -> None:
+    """Reject the removed key and an invalid reasoning_history in a config
+    section (the ``agent`` block or one ``channels`` entry)."""
+    if _REMOVED_REASONING_KEY in section:
+        raise ValueError(
+            f"{where}: {_REMOVED_REASONING_KEY} was removed; use "
+            f"reasoning_history: drop | exchange | keep"
+        )
+    if section.get("reasoning_history") is not None:
+        try:
+            parse_reasoning_history(section["reasoning_history"])
+        except ValueError as exc:
+            raise ValueError(f"{where}: {exc}") from exc
+
+
+def validate_agent_config(agent: dict) -> None:
+    """Validate the ``agent`` config section before it becomes agent_defaults.
+
+    Raises:
+        ValueError: on the removed keep_thinking_in_history key or an
+            invalid reasoning_history value.
+    """
+    _check_reasoning_keys(agent, "agent")
+
+
 @dataclass
 class ChannelConfig:
     """Per-channel configuration. Falls back to agent-level defaults
@@ -33,7 +101,7 @@ class ChannelConfig:
 
     system_prompt: str | list[str] | None = None
     max_context_tokens: int | None = None
-    keep_thinking_in_history: bool | None = None
+    reasoning_history: str | None = None
     max_turns: int | None = None
     # Future: tool allowlist/denylist, response length, etc.
 
@@ -59,10 +127,10 @@ class ChannelConfig:
                 self.max_context_tokens if self.max_context_tokens is not None
                 else agent_defaults.get("max_context_tokens", 24000)
             ),
-            "keep_thinking_in_history": (
-                self.keep_thinking_in_history
-                if self.keep_thinking_in_history is not None
-                else agent_defaults.get("keep_thinking_in_history", False)
+            "reasoning_history": (
+                self.reasoning_history
+                if self.reasoning_history is not None
+                else agent_defaults.get("reasoning_history", ReasoningHistory.DROP)
             ),
             "max_turns": (
                 self.max_turns if self.max_turns is not None
@@ -72,6 +140,12 @@ class ChannelConfig:
 
         if runtime_overrides:
             resolved.update(runtime_overrides)
+
+        # Normalize the reasoning policy to the enum after every layer has
+        # applied, so a bad value from any layer raises here.
+        resolved["reasoning_history"] = parse_reasoning_history(
+            resolved["reasoning_history"]
+        )
 
         logger.debug(
             "channel config resolved",
@@ -182,7 +256,9 @@ def load_channel_config(config: dict, registry: ChannelRegistry) -> None:
     in "transport:scope" format.
 
     Raises:
-        ValueError: If a channel key does not contain a colon separator.
+        ValueError: If a channel key does not contain a colon separator, or
+            an entry uses the removed keep_thinking_in_history key or an
+            invalid reasoning_history value.
     """
     channels_config = config.get("channels", {})
     for channel_id, overrides in channels_config.items():
@@ -199,10 +275,11 @@ def load_channel_config(config: dict, registry: ChannelRegistry) -> None:
             raise ValueError(
                 f"Channel config for {channel_id!r} must be a mapping, got {type(overrides).__name__!r}"
             )
+        _check_reasoning_keys(overrides, f"channels.{channel_id}")
         channel_config = ChannelConfig(
             system_prompt=overrides.get("system_prompt"),
             max_context_tokens=overrides.get("max_context_tokens"),
-            keep_thinking_in_history=overrides.get("keep_thinking_in_history"),
+            reasoning_history=overrides.get("reasoning_history"),
             max_turns=overrides.get("max_turns"),
         )
         registry.get_or_create(transport, scope, config=channel_config)

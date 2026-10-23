@@ -418,7 +418,7 @@ class TestRequestLogprobsInRequestBody:
             agent_defaults={
                 "system_prompt": "You are a test assistant.",
                 "max_context_tokens": 8000,
-                "keep_thinking_in_history": False,
+                "reasoning_history": "drop",
             },
         )
         plugin._client = MagicMock()
@@ -453,7 +453,7 @@ class TestRequestLogprobsInRequestBody:
             agent_defaults={
                 "system_prompt": "You are a test assistant.",
                 "max_context_tokens": 8000,
-                "keep_thinking_in_history": False,
+                "reasoning_history": "drop",
             },
         )
         plugin._client = MagicMock()

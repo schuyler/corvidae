@@ -876,7 +876,7 @@ class TestAgentLogging:
 
         pm = create_plugin_manager()
         registry = ChannelRegistry({"system_prompt": "Test.", "max_context_tokens": 8000,
-                                     "keep_thinking_in_history": False})
+                                     "reasoning_history": "drop"})
         pm.register(registry, name="registry")
         pm.ahook.send_message = AsyncMock()
         pm.ahook.on_agent_response = AsyncMock()
@@ -941,7 +941,7 @@ class TestAgentLogging:
 
         pm = create_plugin_manager()
         registry = ChannelRegistry({"system_prompt": "Test.", "max_context_tokens": 8000,
-                                     "keep_thinking_in_history": False})
+                                     "reasoning_history": "drop"})
         pm.register(registry, name="registry")
 
         persistence = PersistencePlugin(pm)
