@@ -196,9 +196,14 @@ class Runtime:
         await self.pm.ahook.on_stop()
 
     async def run(self) -> None:
-        """start(), wait for SIGINT/SIGTERM, then stop()."""
-        await self.start()
+        """start(), wait for SIGINT/SIGTERM, then stop().
 
+        The handlers go in before start(): a plugin can raise a signal while
+        it starts (the CLI read loop does when stdin is already at EOF), and
+        under the default handler that interrupted startup mid-way or was
+        lost. Installed first, it sets stop_event, startup finishes, and
+        stop() runs.
+        """
         stop_event = asyncio.Event()
         loop = asyncio.get_running_loop()
         _shutdown_requested = False
@@ -214,6 +219,8 @@ class Runtime:
 
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, _handle_stop_signal)
+
+        await self.start()
 
         await stop_event.wait()
 

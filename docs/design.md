@@ -1326,11 +1326,19 @@ registers `task_status` as tool closures during `on_start`.
 Reads stdin line-by-line in a background task. Prints responses to
 stdout with latency timing.
 
-EOF ends the session only at an interactive terminal: Ctrl-D sends SIGINT
-to the process for a graceful shutdown. When stdin is not a TTY (systemd's
-`/dev/null`, a closed pipe), EOF stops just the CLI transport with a
+EOF ends the session at an interactive terminal (Ctrl-D), and always
+under `corvidae cli`, which is a session by definition (`corvidae cli <
+script.txt` exits when the script runs out): SIGINT to the process for a
+graceful shutdown. Under `corvidae serve`, EOF on a non-TTY stdin
+(systemd's `/dev/null`, a closed pipe) stops just the CLI transport with a
 warning and the daemon keeps running; with no stdin at all the read loop
-never starts. So a service-managed config may keep a `cli:` channel.
+never starts. So a service-managed config may keep a `cli:` channel. The
+banner and `> ` prompts print only when stdin is a terminal.
+
+`Runtime.run` installs its SIGINT/SIGTERM handlers before startup, so a
+signal that arrives while plugins are still starting (this EOF path, or a
+Ctrl-C during startup) is held until startup finishes, then shuts down
+normally. A second signal still force-exits.
 
 ### IRC (`channels/irc.py`)
 

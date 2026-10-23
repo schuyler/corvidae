@@ -197,10 +197,10 @@ class TestNonInteractiveStdin:
     """#53: under systemd stdin is /dev/null, so EOF arrives at once. That
     must stop only the CLI transport, not the daemon."""
 
-    async def _run_loop(self, plugin, lines, isatty: bool):
+    async def _run_loop(self, plugin, lines, isatty: bool, stdout=None):
         """Run _read_loop over `lines` with stdin.isatty() == isatty.
 
-        Returns the os.kill mock.
+        Returns the os.kill mock. Pass `stdout` to inspect what was written.
         """
         it = iter(lines)
         loop = asyncio.get_running_loop()
@@ -210,7 +210,7 @@ class TestNonInteractiveStdin:
 
         with patch.object(loop, "run_in_executor", side_effect=fake_executor), \
              patch("sys.stdin") as mock_stdin, \
-             patch("sys.stdout"), \
+             patch("sys.stdout", stdout or MagicMock()), \
              patch("corvidae.channels.cli.os.kill") as mock_kill:
             mock_stdin.readline = lambda: next(it)
             mock_stdin.isatty.return_value = isatty
@@ -248,6 +248,52 @@ class TestNonInteractiveStdin:
             text="hi",
         )
         mock_kill.assert_not_called()
+
+    async def test_cli_subcommand_exits_on_non_tty_eof(self):
+        """`corvidae cli` is an interactive session: input running out
+        (`corvidae cli < script.txt`) still ends it."""
+        import os
+        import signal
+
+        plugin, _pm, _registry = self._plugin()
+        plugin._exit_on_eof = True
+        mock_kill = await self._run_loop(plugin, [""], isatty=False)
+        mock_kill.assert_called_once_with(os.getpid(), signal.SIGINT)
+
+    async def test_on_start_reads_exit_on_eof(self):
+        pm, _registry = _make_pm_with_registry(transport="cli")
+        plugin = CLIPlugin(pm)
+        pm.register(plugin, name="cli")
+
+        async def fake_read_loop():
+            await asyncio.sleep(9999)
+
+        plugin._read_loop = fake_read_loop
+        await plugin.on_start(config={"_cli_exit_on_eof": True})
+        try:
+            assert plugin._exit_on_eof is True
+        finally:
+            plugin._task.cancel()
+            try:
+                await plugin._task
+            except asyncio.CancelledError:
+                pass
+
+    def test_cli_command_requests_exit_on_eof(self):
+        from corvidae.channels.cli import cli_command
+
+        with patch("corvidae.channels.cli.Runtime") as runtime_cls, \
+             patch("corvidae.channels.cli.asyncio.run"):
+            cli_command.main(["--config", "x.yaml"], standalone_mode=False)
+        overrides = runtime_cls.call_args.kwargs["overrides"]
+        assert overrides["_cli_exit_on_eof"] is True
+
+    async def test_banner_only_on_tty(self):
+        plugin, _pm, _registry = self._plugin()
+        out = MagicMock()
+        await self._run_loop(plugin, [""], isatty=False, stdout=out)
+        written = "".join(str(c.args[0]) for c in out.write.call_args_list if c.args)
+        assert "Agent ready" not in written and "> " not in written
 
     async def test_no_stdin_starts_no_task(self, caplog):
         pm, _registry = _make_pm_with_registry(transport="cli")

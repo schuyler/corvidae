@@ -976,6 +976,47 @@ class TestRuntimeRun:
         finally:
             os.unlink(config_path)
 
+    async def test_signal_during_start_still_stops_cleanly(self):
+        """A SIGINT sent while start() is running (the CLI read loop does
+        this when stdin is already at EOF) must reach run()'s handler, so
+        startup finishes and stop() runs, instead of hitting the default
+        handler mid-start."""
+        from corvidae.runtime import Runtime
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            _write_config(f.name)
+            config_path = f.name
+
+        # Stand-in for the default handler, so a signal that arrives before
+        # run() installs its own is recorded instead of interrupting pytest.
+        stray: list[int] = []
+        previous = signal.signal(signal.SIGINT, lambda signum, frame: stray.append(signum))
+        try:
+            mock_pm, mock_agent = _make_mock_pm_and_agent()
+
+            async def signal_during_start(**kwargs):
+                os.kill(os.getpid(), signal.SIGINT)
+                await asyncio.sleep(0)
+                return []
+
+            mock_pm.ahook.on_start = AsyncMock(side_effect=signal_during_start)
+
+            with patch(
+                "corvidae.runtime.create_plugin_manager", return_value=mock_pm
+            ), patch("corvidae.runtime.validate_dependencies"), patch(
+                "corvidae.runtime.configure_logging"
+            ):
+                rt = Runtime(config_path=config_path)
+                await asyncio.wait_for(rt.run(), timeout=3)
+
+            assert stray == []
+            mock_agent.on_stop.assert_awaited_once()
+        finally:
+            asyncio.get_running_loop().remove_signal_handler(signal.SIGINT)
+            asyncio.get_running_loop().remove_signal_handler(signal.SIGTERM)
+            signal.signal(signal.SIGINT, previous)
+            os.unlink(config_path)
+
     async def test_double_sigint_calls_os_exit(self):
         """Second SIGINT during shutdown triggers os._exit(1) — no graceful cleanup.
 

@@ -29,11 +29,19 @@ class CLIPlugin(CorvidaePlugin):
             self.pm = pm
         self._task: asyncio.Task | None = None
         self._registry: ChannelRegistry | None = None
+        # True under `corvidae cli`: EOF ends the session even on a non-TTY
+        # stdin (`corvidae cli < script.txt`). `serve` leaves it False so a
+        # service-managed daemon survives /dev/null stdin (#53).
+        self._exit_on_eof = False
+        # Whether stdin is a terminal; the banner and "> " prompts are only
+        # for a person typing, not a journal or a pipe.
+        self._interactive = False
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
         """Start the stdin read loop if any cli channels are configured."""
         self._registry = get_dependency(self.pm, "registry", ChannelRegistry)
+        self._exit_on_eof = bool(config.get("_cli_exit_on_eof", False))
         if not self._registry.by_transport("cli"):
             logger.debug("CLIPlugin: no cli channels configured, skipping read loop")
             return
@@ -54,13 +62,14 @@ class CLIPlugin(CorvidaePlugin):
         by design — only cli:local receives stdin input.
         """
         channel = self._registry.get_or_create("cli", "local")
-        print("Agent ready. Type a message, or Ctrl-D to quit.\n")
+        self._interactive = sys.stdin.isatty()
+        if self._interactive:
+            print("Agent ready. Type a message, or Ctrl-D to quit.\n")
 
         # Print initial prompt — subsequent prompts appear in send_message
         # after each response, since on_message is now fire-and-enqueue
         # and returns immediately before the agent loop runs.
-        sys.stdout.write("> ")
-        sys.stdout.flush()
+        self._prompt()
 
         loop = asyncio.get_running_loop()
         while True:
@@ -69,10 +78,11 @@ class CLIPlugin(CorvidaePlugin):
             except asyncio.CancelledError:
                 raise
             if not line:
-                # EOF at an interactive terminal (Ctrl-D) means quit: trigger
-                # graceful shutdown by sending SIGINT to ourselves, reusing
-                # the signal handler in main().
-                if sys.stdin.isatty():
+                # EOF at an interactive terminal (Ctrl-D), or anywhere under
+                # `corvidae cli`, means quit: trigger graceful shutdown by
+                # sending SIGINT to ourselves, reusing the signal handler in
+                # main().
+                if self._interactive or self._exit_on_eof:
                     logger.info("EOF received, initiating shutdown")
                     os.kill(os.getpid(), signal.SIGINT)
                     return
@@ -86,8 +96,7 @@ class CLIPlugin(CorvidaePlugin):
                 return
             text = line.strip()
             if not text:
-                sys.stdout.write("> ")
-                sys.stdout.flush()
+                self._prompt()
                 continue
             await self.pm.ahook.on_message(
                 channel=channel,
@@ -111,6 +120,12 @@ class CLIPlugin(CorvidaePlugin):
             print(f"\n{text}\n\033[2m({latency_ms/1000:.1f}s)\033[0m\n")
         else:
             print(f"\n{text}\n")
+        self._prompt()
+
+    def _prompt(self) -> None:
+        """Print the "> " input prompt, only when a person is typing."""
+        if not self._interactive:
+            return
         sys.stdout.write("> ")
         sys.stdout.flush()
 
@@ -177,6 +192,8 @@ def cli_command(config):
         overrides={
             "channels": {"cli:local": {}},
             "logging": {"file": "corvidae.log"},
+            # An interactive session ends when its input does, pipe or not.
+            "_cli_exit_on_eof": True,
         },
     )
     asyncio.run(runtime.run())
