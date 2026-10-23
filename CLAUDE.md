@@ -17,7 +17,7 @@ uv run corvidae                  # run the daemon; reads ./agent.yaml
 
 `agent.yaml` is gitignored. Copy `agent.yaml.example` to create one.
 
-CI (`.github/workflows/tests.yml`) runs `uv run pytest` on every push to `main`
+CI (`.github/workflows/tests.yml`) runs `uv run pytest -q` on every push to `main`
 and every PR, after checking that sqlite-vec loads. It doesn't run the harness
 or `--run-eval`.
 

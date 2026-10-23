@@ -11,15 +11,20 @@ on:
 permissions:
   contents: read
 
+# A newer push to the same branch or PR cancels the run it supersedes.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   pytest:
     runs-on: ubuntu-latest
     # Backstop above pytest's own per-test timeout (15s, pyproject.toml).
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v7
         with:
           python-version: "3.13"
           enable-cache: true
