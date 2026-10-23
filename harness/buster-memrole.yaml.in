@@ -1,0 +1,71 @@
+# Buster agent config — memory_role profile. Rendered to
+# $BUSTER_ROOT/state/agent.yaml by run.sh when HARNESS_PROFILE=buster-memrole
+# (state dir: @STATE_DIR@).
+#
+# One question: with agent.mid_conversation_system_role: user, the funnel's
+# memory block becomes the last "user" message the model sees. Does it
+# still answer the person? The default profile (buster.yaml.in) keeps memory
+# and the funnel off, so this is a separate profile with one probe channel.
+#
+# No llm.embedding role: retrieval runs FTS5-only, so no embedding server is
+# needed on the host. The driver seeds the memory row itself.
+
+llm:
+  main:
+    base_url: http://127.0.0.1:8080/v1
+    # Keep in step with buster.yaml.in.
+    model: qwen3.6:35b
+    extra_body:
+      id_slot: 0
+    timeout: 300
+
+daemon:
+  session_db: sessions.db
+  metrics_jsonl: metrics.jsonl
+  max_task_workers: 2
+
+agent:
+  system_prompt: >
+    You are Buster, a test agent used for harness probes. Answer plainly
+    and follow instructions exactly, including any tokens or codes you are
+    asked to repeat back.
+  max_context_tokens: 24000
+  request_logprobs: false
+  # The setting under test.
+  mid_conversation_system_role: user
+
+memory:
+  # No consolidation LLM calls during the run.
+  idle_consolidate_after: 86400
+  retrieval:
+    # FTS hits carry the 0.6 similarity proxy; banding the decayed score
+    # would put a fresh hit a hair under 0.60 and label it [weak].
+    band_on: similarity
+
+# memory and funnel on; the rest of the cognition set and the Buster
+# hardening stay off as in the default profile.
+plugins:
+  disabled:
+    - memory_tools
+    - appraisal
+    - critique
+    - outcome_log
+    - subagent
+    - mcp
+    - cli
+
+tools:
+  disabled:
+    - shell
+
+irc:
+  host: 127.0.0.1
+  port: 6667
+  nick: buster
+  tls: false
+  channels:
+    - "#p-memrole"
+
+logging:
+  level: INFO
+  file: corvidae.log

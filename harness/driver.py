@@ -42,6 +42,25 @@ SLOW_SERVER_DELAY_S = 13
 SLOW_SERVER_TOKEN = "TOKEN-EELGRASS-71"
 MAX_FILLERS = 12
 
+# memory_role probe (buster-memrole profile). The seeded fact shares
+# "weather station" with both questions, so FTS retrieval admits it; the
+# first question's answer is not in it, so only a reply to the person
+# carries MEMROLE_ANSWER.
+MEMROLE_CHANNEL = "#p-memrole"
+MEMROLE_CODENAME = "PLOVER-48"
+MEMROLE_FACT = (
+    "Kestrel's weather station runs on an ESP32-C6 board, "
+    f"codename {MEMROLE_CODENAME}."
+)
+MEMROLE_QUERY = "Weather station aside, what is 17 plus 25? Reply with the number only."
+MEMROLE_ANSWER = "42"
+MEMROLE_RECALL_QUERY = (
+    "What codename does the weather station board have? Reply with the codename only."
+)
+# The memory table is created by MemoryPlugin.on_start; the bot joining IRC
+# normally means it exists, this bounds the wait if it doesn't.
+MEMROLE_SCHEMA_TIMEOUT_S = 30
+
 # Ordinary single turn. Observed 2-7s (run 7), worst observed 35s on an
 # inflated context. 90s is ~2.5x the worst observation.
 TURN_TIMEOUT_S = 90
@@ -390,6 +409,73 @@ def count_main_calls_since(db_path: Path, channel_id: str, since_ts: float) -> i
         ("main", channel_id, since_ts),
     )
     return rows[0][0] if rows else 0
+
+
+def seed_memory_row(db_path: Path, channel_id: str, summary: str) -> int:
+    """Insert one retrievable memory row into a live sessions.db.
+
+    Written with stdlib sqlite3 while the daemon holds the database (WAL
+    mode tolerates a second writer). embedded=0 matches a profile with no
+    embedding role; the memory_fts insert trigger indexes the summary for
+    keyword retrieval. Returns the new row id.
+    """
+    conn = sqlite3.connect(db_path, timeout=10)
+    try:
+        cursor = conn.execute(
+            "INSERT INTO memory (channel_id, created_at, summary, importance, "
+            "msg_id_start, msg_id_end, embedded) VALUES (?, ?, ?, ?, 0, 0, 0)",
+            (channel_id, time.time(), summary, 0.5),
+        )
+        conn.commit()
+        return cursor.lastrowid
+    finally:
+        conn.close()
+
+
+def memory_table_exists(db_path: Path) -> bool:
+    """Whether MemoryPlugin has created its schema in sessions.db yet."""
+    if not db_path.exists():
+        return False
+    rows = _query(
+        db_path,
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memory'",
+        (),
+    )
+    return bool(rows)
+
+
+def first_admitted_count_since(db_path: Path, channel_id: str, since_ts: float) -> int | None:
+    """admitted_count of the first retrieval on `channel_id` at or after `since_ts`."""
+    rows = _query(
+        db_path,
+        "SELECT admitted_count FROM retrieval_log WHERE channel_id = ? AND ts >= ? "
+        "ORDER BY id LIMIT 1",
+        (channel_id, since_ts),
+    )
+    return rows[0][0] if rows else None
+
+
+def memory_role_verdict(
+    answered: bool, recalled: bool, admitted: int | None
+) -> tuple[bool, str]:
+    """Pass/fail and details for the memory_role probe.
+
+    `admitted` guards against a vacuous pass: if no memory block entered the
+    window, the model answering proves nothing about the role setting.
+    """
+    problems: list[str] = []
+    if not admitted:
+        problems.append(f"no memory block admitted on the first turn (admitted_count={admitted})")
+    if not answered:
+        problems.append(f"did not answer the person ({MEMROLE_ANSWER} absent from the reply)")
+    if not recalled:
+        problems.append(f"did not recall the memory ({MEMROLE_CODENAME} absent from the reply)")
+    if problems:
+        return False, "; ".join(problems)
+    return True, (
+        f"answered the person ({MEMROLE_ANSWER}) with the memory block last, "
+        f"and recalled {MEMROLE_CODENAME}"
+    )
 
 
 def has_summary_row_since(db_path: Path, channel_id: str, since_ts: float) -> bool:
@@ -782,6 +868,53 @@ async def probe_kv_slot(ctx: RunContext) -> ProbeResult:
     return ProbeResult("kv_slot", passed, details, duration, _transcript(ctx, channel, sent))
 
 
+async def probe_memory_role(ctx: RunContext) -> ProbeResult:
+    """With mid_conversation_system_role: user, the memory block is the last
+    "user" message the model sees. Check it still answers the person.
+
+    Turn 1 asks a question the memory doesn't answer, while sharing keywords
+    with it so retrieval admits the block; retrieval_log confirms it did.
+    Turn 2 asks for the remembered codename, so a block the model ignored
+    entirely also fails.
+    """
+    channel = MEMROLE_CHANNEL
+    if not ctx.channel_ready.get(channel):
+        return _skip_result("memory_role", channel)
+    channel_id = f"irc:{channel}"
+    sent: list[tuple[float, str]] = []
+    t0 = time.monotonic()
+
+    # Seed the memory once MemoryPlugin's schema exists.
+    deadline = time.monotonic() + MEMROLE_SCHEMA_TIMEOUT_S
+    while not memory_table_exists(ctx.session_db):
+        if time.monotonic() > deadline:
+            return ProbeResult(
+                "memory_role", False,
+                "memory table never appeared in sessions.db — is the memory plugin enabled?",
+                time.monotonic() - t0, [],
+            )
+        await asyncio.sleep(1)
+    seed_memory_row(ctx.session_db, channel_id, MEMROLE_FACT)
+
+    # Turn 1: the person's question, with the memory block admitted after it.
+    turn1_ts = time.time()
+    answered = await send_and_await(
+        ctx, channel, MEMROLE_QUERY, MEMROLE_ANSWER, sent, TURN_TIMEOUT_S, after_ts=turn1_ts,
+    )
+    admitted = first_admitted_count_since(ctx.session_db, channel_id, turn1_ts)
+
+    # Turn 2: recall. after_ts keeps a turn-1 reply that talked about the
+    # memory instead of answering from satisfying this check.
+    turn2_ts = time.time()
+    recalled = await send_and_await(
+        ctx, channel, MEMROLE_RECALL_QUERY, MEMROLE_CODENAME, sent, TURN_TIMEOUT_S,
+        after_ts=turn2_ts,
+    )
+
+    passed, details = memory_role_verdict(answered is not None, recalled is not None, admitted)
+    return ProbeResult("memory_role", passed, details, time.monotonic() - t0, _transcript(ctx, channel, sent))
+
+
 PROBES: list[Callable[[RunContext], "asyncio.Future[ProbeResult]"]] = [
     probe_smoke_echo,
     probe_tool_loop,
@@ -792,6 +925,13 @@ PROBES: list[Callable[[RunContext], "asyncio.Future[ProbeResult]"]] = [
 ]
 
 ALL_CHANNELS = ["#p-smoke", "#p-toolloop", "#p-interleave", "#p-compact", "#p-restart", "#p-slots"]
+
+# Harness profiles: name -> (probes, channels the driver joins). Each name
+# matches a config template, harness/<name>.yaml.in, which run.sh renders.
+PROFILES: dict[str, tuple[list[Callable[[RunContext], "asyncio.Future[ProbeResult]"]], list[str]]] = {
+    "buster": (PROBES, ALL_CHANNELS),
+    "buster-memrole": ([probe_memory_role], [MEMROLE_CHANNEL]),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -814,6 +954,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--config-sha256", required=True)
     p.add_argument("--server-props-file", required=True, type=Path)
     p.add_argument("--server-models-file", required=True, type=Path)
+    p.add_argument("--profile", default="buster", choices=sorted(PROFILES))
     return p.parse_args(argv)
 
 
@@ -828,15 +969,18 @@ async def async_main(args: argparse.Namespace, run_dims: dict) -> int:
     run_dims["server_props"] = json.loads(args.server_props_file.read_text())
     run_dims["server_models"] = json.loads(args.server_models_file.read_text())
 
+    probes, channels = PROFILES[args.profile]
+    run_dims["profile"] = args.profile
+
     driver_nick = derive_driver_nick(args.bot_nick)
     client = IRCClient(args.irc_host, args.irc_port, driver_nick)
     await client.connect()
-    for channel in ALL_CHANNELS:
+    for channel in channels:
         await client.join(channel)
 
     channel_ready = {
         channel: await client.wait_for_nick_join(channel, args.bot_nick, args.join_timeout)
-        for channel in ALL_CHANNELS
+        for channel in channels
     }
 
     ctx = RunContext(
@@ -851,7 +995,7 @@ async def async_main(args: argparse.Namespace, run_dims: dict) -> int:
     )
 
     results: list[ProbeResult] = []
-    for probe in PROBES:
+    for probe in probes:
         # A probe raising (e.g. restart_recovery's subprocess.run of
         # restart-daemon.sh hitting CalledProcessError/TimeoutExpired) must
         # not take down the whole run — record it as a failed probe and

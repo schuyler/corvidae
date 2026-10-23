@@ -16,6 +16,9 @@ REPO_DIR="$BUSTER_ROOT/repo"
 STATE_DIR="$BUSTER_ROOT/state"
 RUN_DIR="$BUSTER_ROOT/runs/$(date -u +%Y%m%dT%H%M%SZ)"
 LLAMA_URL="http://127.0.0.1:8080"
+# Harness profile: picks harness/<profile>.yaml.in and the driver's probe
+# set. Default is the minimal-profile probe corpus.
+HARNESS_PROFILE="${HARNESS_PROFILE:-buster}"
 STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 # uv installs to ~/.local/bin, which non-interactive ssh sessions don't put
@@ -56,6 +59,12 @@ PYEOF
     exit 1
 }
 
+# --- 0. profile has a config template ---------------------------------------
+PROFILE_TEMPLATE="$REPO_DIR/harness/$HARNESS_PROFILE.yaml.in"
+if [ ! -f "$PROFILE_TEMPLATE" ]; then
+    abort "unknown HARNESS_PROFILE '$HARNESS_PROFILE' (no $PROFILE_TEMPLATE)"
+fi
+
 # --- 1. ngircd reachability — system service, Schuyler-managed. The harness
 #        never starts, stops, or configures it, same contract as llama-server.
 if ! (exec 3<>/dev/tcp/127.0.0.1/6667) 2>/dev/null; then
@@ -87,7 +96,7 @@ rm -f "$STATE_DIR/sessions.db" "$STATE_DIR/sessions.db-wal" "$STATE_DIR/sessions
 rm -f "$STATE_DIR"/corvidae.log*
 
 # --- 4. render config --------------------------------------------------------
-sed "s|@STATE_DIR@|$STATE_DIR|g" "$REPO_DIR/harness/buster.yaml.in" > "$STATE_DIR/agent.yaml"
+sed "s|@STATE_DIR@|$STATE_DIR|g" "$PROFILE_TEMPLATE" > "$STATE_DIR/agent.yaml"
 CONFIG_SHA="$(sha256sum "$STATE_DIR/agent.yaml" | awk '{print $1}')"
 
 # --- 5. record serving dimensions from the live server, verbatim -----------
@@ -120,7 +129,8 @@ python3 "$REPO_DIR/harness/driver.py" \
     --git-rev "$GIT_REV" \
     --config-sha256 "$CONFIG_SHA" \
     --server-props-file "$RUN_DIR/server_props.json" \
-    --server-models-file "$RUN_DIR/server_models.json"
+    --server-models-file "$RUN_DIR/server_models.json" \
+    --profile "$HARNESS_PROFILE"
 DRIVER_EXIT=$?
 set -e
 

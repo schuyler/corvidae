@@ -4,6 +4,7 @@
 # session; exit code is run.sh's exit code.
 #
 # Usage: harness/run-remote.sh [rev]   (default: HEAD)
+#        HARNESS_PROFILE=buster-memrole harness/run-remote.sh [rev]
 #
 # One-time setup — see harness/README.md.
 set -euo pipefail
@@ -21,8 +22,15 @@ for v in BUSTER_HOST BUSTER_ROOT; do
 done
 
 REV="${1:-HEAD}"
+# Profile names a template, harness/<profile>.yaml.in. Restrict it to a
+# plain name since it is spliced into the remote command line.
+HARNESS_PROFILE="${HARNESS_PROFILE:-buster}"
+if [[ ! "$HARNESS_PROFILE" =~ ^[A-Za-z0-9_-]+$ ]]; then
+    echo "HARNESS_PROFILE must be a plain name, got '$HARNESS_PROFILE'" >&2
+    exit 1
+fi
 REV_SHA="$(git rev-parse "$REV")"
 
 git push buster "$REV_SHA:refs/heads/run" --force
 
-ssh "$BUSTER_HOST" "cd \"$BUSTER_ROOT/repo\" && git fetch origin && git checkout -f $REV_SHA && exec harness/run.sh"
+ssh "$BUSTER_HOST" "cd \"$BUSTER_ROOT/repo\" && git fetch origin && git checkout -f $REV_SHA && exec env HARNESS_PROFILE=$HARNESS_PROFILE harness/run.sh"
