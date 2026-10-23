@@ -275,22 +275,6 @@ lands it needs an allowlist of target channels, a send budget, and its
 own entry here. Recurring reminders by tool are deferred for a related
 reason: they need a per-channel budget of their own.
 
-### 8. Smaller things
-
-- `read_file` has a stat-then-read race and follows symlinks. Irrelevant
-  while finding 4 stands.
-- Tool arguments are not validated against the generated schema. Wrong
-  types produce a generic "tool failed". Robustness, not security.
-- `task_pipeline` never marks a non-zero exit as failed, because `shell`
-  returns a string, so dependents run after failures. A correctness bug
-  with mild safety consequences for "deploy after test" graphs.
-- `web_search` sends conversation-derived queries to DuckDuckGo. By
-  design, but it is an off-box data flow nobody sees.
-- `harness/install-signal-cli.sh` defaults `SERVICE_USER` to a real
-  account name. Not a secret, but it is a real identifier in a public
-  repository.
-- No secrets in `prompts/` or `docs/`.
-
 ### 8. Forks put background instructions after untrusted text (opt-in)
 
 With `agent.forks.enabled` (off by default, #51), compaction,
@@ -320,6 +304,22 @@ Critique independence is the open question: a critic that shares the
 agent's context and persona may share its blind spots. #73 measures it
 behaviorally (planted-defect recall, fork vs standalone) before the
 default flips.
+
+### 9. Smaller things
+
+- `read_file` has a stat-then-read race and follows symlinks. Irrelevant
+  while finding 4 stands.
+- Tool arguments are not validated against the generated schema. Wrong
+  types produce a generic "tool failed". Robustness, not security.
+- `task_pipeline` never marks a non-zero exit as failed, because `shell`
+  returns a string, so dependents run after failures. A correctness bug
+  with mild safety consequences for "deploy after test" graphs.
+- `web_search` sends conversation-derived queries to DuckDuckGo. By
+  design, but it is an off-box data flow nobody sees.
+- `harness/install-signal-cli.sh` defaults `SERVICE_USER` to a real
+  account name. Not a secret, but it is a real identifier in a public
+  repository.
+- No secrets in `prompts/` or `docs/`.
 
 ## Privilege separation
 
