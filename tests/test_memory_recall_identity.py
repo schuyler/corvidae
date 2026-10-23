@@ -207,10 +207,15 @@ class TestSourceDatedRecords:
                 message={"role": "system", "content": "[CONTEXT]"},
                 message_type=MessageType.CONTEXT,
             )
+            # Dialog a day earlier than the trailing CONTEXT row, so dating
+            # from the last dialog row instead of the range end would show.
             then = time.time() - 30 * DAY
             await db.execute(
-                "UPDATE message_log SET timestamp = ? WHERE id IN (?, ?, ?)",
-                (then, *rowids, ctx_id),
+                "UPDATE message_log SET timestamp = ? WHERE id IN (?, ?)",
+                (then - DAY, *rowids),
+            )
+            await db.execute(
+                "UPDATE message_log SET timestamp = ? WHERE id = ?", (then, ctx_id),
             )
             await db.commit()
 
@@ -218,7 +223,7 @@ class TestSourceDatedRecords:
 
             async with db.execute("SELECT created_at FROM memory") as cursor:
                 [(created_at,)] = await cursor.fetchall()
-            assert created_at == pytest.approx(then)
+            assert created_at == pytest.approx(then, abs=1.0)
         finally:
             await db.close()
 
