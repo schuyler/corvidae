@@ -100,9 +100,16 @@ class TestOnStart:
         plugin = Agent(pm)
         pm.register(plugin, name="agent")
 
+        assert plugin.started is False
         await plugin.on_start(config=BASE_CONFIG)
 
         assert plugin._client is mock_client
+        # #59: `started` is the public readiness signal producers (the
+        # scheduler) wait on before injecting notifications, since the
+        # on_start broadcast runs plugins concurrently and Agent starts last.
+        assert plugin.started is True
+        await plugin.on_stop()
+        assert plugin.started is False
         await db.close()
 
     async def test_on_start_collects_tools(self):
