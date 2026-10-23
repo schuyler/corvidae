@@ -42,6 +42,7 @@ from corvidae.fork import (
     ForksConfig,
     ForkUnavailable,
     build_fork_prompt,
+    looks_like_tool_call,
     parse_forks_config,
 )
 from corvidae.hooks import (
@@ -823,7 +824,8 @@ class Agent(CorvidaePlugin):
 
         Raises:
             ForkUnavailable: no live window or no main client.
-            ForkRefused: the model answered with tool calls.
+            ForkRefused: the model answered with tool calls, structured or
+                written out as text.
         """
         conv = channel.conversation
         if conv is None:
@@ -857,6 +859,8 @@ class Agent(CorvidaePlugin):
                 f"fork on {channel.id} answered with "
                 f"{len(message['tool_calls'])} tool call(s)"
             )
+        if looks_like_tool_call(message.get("content") or ""):
+            raise ForkRefused(f"fork on {channel.id} wrote a tool call as text")
         return ForkResult(
             text=message.get("content") or "",
             message=message,

@@ -18,7 +18,12 @@ Where the implementation differs from the text below:
 - The tool-block snap (§3) applies with forks off too: it fixes the
   existing seam, so "flag off is byte-for-byte today" holds for the LLM
   requests but not for which messages compaction keeps when a tool cycle
-  straddles the cut.
+  straddles the cut. Backing up is bounded: a long-span cycle (a slow tool
+  with chat interleaved) is dropped whole by snapping forward instead, and
+  when neither keeps enough the walk's cut stands. Unbounded back-up
+  stalled compaction (review of the first cut of this branch).
+- A fork reply that writes a tool call out as text raises `ForkRefused`
+  like a structured one.
 - `before_compaction` fires on every compaction, fork or not.
 
 Part 1 is the fork design. Part 2 is the eval design.

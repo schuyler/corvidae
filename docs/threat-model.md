@@ -293,8 +293,8 @@ What bounds it:
 
 - A fork never dispatches tools. It sends `tool_choice: "none"` after the
   runtime overrides (so a `set_settings` `tool_choice` can't undo it), and
-  a reply that carries `tool_calls` anyway raises `ForkRefused`. The fork
-  code has no path to `dispatch_tool_call`.
+  a reply that carries `tool_calls` anyway, or writes a call out as text,
+  raises `ForkRefused`. The fork code has no path to `dispatch_tool_call`.
 - Fork output is parsed, not executed: JSON for consolidation, appraisal
   and critique, plain text for the summary.
 - The fork instructions and `agent.forks.*` are static config (finding 2).

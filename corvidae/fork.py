@@ -28,6 +28,8 @@ to :func:`fork_agent` and a name nobody uses simply matches nothing.
 
 from __future__ import annotations
 
+import json
+
 from dataclasses import dataclass
 
 from corvidae.context import ContextWindow
@@ -166,6 +168,37 @@ def build_fork_prompt(
     return prompt
 
 
+def _first_result_index(messages: list[dict]) -> dict[str, int]:
+    """Index of the first result for each tool_call_id (build_prompt's rule)."""
+    result_at: dict[str, int] = {}
+    for i, m in enumerate(messages):
+        call_id = m.get("tool_call_id")
+        if m.get("role") == "tool" and call_id and call_id not in result_at:
+            result_at[call_id] = i
+    return result_at
+
+
+def snap_cut_forward(messages: list[dict], cut: int) -> int:
+    """Move ``cut`` forward past the last result of every straddling cycle.
+
+    The other way to clear a straddle (see
+    :func:`snap_cut_to_tool_boundary`): drop the whole cycle instead of
+    keeping it. Moving forward can straddle a later call whose results sit
+    further on, so this repeats until stable. May return ``len(messages)``.
+    """
+    result_at = _first_result_index(messages)
+    while True:
+        new_cut = cut
+        for i in range(cut):
+            for c in messages[i].get("tool_calls") or []:
+                j = result_at.get(c["id"], -1)
+                if j >= new_cut:
+                    new_cut = j + 1
+        if new_cut == cut:
+            return cut
+        cut = new_cut
+
+
 def snap_cut_to_tool_boundary(messages: list[dict], cut: int) -> int:
     """Move ``cut`` back until no tool cycle straddles it.
 
@@ -176,14 +209,10 @@ def snap_cut_to_tool_boundary(messages: list[dict], cut: int) -> int:
     the two prompts diverge there (and compaction would drop the call while
     keeping its results). Backing up to the call can land inside an earlier
     cycle, so this repeats until stable. A call with no result anywhere
-    renders in place either way and never straddles.
+    (in flight or abandoned) renders in place either way and never
+    straddles.
     """
-    # Index of the first result for each tool_call_id (build_prompt's rule).
-    result_at: dict[str, int] = {}
-    for i, m in enumerate(messages):
-        call_id = m.get("tool_call_id")
-        if m.get("role") == "tool" and call_id and call_id not in result_at:
-            result_at[call_id] = i
+    result_at = _first_result_index(messages)
 
     # Back up to the earliest straddling call; repeat to a fixpoint.
     while True:
@@ -196,6 +225,27 @@ def snap_cut_to_tool_boundary(messages: list[dict], cut: int) -> int:
         if new_cut == cut:
             return cut
         cut = new_cut
+
+
+def looks_like_tool_call(text: str) -> bool:
+    """Whether a fork's text reply is a tool call written out as text.
+
+    ``tool_choice: "none"`` stops the server emitting structured
+    ``tool_calls``, but the tools are still in the prompt and a model can
+    write call markup into its content instead. That must not be taken as
+    a summary, record or verdict: a bare ``{"name": ..., "arguments": ...}``
+    object would even parse as a reply with nothing to report.
+    """
+    stripped = text.strip()
+    if stripped.startswith(("<tool_call>", "<function")):
+        return True
+    if stripped.startswith("{"):
+        try:
+            data = json.loads(stripped)
+        except ValueError:
+            return False
+        return isinstance(data, dict) and "name" in data and "arguments" in data
+    return False
 
 
 def window_db_ids(messages: list[dict]) -> set[int]:

@@ -22,6 +22,7 @@ from corvidae.fork import (
     ForkUnavailable,
     build_fork_prompt,
     parse_forks_config,
+    snap_cut_forward,
     snap_cut_to_tool_boundary,
 )
 from corvidae.hooks import hookimpl
@@ -146,6 +147,23 @@ class TestSnapCut:
         # cut=4: call y (index 2) straddles → back up to 2; call x (index 1)
         # has its result at 3 ≥ 2 → back up to 1.
         assert snap_cut_to_tool_boundary(messages, 4) == 1
+
+    @pytest.mark.parametrize("cut,expected", [(3, 6), (4, 6), (5, 6), (2, 2), (7, 7)])
+    def test_forward_snap_passes_the_last_result(self, cut, expected):
+        conv = _tool_window()
+        assert snap_cut_forward(conv.messages, cut) == expected
+
+    def test_forward_snap_chains_to_a_fixpoint(self):
+        messages = [
+            {"role": "assistant", "content": "", "tool_calls": [_call("x")]},
+            {"role": "assistant", "content": "", "tool_calls": [_call("y")]},
+            {"role": "tool", "tool_call_id": "x", "content": "X"},
+            {"role": "user", "content": "hm"},
+            {"role": "tool", "tool_call_id": "y", "content": "Y"},
+            {"role": "user", "content": "done?"},
+        ]
+        # cut=1: x straddles → 3; then y (index 1) straddles → 5.
+        assert snap_cut_forward(messages, 1) == 5
 
     def test_unanswered_call_does_not_straddle(self):
         """A call with no result anywhere renders in place either way."""
@@ -367,6 +385,33 @@ class TestAgentFork:
             with pytest.raises(ForkRefused):
                 await plugin.fork(channel, INSTRUCTION)
             assert channel.pending_tool_call_ids == set()
+        finally:
+            await db.close()
+
+    @pytest.mark.parametrize("text", [
+        '<tool_call>\n{"name": "shell", "arguments": {"command": "ls"}}\n</tool_call>',
+        '  {"name": "shell", "arguments": {"command": "ls"}}',
+        "<function=shell><parameter=command>ls</parameter></function>",
+    ])
+    async def test_tool_call_written_as_text_raises_fork_refused(self, text):
+        plugin, channel, db, client = await _agent_with_window({"enabled": True})
+        client.chat = AsyncMock(return_value=_make_text_response(text))
+        try:
+            with pytest.raises(ForkRefused):
+                await plugin.fork(channel, INSTRUCTION)
+        finally:
+            await db.close()
+
+    @pytest.mark.parametrize("text", [
+        '{"summary": "I helped", "topic_tags": [], "participants": []}',
+        '{"objections": []}',
+        "We were debugging the name and arguments of a function.",
+    ])
+    async def test_ordinary_replies_are_not_refused(self, text):
+        plugin, channel, db, client = await _agent_with_window({"enabled": True})
+        client.chat = AsyncMock(return_value=_make_text_response(text))
+        try:
+            assert (await plugin.fork(channel, INSTRUCTION)).text == text
         finally:
             await db.close()
 

@@ -139,8 +139,10 @@ class TestRetainSnap:
         assert before[2] == 6
         assert order.calls[1][2] == 4  # retain_count
 
-    async def test_snap_to_zero_cut_skips_compaction(self):
-        """A tool cycle spanning the whole window leaves nothing to drop."""
+    async def test_cycle_spanning_the_window_still_compacts(self):
+        """No clean cut keeps anything: backing up reaches the head and the
+        forward snap reaches the tail. The walk's cut stands rather than
+        skipping compaction (which would stall it every turn)."""
         conv = ContextWindow("test:scope")
         big = "x" * 200
         conv.messages = [
@@ -149,13 +151,86 @@ class TestRetainSnap:
             _msg("tool", "r", 7, tool_call_id="c1"),
         ]
         plugin, order = _plugin(conv)
-        summarize = AsyncMock(return_value="sum")
-        with patch.object(plugin, "_summarize", summarize):
+        with patch.object(plugin, "_summarize", AsyncMock(return_value="sum")):
             assert await plugin.compact_conversation(
                 channel=_channel(), conversation=conv, max_tokens=MAX_TOKENS
-            ) is None
-        summarize.assert_not_called()
-        assert order.calls == []
+            )
+        assert order.calls[0][1][0] == 1  # the call was dropped
+
+
+def _long_span_window(trailing_exchanges: int) -> ContextWindow:
+    """A long-running call near the head, 40 exchanges of chat while it
+    runs (R4), its result, then ``trailing_exchanges`` more exchanges."""
+    conv = ContextWindow("test:scope")
+    conv.system_prompt = "sys"
+    big = "word " * 120
+    msgs = [
+        _msg("user", "run the long job", 1),
+        _msg("assistant", "", 2, tool_calls=[_call("c1")]),
+    ]
+    i = 3
+    for _ in range(40):
+        msgs += [_msg("user", big, i), _msg("assistant", big, i + 1)]
+        i += 2
+    msgs.append(_msg("tool", "job done", i, tool_call_id="c1"))
+    i += 1
+    for _ in range(trailing_exchanges):
+        msgs += [_msg("user", big, i), _msg("assistant", big, i + 1)]
+        i += 2
+    conv.messages = msgs
+    return conv
+
+
+def _orphans(messages: list[dict]) -> list[dict]:
+    """Tool results whose call is not in the window."""
+    calls = {c["id"] for m in messages for c in (m.get("tool_calls") or [])}
+    return [m for m in messages if m.get("role") == "tool" and m["tool_call_id"] not in calls]
+
+
+class TestSnapLiveness:
+    """Backing the cut up to a long-span call must not stall compaction."""
+
+    async def test_long_span_cycle_is_dropped_whole_when_the_tail_survives(self):
+        conv = _long_span_window(trailing_exchanges=20)
+        result_id = 83
+        max_tokens = int(conv.token_estimate() / 0.9)
+        plugin, order = _plugin(conv)
+        with patch.object(plugin, "_summarize", AsyncMock(return_value="sum")):
+            assert await plugin.compact_conversation(
+                channel=_channel(), conversation=conv, max_tokens=max_tokens
+            )
+        assert conv.token_estimate() < 0.8 * max_tokens
+        # The cut moved forward: the call and its result both went.
+        assert all(m.get("_db_id") not in (2, result_id) for m in conv.messages)
+        assert result_id in order.calls[0][1]
+        assert _orphans(conv.messages) == []
+        assert len(conv.messages) == 1 + 40  # summary + the 20 trailing exchanges
+
+    @pytest.mark.parametrize("trailing", [0, 3])
+    async def test_short_tail_keeps_the_planned_cut(self, trailing):
+        """When dropping the whole cycle would leave too little (the result
+        is at or near the tail), the walk's own cut stands, as before #51:
+        compaction still makes progress."""
+        conv = _long_span_window(trailing_exchanges=trailing)
+        max_tokens = int(conv.token_estimate() / 0.9)
+        plugin, _ = _plugin(conv)
+        with patch.object(plugin, "_summarize", AsyncMock(return_value="sum")):
+            assert await plugin.compact_conversation(
+                channel=_channel(), conversation=conv, max_tokens=max_tokens
+            )
+        assert conv.token_estimate() < 0.8 * max_tokens
+        assert conv.token_estimate() > 0.3 * max_tokens
+
+    async def test_short_span_still_backs_up(self):
+        """The small straddle keeps backing up: the retained tail stays well
+        under the trigger."""
+        conv = _straddling_window()
+        plugin, _ = _plugin(conv)
+        with patch.object(plugin, "_summarize", AsyncMock(return_value="sum")):
+            await plugin.compact_conversation(
+                channel=_channel(), conversation=conv, max_tokens=MAX_TOKENS
+            )
+        assert [m.get("_db_id") for m in conv.messages[1:]] == [7, 8, 9, 10]
 
 
 # ---------------------------------------------------------------------------

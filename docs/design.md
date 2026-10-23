@@ -826,12 +826,20 @@ for side effects; its return value is not used by the caller.
 3. Backward walk: starting from the most recent message, accumulate messages
    until their token estimate would exceed 50% of `max_tokens`. The count
    of accumulated messages is `retain_count`. The cut
-   (`len(messages) - retain_count`) is then backed up with
-   `snap_cut_to_tool_boundary` until no tool cycle straddles it: an
-   assistant `tool_calls` message is never dropped while any of its results
-   are kept. Before #51 the walk could drop a call and keep orphan results;
-   the snap also makes the dropped prefix render exactly as the start of
-   the full window, which a compaction fork needs.
+   (`len(messages) - retain_count`) is then moved so no tool cycle
+   straddles it (`_clean_cut`), because a straddle drops a call while
+   keeping its results, and makes the dropped prefix render differently
+   from the start of the full window, which a compaction fork needs.
+   First choice: back up with `snap_cut_to_tool_boundary` to keep the
+   cycle, if the retained tail stays at or below the midpoint between
+   `compaction_retention` and `compaction_threshold`. Otherwise (a
+   long-running call near the head with chat interleaved behind it) move
+   forward with `snap_cut_forward` to drop the cycle whole, if at least
+   half the retention budget survives. Otherwise keep the walk's cut, as
+   before #51. Backing up without that bound could leave compaction
+   dropping almost nothing and re-running every few messages. In-flight
+   calls have no result yet and never straddle; one dropped by compaction
+   leaves its later result orphaned, as before.
 4. If `retain_count >= len(conversation.messages)`, return `None` (all messages fit — no-op).
 5. Filter the older (non-retained) messages to `MESSAGE` type only, excluding
    any `SUMMARY` entries. Strip `_message_type` metadata before passing to LLM.
@@ -915,8 +923,10 @@ stage's `extra_body` (`response_format`). Those keys are applied after the
 runtime overrides, so `set_settings` can't re-enable tool calls on a fork.
 
 **Invariants.** A fork mutates nothing, persists nothing, fires no hooks,
-and never dispatches tools: a reply carrying `tool_calls` raises
-`ForkRefused`. No live window or no main client raises `ForkUnavailable`.
+and never dispatches tools: a reply carrying `tool_calls`, or a tool call
+written out as text (`<tool_call>`, `<function…`, a bare
+`{"name", "arguments"}` object), raises `ForkRefused`. No live window or
+no main client raises `ForkUnavailable`.
 Every caller treats any fork exception, or an empty or unparseable reply,
 as a miss: it logs at WARNING and makes its standalone call instead.
 

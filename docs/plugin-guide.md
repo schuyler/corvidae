@@ -185,7 +185,7 @@ async def send_message(self, channel, text: str) -> None:
 | `before_agent_turn(channel, correlation_id: str \| None, meta: dict)` | async broadcast | Before each LLM invocation |
 | `after_persist_assistant(channel, message: dict)` | async broadcast | After assistant message is written to DB; plugins may mutate the in-memory dict |
 | `on_conversation_event(channel, message: dict, message_type: MessageType) -> int \| None` | async broadcast | After every `conv.append()` call; message is the untagged dict (no `_message_type` key). Persistence returns the inserted `message_log` rowid; **exactly one implementation may return non-None** (all others return None). Callers resolve with `resolve_single_result` and attach the rowid to the in-window message as `_db_id`. |
-| `before_compaction(channel, compacted_ids: list[int], cut: int)` | async broadcast, awaited | After the compaction summary succeeded and before `replace_with_summary`. The window still holds the messages about to be dropped (`channel.conversation.messages[:cut]`; `cut` never splits a tool call from its results), so this is where to fork over that prefix (see "Forking the window"). Runs on the response path; failures are logged and never block compaction. |
+| `before_compaction(channel, compacted_ids: list[int], cut: int)` | async broadcast, awaited | After the compaction summary succeeded and before `replace_with_summary`. The window still holds the messages about to be dropped (`channel.conversation.messages[:cut]`; `cut` is moved off tool cycles where compaction can afford it, see design.md), so this is where to fork over that prefix (see "Forking the window"). Runs on the response path; failures are logged and never block compaction. |
 | `on_compaction(channel, summary_msg: dict, retain_count: int, compacted_ids: list[int])` | async broadcast | After compaction replaces older messages with a summary; `summary_msg` is the untagged summary dict. `compacted_ids` carries the `message_log` rowids of exactly the removed messages (empty when unknown) — the consolidation range consumed by `MemoryPlugin`. |
 | `on_idle()` | async broadcast | All queues empty and cooldown elapsed; only fires when `IdleMonitorPlugin` is registered |
 | `resolve_channel(channel_id: str) -> Channel \| None` | async firstresult | A caller holding only a persisted `transport:scope` id (`SchedulerPlugin` firing a row after a restart) asks transports for the live channel. Return it for ids your transport owns, else None. See [Channels](#channels). |
@@ -470,7 +470,7 @@ class MyPlugin(CorvidaePlugin):
   renders into the prompt: that breaks the cached prefix. Bound cost with
   `agent.forks.reasoning_budget_tokens` instead.
 - It mutates nothing, persists nothing, fires no hooks and never runs
-  tools: a reply with `tool_calls` raises `ForkRefused`; no window or no
+  tools: a reply with `tool_calls` (or a call written out as text) raises `ForkRefused`; no window or no
   client raises `ForkUnavailable`. Always keep a standalone fallback.
 - Set your own `stage` attribution around the call; `Agent.fork` adds
   `mode="fork"`. Tag your standalone call `mode="standalone"`.
@@ -821,7 +821,7 @@ Compacts conversation history when it approaches the channel's
 
 Implements one hook:
 
-- `compact_conversation` (`trylast=True`) — fires before each LLM call. Checks whether the token estimate exceeds `compaction_threshold * max_tokens`. If so, and if the conversation has more than `min_messages_to_compact` messages, summarizes older messages to fit within `compaction_retention * max_tokens`, backing the cut up so a tool call is never dropped while its results are kept. With `agent.forks` on for `compaction`, the summary comes from a fork of the dropped prefix (`agent.compaction_fork_prompt`); otherwise, or if the fork fails, from the standalone summarizer. Fires `before_compaction` before truncating and `on_compaction` after. Returns True to stop the `firstresult` chain. Runs after any third-party handlers at default priority.
+- `compact_conversation` (`trylast=True`) — fires before each LLM call. Checks whether the token estimate exceeds `compaction_threshold * max_tokens`. If so, and if the conversation has more than `min_messages_to_compact` messages, summarizes older messages to fit within `compaction_retention * max_tokens`, moving the cut off any tool cycle that straddles it where that still leaves a useful compaction (design.md, CompactionPlugin step 3). With `agent.forks` on for `compaction`, the summary comes from a fork of the dropped prefix (`agent.compaction_fork_prompt`); otherwise, or if the fork fails, from the standalone summarizer. Fires `before_compaction` before truncating and `on_compaction` after. Returns True to stop the `firstresult` chain. Runs after any third-party handlers at default priority.
 
 Token counting uses tiktoken (cl100k_base encoding) via `count_tokens()` in `corvidae/context.py`. When tiktoken is unavailable, a character-based fallback is used (3.5 chars per token). `agent.chars_per_token` is deprecated and only takes effect in the fallback path.
 

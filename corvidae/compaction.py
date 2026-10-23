@@ -7,9 +7,12 @@ Agent so it runs as the default compaction strategy.
 Algorithm:
     1. Skip if token_estimate < 80% of max_tokens.
     2. Skip if len(messages) <= 5.
-    3. Backward walk retaining messages within 50% of max_tokens, then back
-       the cut up so no tool cycle straddles it (a call is never dropped
-       while its results are kept).
+    3. Backward walk retaining messages within 50% of max_tokens, then move
+       the cut so no tool cycle straddles it: back to keep the cycle when
+       the tail stays well under the trigger, else forward to drop it
+       whole if enough of the tail survives, else keep the walk's cut
+       (see _clean_cut). In-flight calls have no result yet and never
+       straddle.
     4. Skip if all messages fit (retain_count >= len(messages)).
     5. Summarize. With forks on for "compaction" (agent.forks, #51), fork
        the window at the cut and append agent.compaction_fork_prompt: the
@@ -30,7 +33,7 @@ import time
 
 from corvidae.attribution import reset_attribution, set_attribution
 from corvidae.context import DEFAULT_CHARS_PER_TOKEN, MessageType, count_tokens, message_tokens
-from corvidae.fork import fork_agent, snap_cut_to_tool_boundary
+from corvidae.fork import fork_agent, snap_cut_forward, snap_cut_to_tool_boundary
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 
 logger = logging.getLogger(__name__)
@@ -212,11 +215,11 @@ class CompactionPlugin(CorvidaePlugin):
             retain_tokens += msg_tokens
             retain_count += 1
 
-        # Back the cut up so no tool cycle straddles it: dropping a call
-        # while keeping its results orphans them, and a fork of the prefix
-        # would render the call differently from the main turn (#51).
-        cut = snap_cut_to_tool_boundary(
-            conversation.messages, len(conversation.messages) - retain_count
+        # Move the cut so no tool cycle straddles it: dropping a call while
+        # keeping its results orphans them, and a fork of the prefix would
+        # render the call differently from the main turn (#51).
+        cut = self._clean_cut(
+            conversation.messages, len(conversation.messages) - retain_count, max_tokens
         )
         retain_count = len(conversation.messages) - cut
 
@@ -331,6 +334,35 @@ class CompactionPlugin(CorvidaePlugin):
                 logger.warning("on_compaction hook failed", exc_info=True)
 
         return True
+
+    def _clean_cut(self, messages: list[dict], planned: int, max_tokens: int) -> int:
+        """The cut to compact at, given the retain walk's ``planned`` cut.
+
+        Prefers backing up to keep a straddling tool cycle whole, but only
+        while the retained tail stays well under the trigger (halfway from
+        compaction_retention to compaction_threshold). A long-running call
+        near the head with chat interleaved behind it would otherwise pull
+        the cut back so far that compaction drops almost nothing and runs
+        again every few messages. Then the cut moves forward past the
+        cycle's last result instead, dropping it whole, but only while at
+        least half the retention budget survives. Otherwise (the result is
+        near the newest message) the planned cut stands, orphaned result
+        and all, as before #51: never worse than the unsnapped walk.
+        """
+        back = snap_cut_to_tool_boundary(messages, planned)
+        if back == planned:
+            return planned
+
+        def tail_tokens(cut: int) -> int:
+            return sum(message_tokens(m) for m in messages[cut:])
+
+        ceiling = max_tokens * (self._compaction_retention + self._compaction_threshold) / 2
+        if back > 0 and tail_tokens(back) <= ceiling:
+            return back
+        forward = snap_cut_forward(messages, planned)
+        if forward < len(messages) and tail_tokens(forward) >= max_tokens * self._compaction_retention / 2:
+            return forward
+        return planned
 
     async def _fork_summary(self, channel, cut: int) -> str | None:
         """The summary from a fork of the window at ``cut``, or None.

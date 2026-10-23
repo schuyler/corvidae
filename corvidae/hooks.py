@@ -797,8 +797,12 @@ class AgentSpec:
                 to be dropped, in window order (same list on_compaction
                 receives). Empty when none were persisted.
             cut: Window index of the first retained message; the dropped
-                messages are ``channel.conversation.messages[:cut]``. Never
-                splits an assistant tool-call message from its results.
+                messages are ``channel.conversation.messages[:cut]``.
+                Normally no tool cycle straddles it; the exception is a
+                long-span cycle whose result is near the tail, where
+                compaction keeps its planned cut (CompactionPlugin
+                ._clean_cut) and the fork prefix renders that call with a
+                placeholder result.
         """
 
     @hookspec
