@@ -1335,10 +1335,12 @@ warning and the daemon keeps running; with no stdin at all the read loop
 never starts. So a service-managed config may keep a `cli:` channel. The
 banner and `> ` prompts print only when stdin is a terminal.
 
-`Runtime.run` installs its SIGINT/SIGTERM handlers before startup, so a
-signal that arrives while plugins are still starting (this EOF path, or a
-Ctrl-C during startup) is held until startup finishes, then shuts down
-normally. A second signal still force-exits.
+`Runtime.run` installs its SIGINT handler before startup, so a SIGINT
+that arrives while plugins are still starting (this EOF path, or a Ctrl-C
+during startup) is held until startup finishes, then shuts down normally;
+it logs that it is waiting, and a second interrupt force-exits. SIGTERM
+keeps its default action until startup finishes, so `systemctl stop`
+during a hung startup ends the process at once.
 
 ### IRC (`channels/irc.py`)
 
