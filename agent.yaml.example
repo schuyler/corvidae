@@ -83,6 +83,8 @@ agent:
 #   retrieval:
 #     band_on: score                  # score | similarity: what strong/moderate/weak is applied to
 #     recency_from: created           # created | last_used: where ranking age is measured from
+#   channel_groups:                   # channels in a group share memory; members may use * and ?
+#     home: ["irc:#lex", "signal:*"]  # signal:* covers Signal channels created at runtime
 
 # Built-in tool settings (optional)
 # tools:

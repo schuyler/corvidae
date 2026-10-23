@@ -32,7 +32,8 @@ Config:
         bands:
           strong: 0.75               # value >= strong → asserted confidently
           moderate: 0.60             # value >= moderate → hedged
-      channel_groups: {}             # {group_name: [channel ids]} shared memory
+      channel_groups: {}             # {group_name: [channel ids or * ? globs]}
+                                     # shared memory
 """
 
 from __future__ import annotations
@@ -44,6 +45,8 @@ import math
 import re
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
+from fnmatch import fnmatchcase
 from typing import Protocol
 
 import aiosqlite
@@ -186,6 +189,77 @@ def _retrieval_choice(retrieval_cfg: dict, key: str, choices: tuple[str, ...]) -
         )
         return choices[0]
     return value
+
+
+# Wildcards a memory.channel_groups member may use. These are the only
+# metacharacters fnmatchcase and SQLite GLOB agree on; '[' / ']' (character
+# classes) differ between the two and are rejected (GitHub issue #50).
+_GLOB_WILDCARDS = frozenset("*?")
+_GLOB_REJECTED = frozenset("[]")
+
+
+def _is_pattern(member: str) -> bool:
+    """Whether a channel_groups member is a glob pattern, not a literal id."""
+    return not _GLOB_WILDCARDS.isdisjoint(member)
+
+
+def _validate_channel_groups(groups: object) -> dict[str, list[str]]:
+    """Check memory.channel_groups is {name: [str]} with no bracket members.
+
+    Raises ValueError rather than dropping a bad member: silently narrowing
+    or reshaping a memory compartment is worse than refusing to start.
+    """
+    if not isinstance(groups, dict):
+        raise ValueError(
+            f"memory.channel_groups must be a mapping, got {type(groups).__name__}"
+        )
+    for name, members in groups.items():
+        if not isinstance(members, list) or not all(
+            isinstance(m, str) for m in members
+        ):
+            raise ValueError(
+                f"memory.channel_groups.{name} must be a list of channel ids"
+            )
+        for member in members:
+            if not _GLOB_REJECTED.isdisjoint(member):
+                raise ValueError(
+                    f"memory.channel_groups.{name} member {member!r}: "
+                    "'[' and ']' are not supported; use '*' or '?'"
+                )
+    return groups
+
+
+@dataclass(frozen=True)
+class ChannelScope:
+    """The set of channels whose memories a calling channel may read.
+
+    ``ids`` match by equality (the caller's own id and literal group
+    members); ``patterns`` are '*' / '?' globs from group members, matched
+    case-sensitively with the same semantics in Python and SQLite GLOB.
+    """
+
+    ids: frozenset[str]
+    patterns: tuple[str, ...] = ()
+
+    def contains(self, channel_id: str) -> bool:
+        """Whether a memory owned by channel_id is visible in this scope."""
+        return channel_id in self.ids or any(
+            fnmatchcase(channel_id, p) for p in self.patterns
+        )
+
+    def sql(self, column: str) -> tuple[str, list[str]]:
+        """A parenthesized WHERE fragment restricting column to this scope,
+        with its bind parameters (ids first, then patterns)."""
+        clauses = []
+        if self.ids:
+            placeholders = ",".join("?" for _ in self.ids)
+            clauses.append(f"{column} IN ({placeholders})")
+        clauses.extend(f"{column} GLOB ?" for _ in self.patterns)
+        return "(" + " OR ".join(clauses) + ")", [*sorted(self.ids), *self.patterns]
+
+    def describe(self) -> str:
+        """Human-readable listing for scope errors shown to the model."""
+        return ", ".join([*sorted(self.ids), *self.patterns])
 
 
 def _format_age(seconds: float) -> str:
@@ -458,7 +532,9 @@ class MemoryPlugin(CorvidaePlugin):
         self._recency_from = _retrieval_choice(
             retrieval_cfg, "recency_from", RECENCY_FROM_CHOICES
         )
-        self._channel_groups = self._memory_cfg.get("channel_groups", {}) or {}
+        self._channel_groups = _validate_channel_groups(
+            self._memory_cfg.get("channel_groups", {}) or {}
+        )
         # Phase 1b: near-dup merge threshold (WP1b.2)
         self._dup_threshold = float(self._memory_cfg.get("dup_threshold", 0.95))
 
@@ -1119,21 +1195,36 @@ class MemoryPlugin(CorvidaePlugin):
         candidates.sort(key=lambda c: c["score"], reverse=True)
         return candidates[:k], degraded
 
-    def _channel_scope(self, channel_id: str) -> list[str]:
-        """The channel ids whose memories this channel may retrieve.
+    def _channel_scope(self, channel_id: str) -> ChannelScope:
+        """The channels whose memories this channel may retrieve.
 
-        The channel itself, plus every member of any configured group it
-        belongs to (memory.channel_groups, §3.1 compartmentalization).
+        The channel itself (by equality), plus every member of any
+        configured group it belongs to (memory.channel_groups, §3.1
+        compartmentalization). A group applies when the caller equals a
+        literal member or matches a '*' / '?' pattern member; its literal
+        members join the scope as ids and its patterns as patterns, so
+        channels created at runtime are covered (GitHub issue #50).
         """
-        scope = {channel_id}
+        ids = {channel_id}
+        patterns: list[str] = []
         for members in self._channel_groups.values():
-            if channel_id in members:
-                scope.update(members)
-        return sorted(scope)
+            # Does this group admit the caller?
+            if not any(
+                fnmatchcase(channel_id, m) if _is_pattern(m) else channel_id == m
+                for m in members
+            ):
+                continue
+            # Merge the group's members into the scope, deduplicated.
+            for m in members:
+                if not _is_pattern(m):
+                    ids.add(m)
+                elif m not in patterns:
+                    patterns.append(m)
+        return ChannelScope(frozenset(ids), tuple(patterns))
 
     async def _vec_candidates(
         self, db: aiosqlite.Connection, query_vector: list[float],
-        scope: list[str], k: int,
+        scope: ChannelScope, k: int,
     ) -> list[tuple]:
         """Exact-KNN candidates:
         (id, summary, created_at, last_retrieved_at, cosine_similarity).
@@ -1143,19 +1234,19 @@ class MemoryPlugin(CorvidaePlugin):
         and flags in the join.
         """
         import sqlite_vec
-        placeholders = ",".join("?" for _ in scope)
+        scope_sql, scope_params = scope.sql("m.channel_id")
         async with db.execute(
             "SELECT m.id, m.summary, m.created_at, m.last_retrieved_at, v.distance "
             "FROM (SELECT memory_id, distance FROM memory_vec "
             "      WHERE embedding MATCH ? AND k = ?) AS v "
             "JOIN memory m ON m.id = v.memory_id "
             f"WHERE m.indexed = 1 AND m.redacted = 0 "
-            f"AND m.channel_id IN ({placeholders}) "
+            f"AND {scope_sql} "
             "ORDER BY v.distance",
             (
                 sqlite_vec.serialize_float32(query_vector),
                 k * VEC_OVERFETCH,
-                *scope,
+                *scope_params,
             ),
         ) as cursor:
             rows = await cursor.fetchall()
@@ -1166,21 +1257,21 @@ class MemoryPlugin(CorvidaePlugin):
         ]
 
     async def _fts_candidates(
-        self, db: aiosqlite.Connection, text: str, scope: list[str], k: int
+        self, db: aiosqlite.Connection, text: str, scope: ChannelScope, k: int
     ) -> list[tuple]:
         """FTS5 keyword candidates with a fixed similarity proxy:
         (id, summary, created_at, last_retrieved_at, FTS_SIMILARITY_PROXY)."""
         match = _fts_match_query(text)
         if match is None:
             return []
-        placeholders = ",".join("?" for _ in scope)
+        scope_sql, scope_params = scope.sql("m.channel_id")
         async with db.execute(
             "SELECT m.id, m.summary, m.created_at, m.last_retrieved_at "
             "FROM memory_fts JOIN memory m ON m.id = memory_fts.rowid "
             f"WHERE memory_fts MATCH ? AND m.indexed = 1 AND m.redacted = 0 "
-            f"AND m.channel_id IN ({placeholders}) "
+            f"AND {scope_sql} "
             "ORDER BY rank LIMIT ?",
-            (match, *scope, k),
+            (match, *scope_params, k),
         ) as cursor:
             rows = await cursor.fetchall()
         return [

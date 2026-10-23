@@ -648,6 +648,110 @@ class TestToolCompartmentScoping:
         await db.close()
 
 
+GLOB_CONFIG = {
+    **EMBED_CONFIG,
+    "memory": {
+        "channel_groups": {
+            "lex": ["irc:#electronics", "signal:*"],
+        },
+    },
+}
+
+
+class TestGlobGroupToolScoping:
+    """search_memory and recall_raw honor glob group members (issue #50)."""
+
+    async def test_search_memory_sees_glob_matched_channel(self):
+        memory, memory_tools, db = await build_tools_env(config=GLOB_CONFIG)
+        caller = Channel(transport="irc", scope="#electronics")
+        await seed_memory(db, "signal:runtime-aci", "kestrel solar MQTT glob sibling")
+
+        tools = get_tools(memory_tools)
+        result = await tools["search_memory"]("solar MQTT", _ctx=make_ctx(caller))
+        assert "glob sibling" in result, result
+        await db.close()
+
+    async def test_search_memory_channel_arg_glob_member_accepted(self):
+        memory, memory_tools, db = await build_tools_env(config=GLOB_CONFIG)
+        caller = Channel(transport="irc", scope="#electronics")
+        await seed_memory(db, "signal:runtime-aci", "kestrel solar MQTT narrowed")
+
+        tools = get_tools(memory_tools)
+        result = await tools["search_memory"](
+            "solar MQTT", channel="signal:runtime-aci", _ctx=make_ctx(caller)
+        )
+        assert "narrowed" in result, result
+        await db.close()
+
+    async def test_search_memory_channel_arg_is_not_a_pattern(self):
+        # channel= narrows by equality: passing the pattern itself must not
+        # turn into a GLOB query over every matching channel.
+        memory, memory_tools, db = await build_tools_env(config=GLOB_CONFIG)
+        caller = Channel(transport="irc", scope="#electronics")
+        await seed_memory(db, "signal:runtime-aci", "kestrel solar MQTT literal")
+
+        tools = get_tools(memory_tools)
+        result = await tools["search_memory"](
+            "solar MQTT", channel="signal:*", _ctx=make_ctx(caller)
+        )
+        assert "literal" not in result, result
+        await db.close()
+
+    async def test_search_memory_out_of_scope_error_names_pattern(self):
+        memory, memory_tools, db = await build_tools_env(config=GLOB_CONFIG)
+        caller = Channel(transport="irc", scope="#electronics")
+
+        tools = get_tools(memory_tools)
+        result = await tools["search_memory"](
+            "query", channel="irc:#secret", _ctx=make_ctx(caller)
+        )
+        assert "outside your visible scope" in result
+        assert "signal:*" in result, result
+        await db.close()
+
+    async def test_search_memory_non_member_does_not_see_glob_group(self):
+        memory, memory_tools, db = await build_tools_env(config=GLOB_CONFIG)
+        outsider = Channel(transport="irc", scope="#secret")
+        await seed_memory(db, "signal:runtime-aci", "kestrel solar MQTT hidden")
+
+        tools = get_tools(memory_tools)
+        result = await tools["search_memory"]("solar MQTT", _ctx=make_ctx(outsider))
+        assert "hidden" not in result, result
+        await db.close()
+
+    async def test_recall_raw_glob_matched_caller(self):
+        memory, memory_tools, db = await build_tools_env(config=GLOB_CONFIG)
+        caller = Channel(transport="signal", scope="new-aci")
+
+        msg1 = await seed_message_log_row(db, "irc:#electronics", "user", "irc dialog")
+        msg2 = await seed_message_log_row(db, "irc:#electronics", "assistant", "irc reply")
+        mid = await seed_memory(
+            db, "irc:#electronics", "irc memory",
+            msg_id_start=msg1, msg_id_end=msg2,
+        )
+
+        tools = get_tools(memory_tools)
+        result = await tools["recall_raw"](mid, _ctx=make_ctx(caller))
+        assert "irc dialog" in result, result
+        await db.close()
+
+    async def test_recall_raw_rejects_non_member(self):
+        memory, memory_tools, db = await build_tools_env(config=GLOB_CONFIG)
+        outsider = Channel(transport="irc", scope="#secret")
+
+        msg1 = await seed_message_log_row(db, "signal:aci", "user", "signal dialog")
+        mid = await seed_memory(
+            db, "signal:aci", "signal memory",
+            msg_id_start=msg1, msg_id_end=msg1,
+        )
+
+        tools = get_tools(memory_tools)
+        result = await tools["recall_raw"](mid, _ctx=make_ctx(outsider))
+        assert "outside your scope" in result, result
+        assert "signal dialog" not in result
+        await db.close()
+
+
 # ---------------------------------------------------------------------------
 # WP1b.3 stat semantics: recall_raw bumps, search_memory does not
 # ---------------------------------------------------------------------------
