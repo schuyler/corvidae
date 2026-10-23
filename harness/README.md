@@ -28,6 +28,35 @@ tokens grepped from replies, or facts read straight out of `sessions.db`):
 
 Full pass criteria: the probe functions' verdict logic in `harness/driver.py`.
 
+### Profiles
+
+The table above is the default profile, `buster`. `HARNESS_PROFILE` picks
+another: it names a config template, `harness/<profile>.yaml.in`, and the
+driver's probe set (`PROFILES` in `driver.py`).
+
+```
+HARNESS_PROFILE=buster-memrole harness/run-remote.sh [rev]
+```
+
+| Profile | Probe | Channel | Checks |
+|---|---|---|---|
+| `buster-memrole` | `memory_role` | `#p-memrole` | With `agent.mid_conversation_system_role: user`, the memory block is the last "user" message the model sees; the model still answers the person |
+
+`memory_role` sends a warm-up turn (MemoryPlugin creates its schema on first
+use when its `on_start` ran before the database opened), seeds one memory row
+into `sessions.db`, then asks a question
+that shares keywords with it (so retrieval admits the block) but whose answer
+isn't in it. It passes when the reply carries the answer (42),
+`retrieval_log` shows the block was admitted on that turn, and a follow-up
+recalls the remembered codename. The profile turns on `memory` and `funnel`,
+which the default profile keeps off, and has no `llm.embedding` role, so
+retrieval runs FTS5-only and the host needs no embedding server. Run it
+before making `user` the default for `mid_conversation_system_role`.
+
+A run under any profile but `buster` moves its rendered config into the run
+directory when it finishes, so the next `chat.sh` renders the default profile
+again instead of starting Buster under this one.
+
 The harness introduces concurrency only where concurrency is the thing under
 test. Every probe but `interleave` sends one line and waits for the bot's
 reply before sending the next; an unawaited send turns queue depth into an
