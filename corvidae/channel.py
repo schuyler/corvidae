@@ -20,6 +20,8 @@ from pathlib import Path
 from time import time
 from typing import TYPE_CHECKING
 
+from corvidae.fork import parse_forks_config
+
 if TYPE_CHECKING:
     from corvidae.context import ContextWindow
 
@@ -88,10 +90,12 @@ def validate_agent_config(agent: dict) -> None:
     """Validate the ``agent`` config section before it becomes agent_defaults.
 
     Raises:
-        ValueError: on the removed keep_thinking_in_history key or an
-            invalid reasoning_history value.
+        ValueError: on the removed keep_thinking_in_history key, an
+            invalid reasoning_history value, or an invalid agent.forks
+            section.
     """
     _check_reasoning_keys(agent, "agent")
+    parse_forks_config(agent)
 
 
 @dataclass

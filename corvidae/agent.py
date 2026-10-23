@@ -12,6 +12,8 @@ Agent is the central plugin that:
 Config:
     agent:
       chars_per_token: 4.0  # optional — deprecated; retained for config compatibility only
+      forks:                # background processes as forks of the window (#51)
+        enabled: false      # see corvidae.fork for the full section
 
 LLM client configuration is owned by LLMPlugin (llm: main:, llm: background:).
 Tool result truncation configuration is owned by ToolCollectionPlugin (tools: max_result_chars:).
@@ -34,6 +36,14 @@ from corvidae.turn import AgentTurnResult, run_agent_turn
 from corvidae.attribution import get_attribution, reset_attribution, set_attribution
 from corvidae.channel import Channel, ChannelConfig, ChannelRegistry, resolve_system_prompt
 from corvidae.context import ContextWindow, MessageType, DEFAULT_CHARS_PER_TOKEN
+from corvidae.fork import (
+    ForkRefused,
+    ForkResult,
+    ForksConfig,
+    ForkUnavailable,
+    build_fork_prompt,
+    parse_forks_config,
+)
 from corvidae.hooks import (
     CorvidaePlugin,
     get_dependency,
@@ -152,6 +162,7 @@ class Agent(CorvidaePlugin):
         self._idle_cooldown: float = 30.0
         self._request_logprobs: bool = False
         self._mid_conversation_system_role: str = "system"
+        self._forks: ForksConfig = ForksConfig()
         self._last_idle_fire: float = 0.0
         self._idle_firing: bool = False
         # True between a completed on_start and on_stop; see `started`.
@@ -220,6 +231,9 @@ class Agent(CorvidaePlugin):
         self._request_logprobs = agent_config.get("request_logprobs", False)
         # Role for non-leading system messages at prompt build (issue #49).
         self._mid_conversation_system_role = _resolve_mid_conversation_system_role(agent_config)
+        # agent.forks: static operator flags (validated at startup by
+        # validate_agent_config, so a bad section never gets this far).
+        self._forks = parse_forks_config(agent_config)
         daemon_config = config.get("daemon", {})
         self._idle_cooldown = daemon_config.get("idle_cooldown_seconds", 30.0)
 
@@ -700,13 +714,7 @@ class Agent(CorvidaePlugin):
             frozenset(channel.pending_tool_call_ids),
             mid_conversation_system_role=self._mid_conversation_system_role,
         )
-        # Dotted keys are plugin tunables (see corvidae.tuning), never LLM
-        # inference params — they must not leak into the request body.
-        llm_overrides = {
-            k: v
-            for k, v in channel.runtime_overrides.items()
-            if k not in FRAMEWORK_KEYS and "." not in k
-        }
+        llm_overrides = self._llm_overrides(channel)
         if self._request_logprobs:
             llm_overrides["logprobs"] = True
 
@@ -767,6 +775,113 @@ class Agent(CorvidaePlugin):
                 "prompt_tokens": result.usage.get("prompt_tokens") if result.usage else None,
                 "message_count": len(conv.messages) if conv else 0,
             },
+        )
+
+    @staticmethod
+    def _llm_overrides(channel: Channel) -> dict:
+        """The channel's runtime overrides that go into the request body.
+
+        Framework keys are channel config, and dotted keys are plugin
+        tunables (see corvidae.tuning), never LLM inference params — neither
+        may leak into the request body. Shared by the main turn and forks,
+        which must send the same body to keep the cached prefix.
+        """
+        return {
+            k: v
+            for k, v in channel.runtime_overrides.items()
+            if k not in FRAMEWORK_KEYS and "." not in k
+        }
+
+    def fork_enabled(self, stage: str) -> bool:
+        """Whether ``stage`` runs as a fork (agent.forks.enabled and stages)."""
+        return self._forks.stage_enabled(stage)
+
+    async def fork(
+        self,
+        channel: Channel,
+        instruction: str,
+        *,
+        cut: int | None = None,
+        extra_body: dict | None = None,
+    ) -> ForkResult:
+        """Run one fork of the channel's window (GitHub issue #51).
+
+        The prompt is ``build_prompt(window[:cut])`` plus ``instruction`` as
+        a user turn, built with exactly what step 7 of the agent loop uses
+        (main client, tool schemas, pending ids, mid-conversation role,
+        override filter, reasoning effort untouched), so the server reuses
+        the cached prefix. ``cut`` None forks from the whole window.
+
+        On top of the main turn's body a fork sends ``tool_choice: "none"``,
+        the configured ``reasoning_budget_tokens``, and ``extra_body`` (a
+        stage's ``response_format``). Those keys are applied after the
+        runtime overrides so ``set_settings`` can't re-enable tool calls.
+
+        Mutates nothing, persists nothing, fires no hooks, dispatches no
+        tools. Attribution gains ``mode="fork"`` for the call; the caller
+        sets ``stage``.
+
+        Raises:
+            ForkUnavailable: no live window or no main client.
+            ForkRefused: the model answered with tool calls.
+        """
+        conv = channel.conversation
+        if conv is None:
+            raise ForkUnavailable(f"no live window on {channel.id}")
+        if self._client is None:
+            raise ForkUnavailable("LLM client not initialized")
+
+        messages = build_fork_prompt(
+            conv,
+            cut,
+            instruction,
+            frozenset(channel.pending_tool_call_ids),
+            self._mid_conversation_system_role,
+        )
+        # Fork-specific keys last: a stage's body, then the invariants.
+        body = {**self._llm_overrides(channel), **(extra_body or {}), "tool_choice": "none"}
+        if self._forks.reasoning_budget_tokens is not None:
+            body["reasoning_budget_tokens"] = self._forks.reasoning_budget_tokens
+
+        token = set_attribution(channel_id=channel.id, mode="fork")
+        try:
+            response = await self._client.chat(
+                messages, tools=self._tool_schemas or None, extra_body=body
+            )
+        finally:
+            reset_attribution(token)
+
+        message = response["choices"][0]["message"]
+        if message.get("tool_calls"):
+            raise ForkRefused(
+                f"fork on {channel.id} answered with "
+                f"{len(message['tool_calls'])} tool call(s)"
+            )
+        return ForkResult(
+            text=message.get("content") or "",
+            message=message,
+            usage=response.get("usage"),
+        )
+
+    def _warn_if_forks_change_model(self) -> None:
+        """Warn when forks are on and llm.background is a different model.
+
+        Forks always run on llm.main (only it shares the window's cache),
+        so enabling them moves the forked background stages off a
+        separately configured background model.
+        """
+        if not self._forks.enabled:
+            return
+        llm = self.pm.get_plugin("llm")
+        background = getattr(llm, "_clients", {}).get("background") if llm is not None else None
+        main_model = getattr(self._client, "model", None)
+        background_model = getattr(background, "model", None)
+        if background is None or background_model == main_model:
+            return
+        logger.warning(
+            "agent.forks.enabled: forked stages run on llm.main (%s), not "
+            "llm.background (%s); their cost moves to the main model",
+            main_model, background_model,
         )
 
     async def _dispatch_tool_calls(
@@ -867,6 +982,8 @@ class Agent(CorvidaePlugin):
         self._tools, self._tool_schemas = tools_plugin.get_tools()
         self._max_tool_result_chars = tools_plugin.max_result_chars
 
+        self._warn_if_forks_change_model()
+
         # Everything _process_queue_item needs is in place.
         self._started = True
 
@@ -896,6 +1013,7 @@ class Agent(CorvidaePlugin):
         self._chars_per_token = agent_config.get("chars_per_token", DEFAULT_CHARS_PER_TOKEN)
         self._request_logprobs = agent_config.get("request_logprobs", False)
         self._mid_conversation_system_role = _resolve_mid_conversation_system_role(agent_config)
+        self._forks = parse_forks_config(agent_config)
         daemon_config = config.get("daemon", {})
         self._idle_cooldown = daemon_config.get("idle_cooldown_seconds", 30.0)
 
