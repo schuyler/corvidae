@@ -262,3 +262,32 @@ class TestEnrichedOnAgentResponseParams:
         assert received["logprobs"] == {"content": [{"token": "resp", "logprob": -0.1}]}
         assert received["correlation_id"] == "cid-1"
         assert received["meta"] == {"origin": "user"}
+
+
+class TestResolveChannelSpec:
+    """#59: resolve_channel is firstresult with one spec-REQUIRED param.
+
+    A default on channel_id would exempt it from the guard, and an impl
+    mirroring it would silently resolve None forever.
+    """
+
+    def test_spec_is_firstresult_with_required_channel_id(self):
+        pm = create_plugin_manager()
+        caller = pm.hook.resolve_channel
+        assert caller.spec.opts.get("firstresult") is True
+        assert tuple(caller.spec.argnames) == ("channel_id",)
+        assert not caller.spec.kwargnames
+
+    def test_impl_defaulting_channel_id_is_flagged(self):
+        pm = create_plugin_manager()
+
+        class MirroringPlugin:
+            @hookimpl
+            async def resolve_channel(self, channel_id=None):
+                return None
+
+        pm.register(MirroringPlugin(), name="mirroring_plugin")
+
+        with pytest.raises(pluggy.PluginValidationError) as excinfo:
+            _check_hook_arg_binding(pm)
+        assert "channel_id" in str(excinfo.value)

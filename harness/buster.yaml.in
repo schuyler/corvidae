@@ -65,6 +65,8 @@ irc:
     - "#p-compact"
     - "#p-restart"
     - "#p-slots"
+    - "#p-remind"           # reminder probe (SchedulerPlugin, #59)
+    - "#p-remind-restart"   # reminder_restart probe
     - "#chat"        # free conversation with a human; no probe uses this channel
     - "#s-compact"   # shakedown session, reduced budget so compaction is human-reachable
 

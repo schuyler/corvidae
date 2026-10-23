@@ -731,6 +731,26 @@ class AgentSpec:
             channel: The Channel to load history for.
         """
 
+    @hookspec(firstresult=True)
+    async def resolve_channel(self, channel_id: str) -> "Channel | None":
+        """Return the live Channel for a persisted channel id, creating it
+        with transport-specific config if needed.
+
+        Sequential hook (firstresult=True). Transports implement this for
+        ids they own and return None for others. Callers holding only a
+        persisted ``transport:scope`` id (e.g. SchedulerPlugin firing a row
+        after a restart) use it so a transport can apply config a bare
+        ``registry.get_or_create`` would bypass, such as Signal's E.164
+        alias ``ChannelConfig``. ``channel_id`` has no default — see the
+        arg-binding guard (tests/test_hook_arg_binding.py).
+
+        Args:
+            channel_id: The ``transport:scope`` persistence key.
+
+        Returns:
+            The Channel, or None when this transport does not own the id.
+        """
+
     @hookspec
     async def on_conversation_event(
         self, channel: "Channel", message: dict, message_type: "MessageType"

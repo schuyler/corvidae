@@ -1220,3 +1220,60 @@ class TestBacklogTimestamps:
             assert order == texts
         finally:
             await _stop_plugin(h)
+
+
+# ---------------------------------------------------------------------------
+# resolve_channel (#59): channel resolution for a persisted id after restart
+# ---------------------------------------------------------------------------
+
+
+class TestResolveChannel:
+    async def test_unseen_aci_gets_the_e164_alias_config(self, tmp_path):
+        """A scheduler row due after a restart carries only a channel id.
+        resolve_channel must route through the alias resolver (ACI as
+        scope, no source_number) so the E.164 alias's ChannelConfig lands
+        on the channel, not a bare default one."""
+        channels_config = {f"signal:{OTHER_NUMBER}": {"system_prompt": "alias prompt"}}
+        h = await _start_plugin(
+            tmp_path,
+            signal_overrides={"allow": [OTHER_NUMBER]},
+            channels=channels_config,
+            pre_arm=[(
+                OTHER_NUMBER,
+                [{"recipient": OTHER_NUMBER, "number": OTHER_NUMBER, "username": None,
+                  "uuid": OTHER_ACI, "isRegistered": True}],
+            )],
+        )
+        try:
+            # Forward resolution starts on connect; wait for it to be in
+            # flight so the hook awaits it rather than racing its start.
+            await _wait_until(lambda: h.plugin._allow_resolution_task is not None, timeout=5)
+            assert h.registry.get(f"signal:{OTHER_ACI}") is None
+            channel = await h.pm.ahook.resolve_channel(channel_id=f"signal:{OTHER_ACI}")
+            assert channel is not None
+            assert channel.id == f"signal:{OTHER_ACI}"
+            assert h.registry.get(channel.id) is channel
+            resolved = h.registry.resolve_config(channel)
+            assert resolved["system_prompt"] == "alias prompt"
+        finally:
+            await _stop_plugin(h)
+
+    async def test_known_channel_is_returned_as_is(self, tmp_path):
+        h = await _start_plugin(tmp_path)
+        try:
+            existing = h.registry.get_or_create("signal", AUTH_ACI)
+            channel = await h.pm.ahook.resolve_channel(channel_id=f"signal:{AUTH_ACI}")
+            assert channel is existing
+        finally:
+            await _stop_plugin(h)
+
+    async def test_non_signal_ids_defer(self, tmp_path):
+        """Ids Signal does not own return None so the next impl (or the
+        caller's registry fallback) handles them."""
+        h = await _start_plugin(tmp_path)
+        try:
+            for channel_id in ("internal:heartbeat", "irc:#lex", "signal:", "nocolon"):
+                assert await h.pm.ahook.resolve_channel(channel_id=channel_id) is None
+            assert h.registry.get("internal:heartbeat") is None
+        finally:
+            await _stop_plugin(h)

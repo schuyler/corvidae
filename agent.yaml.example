@@ -45,7 +45,7 @@ agent:
   reasoning_history: drop         # drop | exchange | keep — reasoning_content kept in history.
                                   # exchange: keep it only for the current exchange (since the
                                   # last user message); pair with the server's preserve_thinking off.
-  # max_turns: 10                   # max consecutive tool-calling turns per message
+  # max_turns: 10                   # max consecutive tool-calling turns per exchange (message or scheduled firing)
   # max_tool_result_chars: 100000   # truncate tool results beyond this length
   # compaction_threshold: 0.8       # compact when token estimate exceeds this × max_context_tokens
   # compaction_retention: 0.5       # after compaction, retain this fraction of token budget
@@ -58,7 +58,7 @@ agent:
   # request_logprobs: false         # ask the LLM for token logprobs on every request (llama-server supports
   #                                    this; Anthropic-style providers ignore it and logprobs surface as null)
   # mid_conversation_system_role: system  # system | user. Role for system messages after the first
-  #                                    (memory CONTEXT, notifications). Set user for strict chat templates
+  #                                    (memory CONTEXT, notifications, scheduled firings). Set user for strict chat templates
   #                                    (Qwen 3.8, Swift-1.5) that reject a non-leading system message.
   # immutable_settings:             # keys the agent cannot change via set_settings (system_prompt always blocked)
   #   - max_turns                   # example: prevent the agent from extending its own turn limit
@@ -119,6 +119,26 @@ agent:
 #   allow:                             # ACIs or E.164; default-deny
 #     - "+15551234567"
 #   message_chunk_size: 2000           # max UTF-8 bytes per outbound message
+
+# Scheduler: reminders (remind_me tool) and operator jobs (optional;
+# without this block the tools still work, in UTC, with these defaults).
+# A job can target any channel; see docs/threat-model.md finding 7.
+# scheduler:
+#   timezone: America/Los_Angeles      # resolves offset-less times; default UTC
+#   catch_up_window: 3600              # seconds a reminder missed while down may still fire
+#   max_reminders_per_channel: 50      # pending tool-created reminders per channel
+#   jobs:                              # synced by name on start and reload
+#     - name: heartbeat                # unique; removing it disables the job durably
+#       channel: internal:heartbeat    # no transport owns it: replies go to the log only
+#       origin: heartbeat              # reminder (default) | heartbeat
+#       every: 6h                      # required: 30s, 20m, 6h, 1d, 7d, 1h30m
+#       at: "08:00"                    # optional anchor: HH:MM, or ISO datetime for a weekday
+#       prompt_file: prompts/heartbeat.md   # or prompt: "..."
+#     - name: morning-checkin
+#       channel: signal:8f2c1c9a-3e21-4b77-9c3f-1a2b3c4d5e6f
+#       every: 1d
+#       at: "08:30"
+#       prompt: "Good-morning check-in: ask how they slept and what is on today."
 
 # Logging (optional)
 # logging:

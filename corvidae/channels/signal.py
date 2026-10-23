@@ -433,6 +433,26 @@ class SignalPlugin(CorvidaePlugin):
         alias_config = await self._resolve_alias_config(source_uuid, source_number)
         return self._registry.get_or_create("signal", source_uuid, config=alias_config)
 
+    @hookimpl
+    async def resolve_channel(self, channel_id: str) -> Channel | None:
+        """Resolve a persisted ``signal:<ACI>`` id to its live channel.
+
+        Routes through _resolve_channel with the ACI as scope and no
+        source_number, so a channel first created here (e.g. a reminder
+        due after a restart, before the sender has messaged again) gets
+        the E.164 alias's ChannelConfig via forward resolution, the same
+        as an inbound message under phone-number privacy would. Defers
+        (None) for ids this transport does not own, and before on_start
+        has resolved the registry.
+        """
+        # Only ids of the form "signal:<non-empty scope>" belong here.
+        transport, sep, scope = channel_id.partition(":")
+        if transport != "signal" or not sep or not scope:
+            return None
+        if self._registry is None:
+            return None
+        return await self._resolve_channel(scope, None)
+
     async def _resolve_alias_config(
         self, source_uuid: str, source_number: str | None
     ) -> ChannelConfig | None:

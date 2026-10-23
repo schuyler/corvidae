@@ -154,6 +154,8 @@ class Agent(CorvidaePlugin):
         self._mid_conversation_system_role: str = "system"
         self._last_idle_fire: float = 0.0
         self._idle_firing: bool = False
+        # True between a completed on_start and on_stop; see `started`.
+        self._started: bool = False
 
     @property
     def tools(self) -> dict[str, Callable]:
@@ -164,6 +166,18 @@ class Agent(CorvidaePlugin):
     def tool_schemas(self) -> list[dict]:
         """Public read-only access to tool schemas."""
         return self._tool_schemas
+
+    @property
+    def started(self) -> bool:
+        """True once on_start has completed, False again after on_stop.
+
+        Runtime broadcasts on_start to every plugin concurrently and only
+        then starts Agent, so a producer whose background task begins in
+        its own on_start (SchedulerPlugin) can run before the queues have
+        a registry and client. Such producers wait for this before
+        calling on_notify.
+        """
+        return self._started
 
     async def _maybe_fire_idle(self) -> None:
         """Fire on_idle if all queues are empty and cooldown has elapsed.
@@ -571,11 +585,15 @@ class Agent(CorvidaePlugin):
         conv = channel.conversation
         _phases["conv_init"] = _time.monotonic() - _t_conv_init_start
 
-        # 2. Reset turn_counter on user messages — but only when this
-        # message starts a cycle. A user message arriving while a tool
-        # cycle is in flight is charged against that cycle's budget
-        # instead (R4), so a chatty channel can't extend max_turns.
-        if item.role == QueueItemRole.USER and not channel.pending_tool_call_ids:
+        # 2. Reset turn_counter when this item originates a new correlation
+        # (USER items, and notifications whose id was minted at dequeue in
+        # _process_queue_item) — but only when it starts a cycle. An item
+        # arriving while a tool cycle is in flight is charged against that
+        # cycle's budget instead (R4), so a chatty channel can't extend
+        # max_turns. Keying on `originating` rather than USER role lets a
+        # notification-only channel (scheduler reminders, heartbeat) get a
+        # fresh per-exchange budget instead of exhausting it permanently.
+        if item.originating and not channel.pending_tool_call_ids:
             channel.turn_counter = 0
 
         # 3. Resolve config and read max_turns_limit
@@ -821,6 +839,9 @@ class Agent(CorvidaePlugin):
             await task_queue.enqueue(task)
 
     async def on_stop(self) -> None:
+        # Stop advertising readiness first, so producers stop injecting
+        # notifications into queues that are about to be cancelled.
+        self._started = False
         # Cancel all channel queue consumers.
         for queue in self.queues.values():
             await queue.stop()
@@ -845,6 +866,9 @@ class Agent(CorvidaePlugin):
         tools_plugin = get_dependency(self.pm, "tools", ToolCollectionPlugin)
         self._tools, self._tool_schemas = tools_plugin.get_tools()
         self._max_tool_result_chars = tools_plugin.max_result_chars
+
+        # Everything _process_queue_item needs is in place.
+        self._started = True
 
         logger.info(
             "on_start complete",

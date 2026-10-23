@@ -64,6 +64,30 @@ MEMROLE_RECALL_QUERY = (
 # that first use; this bounds the wait for the schema to land after it.
 MEMROLE_SCHEMA_TIMEOUT_S = 30
 
+# reminder / reminder_restart probes (#59). The driver asks the bot to set
+# a reminder carrying a planted token, sends nothing further, and passes
+# when the token comes back unprompted after the reminder fired.
+REMIND_CHANNEL = "#p-remind"
+REMIND_TOKEN = "REMIND-KESTREL-52"
+REMIND_DELAY = "20s"
+REMIND_RESTART_CHANNEL = "#p-remind-restart"
+REMIND_RESTART_TOKEN = "REMIND-OSPREY-17"
+# Long enough that the restart (screen quit, uv run, IRC rejoin) usually
+# lands before it is due; a restart that overruns it exercises the
+# catch-up path instead, which passes the same way.
+REMIND_RESTART_DELAY = "60s"
+# Bounds the wait for the firing row after the reminder came due: the bot
+# may still be finishing the acknowledgement turn on a busy slot.
+# Same budget as TOOL_TURN_TIMEOUT_S (defined below): a turn plus a tool trip.
+REMIND_FIRE_GRACE_S = 120
+# heartbeat_smoke probe (buster-heartbeat profile): a config job on
+# internal:heartbeat, a channel no transport owns.
+HEARTBEAT_CHANNEL = "#p-heartbeat"
+HEARTBEAT_JOB_CHANNEL = "internal:heartbeat"
+# Job interval is 30s (buster-heartbeat.yaml.in); allow several beats and
+# a slow turn.
+HEARTBEAT_TIMEOUT_S = 240
+
 # Ordinary single turn. Observed 2-7s (run 7), worst observed 35s on an
 # inflated context. 90s is ~2.5x the worst observation.
 TURN_TIMEOUT_S = 90
@@ -484,6 +508,91 @@ def memory_role_verdict(
         f"answered the person ({MEMROLE_ANSWER}) with the memory block last, "
         f"and recalled {MEMROLE_CODENAME}"
     )
+
+
+def table_exists(db_path: Path, name: str) -> bool:
+    """Whether `name` exists in sessions.db yet (plugins create theirs lazily)."""
+    if not db_path.exists():
+        return False
+    return bool(_query(
+        db_path, "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,),
+    ))
+
+
+def reminder_set_since(db_path: Path, channel_id: str, since_ts: float) -> tuple[int, float] | None:
+    """(id, next_fire_at) of the newest tool-created schedule row on
+    `channel_id` created at or after `since_ts`, or None."""
+    if not table_exists(db_path, "schedule"):
+        return None
+    rows = _query(
+        db_path,
+        "SELECT id, next_fire_at FROM schedule WHERE channel_id = ? AND created_by = 'tool' "
+        "AND created_at >= ? ORDER BY id DESC LIMIT 1",
+        (channel_id, since_ts),
+    )
+    return (rows[0][0], rows[0][1]) if rows else None
+
+
+def reminder_firing_row(
+    db_path: Path, channel_id: str, token: str, since_ts: float
+) -> tuple[float, str] | None:
+    """(timestamp, message JSON) of the persisted "[reminder]" notification
+    row on `channel_id` carrying `token`, or None. It is persisted when the
+    channel queue dequeues the firing, so every bot reply after its
+    timestamp answers the reminder, not the request that set it."""
+    rows = _query(
+        db_path,
+        "SELECT timestamp, message FROM message_log WHERE channel_id = ? AND timestamp >= ? "
+        "AND message LIKE ? AND message LIKE ? ORDER BY id LIMIT 1",
+        (channel_id, since_ts, "%[reminder]%", f"%{token}%"),
+    )
+    return (rows[0][0], rows[0][1]) if rows else None
+
+
+def reminder_verdict(set_row: bool, fired: bool, replied: bool) -> tuple[bool, str]:
+    """Pass/fail and details for the reminder probes: the model set the
+    reminder through the tool, the scheduler fired it as a "[reminder]"
+    row, and the bot then said the token unprompted."""
+    if not set_row:
+        return False, "no tool-created schedule row — the model did not call remind_me"
+    if not fired:
+        return False, "the reminder never fired: no [reminder] row in message_log"
+    if not replied:
+        return False, "the reminder fired but no unprompted reply carried the token"
+    return True, "reminder set by tool, fired as [reminder], token delivered unprompted"
+
+
+def heartbeat_exchange_count(db_path: Path, channel_id: str) -> int:
+    """exchange_log rows with origin 'heartbeat' on `channel_id`."""
+    if not table_exists(db_path, "exchange_log"):
+        return 0
+    rows = _query(
+        db_path,
+        "SELECT COUNT(*) FROM exchange_log WHERE channel_id = ? AND origin = 'heartbeat'",
+        (channel_id,),
+    )
+    return rows[0][0] if rows else 0
+
+
+def assistant_rows(db_path: Path, channel_id: str) -> int:
+    """Assistant rows persisted on `channel_id` — evidence a turn completed."""
+    rows = _query(
+        db_path,
+        "SELECT COUNT(*) FROM message_log WHERE channel_id = ? AND message LIKE ?",
+        (channel_id, '%"role": "assistant"%'),
+    )
+    return rows[0][0] if rows else 0
+
+
+async def poll_db(predicate: Callable[[], bool], timeout: float, interval: float = 1.0) -> bool:
+    """Poll a sessions.db predicate until it holds or `timeout` passes."""
+    deadline = time.monotonic() + timeout
+    while True:
+        if predicate():
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(interval)
 
 
 def has_summary_row_since(db_path: Path, channel_id: str, since_ts: float) -> bool:
@@ -937,6 +1046,114 @@ async def probe_memory_role(ctx: RunContext) -> ProbeResult:
     return ProbeResult("memory_role", passed, details, time.monotonic() - t0, _transcript(ctx, channel, sent))
 
 
+async def _reminder_probe(ctx: RunContext, name: str, channel: str, token: str,
+                          delay: str, restart: bool) -> ProbeResult:
+    """Shared body of the reminder probes.
+
+    Asks for a reminder carrying `token`, sends nothing further, then
+    waits for the scheduler's "[reminder]" row and a bot reply carrying
+    the token timestamped after it. With `restart`, bounces the daemon
+    while the reminder is still pending, so the row has to survive it.
+    """
+    if not ctx.channel_ready.get(channel):
+        return _skip_result(name, channel)
+    channel_id = f"irc:{channel}"
+    sent: list[tuple[float, str]] = []
+    t0 = time.monotonic()
+    ts0 = time.time()
+
+    def result(passed: bool, details: str) -> ProbeResult:
+        return ProbeResult(name, passed, details, time.monotonic() - t0, _transcript(ctx, channel, sent))
+
+    # 1. Ask for the reminder; the ack's content is not load-bearing.
+    request = (
+        f"Use the remind_me tool to set a reminder {delay} from now with the text "
+        f"'{token}'. Then reply with only the word SCHEDULED."
+    )
+    if not await send_and_await_any_reply(ctx, channel, request, sent, TOOL_TURN_TIMEOUT_S):
+        return result(False, "no reply to the reminder request")
+
+    # 2. The model must have gone through the tool, not just promised to.
+    row = reminder_set_since(ctx.session_db, channel_id, ts0)
+    if row is None:
+        passed, details = reminder_verdict(False, False, False)
+        return result(passed, details)
+    _, due_at = row
+    restart_note = ""
+
+    # 3. Optionally restart the daemon before the reminder is due.
+    if restart:
+        if time.time() >= due_at:
+            restart_note = " (reminder came due before the restart began)"
+        restart_ts = time.time()
+        subprocess.run(
+            [str(ctx.repo_dir / "harness" / "restart-daemon.sh"), str(ctx.run_dir / "daemon.log")],
+            cwd=ctx.repo_dir, check=True, timeout=120,
+        )
+        if not await ctx.client.wait_for_nick_join(channel, ctx.bot_nick, timeout=90, after_ts=restart_ts):
+            return result(False, "buster did not rejoin channel after restart")
+
+    # 4. Wait for the firing row, then for the unprompted token reply after it.
+    wait_s = max(due_at - time.time(), 0) + REMIND_FIRE_GRACE_S
+    fired = await poll_db(
+        lambda: reminder_firing_row(ctx.session_db, channel_id, token, ts0) is not None, wait_s,
+    )
+    replied = False
+    if fired:
+        fired_ts, fired_msg = reminder_firing_row(ctx.session_db, channel_id, token, ts0)
+        if restart and "daemon was down" in fired_msg:
+            restart_note += " (fired late via catch-up)"
+        replied = await ctx.client.wait_until(
+            channel,
+            lambda msgs: reply_from(msgs, ctx.bot_nick, token, fired_ts) is not None,
+            TURN_TIMEOUT_S,
+        )
+    passed, details = reminder_verdict(True, fired, replied)
+    return result(passed, details + restart_note)
+
+
+async def probe_reminder(ctx: RunContext) -> ProbeResult:
+    """A reminder set by tool fires on time and the bot speaks unprompted."""
+    return await _reminder_probe(ctx, "reminder", REMIND_CHANNEL, REMIND_TOKEN, REMIND_DELAY, restart=False)
+
+
+async def probe_reminder_restart(ctx: RunContext) -> ProbeResult:
+    """As probe_reminder, with a daemon restart while the reminder is pending."""
+    return await _reminder_probe(
+        ctx, "reminder_restart", REMIND_RESTART_CHANNEL, REMIND_RESTART_TOKEN,
+        REMIND_RESTART_DELAY, restart=True,
+    )
+
+
+async def probe_heartbeat_smoke(ctx: RunContext) -> ProbeResult:
+    """The config heartbeat job on internal:heartbeat runs a full exchange
+    (exchange_log row with origin 'heartbeat', an assistant row) and its
+    reply reaches no transport: the bot says nothing on IRC."""
+    channel = HEARTBEAT_CHANNEL
+    if not ctx.channel_ready.get(channel):
+        return _skip_result("heartbeat_smoke", channel)
+    t0 = time.monotonic()
+
+    # The beat fires on its own schedule; the driver only watches.
+    beat = await poll_db(
+        lambda: heartbeat_exchange_count(ctx.session_db, HEARTBEAT_JOB_CHANNEL) > 0
+        and assistant_rows(ctx.session_db, HEARTBEAT_JOB_CHANNEL) > 0,
+        HEARTBEAT_TIMEOUT_S,
+    )
+    # Give a misrouted send a moment to arrive before declaring silence.
+    await asyncio.sleep(5)
+    spoke = [m for m in ctx.client.messages.get(channel, []) if m.nick == ctx.bot_nick]
+    passed = beat and not spoke
+    if not beat:
+        details = "no heartbeat-origin exchange with an assistant reply within timeout"
+    elif spoke:
+        details = f"heartbeat ran, but the bot sent {len(spoke)} message(s) to IRC"
+    else:
+        details = "heartbeat exchange recorded; nothing sent to IRC"
+    return ProbeResult("heartbeat_smoke", passed, details, time.monotonic() - t0,
+                       _transcript(ctx, channel, []))
+
+
 PROBES: list[Callable[[RunContext], "asyncio.Future[ProbeResult]"]] = [
     probe_smoke_echo,
     probe_tool_loop,
@@ -944,15 +1161,21 @@ PROBES: list[Callable[[RunContext], "asyncio.Future[ProbeResult]"]] = [
     probe_compaction,
     probe_restart_recovery,
     probe_kv_slot,
+    probe_reminder,
+    probe_reminder_restart,
 ]
 
-ALL_CHANNELS = ["#p-smoke", "#p-toolloop", "#p-interleave", "#p-compact", "#p-restart", "#p-slots"]
+ALL_CHANNELS = [
+    "#p-smoke", "#p-toolloop", "#p-interleave", "#p-compact", "#p-restart", "#p-slots",
+    REMIND_CHANNEL, REMIND_RESTART_CHANNEL,
+]
 
 # Harness profiles: name -> (probes, channels the driver joins). Each name
 # matches a config template, harness/<name>.yaml.in, which run.sh renders.
 PROFILES: dict[str, tuple[list[Callable[[RunContext], "asyncio.Future[ProbeResult]"]], list[str]]] = {
     "buster": (PROBES, ALL_CHANNELS),
     "buster-memrole": ([probe_memory_role], [MEMROLE_CHANNEL]),
+    "buster-heartbeat": ([probe_heartbeat_smoke], [HEARTBEAT_CHANNEL]),
 }
 
 
