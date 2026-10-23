@@ -17,6 +17,10 @@ uv run corvidae                  # run the daemon; reads ./agent.yaml
 
 `agent.yaml` is gitignored. Copy `agent.yaml.example` to create one.
 
+CI (`.github/workflows/tests.yml`) runs `uv run pytest -q` on every push to `main`
+and every PR, after checking that sqlite-vec loads. It doesn't run the harness
+or `--run-eval`.
+
 `tool.pytest.ini_options` sets a global `timeout = 15`. Every async test inherits
 it — this is the hang safety net AGENTS.md calls for, so don't disable it. If a
 test legitimately needs longer, mark that test rather than raising the global.

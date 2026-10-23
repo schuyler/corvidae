@@ -1,5 +1,7 @@
 """Tests for corvidae.outcome_log — the exchange_log table and writer API."""
 
+import asyncio
+
 import pytest
 
 from corvidae.hooks import create_plugin_manager
@@ -121,6 +123,76 @@ class TestExchangeLogWriter:
             "valence": 0.2,
             "stage2": {"score": 0.5},
         }
+
+
+class TestRetrievalTopSimilarity:
+    """#66: exchange_log carries the raw top similarity next to the score."""
+
+    async def test_similarity_round_trip(self, db):
+        plugin = await _setup(db)
+        await plugin.record_exchange("ex-s", "irc:#general")
+        await plugin.update_exchange(
+            "ex-s", retrieval_top_score=0.3, retrieval_top_similarity=0.82
+        )
+        async with db.execute(
+            "SELECT retrieval_top_score, retrieval_top_similarity "
+            "FROM exchange_log WHERE exchange_key = ?",
+            ("ex-s",),
+        ) as cursor:
+            assert await cursor.fetchone() == (0.3, 0.82)
+
+    async def test_legacy_table_upgraded(self, db):
+        """An exchange_log created before #66 gains the column, rows kept."""
+        await db.execute(
+            "CREATE TABLE exchange_log (exchange_key TEXT PRIMARY KEY, "
+            "channel_id TEXT NOT NULL, origin TEXT, message_rowid INTEGER, "
+            "created_at REAL NOT NULL, retrieval_top_score REAL, "
+            "retrieval_hit_count INTEGER, probe_score REAL, appraisal TEXT, "
+            "provenance_snapshot TEXT, outcomes TEXT)"
+        )
+        await db.execute(
+            "INSERT INTO exchange_log (exchange_key, channel_id, created_at, "
+            "retrieval_top_score) VALUES ('old', 'irc:#old', 1.0, 0.4)"
+        )
+        await db.commit()
+
+        plugin = await _setup(db)
+        await plugin.record_exchange("new", "irc:#new")
+        await plugin.update_exchange("new", retrieval_top_similarity=0.9)
+        async with db.execute(
+            "SELECT exchange_key, retrieval_top_score, retrieval_top_similarity "
+            "FROM exchange_log ORDER BY created_at"
+        ) as cursor:
+            rows = await cursor.fetchall()
+        assert rows == [("old", 0.4, None), ("new", None, 0.9)]
+
+
+    async def test_concurrent_upgrade_does_not_fail(self, db):
+        """Two first writers racing the upgrade both succeed: the loser of
+        the ALTER race sees 'duplicate column name', which means done."""
+        from corvidae.outcome_log import OutcomeLogPlugin
+        from corvidae.persistence import PersistencePlugin
+
+        await db.execute(
+            "CREATE TABLE exchange_log (exchange_key TEXT PRIMARY KEY, "
+            "channel_id TEXT NOT NULL, origin TEXT, message_rowid INTEGER, "
+            "created_at REAL NOT NULL, retrieval_top_score REAL, "
+            "retrieval_hit_count INTEGER, probe_score REAL, appraisal TEXT, "
+            "provenance_snapshot TEXT, outcomes TEXT)"
+        )
+        await db.commit()
+        pm = create_plugin_manager()
+        persistence = PersistencePlugin()
+        persistence.db = db
+        pm.register(persistence, name="persistence")
+        plugin = OutcomeLogPlugin()
+        pm.register(plugin, name="outcome_log")
+        await plugin.on_init(pm, {})
+
+        await asyncio.gather(plugin._ensure_table(), plugin._ensure_table())
+        async with db.execute("PRAGMA table_info(exchange_log)") as cursor:
+            cols = {row[1] for row in await cursor.fetchall()}
+        assert "retrieval_top_similarity" in cols
 
 
 class TestRfc7386NoneDeletes:

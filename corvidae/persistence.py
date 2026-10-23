@@ -14,6 +14,7 @@ Config:
 
 import json
 import logging
+import sqlite3
 import time
 from pathlib import Path
 
@@ -24,6 +25,29 @@ from corvidae.hooks import CorvidaePlugin, hookimpl
 logger = logging.getLogger(__name__)
 
 _ALLOWED_JOURNAL_MODES = {"delete", "truncate", "persist", "memory", "wal", "off"}
+
+
+async def add_column_if_missing(
+    db: aiosqlite.Connection, table: str, column: str, decl: str
+) -> None:
+    """Add ``column`` to an existing ``table`` unless it is already there.
+
+    Upgrades a table created before the column existed; old rows read the
+    column's default. Two first callers can race between the check and the
+    ALTER, so the loser's "duplicate column name" error means the column is
+    in place, not a failure. ``table``, ``column``, and ``decl`` are
+    interpolated into SQL and must be code constants, never input.
+    """
+    async with db.execute(f"PRAGMA table_info({table})") as cursor:
+        existing = {row[1] for row in await cursor.fetchall()}
+    if column in existing:
+        return
+    try:
+        await db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+    except sqlite3.OperationalError as exc:
+        if "duplicate column name" not in str(exc):
+            raise
+        logger.debug("%s.%s added concurrently by another caller", table, column)
 
 
 async def init_db(db: aiosqlite.Connection) -> None:
