@@ -953,7 +953,8 @@ advance in one compare-and-set section. The row's `created_at` is the
 `message_log.timestamp` of the last row in the source range, i.e. when
 the conversation happened, not when consolidation ran, so history
 consolidated long after the fact is aged correctly by retrieval and
-retention. Overlapping triggers on the same
+retention. A near-duplicate merge keeps the later of the two records'
+dates. Overlapping triggers on the same
 range discard the loser's record — no duplicates. Embedding failure
 stores the record with `embedded=0` for later backfill; the summary text
 is canonical and vectors are a rebuildable cache. All consolidation LLM

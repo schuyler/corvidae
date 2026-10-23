@@ -8,6 +8,7 @@
   time consolidation ran.
 """
 
+import json
 import logging
 import math
 import time
@@ -218,5 +219,48 @@ class TestSourceDatedRecords:
             async with db.execute("SELECT created_at FROM memory") as cursor:
                 [(created_at,)] = await cursor.fetchall()
             assert created_at == pytest.approx(then)
+        finally:
+            await db.close()
+
+    async def test_near_dup_merge_keeps_latest_date(self):
+        """A backdated record that supersedes a live one carries the later
+        date: the merged memory spans both conversations, and the latest of
+        them is when it was last true."""
+        from test_memory_dedup import _NEAR_IDENTICAL_SUMMARY, build_dedup_env
+        from test_memory_dedup import seed_dialog as seed_dedup_dialog
+
+        memory, persistence, stub, channel, db = await build_dedup_env()
+        try:
+            if not memory._vec_available:
+                pytest.skip("sqlite-vec unavailable")
+            stub.chat_text = json.dumps({
+                "summary": _NEAR_IDENTICAL_SUMMARY, "topic_tags": [], "participants": [],
+            })
+            stub.fixed_embeddings[_NEAR_IDENTICAL_SUMMARY[:20]] = [1.0, 0.0, 0.0, 0.0]
+
+            # A live conversation consolidates first, dated now.
+            live = await seed_dedup_dialog(persistence, channel, [
+                ("user", "live segment"), ("assistant", "live reply"),
+            ])
+            await memory._consolidate_range(channel.id, live[-1], "test")
+            async with db.execute("SELECT created_at FROM memory") as cursor:
+                [(live_created,)] = await cursor.fetchall()
+
+            # Imported April history arrives later (higher ids, older timestamps).
+            seeded = await seed_dedup_dialog(persistence, channel, [
+                ("user", "seeded segment"), ("assistant", "seeded reply"),
+            ])
+            april = time.time() - 180 * DAY
+            await db.execute(
+                "UPDATE message_log SET timestamp = ? WHERE id IN (?, ?)", (april, *seeded),
+            )
+            await db.commit()
+            await memory._consolidate_range(channel.id, seeded[-1], "test")
+
+            async with db.execute(
+                "SELECT created_at FROM memory WHERE superseded_by IS NULL"
+            ) as cursor:
+                [(survivor_created,)] = await cursor.fetchall()
+            assert survivor_created == pytest.approx(live_created)
         finally:
             await db.close()

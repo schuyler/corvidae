@@ -123,12 +123,10 @@ class TestSwiftTemplate:
         conv = ContextWindow("test:scope")
         conv.system_prompt = "You are Lex."
         conv.append({"role": "system", "content": "[task]\n\nbackground event"})
-        with pytest.raises(TemplateError):
-            # Stock: the non-leading system message raises first.
-            render_swift(conv.build_prompt())
+        # Stock: the template's user-query scan runs before its per-message
+        # role check, so this window fails on the missing user turn.
         with pytest.raises(TemplateError, match="No user query found"):
-            # Even dropping that check, there is no user turn at all.
-            render_swift([conv.build_prompt()[0]])
+            render_swift(conv.build_prompt())
         rendered = render_swift(conv.build_prompt(mid_conversation_system_role="user"))
         assert "<|im_start|>user\n[task]\n\nbackground event<|im_end|>" in rendered
 

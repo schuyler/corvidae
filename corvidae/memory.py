@@ -826,20 +826,24 @@ class MemoryPlugin(CorvidaePlugin):
                 if dup_old_id is not None:
                     async with db.execute(
                         "SELECT retrieval_count, last_retrieved_at, importance, "
-                        "msg_id_start, msg_id_end "
+                        "msg_id_start, msg_id_end, created_at "
                         "FROM memory WHERE id = ?",
                         (dup_old_id,),
                     ) as old_cursor:
                         old_row = await old_cursor.fetchone()
                     if old_row is not None:
                         (old_rc, old_lra, old_importance,
-                         old_start, old_end) = old_row
+                         old_start, old_end, old_created) = old_row
                         # Fold stats into the new record
                         inherited_rc = (old_rc or 0)  # old record's count to fold in
                         new_importance = max(importance, old_importance or 0.0)
                         new_lra = old_lra  # new record has None; old may have a value
                         new_start = min(old_start, rows[0][0])
                         new_end = max(old_end, rows[-1][0])
+                        # The merged record spans both conversations; date it
+                        # from the later one. Imported history has newer ids
+                        # but older timestamps, so this is not new_end's date.
+                        new_created = max(created_at, old_created)
                         await db.execute(
                             "UPDATE memory SET "
                             "retrieval_count = retrieval_count + ?, "
@@ -849,11 +853,11 @@ class MemoryPlugin(CorvidaePlugin):
                             "  WHEN ? IS NULL THEN last_retrieved_at "
                             "  ELSE MAX(last_retrieved_at, ?) "
                             "END, "
-                            "msg_id_start = ?, msg_id_end = ? "
+                            "msg_id_start = ?, msg_id_end = ?, created_at = ? "
                             "WHERE id = ?",
                             (inherited_rc, new_importance,
                              new_lra, new_lra, new_lra,
-                             new_start, new_end, memory_id),
+                             new_start, new_end, new_created, memory_id),
                         )
                         # Supersede the old record
                         await db.execute(
