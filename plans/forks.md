@@ -1,9 +1,25 @@
 # Background processes as forks of the main window
 
 Design for GitHub issues #51 (the forks) and #73 (the evals that gate
-them). Status: proposal, 2026-10-23. Nothing in it is implemented; the
-"related bug" in #51 (custom compaction prompt ignored after the first
-round) is already fixed in 4936c00.
+them). Status: Part 1 phases 1–5 (§10) are implemented behind
+`agent.forks.enabled`, which defaults to off; phases 6–7 and all of Part 2
+remain with #73. The "related bug" in #51 (custom compaction prompt
+ignored after the first round) is already fixed in 4936c00.
+
+Where the implementation differs from the text below:
+
+- `agent.forks.stages` defaults to `null` (every stage), not a list. Core
+  modules may not name cognition plugins (`tests/test_correlation_core.py`),
+  so stage names are opaque strings in `corvidae/fork.py`.
+- The fork instruction keys are static config (`tuning.config_value`), not
+  `resolve_tunable` keys, which is how they land on the immutable side (§9).
+- Any fork failure (exception, `ForkRefused`, empty or unparseable reply)
+  falls back to the stage's standalone call, compaction included.
+- The tool-block snap (§3) applies with forks off too: it fixes the
+  existing seam, so "flag off is byte-for-byte today" holds for the LLM
+  requests but not for which messages compaction keeps when a tool cycle
+  straddles the cut.
+- `before_compaction` fires on every compaction, fork or not.
 
 Part 1 is the fork design. Part 2 is the eval design.
 

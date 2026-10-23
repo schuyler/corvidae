@@ -54,6 +54,11 @@ agent:
   #                                    will re-compact every few messages without reducing context.
   # min_messages_to_compact: 5      # skip compaction with this many messages or fewer
   # compaction_prompt: "..."        # summarizer system prompt, used in every compaction round
+  # compaction_fork_prompt: "..."   # instruction a compaction fork appends (prompts/compaction_fork.md)
+  # forks:                          # run background stages as forks of the main window (#51)
+  #   enabled: false                # opt-in; any fork failure falls back to the standalone call
+  #   reasoning_budget_tokens: 2048 # per-fork think budget; null = server default
+  #   stages: null                  # null = all; or [compaction, consolidation, appraisal, critique]
   # chars_per_token: 3.5            # deprecated: retained for config compatibility; has no effect on token counting
   # request_logprobs: false         # ask the LLM for token logprobs on every request (llama-server supports
   #                                    this; Anthropic-style providers ignore it and logprobs surface as null)
@@ -89,6 +94,15 @@ agent:
 #     recency_from: created           # created | last_used: where ranking age is measured from
 #   channel_groups:                   # channels in a group share memory; members may use * and ?
 #     home: ["irc:#lex", "signal:*"]  # signal:* covers Signal channels created at runtime
+#   consolidation_fork_prompt: "..."  # instruction for forked consolidation (agent.forks)
+
+# Fork instructions for appraisal and critique (optional; agent.forks).
+# Static config: set_settings can't change these.
+# appraisal:
+#   stage2_fork_prompt: "..."         # prompts/appraisal_fork.md
+# critique:
+#   fork_prompt:
+#     provenance: "..."               # prompts/critique_<lens>_fork.md
 
 # Built-in tool settings (optional)
 # tools:

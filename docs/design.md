@@ -84,6 +84,7 @@ class AgentSpec:
     async def load_conversation(self, channel: Channel) -> list[dict] | None
     async def resolve_channel(self, channel_id: str) -> Channel | None
     async def on_conversation_event(self, channel: Channel, message: dict, message_type: MessageType) -> int | None
+    async def before_compaction(self, channel: Channel, compacted_ids: list[int], cut: int) -> None
     async def on_compaction(self, channel: Channel, summary_msg: dict, retain_count: int, compacted_ids: list[int]) -> None
 ```
 
@@ -139,6 +140,7 @@ their return values are ignored.
 | `load_conversation` | firstresult=True | `_process_queue_item`, when `channel.conversation is None`; return list of tagged message dicts or None to defer |
 | `resolve_channel` | firstresult=True | `SchedulerPlugin`, for a persisted channel id the registry does not hold (e.g. a reminder due after a restart); a transport returns the live Channel for ids it owns, created with transport-specific config, or None to defer. `SignalPlugin` implements it; callers fall back to `registry.get_or_create` from the split id |
 | `on_conversation_event` | broadcast | `_process_queue_item`, after every `conv.append()`; side effects only (persistence, JSONL logging) |
+| `before_compaction` | broadcast, awaited | `CompactionPlugin`, after the summary succeeded and before `replace_with_summary()`; the window still holds `messages[:cut]`, so a plugin can fork over the dropped prefix (see [Forks](#forks)); failures logged, never block compaction |
 | `on_compaction` | broadcast | `CompactionPlugin`, after `replace_with_summary()`; side effects only (persistence) |
 | `on_llm_request` | broadcast | `LLMClient.chat()` via LLMPlugin's injected observer, before the retry loop; side effects only (observability) |
 | `on_llm_response` | broadcast | `LLMClient.chat()` via the observer, exactly once per call (success or terminal failure); side effects only (metrics, usage log) |
@@ -265,7 +267,10 @@ extras such as `trigger` on consolidation calls). Callers set it at the
 top of a logical operation and reset in a `finally`: the Agent turn loop
 (`stage="turn"`), CompactionPlugin around its summary call
 (`stage="compaction"`, shadowing the turn), and the subagent work loop
-(`stage="subagent"`). Contextvars snapshot at `asyncio.create_task`
+(`stage="subagent"`). Stages that can run as forks (compaction,
+consolidation, appraisal, critique) add `mode="fork"` (set by
+`Agent.fork`) or `mode="standalone"` around their own LLM call; it lands
+in `usage_log.mode`. Contextvars snapshot at `asyncio.create_task`
 time and TaskQueue workers are created once at startup, so `Task`
 captures `contextvars.copy_context()` at creation and the worker runs
 `task.work()` inside that context via
@@ -292,6 +297,7 @@ CREATE TABLE usage_log (
     channel_id TEXT,
     correlation_id TEXT,        -- NULL when the call ran outside any correlated turn
     trigger TEXT,               -- 'compaction' or 'idle' for consolidation calls, else NULL
+    mode TEXT,                  -- 'fork' or 'standalone' for stages that can fork (#51), else NULL
     prompt_tokens INTEGER,
     completion_tokens INTEGER,
     total_tokens INTEGER,
@@ -819,11 +825,24 @@ for side effects; its return value is not used by the caller.
 2. If `len(conversation.messages) <= 5`, return `None` (skip — too few messages to compact).
 3. Backward walk: starting from the most recent message, accumulate messages
    until their token estimate would exceed 50% of `max_tokens`. The count
-   of accumulated messages is `retain_count`.
+   of accumulated messages is `retain_count`. The cut
+   (`len(messages) - retain_count`) is then backed up with
+   `snap_cut_to_tool_boundary` until no tool cycle straddles it: an
+   assistant `tool_calls` message is never dropped while any of its results
+   are kept. Before #51 the walk could drop a call and keep orphan results;
+   the snap also makes the dropped prefix render exactly as the start of
+   the full window, which a compaction fork needs.
 4. If `retain_count >= len(conversation.messages)`, return `None` (all messages fit — no-op).
 5. Filter the older (non-retained) messages to `MESSAGE` type only, excluding
    any `SUMMARY` entries. Strip `_message_type` metadata before passing to LLM.
-6. Call `_summarize(new_messages_clean, prior_summaries_clean,
+6. With forks on for `compaction` (`agent.forks`, see [Forks](#forks)),
+   fork the window at the cut with `agent.compaction_fork_prompt` (default
+   `CompactionPlugin.DEFAULT_FORK_PROMPT`, `prompts/compaction_fork.md`)
+   and use the reply as the summary. The prefix already holds any prior
+   summary at its head, so no bounded copy is passed. If forks are off for
+   the stage, or the fork raises or comes back empty (logged at WARNING),
+   fall through to the standalone call:
+   call `_summarize(new_messages_clean, prior_summaries_clean,
    max_tokens=max_tokens)` — sends the older messages to the LLM with a
    system prompt asking for a concise summary, incorporating any prior
    summaries carried forward from earlier compaction rounds. The system
@@ -848,16 +867,116 @@ for side effects; its return value is not used by the caller.
    message (a long tool loop); then it is `user`, because strict chat
    templates (Swift-1.5 / Qwen 3.8) reject a prompt with no user query
    (#56). The role is persisted with the summary row, so a reload renders
-   the same prompt. Call
-   `conversation.replace_with_summary(summary_msg, retain_count)`.
-8. Fire `on_compaction(channel, summary_msg, retain_count, compacted_ids)`
+   the same prompt.
+8. Fire `before_compaction(channel, compacted_ids, cut)` (broadcast,
+   awaited) while the window is still whole. `MemoryPlugin` forks the
+   compaction-time memory record here. Failures are logged and ignored.
+9. Call `conversation.replace_with_summary(summary_msg, retain_count)`.
+10. Fire `on_compaction(channel, summary_msg, retain_count, compacted_ids)`
    (broadcast) so persistence plugins can update the DB.
-9. Return `True`.
+11. Return `True`.
+
+The summary LLM call is attributed `stage="compaction"` plus
+`mode="fork"` or `mode="standalone"`.
 
 **Graceful degradation:** without `CompactionPlugin`, the
 `compact_conversation` hook returns `None` on every turn and compaction
 does not run. The conversation history will grow without bound until the
 LLM context window is exceeded.
+
+## Forks
+
+`fork.py` plus `Agent.fork` — background processes run as branches of the
+main window (GitHub issue #51; plan of record `plans/forks.md`). Off by
+default: `agent.forks.enabled`.
+
+On a single llama-server KV slot, every separate background prompt evicts
+the main context, and compaction re-prefills the whole window. A **fork**
+instead renders the channel's window exactly as the main turn does, up to
+a cut, and appends one `user` instruction. The prompt is then a prefix of
+what the server already holds, so it reuses the cached KV, and it carries
+the agent's own system prompt, so first-person records and summaries are
+written by the agent they describe.
+
+```
+fork_prompt = build_prompt(window[:cut]) + [{"role": "user", "content": instruction}]
+```
+
+**Prefix parity.** `Agent.fork(channel, instruction, *, cut=None,
+extra_body=None)` builds with exactly what step 7 of the agent loop uses:
+the `llm.main` client (its `extra_body`, e.g. `id_slot`), `_tool_schemas`,
+`build_prompt(pending_ids, mid_conversation_system_role)`, and the same
+runtime-override filter (`_llm_overrides`). `reasoning_effort` is left
+alone, because the chat template renders it into the system block.
+On top of that a fork sends `tool_choice: "none"` (tools stay in the
+render), `reasoning_budget_tokens` from `agent.forks.reasoning_budget_tokens`
+(a per-request sampler budget that never touches the template), and the
+stage's `extra_body` (`response_format`). Those keys are applied after the
+runtime overrides, so `set_settings` can't re-enable tool calls on a fork.
+
+**Invariants.** A fork mutates nothing, persists nothing, fires no hooks,
+and never dispatches tools: a reply carrying `tool_calls` raises
+`ForkRefused`. No live window or no main client raises `ForkUnavailable`.
+Every caller treats any fork exception, or an empty or unparseable reply,
+as a miss: it logs at WARNING and makes its standalone call instead.
+
+**Which process forks from where.** Plugins reach the Agent through
+`fork_agent(pm, stage)`, which returns it only when that stage is enabled.
+Stage names are opaque to core (it never names cognition plugins).
+
+| Stage | Cut | Runs | Standalone when |
+|---|---|---|---|
+| `compaction` | dropped prefix | inline in `compact_conversation` | forks off for the stage; fork miss |
+| `consolidation` (compaction trigger) | dropped prefix | inline in `before_compaction`; the record is stashed and the `on_compaction` task consumes it | also: a range dialog row is not in `messages[:cut]`; the watermark moved since the fork |
+| `consolidation` (idle trigger) | full window | in the idle task | also: no registered channel or live window; a range row not in the window |
+| `appraisal` (stage 2) | full window at run time | silent TaskQueue task | also: the exchange's originating rowid has left the window (or was never persisted) |
+| `critique` (each lens) | full window at run time | silent TaskQueue task | same as appraisal; a lens whose fork misses falls back alone |
+
+Seeding, imports, `consolidate_replay.py` and the `eval_*` scripts have no
+live window and always run standalone. Subagents are unchanged: workers
+with their own persona-neutral prompts.
+
+The compaction and consolidation forks share one prefix: the second
+fork's prefill is just its instruction. Containment for consolidation is
+exact: every `message`-type row in the range must be a `_db_id` in the
+fork's window (summary rows are skipped; a live window's summary has no
+rowid and summaries are never consolidated). Appraisal and critique check
+the originating rowid recorded by their own `on_message_persisted`, and
+read the window at run time, so a fork after the user has said more still
+sees the exchange, named by a quote of its opening message.
+
+**Instructions.** Each stage has a fork instruction beside its standalone
+prompt, written to the agent in the second person:
+`agent.compaction_fork_prompt`, `memory.consolidation_fork_prompt`,
+`appraisal.stage2_fork_prompt`, `critique.fork_prompt.<lens>` (documented
+copies in `prompts/*_fork.md`). They are read from static config with
+`tuning.config_value`, never `resolve_tunable`, so `set_settings` can't
+write them. Consolidation appends a sentence naming where the range
+starts ("the whole conversation above", "what follows the summary at its
+top", or a quote of the first new message when rows below the watermark
+are still in view). Appraisal appends the exchange's opening message and
+the retrieval profile. Critique appends the opening message, and the
+provenance lens still passes the CONTEXT snapshot inline.
+
+**Configuration** (`agent.forks`, validated at startup and on reload by
+`validate_agent_config`):
+
+```yaml
+agent:
+  forks:
+    enabled: false                # opt-in until measured (#73)
+    reasoning_budget_tokens: 2048 # per fork; null = server default
+    stages: null                  # null = every stage; or a list of names
+```
+
+With forks on and `llm.background` set to a different model than
+`llm.main`, `Agent.on_start` logs a warning: forked stages move to the
+main model.
+
+**Not yet settled.** Whether `response_format` is enforced under
+`tool_choice: "none"` with tools present, and `/apply-template` parity with
+and without `tool_choice`, need the live checks in #73 (K2, K3); the
+harness probes and the flip of `enabled` are tracked there.
 
 ## Task System
 
@@ -996,8 +1115,10 @@ Two triggers, one watermarked code path:
 Both spawn a tracked plugin-owned `asyncio.create_task` (never the
 TaskQueue — every TaskQueue completion wakes the main model). The task
 reads the per-channel **consolidation watermark**, fetches the working
-range, makes one `llm.background` call (first-person summary with
-epistemic framing, JSON out — see `prompts/memory_consolidation.md`),
+range, produces the record (first-person summary with epistemic framing,
+JSON out) — from a fork of the live window when one is available (see
+[Forks](#forks)), else one standalone `llm.background` call
+(`prompts/memory_consolidation.md`) —
 scores an importance prior through the pluggable
 `MemoryPlugin.importance_prior` (default: cheap-model `RubricPrior`,
 0.5 on failure; `AppraisalPlugin` wraps it in `AppraisalPrior` when
@@ -1784,13 +1905,13 @@ Agent               → "registry", "task", "llm", "tools"
 CLIPlugin           → "registry"    (ChannelRegistry)
 IRCPlugin           → "registry"    (ChannelRegistry)
 SubagentPlugin      → "llm", "tools"
-CompactionPlugin    → "llm"         (LLMPlugin)
+CompactionPlugin    → "llm"         (LLMPlugin); soft-uses "agent" for forks
 ThinkingPlugin      → "registry"    (ChannelRegistry)
-MemoryPlugin        → "persistence", "llm"
+MemoryPlugin        → "persistence", "llm"; soft-uses "agent", "registry" for forks
 MemoryToolsPlugin   → "memory"      (MemoryPlugin)
-CritiquePlugin      → "task", "llm"
+CritiquePlugin      → "task", "llm"; soft-uses "agent" for forks
 OutcomeLogPlugin    → "persistence"
-AppraisalPlugin     → "persistence"
+AppraisalPlugin     → "persistence"; soft-uses "agent" for forks
 UsageLogPlugin      → "persistence"
 SchedulerPlugin     → "registry", "persistence"
 ```
@@ -1800,6 +1921,10 @@ Plugins with `depends_on = set()` (declared but empty):
 `CoreToolsPlugin`, `McpClientPlugin`, `RuntimeSettingsPlugin`, `JsonlLogPlugin`,
 `TaskPlugin`, `MetricsPlugin`, `MetricsJsonlPlugin`, `ConfigWatcherPlugin`,
 `FunnelPlugin`.
+
+"Soft-uses" means `fork_agent(pm, stage)` (`pm.get_plugin("agent")`,
+duck-typed): with the agent plugin absent or forks off, the stage runs
+standalone.
 
 Transport plugins use `get_dependency(pm, "registry", ChannelRegistry)` in
 `on_start` to retrieve the shared `ChannelRegistry`. `SubagentPlugin` calls
@@ -1826,6 +1951,7 @@ corvidae/
 ├── idle.py               # IdleMonitorPlugin (no-op stub; idle detection is push-based in Agent)
 ├── thinking.py           # ThinkingPlugin, strip_thinking(), strip_reasoning_content()
 ├── compaction.py         # CompactionPlugin
+├── fork.py               # fork prompt builder, cut snap, agent.forks parser (#51)
 ├── task.py               # Task, TaskQueue, TaskPlugin
 ├── mcp_client.py         # McpClientPlugin (MCP server bridge)
 ├── memory.py             # MemoryPlugin (consolidation + retrieval + message_fts schema)
