@@ -571,11 +571,15 @@ class Agent(CorvidaePlugin):
         conv = channel.conversation
         _phases["conv_init"] = _time.monotonic() - _t_conv_init_start
 
-        # 2. Reset turn_counter on user messages — but only when this
-        # message starts a cycle. A user message arriving while a tool
-        # cycle is in flight is charged against that cycle's budget
-        # instead (R4), so a chatty channel can't extend max_turns.
-        if item.role == QueueItemRole.USER and not channel.pending_tool_call_ids:
+        # 2. Reset turn_counter when this item originates a new correlation
+        # (USER items, and notifications whose id was minted at dequeue in
+        # _process_queue_item) — but only when it starts a cycle. An item
+        # arriving while a tool cycle is in flight is charged against that
+        # cycle's budget instead (R4), so a chatty channel can't extend
+        # max_turns. Keying on `originating` rather than USER role lets a
+        # notification-only channel (scheduler reminders, heartbeat) get a
+        # fresh per-exchange budget instead of exhausting it permanently.
+        if item.originating and not channel.pending_tool_call_ids:
             channel.turn_counter = 0
 
         # 3. Resolve config and read max_turns_limit

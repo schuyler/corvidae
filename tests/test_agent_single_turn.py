@@ -276,6 +276,68 @@ class TestMaxTurnsNotResetWhileToolsPending:
 
 
 # ---------------------------------------------------------------------------
+# Test 4c: the reset rule is "originates a new correlation and no tool cycle
+# is in flight" (#59) — not "is a USER item". A clock-driven notification
+# (scheduler reminder, heartbeat) starts its own exchange and gets a fresh
+# max_turns budget; a notification inheriting a correlation does not.
+# ---------------------------------------------------------------------------
+
+
+class TestMaxTurnsResetsOnOriginatingNotification:
+    async def test_originating_notification_resets_counter(self, plugin_and_channel):
+        """A notification with no inherited correlation id mints its own at
+        dequeue (item.originating=True); with no pending tools it resets the
+        counter, so a notification-only channel never exhausts max_turns."""
+        plugin, channel, db = plugin_and_channel
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(return_value=_make_text_response("ok"))
+        plugin._client = mock_client
+
+        channel.turn_counter = 10
+        await plugin.on_notify(
+            channel=channel, source="reminder", text="due",
+            tool_call_id=None, meta={"origin": "reminder"},
+        )
+        await drain(plugin, channel)
+        assert channel.turn_counter == 1, (
+            "an originating notification with no cycle in flight must reset"
+        )
+
+    async def test_originating_notification_mid_cycle_charges_budget(self, plugin_and_channel):
+        """With tools pending, an originating notification is charged to the
+        running cycle, the same R4 guard user messages get."""
+        plugin, channel, db = plugin_and_channel
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(return_value=_make_text_response("ok"))
+        plugin._client = mock_client
+
+        channel.pending_tool_call_ids = {"x"}
+        channel.turn_counter = 3
+        await plugin.on_notify(
+            channel=channel, source="reminder", text="due",
+            tool_call_id=None, meta=None,
+        )
+        await drain(plugin, channel)
+        assert channel.turn_counter == 4
+
+    async def test_inherited_correlation_notification_does_not_reset(self, plugin_and_channel):
+        """A notification carrying meta['correlation_id'] belongs to an
+        existing exchange (originating=False) and must not reset."""
+        plugin, channel, db = plugin_and_channel
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(return_value=_make_text_response("ok"))
+        plugin._client = mock_client
+
+        channel.turn_counter = 3
+        await plugin.on_notify(
+            channel=channel, source="task", text="background done",
+            tool_call_id=None, meta={"correlation_id": "abc-123"},
+        )
+        await drain(plugin, channel)
+        assert channel.turn_counter == 4
+
+
+# ---------------------------------------------------------------------------
 # Test 5: notification-triggered turn increments counter
 # ---------------------------------------------------------------------------
 
