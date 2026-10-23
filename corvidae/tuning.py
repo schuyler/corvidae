@@ -41,8 +41,19 @@ def resolve_tunable(channel, config: dict, key: str, default: Any) -> Any:
     if overrides is not None and key in overrides:
         return overrides[key]
 
-    # Surface 2: walk the (hot-reloadable) config dict by dotted path. Any
-    # missing or non-dict intermediate node means the key is not configured.
+    # Surface 2: the (hot-reloadable) config dict.
+    return config_value(config, key, default)
+
+
+def config_value(config: dict, key: str, default: Any) -> Any:
+    """Read a dotted key from the config dict alone, ignoring runtime
+    overrides.
+
+    For static operator settings the agent must not be able to change
+    through ``set_settings`` (e.g. the fork instruction keys, GitHub issue
+    #51), while still picking up hot config reload. A missing or non-dict
+    intermediate node means the key is not configured.
+    """
     node: Any = config
     for part in key.split("."):
         if not isinstance(node, dict) or part not in node:
