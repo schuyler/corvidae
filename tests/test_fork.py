@@ -202,6 +202,9 @@ async def test_fork_request_matches_main_turn(forking_agent):
     _make_text_response('<tool_call>\n{"name": "shell", "arguments": {}}\n</tool_call>'),
     _make_text_response('  {"name": "shell", "arguments": {"command": "ls"}}'),
     _make_text_response("<function=shell><parameter=command>ls</parameter></function>"),
+    _make_text_response('<function name="shell">{}</function>'),
+    _make_text_response("<function_call>{}</function_call>"),
+    _make_text_response("<functions.shell>{}"),
 ])
 async def test_tool_calls_raise_fork_refused(forking_agent, response):
     plugin, channel, client = forking_agent

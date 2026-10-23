@@ -29,6 +29,7 @@ to :func:`fork_agent` and a name nobody uses simply matches nothing.
 from __future__ import annotations
 
 import json
+import re
 
 from dataclasses import dataclass
 
@@ -227,6 +228,11 @@ def snap_cut_to_tool_boundary(messages: list[dict], cut: int) -> int:
         cut = new_cut
 
 
+# Function-call markup openers: <function=…>, <function>, <function name=…>,
+# <function_call…>, <functions.…> — but not prose like <functional>.
+_FUNCTION_TAG = re.compile(r"<functions?(?:[=>\s_.])")
+
+
 def looks_like_tool_call(text: str) -> bool:
     """Whether a fork's text reply is a tool call written out as text.
 
@@ -237,7 +243,7 @@ def looks_like_tool_call(text: str) -> bool:
     object would even parse as a reply with nothing to report.
     """
     stripped = text.strip()
-    if stripped.startswith(("<tool_call>", "<function=", "<function>", "<function_calls>")):
+    if stripped.startswith("<tool_call>") or _FUNCTION_TAG.match(stripped):
         return True
     if stripped.startswith("{"):
         try:

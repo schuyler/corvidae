@@ -926,7 +926,7 @@ runtime overrides, so `set_settings` can't re-enable tool calls on a fork.
 
 **Invariants.** A fork mutates nothing, persists nothing, fires no hooks,
 and never dispatches tools: a reply carrying `tool_calls`, or a tool call
-written out as text (`<tool_call>`, `<function=`, a bare
+written out as text (`<tool_call>`, a `<function…>` tag, a bare
 `{"name", "arguments"}` object), raises `ForkRefused`. No live window or
 no main client raises `ForkUnavailable`.
 Every caller treats any fork exception, or an empty or unparseable reply,
