@@ -38,16 +38,17 @@ async def close_leaked_aiosqlite_connections(monkeypatch: pytest.MonkeyPatch):
 
     yield
 
-    # Close connections the test left open. _connection is aiosqlite's
-    # handle to the sqlite3 connection; it is None once closed (or if the
-    # connection was never awaited), and there is no public equivalent.
+    # Close connections the test left open. aiosqlite has no public "is
+    # open" check: _connection is None once closed (or never awaited), and
+    # _running is False once stop() was called, after which the worker may
+    # already have exited and close() would wait on it forever.
     for conn in opened:
-        if conn._connection is None:
+        if conn._connection is None or not conn._running:
             continue
         try:
             await conn.close()
         except Exception:
-            # Closing failed (e.g. a statement still running): log it and
-            # stop the worker thread anyway so the process can exit.
-            logger.warning("could not close leaked aiosqlite connection; stopping it", exc_info=True)
-            conn.stop()
+            # close() stops the worker thread in its own finally block even
+            # when closing the sqlite3 connection fails, so the process can
+            # still exit; record the failure for whoever reads the log.
+            logger.warning("could not close leaked aiosqlite connection", exc_info=True)

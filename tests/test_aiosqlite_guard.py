@@ -9,6 +9,7 @@ Exit-time hangs can only be observed from outside, so these tests run pytest
 in a subprocess on a probe directory that uses the guard fixture.
 """
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -50,7 +51,10 @@ def test_failing_test_with_open_connection_does_not_hang(tmp_path):
     (tmp_path / "test_probe.py").write_text(PROBE_TESTS)
 
     # Run the probe with the repo's pytest config (asyncio auto mode,
-    # pythonpath) so the guard module is importable.
+    # pythonpath) so the guard module is importable. PYTEST_ADDOPTS is
+    # dropped: options defined in tests/conftest.py (e.g. --run-eval) don't
+    # exist in the probe.
+    env = {k: v for k, v in os.environ.items() if k != "PYTEST_ADDOPTS"}
     try:
         result = subprocess.run(
             [
@@ -58,7 +62,7 @@ def test_failing_test_with_open_connection_does_not_hang(tmp_path):
                 "-c", str(REPO / "pyproject.toml"), "--rootdir", str(REPO),
                 str(tmp_path),
             ],
-            capture_output=True, text=True, timeout=10, cwd=REPO,
+            capture_output=True, text=True, timeout=10, cwd=REPO, env=env,
         )
     except subprocess.TimeoutExpired:
         pytest.fail("pytest hung at exit after a failing test leaked an aiosqlite connection")
