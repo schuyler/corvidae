@@ -136,6 +136,16 @@ it came from outlives compaction and gets re-admitted on later turns.
 Fix shape: deliver CONTEXT as a `user` turn (or a tool result) with the
 same framing, and reserve `system` for text the operator wrote.
 
+Available as an opt-in: `agent.mid_conversation_system_role: user` sends
+every system message after the operator's system prompt (both places
+above) as `user`, with the framing unchanged. It is applied at prompt
+build, so the stored rows keep `role: system`. The default is still
+`system`, because the evals were tuned against it. One behavioural
+caveat: CONTEXT is appended after the person's message, so with `user`
+the framed block becomes the last user turn the model sees. Check in
+`harness/` that the model still answers the person before you make it the
+default.
+
 Compaction is the adjacent problem. Summaries paraphrase other people's
 IRC messages and raw tool output and are stored as `role: assistant`
 (`compaction.py`), so the model reads whatever was injected as something
@@ -250,7 +260,9 @@ of it.
    they are on. Meanwhile, add `task_pipeline` and `write_file` to
    `tools.disabled` wherever `shell` already is, `buster.yaml.in` included.
 5. Deny private ranges and non-HTTP schemes in `web_fetch`.
-6. Move CONTEXT out of the `system` role.
+6. Move CONTEXT out of the `system` role. Opt-in today via
+   `agent.mid_conversation_system_role: user`; flipping the default is
+   what remains.
 7. Give `process_tool_result` a default that frames MCP results the way
    the funnel frames CONTEXT.
 8. Decide whether process separation is worth doing.

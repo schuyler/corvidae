@@ -987,8 +987,10 @@ Implements five hooks:
 - `on_idle` — consolidates the un-consolidated tail of channels inactive
   past `memory.idle_consolidate_after` seconds.
 - `before_agent_turn` — embeds the inbound user text, scores candidates
-  (`similarity × exp(-age_days / half_life)`), bands them
-  (strong/moderate/weak), admits winners through the funnel, bumps access
+  (`similarity × exp(-age_days / half_life)`, with age from `created_at` or,
+  under `memory.retrieval.recency_from: last_used`, from the last
+  retrieval), bands them (strong/moderate/weak, on the score or, under
+  `memory.retrieval.band_on: similarity`, on raw similarity), admits winners through the funnel, bumps access
   stats for admitted records, and writes a `retrieval_log` row.
 - `on_stop` — cancels in-flight background tasks.
 

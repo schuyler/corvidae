@@ -47,8 +47,8 @@ class CompactionPlugin(CorvidaePlugin):
 
     # Cap on the carried-forward prior-summary text, as a fraction of
     # max_tokens — bounds growth across repeated compaction rounds, since
-    # the prior-summaries system-prompt branch carries no length cap of its
-    # own.
+    # the summary length limit lives only in the (configurable) prompt text
+    # and a custom agent.compaction_prompt need not set one.
     _PRIOR_SUMMARIES_MAX_FRACTION = 0.5
 
     def __init__(self, pm=None) -> None:
@@ -313,11 +313,12 @@ class CompactionPlugin(CorvidaePlugin):
             raise RuntimeError("LLM client not available for compaction")
 
         # Build system prompt before truncation — the token budget depends on
-        # its size. If there are prior summaries, instruct the LLM to
-        # incorporate their (bounded) content into the new summary.
+        # its size. The configured prompt (agent.compaction_prompt) leads in
+        # every round; with prior summaries, an instruction to incorporate
+        # their (bounded) content follows it.
         if prior_summaries:
             system_content = (
-                "You are summarizing a conversation for an AI agent that will continue it. "
+                self._summary_prompt + "\n\n"
                 "Below are PRIOR SUMMARIES from earlier compaction rounds, followed by "
                 "NEW MESSAGES that need to be incorporated. Your summary MUST preserve "
                 "ALL key information from the prior summaries AND add any new facts, "

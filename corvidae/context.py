@@ -134,7 +134,11 @@ class ContextWindow:
         tagged = {**summary_msg, "_message_type": MessageType.SUMMARY}
         self.messages = [tagged] + retained
 
-    def build_prompt(self, pending_tool_call_ids: frozenset = frozenset()) -> list[dict]:
+    def build_prompt(
+        self,
+        pending_tool_call_ids: frozenset = frozenset(),
+        mid_conversation_system_role: str = "system",
+    ) -> list[dict]:
         """Return [system_message, *self.messages] with internal tags stripped.
 
         Does not modify self.messages. Strips every _-prefixed key
@@ -148,6 +152,12 @@ class ContextWindow:
         yet). If any call in the message is unanswered, the block emits in
         place instead. A tool message whose call is not in the window (e.g.
         compaction dropped it) stays where it is.
+
+        mid_conversation_system_role renders every system message after the
+        leading one under that role (``agent.mid_conversation_system_role``).
+        Strict chat templates reject a system message that is not first;
+        "user" satisfies them. Only the returned copy changes — the window
+        and the DB keep ``role: system``.
         """
         result_at = {}
         for i, m in enumerate(self.messages):
@@ -191,6 +201,15 @@ class ContextWindow:
             if i in emit_at:
                 continue
             out.append(_visible(msg))
+
+        # Re-role non-leading system messages (CONTEXT, untargeted
+        # notifications) for strict chat templates. A pure function of the
+        # message, so the rendered prefix stays stable across turns.
+        if mid_conversation_system_role != "system":
+            out[1:] = [
+                {**m, "role": mid_conversation_system_role} if m.get("role") == "system" else m
+                for m in out[1:]
+            ]
         return out
 
     def token_estimate(self) -> int:

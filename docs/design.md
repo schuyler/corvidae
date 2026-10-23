@@ -405,6 +405,16 @@ All operations are synchronous; no database access:
   cycle. The consequence this ordering secures: the emitted prompt never ends on
   an assistant message, which llama.cpp reads as a prefill and rejects under
   `enable_thinking`.
+  `build_prompt(pending_tool_call_ids, mid_conversation_system_role="system")`
+  also renders every `system` message after the leading system prompt
+  (CONTEXT, untargeted notifications) under `mid_conversation_system_role`.
+  `Agent` passes `agent.mid_conversation_system_role`. Strict chat templates
+  (Qwen 3.8, Swift-1.5) reject a non-leading system message, and `user`
+  keeps untrusted text out of the `system` role. Only the returned copy is
+  re-roled: the window and `message_log` keep `role: system`. That matters
+  because memory retrieval keys on a plain `user` tail, and because the
+  rewrite must stay a pure function of each message for the prompt prefix
+  to stay cache-stable.
 - `token_estimate()` — sums the token count of every message via tiktoken
   (`cl100k_base`), with a character-based fallback when tiktoken is
   unavailable. Each message is sized by its JSON-serialized visible fields
@@ -606,7 +616,9 @@ result and `tool_call_id`. `Agent.on_notify` enqueues a
 notification `QueueItem`. The next `_process_queue_item` call uses
 `_build_conversation_message` to format it as a `role: "tool"` message
 (if `tool_call_id` is set) or a system message, appends it to
-conversation, and calls `_run_turn` again.
+conversation, and calls `_run_turn` again. The system message is stored
+as such and sent as `agent.mid_conversation_system_role` (see
+`build_prompt` above).
 
 Multi-turn reasoning emerges from this cycle without blocking the
 channel queue.
@@ -767,7 +779,10 @@ for side effects; its return value is not used by the caller.
 6. Call `_summarize(new_messages_clean, prior_summaries_clean,
    max_tokens=max_tokens)` — sends the older messages to the LLM with a
    system prompt asking for a concise summary, incorporating any prior
-   summaries carried forward from earlier compaction rounds. Resolves the
+   summaries carried forward from earlier compaction rounds. The system
+   prompt is `agent.compaction_prompt` (default `DEFAULT_SUMMARY_PROMPT`)
+   in every round; when prior summaries exist, the carry-forward
+   instruction and the bounded prior-summary text are appended to it. Resolves the
    LLM client lazily via `get_dependency(pm, "llm", LLMPlugin)` on first
    call (not in `on_start`, because `on_start` hooks run in LIFO order and
    `CompactionPlugin.on_start` fires before `LLMPlugin.on_start`). The
@@ -934,7 +949,12 @@ scores an importance prior through the pluggable
 0.5 on failure; `AppraisalPlugin` wraps it in `AppraisalPrior` when
 appraisal is enabled), embeds the summary via
 `llm.embedding`, and commits the memory row together with the watermark
-advance in one compare-and-set section. Overlapping triggers on the same
+advance in one compare-and-set section. The row's `created_at` is the
+`message_log.timestamp` of the last row in the source range, i.e. when
+the conversation happened, not when consolidation ran, so history
+consolidated long after the fact is aged correctly by retrieval and
+retention. A near-duplicate merge keeps the later of the two records'
+dates. Overlapping triggers on the same
 range discard the loser's record — no duplicates. Embedding failure
 stores the record with `embedded=0` for later backfill; the summary text
 is canonical and vectors are a rebuildable cache. All consolidation LLM
@@ -952,9 +972,15 @@ log line.
 (sqlite-vec exact KNN, cosine distance); candidates are filtered to
 `indexed=1 AND redacted=0` and channel-compartmentalized (`channel_id`
 match, or shared scope via `memory.channel_groups`). Scores are
-`cosine_similarity × exp(-age_days / memory.half_life_days)` and annotated
-into relevance bands (strong ≥ 0.75, moderate ≥ 0.60, else weak; weak
-drops unless nothing else matched). Winners enter the window as
+`cosine_similarity × exp(-age_days / memory.half_life_days)`, where
+`age_days` runs from `created_at`, or from `max(created_at,
+last_retrieved_at)` under `memory.retrieval.recency_from: last_used`.
+Candidates rank by score and are annotated into relevance bands (strong
+≥ 0.75, moderate ≥ 0.60, else weak; weak drops unless nothing else
+matched). The bands apply to the score by default, or to raw similarity
+under `memory.retrieval.band_on: similarity`, so an old but apt memory is
+not presented as a guess. The `(age)` shown always runs from
+`created_at`. Winners enter the window as
 `[band] (age) summary` lines through the admission funnel — never by
 direct CONTEXT append. Admitted memories get their access statistics
 bumped (`retrieval_count`, `last_retrieved_at` — the write half of
@@ -1402,6 +1428,7 @@ agent:
   max_context_tokens: 24000
   keep_thinking_in_history: false
   max_turns: 10
+  mid_conversation_system_role: system  # system | user — role for non-leading system messages
   immutable_settings:           # keys the agent must not change (system_prompt always added)
     - max_turns
 
@@ -1415,12 +1442,14 @@ tools:
 
 memory:
   idle_consolidate_after: 1800  # seconds of channel inactivity before idle consolidation
-  half_life_days: 30            # retrieval recency half-life
+  half_life_days: 30            # retrieval recency decay (e-folding time, days)
   retrieval:
     k: 8                        # KNN candidate count
+    band_on: score              # score | similarity — what the bands apply to
+    recency_from: created       # created | last_used — where ranking age runs from
     bands:
-      strong: 0.75              # assert confidently at or above this score
-      moderate: 0.60            # hedge at or above this score
+      strong: 0.75              # assert confidently at or above this value (score or similarity, per band_on)
+      moderate: 0.60            # hedge at or above this value
   channel_groups: {}            # {group: [channel ids]} shared memory scopes
 
 funnel:

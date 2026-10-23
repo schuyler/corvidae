@@ -70,20 +70,11 @@ The system prompt is resolved **on the first message to a channel**. It is store
 
 ## Conversation history
 
-After the system message, `build_prompt()` appends all messages from `ContextWindow.messages`:
+After the system message, `build_prompt()` (`corvidae/context.py`) appends all messages from `ContextWindow.messages`. Each message is a standard dict with `"role"` and `"content"` keys. Every internal `_`-prefixed tag (`_message_type`, `_db_id`) is stripped before the list is returned, so the LLM never sees them. Assistant tool-call messages are moved next to their results; see [design.md](design.md), "Conversation Management", for that ordering.
 
-```python
-# corvidae/context.py:118
-def build_prompt(self) -> list[dict]:
-    cleaned = []
-    for msg in self.messages:
-        if "_message_type" in msg:
-            msg = {k: v for k, v in msg.items() if k != "_message_type"}
-        cleaned.append(msg)
-    return [{"role": "system", "content": self.system_prompt}] + cleaned
-```
+### Roles of injected context and notifications
 
-Each message is a standard dict with `"role"` and `"content"` keys. The internal `_message_type` tag is stripped before the list is returned — the LLM never sees it.
+CONTEXT entries and notifications that are not tool results are stored as `role: system`. By default they are sent that way too, so the LLM sees system messages after the first one. Strict chat templates (Qwen 3.8, Swift-1.5) reject that. With `agent.mid_conversation_system_role: user`, `build_prompt()` sends every system message after the leading system prompt as `user`, with its content and framing unchanged. Only the prompt copy changes; the window and `sessions.db` keep `role: system`. See [configuration.md](configuration.md).
 
 ### Message types
 
