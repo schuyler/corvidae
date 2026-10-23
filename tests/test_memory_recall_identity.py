@@ -159,6 +159,8 @@ class TestRecencyFrom:
         await _set_last_retrieved(db, mid, time.time() - 2 * DAY)
         [c], _ = await memory.retrieve(channel.id, SUMMARY)
         assert c["band"] == "strong"
+        # Ranked as 2 days old, displayed as 180.
+        assert c["score"] == pytest.approx(math.exp(-2 / 30), rel=1e-3)
         assert c["age_seconds"] == pytest.approx(180 * DAY, rel=1e-3)
 
 
