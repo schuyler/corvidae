@@ -9,6 +9,7 @@ The stub embedder is a deterministic hashed bag-of-words unit vector, so
 related texts have reproducibly higher cosine similarity.
 """
 
+import asyncio
 import hashlib
 import json
 import math
@@ -655,7 +656,6 @@ class TestRetrievalLogSimilarity:
 
     async def test_concurrent_upgrade_does_not_fail(self, tmp_path):
         """Two first retrievals racing the retrieval_log upgrade both succeed."""
-        import asyncio
         path = tmp_path / "sessions.db"
         async with aiosqlite.connect(path) as legacy:
             await legacy.execute(
@@ -667,13 +667,15 @@ class TestRetrievalLogSimilarity:
             )
             await legacy.commit()
         memory, embedder, channel, conv, db = await build_retrieval_env(db_path=path)
-        # on_start's schema pass is what a deferred start would skip.
+        # on_start already upgraded the table; put it back in the legacy
+        # shape and rerun the schema pass twice at once, as two first
+        # retrievals after a deferred start would.
         memory._schema_ready = False
-        async with db.execute("PRAGMA table_info(retrieval_log)") as cursor:
-            cols = {row[1] for row in await cursor.fetchall()}
-        if "top_similarity" in cols:
-            await db.execute("ALTER TABLE retrieval_log DROP COLUMN top_similarity")
-            await db.commit()
+        await db.execute("ALTER TABLE retrieval_log DROP COLUMN top_similarity")
+        await db.commit()
         results = await asyncio.gather(memory._ensure_schema(), memory._ensure_schema())
         assert all(r is db for r in results)
+        async with db.execute("PRAGMA table_info(retrieval_log)") as cursor:
+            cols = {row[1] for row in await cursor.fetchall()}
+        assert "top_similarity" in cols
         await db.close()

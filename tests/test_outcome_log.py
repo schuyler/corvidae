@@ -1,5 +1,7 @@
 """Tests for corvidae.outcome_log — the exchange_log table and writer API."""
 
+import asyncio
+
 import pytest
 
 from corvidae.hooks import create_plugin_manager
@@ -168,7 +170,6 @@ class TestRetrievalTopSimilarity:
     async def test_concurrent_upgrade_does_not_fail(self, db):
         """Two first writers racing the upgrade both succeed: the loser of
         the ALTER race sees 'duplicate column name', which means done."""
-        import asyncio
         from corvidae.outcome_log import OutcomeLogPlugin
         from corvidae.persistence import PersistencePlugin
 
@@ -189,6 +190,9 @@ class TestRetrievalTopSimilarity:
         await plugin.on_init(pm, {})
 
         await asyncio.gather(plugin._ensure_table(), plugin._ensure_table())
+        async with db.execute("PRAGMA table_info(exchange_log)") as cursor:
+            cols = {row[1] for row in await cursor.fetchall()}
+        assert "retrieval_top_similarity" in cols
 
 
 class TestRfc7386NoneDeletes:
