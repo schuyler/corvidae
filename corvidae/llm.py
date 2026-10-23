@@ -23,8 +23,44 @@ import aiohttp
 
 TRANSIENT_STATUS_CODES = {429, 500, 502, 503, 504}
 ERROR_BODY_CHARS = 2000
+# Minimum sleep between "model is not loaded" retries, so a zero backoff
+# config cannot spin without spending the wait budget.
+MODEL_NOT_LOADED_MIN_DELAY = 1.0
+# llama-server router's 400 body when the requested model is unloaded and
+# --no-models-autoload is set (tools/server/server-models.cpp,
+# router_validate_model).
+MODEL_NOT_LOADED_MARKER = "model is not loaded"
 
 logger = logging.getLogger(__name__)
+
+
+class LLMHTTPError(aiohttp.ClientResponseError):
+    """A non-2xx LLM API response, carrying the response body and model.
+
+    Subclasses ClientResponseError so existing handlers keep working; the
+    extra fields let error handlers (on_llm_error) tell failures apart.
+    """
+
+    def __init__(self, cause: aiohttp.ClientResponseError, body: str, model: str) -> None:
+        super().__init__(
+            request_info=cause.request_info,
+            history=cause.history,
+            status=cause.status,
+            message=cause.message,
+            headers=cause.headers,
+        )
+        self.body = body
+        self.model = model
+
+
+def _body_says_not_loaded(status: int, body: str) -> bool:
+    """Whether a response is the router's 'model is not loaded' 400."""
+    return status == 400 and isinstance(body, str) and MODEL_NOT_LOADED_MARKER in body
+
+
+def is_model_not_loaded(error: BaseException) -> bool:
+    """Whether error is an LLMHTTPError for an unloaded backend model."""
+    return isinstance(error, LLMHTTPError) and _body_says_not_loaded(error.status, error.body)
 
 
 class LLMClient:
@@ -60,6 +96,7 @@ class LLMClient:
         timeout: float | None = None,
         document_prefix: str = "",
         query_prefix: str = "",
+        model_not_loaded_wait: float = 60.0,
     ) -> None:
         """Initialize the LLM client.
 
@@ -81,6 +118,10 @@ class LLMClient:
                              Defaults to '' (no prefix).
             query_prefix: String prepended to every text when kind='query'.
                           Defaults to '' (no prefix).
+            model_not_loaded_wait: Total seconds to keep retrying while the
+                          server reports the model is not loaded (a
+                          llama-server router with --no-models-autoload).
+                          Independent of max_retries. 0 disables.
         """
         self.base_url = base_url.rstrip("/")
         self.model = model
@@ -94,6 +135,7 @@ class LLMClient:
         )
         self.document_prefix = document_prefix
         self.query_prefix = query_prefix
+        self.model_not_loaded_wait = model_not_loaded_wait
         self.session: aiohttp.ClientSession | None = None
         self.observer: object | None = None
 
@@ -125,7 +167,9 @@ class LLMClient:
                 return min(float(retry_after), self.retry_max_delay)
             except ValueError:
                 pass
-        return min(self.retry_base_delay * (2 ** attempt), self.retry_max_delay)
+        # Cap the exponent: past 2**30 the delay is pinned at the max anyway,
+        # and an unbounded one overflows float conversion on long waits.
+        return min(self.retry_base_delay * (2 ** min(attempt, 30)), self.retry_max_delay)
 
     async def start(self) -> None:
         """Create the aiohttp session with optional auth header.
@@ -299,8 +343,12 @@ class LLMClient:
             (parsed JSON response, elapsed seconds of the final attempt).
         """
         start = time.monotonic()
+        # Transient-error attempts, and the separate not-loaded wait budget.
+        attempt = 0
+        not_loaded_attempt = 0
+        not_loaded_waited = 0.0
         try:
-            for attempt in range(1 + self.max_retries):
+            while True:
                 try:
                     start = time.monotonic()
                     async with self.session.post(
@@ -323,22 +371,54 @@ class LLMClient:
                                 },
                             )
                             await asyncio.sleep(delay)
+                            attempt += 1
                             continue
 
                         error_body = ""
+                        if resp.status >= 400:
+                            # raise_for_status() releases the connection; read
+                            # the body first or lose it.
+                            error_body = (await resp.text())[:ERROR_BODY_CHARS]
+
+                        # Model unloaded on a router (GitHub issue #55): it may
+                        # be swapped back shortly, so wait and retry within
+                        # model_not_loaded_wait, clamping the last sleep.
+                        remaining = self.model_not_loaded_wait - not_loaded_waited
+                        if _body_says_not_loaded(resp.status, error_body) and remaining > 0:
+                            delay = min(
+                                max(self._retry_delay(not_loaded_attempt), MODEL_NOT_LOADED_MIN_DELAY),
+                                remaining,
+                            )
+                            logger.warning(
+                                "LLM model not loaded, waiting",
+                                extra={
+                                    "model": self.model,
+                                    "attempt": not_loaded_attempt + 1,
+                                    "delay": delay,
+                                },
+                            )
+                            await asyncio.sleep(delay)
+                            not_loaded_waited += delay
+                            not_loaded_attempt += 1
+                            continue
+
                         try:
-                            if resp.status >= 400:
-                                # raise_for_status() releases the connection; read
-                                # the body first or lose it.
-                                error_body = (await resp.text())[:ERROR_BODY_CHARS]
                             resp.raise_for_status()
                             response = await resp.json()
-                        except aiohttp.ClientResponseError:
+                        except aiohttp.ClientResponseError as exc:
                             logger.error(
                                 "%s failed", label,
                                 extra={"status": resp.status, "body": error_body},
                             )
-                            raise
+                            # A 2xx with an unparseable body (ContentTypeError)
+                            # is not an HTTP failure; propagate it unchanged.
+                            if resp.status < 400:
+                                raise
+                            # Name the model this request asked for: extra_body
+                            # can override the client's configured model.
+                            raise LLMHTTPError(
+                                exc, body=error_body, model=payload.get("model", self.model)
+                            ) from exc
 
                 except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as exc:
                     if attempt < self.max_retries:
@@ -352,6 +432,7 @@ class LLMClient:
                             },
                         )
                         await asyncio.sleep(delay)
+                        attempt += 1
                         continue
                     raise
 

@@ -478,6 +478,7 @@ class TestOnMessagePersistenceAndLoop:
             timeout=None,
             document_prefix="",
             query_prefix="",
+            model_not_loaded_wait=60.0,
         )
 
         await db.close()
@@ -519,6 +520,7 @@ class TestOnMessagePersistenceAndLoop:
             timeout=None,
             document_prefix="",
             query_prefix="",
+            model_not_loaded_wait=60.0,
         )
 
         await db.close()
@@ -560,6 +562,7 @@ class TestOnMessagePersistenceAndLoop:
             timeout=None,
             document_prefix="",
             query_prefix="",
+            model_not_loaded_wait=60.0,
         )
 
         await db.close()
@@ -601,6 +604,7 @@ class TestOnMessagePersistenceAndLoop:
             timeout=None,
             document_prefix="",
             query_prefix="",
+            model_not_loaded_wait=60.0,
         )
 
         await db.close()

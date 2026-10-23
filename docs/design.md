@@ -213,6 +213,7 @@ class LLMClient:
         retry_base_delay: float = 2.0,
         retry_max_delay: float = 60.0,
         timeout: float | None = None,
+        model_not_loaded_wait: float = 60.0,
     )
     async def start(self)
     async def stop(self)
@@ -224,6 +225,15 @@ Retry parameters: `max_retries` (default 3, set to 0 to disable), `retry_base_de
 Retries apply to transient HTTP status codes (429, 500, 502, 503, 504) and connection
 errors. Honors `Retry-After` response headers. `timeout` is the total HTTP timeout per
 request in seconds; `None` uses aiohttp's session default (300s).
+
+A llama-server router started with `--no-models-autoload` answers a request
+for an unloaded model with HTTP 400 `"model is not loaded"` (#55). That
+response is retried with the same backoff until a total of
+`model_not_loaded_wait` seconds has been slept (the last sleep is clamped to
+fit), independently of `max_retries`; `0` disables it. Any terminal non-2xx
+response raises `LLMHTTPError`, a `ClientResponseError` subclass carrying the
+response `body` (truncated to 2000 characters) and the client's `model`;
+`is_model_not_loaded(error)` recognizes the unloaded-model case.
 
 ### Observability
 
@@ -551,7 +561,9 @@ per-channel `SerialQueue`. The queue's consumer calls
 8. **`_run_turn`** — calls `run_agent_turn` (single LLM invocation).
    On exception, broadcasts `on_llm_error` (`firstresult=True`), sends
    the error message to the channel, and returns `None` to abort
-   processing.
+   processing. `LLMPlugin` implements it `trylast`: for an unloaded
+   backend model it returns a message naming the model, and it defers
+   (`None`) on every other error, so the generic message still applies.
 9. Appends the assistant message to conversation; fires `on_conversation_event`
 10. Calls `after_persist_assistant` hook (broadcast); `ThinkingPlugin`
     uses this to strip `reasoning_content` from the in-memory copy
@@ -796,7 +808,13 @@ for side effects; its return value is not used by the caller.
    inserting a `[...N messages omitted...]` marker between them when
    anything is dropped. This method is a separate method so tests can patch
    it via `patch.object`.
-7. Call `conversation.replace_with_summary(summary_msg, retain_count)`.
+7. Build the summary message (`[Summary of earlier conversation]\n…`).
+   Its role is `assistant`, unless the retained tail holds no `user`
+   message (a long tool loop); then it is `user`, because strict chat
+   templates (Swift-1.5 / Qwen 3.8) reject a prompt with no user query
+   (#56). The role is persisted with the summary row, so a reload renders
+   the same prompt. Call
+   `conversation.replace_with_summary(summary_msg, retain_count)`.
 8. Fire `on_compaction(channel, summary_msg, retain_count, compacted_ids)`
    (broadcast) so persistence plugins can update the DB.
 9. Return `True`.
@@ -869,6 +887,7 @@ llm:
     max_retries: 3
     retry_base_delay: 2.0
     retry_max_delay: 60.0
+    model_not_loaded_wait: 60.0
     timeout: null             # optional; aiohttp default (300s) if absent
   background:                 # optional; absent means use llm.main
     base_url: "..."
@@ -953,8 +972,24 @@ advance in one compare-and-set section. The row's `created_at` is the
 `message_log.timestamp` of the last row in the source range, i.e. when
 the conversation happened, not when consolidation ran, so history
 consolidated long after the fact is aged correctly by retrieval and
-retention. A near-duplicate merge keeps the later of the two records'
-dates. Overlapping triggers on the same
+retention.
+
+**Near-duplicate merge.** Before inserting the new vector, consolidation
+looks for the nearest indexed record with cosine similarity
+≥ `memory.dup_threshold` among the records in the channel's retrieval
+scope (#58). A record on another channel qualifies only if that channel's
+scope has the same reach (`ChannelScope.same_reach`), because groups are
+not transitive: with groups {A, B} and {A, C}, folding C's record into one
+owned by A, and later A's into one owned by B, would hide the fact from C.
+Equal reach keeps the survivor visible to exactly the channels that could
+see the superseded record. Under a single `*` group every channel
+qualifies. The old record is superseded (`superseded_by`, `indexed=0`,
+vector deleted); the survivor takes the summed retrieval count, the
+higher importance, and the later of the two records' dates. Message
+ranges fold only within one channel: `message_log` ids are global, and
+`recall_raw` and `/redact` read a record's range on its own channel, so on
+a cross-channel merge each record keeps its own range and the superseded
+record still leads to its channel's source dialog. Overlapping triggers on the same
 range discard the loser's record — no duplicates. Embedding failure
 stores the record with `embedded=0` for later backfill; the summary text
 is canonical and vectors are a rebuildable cache. All consolidation LLM
@@ -1418,6 +1453,7 @@ llm:
     max_retries: 3              # retry attempts on transient errors (default 3)
     retry_base_delay: 2.0       # base exponential backoff delay in seconds
     retry_max_delay: 60.0       # maximum retry delay cap in seconds
+    model_not_loaded_wait: 60.0 # seconds to wait out an unloaded router model
     timeout: null               # HTTP timeout per request; null = aiohttp default (300s)
   background:                   # optional separate LLM for subagent tasks
     base_url: "..."

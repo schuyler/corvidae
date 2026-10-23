@@ -196,7 +196,11 @@ compartment, so "memory is compartmentalized per channel" means less on
 IRC than it does on Signal. Glob members in `memory.channel_groups`
 (`irc:*`, or `*` alone) widen this further: every channel the pattern
 matches, including ones a stranger creates later by sending a PM, shares
-one memory compartment with every other member of the group. Only
+one memory compartment with every other member of the group. That
+includes the near-duplicate merge (#58): a channel in the group can
+consolidate a near-duplicate of a member's memory and supersede it, so its
+own wording replaces the original record and inherits its importance and
+retrieval count. Only
 Signal's allowlist bounds which channels can come into existence under
 `signal:*`. At minimum, PMs should be off by default or
 gated by an `irc.allow` list, bringing it in line with Signal.

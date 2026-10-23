@@ -11,7 +11,8 @@ Algorithm:
     4. Skip if all messages fit (retain_count >= len(messages)).
     5. Extract existing summaries from older, then filter remaining to MESSAGE type.
     6. Summarize via LLM: pass existing summaries as context + new messages.
-    7. Call conversation.replace_with_summary(summary_msg, retain_count) (sync).
+    7. Summary role is assistant, or user if the retained tail holds no
+       user message (#56). Call conversation.replace_with_summary(summary_msg, retain_count) (sync).
     8. Fire on_compaction hook if pm is set.
     9. Return True.
 """
@@ -240,8 +241,17 @@ class CompactionPlugin(CorvidaePlugin):
             self._last_failed_compaction[channel_id] = time.monotonic()
             return None
 
+        # The summary is normally an assistant message. If the retained tail
+        # holds no user message (a long tool loop), render it as user
+        # instead: strict chat templates (Swift-1.5 / Qwen 3.8) reject a
+        # prompt with no user query (GitHub issue #56). The role is stored
+        # with the summary, so a reload renders the same prompt.
+        retained = conversation.messages[-retain_count:]
+        summary_role = (
+            "assistant" if any(m.get("role") == "user" for m in retained) else "user"
+        )
         summary_msg = {
-            "role": "assistant",
+            "role": summary_role,
             "content": f"[Summary of earlier conversation]\n{summary_text}",
         }
 

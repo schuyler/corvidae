@@ -11,6 +11,7 @@ llm:
     # max_retries: 3                   # max retry attempts on transient errors (429, 500, 502, 503, 504)
     # retry_base_delay: 2.0            # base delay in seconds for exponential backoff
     # retry_max_delay: 60.0            # maximum delay cap in seconds
+    # model_not_loaded_wait: 60.0      # seconds to wait out "model is not loaded" (llama-server router)
     # timeout: null                    # HTTP timeout in seconds per request (null uses aiohttp's 300s default)
   # background:                        # optional: separate LLM for background tasks
   #   base_url: http://localhost:8080   # all fields must be specified; no inheritance from llm.main
@@ -21,6 +22,7 @@ llm:
   #   # max_retries: 3
   #   # retry_base_delay: 2.0
   #   # retry_max_delay: 60.0
+  #   # model_not_loaded_wait: 60.0
   #   # timeout: null
   # embedding:                         # optional: embedding model for memory retrieval
   #   base_url: http://localhost:8082/v1  # embedding servers are usually separate endpoints

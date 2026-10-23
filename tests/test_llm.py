@@ -3,6 +3,7 @@
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import aiohttp
 import pytest
 
 from corvidae.llm import LLMClient
@@ -460,3 +461,155 @@ class TestLLMClientErrorBody:
         records_with_body = [r for r in caplog.records if hasattr(r, "body")]
         assert records_with_body, "no log record carried a body attribute"
         assert len(records_with_body[0].body) <= ERROR_BODY_CHARS
+
+
+# ---------------------------------------------------------------------------
+# GitHub issue #55: llama-server router "model is not loaded"
+# ---------------------------------------------------------------------------
+
+NOT_LOADED_BODY = json.dumps({
+    "error": {"code": 400, "message": "model is not loaded", "type": "invalid_request_error"}
+})
+
+
+def _session_returning(*responses):
+    """A mock session whose successive post() calls yield the given responses."""
+    session = AsyncMock()
+    cms = []
+    for resp in responses:
+        cm = AsyncMock()
+        cm.__aenter__ = AsyncMock(return_value=resp)
+        cm.__aexit__ = AsyncMock(return_value=False)
+        cms.append(cm)
+    session.post = MagicMock(side_effect=cms)
+    session.close = AsyncMock()
+    return session
+
+
+class TestModelNotLoaded:
+    async def test_retries_until_model_loads(self):
+        """A 'model is not loaded' 400 is retried, without spending max_retries."""
+        client = LLMClient(
+            base_url=BASE_URL, model=MODEL, max_retries=0,
+            retry_base_delay=1.0, model_not_loaded_wait=60.0,
+        )
+        not_loaded = [_make_mock_response(status=400, body_text=NOT_LOADED_BODY) for _ in range(3)]
+        ok = _make_mock_response(status=200, json_body=MOCK_COMPLETION)
+        client.session = _session_returning(*not_loaded, ok)
+
+        with patch("asyncio.sleep", new_callable=AsyncMock) as sleep:
+            result = await client.chat(MESSAGES)
+
+        assert result == MOCK_COMPLETION
+        assert client.session.post.call_count == 4
+        assert [c.args[0] for c in sleep.call_args_list] == [1.0, 2.0, 4.0]
+
+    async def test_gives_up_after_wait_budget(self):
+        """Total sleep never exceeds model_not_loaded_wait; then LLMHTTPError carries the body."""
+        from corvidae.llm import LLMHTTPError, is_model_not_loaded
+
+        client = LLMClient(
+            base_url=BASE_URL, model=MODEL, retry_base_delay=1.0,
+            retry_max_delay=60.0, model_not_loaded_wait=10.0,
+        )
+        responses = [_make_mock_response(status=400, body_text=NOT_LOADED_BODY) for _ in range(10)]
+        client.session = _session_returning(*responses)
+
+        with patch("asyncio.sleep", new_callable=AsyncMock) as sleep:
+            with pytest.raises(LLMHTTPError) as excinfo:
+                await client.chat(MESSAGES)
+
+        # 1 + 2 + 4 + 3 (clamped to what is left of the 10s budget).
+        assert [c.args[0] for c in sleep.call_args_list] == [1.0, 2.0, 4.0, 3.0]
+        assert client.session.post.call_count == 5
+        err = excinfo.value
+        assert err.status == 400
+        assert "model is not loaded" in err.body
+        assert err.model == MODEL
+        assert is_model_not_loaded(err)
+
+    async def test_wait_zero_disables_retry(self):
+        client = LLMClient(base_url=BASE_URL, model=MODEL, model_not_loaded_wait=0.0)
+        client.session = _session_returning(
+            _make_mock_response(status=400, body_text=NOT_LOADED_BODY)
+        )
+
+        with patch("asyncio.sleep", new_callable=AsyncMock) as sleep:
+            with pytest.raises(aiohttp.ClientResponseError):
+                await client.chat(MESSAGES)
+
+        assert client.session.post.call_count == 1
+        sleep.assert_not_called()
+
+    async def test_other_400_not_retried(self):
+        """A 400 with a different body still fails immediately."""
+        from corvidae.llm import LLMHTTPError, is_model_not_loaded
+
+        client = LLMClient(base_url=BASE_URL, model=MODEL, model_not_loaded_wait=60.0)
+        client.session = _session_returning(
+            _make_mock_response(status=400, body_text='{"error": {"message": "bad grammar"}}')
+        )
+
+        with patch("asyncio.sleep", new_callable=AsyncMock) as sleep:
+            with pytest.raises(LLMHTTPError) as excinfo:
+                await client.chat(MESSAGES)
+
+        assert client.session.post.call_count == 1
+        sleep.assert_not_called()
+        assert not is_model_not_loaded(excinfo.value)
+
+    def test_is_model_not_loaded_rejects_unrelated_errors(self):
+        from corvidae.llm import is_model_not_loaded
+
+        assert not is_model_not_loaded(RuntimeError("model is not loaded"))
+
+
+
+class TestModelNotLoadedRobustness:
+    async def test_zero_backoff_still_spends_the_budget(self):
+        """retry_base_delay=0 must not loop without sleeping: each wait is at least 1s."""
+        from corvidae.llm import LLMHTTPError
+
+        client = LLMClient(
+            base_url=BASE_URL, model=MODEL, retry_base_delay=0.0,
+            model_not_loaded_wait=3.0,
+        )
+        responses = [_make_mock_response(status=400, body_text=NOT_LOADED_BODY) for _ in range(10)]
+        client.session = _session_returning(*responses)
+
+        with patch("asyncio.sleep", new_callable=AsyncMock) as sleep:
+            with pytest.raises(LLMHTTPError):
+                await client.chat(MESSAGES)
+
+        assert [c.args[0] for c in sleep.call_args_list] == [1.0, 1.0, 1.0]
+        assert client.session.post.call_count == 4
+
+    def test_retry_delay_does_not_overflow(self):
+        client = LLMClient(base_url=BASE_URL, model=MODEL, retry_max_delay=5.0)
+        assert client._retry_delay(5000) == 5.0
+
+
+class TestLLMHTTPErrorDetails:
+    async def test_error_names_requested_model(self):
+        """A model overridden via extra_body is the one named in the error."""
+        from corvidae.llm import LLMHTTPError
+
+        client = LLMClient(base_url=BASE_URL, model="m1", model_not_loaded_wait=0.0)
+        client.session = _session_returning(
+            _make_mock_response(status=400, body_text=NOT_LOADED_BODY)
+        )
+        with pytest.raises(LLMHTTPError) as excinfo:
+            await client.chat(MESSAGES, extra_body={"model": "m2"})
+        assert excinfo.value.model == "m2"
+
+    async def test_non_json_success_keeps_content_type_error(self):
+        """A 2xx with a bad body is not reported as an HTTP error."""
+        from corvidae.llm import LLMHTTPError
+
+        client = LLMClient(base_url=BASE_URL, model=MODEL)
+        resp = _make_mock_response(status=200)
+        resp.json = AsyncMock(side_effect=aiohttp.ContentTypeError(MagicMock(), ()))
+        client.session = _session_returning(resp)
+        with pytest.raises(aiohttp.ContentTypeError) as excinfo:
+            await client.chat(MESSAGES)
+        assert not isinstance(excinfo.value, LLMHTTPError)
