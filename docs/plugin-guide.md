@@ -123,7 +123,7 @@ The built-in subcommand `scaffold` is registered by corvidae itself under `corvi
 |------|------|------|
 | `on_init(pm, config: dict)` | async broadcast | After all plugins are registered, before `on_start`. Use to store `pm`, read config values, and resolve references to other plugins. Do not create runtime resources here. |
 | `on_start(config: dict)` | async broadcast | Once at startup, after `on_init`. Use to open runtime resources: DB connections, network clients, file handles, asyncio tasks. |
-| `on_stop()` | async broadcast | On SIGINT/SIGTERM, before process exits |
+| `on_stop()` | async broadcast | On SIGINT/SIGTERM, before process exits (a SIGINT during startup is held until `on_start` finishes; a SIGTERM then ends the process without `on_stop`) |
 | `on_config_reload(config: dict)` | async broadcast | When `agent.yaml` is modified while the daemon is running. The config dict has been re-parsed, merged with CLI overrides, and validated before dispatch. |
 
 `config` is the full parsed `agent.yaml` dict. The key `_base_dir` (a `Path`) is set by `Runtime.start()` pointing to the config file's directory.

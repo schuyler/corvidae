@@ -193,6 +193,119 @@ class TestReadLoop:
         pm.ahook.on_message.assert_not_awaited()
 
 
+class TestNonInteractiveStdin:
+    """#53: under systemd stdin is /dev/null, so EOF arrives at once. That
+    must stop only the CLI transport, not the daemon."""
+
+    async def _run_loop(self, plugin, lines, isatty: bool, stdout=None):
+        """Run _read_loop over `lines` with stdin.isatty() == isatty.
+
+        Returns the os.kill mock. Pass `stdout` to inspect what was written.
+        """
+        it = iter(lines)
+        loop = asyncio.get_running_loop()
+
+        async def fake_executor(executor, fn, *args):
+            return fn(*args)
+
+        with patch.object(loop, "run_in_executor", side_effect=fake_executor), \
+             patch("sys.stdin") as mock_stdin, \
+             patch("sys.stdout", stdout or MagicMock()), \
+             patch("corvidae.channels.cli.os.kill") as mock_kill:
+            mock_stdin.readline = lambda: next(it)
+            mock_stdin.isatty.return_value = isatty
+            await plugin._read_loop()
+        return mock_kill
+
+    def _plugin(self):
+        pm, registry = _make_pm_with_registry(transport="cli")
+        plugin = CLIPlugin(pm)
+        pm.register(plugin, name="cli")
+        plugin._registry = registry
+        return plugin, pm, registry
+
+    async def test_non_tty_eof_does_not_signal(self, caplog):
+        plugin, _pm, _registry = self._plugin()
+        with caplog.at_level("WARNING", logger="corvidae.channels.cli"):
+            mock_kill = await self._run_loop(plugin, [""], isatty=False)
+        mock_kill.assert_not_called()
+        assert any("stdin" in r.getMessage() for r in caplog.records)
+
+    async def test_tty_eof_still_signals(self):
+        import os
+        import signal
+
+        plugin, _pm, _registry = self._plugin()
+        mock_kill = await self._run_loop(plugin, [""], isatty=True)
+        mock_kill.assert_called_once_with(os.getpid(), signal.SIGINT)
+
+    async def test_piped_lines_dispatched_before_eof(self):
+        plugin, pm, registry = self._plugin()
+        mock_kill = await self._run_loop(plugin, ["hi\n", ""], isatty=False)
+        pm.ahook.on_message.assert_awaited_once_with(
+            channel=registry.get_or_create("cli", "local"),
+            sender="user",
+            text="hi",
+        )
+        mock_kill.assert_not_called()
+
+    async def test_cli_subcommand_exits_on_non_tty_eof(self):
+        """`corvidae cli` is an interactive session: input running out
+        (`corvidae cli < script.txt`) still ends it."""
+        import os
+        import signal
+
+        plugin, _pm, _registry = self._plugin()
+        plugin._exit_on_eof = True
+        mock_kill = await self._run_loop(plugin, [""], isatty=False)
+        mock_kill.assert_called_once_with(os.getpid(), signal.SIGINT)
+
+    async def test_on_start_reads_exit_on_eof(self):
+        pm, _registry = _make_pm_with_registry(transport="cli")
+        plugin = CLIPlugin(pm)
+        pm.register(plugin, name="cli")
+
+        async def fake_read_loop():
+            await asyncio.sleep(9999)
+
+        plugin._read_loop = fake_read_loop
+        await plugin.on_start(config={"_cli_exit_on_eof": True})
+        try:
+            assert plugin._exit_on_eof is True
+        finally:
+            plugin._task.cancel()
+            try:
+                await plugin._task
+            except asyncio.CancelledError:
+                pass
+
+    def test_cli_command_requests_exit_on_eof(self):
+        from corvidae.channels.cli import cli_command
+
+        with patch("corvidae.channels.cli.Runtime") as runtime_cls, \
+             patch("corvidae.channels.cli.asyncio.run"):
+            cli_command.main(["--config", "x.yaml"], standalone_mode=False)
+        overrides = runtime_cls.call_args.kwargs["overrides"]
+        assert overrides["_cli_exit_on_eof"] is True
+
+    async def test_banner_only_on_tty(self):
+        plugin, _pm, _registry = self._plugin()
+        out = MagicMock()
+        await self._run_loop(plugin, [""], isatty=False, stdout=out)
+        written = "".join(str(c.args[0]) for c in out.write.call_args_list if c.args)
+        assert "Agent ready" not in written and "> " not in written
+
+    async def test_no_stdin_starts_no_task(self, caplog):
+        pm, _registry = _make_pm_with_registry(transport="cli")
+        plugin = CLIPlugin(pm)
+        pm.register(plugin, name="cli")
+        with patch("sys.stdin", None), \
+             caplog.at_level("WARNING", logger="corvidae.channels.cli"):
+            await plugin.on_start(config=BASE_CONFIG)
+        assert plugin._task is None
+        assert any("stdin" in r.getMessage() for r in caplog.records)
+
+
 # ---------------------------------------------------------------------------
 # Section 3 — send_message
 # ---------------------------------------------------------------------------

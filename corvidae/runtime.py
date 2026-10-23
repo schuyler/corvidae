@@ -196,12 +196,20 @@ class Runtime:
         await self.pm.ahook.on_stop()
 
     async def run(self) -> None:
-        """start(), wait for SIGINT/SIGTERM, then stop()."""
-        await self.start()
+        """start(), wait for SIGINT/SIGTERM, then stop().
 
+        The SIGINT handler goes in before start(): a plugin can raise SIGINT
+        while it starts (the CLI read loop does when stdin is already at
+        EOF), and under the default handler that interrupted startup mid-way
+        or was lost. Installed first, it sets stop_event, startup finishes,
+        and stop() runs. SIGTERM keeps its default action until startup is
+        done, so `systemctl stop` during a hung startup still ends the
+        process at once.
+        """
         stop_event = asyncio.Event()
         loop = asyncio.get_running_loop()
         _shutdown_requested = False
+        _starting = True
 
         def _handle_stop_signal() -> None:
             nonlocal _shutdown_requested
@@ -210,10 +218,24 @@ class Runtime:
                 sys.stderr.flush()
                 os._exit(1)
             _shutdown_requested = True
+            if _starting:
+                # Say why nothing happens yet, and how to force it. stderr as
+                # well as the log: `corvidae cli` logs to a file, and logging
+                # may not be configured yet this early.
+                message = (
+                    "shutdown requested; waiting for startup to finish "
+                    "(interrupt again to force)"
+                )
+                logger.info(message)
+                sys.stderr.write(message + "\n")
+                sys.stderr.flush()
             stop_event.set()
 
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, _handle_stop_signal)
+        loop.add_signal_handler(signal.SIGINT, _handle_stop_signal)
+
+        await self.start()
+        _starting = False
+        loop.add_signal_handler(signal.SIGTERM, _handle_stop_signal)
 
         await stop_event.wait()
 
