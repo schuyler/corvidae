@@ -1,0 +1,75 @@
+# Buster agent config — heartbeat smoke profile. Rendered to
+# $BUSTER_ROOT/state/agent.yaml by run.sh when HARNESS_PROFILE=buster-heartbeat
+# (state dir: @STATE_DIR@).
+#
+# One question: does a config-declared scheduler job on a channel no
+# transport owns (internal:heartbeat) run a full exchange without sending
+# anything to a person? The driver joins #p-heartbeat only to watch for a
+# misrouted reply; it sends nothing. Pass criterion: a heartbeat-origin row
+# in exchange_log, an assistant reply on internal:heartbeat, and silence on
+# IRC. outcome_log is on here (the default profile keeps it off) because
+# exchange_log is the record of the beat's origin.
+
+llm:
+  main:
+    base_url: http://127.0.0.1:8080/v1
+    # Keep in step with buster.yaml.in.
+    model: qwen3.6:35b
+    extra_body:
+      id_slot: 0
+    timeout: 300
+
+daemon:
+  session_db: sessions.db
+  metrics_jsonl: metrics.jsonl
+  max_task_workers: 2
+
+agent:
+  system_prompt: >
+    You are Buster, a test agent used for harness probes. Answer plainly
+    and follow instructions exactly, including any tokens or codes you are
+    asked to repeat back.
+  max_context_tokens: 24000
+  request_logprobs: false
+
+scheduler:
+  timezone: UTC
+  jobs:
+    # A short interval so the smoke completes in minutes; production beats
+    # should be hours apart (one llama-server slot is shared).
+    - name: heartbeat
+      channel: internal:heartbeat
+      origin: heartbeat
+      every: 30s
+      prompt: >
+        Heartbeat check. Nothing is expected of you; if nothing needs doing,
+        reply with the single word IDLE.
+
+# outcome_log on for exchange_log; the rest of the cognition set and the
+# Buster hardening stay off as in the default profile.
+plugins:
+  disabled:
+    - memory
+    - memory_tools
+    - funnel
+    - appraisal
+    - critique
+    - subagent
+    - mcp
+    - cli
+
+tools:
+  disabled:
+    - shell
+
+irc:
+  host: 127.0.0.1
+  port: 6667
+  nick: buster
+  tls: false
+  channels:
+    - "#p-heartbeat"
+
+logging:
+  level: INFO
+  file: corvidae.log

@@ -14,7 +14,7 @@ is the run's pass/fail.
 
 ## What it checks
 
-Six IRC channels, one probe each, every pass criterion mechanical (planted
+Eight IRC channels, one probe each, every pass criterion mechanical (planted
 tokens grepped from replies, or facts read straight out of `sessions.db`):
 
 | Probe | Channel | Checks |
@@ -25,6 +25,8 @@ tokens grepped from replies, or facts read straight out of `sessions.db`):
 | `compaction` | `#p-compact` | A capacity-limited channel compacts under paced filler load, confirmed by a real summary row |
 | `restart_recovery` | `#p-restart` | Conversation history survives a daemon restart |
 | `kv_slot` | `#p-slots` | A follow-up turn reuses the cached prompt prefix instead of reprocessing it |
+| `reminder` | `#p-remind` | A reminder set through `remind_me` fires on time and the bot speaks unprompted |
+| `reminder_restart` | `#p-remind-restart` | The same, with a daemon restart while the reminder is pending |
 
 Full pass criteria: the probe functions' verdict logic in `harness/driver.py`.
 
@@ -41,6 +43,7 @@ HARNESS_PROFILE=buster-memrole harness/run-remote.sh [rev]
 | Profile | Probe | Channel | Checks |
 |---|---|---|---|
 | `buster-memrole` | `memory_role` | `#p-memrole` | With `agent.mid_conversation_system_role: user`, the memory block is the last "user" message the model sees; the model still answers the person |
+| `buster-heartbeat` | `heartbeat_smoke` | `#p-heartbeat` | A `scheduler.jobs` heartbeat on `internal:heartbeat` runs a full exchange and sends nothing to IRC |
 
 `memory_role` sends a warm-up turn (MemoryPlugin creates its schema on first
 use when its `on_start` ran before the database opened), seeds one memory row
@@ -52,6 +55,25 @@ recalls the remembered codename. The profile turns on `memory` and `funnel`,
 which the default profile keeps off, and has no `llm.embedding` role, so
 retrieval runs FTS5-only and the host needs no embedding server. Run it
 before making `user` the default for `mid_conversation_system_role`.
+
+`reminder` asks the bot to call `remind_me` for 20 seconds out with a
+planted token, then sends nothing further. It needs three things: a
+tool-created row in the `schedule` table (the model used the tool rather
+than promising to), the scheduler's `[reminder]` notification row in
+`message_log`, and a bot reply carrying the token timestamped after that
+row. The channel queue is serial, so anything the bot says after the
+firing row is persisted answers the reminder, not the request; that keeps
+an acknowledgement that echoes the token from passing the probe.
+`reminder_restart` does the same with a 60-second reminder and runs
+`restart-daemon.sh` while it is pending. If the restart outlasts the delay,
+the reminder fires late through the startup catch-up policy, the details
+say so, and it still passes.
+
+`heartbeat_smoke` sends nothing. The profile declares a `heartbeat` job
+every 30 seconds on `internal:heartbeat`, a channel no transport owns, and
+turns `outcome_log` on. The probe passes when `exchange_log` has a
+`heartbeat`-origin row and `message_log` has an assistant reply on that
+channel, while the bot has said nothing in `#p-heartbeat`.
 
 A run under any profile but `buster` moves its rendered config into the run
 directory when it finishes, so the next `chat.sh` renders the default profile
