@@ -976,7 +976,7 @@ class TestRuntimeRun:
         finally:
             os.unlink(config_path)
 
-    async def test_signal_during_start_still_stops_cleanly(self, caplog):
+    async def test_signal_during_start_still_stops_cleanly(self, caplog, capsys):
         """A SIGINT sent while start() is running (the CLI read loop does
         this when stdin is already at EOF) must reach run()'s handler, so
         startup finishes and stop() runs, instead of hitting the default
@@ -1017,6 +1017,9 @@ class TestRuntimeRun:
             assert any(
                 "waiting for startup" in r.getMessage() for r in caplog.records
             )
+            # `corvidae cli` logs to a file, so the person who pressed
+            # Ctrl-C only sees what reaches the terminal.
+            assert "waiting for startup" in capsys.readouterr().err
         finally:
             asyncio.get_running_loop().remove_signal_handler(signal.SIGINT)
             asyncio.get_running_loop().remove_signal_handler(signal.SIGTERM)
@@ -1034,6 +1037,7 @@ class TestRuntimeRun:
             config_path = f.name
 
         seen: list = []
+        loop = asyncio.get_running_loop()
         try:
             mock_pm, mock_agent = _make_mock_pm_and_agent()
 
@@ -1042,7 +1046,6 @@ class TestRuntimeRun:
                 return []
 
             mock_pm.ahook.on_start = AsyncMock(side_effect=record_sigterm_disposition)
-            loop = asyncio.get_running_loop()
 
             with patch(
                 "corvidae.runtime.create_plugin_manager", return_value=mock_pm

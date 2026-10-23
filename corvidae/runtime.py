@@ -219,11 +219,16 @@ class Runtime:
                 os._exit(1)
             _shutdown_requested = True
             if _starting:
-                # Say why nothing happens yet, and how to force it.
-                logger.info(
+                # Say why nothing happens yet, and how to force it. stderr as
+                # well as the log: `corvidae cli` logs to a file, and logging
+                # may not be configured yet this early.
+                message = (
                     "shutdown requested; waiting for startup to finish "
                     "(interrupt again to force)"
                 )
+                logger.info(message)
+                sys.stderr.write(message + "\n")
+                sys.stderr.flush()
             stop_event.set()
 
         loop.add_signal_handler(signal.SIGINT, _handle_stop_signal)
