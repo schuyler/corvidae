@@ -123,6 +123,48 @@ class TestExchangeLogWriter:
         }
 
 
+class TestRetrievalTopSimilarity:
+    """#66: exchange_log carries the raw top similarity next to the score."""
+
+    async def test_similarity_round_trip(self, db):
+        plugin = await _setup(db)
+        await plugin.record_exchange("ex-s", "irc:#general")
+        await plugin.update_exchange(
+            "ex-s", retrieval_top_score=0.3, retrieval_top_similarity=0.82
+        )
+        async with db.execute(
+            "SELECT retrieval_top_score, retrieval_top_similarity "
+            "FROM exchange_log WHERE exchange_key = ?",
+            ("ex-s",),
+        ) as cursor:
+            assert await cursor.fetchone() == (0.3, 0.82)
+
+    async def test_legacy_table_upgraded(self, db):
+        """An exchange_log created before #66 gains the column, rows kept."""
+        await db.execute(
+            "CREATE TABLE exchange_log (exchange_key TEXT PRIMARY KEY, "
+            "channel_id TEXT NOT NULL, origin TEXT, message_rowid INTEGER, "
+            "created_at REAL NOT NULL, retrieval_top_score REAL, "
+            "retrieval_hit_count INTEGER, probe_score REAL, appraisal TEXT, "
+            "provenance_snapshot TEXT, outcomes TEXT)"
+        )
+        await db.execute(
+            "INSERT INTO exchange_log (exchange_key, channel_id, created_at, "
+            "retrieval_top_score) VALUES ('old', 'irc:#old', 1.0, 0.4)"
+        )
+        await db.commit()
+
+        plugin = await _setup(db)
+        await plugin.record_exchange("new", "irc:#new")
+        await plugin.update_exchange("new", retrieval_top_similarity=0.9)
+        async with db.execute(
+            "SELECT exchange_key, retrieval_top_score, retrieval_top_similarity "
+            "FROM exchange_log ORDER BY created_at"
+        ) as cursor:
+            rows = await cursor.fetchall()
+        assert rows == [("old", 0.4, None), ("new", None, 0.9)]
+
+
 class TestRfc7386NoneDeletes:
     """Pin the RFC 7386 cross-WP contract (WP2.1 review-gate follow-up):
     a None value inside a merge fragment DELETES that key from the

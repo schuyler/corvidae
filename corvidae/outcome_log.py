@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS exchange_log (
     message_rowid INTEGER,
     created_at REAL NOT NULL,
     retrieval_top_score REAL,
+    retrieval_top_similarity REAL,
     retrieval_hit_count INTEGER,
     probe_score REAL,
     appraisal TEXT,
@@ -56,6 +57,7 @@ UPDATABLE_COLUMNS = frozenset(
         "origin",
         "message_rowid",
         "retrieval_top_score",
+        "retrieval_top_similarity",
         "retrieval_hit_count",
         "probe_score",
         "appraisal",
@@ -94,6 +96,15 @@ class OutcomeLogPlugin(CorvidaePlugin):
             raise RuntimeError("persistence DB not available for exchange_log")
         if not self._table_ready:
             await db.execute(EXCHANGE_LOG_DDL)
+            # Schema upgrade: exchange_log tables from before #66 gain
+            # retrieval_top_similarity as a nullable column.
+            async with db.execute("PRAGMA table_info(exchange_log)") as cursor:
+                existing_cols = {row[1] for row in await cursor.fetchall()}
+            if "retrieval_top_similarity" not in existing_cols:
+                await db.execute(
+                    "ALTER TABLE exchange_log ADD COLUMN "
+                    "retrieval_top_similarity REAL"
+                )
             await db.execute(EXCHANGE_LOG_INDEX_DDL)
             await db.commit()
             self._table_ready = True

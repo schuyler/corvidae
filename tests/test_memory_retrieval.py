@@ -72,13 +72,14 @@ class StubEmbedClient:
         raise AssertionError("retrieval must not call chat()")
 
 
-async def build_retrieval_env(config=None):
+async def build_retrieval_env(config=None, db_path=":memory:"):
     """persistence + llm(stub embedder) + funnel + memory on one pm.
 
+    ``db_path`` lets a test open a pre-seeded on-disk database.
     Returns (memory, embedder, channel, conv, db).
     """
     config = config or EMBED_CONFIG
-    db = await aiosqlite.connect(":memory:")
+    db = await aiosqlite.connect(db_path)
     await init_db(db)
 
     pm = create_plugin_manager()
@@ -556,4 +557,98 @@ class TestRecallBenchmark:
         # fixture measured well above this; a regression below it means the
         # scoring path broke.
         assert mean_recall >= 0.75, f"mean recall@5 {mean_recall:.2f} below floor"
+        await db.close()
+
+
+# --- #66: raw similarity logged alongside the decayed score ---
+
+
+class _ExchangeRecorder:
+    """outcome_log stand-in that records update_exchange kwargs per key."""
+
+    def __init__(self):
+        self.updates: list[tuple[str, dict]] = []
+
+    async def update_exchange(self, exchange_key, **fields):
+        self.updates.append((exchange_key, fields))
+
+
+class TestRetrievalLogSimilarity:
+    async def test_top_similarity_is_raw_similarity_of_top_ranked(self):
+        """top_similarity is the undecayed similarity; top_score stays decayed."""
+        memory, embedder, channel, conv, db = await build_retrieval_env()
+        if not memory._vec_available:
+            pytest.skip("sqlite-vec unavailable; similarity not measured")
+        # Aged 30 days so the recency decay pulls score well below similarity.
+        await seed_memory(db, channel.id,
+                          "kestrel moved the rain gauge to the north fence",
+                          created_at=time.time() - 30 * 86400)
+        candidates, _ = await memory.retrieve(channel.id, "where is the rain gauge?")
+        await ask(memory, channel, conv, "where is the rain gauge?")
+
+        async with db.execute(
+            "SELECT top_score, top_similarity FROM retrieval_log"
+        ) as cursor:
+            top_score, top_similarity = await cursor.fetchone()
+        assert top_similarity == pytest.approx(candidates[0]["similarity"])
+        assert top_score == pytest.approx(candidates[0]["score"])
+        assert top_similarity > top_score
+        await db.close()
+
+    async def test_empty_retrieval_logs_null_similarity(self):
+        memory, embedder, channel, conv, db = await build_retrieval_env()
+        await ask(memory, channel, conv, "anything at all?")
+        async with db.execute("SELECT top_similarity FROM retrieval_log") as cursor:
+            assert await cursor.fetchall() == [(None,)]
+        await db.close()
+
+    async def test_similarity_copied_into_exchange_log(self):
+        """update_exchange receives retrieval_top_similarity under the key."""
+        memory, embedder, channel, conv, db = await build_retrieval_env()
+        recorder = _ExchangeRecorder()
+        memory.pm.register(recorder, name="outcome_log")
+        await seed_memory(db, channel.id,
+                          "kestrel moved the rain gauge to the north fence")
+        conv.append({"role": "user", "content": "where is the rain gauge?"})
+        await memory.before_agent_turn(
+            channel=channel, correlation_id="ex-sim", meta={}
+        )
+
+        async with db.execute(
+            "SELECT top_similarity FROM retrieval_log"
+        ) as cursor:
+            (logged,) = await cursor.fetchone()
+        assert len(recorder.updates) == 1
+        key, fields = recorder.updates[0]
+        assert key == "ex-sim"
+        assert fields["retrieval_hit_count"] == 1
+        assert fields["retrieval_top_similarity"] == logged
+        assert logged is not None
+        await db.close()
+
+    async def test_legacy_retrieval_log_upgraded_on_start(self, tmp_path):
+        """A retrieval_log created before #66 gains top_similarity, rows kept."""
+        path = tmp_path / "sessions.db"
+        async with aiosqlite.connect(path) as legacy:
+            await legacy.execute(
+                "CREATE TABLE retrieval_log (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                "ts REAL NOT NULL, channel_id TEXT NOT NULL, exchange_key TEXT, "
+                "top_score REAL, hit_count INTEGER NOT NULL, "
+                "admitted_count INTEGER NOT NULL, "
+                "degraded_to_fts INTEGER NOT NULL DEFAULT 0)"
+            )
+            await legacy.execute(
+                "INSERT INTO retrieval_log (ts, channel_id, top_score, hit_count, "
+                "admitted_count) VALUES (1.0, 'irc:#old', 0.42, 2, 1)"
+            )
+            await legacy.commit()
+
+        memory, embedder, channel, conv, db = await build_retrieval_env(db_path=path)
+        await ask(memory, channel, conv, "anything at all?")
+        async with db.execute(
+            "SELECT channel_id, top_score, top_similarity FROM retrieval_log "
+            "ORDER BY id"
+        ) as cursor:
+            rows = await cursor.fetchall()
+        assert rows == [("irc:#old", 0.42, None), (channel.id, None, None)]
         await db.close()
