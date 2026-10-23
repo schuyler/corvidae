@@ -528,7 +528,7 @@ class TestAgentMaxToolResultChars:
         registry = ChannelRegistry({
             "system_prompt": "test",
             "max_context_tokens": 8000,
-            "keep_thinking_in_history": False,
+            "reasoning_history": "drop",
         })
         pm.register(registry, name="registry")
 

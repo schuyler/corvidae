@@ -267,7 +267,7 @@ class TestQueueItemRole:
         from corvidae.queue import SerialQueue
 
         pm = create_plugin_manager()
-        registry = ChannelRegistry({"system_prompt": "", "max_context_tokens": 8000, "keep_thinking_in_history": False})
+        registry = ChannelRegistry({"system_prompt": "", "max_context_tokens": 8000, "reasoning_history": "drop"})
         pm.register(registry, name="registry")
         plugin = Agent.__new__(Agent)
         plugin.pm = pm
@@ -300,7 +300,7 @@ class TestQueueItemRole:
         from corvidae.queue import SerialQueue
 
         pm = create_plugin_manager()
-        registry = ChannelRegistry({"system_prompt": "", "max_context_tokens": 8000, "keep_thinking_in_history": False})
+        registry = ChannelRegistry({"system_prompt": "", "max_context_tokens": 8000, "reasoning_history": "drop"})
         pm.register(registry, name="registry")
         plugin = Agent.__new__(Agent)
         plugin.pm = pm

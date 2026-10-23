@@ -211,7 +211,7 @@ class TestResolveTunableResolutionOrder:
 class TestResolveTunableDivergesFromChannelConfigResolve:
     def test_resolve_tunable_reads_arbitrary_dotted_keys_channelconfig_resolve_cannot(self):
         """ChannelConfig.resolve() only knows about its fixed typed fields
-        (system_prompt, max_context_tokens, keep_thinking_in_history,
+        (system_prompt, max_context_tokens, reasoning_history,
         max_turns). resolve_tunable must work for arbitrary plugin-namespaced
         dotted keys that ChannelConfig has never heard of, proving the two
         are not the same mechanism."""

@@ -17,6 +17,7 @@ blocklist on multi-speaker channels).
 
 import logging
 
+from corvidae.channel import parse_reasoning_history
 from corvidae.hooks import CorvidaePlugin, hookimpl
 from corvidae.tool import Tool, tool_to_schema
 
@@ -76,8 +77,9 @@ class RuntimeSettingsPlugin(CorvidaePlugin):
             """Update runtime settings for this conversation. Keys include LLM
             inference parameters (temperature, top_p, top_k, frequency_penalty,
             presence_penalty, max_tokens) and framework parameters (max_turns,
-            max_context_tokens, keep_thinking_in_history). Pass null for a key
-            to clear that override and revert to the static config value.
+            max_context_tokens, reasoning_history: drop | exchange | keep).
+            Pass null for a key to clear that override and revert to the
+            static config value.
             Returns the current settings after the update."""
             # Blocklist check runs first — before any mutations.
             blocked = [k for k in settings if k in plugin.blocklist]
@@ -94,6 +96,15 @@ class RuntimeSettingsPlugin(CorvidaePlugin):
             channel = _ctx.channel
             if channel is None:
                 return "Error: no channel context available"
+
+            # Validate reasoning_history before any mutation: a stored bad
+            # value would make every later resolve_config raise.
+            if settings.get("reasoning_history") is not None:
+                try:
+                    parse_reasoning_history(settings["reasoning_history"])
+                except ValueError as exc:
+                    logger.warning("set_settings: invalid reasoning_history rejected: %s", exc)
+                    return f"Error: {exc}"
 
             for key, value in settings.items():
                 if value is None:

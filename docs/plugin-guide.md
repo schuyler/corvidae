@@ -706,12 +706,16 @@ if the `mcp:` config key is absent — the plugin no-ops.
 Strips `<think>...</think>` blocks and `reasoning_content` from LLM
 output. Entry point name: `"thinking"`.
 
-Implements two hooks:
+Implements three hooks, driven by the resolved `reasoning_history`
+(`drop` | `exchange` | `keep`):
 
-- `after_persist_assistant` — reads `keep_thinking_in_history` from the
-  resolved channel config. If `False`, calls `strip_reasoning_content`
-  on the in-memory message dict. The DB copy is already written; this
-  only affects subsequent prompt builds.
+- `before_agent_turn` — applies the policy to the whole in-memory window
+  before each LLM call: `drop` strips every assistant message's
+  `reasoning_content`, `exchange` only those before the last `role: user`
+  message, `keep` none.
+- `after_persist_assistant` — under `drop`, strips the just-appended
+  message. The DB copy is already written; this only affects subsequent
+  prompt builds.
 - `transform_display_text` (`@hookimpl(wrapper=True)`) — receives the
   chain result and calls `strip_thinking` on it unconditionally. Returns
   the stripped string. Operates as a sync wrapper; does not take
@@ -719,7 +723,7 @@ Implements two hooks:
 
 **Without this plugin:** `<think>` blocks pass through to the channel
 verbatim, and `reasoning_content` remains in in-memory history
-regardless of the `keep_thinking_in_history` config value.
+regardless of the `reasoning_history` config value.
 
 ### CompactionPlugin (`corvidae/compaction.py`)
 
@@ -920,7 +924,7 @@ Implements one hook:
 The `set_settings` tool accepts a `settings` dict. Supported keys include
 LLM inference parameters (`temperature`, `top_p`, `top_k`,
 `frequency_penalty`, `presence_penalty`, `max_tokens`), framework
-parameters (`max_turns`, `max_context_tokens`, `keep_thinking_in_history`),
+parameters (`max_turns`, `max_context_tokens`, `reasoning_history`),
 and dotted plugin tunables (`critique.*`, `appraisal.*`; see
 configuration.md). Pass `null` for a key to clear the override and revert to
 the static config value. `system_prompt` is always blocked. Additional keys

@@ -24,7 +24,7 @@ agent:
   system_prompt: "You are a helpful assistant."
   max_context_tokens: 24000
   max_turns: 10
-  keep_thinking_in_history: false
+  reasoning_history: drop
   compaction_threshold: 0.8
   compaction_retention: 0.5
   min_messages_to_compact: 5
@@ -49,7 +49,7 @@ channels:
     system_prompt: "You are the channel bot."
     max_context_tokens: 16000
     max_turns: 10
-    keep_thinking_in_history: false
+    reasoning_history: drop
 ```
 
 ---
@@ -127,7 +127,7 @@ These values apply to all channels. Per-channel overrides in the `channels` sect
 | `agent.system_prompt` | string or list of strings | `"You are a helpful assistant."` | System prompt prepended to each LLM call. A list of strings is treated as file paths; each file is read and concatenated with double newlines. Relative paths are resolved against `_base_dir`. |
 | `agent.max_context_tokens` | integer | `24000` | Token budget for conversation history. `CompactionPlugin` compacts when the estimated token count exceeds `compaction_threshold` × this value. |
 | `agent.max_turns` | integer | `10` | Maximum consecutive tool-calling turns per user message before tool dispatch is suppressed. |
-| `agent.keep_thinking_in_history` | boolean | `false` | When `false`, `ThinkingPlugin` strips `reasoning_content` from in-memory assistant messages after they are persisted. Does not affect the DB record. |
+| `agent.reasoning_history` | `drop` \| `exchange` \| `keep` | `drop` | `drop` strips `reasoning_content` from every in-memory assistant message. `exchange` strips it only from completed exchanges (assistant messages before the last `role: user` message), so a tool chain in progress keeps its reasoning — the trained distribution for Qwen-family models. `keep` never strips it. Applied to the whole window before each LLM call, so history reloaded after a restart follows it too. The DB record always keeps reasoning. Any other value, or the removed `keep_thinking_in_history` key, fails at startup. Use `exchange` with the server's `preserve_thinking` off (see below). |
 | `agent.compaction_threshold` | float | `0.8` | Compaction triggers when `token_estimate / max_context_tokens` exceeds this value. |
 | `agent.compaction_retention` | float | `0.5` | After compaction, retain messages that fit within `compaction_retention × max_context_tokens` tokens, counting from the most recent. |
 | `agent.min_messages_to_compact` | integer | `5` | Skip compaction if the conversation has this many messages or fewer. |
@@ -136,6 +136,29 @@ These values apply to all channels. Per-channel overrides in the `channels` sect
 | `agent.immutable_settings` | list of strings | `[]` | Keys the agent is blocked from changing via the `set_settings` tool. `system_prompt` is always blocked regardless of this list, but see the note under "Runtime-tunable gate parameters" for what that does and does not protect. |
 | `agent.request_logprobs` | boolean | `false` | When `true`, `Agent` merges `"logprobs": true` into every LLM request body. llama-server returns a logprobs envelope (surfaced to plugins via `on_agent_response`); Anthropic-style providers return nothing and the field surfaces as `None`. Static operator-only flag — captured at init and on config reload, not per-channel tunable. |
 | `agent.mid_conversation_system_role` | `system` \| `user` | `system` | Role under which every `system` message *after the leading system prompt* is sent to the LLM: funnel CONTEXT and notifications without a `tool_call_id`. Strict chat templates (Qwen 3.8, Swift-1.5) raise "System message must be at the beginning" on those; `user` satisfies them and also keeps untrusted text out of the `system` role ([threat-model.md](threat-model.md), finding 3). Applied when the prompt is built: the in-memory window and `sessions.db` keep `role: system`, and the rewrite is deterministic, so the cached prompt prefix stays stable. Any other value logs a warning and uses `system`. Static operator-only flag, re-read on config reload. |
+
+### `reasoning_history: exchange` and `preserve_thinking`
+
+Qwen-family chat templates (Swift 1.5 included) render `<think>` on every
+assistant message after the last user query, and on earlier ones only when
+the server's `preserve_thinking` template kwarg is unset or true. `exchange`
+mirrors that: corvidae keeps reasoning for the current exchange and drops it
+for completed ones, so the old turns stop costing context budget.
+
+Turn `preserve_thinking` off on the server when you use it. With it on, the
+template renders every stripped older turn as an empty `<think></think>`
+block, which is off-distribution. With it off, the template drops `<think>`
+before its own last-query boundary, and corvidae's boundary is never later
+than the template's, so nothing corvidae stripped is rendered.
+
+Two known gaps, both narrow:
+
+- `build_prompt` moves a tool-call message to where its last result
+  arrived. If a user message interrupts a tool chain, a call made before
+  it can render after it in the prompt. Corvidae has already stripped that
+  call, and the template renders it with an empty `<think>` block.
+- Compaction runs before the stripping pass, so its first token estimate
+  after a new user message still counts the previous exchange's reasoning.
 
 ### Runtime-tunable gate parameters
 
@@ -319,7 +342,7 @@ Keys are `transport:scope` identifiers (e.g., `irc:#general`, `cli:local`). Each
 | `system_prompt` | string or list of strings | `agent.system_prompt` | System prompt for this channel. Same format as `agent.system_prompt`. |
 | `max_context_tokens` | integer | `agent.max_context_tokens` | Token budget for this channel's conversation history. |
 | `max_turns` | integer | `agent.max_turns` | Maximum consecutive tool-calling turns for this channel. |
-| `keep_thinking_in_history` | boolean | `agent.keep_thinking_in_history` | Controls `reasoning_content` retention for this channel. |
+| `reasoning_history` | `drop` \| `exchange` \| `keep` | `agent.reasoning_history` | Controls `reasoning_content` retention for this channel. |
 
 Channels not listed here are created on-demand when a message arrives and use `agent` defaults for all fields.
 
@@ -332,7 +355,7 @@ channels:
     system_prompt:
       - prompts/base.txt
       - prompts/cli-addendum.txt
-    keep_thinking_in_history: true
+    reasoning_history: keep
 ```
 
 Signal channels accept either form of key. `signal:<aci>` is the real channel id and matches directly. `signal:+15551234567` is an alias: its overrides are copied onto the ACI-keyed channel the first time that person writes, once the number has resolved. The alias entry itself never becomes a live channel, and an alias naming someone absent from `signal.allow` is simply inert — an unauthorized sender never gets a turn for the overrides to apply to.

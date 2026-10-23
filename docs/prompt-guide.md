@@ -136,7 +136,7 @@ After the LLM responds, two steps affect what `build_prompt()` returns on the **
 
 **Step 8 — Append assistant message.** The assistant message dict (including any `reasoning_content` from a reasoning model) is appended to `conv.messages` and persisted.
 
-**Step 9 — `after_persist_assistant` hook.** Plugins may mutate the in-memory message dict after the DB record is written. `ThinkingPlugin` uses this hook to strip `reasoning_content` from the in-memory dict when `keep_thinking_in_history` is `false`. The DB copy is already written and is not affected. Because `build_prompt()` reads `conv.messages` directly, subsequent turns will not include reasoning content in prompt history when this setting is off.
+**Step 9 — `after_persist_assistant` hook.** Plugins may mutate the in-memory message dict after the DB record is written. `ThinkingPlugin` uses this hook to strip `reasoning_content` from the in-memory dict when `reasoning_history` is `drop`. The DB copy is already written and is not affected. Under `exchange`, the message keeps its reasoning until a later user message completes the exchange; `ThinkingPlugin.before_agent_turn` (step 6) then strips it. Because `build_prompt()` reads `conv.messages` directly, the prompt reflects whatever the policy left in the window.
 
 ---
 

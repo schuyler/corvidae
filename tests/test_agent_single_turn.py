@@ -37,7 +37,7 @@ from llm_response_fixtures import (
 AGENT_DEFAULTS = {
     "system_prompt": "You are a test assistant.",
     "max_context_tokens": 8000,
-    "keep_thinking_in_history": False,
+    "reasoning_history": "drop",
 }
 
 

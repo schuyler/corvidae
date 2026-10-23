@@ -2,7 +2,14 @@
 
 import pytest
 from time import time
-from corvidae.channel import Channel, ChannelConfig, ChannelRegistry, load_channel_config
+from corvidae.channel import (
+    Channel,
+    ChannelConfig,
+    ChannelRegistry,
+    ReasoningHistory,
+    load_channel_config,
+    validate_agent_config,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -16,29 +23,29 @@ class TestChannelConfigResolve:
         agent_defaults = {
             "system_prompt": "Be helpful.",
             "max_context_tokens": 8000,
-            "keep_thinking_in_history": False,
+            "reasoning_history": "drop",
         }
         result = cfg.resolve(agent_defaults)
         assert result["system_prompt"] == "Be helpful."
         assert result["max_context_tokens"] == 8000
-        assert result["keep_thinking_in_history"] is False
+        assert result["reasoning_history"] == "drop"
 
     def test_resolve_channel_overrides_win(self):
         """Channel-level values override agent defaults for all three fields."""
         cfg = ChannelConfig(
             system_prompt="Channel prompt.",
             max_context_tokens=4000,
-            keep_thinking_in_history=False,
+            reasoning_history="drop",
         )
         agent_defaults = {
             "system_prompt": "Agent prompt.",
             "max_context_tokens": 24000,
-            "keep_thinking_in_history": True,
+            "reasoning_history": "keep",
         }
         result = cfg.resolve(agent_defaults)
         assert result["system_prompt"] == "Channel prompt."
         assert result["max_context_tokens"] == 4000
-        assert result["keep_thinking_in_history"] is False
+        assert result["reasoning_history"] == "drop"
 
     def test_resolve_partial_override(self):
         """Only some fields overridden; rest fall back to agent defaults."""
@@ -46,12 +53,12 @@ class TestChannelConfigResolve:
         agent_defaults = {
             "system_prompt": "Agent prompt.",
             "max_context_tokens": 16000,
-            "keep_thinking_in_history": True,
+            "reasoning_history": "keep",
         }
         result = cfg.resolve(agent_defaults)
         assert result["system_prompt"] == "Custom prompt."
         assert result["max_context_tokens"] == 16000
-        assert result["keep_thinking_in_history"] is True
+        assert result["reasoning_history"] == "keep"
 
     def test_resolve_empty_string_is_not_none(self):
         """Empty string system_prompt is an intentional override, not a fallback."""
@@ -67,12 +74,12 @@ class TestChannelConfigResolve:
         result = cfg.resolve(agent_defaults)
         assert result["max_context_tokens"] == 0
 
-    def test_resolve_false_keep_thinking_is_not_none(self):
-        """`False` keep_thinking_in_history is an intentional override."""
-        cfg = ChannelConfig(keep_thinking_in_history=False)
-        agent_defaults = {"keep_thinking_in_history": True}
+    def test_resolve_channel_reasoning_history_wins(self):
+        """A channel-level reasoning_history beats the agent default."""
+        cfg = ChannelConfig(reasoning_history="drop")
+        agent_defaults = {"reasoning_history": "keep"}
         result = cfg.resolve(agent_defaults)
-        assert result["keep_thinking_in_history"] is False
+        assert result["reasoning_history"] == "drop"
 
     def test_resolve_missing_agent_defaults(self):
         """Empty agent_defaults dict falls back to hardcoded defaults."""
@@ -80,7 +87,44 @@ class TestChannelConfigResolve:
         result = cfg.resolve({})
         assert result["system_prompt"] == "You are a helpful assistant."
         assert result["max_context_tokens"] == 24000
-        assert result["keep_thinking_in_history"] is False
+        assert result["reasoning_history"] == "drop"
+
+    def test_resolve_returns_reasoning_history_enum(self):
+        """The resolved value is a ReasoningHistory member, so consumers
+        compare against one definition of the three policies."""
+        result = ChannelConfig(reasoning_history="exchange").resolve({})
+        assert result["reasoning_history"] is ReasoningHistory.EXCHANGE
+
+    @pytest.mark.parametrize("bad", [True, False, "strip", "Drop"])
+    def test_resolve_rejects_invalid_reasoning_history(self, bad):
+        """Anything outside drop/exchange/keep — including the booleans the
+        old keep_thinking_in_history key took — raises instead of silently
+        picking a policy."""
+        with pytest.raises(ValueError, match="reasoning_history"):
+            ChannelConfig().resolve({"reasoning_history": bad})
+
+
+# ---------------------------------------------------------------------------
+# validate_agent_config — fail loudly on stale or bad reasoning config (#57)
+# ---------------------------------------------------------------------------
+
+class TestValidateAgentConfig:
+    @pytest.mark.parametrize("value", ["drop", "exchange", "keep"])
+    def test_accepts_valid_values(self, value):
+        validate_agent_config({"reasoning_history": value})
+
+    def test_accepts_missing_key(self):
+        validate_agent_config({})
+
+    def test_rejects_invalid_value(self):
+        with pytest.raises(ValueError, match="reasoning_history"):
+            validate_agent_config({"reasoning_history": "sometimes"})
+
+    def test_rejects_removed_keep_thinking_key(self):
+        """The old boolean key was removed, not aliased; a stale agent.yaml
+        must not quietly fall back to the default."""
+        with pytest.raises(ValueError, match="keep_thinking_in_history"):
+            validate_agent_config({"keep_thinking_in_history": True})
 
 
 # ---------------------------------------------------------------------------
@@ -119,7 +163,7 @@ class TestChannel:
         ch = Channel(transport="irc", scope="#general")
         assert ch.config.system_prompt is None
         assert ch.config.max_context_tokens is None
-        assert ch.config.keep_thinking_in_history is None
+        assert ch.config.reasoning_history is None
 
 
 # ---------------------------------------------------------------------------
@@ -234,7 +278,7 @@ class TestLoadChannelConfig:
         config = {
             "channels": {
                 "irc:#lex": {"system_prompt": "IRC prompt.", "max_context_tokens": 8000},
-                "signal:+15551234567": {"keep_thinking_in_history": False},
+                "signal:+15551234567": {"reasoning_history": "exchange"},
             }
         }
         registry = ChannelRegistry({})
@@ -247,7 +291,19 @@ class TestLoadChannelConfig:
 
         signal = registry.get("signal:+15551234567")
         assert signal is not None
-        assert signal.config.keep_thinking_in_history is False
+        assert signal.config.reasoning_history == "exchange"
+
+    def test_load_channel_config_rejects_removed_keep_thinking_key(self):
+        """A channel entry still using keep_thinking_in_history raises."""
+        config = {"channels": {"irc:#lex": {"keep_thinking_in_history": False}}}
+        with pytest.raises(ValueError, match="keep_thinking_in_history"):
+            load_channel_config(config, ChannelRegistry({}))
+
+    def test_load_channel_config_rejects_invalid_reasoning_history(self):
+        """An invalid per-channel reasoning_history raises at load time."""
+        config = {"channels": {"irc:#lex": {"reasoning_history": "yes"}}}
+        with pytest.raises(ValueError, match="reasoning_history"):
+            load_channel_config(config, ChannelRegistry({}))
 
     def test_load_channel_config_no_channels_section(self):
         """Missing 'channels' key is a no-op."""
@@ -315,7 +371,7 @@ class TestChannelConfigListSystemPrompt:
         agent_defaults = {
             "system_prompt": ["soul.md", "irc.md"],
             "max_context_tokens": 8000,
-            "keep_thinking_in_history": False,
+            "reasoning_history": "drop",
         }
         cfg = ChannelConfig()  # no override
         result = cfg.resolve(agent_defaults)

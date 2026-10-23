@@ -490,6 +490,48 @@ async def test_config_watcher_handles_missing_file(tmp_path, caplog):
 # ---------------------------------------------------------------------------
 
 
+async def test_config_watcher_rejects_invalid_agent_config(tmp_path, caplog):
+    """_reload_config must reject a reload whose agent section fails
+    validate_agent_config (here: the removed keep_thinking_in_history key)
+    without touching the registry's agent_defaults or dispatching."""
+    from corvidae.channel import ChannelRegistry
+    from corvidae.config_watcher import ConfigWatcherPlugin
+
+    config_file = tmp_path / "agent.yaml"
+    config_file.write_text(
+        "llm:\n  main:\n    base_url: http://localhost\n    model: m\n"
+        "agent:\n  keep_thinking_in_history: true\n"
+    )
+
+    registry = ChannelRegistry({"reasoning_history": "drop"})
+    pm = MagicMock()
+    pm.hook.on_config_reload.get_hookimpls.return_value = []
+    pm.get_plugin.return_value = registry
+    plugin = ConfigWatcherPlugin()
+    await plugin.on_init(
+        pm=pm,
+        config={
+            "_config_path": config_file,
+            "_cli_overrides": {},
+            "llm": {"main": {"base_url": "http://localhost", "model": "m"}},
+        },
+    )
+
+    dispatched = []
+
+    async def capture_dispatch(config: dict) -> None:
+        dispatched.append(config)
+
+    plugin._dispatch_config_reload = capture_dispatch
+
+    with caplog.at_level(logging.ERROR, logger="corvidae.config_watcher"):
+        await plugin._reload_config()
+
+    assert not dispatched
+    assert registry.agent_defaults == {"reasoning_history": "drop"}
+    assert any("invalid agent config" in r.getMessage() for r in caplog.records)
+
+
 async def test_config_watcher_rejects_config_without_llm_main(tmp_path, caplog):
     """_reload_config must skip dispatch when llm.main is absent after merge."""
     from corvidae.config_watcher import ConfigWatcherPlugin

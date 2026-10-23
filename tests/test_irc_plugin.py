@@ -54,7 +54,7 @@ with patch.dict('sys.modules', {'pydle': mock_pydle}):
 AGENT_DEFAULTS = {
     "system_prompt": "You are a test assistant.",
     "max_context_tokens": 8000,
-    "keep_thinking_in_history": False,
+    "reasoning_history": "drop",
 }
 
 BASE_CONFIG: dict = {}

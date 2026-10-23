@@ -35,7 +35,7 @@ async def build_plugin_and_channel(
     _AGENT_DEFAULTS = {
         "system_prompt": "You are a test assistant.",
         "max_context_tokens": 8000,
-        "keep_thinking_in_history": False,
+        "reasoning_history": "drop",
     }
 
     if agent_defaults is None:

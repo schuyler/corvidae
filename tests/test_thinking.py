@@ -57,12 +57,12 @@ def test_strip_reasoning_content_no_reasoning_content_is_noop():
     assert messages == [{"role": "assistant", "content": "hi"}]
 
 
-def _make_pm(keep_thinking_in_history=False, registry_missing=False):
+def _make_pm(reasoning_history="drop", registry_missing=False):
     """Build a minimal mock PluginManager for ThinkingPlugin tests.
 
     If registry_missing=True, pm.get_plugin("registry") returns None.
     Otherwise returns a mock registry whose resolved config includes
-    keep_thinking_in_history.
+    reasoning_history.
     """
     pm = MagicMock()
     if registry_missing:
@@ -70,7 +70,7 @@ def _make_pm(keep_thinking_in_history=False, registry_missing=False):
     else:
         registry = MagicMock()
         registry.resolve_config.return_value = {
-            "keep_thinking_in_history": keep_thinking_in_history,
+            "reasoning_history": reasoning_history,
         }
 
         def _get_plugin(name):
@@ -90,9 +90,9 @@ def _make_channel():
 
 class TestAfterPersistAssistant:
     async def test_after_persist_strips_reasoning_content(self):
-        """Plugin with keep_thinking_in_history=False removes reasoning_content
+        """Plugin with reasoning_history="drop" removes reasoning_content
         from the in-memory message dict."""
-        pm = _make_pm(keep_thinking_in_history=False)
+        pm = _make_pm(reasoning_history="drop")
         plugin = ThinkingPlugin(pm)
         channel = _make_channel()
 
@@ -108,9 +108,9 @@ class TestAfterPersistAssistant:
         assert message["content"] == "hello"
 
     async def test_after_persist_preserves_reasoning_content_when_configured(self):
-        """Plugin with keep_thinking_in_history=True leaves reasoning_content
+        """Plugin with reasoning_history="keep" leaves reasoning_content
         in the in-memory message dict."""
-        pm = _make_pm(keep_thinking_in_history=True)
+        pm = _make_pm(reasoning_history="keep")
         plugin = ThinkingPlugin(pm)
         channel = _make_channel()
 
@@ -143,6 +143,134 @@ class TestAfterPersistAssistant:
 
         # Message is untouched
         assert message["reasoning_content"] == "internal thoughts"
+
+
+    async def test_after_persist_exchange_keeps_reasoning_content(self):
+        """Under "exchange" the just-produced message is part of the current
+        exchange, so after_persist_assistant leaves its reasoning alone."""
+        pm = _make_pm(reasoning_history="exchange")
+        plugin = ThinkingPlugin(pm)
+        message = {"role": "assistant", "content": "", "reasoning_content": "mid-chain"}
+
+        await plugin.after_persist_assistant(channel=_make_channel(), message=message)
+
+        assert message["reasoning_content"] == "mid-chain"
+
+
+# ---------------------------------------------------------------------------
+# before_agent_turn — window-wide reasoning policy (#57)
+# ---------------------------------------------------------------------------
+
+
+def _window_channel(messages):
+    """A mock channel whose conversation window holds ``messages``."""
+    channel = MagicMock()
+    channel.conversation.messages = messages
+    return channel
+
+
+def _two_exchange_window():
+    """A completed tool-chain exchange followed by a new user message and an
+    in-progress tool chain — the shape the "exchange" policy cares about."""
+    return [
+        {"role": "user", "content": "first question"},
+        {"role": "assistant", "content": "", "reasoning_content": "old-1",
+         "tool_calls": [{"id": "c1", "type": "function",
+                         "function": {"name": "t", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "c1", "content": "r1"},
+        {"role": "assistant", "content": "first answer", "reasoning_content": "old-2"},
+        {"role": "system", "content": "[task] a notification"},
+        {"role": "user", "content": "second question"},
+        {"role": "assistant", "content": "", "reasoning_content": "new-1",
+         "tool_calls": [{"id": "c2", "type": "function",
+                         "function": {"name": "t", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "c2", "content": "r2"},
+    ]
+
+
+def _reasoning(messages):
+    """reasoning_content of each assistant message, None where absent."""
+    return [m.get("reasoning_content") for m in messages if m["role"] == "assistant"]
+
+
+class TestBeforeAgentTurn:
+    async def test_exchange_strips_only_before_last_user_message(self):
+        """"exchange" strips reasoning from completed exchanges and keeps it
+        on every assistant message after the last user message."""
+        messages = _two_exchange_window()
+        plugin = ThinkingPlugin(_make_pm(reasoning_history="exchange"))
+
+        await plugin.before_agent_turn(
+            channel=_window_channel(messages), correlation_id=None, meta={},
+        )
+
+        assert _reasoning(messages) == [None, None, "new-1"]
+
+    async def test_exchange_keeps_whole_chain_when_no_new_user_message(self):
+        """Mid tool chain with no newer user message, nothing is stripped —
+        the case "drop" gets wrong for Qwen-family templates."""
+        messages = _two_exchange_window()[:4]
+        plugin = ThinkingPlugin(_make_pm(reasoning_history="exchange"))
+
+        await plugin.before_agent_turn(
+            channel=_window_channel(messages), correlation_id=None, meta={},
+        )
+
+        assert _reasoning(messages) == ["old-1", "old-2"]
+
+    async def test_exchange_ignores_system_and_tool_messages_as_boundary(self):
+        """Only role "user" marks an exchange boundary: a system notification
+        or tool result after the final answer does not complete the exchange."""
+        messages = _two_exchange_window()[:5]  # ends on the system notice
+        plugin = ThinkingPlugin(_make_pm(reasoning_history="exchange"))
+
+        await plugin.before_agent_turn(
+            channel=_window_channel(messages), correlation_id=None, meta={},
+        )
+
+        assert _reasoning(messages) == ["old-1", "old-2"]
+
+    async def test_drop_strips_every_assistant_message(self):
+        """"drop" strips the whole window, including history reloaded from the
+        DB (which carries reasoning_content because the DB copy keeps it)."""
+        messages = _two_exchange_window()
+        plugin = ThinkingPlugin(_make_pm(reasoning_history="drop"))
+
+        await plugin.before_agent_turn(
+            channel=_window_channel(messages), correlation_id=None, meta={},
+        )
+
+        assert _reasoning(messages) == [None, None, None]
+
+    async def test_keep_is_noop(self):
+        """"keep" leaves every message's reasoning in place."""
+        messages = _two_exchange_window()
+        plugin = ThinkingPlugin(_make_pm(reasoning_history="keep"))
+
+        await plugin.before_agent_turn(
+            channel=_window_channel(messages), correlation_id=None, meta={},
+        )
+
+        assert _reasoning(messages) == ["old-1", "old-2", "new-1"]
+
+    async def test_no_registry_is_noop(self):
+        """Without a registry the plugin cannot resolve policy; no-op."""
+        messages = _two_exchange_window()
+        plugin = ThinkingPlugin(_make_pm(registry_missing=True))
+
+        await plugin.before_agent_turn(
+            channel=_window_channel(messages), correlation_id=None, meta={},
+        )
+
+        assert _reasoning(messages) == ["old-1", "old-2", "new-1"]
+
+    async def test_no_conversation_is_noop(self):
+        """A channel without a conversation window must not crash."""
+        channel = MagicMock()
+        channel.conversation = None
+        plugin = ThinkingPlugin(_make_pm(reasoning_history="exchange"))
+
+        await plugin.before_agent_turn(channel=channel, correlation_id=None, meta={})
 
 
 class TestTransformDisplayText:
