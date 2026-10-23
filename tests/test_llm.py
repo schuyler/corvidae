@@ -587,3 +587,29 @@ class TestModelNotLoadedRobustness:
     def test_retry_delay_does_not_overflow(self):
         client = LLMClient(base_url=BASE_URL, model=MODEL, retry_max_delay=5.0)
         assert client._retry_delay(5000) == 5.0
+
+
+class TestLLMHTTPErrorDetails:
+    async def test_error_names_requested_model(self):
+        """A model overridden via extra_body is the one named in the error."""
+        from corvidae.llm import LLMHTTPError
+
+        client = LLMClient(base_url=BASE_URL, model="m1", model_not_loaded_wait=0.0)
+        client.session = _session_returning(
+            _make_mock_response(status=400, body_text=NOT_LOADED_BODY)
+        )
+        with pytest.raises(LLMHTTPError) as excinfo:
+            await client.chat(MESSAGES, extra_body={"model": "m2"})
+        assert excinfo.value.model == "m2"
+
+    async def test_non_json_success_keeps_content_type_error(self):
+        """A 2xx with a bad body is not reported as an HTTP error."""
+        from corvidae.llm import LLMHTTPError
+
+        client = LLMClient(base_url=BASE_URL, model=MODEL)
+        resp = _make_mock_response(status=200)
+        resp.json = AsyncMock(side_effect=aiohttp.ContentTypeError(MagicMock(), ()))
+        client.session = _session_returning(resp)
+        with pytest.raises(aiohttp.ContentTypeError) as excinfo:
+            await client.chat(MESSAGES)
+        assert not isinstance(excinfo.value, LLMHTTPError)

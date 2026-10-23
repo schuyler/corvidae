@@ -410,7 +410,15 @@ class LLMClient:
                                 "%s failed", label,
                                 extra={"status": resp.status, "body": error_body},
                             )
-                            raise LLMHTTPError(exc, body=error_body, model=self.model) from exc
+                            # A 2xx with an unparseable body (ContentTypeError)
+                            # is not an HTTP failure; propagate it unchanged.
+                            if resp.status < 400:
+                                raise
+                            # Name the model this request asked for: extra_body
+                            # can override the client's configured model.
+                            raise LLMHTTPError(
+                                exc, body=error_body, model=payload.get("model", self.model)
+                            ) from exc
 
                 except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as exc:
                     if attempt < self.max_retries:

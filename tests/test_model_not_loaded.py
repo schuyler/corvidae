@@ -106,3 +106,11 @@ class TestWaitValidation:
         cfg = {"base_url": "http://x", "model": "m", "model_not_loaded_wait": -1}
         with pytest.raises(ValueError, match="model_not_loaded_wait"):
             LLMPlugin()._create_client(cfg)
+
+    def test_rejects_non_finite_wait(self):
+        import pytest
+
+        for value in (float("inf"), float("nan")):
+            cfg = {"base_url": "http://x", "model": "m", "model_not_loaded_wait": value}
+            with pytest.raises(ValueError, match="model_not_loaded_wait"):
+                LLMPlugin()._create_client(cfg)

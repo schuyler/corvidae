@@ -27,6 +27,7 @@ is hot-swapped by on_config_reload; other roles are restart-only for now.
 """
 import asyncio
 import logging
+import math
 
 from corvidae.attribution import get_attribution
 from corvidae.hooks import CorvidaePlugin, hookimpl
@@ -72,12 +73,18 @@ class _HookObserver:
 
 
 def _model_not_loaded_wait(cfg: dict, role: str) -> float:
-    """Validate llm.<role>.model_not_loaded_wait: a non-negative number of seconds."""
+    """Validate llm.<role>.model_not_loaded_wait: a finite, non-negative number of seconds."""
     value = cfg.get("model_not_loaded_wait", 60.0)
-    # bool is an int subclass; reject it along with None and strings.
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+    # bool is an int subclass; reject it along with None and strings. inf
+    # would wait forever and nan would silently disable the wait.
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value < 0
+    ):
         raise ValueError(
-            f"llm.{role}.model_not_loaded_wait must be a non-negative number "
+            f"llm.{role}.model_not_loaded_wait must be a finite, non-negative number "
             f"of seconds, got {value!r}"
         )
     return float(value)
