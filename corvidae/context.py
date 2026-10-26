@@ -157,8 +157,9 @@ class ContextWindow:
         flight, #79) keeps its place but renders as a framed system
         notification without ``tool_call_id``, like an untargeted
         notification: strict chat templates reject a tool result with no
-        preceding call. This depends only on calls earlier in the window, so
-        a fork's prefix renders it identically.
+        preceding call. It depends only on whether the call is in the
+        window; calls precede their results, so a fork's prefix renders it
+        identically.
 
         mid_conversation_system_role renders every system message after the
         leading one under that role (``agent.mid_conversation_system_role``).
