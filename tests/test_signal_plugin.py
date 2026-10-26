@@ -1116,6 +1116,27 @@ class TestLiveness:
             finally:
                 await _stop_plugin(h)
 
+    async def test_refused_stranger_does_not_release_a_typing_slot(self, tmp_path):
+        """Only an allowlisted sender ever takes an outstanding slot, so a
+        refused stranger's rejection must give none back. Unreachable while
+        channels are one per sender, but guards the day Signal handles
+        groups, where a stranger and an allowed user share a channel."""
+        h = await _start_plugin(tmp_path)
+        try:
+            await h.server.push_notification(
+                "receive", make_data_envelope(source_uuid=AUTH_ACI, source_number=None, text="work"),
+            )
+            await _wait_until(lambda: h.pm.ahook.on_message.await_count >= 1, timeout=5)
+            channel = h.pm.ahook.on_message.await_args.kwargs["channel"]
+            assert h.plugin._outstanding[channel.id] == 1
+
+            await h.plugin.on_message_rejected(
+                channel=channel, correlation_id="corr-stranger", sender=OTHER_ACI, text="hi",
+            )
+            assert h.plugin._outstanding[channel.id] == 1
+        finally:
+            await _stop_plugin(h)
+
     async def test_one_refresh_loop_per_channel_and_stop_cancels_it(self, tmp_path):
         """A message arriving while the previous turn's refresh loop is still
         asleep reuses that loop rather than starting a second one -- a

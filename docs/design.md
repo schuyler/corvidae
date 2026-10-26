@@ -1780,10 +1780,12 @@ monitored.
   count stays positive (Signal clients expire an indicator after roughly
   15s). `send_message` and `on_message_rejected` each give one outstanding
   slot back; a second gate plugin vetoing a message this transport already
-  counted is why the rejection path decrements too. A refused stranger's
-  rejection gives back nothing that matters: Signal channels are one per
-  sender (groups are dropped), so it lands on the stranger's own channel,
-  whose count is already zero. A refresh loop still asleep from an earlier
+  counted is why the rejection path decrements too. It gives one back
+  only for an allowlisted sender, the only kind that ever took one. Today
+  that is belt and braces: channels are one per sender (groups are
+  dropped), so a stranger's rejection could only reach their own zero
+  count. It matters if group messages are ever handled, where a refused
+  stranger could otherwise stop typing owed to an allowed user. A refresh loop still asleep from an earlier
   turn is reused rather than doubled, so a channel has at most one, and
   `on_stop` cancels it. No explicit stop is ever sent — once the loop
   exits, the indicator expires on its own.
