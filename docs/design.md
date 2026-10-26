@@ -1505,7 +1505,7 @@ with the same prefixed name, the second is skipped and a warning is logged
 ### Schema sanitization
 
 `_mcp_tool_to_schema` strips the keys `$schema`, `$id`, `$comment`, `$defs`,
-and `definitions` from the top level of `mcp_tool.inputSchema` before wrapping
+and `definitions` from the top level of `mcp_tool.input_schema` before wrapping
 it in the OpenAI function-call envelope. Sanitization is shallow (top-level
 only); nested occurrences in `properties` are not removed.
 
@@ -1521,8 +1521,25 @@ mcp:
       env: {...}              # stdio only, optional
       url: <endpoint>         # sse only
       tool_prefix: <prefix>   # optional; default: server name
-      timeout_seconds: 30     # optional; default: 30
+      timeout_seconds: 30     # optional; per tool call; default: 30
+      connect_timeout_seconds: 30  # optional; handshake bound; default: 30
 ```
+
+### Connect timeout
+
+`_connect_server` opens each server's transport and session in its own
+`AsyncExitStack`, inside `asyncio.timeout(connect_timeout_seconds)`, so a
+server that never answers `initialize` cannot hold up the `on_start`
+broadcast (#72). On success the per-server stack is pushed onto the
+plugin's lifetime stack and closes with it in `on_stop`. On a timeout or any
+other failure it is closed immediately, which terminates a stdio subprocess.
+On a timeout `_connect_server` then logs it once and returns without
+registering the server; any other failure propagates to `on_start`, which
+logs and skips it. The close runs after the timeout has turned
+its cancellation into `TimeoutError`, so teardown is not itself cancelled.
+
+The client targets the mcp 2.x API (`mcp>=2.0`): tool schemas are read from
+`Tool.input_schema` and error results from `CallToolResult.is_error`.
 
 **Graceful degradation:** without `McpClientPlugin`, no MCP tools are
 registered. The plugin declares no `depends_on`.

@@ -775,6 +775,7 @@ mcp:
         NODE_ENV: production
       tool_prefix: "fs"        # optional: prefix for tool names; defaults to server name
       timeout_seconds: 30      # optional: per-call timeout; default 30
+      connect_timeout_seconds: 30  # optional: startup handshake bound; default 30
 
     remote_api:
       transport: sse
@@ -785,7 +786,9 @@ mcp:
 Tool names are prefixed to avoid collisions: a server named `filesystem`
 produces tools like `filesystem__read_file`. Set `tool_prefix: ""` to
 disable prefixing. If two servers produce the same tool name, the first
-wins and the duplicate is skipped with a WARNING.
+wins and the duplicate is skipped with a WARNING. A server that does not
+complete its handshake within `connect_timeout_seconds` is skipped with a
+WARNING and its subprocess terminated; startup continues without it.
 
 **Without this plugin:** MCP servers cannot be used. No tools are affected
 if the `mcp:` config key is absent — the plugin no-ops.
