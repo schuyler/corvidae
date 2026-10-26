@@ -138,7 +138,7 @@ their return values are ignored.
 | `transform_display_text` | firstresult=True wrapper chain | `_resolve_display_text`, before `send_message`; return transformed text or None to leave unchanged |
 | `on_idle` | broadcast | `IdleMonitor`, when all queues empty and cooldown elapsed |
 | `load_conversation` | firstresult=True | `_process_queue_item`, when `channel.conversation is None`; return list of tagged message dicts or None to defer |
-| `resolve_channel` | firstresult=True | `SchedulerPlugin`, for a persisted channel id the registry does not hold (e.g. a reminder due after a restart); a transport returns the live Channel for ids it owns, created with transport-specific config, or None to defer. `SignalPlugin` implements it; callers fall back to `registry.get_or_create` from the split id |
+| `resolve_channel` | firstresult=True | `SchedulerPlugin`, for a persisted channel id the registry does not hold (e.g. a reminder due after a restart); a transport returns the live Channel for ids it owns, created with transport-specific config, or None to defer. `SignalPlugin` and `DiscordPlugin` implement it; callers fall back to `registry.get_or_create` from the split id |
 | `on_conversation_event` | broadcast | `_process_queue_item`, after every `conv.append()`; side effects only (persistence, JSONL logging) |
 | `before_compaction` | broadcast, awaited | `CompactionPlugin`, after the summary succeeded and before `replace_with_summary()`; the window still holds `messages[:cut]`, so a plugin can fork over the dropped prefix (see [Forks](#forks)); failures logged, never block compaction |
 | `on_compaction` | broadcast | `CompactionPlugin`, after `replace_with_summary()`; side effects only (persistence) |
@@ -1680,6 +1680,19 @@ boundaries.
 `split_message` itself lives in `channels/split.py`, not in the IRC
 plugin, so a transport can size its own chunks without importing IRC.
 
+Its contract: `max_len` is in UTF-8 bytes and must be at least 6, or it
+raises `ValueError` regardless of the text (so a bad limit is not
+input-dependent; a 6-byte floor leaves room for one 4-byte codepoint
+after the 2-byte paragraph separator is re-attached). For any
+`max_len >= 6`, every chunk is at most `max_len` bytes and
+`"".join(chunks) == text`. The word tier carries each word's leading space
+with it and cuts a word that cannot fit on its own on codepoint
+boundaries, so nothing is dropped and nothing overflows. Earlier versions
+could lose characters or exceed the limit on long unbroken runs and
+multi-byte text. That affected IRC and Signal as well, and the same fix
+applies to both. `irc.message_chunk_size` and `signal.message_chunk_size`
+below 6 now raise `ValueError` when a reply is first split, not at startup.
+
 ### Signal (`channels/signal.py`)
 
 `SignalPlugin` — Signal DM transport, speaking newline-delimited JSON-RPC
@@ -1792,6 +1805,138 @@ Group conversations are out of scope; agent-initiated (unprompted) sends
 and any privacy handling specific to disappearing messages are not
 implemented.
 
+### Discord (`channels/discord.py`)
+
+`DiscordPlugin` — Discord transport, built on discord.py's gateway client.
+It logs in as a bot account and talks in DMs, server channels, and threads.
+Creating the application and inviting the bot are covered in
+[discord-ops.md](discord-ops.md).
+
+With no `discord:` block in config the plugin loads, resolves its registry
+dependency, and does nothing else — no client, no tasks, nothing logged
+above DEBUG. A block that is present but has no token (neither `token` nor
+the `DISCORD_TOKEN` environment variable), an `allow` that is not a list,
+or a `message_chunk_size` outside 100–2000 raises in `on_init` and aborts
+startup. Silence is for absence; errors are loud.
+
+**Connection.** discord.py owns the gateway: heartbeats, resumes, and
+reconnects within a session are its job, not ours. `on_start` launches two
+long-lived tasks, a connection loop and an inbound processor. The loop
+builds a new client for every attempt and closes it in a `finally`, so a
+failed login never leaks its HTTP session. A `LoginFailure` (bad token) is
+logged once at ERROR and not retried, since retrying a rejected token does
+not improve it. Any other failure, or the client stopping on its own, is
+retried on the ladder IRC and Signal use: 10s, doubling, capped at 300s,
+reset to 10s when the client reports ready. The plugin stays loaded after
+a login failure, but is deaf and mute until the daemon restarts.
+
+**No privileged intent.** The client uses discord.py's default intents and
+does not request the privileged Message Content intent, so operators need
+not enable it in the Developer Portal. Discord still delivers message
+content for DMs and for messages that mention the bot, and those are the
+only messages this transport processes. If a guild message mentions the
+bot and arrives with empty content anyway, the transport logs a WARNING and
+drops it. That should not happen, and the warning is how a change on
+Discord's side would show up.
+
+**Inbound filtering.** A message is dropped if its author is a bot (this
+covers the bot's own messages and other bots', so two bots cannot talk each
+other into a loop). In DMs every message from a human is processed. In
+guild channels and threads the bot must itself appear in
+`message.mentions`. `@everyone`, `@here`, and role pings do not count, even
+though discord.py's `mentioned_in` would accept some of them. The bot's
+mention token (`<@id>` or `<@!id>`) is stripped, the text is trimmed, and
+a message with nothing left (a bare mention, whitespace, attachment only)
+is dropped. Attachments are logged at DEBUG and discarded; any text with
+them is still processed.
+
+**Ordering.** discord.py runs every gateway event as its own task, so
+handling a message inside `on_message` would let two quick messages
+overtake each other. The client's `on_message` therefore only puts the
+message on a queue (synchronously, which preserves arrival order), and a
+single processor task consumes it. A failure handling one message is
+logged and does not stop the processor.
+
+**Identity.** A channel's scope is a numeric Discord id, never a name:
+`discord:<channel_id>` for a server channel, and `discord:<thread_id>` for
+a thread, which has its own id and therefore its own history, separate from
+its parent channel. DMs are `discord:dm:<user_id>`, keyed on the user, not
+the DM channel's id. Names (nicks, channel names, usernames) change, and
+channel ids are the persistence key for `sessions.db`, the jsonl logs, and
+memory, so keying on a name would fork a history on a rename. The sender
+passed to `on_message` is the author's user id.
+
+**`resolve_channel`.** For a `discord:<scope>` id the registry does not
+hold (a reminder due after a restart), `DiscordPlugin.resolve_channel`
+returns the registry's channel for it. It returns None for other
+transports, for scopes that are not all ASCII digits (optionally prefixed
+`dm:`), and before `on_start` has resolved the registry. Sending to such a
+channel looks the destination up lazily (cache first, then a fetch), so it
+works as long as the bot can still see that channel or user.
+
+**Authorization.** `should_process_message` is a default-deny gate: the
+sender's user id must appear in `allow:` (entries are compared as strings,
+so YAML ints work). A refusal is logged at INFO naming the sender's id, and
+nothing is sent back. The transport fires `on_message` for every message
+that passes inbound filtering regardless: the gate is the one place that
+vetoes and the one place that logs the attempt. Note what that means in a
+server: anyone who can see the channel can @-mention the bot, and gets
+silence. The bot has no way to tell them it is configured to ignore them.
+
+**Liveness.** Typing only; Discord has no bot read receipts. On the first
+outstanding message for a channel the transport sends the typing indicator
+immediately and starts a refresh loop that re-sends every 8s (Discord's
+indicator lasts about 10s) while the channel's outstanding count stays
+positive. `send_message` and `on_message_rejected` each give one slot back,
+for the same reason as on Signal. Typing is only ever sent for an
+allowlisted sender, so an unauthorized user gets no sign the bot is live.
+A failed typing call is logged and never blocks the reply.
+
+**Outbound.** `send_message` and `send_progress` both split through
+`split_discord_message` at `message_chunk_size` and send every non-blank
+chunk; `send_progress` skips the outstanding-count bookkeeping, as on
+Signal. Two properties apply to every send:
+
+- *Mentions are disabled.* Each `send` passes
+  `AllowedMentions.none()` explicitly, whatever the client's default is.
+  The reply is built from model output, which can contain text from any
+  untrusted source, and a literal `@everyone`, role mention, or user
+  mention in it must render as text and ping no one.
+- *Splitting is fence-aware.* `split_discord_message` builds on the shared
+  `split_message` for oversized lines, but keeps ``` code fences intact:
+  a fence left open at a chunk boundary is closed at the end of that chunk
+  and reopened, with the same language tag, at the start of the next, so
+  every chunk renders its code as code. Chunks are at most
+  `message_chunk_size` UTF-8 bytes (the limit is in bytes, though
+  Discord's 2000 is in characters, so multi-byte text splits a little
+  early), and the chunks' bodies concatenate to the original text, so
+  nothing is truncated. A chunk that is only whitespace is not sent,
+  because Discord rejects empty messages.
+
+Known limits of the splitter, none of which loses text:
+
+- Only ``` fences are tracked. `~~~` fences and runs of four or more
+  backticks are not recognized as fences, and a longer run is treated as
+  ``` plus extra backticks.
+- A ``` run that happens to be cut inside a single space-free word of
+  about 2000 bytes inverts the tracked fence state for the rest of the
+  message. Chunks stay balanced, but later code may render as prose and
+  vice versa.
+- A language tag longer than 16 bytes, or one containing a backtick, is
+  not carried across a boundary; the reopened fence has no tag.
+- A cut can fall inside a ZWJ emoji sequence or between a base character
+  and its combining marks, because splitting is by codepoint.
+
+Outbound is text only. `send_thinking` and `send_tool_status` are not
+implemented, so reasoning and tool traffic never reach Discord.
+
+There is no local Discord server, so there is no harness end-to-end test
+for this transport; behavior is pinned by `tests/test_discord_plugin.py`
+against fake clients. The first real connection is the real test.
+
+Out of scope: voice, slash commands, embeds, attachments in either
+direction, reactions, and agent-initiated (unprompted) sends.
+
 ## Configuration
 
 ```yaml
@@ -1876,6 +2021,12 @@ irc:
   channels:
     - "#channel"
 
+discord:                        # optional; omit to leave the transport inert
+  token: "..."                  # or set DISCORD_TOKEN in the environment
+  allow:                        # Discord user ids; default-deny
+    - 123456789012345678
+  message_chunk_size: 2000      # 100-2000
+
 logging:                        # optional, falls back to defaults
   level: INFO                   # DEBUG | INFO | WARNING | ERROR | CRITICAL
   file: corvidae.log            # omit for stderr; CLI mode defaults to corvidae.log
@@ -1899,7 +2050,7 @@ fixed hand-written order:
    never instantiated.
 
 The full entry-point plugin set (`pyproject.toml:36-62`): `persistence`,
-`jsonl_log`, `core_tools`, `cli`, `irc`, `signal`, `task`, `subagent`, `mcp`, `llm`,
+`jsonl_log`, `core_tools`, `cli`, `irc`, `signal`, `discord`, `task`, `subagent`, `mcp`, `llm`,
 `compaction`, `memory`, `memory_tools`, `funnel`, `thinking`,
 `runtime_settings`, `tools`, `metrics`, `usage_log`, `metrics_jsonl`,
 `outcome_log`, `appraisal`, `critique`, `scheduler`, `agent`,
@@ -2004,6 +2155,7 @@ corvidae/
 │   ├── cli.py            # CLIPlugin
 │   ├── irc.py            # IRCPlugin
 │   ├── signal.py         # SignalPlugin (signal-cli JSON-RPC transport)
+│   ├── discord.py        # DiscordPlugin (discord.py gateway transport)
 │   └── split.py          # split_message() — shared outbound chunking
 ├── commands/
 │   └── redact.py         # corvidae redact CLI (operator-only)
@@ -2070,4 +2222,4 @@ seamlessly. Not implemented; current compaction is stop-the-world.
 ### Additional transports
 
 BlueSky and other transports are future work. The hook system supports
-them; the implemented transports are CLI, IRC, and Signal.
+them; the implemented transports are CLI, IRC, Signal, and Discord.

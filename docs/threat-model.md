@@ -14,7 +14,9 @@ default-deny with silent refusal, memory is compartmentalized per channel
 (or per operator-configured channel group),
 retrieved context is framed as data, tool `_ctx` is hidden from the model,
 SQL is parameterized, signal-cli is pinned and signature-verified, and the
-docs are candid about plaintext at rest.
+docs are candid about plaintext at rest. The Discord transport follows
+Signal's model, not IRC's: default-deny, silent refusal, and outbound
+mentions disabled.
 
 The weak spot is that the model's authority is unbounded and the model's
 inputs are not. Simon Willison's "lethal trifecta" is three things in one
@@ -26,6 +28,8 @@ them:
   directory (which *is* the Signal credential), and `~/.ssh`. `shell`
   reaches everything else.
 - **Untrusted content.** Every IRC channel message and private message,
+  every Discord message that mentions the bot from an allowlisted user in
+  a channel other people can read,
   every web page `web_fetch` returns, every DuckDuckGo snippet, every MCP
   tool description and result, and every memory distilled from any of the
   above.
@@ -43,10 +47,16 @@ another tenant, it is whoever can post in a channel the bot sits in.
 Assets, roughly in order of how bad it is to lose them:
 
 1. The signal-cli data directory. There is no recovery; whoever has it is
-   the bot's phone number.
+   the bot's phone number. The Discord bot token (`discord.token` or
+   `DISCORD_TOKEN`) is the same kind of asset: whoever holds it is the bot,
+   and it is read from `agent.yaml` or the environment, both of which
+   `read_file` and `shell` can reach. It is revocable (reset it in the
+   Developer Portal), which the Signal identity is not.
 2. The host account corvidae runs as, and anything it can read or run.
 3. `sessions.db`, the JSONL logs, and the memory tables: plaintext copies
    of every conversation, including end-to-end-encrypted Signal ones.
+   Discord conversations are not end-to-end encrypted to begin with:
+   Discord the company can read them whatever corvidae does.
 4. `agent.yaml`: operator intent, hot-reloaded within seconds of a write
    (default poll 2s).
 5. The LLM server, if it is shared with anything else.
@@ -55,6 +65,9 @@ Adversaries:
 
 - **Anyone in an IRC channel the bot has joined**, or anyone who can PM
   it. IRC nicks are unauthenticated on most networks.
+- **Anyone in a Discord server the bot has been invited to**, who can
+  @-mention it, and anyone Discord lets DM it.
+  The allowlist refuses them, silently; see finding 5.
 - **Anyone who controls a page the bot fetches**, or a search result it
   reads.
 - **An MCP server**, via its tool descriptions and results.
@@ -229,6 +242,34 @@ The Signal plugin also carries a documented latent bug (`on_message_rejected`
 docstring): a second gate plugin vetoing an already-admitted message would
 leak a stale timestamp into every later read receipt. Not exploitable
 today; a trap for the next plugin author.
+
+Discord is built like Signal, not like IRC. The transport's
+`should_process_message` is a default-deny allowlist of numeric user ids; an
+empty list refuses everyone, and a refusal is one INFO log line with no
+reply and no typing indicator. In a server, though, anyone who can see a
+channel can @-mention the bot, and what stops them is only that allowlist.
+Three more things to know:
+
+- **Allowed users in a shared channel are an injection path.** An
+  allowlisted user is trusted to drive the agent, but a server channel (or
+  thread) has other readers, and the channel's history is one shared
+  conversation. What an allowed user pastes in, including text they copied
+  from someone else, is untrusted content with the same weight as any
+  other. The bot answers only when mentioned, but it records only those
+  messages, so the model never sees unmentioned chatter. Prefer DMs, or
+  channels where everyone present is someone you would add to `allow`.
+- **Outbound mentions are disabled.** Model output can contain anything an
+  attacker got into context. Every send passes `AllowedMentions.none()`,
+  so `@everyone`, role mentions, and user mentions in a reply render as
+  text and ping nobody. Without it a prompt-injected reply could ping a
+  whole server. This closes the ping, not the content: the reply is still
+  visible to everyone in the channel, including text the model was tricked
+  into leaking.
+- **No privileged intent.** The bot does not request the Message Content
+  intent, so it cannot read messages that do not mention it or arrive
+  outside a DM, even if it is in the channel. That narrows what the
+  transport can ever be made to see, though it is a Discord-side limit
+  and not a corvidae one.
 
 ### 6. MCP servers are trusted peers
 

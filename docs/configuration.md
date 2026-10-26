@@ -381,7 +381,7 @@ The `irc` section is optional. If absent, `IRCPlugin` does not connect.
 | `irc.nick` | string | `corvidae` | Bot nickname. |
 | `irc.tls` | boolean | `false` | Use TLS for the IRC connection. |
 | `irc.channels` | list of strings | `[]` | IRC channels to join on connect (e.g., `["#general", "#dev"]`). |
-| `irc.message_chunk_size` | integer | `400` | Maximum UTF-8 bytes per outbound IRC message. Messages longer than this are split using three-tier splitting: paragraphs → sentences → words. |
+| `irc.message_chunk_size` | integer | `400` | Maximum UTF-8 bytes per outbound IRC message. Messages longer than this are split using three-tier splitting: paragraphs → sentences → words. Must be at least 6; a smaller value raises `ValueError` the first time a reply is split. |
 
 ---
 
@@ -396,7 +396,7 @@ corvidae talks JSON-RPC to a `signal-cli daemon` that is already running; it doe
 | `signal.socket` | string | *required* | Path to the `signal-cli daemon --socket` unix socket. |
 | `signal.account` | string | *required* | The bot's own number, E.164, e.g. `"+15550001111"`. Quote it — bare `+…` is not valid YAML. Used to recognize and ignore the account's own traffic. |
 | `signal.allow` | list of strings | `[]` | Senders permitted to drive the agent. Each entry is either an E.164 number or an ACI (the account UUID). Default-deny: an empty or absent list refuses everyone, silently — no reply, no typing indicator, no read receipt. |
-| `signal.message_chunk_size` | integer | `2000` | Maximum UTF-8 bytes per outbound Signal message. Longer replies are split paragraphs → sentences → words and sent as several messages; nothing is truncated. |
+| `signal.message_chunk_size` | integer | `2000` | Maximum UTF-8 bytes per outbound Signal message. Longer replies are split paragraphs → sentences → words and sent as several messages; nothing is truncated. Must be at least 6; a smaller value raises `ValueError` the first time a reply is split. |
 
 ```yaml
 signal:
@@ -420,6 +420,34 @@ uv run corvidae redact --db sessions.db message <id> [<id> ...]
 ```
 
 Pass the ids explicitly rather than using the `range` form: `message_log` ids are global across all channels, so an id range spans whatever other channels were active in the same window. The redaction cascades to intersecting memory records and to both FTS surfaces; see "Operator redaction" in [design.md](design.md). The jsonl logs are separate files and are not touched — delete them yourself.
+
+---
+
+## `discord` — Discord transport
+
+The `discord` section is optional. If absent, `DiscordPlugin` loads but stays inert: no client, no tasks, nothing logged above `DEBUG`. If present, it must be well-formed — no token (in the block or the environment), an `allow` that is not a list, or a `message_chunk_size` that is not an integer from 100 to 2000 raises at startup naming the offending field.
+
+corvidae logs in as a Discord bot account. Creating the application, getting the token, and inviting the bot are covered in [discord-ops.md](discord-ops.md). In DMs the bot answers every message from an allowed user; in servers and threads it answers only messages that @-mention it.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `discord.token` | string | `$DISCORD_TOKEN` | The bot token. If the key is absent, null, or empty, the `DISCORD_TOKEN` environment variable is used; if neither is set, startup fails. |
+| `discord.allow` | list of user ids | `[]` | Discord user ids permitted to drive the agent. Numeric ids, written as YAML ints or quoted strings; they are compared as strings. Default-deny: an empty or absent list refuses everyone, silently — no reply and no typing indicator. An explicit `allow: null` is an error, not an empty list. |
+| `discord.message_chunk_size` | integer | `2000` | Maximum UTF-8 bytes per outbound Discord message, 100 to 2000 inclusive. Longer replies are split, keeping code fences intact, and sent as several messages; nothing is truncated. An explicit `null` is rejected (unlike a null `token`, which falls back to the environment). The limit is bytes, while Discord's 2000 is characters, so text with multi-byte characters splits earlier than strictly needed. |
+
+```yaml
+discord:
+  token: "MTIz...your.bot.token"   # or leave out and set DISCORD_TOKEN
+  allow:
+    - 123456789012345678
+  message_chunk_size: 2000
+```
+
+User ids are the long numeric snowflakes you get from Discord's Developer Mode, not usernames; see [discord-ops.md](discord-ops.md#find-ids). Prefer the environment variable if `agent.yaml` is world-readable or checked in anywhere: the token is the bot, and anyone holding it can act as it.
+
+**Discord content is stored in plaintext on this host, and Discord has it too.** Discord messages are not end-to-end encrypted; Discord (the company) can read them in transit and at rest. On this side they are written to `sessions.db`, to the JSONL conversation log (`<daemon.jsonl_log_dir>/discord_<channel_id>.jsonl`, or `discord_dm_<user_id>.jsonl` for a DM, when that is enabled), and into consolidated memory records, all as ordinary text. Messages from senders who are not allowlisted are refused before they are persisted. In a server channel, though, the stored history is whatever allowlisted users said there, and the model's replies to it. File permissions and whatever disk encryption the host has are all that protect the local copies.
+
+To remove a conversation's stored content, use `corvidae redact` as described for Signal above, with `channel_id = 'discord:<channel_id>'` or `'discord:dm:<user_id>'`.
 
 ---
 
@@ -447,6 +475,8 @@ channels:
       - prompts/cli-addendum.txt
     reasoning_history: keep
 ```
+
+Discord channels are keyed on numeric ids: `discord:<channel_id>` for a server channel, `discord:<thread_id>` for a thread (a thread has its own id and its own history, so it does not inherit its parent channel's override), and `discord:dm:<user_id>` for a DM. Names are not accepted, because they change and the id is the persistence key.
 
 Signal channels accept either form of key. `signal:<aci>` is the real channel id and matches directly. `signal:+15551234567` is an alias: its overrides are copied onto the ACI-keyed channel the first time that person writes, once the number has resolved. The alias entry itself never becomes a live channel, and an alias naming someone absent from `signal.allow` is simply inert — an unauthorized sender never gets a turn for the overrides to apply to.
 
