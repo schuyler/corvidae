@@ -9,6 +9,10 @@ left behind in irc.py. Transport-specific integration (chunk delivery,
 whitespace-only-chunk filtering) stays in tests/test_irc_plugin.py.
 """
 
+import random
+
+import pytest
+
 from corvidae.channels.split import split_message
 
 
@@ -214,3 +218,93 @@ class TestSplitDefects:
         result = split_message(text, max_len=2000)
         assert "".join(result) == text
         assert all(len(part.encode("utf-8")) <= 2000 for part in result)
+
+
+# ---------------------------------------------------------------------------
+# Shared splitter invariants (Discord design, R12). For every max_len >= 6,
+# every chunk is <= max_len UTF-8 bytes and the chunks concatenate back to the
+# input exactly. max_len < 6 cannot hold a 4-byte codepoint after tier 1's
+# two-byte shrink, so it is a configuration error, raised regardless of input.
+# ---------------------------------------------------------------------------
+
+
+def _assert_invariants(text: str, max_len: int) -> None:
+    """Assert the byte-bound and lossless-reassembly invariants for one case."""
+    chunks = split_message(text, max_len=max_len)
+    assert "".join(chunks) == text, f"content changed (max_len={max_len})"
+    for chunk in chunks:
+        size = len(chunk.encode("utf-8"))
+        assert size <= max_len, f"chunk of {size} bytes exceeds {max_len}"
+
+
+class TestSplitInvariantsExplicit:
+    @pytest.mark.parametrize(
+        "text,max_len",
+        [
+            ("\u4e2d" * 1000, 1976),
+            ("\u4e2d\u6587\u3002" * 400, 1976),
+            ("\U0001f600" * 600, 1975),
+            ("A" * 3000 + " " + "B" * 3000, 1975),
+            ("a " + "b" * 10, 10),
+            ("a" * 1976 + " " + "b" * 1976, 1976),
+        ],
+        ids=["cjk-no-spaces", "cjk-sentences", "emoji", "two-long-words", "leading-space-overflow", "word-plus-space-overflow"],
+    )
+    def test_previously_failing_inputs_hold_invariants(self, text, max_len):
+        """Inputs that reproduced overflow or data loss now satisfy both invariants."""
+        _assert_invariants(text, max_len)
+
+    @pytest.mark.parametrize("max_len", [-1, 0, 1, 2, 3, 4, 5])
+    def test_max_len_below_six_raises_on_long_text(self, max_len):
+        """A limit that cannot hold one codepoint is a ValueError."""
+        with pytest.raises(ValueError):
+            split_message("x" * 100, max_len=max_len)
+
+    @pytest.mark.parametrize("max_len", [0, 3, 5])
+    def test_max_len_below_six_raises_even_when_text_would_fit(self, max_len):
+        """The precondition is checked before the fits-already shortcut."""
+        with pytest.raises(ValueError):
+            split_message("hi", max_len=max_len)
+
+    def test_max_len_six_is_accepted(self):
+        """6 is the smallest legal limit and fits a 4-byte codepoint."""
+        _assert_invariants("\U0001f600" * 20 + " ab cd", 6)
+
+
+# Fragments the property test stitches together: ASCII words, CJK, emoji,
+# spaces, newlines, paragraph breaks, sentence punctuation, backticks.
+_FRAGMENTS = [
+    "alpha", "beta", "gamma", "delta", "x", "hello", "world",
+    "\u4e2d", "\u6587", "\u4e2d\u6587\u3002", "\u3053\u3093\u306b\u3061\u306f",
+    "\U0001f600", "\U0001f680", "\u00e9", "\u2603",
+    " ", " ", " ", "  ", "\n", "\n\n", "\n\n",
+    ".", "!", "?", ". ", "! ", "? ",
+    "`", "```", "```python\n",
+]
+
+
+def _random_text(rng: random.Random, max_len: int) -> str:
+    """Build a random mixed text, sometimes containing a long space-free word."""
+    parts = [rng.choice(_FRAGMENTS) for _ in range(rng.randint(0, 60))]
+    if rng.random() < 0.35:
+        # A long space-free word, to force the oversized-piece hard split.
+        word = rng.choice(["a", "\u4e2d", "\U0001f600", "ab\u4e2d"]) * rng.randint(1, max_len * 3)
+        parts.insert(rng.randint(0, len(parts)), word)
+    return "".join(parts)
+
+
+class TestSplitInvariantsProperty:
+    @pytest.mark.parametrize("seed", [0, 1, 2, 3])
+    def test_small_limits(self, seed):
+        """Seeded random texts hold both invariants for every n in [6, 60]."""
+        rng = random.Random(seed)
+        for _ in range(750):
+            n = rng.randint(6, 60)
+            _assert_invariants(_random_text(rng, n), n)
+
+    @pytest.mark.parametrize("n", [400, 2000])
+    def test_production_limits(self, n):
+        """Same invariants at the IRC (400) and Discord/Signal (2000) sizes."""
+        rng = random.Random(1000 + n)
+        for _ in range(300):
+            _assert_invariants(_random_text(rng, n), n)
