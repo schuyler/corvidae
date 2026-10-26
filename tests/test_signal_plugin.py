@@ -1116,6 +1116,45 @@ class TestLiveness:
             finally:
                 await _stop_plugin(h)
 
+    async def test_one_refresh_loop_per_channel_and_stop_cancels_it(self, tmp_path):
+        """A message arriving while the previous turn's refresh loop is still
+        asleep reuses that loop rather than starting a second one -- a
+        second loop would double the refreshes, and once the first exits it
+        would drop the second from tracking, so on_stop would leave it
+        running."""
+
+        def _live_loops() -> list[asyncio.Task]:
+            # Every not-yet-finished task running the refresh coroutine.
+            return [
+                t for t in asyncio.all_tasks()
+                if not t.done() and "_typing_refresh_loop" in repr(t.get_coro())
+            ]
+
+        with _fast_typing_refresh():
+            h = await _start_plugin(tmp_path)
+            try:
+                # First turn: typing starts and the refresh loop goes to sleep.
+                await h.server.push_notification(
+                    "receive", make_data_envelope(source_uuid=AUTH_ACI, source_number=None, text="one"),
+                )
+                await _wait_until(lambda: h.pm.ahook.on_message.await_count >= 1, timeout=5)
+                channel = h.pm.ahook.on_message.await_args.kwargs["channel"]
+
+                # Reply, then a new message before the loop's sleep ends.
+                await h.plugin.send_message(channel=channel, text="reply to one")
+                await h.server.push_notification(
+                    "receive", make_data_envelope(source_uuid=AUTH_ACI, source_number=None, text="two"),
+                )
+                await _wait_until(lambda: h.pm.ahook.on_message.await_count >= 2, timeout=5)
+                assert len(_live_loops()) == 1
+
+                # Let the loop wake: it must still be the tracked one.
+                await asyncio.sleep(TYPING_REFRESH_FOR_TESTS * 2)
+                assert len(_live_loops()) == 1
+            finally:
+                await _stop_plugin(h)
+            assert _live_loops() == []
+
     async def test_typing_send_failure_is_logged_and_does_not_block_reply(self, tmp_path, caplog):
         h = await _start_plugin(tmp_path)
         try:
