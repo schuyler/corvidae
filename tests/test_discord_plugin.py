@@ -918,6 +918,54 @@ class TestTyping:
         finally:
             await h.plugin.on_stop()
 
+    async def test_refused_stranger_does_not_stop_owed_typing(self, fast_typing):
+        """A refused sender never took an outstanding slot, so their
+        rejection must not give one back: typing for an allowlisted user's
+        turn in the same channel keeps running."""
+        h = await _start_plugin()
+        try:
+            h.plugin._enqueue(make_dm("work"), BOT_ID)
+            await _wait_until(lambda: h.messageable.typing_count >= 2)
+            ch = h.registry.get(f"discord:dm:{AUTH_ID}")
+            await h.plugin.on_message_rejected(
+                channel=ch, correlation_id="cid", sender=str(OTHER_ID), text="hi",
+            )
+            assert h.plugin._outstanding[ch.id] == 1
+            before = h.messageable.typing_count
+            await _wait_until(lambda: h.messageable.typing_count >= before + 2)
+        finally:
+            await h.plugin.on_stop()
+
+    async def test_one_refresh_loop_per_channel_and_stop_cancels_it(self, fast_typing):
+        """Re-arming typing while the previous refresh loop is still asleep
+        reuses that loop rather than starting a second one, and on_stop
+        leaves no refresh loop running."""
+
+        def _live_loops() -> list[asyncio.Task]:
+            # Every not-yet-finished task running the refresh coroutine.
+            return [
+                t for t in asyncio.all_tasks()
+                if not t.done() and "_typing_refresh_loop" in repr(t.get_coro())
+            ]
+
+        h = await _start_plugin()
+        try:
+            h.plugin._enqueue(make_dm("one"), BOT_ID)
+            await _wait_until(lambda: h.messageable.typing_count >= 1)
+            ch = h.registry.get(f"discord:dm:{AUTH_ID}")
+            # Reply, then a new message before the loop's sleep ends.
+            h.plugin._decrement_outstanding(ch)
+            await h.plugin._begin_typing(ch)
+            assert len(_live_loops()) == 1
+            # Reply again, wait out the old loop, and re-arm once more.
+            h.plugin._decrement_outstanding(ch)
+            await asyncio.sleep(TYPING_REFRESH_FOR_TESTS * 3)
+            await h.plugin._begin_typing(ch)
+            assert len(_live_loops()) == 1
+        finally:
+            await h.plugin.on_stop()
+        assert _live_loops() == []
+
     async def test_typing_stops_after_rejection(self, fast_typing):
         """on_message_rejected also gives the outstanding slot back."""
         h = await _start_plugin()
