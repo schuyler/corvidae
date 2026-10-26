@@ -122,7 +122,7 @@ def _split_discord_segments(text: str, max_len: int) -> list[tuple[str, str, str
         if not current:
             current_line_start = starts_line
         current += piece
-    if current or not bodies:
+    if current:
         bodies.append((current, current_line_start))
 
     # Walk the bodies tracking fence state, adding the reopening prefix and
@@ -500,8 +500,15 @@ class DiscordPlugin(CorvidaePlugin):
         self, channel: Channel, correlation_id: str, sender: str, text: str
     ) -> None:
         """Give back the outstanding slot of a message another gate vetoed,
-        so the typing refresh loop still reaches zero."""
+        so the typing refresh loop still reaches zero.
+
+        Only an allowlisted sender ever took a slot (_handle_message counts
+        nobody else), so a refused stranger's rejection gives nothing back --
+        otherwise it would stop typing for an allowlisted user's turn that
+        is still running in the same channel."""
         if not channel.matches_transport("discord"):
+            return
+        if sender not in self._allow:
             return
         self._decrement_outstanding(channel)
 
@@ -516,9 +523,14 @@ class DiscordPlugin(CorvidaePlugin):
         self._outstanding[channel.id] = count
         if count == 1:
             await self._send_typing(channel)
-            self._typing_tasks[channel.id] = asyncio.create_task(
-                self._typing_refresh_loop(channel)
-            )
+            # A loop from an earlier turn may still be asleep; it will see the
+            # count back above zero and carry on, so starting a second one
+            # would double the refreshes and leave one untracked by on_stop.
+            existing = self._typing_tasks.get(channel.id)
+            if existing is None or existing.done():
+                self._typing_tasks[channel.id] = asyncio.create_task(
+                    self._typing_refresh_loop(channel)
+                )
 
     def _decrement_outstanding(self, channel: Channel) -> None:
         """Give back one outstanding slot (a reply sent or a rejection)."""
@@ -537,7 +549,10 @@ class DiscordPlugin(CorvidaePlugin):
                 if not await self._send_typing(channel):
                     return
         finally:
-            self._typing_tasks.pop(channel.id, None)
+            # Forget this loop only if it is still the tracked one, never a
+            # successor registered under the same channel id.
+            if self._typing_tasks.get(channel.id) is asyncio.current_task():
+                del self._typing_tasks[channel.id]
 
     async def _send_typing(self, channel: Channel) -> bool:
         """Send one typing indicator. A failure is logged and never blocks
