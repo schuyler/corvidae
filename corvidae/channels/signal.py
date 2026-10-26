@@ -598,8 +598,17 @@ class SignalPlugin(CorvidaePlugin):
         today only because the transport's own allowlist check is the
         only gate on signal channels; any future gate plugin on signal
         channels must add the pop here.
+
+        Only an allowlisted sender ever took a slot (the inbound handler
+        counts nobody else), so a refused stranger's rejection gives
+        nothing back. Channels are one per sender today, so that rejection
+        could only hit the stranger's own zero count, but the guard keeps
+        it from stopping typing owed to an allowed user if Signal ever
+        handles group messages.
         """
         if not channel.matches_transport("signal"):
+            return
+        if not await self._is_allowed(sender):
             return
         self._decrement_outstanding(channel)
 
