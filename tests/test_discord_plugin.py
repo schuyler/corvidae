@@ -45,7 +45,7 @@ from unittest.mock import AsyncMock, patch
 import discord
 import pytest
 
-from corvidae.channel import ChannelRegistry
+from corvidae.channel import ChannelRegistry, load_channel_config
 from corvidae.hooks import (
     _check_hook_arg_binding,
     create_plugin_manager,
@@ -168,7 +168,8 @@ class FakeClient:
     """Stand-in for the discord client the connection loop drives.
 
     ``behavior`` is an Exception (raised from start), the string "return"
-    (start returns immediately) or None (start blocks until close()).
+    (start returns immediately), an async callable taking the client (run
+    inside start; may raise) or None (start blocks until close()).
     """
 
     def __init__(self, behavior=None) -> None:
@@ -183,6 +184,10 @@ class FakeClient:
         if isinstance(self.behavior, BaseException):
             raise self.behavior
         if self.behavior == "return":
+            return
+        if callable(self.behavior):
+            # A scripted coroutine function: run it (it may raise).
+            await self.behavior(self)
             return
         await self._closed.wait()
 
@@ -313,6 +318,10 @@ async def _start_plugin(
         block: dict = {"token": TOKEN, "allow": [AUTH_ID]}
         block.update(discord_overrides or {})
         config["discord"] = block
+
+    # Mirror Runtime: per-channel config is registered before on_start.
+    if "channels" in config:
+        load_channel_config(config, registry)
 
     plugin = DiscordPlugin(pm)
     pm.register(plugin, name="discord")
@@ -673,6 +682,16 @@ class TestInboundFiltering:
         finally:
             await h.plugin.on_stop()
 
+    async def test_pinging_reply_without_token_is_admitted(self):
+        """R7: a reply that pings the bot lists it in mentions but carries no
+        <@id> token in the content; it is admitted with the text unchanged."""
+        h = await _start_plugin()
+        try:
+            await _deliver(h, make_message("hi", mentions=[BOT_MENTION]))
+            assert _delivered(h) == ["hi"]
+        finally:
+            await h.plugin.on_stop()
+
     async def test_other_mentions_are_left_in_text(self):
         """Only the bot's own mention token is stripped."""
         h = await _start_plugin()
@@ -799,6 +818,8 @@ class TestOrdering:
         h.pm.ahook.on_message = AsyncMock(side_effect=slow)
         try:
             await _deliver(h, *[make_dm(f"msg {i}") for i in range(1, 9)])
+            # The side effect records after its sleep, so wait for the last one.
+            await _wait_until(lambda: len(seen) == 9)
             assert seen == [f"msg {i}" for i in range(1, 9)] + ["__sentinel__"]
         finally:
             await h.plugin.on_stop()
@@ -939,6 +960,7 @@ class TestTyping:
             with caplog.at_level(logging.DEBUG):
                 await _deliver(h, make_dm("hi"))
             assert "hi" in h.texts()
+            assert any(r.levelno >= logging.WARNING for r in caplog.records)
         finally:
             await h.plugin.on_stop()
 
@@ -1012,7 +1034,7 @@ class TestOutbound:
             await h.plugin.send_message(channel=await self._channel(h), text="hello @everyone <@123>")
             assert h.messageable.contents == ["hello @everyone <@123>"]
             for _, kwargs in h.messageable.sends:
-                assert kwargs.get("allowed_mentions") == discord.AllowedMentions.none()
+                assert _is_no_mentions(kwargs.get("allowed_mentions"))
         finally:
             await h.plugin.on_stop()
 
@@ -1023,7 +1045,7 @@ class TestOutbound:
             await h.plugin.send_message(channel=await self._channel(h), text="word " * 1500)
             assert len(h.messageable.sends) >= 3
             for _, kwargs in h.messageable.sends:
-                assert kwargs.get("allowed_mentions") == discord.AllowedMentions.none()
+                assert _is_no_mentions(kwargs.get("allowed_mentions"))
         finally:
             await h.plugin.on_stop()
 
@@ -1032,7 +1054,7 @@ class TestOutbound:
         try:
             await h.plugin.send_progress(channel=await self._channel(h), text="@everyone")
             assert len(h.messageable.sends) == 1
-            assert h.messageable.sends[0][1].get("allowed_mentions") == discord.AllowedMentions.none()
+            assert _is_no_mentions(h.messageable.sends[0][1].get("allowed_mentions"))
         finally:
             await h.plugin.on_stop()
 
@@ -1117,7 +1139,9 @@ class TestOutbound:
         here: the message goes out and typing keeps going afterwards."""
         h = await _start_plugin()
         try:
-            await _deliver(h, make_dm("go"))
+            # Exactly one owed reply (no sentinel, which would add a second).
+            h.plugin._enqueue(make_dm("go"), BOT_ID)
+            await _wait_until(lambda: h.on_message.await_count >= 1)
             ch = h.registry.get(f"discord:dm:{AUTH_ID}")
             await h.plugin.send_progress(channel=ch, text="step 1")
             assert h.messageable.contents == ["step 1"]
@@ -1129,7 +1153,7 @@ class TestOutbound:
     async def test_send_failure_is_logged_not_raised(self, caplog):
         """A failing send neither raises into the agent nor goes unlogged."""
         h = await _start_plugin()
-        h.messageable.fail_with = RuntimeError("403 Forbidden")
+        h.messageable.fail_with = discord.Forbidden(SimpleNamespace(status=403, reason="Forbidden"), "Missing Permissions")
         try:
             with caplog.at_level(logging.DEBUG):
                 await h.plugin.send_message(channel=await self._channel(h), text="hi")
@@ -1200,7 +1224,7 @@ class TestMessageableLookup:
 
     async def test_lookup_error_returns_none_and_logs(self, caplog):
         lookup = LookupClient()
-        lookup.fail_remote = RuntimeError("unknown channel")
+        lookup.fail_remote = discord.NotFound(SimpleNamespace(status=404, reason="Not Found"), "unknown")
         plugin, reg = await self._plugin(lookup)
         with caplog.at_level(logging.DEBUG):
             got = await plugin._messageable(reg.get_or_create("discord", str(CHAN_ID)))
@@ -1211,6 +1235,129 @@ class TestMessageableLookup:
     async def test_no_client_returns_none(self):
         plugin, reg = await self._plugin(None)
         assert await plugin._messageable(reg.get_or_create("discord", str(CHAN_ID))) is None
+
+
+# ---------------------------------------------------------------------------
+# R6: the real client (intents) and discord.py -> plugin glue
+# ---------------------------------------------------------------------------
+
+
+class TestRealClient:
+    def test_client_does_not_request_message_content_intent(self):
+        """R6: no privileged Message Content intent is requested."""
+        client = DiscordPlugin(create_plugin_manager())._make_client()
+        assert isinstance(client, discord.Client)
+        assert client.intents.message_content is False
+
+    async def test_client_on_message_reaches_on_message_hook(self):
+        """The real client's on_message feeds the plugin's inbound queue."""
+        h = await _start_plugin()
+        try:
+            # The class's real factory, bypassing the instance-level fake.
+            client = DiscordPlugin._make_client(h.plugin)
+            client._connection.user = SimpleNamespace(id=BOT_ID)
+            await client.on_message(make_dm("through the glue"))
+            await _wait_until(lambda: "through the glue" in h.texts())
+            kw = h.on_message.await_args_list[0].kwargs
+            assert kw["channel"].id == f"discord:dm:{AUTH_ID}"
+        finally:
+            await h.plugin.on_stop()
+
+    async def test_client_on_message_drops_own_message(self):
+        """The bot id the glue passes is the client's own user id (R4)."""
+        h = await _start_plugin()
+        try:
+            client = DiscordPlugin._make_client(h.plugin)
+            client._connection.user = SimpleNamespace(id=BOT_ID)
+            await client.on_message(make_dm("echo", author_id=BOT_ID))
+            await _deliver(h)
+            assert _delivered(h) == []
+        finally:
+            await h.plugin.on_stop()
+
+    async def test_on_ready_logs_info_with_user_id(self, caplog):
+        """on_ready announces itself at INFO with the bot's user id."""
+        h = await _start_plugin()
+        try:
+            client = DiscordPlugin._make_client(h.plugin)
+            client._connection.user = SimpleNamespace(id=BOT_ID)
+            with caplog.at_level(logging.INFO):
+                await client.on_ready()
+            assert any(
+                r.levelno == logging.INFO and str(BOT_ID) in r.getMessage()
+                for r in caplog.records
+            )
+        finally:
+            await h.plugin.on_stop()
+
+    async def test_on_ready_resets_backoff(self):
+        """Design: backoff resets to the initial value on on_ready. A
+        failure after a successful ready waits the initial delay again
+        instead of continuing the doubling ladder."""
+        delays: list[float] = []
+        real_sleep = asyncio.sleep
+        holder: dict = {}
+
+        async def ready_then_fail(_fake_client) -> None:
+            # Drive the real client's on_ready, then drop the connection.
+            real = DiscordPlugin._make_client(holder["h"].plugin)
+            real._connection.user = SimpleNamespace(id=BOT_ID)
+            await real.on_ready()
+            raise RuntimeError("connection lost after ready")
+
+        async def tracking_sleep(delay, *a, **kw):
+            delays.append(delay)
+            await real_sleep(0.001)
+
+        behaviors = [RuntimeError("fail 1"), RuntimeError("fail 2"), ready_then_fail, RuntimeError("fail 4")]
+        with patch("corvidae.channels.discord.asyncio.sleep", side_effect=tracking_sleep):
+            h = await _start_plugin(behaviors=behaviors, wait_connect=False)
+            holder["h"] = h
+            try:
+                for _ in range(1000):
+                    if len(h.clients) >= 5:
+                        break
+                    await real_sleep(0.005)
+                assert len(h.clients) >= 5
+            finally:
+                await h.plugin.on_stop()
+        # Failures: #1 -> 10, #2 -> 20, ready+fail #3 -> reset to 10, #4 -> 20.
+        assert delays[0] == pytest.approx(10, rel=0.5)
+        assert delays[1] == pytest.approx(2 * delays[0], rel=0.01)
+        assert delays[2] == pytest.approx(delays[0], rel=0.01), delays
+        assert delays[3] == pytest.approx(2 * delays[0], rel=0.01), delays
+
+
+# ---------------------------------------------------------------------------
+# R16: per-channel config keyed on raw ids
+# ---------------------------------------------------------------------------
+
+
+class TestChannelConfigKeys:
+    async def test_raw_id_keys_round_trip_and_apply_to_inbound(self):
+        """`channels: discord:<id>` / `discord:dm:<id>` register channels whose
+        ids round-trip, and an inbound DM lands on the pre-registered one."""
+        channels = {
+            "discord:123": {"system_prompt": "guild prompt"},
+            "discord:dm:456": {"max_turns": 7},
+        }
+        h = await _start_plugin(
+            discord_overrides={"allow": [456]},
+            extra_config={"channels": channels},
+        )
+        try:
+            guild_ch = h.registry.get("discord:123")
+            dm_ch = h.registry.get("discord:dm:456")
+            assert guild_ch is not None and guild_ch.id == "discord:123"
+            assert dm_ch is not None and dm_ch.id == "discord:dm:456"
+            assert guild_ch.config.system_prompt == "guild prompt"
+
+            await _deliver(h, make_dm("hi", author_id=456))
+            landed = h.on_message.await_args_list[0].kwargs["channel"]
+            assert landed is dm_ch
+            assert landed.config.max_turns == 7
+        finally:
+            await h.plugin.on_stop()
 
 
 # ---------------------------------------------------------------------------
@@ -1272,7 +1419,7 @@ class TestSplitDiscordMessage:
 
     def test_reopened_fence_keeps_language(self):
         """```python + ~3000 bytes @2000: chunk 1 closes, chunk 2 reopens python."""
-        code = "".join(f"total_{i:03d} = {i} * 2\n" for i in range(130))
+        code = "".join(f"total_{i:03d} = {i} * 2\n" for i in range(160))
         assert 2900 <= len(code.encode()) <= 3300
         text = "```python\n" + code + "```\n"
         chunks = split_discord_message(text, 2000)
@@ -1325,6 +1472,10 @@ class TestSplitDiscordMessage:
         text = "a" * 100 + "\n" * 300 + "b"
         segments = _split_discord_segments(text, 100)
         assert "".join(body for _, body, _ in segments) == text
+        chunks = split_discord_message(text, 100)
+        assert chunks == [p + b + s for p, b, s in segments]
+        assert "".join(chunks) == text
+        assert any(not c.strip() for c in chunks)
 
 
 # ---------------------------------------------------------------------------
@@ -1332,7 +1483,25 @@ class TestSplitDiscordMessage:
 # ---------------------------------------------------------------------------
 
 
+def _is_no_mentions(value: object) -> bool:
+    """True when value is an AllowedMentions that pings nobody.
+
+    AllowedMentions defines no __eq__ in discord.py 2.7.1, so compare the
+    serialized form rather than the objects themselves.
+    """
+    return (
+        isinstance(value, discord.AllowedMentions)
+        and value.to_dict() == discord.AllowedMentions.none().to_dict()
+    )
+
+
 class TestWiring:
+    def test_production_constants(self):
+        """R13/R12: Discord's typing indicator lasts ~10s, so refresh at 8s;
+        Discord's message limit is 2000."""
+        assert dmod.TYPING_REFRESH_SECONDS == 8
+        assert dmod.DISCORD_MESSAGE_LIMIT == 2000
+
     def test_hook_arg_binding_guard_passes(self):
         """No hookimpl defaults a spec-required param (pluggy would drop it)."""
         pm = create_plugin_manager()

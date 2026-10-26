@@ -257,13 +257,13 @@ class TestSplitInvariantsExplicit:
     @pytest.mark.parametrize("max_len", [-1, 0, 1, 2, 3, 4, 5])
     def test_max_len_below_six_raises_on_long_text(self, max_len):
         """A limit that cannot hold one codepoint is a ValueError."""
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="max_len"):
             split_message("x" * 100, max_len=max_len)
 
     @pytest.mark.parametrize("max_len", [0, 3, 5])
     def test_max_len_below_six_raises_even_when_text_would_fit(self, max_len):
         """The precondition is checked before the fits-already shortcut."""
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="max_len"):
             split_message("hi", max_len=max_len)
 
     def test_max_len_six_is_accepted(self):
