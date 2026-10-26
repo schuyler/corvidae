@@ -1861,8 +1861,12 @@ silence. The bot has no way to tell them it is configured to ignore them.
 outstanding message for a channel the transport sends the typing indicator
 immediately and starts a refresh loop that re-sends every 8s (Discord's
 indicator lasts about 10s) while the channel's outstanding count stays
-positive. `send_message` and `on_message_rejected` each give one slot back,
-for the same reason as on Signal. Typing is only ever sent for an
+positive. `send_message` gives one slot back. `on_message_rejected` gives
+one back only for an allowlisted sender — the only kind that ever took one —
+so a refused stranger @-mentioning the bot cannot stop typing owed to an
+allowed user in the same channel. A refresh loop still asleep from an
+earlier turn is reused rather than doubled, so a channel has at most one,
+and `on_stop` cancels it. Typing is only ever sent for an
 allowlisted sender, so an unauthorized user gets no sign the bot is live.
 A failed typing call is logged and never blocks the reply.
 
@@ -1893,7 +1897,7 @@ Known limits of the splitter, none of which loses text:
   backticks are not recognized as fences, and a longer run is treated as
   ``` plus extra backticks.
 - A ``` run that happens to be cut inside a single space-free word of
-  about 2000 bytes inverts the tracked fence state for the rest of the
+  about `message_chunk_size` bytes inverts the tracked fence state for the rest of the
   message. Chunks stay balanced, but later code may render as prose and
   vice versa.
 - A language tag longer than 16 bytes, or one containing a backtick, is
@@ -2023,7 +2027,7 @@ fixed hand-written order:
    via `pm.set_blocked(name)` before this call, so disabled plugins are
    never instantiated.
 
-The full entry-point plugin set (`pyproject.toml:36-62`): `persistence`,
+The full entry-point plugin set (`[project.entry-points.corvidae]` in `pyproject.toml`): `persistence`,
 `jsonl_log`, `core_tools`, `cli`, `irc`, `signal`, `discord`, `task`, `subagent`, `mcp`, `llm`,
 `compaction`, `memory`, `memory_tools`, `funnel`, `thinking`,
 `runtime_settings`, `tools`, `metrics`, `usage_log`, `metrics_jsonl`,

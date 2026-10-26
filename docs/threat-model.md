@@ -261,8 +261,8 @@ Three more things to know:
   visible to everyone in the channel, including text the model was tricked
   into leaking.
 - **No privileged intent.** The bot does not request the Message Content
-  intent, so it cannot read messages that do not mention it or arrive
-  outside a DM, even if it is in the channel. That narrows what the
+  intent, so it cannot read server messages that do not mention it, even if
+  it is in the channel. That narrows what the
   transport can ever be made to see, though it is a Discord-side limit
   and not a corvidae one.
 
@@ -369,7 +369,7 @@ default flips.
 There isn't any. Transports, the LLM loop, tool execution, the SQLite
 store, and the Signal socket all run in one process as one user. The
 effective privilege of the `shell` tool is "whoever owns the Signal
-identity and the memory database".
+identity, the Discord bot token, and the memory database".
 
 The architecture already has the seam to split this. Tool calls dispatch
 through `TaskQueue` and `dispatch_tool_call`, so a separated design would
