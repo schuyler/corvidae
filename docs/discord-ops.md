@@ -136,7 +136,7 @@ bot, and it will not tell them so.
 
 ## Troubleshooting
 
-The bot is online but never answers. That is two causes, and corvidae
+The bot is online but never answers. There are three likely causes, and corvidae
 cannot tell you which from Discord's side. Check the log (INFO or lower):
 
 - `discord: rejected message from unauthorized sender <id>` means the user
@@ -146,8 +146,9 @@ cannot tell you which from Discord's side. Check the log (INFO or lower):
   mention the bot. Mention it with the autocomplete (typing `@name` as
   plain text does not make a mention), or DM it.
 - `mention in channel <id> arrived with empty content; dropping` at WARNING
-  means Discord sent a mention without text. It should not happen without
-  the Message Content intent; if you see it, Discord's behavior has
+  means Discord sent a mention without text. Discord delivers the content
+  of messages that mention the bot even without the Message Content
+  intent, so this should not happen; if you see it, Discord's behavior has
   changed and the transport needs a code change (it would have to request
   that intent). Enabling the intent in the portal alone does nothing.
 
