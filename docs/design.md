@@ -427,6 +427,13 @@ All operations are synchronous; no database access:
   cycle. The consequence this ordering secures: the emitted prompt never ends on
   an assistant message, which llama.cpp reads as a prefill and rejects under
   `enable_thinking`.
+  A `tool` message whose call is not in the window (compaction dropped the
+  call, #79) renders in place as a framed notification:
+  `role: system`, content `[result of an earlier tool call that is no longer
+  shown]` plus the result text, no `tool_call_id`. Strict chat templates
+  reject a tool result with no preceding call. Because the frame is a
+  `system` message it is then re-roled like any other (below). The window
+  and `message_log` keep the stored `tool` message.
   `build_prompt(pending_tool_call_ids, mid_conversation_system_role="system")`
   also renders every `system` message after the leading system prompt
   (CONTEXT, untargeted notifications) under `mid_conversation_system_role`.
@@ -841,7 +848,9 @@ for side effects; its return value is not used by the caller.
    before #51. Backing up without that bound could leave compaction
    dropping almost nothing and re-running every few messages. In-flight
    calls have no result yet and never straddle; one dropped by compaction
-   leaves its later result orphaned, as before.
+   leaves its later result orphaned, as does the walk's own cut when it
+   stands. `build_prompt` renders such orphans as framed notifications
+   (see `ContextWindow` above), so the cut logic need not prevent them.
 4. If `retain_count >= len(conversation.messages)`, return `None` (all messages fit — no-op).
 5. Filter the older (non-retained) messages to `MESSAGE` type only, excluding
    any `SUMMARY` entries. Strip `_message_type` metadata before passing to LLM.

@@ -131,6 +131,29 @@ async def test_short_tail_keeps_the_planned_cut(trailing):
     assert 0.3 * max_tokens < conv.token_estimate() < 0.8 * max_tokens
 
 
+@pytest.mark.parametrize("trailing", [0, 3])
+async def test_short_tail_cut_renders_no_unclaimed_tool_message(trailing):
+    """#79 case 2: the planned cut drops the call and keeps its result. The
+    rendered prompt must still carry no tool message without its call."""
+    conv = _long_span_window(trailing_exchanges=trailing)
+    max_tokens = int(conv.token_estimate() / 0.9)
+    result, _, _ = await _compact(conv, max_tokens=max_tokens)
+    assert result
+    # The window really is in the orphaned state the render must handle.
+    assert any(m.get("tool_call_id") == "c1" for m in conv.messages)
+    assert not any(m.get("tool_calls") for m in conv.messages)
+
+    prompt = conv.build_prompt(frozenset())
+    seen_calls: set[str] = set()
+    for msg in prompt:
+        for call in msg.get("tool_calls") or []:
+            seen_calls.add(call["id"])
+        if msg.get("role") == "tool":
+            assert msg["tool_call_id"] in seen_calls, msg
+    # The result is reframed, not dropped.
+    assert any(m["role"] == "system" and m["content"].endswith("job done") for m in prompt[1:])
+
+
 async def test_large_system_prompt_does_not_stall_compaction():
     """Repeated rounds with a long-span call behind the summary and a system
     prompt of ~22% of max_tokens: the back-snap has to count the system

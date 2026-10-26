@@ -128,7 +128,7 @@ tunables. Keep them in `immutable_settings` with forks on too.
 
 ### 3. Untrusted text is promoted to the `system` role
 
-Two places:
+Three places:
 
 - Funnel-admitted CONTEXT (memories distilled from channel participants,
   critique objections) is appended as `role: system` (`funnel.py`).
@@ -137,6 +137,11 @@ Two places:
   a reminder's text is whatever the model wrote into `remind_me`, possibly
   at an untrusted speaker's request, and it comes back later as a system
   row. See finding 7.
+- A tool result whose call compaction dropped (#79) is rendered by
+  `ContextWindow.build_prompt` as a framed `role: system` message, since a
+  `tool` message with no call breaks strict chat templates. The result can
+  be untrusted (a `web_fetch` page, an MCP reply). Unlike the two above it
+  is render-only: the stored row stays `role: tool`.
 
 The "retrieved data, not instructions" wrapper is the right instinct. But
 message role is a stronger signal to an instruction-tuned model than a
@@ -149,8 +154,8 @@ Fix shape: deliver CONTEXT as a `user` turn (or a tool result) with the
 same framing, and reserve `system` for text the operator wrote.
 
 Available as an opt-in: `agent.mid_conversation_system_role: user` sends
-every system message after the operator's system prompt (both places
-above) as `user`, with the framing unchanged. It is applied at prompt
+every system message after the operator's system prompt (all three
+places above) as `user`, with the framing unchanged. It is applied at prompt
 build, so the stored rows keep `role: system`. The default is still
 `system`, because the evals were tuned against it. One behavioural
 caveat: CONTEXT is appended after the person's message, so with `user`
