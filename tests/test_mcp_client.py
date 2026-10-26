@@ -8,12 +8,12 @@ Design assumptions (from plans/mcp-client-plugin.md):
 - McpClientPlugin.on_stop() is an async hookimpl.
 - Tool naming: "{prefix}__{mcp_tool_name}" when prefix is set, else just "{mcp_tool_name}".
 - prefix defaults to the server name if tool_prefix not specified in config.
-- Schema translation: wraps mcp_tool.inputSchema in the OpenAI function-call envelope.
-- Unsafe keys ($schema, $id, $comment, $defs, definitions) are stripped from inputSchema.
+- Schema translation: wraps mcp_tool.input_schema in the OpenAI function-call envelope.
+- Unsafe keys ($schema, $id, $comment, $defs, definitions) are stripped from input_schema.
 - Tool call success: calls session.call_tool, joins TextContent blocks with newlines.
 - Tool call timeout: returns error string including tool name, server name, and timeout.
 - Tool call exception: returns error string including original exception message.
-- result.isError: prepends "Error: " to the joined text.
+- result.is_error: prepends "Error: " to the joined text.
 - Duplicate tool names: first registration wins; warning logged, duplicate skipped.
 - Non-text content blocks: dropped (logged at DEBUG), text blocks only are joined.
 - on_stop: calls AsyncExitStack.aclose() to close all sessions.
@@ -42,7 +42,7 @@ def _make_mcp_tool(name: str, description: str = "", input_schema: dict | None =
     tool = MagicMock()
     tool.name = name
     tool.description = description
-    tool.inputSchema = input_schema or {"type": "object", "properties": {}}
+    tool.input_schema = input_schema or {"type": "object", "properties": {}}
     return tool
 
 
@@ -63,7 +63,7 @@ def _make_tool_result(content: list, is_error: bool = False):
     """Build a mock MCP call_tool result."""
     result = MagicMock()
     result.content = content
-    result.isError = is_error
+    result.is_error = is_error
     return result
 
 
@@ -546,7 +546,7 @@ class TestToolNamingEmptyPrefix:
 
 
 class TestSchemaTranslation:
-    """MCP inputSchema is wrapped in the OpenAI function-calling envelope."""
+    """MCP input_schema is wrapped in the OpenAI function-calling envelope."""
 
     def test_schema_wrapped_in_openai_envelope(self):
         """_mcp_tool_to_schema returns a dict with 'type': 'function' and 'function' key."""
@@ -567,7 +567,7 @@ class TestSchemaTranslation:
         assert "parameters" in schema["function"]
 
     def test_parameters_match_input_schema(self):
-        """parameters in the OpenAI envelope equals the MCP inputSchema (after sanitization)."""
+        """parameters in the OpenAI envelope equals the MCP input_schema (after sanitization)."""
         input_schema = {
             "type": "object",
             "properties": {"path": {"type": "string"}},
@@ -579,9 +579,9 @@ class TestSchemaTranslation:
         assert "path" in schema["function"]["parameters"]["properties"]
 
     def test_null_input_schema_produces_empty_object_schema(self):
-        """When inputSchema is None, parameters defaults to empty object schema."""
+        """When input_schema is None, parameters defaults to empty object schema."""
         mcp_tool = _make_mcp_tool("ping")
-        mcp_tool.inputSchema = None
+        mcp_tool.input_schema = None
         schema = _mcp_tool_to_schema("server__ping", mcp_tool)
         params = schema["function"]["parameters"]
         assert params.get("type") == "object"
@@ -599,7 +599,7 @@ class TestSchemaTranslation:
 
 
 class TestSchemaSanitization:
-    """Unsafe keys are stripped from the top level of inputSchema."""
+    """Unsafe keys are stripped from the top level of input_schema."""
 
     def test_dollar_schema_stripped(self):
         """'$schema' key is removed from the parameters."""
@@ -821,10 +821,10 @@ class TestToolExecutionException:
 
 
 class TestToolExecutionIsError:
-    """result.isError causes the result to be prefixed with 'Error: '."""
+    """result.is_error causes the result to be prefixed with 'Error: '."""
 
     async def test_is_error_prefixes_with_error(self):
-        """When result.isError is True, output is prefixed with 'Error: '."""
+        """When result.is_error is True, output is prefixed with 'Error: '."""
         mock_session = AsyncMock()
         blocks = [_make_text_block("something went wrong")]
         tool_result = _make_tool_result(blocks, is_error=True)
@@ -836,7 +836,7 @@ class TestToolExecutionIsError:
         assert "something went wrong" in result
 
     async def test_is_error_false_no_prefix(self):
-        """When result.isError is False, output has no 'Error: ' prefix."""
+        """When result.is_error is False, output has no 'Error: ' prefix."""
         mock_session = AsyncMock()
         blocks = [_make_text_block("all good")]
         tool_result = _make_tool_result(blocks, is_error=False)
