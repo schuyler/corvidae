@@ -1780,8 +1780,13 @@ monitored.
   count stays positive (Signal clients expire an indicator after roughly
   15s). `send_message` and `on_message_rejected` each give one outstanding
   slot back; a second gate plugin vetoing a message this transport already
-  counted is why the rejection path decrements too. No explicit stop is
-  ever sent — once the loop exits, the indicator expires on its own.
+  counted is why the rejection path decrements too. A refused stranger's
+  rejection gives back nothing that matters: Signal channels are one per
+  sender (groups are dropped), so it lands on the stranger's own channel,
+  whose count is already zero. A refresh loop still asleep from an earlier
+  turn is reused rather than doubled, so a channel has at most one, and
+  `on_stop` cancels it. No explicit stop is ever sent — once the loop
+  exits, the indicator expires on its own.
 - *Read receipt.* Sent from `on_message_persisted` — processing start —
   not on arrival. A message can sit queued behind contended local
   inference, and a "read" marker followed by a long silence is worse than

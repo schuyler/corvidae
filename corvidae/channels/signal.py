@@ -614,9 +614,14 @@ class SignalPlugin(CorvidaePlugin):
         self._outstanding[channel.id] = count
         if count == 1:
             await self._send_typing(channel)
-            self._typing_tasks[channel.id] = asyncio.create_task(
-                self._typing_refresh_loop(channel)
-            )
+            # A loop from an earlier turn may still be asleep; it will see the
+            # count back above zero and carry on, so starting a second one
+            # would double the refreshes and leave one untracked by on_stop.
+            existing = self._typing_tasks.get(channel.id)
+            if existing is None or existing.done():
+                self._typing_tasks[channel.id] = asyncio.create_task(
+                    self._typing_refresh_loop(channel)
+                )
 
     def _decrement_outstanding(self, channel: Channel) -> None:
         """Give back one outstanding slot: a final reply send, an
@@ -637,7 +642,10 @@ class SignalPlugin(CorvidaePlugin):
                 if not await self._send_typing(channel):
                     return
         finally:
-            self._typing_tasks.pop(channel.id, None)
+            # Forget this loop only if it is still the tracked one, never a
+            # successor registered under the same channel id.
+            if self._typing_tasks.get(channel.id) is asyncio.current_task():
+                del self._typing_tasks[channel.id]
 
     async def _send_typing(self, channel: Channel) -> bool:
         """Send one typing-indicator request. A failure is logged and never
