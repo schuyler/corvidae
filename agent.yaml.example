@@ -134,6 +134,15 @@ agent:
 #     - "+15551234567"
 #   message_chunk_size: 2000           # max UTF-8 bytes per outbound message
 
+# Discord transport (optional — omit to disable Discord; see
+# docs/discord-ops.md for creating the bot and finding ids). In servers the
+# bot only answers messages that @-mention it; DMs always reach it.
+# discord:
+#   token: "..."                       # bot token; or set DISCORD_TOKEN instead
+#   allow:                             # Discord user ids (numeric); default-deny
+#     - 123456789012345678
+#   message_chunk_size: 2000           # max UTF-8 bytes per message, 100-2000
+
 # Scheduler: reminders (remind_me tool) and operator jobs (optional;
 # without this block the tools still work, in UTC, with these defaults).
 # A job can target any channel; see docs/threat-model.md finding 7.
