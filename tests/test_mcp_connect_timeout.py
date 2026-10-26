@@ -10,6 +10,7 @@ failure being guarded against lives in the transport, not in our mocks.
 
 import asyncio
 import logging
+import os
 import shutil
 import sys
 import time
@@ -95,7 +96,10 @@ class TestConnectTimeout:
         plugin = await _start({"hung": _hung_server(0.5, duration)})
         try:
             proc = await asyncio.create_subprocess_exec(
-                "pgrep", "-f", f"^sleep {duration}$", stdout=asyncio.subprocess.PIPE
+                # Only this process's own children, so a stray process left
+                # by another run cannot fail the test.
+                "pgrep", "-P", str(os.getpid()), "-f", f"^sleep {duration}$",
+                stdout=asyncio.subprocess.PIPE,
             )
             out, _ = await proc.communicate()
             assert out.strip() == b"", f"hung server still running: {out!r}"
@@ -117,6 +121,23 @@ class TestConnectTimeout:
         try:
             assert seen == [30.0]
             assert plugin._servers == []
+        finally:
+            await plugin.on_stop()
+
+
+class TestConnectTimeoutValidation:
+    async def test_non_positive_connect_timeout_skips_server(self, caplog):
+        """connect_timeout_seconds must be positive: 0 is a config error, so
+        the server is skipped with the usual failed-to-connect warning."""
+        caplog.set_level(logging.WARNING, logger="corvidae.mcp_client")
+        plugin = await _start({"bad": _hung_server(0)})
+        try:
+            assert plugin._servers == []
+            assert any(
+                "failed to connect" in r.getMessage() and r.exc_info
+                and "must be positive" in str(r.exc_info[1])
+                for r in caplog.records
+            )
         finally:
             await plugin.on_stop()
 

@@ -17,7 +17,7 @@ Config (top-level 'mcp:' key in agent.yaml):
           url: <endpoint>              # sse only
           tool_prefix: <prefix>        # optional, default: server name
           timeout_seconds: 30          # optional, default: 30 (per tool call)
-          connect_timeout_seconds: 30  # optional, default: 30 (connect + initialize)
+          connect_timeout_seconds: 30  # optional, default: 30 (connect + initialize + list_tools)
 """
 
 from __future__ import annotations
@@ -87,10 +87,6 @@ class McpClientPlugin(CorvidaePlugin):
         for server_name, server_cfg in servers_config.items():
             try:
                 await self._connect_server(server_name, server_cfg)
-            except TimeoutError:
-                # Already logged by _connect_server with the bound; a
-                # traceback of the cancelled handshake adds nothing.
-                continue
             except Exception:
                 logger.warning(
                     "MCP server failed to connect, skipping",
@@ -144,9 +140,11 @@ class McpClientPlugin(CorvidaePlugin):
 
         Note: The caller (on_start) catches all exceptions from
         this method, logs them as warnings, and skips the server. Exceptions
-        that may arise include ValueError (unknown transport), KeyError
-        (missing required config keys like 'command' or 'url') and
-        TimeoutError (no handshake within connect_timeout_seconds).
+        that may arise include ValueError (unknown transport, or a
+        non-positive connect_timeout_seconds) and KeyError (missing required
+        config keys like 'command' or 'url'). A handshake that exceeds
+        connect_timeout_seconds is logged here and returns without
+        registering the server.
         """
         from mcp import ClientSession
         from mcp.client.stdio import StdioServerParameters, stdio_client
@@ -156,6 +154,8 @@ class McpClientPlugin(CorvidaePlugin):
         prefix = cfg.get("tool_prefix", name)
         timeout = float(cfg.get("timeout_seconds", 30))
         connect_timeout = float(cfg.get("connect_timeout_seconds", 30))
+        # A zero or negative bound would fail every handshake; reject it as
+        # a config error (on_start logs it and skips the server).
         if connect_timeout <= 0:
             raise ValueError(
                 f"connect_timeout_seconds must be positive for server {name!r}"
@@ -165,11 +165,12 @@ class McpClientPlugin(CorvidaePlugin):
         # mid-connect can be torn down (subprocess included) on the spot,
         # without touching servers that already connected.
         local_stack = AsyncExitStack()
+        deadline = asyncio.timeout(connect_timeout)
         try:
             # Bound the whole handshake: a server that never answers
             # initialize (or list_tools) would otherwise block the on_start
             # broadcast, and with it daemon startup, forever (#72).
-            async with asyncio.timeout(connect_timeout):
+            async with deadline:
                 if transport == "stdio":
                     params = StdioServerParameters(
                         command=cfg["command"],
@@ -198,12 +199,17 @@ class McpClientPlugin(CorvidaePlugin):
             # Runs outside the timeout block, so the cancel the timeout used
             # has already become TimeoutError and teardown is not cancelled.
             await self._close_failed_server(name, local_stack)
-            if isinstance(exc, TimeoutError):
+            # Our own bound expired: log it once, without the traceback of
+            # the cancelled handshake, and skip the server. Any other
+            # failure (including a TimeoutError raised inside the
+            # handshake) propagates to on_start's logged skip.
+            if isinstance(exc, TimeoutError) and deadline.expired():
                 logger.warning(
                     "MCP server connect timed out after %ss; unavailable",
                     connect_timeout,
                     extra={"server": name},
                 )
+                return
             raise
 
         # Connected: hand the server's resources to the daemon-lifetime stack
