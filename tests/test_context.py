@@ -7,7 +7,7 @@ import pytest
 from unittest.mock import patch
 
 # This import fails until corvidae/context.py exists — that is the intended red state.
-from corvidae.context import ContextWindow, MessageType, DEFAULT_CHARS_PER_TOKEN
+from corvidae.context import ContextWindow, MessageType, DEFAULT_CHARS_PER_TOKEN, ORPHAN_RESULT_LABEL
 
 
 class TestMessageType:
@@ -466,10 +466,11 @@ class TestBuildPromptResumedTurnOrdering:
 
         assert [m["role"] for m in prompt] == ["system", "user", "assistant", "tool"]
 
-    def test_orphaned_tool_message_stays_in_place(self):
-        """A tool message whose call fell out of the window (e.g. compaction
-        dropped it) has no home to be reordered into, so it stays put rather
-        than being dropped."""
+    def test_orphaned_tool_message_renders_as_framed_notification(self):
+        """A tool message whose call fell out of the window (compaction
+        dropped it, #79) keeps its place and content but renders as a framed
+        system notification with no tool_call_id: the model never sees a
+        tool result without its call."""
         cw = ContextWindow("test:scope")
         cw.system_prompt = "sys"
         cw.append({"role": "user", "content": "hi"})
@@ -477,7 +478,62 @@ class TestBuildPromptResumedTurnOrdering:
 
         prompt = cw.build_prompt(frozenset())
 
-        assert prompt[-1] == {"role": "tool", "tool_call_id": "orphan", "content": "leftover"}
+        assert prompt[-1] == {
+            "role": "system",
+            "content": f"[{ORPHAN_RESULT_LABEL}]\n\nleftover",
+        }
+        # Render-only: the window still holds the tool message as stored.
+        assert cw.messages[-1]["role"] == "tool"
+        assert cw.messages[-1]["tool_call_id"] == "orphan"
+
+    def test_orphaned_tool_message_follows_mid_conversation_role(self):
+        """The orphan renders like any non-leading system message, so a strict
+        template's mid_conversation_system_role applies to it too."""
+        cw = ContextWindow("test:scope")
+        cw.system_prompt = "sys"
+        cw.append({"role": "user", "content": "hi"})
+        cw.append({"role": "tool", "tool_call_id": "orphan", "content": "leftover"})
+
+        prompt = cw.build_prompt(frozenset(), mid_conversation_system_role="user")
+
+        assert prompt[-1] == {"role": "user", "content": f"[{ORPHAN_RESULT_LABEL}]\n\nleftover"}
+
+    def test_late_result_for_compacted_in_flight_call_is_framed(self):
+        """#79 case 1: the call was in flight when compaction dropped it, so
+        its result arrives after the summary with no call in the window. Its
+        id may still be pending; it renders framed all the same."""
+        cw = ContextWindow("test:scope")
+        cw.system_prompt = "sys"
+        cw.append({"role": "assistant", "content": "[Summary of earlier conversation]\ns"},
+                  MessageType.SUMMARY)
+        cw.append({"role": "user", "content": "still there?"})
+        cw.append({"role": "assistant", "content": "yes"})
+        cw.append({"role": "tool", "tool_call_id": "c-dropped", "content": "job done"})
+
+        prompt = cw.build_prompt(frozenset({"c-dropped"}))
+
+        assert [m["role"] for m in prompt] == ["system", "assistant", "user", "assistant", "system"]
+        assert "tool_call_id" not in prompt[-1]
+        assert prompt[-1]["content"].endswith("job done")
+
+    def test_claimed_result_is_unaffected_by_orphan_rendering(self):
+        """A result whose call is in the window still renders as a tool
+        message right after its call."""
+        cw = ContextWindow("test:scope")
+        cw.system_prompt = "sys"
+        cw.append({"role": "user", "content": "go"})
+        cw.append({
+            "role": "assistant", "content": "",
+            "tool_calls": [{"id": "c1", "function": {"name": "f", "arguments": "{}"}}],
+        })
+        cw.append({"role": "tool", "tool_call_id": "orphan", "content": "leftover"})
+        cw.append({"role": "tool", "tool_call_id": "c1", "content": "result"})
+
+        prompt = cw.build_prompt(frozenset())
+
+        assert prompt[-1] == {"role": "tool", "tool_call_id": "c1", "content": "result"}
+        assert prompt[-2]["tool_calls"][0]["id"] == "c1"
+        assert prompt[-3]["role"] == "system"
 
 
 class TestBuildPromptRun8Interleave:
