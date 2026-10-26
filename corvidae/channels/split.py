@@ -14,13 +14,57 @@ _PARAGRAPH_SEP = "\n\n"
 _PARAGRAPH_SEP_LEN = len(_PARAGRAPH_SEP.encode("utf-8"))
 
 
+# Smallest usable limit. Tier 1 recurses at max_len - 2 (to leave room for the
+# re-attached '\n\n'), and that shrunken budget must still hold one 4-byte
+# UTF-8 codepoint so an oversized piece can always be cut on a codepoint
+# boundary.
+_MIN_MAX_LEN = 6
+
+
 def split_message(text: str, max_len: int = 400) -> list[str]:
     """Split text into chunks that fit within max_len UTF-8 bytes.
 
     Three-tier splitting: paragraphs -> sentences -> words.
-    Oversized words are split into multiple max_len chunks.
-    Preserves all whitespace and separators when reassembling chunks.
+    Oversized words are split into multiple max_len chunks, cut on codepoint
+    boundaries. Invariants (for max_len >= 6): every chunk is at most max_len
+    UTF-8 bytes, and "".join(chunks) == text.
+
+    Raises ValueError if max_len < 6, regardless of the text, so a
+    misconfigured limit is not input-dependent.
     """
+    # Validate once at the public entry point; the recursive helper below
+    # legitimately shrinks its budget by 2 and must not re-trip this check.
+    if max_len < _MIN_MAX_LEN:
+        raise ValueError(
+            f"max_len must be at least {_MIN_MAX_LEN} bytes to hold one "
+            f"UTF-8 codepoint, got {max_len}"
+        )
+    return _split(text, max_len)
+
+
+def _cut_codepoints(piece: str, max_len: int) -> list[str]:
+    """Cut piece into parts of at most max_len UTF-8 bytes, only ever on
+    codepoint boundaries, so no part is invalid UTF-8 and no data is lost.
+    Requires max_len >= 4 (the widest codepoint)."""
+    parts: list[str] = []
+    current: list[str] = []
+    size = 0
+    for ch in piece:
+        # Width of this codepoint in UTF-8.
+        width = len(ch.encode('utf-8'))
+        if size + width > max_len:
+            parts.append(''.join(current))
+            current = []
+            size = 0
+        current.append(ch)
+        size += width
+    if current:
+        parts.append(''.join(current))
+    return parts
+
+
+def _split(text: str, max_len: int) -> list[str]:
+    """Recursive worker for split_message; assumes max_len >= 6."""
     if len(text.encode('utf-8')) <= max_len:
         return [text]
 
@@ -48,9 +92,9 @@ def split_message(text: str, max_len: int = 400) -> list[str]:
                 # against a budget shrunk by the separator's byte length --
                 # otherwise the re-attach can push it past max_len.
                 if i > 0:
-                    sub_chunks = split_message(para, max_len - _PARAGRAPH_SEP_LEN)
+                    sub_chunks = _split(para, max_len - _PARAGRAPH_SEP_LEN)
                 else:
-                    sub_chunks = split_message(para, max_len)
+                    sub_chunks = _split(para, max_len)
                 if i > 0 and sub_chunks:
                     sub_chunks[0] = '\n\n' + sub_chunks[0]
                 chunks.extend(sub_chunks)
@@ -87,50 +131,37 @@ def split_message(text: str, max_len: int = 400) -> list[str]:
             else:
                 if current:
                     chunks.append(current)
-                chunks.extend(split_message(sentence, max_len))
+                chunks.extend(_split(sentence, max_len))
                 current = ""
         if current:
             chunks.append(current)
         return chunks
 
-    # Tier 3: Split on word boundaries (spaces)
+    # Tier 3: Split on word boundaries (spaces). Each piece carries its own
+    # leading space (piece_0 = word_0, piece_i = ' ' + word_i), so joining the
+    # pieces reproduces the text exactly and the space is counted against the
+    # byte budget.
     words = text.split(' ')
+    pieces = [words[0]] + [' ' + w for w in words[1:]]
     current = ""
-    for i, word in enumerate(words):
-        # Track if this word should have a leading space
-        has_leading_space = i > 0
-
-        # Check if this word itself exceeds max_len
-        if len(word.encode('utf-8')) > max_len:
-            # Output current chunk first
+    for piece in pieces:
+        # A piece that cannot fit even alone is flushed against and then cut
+        # on codepoint boundaries into parts that each fit.
+        if len(piece.encode('utf-8')) > max_len:
             if current:
-                # If this is not the first word, add trailing space to preserve it
-                if has_leading_space and not current.endswith(' '):
-                    current = current + ' '
                 chunks.append(current)
                 current = ""
-
-            # Split the oversized word into max_len chunks
-            # Note: we don't include the leading space in the oversized word chunks
-            # to avoid exceeding max_len. The space was added to the previous chunk.
-            word_bytes = word.encode('utf-8')
-            for start in range(0, len(word_bytes), max_len):
-                chunk_bytes = word_bytes[start:start + max_len]
-                chunk = chunk_bytes.decode('utf-8', errors='ignore')
-                chunks.append(chunk)
-            # Continue to next word (don't add space handling below)
+            chunks.extend(_cut_codepoints(piece, max_len))
             continue
-
-        # Add space for non-first words
-        if has_leading_space:
-            word = ' ' + word
-        candidate = current + word
+        # Greedily pack the piece onto the current chunk if it fits;
+        # otherwise flush the chunk and start a new one. A flushed chunk is
+        # never touched again.
+        candidate = current + piece
         if len(candidate.encode('utf-8')) <= max_len:
             current = candidate
         else:
-            if current:
-                chunks.append(current)
-            current = word
+            chunks.append(current)
+            current = piece
     if current:
         chunks.append(current)
 
