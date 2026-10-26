@@ -62,6 +62,8 @@ DEFAULT_CHARS_PER_TOKEN: float = 3.5
 
 TOOL_RESULT_PENDING = "[still running — the result will arrive in a later message]"
 TOOL_RESULT_ABANDONED = "[did not complete — no result was returned]"
+#: Frame for a tool result whose call is no longer in the window (#79).
+ORPHAN_RESULT_LABEL = "result of an earlier tool call that is no longer shown"
 
 
 def _visible(msg: dict) -> dict:
@@ -150,8 +152,13 @@ class ContextWindow:
         the last of its results, so call+results emit as one contiguous
         block there (synthesizing a placeholder for any call with no result
         yet). If any call in the message is unanswered, the block emits in
-        place instead. A tool message whose call is not in the window (e.g.
-        compaction dropped it) stays where it is.
+        place instead. A tool message whose call is not in the window
+        (compaction dropped the call, whether it was answered or still in
+        flight, #79) keeps its place but renders as a framed system
+        notification without ``tool_call_id``, like an untargeted
+        notification: strict chat templates reject a tool result with no
+        preceding call. This depends only on calls earlier in the window, so
+        a fork's prefix renders it identically.
 
         mid_conversation_system_role renders every system message after the
         leading one under that role (``agent.mid_conversation_system_role``).
@@ -199,6 +206,13 @@ class ContextWindow:
             if msg.get("role") == "tool" and msg.get("tool_call_id") in claimed:
                 continue
             if i in emit_at:
+                continue
+            # Orphaned result: its call is gone, so frame it as a notification.
+            if msg.get("role") == "tool":
+                out.append({
+                    "role": "system",
+                    "content": f"[{ORPHAN_RESULT_LABEL}]\n\n{msg.get('content', '')}",
+                })
                 continue
             out.append(_visible(msg))
 

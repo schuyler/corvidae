@@ -143,12 +143,15 @@ async def test_short_tail_cut_renders_no_unclaimed_tool_message(trailing):
     assert any(m.get("tool_call_id") == "c1" for m in conv.messages)
     assert not any(m.get("tool_calls") for m in conv.messages)
 
+    prompt = conv.build_prompt(frozenset())
     seen_calls: set[str] = set()
-    for msg in conv.build_prompt(frozenset()):
+    for msg in prompt:
         for call in msg.get("tool_calls") or []:
             seen_calls.add(call["id"])
         if msg.get("role") == "tool":
             assert msg["tool_call_id"] in seen_calls, msg
+    # The result is reframed, not dropped.
+    assert any(m["role"] == "system" and m["content"].endswith("job done") for m in prompt[1:])
 
 
 async def test_large_system_prompt_does_not_stall_compaction():

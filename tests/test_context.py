@@ -474,7 +474,8 @@ class TestBuildPromptResumedTurnOrdering:
         cw = ContextWindow("test:scope")
         cw.system_prompt = "sys"
         cw.append({"role": "user", "content": "hi"})
-        cw.append({"role": "tool", "tool_call_id": "orphan", "content": "leftover"})
+        # Carries an internal tag, so exact equality also proves tags are stripped.
+        cw.append({"role": "tool", "tool_call_id": "orphan", "content": "leftover", "_db_id": 7})
 
         prompt = cw.build_prompt(frozenset())
 
