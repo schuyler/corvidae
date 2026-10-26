@@ -74,6 +74,8 @@ class TestConnectTimeout:
                 if "timed out" in r.getMessage() and getattr(r, "server", None) == "hung"
             ]
             assert timeout_records, [r.getMessage() for r in caplog.records]
+            # Logged once: the timeout does not also reach on_start's skip.
+            assert not any("failed to connect" in r.getMessage() for r in caplog.records)
         finally:
             await plugin.on_stop()
 

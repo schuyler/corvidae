@@ -1532,8 +1532,10 @@ mcp:
 server that never answers `initialize` cannot hold up the `on_start`
 broadcast (#72). On success the per-server stack is pushed onto the
 plugin's lifetime stack and closes with it in `on_stop`. On a timeout or any
-other failure it is closed immediately, which terminates a stdio subprocess,
-and `on_start` skips the server. The close runs after the timeout has turned
+other failure it is closed immediately, which terminates a stdio subprocess.
+On a timeout `_connect_server` then logs it once and returns without
+registering the server; any other failure propagates to `on_start`, which
+logs and skips it. The close runs after the timeout has turned
 its cancellation into `TimeoutError`, so teardown is not itself cancelled.
 
 The client targets the mcp 2.x API (`mcp>=2.0`): tool schemas are read from
