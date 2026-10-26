@@ -16,7 +16,8 @@ Config (top-level 'mcp:' key in agent.yaml):
           env: {...}                    # stdio only, optional
           url: <endpoint>              # sse only
           tool_prefix: <prefix>        # optional, default: server name
-          timeout_seconds: 30          # optional, default: 30
+          timeout_seconds: 30          # optional, default: 30 (per tool call)
+          connect_timeout_seconds: 30  # optional, default: 30 (connect + initialize)
 """
 
 from __future__ import annotations
@@ -86,6 +87,10 @@ class McpClientPlugin(CorvidaePlugin):
         for server_name, server_cfg in servers_config.items():
             try:
                 await self._connect_server(server_name, server_cfg)
+            except TimeoutError:
+                # Already logged by _connect_server with the bound; a
+                # traceback of the cancelled handshake adds nothing.
+                continue
             except Exception:
                 logger.warning(
                     "MCP server failed to connect, skipping",
@@ -124,19 +129,24 @@ class McpClientPlugin(CorvidaePlugin):
     async def _connect_server(self, name: str, cfg: dict) -> None:
         """Connect to one MCP server and register its tools.
 
-        Enters the transport and session into self._exit_stack so they are
-        kept alive for the daemon's lifetime and closed together on on_stop.
+        Enters the transport and session into a per-server exit stack, all
+        within connect_timeout_seconds (default 30). On success that stack is
+        handed to self._exit_stack, so the server stays alive for the
+        daemon's lifetime and closes with the rest on on_stop; on failure or
+        timeout it is closed at once, terminating a stdio subprocess.
         Appends a _McpServerState entry to self._servers on success.
 
         Args:
             name: Server name from config (used as default tool prefix).
             cfg: Server config dict with transport, command/args/env or url,
-                 and optional tool_prefix and timeout_seconds keys.
+                 and optional tool_prefix, timeout_seconds and
+                 connect_timeout_seconds keys.
 
         Note: The caller (on_start) catches all exceptions from
         this method, logs them as warnings, and skips the server. Exceptions
-        that may arise include ValueError (unknown transport) and KeyError
-        (missing required config keys like 'command' or 'url').
+        that may arise include ValueError (unknown transport), KeyError
+        (missing required config keys like 'command' or 'url') and
+        TimeoutError (no handshake within connect_timeout_seconds).
         """
         from mcp import ClientSession
         from mcp.client.stdio import StdioServerParameters, stdio_client
@@ -145,31 +155,60 @@ class McpClientPlugin(CorvidaePlugin):
         transport = cfg["transport"]
         prefix = cfg.get("tool_prefix", name)
         timeout = float(cfg.get("timeout_seconds", 30))
-
-        if transport == "stdio":
-            params = StdioServerParameters(
-                command=cfg["command"],
-                args=cfg.get("args", []),
-                env=cfg.get("env") or None,
-            )
-            read, write = await self._exit_stack.enter_async_context(
-                stdio_client(params)
-            )
-        elif transport == "sse":
-            read, write = await self._exit_stack.enter_async_context(
-                sse_client(cfg["url"])
-            )
-        else:
+        connect_timeout = float(cfg.get("connect_timeout_seconds", 30))
+        if connect_timeout <= 0:
             raise ValueError(
-                f"Unknown MCP transport {transport!r} for server {name!r}"
+                f"connect_timeout_seconds must be positive for server {name!r}"
             )
 
-        session = await self._exit_stack.enter_async_context(
-            ClientSession(read, write)
-        )
-        await session.initialize()
+        # Each server gets its own exit stack so a server that fails or hangs
+        # mid-connect can be torn down (subprocess included) on the spot,
+        # without touching servers that already connected.
+        local_stack = AsyncExitStack()
+        try:
+            # Bound the whole handshake: a server that never answers
+            # initialize (or list_tools) would otherwise block the on_start
+            # broadcast, and with it daemon startup, forever (#72).
+            async with asyncio.timeout(connect_timeout):
+                if transport == "stdio":
+                    params = StdioServerParameters(
+                        command=cfg["command"],
+                        args=cfg.get("args", []),
+                        env=cfg.get("env") or None,
+                    )
+                    read, write = await local_stack.enter_async_context(
+                        stdio_client(params)
+                    )
+                elif transport == "sse":
+                    read, write = await local_stack.enter_async_context(
+                        sse_client(cfg["url"])
+                    )
+                else:
+                    raise ValueError(
+                        f"Unknown MCP transport {transport!r} for server {name!r}"
+                    )
 
-        result = await session.list_tools()
+                session = await local_stack.enter_async_context(
+                    ClientSession(read, write)
+                )
+                await session.initialize()
+
+                result = await session.list_tools()
+        except BaseException as exc:
+            # Runs outside the timeout block, so the cancel the timeout used
+            # has already become TimeoutError and teardown is not cancelled.
+            await self._close_failed_server(name, local_stack)
+            if isinstance(exc, TimeoutError):
+                logger.warning(
+                    "MCP server connect timed out after %ss; unavailable",
+                    connect_timeout,
+                    extra={"server": name},
+                )
+            raise
+
+        # Connected: hand the server's resources to the daemon-lifetime stack
+        # so on_stop closes them with everything else.
+        self._exit_stack.push_async_callback(local_stack.aclose)
 
         self._servers.append(_McpServerState(
             name=name,
@@ -183,6 +222,20 @@ class McpClientPlugin(CorvidaePlugin):
             "MCP server connected",
             extra={"server": name, "transport": transport, "tools": len(result.tools)},
         )
+
+    async def _close_failed_server(self, name: str, stack: AsyncExitStack) -> None:
+        """Tear down a server whose connect failed, logging (never raising)
+        cleanup errors so they cannot mask the connect failure itself."""
+        try:
+            await stack.aclose()
+        # Transport cleanup raises types outside this codebase's control
+        # (anyio, mcp), as in on_stop.
+        except Exception:
+            logger.warning(
+                "MCP server cleanup after failed connect raised",
+                extra={"server": name},
+                exc_info=True,
+            )
 
     def _build_tool_list(self) -> list[Tool]:
         """Build the cached Tool list from all connected servers.
@@ -238,7 +291,7 @@ _UNSAFE_SCHEMA_KEYS = frozenset({"$schema", "$id", "$comment", "$defs", "definit
 def _mcp_tool_to_schema(tool_name: str, mcp_tool) -> dict:
     """Translate MCP tool to Corvidae's OpenAI function-call schema.
 
-    MCP's inputSchema is already a JSON Schema dict — same format Corvidae
+    MCP's input_schema is already a JSON Schema dict — same format Corvidae
     uses for function parameters. Strips known-unsafe top-level keys before
     wrapping it in the OpenAI envelope.
 
@@ -247,7 +300,7 @@ def _mcp_tool_to_schema(tool_name: str, mcp_tool) -> dict:
     they're inside 'properties'. If this assumption proves wrong, deep
     sanitization would be needed.
     """
-    parameters = dict(mcp_tool.inputSchema or {"type": "object", "properties": {}})
+    parameters = dict(mcp_tool.input_schema or {"type": "object", "properties": {}})
     stripped = _UNSAFE_SCHEMA_KEYS & parameters.keys()
     if stripped:
         for key in stripped:
@@ -307,6 +360,6 @@ async def _call_mcp_tool(
             )
 
     text = "\n".join(parts) if parts else "(no output)"
-    if result.isError:
+    if result.is_error:
         return "Error: " + text
     return text
