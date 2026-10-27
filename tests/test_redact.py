@@ -17,6 +17,7 @@ Tests call the redact module's functions directly against a temp DB, not
 through the Click runner, except where the CLI's own output is the subject.
 """
 
+import asyncio
 import json
 import time
 
@@ -227,3 +228,61 @@ def test_cli_missing_db_raises_clean_error_without_creating_file(tmp_path):
     assert not db_path.exists(), "the CLI must not create an empty database"
 
 
+
+
+# ---------------------------------------------------------------------------
+# CLI forms on a database without the memory schema
+# ---------------------------------------------------------------------------
+
+
+async def _make_kernel_db(path: str) -> None:
+    """A WAL database with only the kernel's message_log and two rows."""
+    db = await aiosqlite.connect(path)
+    try:
+        await db.execute("PRAGMA journal_mode=WAL")
+        await init_db(db)
+        for text in ("first secret words here", "second secret words here"):
+            await db.execute(
+                "INSERT INTO message_log (channel_id, message, timestamp) VALUES (?, ?, ?)",
+                ("cli:local", json.dumps({"role": "user", "content": text}), time.time()),
+            )
+        await db.commit()
+    finally:
+        await db.close()
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_cli_range_form_reports_found_of_requested(tmp_path, dry_run):
+    """The range form runs to completion and reports what it found.
+
+    It used to raise NameError on every call: the found-vs-requested report
+    read an `ids` variable that only exists in the message form.
+    """
+    from click.testing import CliRunner
+
+    db_path = str(tmp_path / "sessions.db")
+    asyncio.run(_make_kernel_db(db_path))
+    args = ["--db", db_path] + (["--dry-run"] if dry_run else []) + ["range", "1", "2"]
+
+    result = CliRunner().invoke(redact_command, args)
+
+    assert result.exit_code == 0, result.output + repr(result.exception)
+    assert "2 of 2 messages" in result.output
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_cli_memory_form_without_memory_table_fails_cleanly(tmp_path, dry_run):
+    """Without the memory schema the memory form exits non-zero with one
+    clear message, in both modes, instead of a raw SQLite error."""
+    from click.testing import CliRunner
+
+    db_path = str(tmp_path / "sessions.db")
+    asyncio.run(_make_kernel_db(db_path))
+    args = ["--db", db_path] + (["--dry-run"] if dry_run else []) + ["memory", "1"]
+
+    result = CliRunner().invoke(redact_command, args)
+
+    assert result.exit_code != 0
+    assert "memory table not present in this database" in result.output
+    # A ClickException is a handled exit, not a crash with a traceback.
+    assert isinstance(result.exception, SystemExit), repr(result.exception)
