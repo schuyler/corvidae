@@ -169,7 +169,7 @@ class TestAfterPersistAssistantHookSafety:
 
 
 class TestOnAgentResponseHookSafety:
-    """on_agent_response raising must not prevent send_message from firing.
+    """on_agent_response raising must not prevent the reply from being sent.
 
     Expected behavior (not yet implemented):
       - the reply IS sent after on_agent_response raises

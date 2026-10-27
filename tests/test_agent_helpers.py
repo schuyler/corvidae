@@ -511,7 +511,7 @@ class TestHandleResponse:
             request_text="use the tool",
         )
 
-        # no OutboundMessage must be called when tool calls are dispatched
+        # no OutboundMessage may be sent when tool calls are dispatched
         assert sent(plugin.pm, OutboundMessage) == []
 
     async def test_tool_calls_under_limit_increment_turn_counter(

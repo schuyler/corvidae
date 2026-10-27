@@ -1242,7 +1242,7 @@ class TestToolSchema:
 class TestShouldProcessMessage:
     async def test_returns_false_rejects_message(self):
         """When should_process_message returns False, on_message does not enqueue
-        the message and no OutboundMessage is ever called."""
+        the message and no OutboundMessage is ever sent."""
         from corvidae.hooks import hookimpl
 
         plugin, channel, db = await build_plugin_and_channel()
