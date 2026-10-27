@@ -641,11 +641,14 @@ logged and dropped, and a prompt with no text at all returns
 `resourceNotFound` for `prompt`, `load`, `resume`, and `close` alike.
 
 A prompt always ends. If the client connection dies while the final
-message is being delivered, the turn is still completed rather than left
-pending; if the turn never starts (the enqueue fails), its future is
-cleared so a later prompt cannot inherit it. A second `session/prompt`
-on a session that already has one in flight is `invalidRequest`; the
-first prompt is left untouched (see the concurrent-prompt policy issue).
+message is being delivered, the turn still completes with `end_turn` and
+the failed delivery is logged at WARNING: the reply is in `message_log`
+and a later `session/load` replays it (#99). If the turn never starts
+(the enqueue fails), its future is cleared so a later prompt cannot
+inherit it. A second `session/prompt` on a session that already has one
+in flight is `invalidRequest`; the first prompt is left untouched, and a
+client that wants to steer sends `session/cancel` first (#93; the policy
+and its revisit trigger are in `docs/prd.md`).
 
 The ACP loop owns stdin/stdout, so the process stops when the loop ends:
 a client disconnect initiates a normal shutdown, and a loop crash is

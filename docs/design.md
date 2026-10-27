@@ -2188,7 +2188,10 @@ drops the in-memory channel while leaving `message_log` intact.
 **Hooks.** Every `send_*` broadcast-filters with
 `channel.matches_transport("acp")`. `session/prompt` mints the message's
 trace id and passes it to `on_message`, and completes with `end_turn`
-after tool drain; `session/cancel` yields `cancelled`. The stdio loop
+after tool drain, including when the final `session/update` cannot be
+delivered (logged at WARNING; #99); `session/cancel` yields `cancelled`.
+A second `session/prompt` on a session with one in flight is rejected
+with `invalidRequest` and the first is left untouched (#93). The stdio loop
 starts reading only once `Agent.started` is true: Runtime starts Agent
 after the `on_start` broadcast, and a prompt read before then would be
 dropped with its response never sent.
