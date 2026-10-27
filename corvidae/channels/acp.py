@@ -724,9 +724,10 @@ def acp_command(config: str) -> None:
         import acp  # noqa: F401
     except ImportError:
         click.echo(
-            "The ACP SDK is not installed. Install the optional extra:\n"
-            "  uv sync --extra acp\n"
-            "  # or: uv sync --extra acp --extra dev",
+            "The ACP SDK is not installed. Add the optional extra to your\n"
+            "uv sync line, keeping the other extras you use (uv sync removes\n"
+            "extras you don't name), e.g.:\n"
+            "  uv sync --extra acp --extra cognition",
             err=True,
         )
         sys.exit(1)

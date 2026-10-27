@@ -271,7 +271,7 @@ Requires the cognition extra (`--extra cognition` on your `uv sync` line; see [c
 
 Requires the cognition extra (`--extra cognition` on your `uv sync` line; see [cognition.md](cognition.md)). Without it these keys are ignored.
 
-`MemoryPlugin` consolidates compacted dialog into first-person memory records and retrieves them into the prompt (see [design.md](design.md)). The former `dream.*` keys are gone with `DreamPlugin` (absorbed by this plugin).
+`MemoryPlugin` consolidates compacted dialog into first-person memory records and retrieves them into the prompt (see [cognition.md](cognition.md#memoryplugin)). The former `dream.*` keys are gone with `DreamPlugin` (absorbed by this plugin).
 
 A record's `created_at` is the `sessions.db` timestamp of the last message in its source range, i.e. when the conversation happened, not when consolidation ran. When a near-duplicate merge folds an older record into a new one, the survivor keeps the later of the two dates. Everything that ages a record (the retrieval score, the displayed `(age)`, retention decay and `memory.retention.grace_days`, and the `search_memory` date filters) measures from that date, so history consolidated long after the fact is aged correctly.
 

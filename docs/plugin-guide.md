@@ -521,7 +521,7 @@ class MemoryPlugin(CorvidaePlugin):
 
 `MessageType.CONTEXT` entries survive compaction — compaction only summarizes `MESSAGE` entries.
 
-Prefer routing CONTEXT through the admission funnel instead of appending directly: `pm.get_plugin("funnel").admit(channel, conv, "<source>", entries)` gives you window dedupe, per-source token budgets, and the mandatory data-not-instructions framing for free (see FunnelPlugin below). Direct appends bypass all three.
+Prefer routing CONTEXT through the admission funnel instead of appending directly: `pm.get_plugin("funnel").admit(channel, conv, "<source>", entries)` gives you window dedupe, per-source token budgets, and the mandatory data-not-instructions framing for free (see [FunnelPlugin](cognition.md#funnelplugin-packagescorvidae-cognitioncorvidae_cognitionfunnelpy) in cognition.md; the funnel is part of the cognition extra, so check that `pm.get_plugin("funnel")` is not None). Direct appends bypass all three.
 
 ## Forking the window
 
@@ -765,9 +765,9 @@ compaction        (CompactionPlugin)    — entry point
 thinking          (ThinkingPlugin)      — entry point
 runtime_settings  (RuntimeSettingsPlugin) — entry point
 tools             (ToolCollectionPlugin) — entry point
-memory            (MemoryPlugin)        — entry point
-memory_tools      (MemoryToolsPlugin)   — entry point
-funnel            (FunnelPlugin)        — entry point
+memory            (MemoryPlugin)        — entry point (cognition extra)
+memory_tools      (MemoryToolsPlugin)   — entry point (cognition extra)
+funnel            (FunnelPlugin)        — entry point (cognition extra)
 agent             (Agent)               — entry point
 idle_monitor      (IdleMonitorPlugin)   — entry point
 config_watcher    (ConfigWatcherPlugin) — entry point

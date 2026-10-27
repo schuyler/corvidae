@@ -19,7 +19,7 @@ transports.
 | `MemoryToolsPlugin` | `memory_tools` | `search_memory` and `recall_raw` tools for the model |
 | `FunnelPlugin` | `funnel` | Admits retrieved context into the window under a budget |
 | `AppraisalPlugin` | `appraisal` | Scores every inbound message at the gate (novelty, commitment density, disagreement, question, salience), then appraises the exchange once the agent has answered |
-| `CritiquePlugin` | `critique` | Reviews the agent's replies for unsupported claims |
+| `CritiquePlugin` | `critique` | Reviews the agent's replies after the fact through several lenses (provenance, predictive, constrained, adversarial) |
 | `OutcomeLogPlugin` | `outcome_log` | Records each exchange and its outcome in `exchange_log` |
 
 Entry-point names are the same as when these plugins lived in the kernel, so

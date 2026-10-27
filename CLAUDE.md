@@ -93,6 +93,7 @@ that means one or more of:
 - `docs/design.md` — architecture, hook specs, transports, schemas
 - `docs/configuration.md` — any new or changed `agent.yaml` key
 - `docs/plugin-guide.md` — anything a plugin author would need
+- `docs/cognition.md` — the cognition plugins (`packages/corvidae-cognition`)
 - `docs/threat-model.md` — anything that changes what untrusted text can
   reach or what a tool can do (new tools, transports, tunables, roles)
 - `agent.yaml.example` — new config keys, commented out

@@ -8,7 +8,8 @@ The client deliberately does not request the privileged Message Content
 intent: Discord still delivers message content for DMs and for messages that
 mention the bot, which are the only messages this transport processes.
 
-The SDK (discord-py) is optional: ``uv sync --extra discord``. This module
+The SDK (discord-py) is optional: add ``--extra discord`` to the ``uv sync``
+line. This module
 never imports it at load time, because pluggy loads every entry point
 eagerly and an ImportError here would stop every install without the extra
 from starting. It is imported on first use, and ``on_init`` fails with an

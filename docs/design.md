@@ -2230,16 +2230,19 @@ fixed hand-written order:
    via `pm.set_blocked(name)` before this call, so disabled plugins are
    never instantiated.
 
-The full entry-point plugin set (`[project.entry-points.corvidae]` in `pyproject.toml`): `persistence`,
-`jsonl_log`, `core_tools`, `cli`, `irc`, `signal`, `discord`, `web`, `task`, `subagent`, `mcp`, `llm`,
-`compaction`, `memory`, `memory_tools`, `funnel`, `thinking`,
-`runtime_settings`, `tools`, `metrics`, `usage_log`, `metrics_jsonl`,
-`outcome_log`, `appraisal`, `critique`, `scheduler`, `agent`,
-`idle_monitor`, `config_watcher`.
+The kernel's entry points (`[project.entry-points.corvidae]` in the root
+`pyproject.toml`): `persistence`, `jsonl_log`, `core_tools`, `cli`, `irc`,
+`signal`, `discord`, `web`, `acp`, `task`, `subagent`, `mcp`, `llm`,
+`compaction`, `thinking`, `runtime_settings`, `tools`, `metrics`,
+`usage_log`, `metrics_jsonl`, `scheduler`, `agent`, `idle_monitor`,
+`config_watcher`. The cognition extra adds `memory`, `memory_tools`,
+`funnel`, `outcome_log`, `appraisal` and `critique` from
+`packages/corvidae-cognition/pyproject.toml`.
 
-An entry point that fails to import or instantiate is logged at WARNING
-with the entry-point name and the failure type, and is skipped; the other
-plugins still load.
+`Runtime.start()` loads them with pluggy's `load_setuptools_entrypoints`,
+which does not catch errors: an entry point that fails to import stops
+startup. That is why a transport with an optional SDK (ACP, Discord)
+imports it lazily rather than at module load.
 
 Entry-point loading does not guarantee a meaningful cross-plugin order;
 plugins that need another plugin's state resolve it lazily via
