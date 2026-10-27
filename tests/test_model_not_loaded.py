@@ -6,6 +6,7 @@ budget runs out, LLMPlugin's on_llm_error turns that into a reply naming
 the model, instead of the generic error.
 """
 
+from corvidae.correlation import mint_correlation_id
 import json
 from unittest.mock import AsyncMock, MagicMock
 
@@ -64,7 +65,7 @@ class TestEndToEnd:
         plugin._client.chat = AsyncMock(side_effect=_http_error(NOT_LOADED_BODY))
         plugin.pm.register(LLMPlugin(), name="llm_for_error")
 
-        await plugin.on_message(channel=channel, sender="user", text="hi")
+        await plugin.on_message(channel=channel, sender="user", text="hi", correlation_id=mint_correlation_id())
         await drain(plugin, channel)
 
         sent = plugin.pm.ahook.send_message.call_args.kwargs["text"]
@@ -85,7 +86,7 @@ class TestEndToEnd:
 
         plugin.pm.register(Override(), name="override")
 
-        await plugin.on_message(channel=channel, sender="user", text="hi")
+        await plugin.on_message(channel=channel, sender="user", text="hi", correlation_id=mint_correlation_id())
         await drain(plugin, channel)
 
         assert plugin.pm.ahook.send_message.call_args.kwargs["text"] == "custom"

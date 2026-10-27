@@ -10,6 +10,7 @@ Window messages carry their message_log rowid as an internal ``_db_id`` tag:
   messages.
 """
 
+from corvidae.correlation import mint_correlation_id
 import json
 import logging
 from unittest.mock import AsyncMock, MagicMock
@@ -46,7 +47,7 @@ class TestRowidAttachment:
         mock_client.chat = AsyncMock(return_value=_make_text_response("hi there"))
         plugin._client = mock_client
 
-        await plugin.on_message(channel=channel, sender="user", text="hello")
+        await plugin.on_message(channel=channel, sender="user", text="hello", correlation_id=mint_correlation_id())
         await drain(plugin, channel)
 
         conv = channel.conversation

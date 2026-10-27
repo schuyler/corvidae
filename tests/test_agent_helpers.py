@@ -12,6 +12,7 @@ All tests are expected to fail with AttributeError until the helpers are
 implemented (Item 2 of corvidae-cleanup.md).
 """
 
+from corvidae.correlation import mint_correlation_id
 import logging
 
 import pytest
@@ -616,7 +617,7 @@ class TestQueueItemTimingPromptTokens:
         plugin._client = mock_client
 
         with caplog.at_level(logging.INFO, logger="corvidae.agent"):
-            await plugin.on_message(channel=channel, sender="user", text="hi")
+            await plugin.on_message(channel=channel, sender="user", text="hi", correlation_id=mint_correlation_id())
             await drain(plugin, channel)
 
         timing_records = [

@@ -7,6 +7,7 @@ modules and the specific log calls have not been added.
 Convention: Use `caplog` (pytest's built-in fixture) to assert on log records.
 """
 
+from corvidae.correlation import mint_correlation_id
 import logging
 import logging.config
 import os
@@ -905,7 +906,7 @@ class TestAgentLogging:
         plugin, channel = await self._make_on_message_plugin(db)
 
         with caplog.at_level(logging.INFO, logger="corvidae.agent"):
-            await plugin.on_message(channel=channel, sender="alice", text="hello")
+            await plugin.on_message(channel=channel, sender="alice", text="hello", correlation_id=mint_correlation_id())
 
         records = [r for r in caplog.records if r.name == "corvidae.agent"]
         info_records = [r for r in records if r.levelno == logging.INFO]
@@ -918,7 +919,7 @@ class TestAgentLogging:
         plugin, channel = await self._make_on_message_plugin(db)
 
         with caplog.at_level(logging.INFO, logger="corvidae.agent"):
-            await plugin.on_message(channel=channel, sender="alice", text="hello")
+            await plugin.on_message(channel=channel, sender="alice", text="hello", correlation_id=mint_correlation_id())
             # Drain the channel queue so the consumer (which emits latency log)
             # runs before we check caplog records.
             if channel.id in plugin.queues:

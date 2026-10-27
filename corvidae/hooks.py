@@ -336,13 +336,23 @@ class AgentSpec:
         """Called once when the daemon receives SIGINT or SIGTERM."""
 
     @hookspec
-    async def on_message(self, channel: Channel, sender: str, text: str) -> None:
+    async def on_message(
+        self, channel: Channel, sender: str, text: str, correlation_id: str
+    ) -> None:
         """Called when an inbound message arrives on a channel.
 
         Args:
             channel: The Channel object for this conversation scope.
             sender: The user or entity that sent the message.
             text: The message content.
+            correlation_id: Id minted by the transport for this message
+                (``corvidae.correlation.mint_correlation_id()``). Required,
+                with no default: pluggy would silently drop a defaulted
+                param. The Agent uses it verbatim for the gate, the
+                admitted/rejected hooks and persistence, and raises
+                ValueError if it is empty. admitted/rejected fire before
+                this hook returns, so a transport can treat "returned
+                without admission" as the message being dropped.
         """
 
     @hookspec
@@ -498,8 +508,8 @@ class AgentSpec:
             channel: The Channel object for this conversation scope.
             sender: The user or entity that sent the message.
             text: The message content.
-            correlation_id: The id minted for this message before the gate
-                fires. Present for every USER message.
+            correlation_id: The id minted by the transport for this message
+                (passed to ``on_message``). Present for every USER message.
 
         Note:
             Extension point for message filtering (rate limiting, blocklists,
@@ -520,7 +530,7 @@ class AgentSpec:
 
         Args:
             channel: The Channel the message arrived on.
-            correlation_id: The id minted for this message before the gate.
+            correlation_id: The id minted by the transport for this message.
             sender: The user or entity that sent the message.
             text: The message content.
         """
@@ -535,7 +545,7 @@ class AgentSpec:
 
         Args:
             channel: The Channel the message arrived on.
-            correlation_id: The id minted for this message before the gate.
+            correlation_id: The id minted by the transport for this message.
             sender: The user or entity that sent the message.
             text: The message content.
         """

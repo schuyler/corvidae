@@ -28,6 +28,7 @@ bb03fa5bbc46e31ba757e133b38912b62fc65783 -- the WP2.2 implementation does not
 exist yet.
 """
 
+from corvidae.correlation import mint_correlation_id
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -292,7 +293,7 @@ class TestLogprobsThreadedIntoOnAgentResponse:
 
         with patch("corvidae.agent.run_agent_turn", new_callable=AsyncMock) as mock_turn:
             mock_turn.return_value = turn_result
-            await plugin.on_message(channel=channel, sender="user", text="query")
+            await plugin.on_message(channel=channel, sender="user", text="query", correlation_id=mint_correlation_id())
             await drain(plugin, channel)
 
         plugin.pm.ahook.on_agent_response.assert_awaited_once()
@@ -319,7 +320,7 @@ class TestLogprobsThreadedIntoOnAgentResponse:
 
         with patch("corvidae.agent.run_agent_turn", new_callable=AsyncMock) as mock_turn:
             mock_turn.return_value = turn_result
-            await plugin.on_message(channel=channel, sender="user", text="query")
+            await plugin.on_message(channel=channel, sender="user", text="query", correlation_id=mint_correlation_id())
             await drain(plugin, channel)
 
         plugin.pm.ahook.on_agent_response.assert_awaited_once()
@@ -433,7 +434,7 @@ class TestRequestLogprobsInRequestBody:
 
         with patch("corvidae.agent.run_agent_turn", new_callable=AsyncMock) as mock_turn:
             mock_turn.return_value = turn_result
-            await plugin.on_message(channel=channel, sender="user", text="query")
+            await plugin.on_message(channel=channel, sender="user", text="query", correlation_id=mint_correlation_id())
             await drain(plugin, channel)
 
         mock_turn.assert_awaited_once()
@@ -468,7 +469,7 @@ class TestRequestLogprobsInRequestBody:
 
         with patch("corvidae.agent.run_agent_turn", new_callable=AsyncMock) as mock_turn:
             mock_turn.return_value = turn_result
-            await plugin.on_message(channel=channel, sender="user", text="query")
+            await plugin.on_message(channel=channel, sender="user", text="query", correlation_id=mint_correlation_id())
             await drain(plugin, channel)
 
         mock_turn.assert_awaited_once()

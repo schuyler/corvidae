@@ -1,5 +1,6 @@
 """Tests for corvidae.persistence.PersistencePlugin."""
 
+from corvidae.correlation import mint_correlation_id
 import json
 import logging
 import time
@@ -668,7 +669,7 @@ class TestGracefulDegradation:
         channel = registry.get_or_create("test", "scope1", config=ChannelConfig())
 
         # With no PersistencePlugin, Agent should still create a ContextWindow
-        await plugin.on_message(channel=channel, sender="user", text="hello")
+        await plugin.on_message(channel=channel, sender="user", text="hello", correlation_id=mint_correlation_id())
         if channel.id in plugin.queues:
             await plugin.queues[channel.id].drain()
 

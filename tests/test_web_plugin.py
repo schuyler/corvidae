@@ -101,13 +101,12 @@ class AgentStub:
         self.queues: dict = {}
         # (channel, sender, text, correlation_id) per admitted message.
         self.calls: list[tuple] = []
-        self._n = 0
 
     @hookimpl
-    async def on_message(self, channel, sender: str, text: str) -> None:
-        # Mint a correlation id before the gate, as Agent does.
-        self._n += 1
-        cid = f"cid-{self._n}"
+    async def on_message(self, channel, sender: str, text: str,
+                         correlation_id: str) -> None:
+        # Use the transport-minted id for every hook, as Agent does.
+        cid = correlation_id
         results = await self.pm.ahook.should_process_message(
             channel=channel, sender=sender, text=text, correlation_id=cid,
         )
@@ -1500,42 +1499,8 @@ class TestPackaging:
 
 
 # ===========================================================================
-# Issue #95: the transport mints the correlation id (RED tests)
+# Issue #95: the transport mints the correlation id
 # ===========================================================================
-
-class CidAgentStub(AgentStub):
-    """Like AgentStub, but on_message takes the caller's correlation_id and
-    uses it for every hook, as the real Agent will once #95 lands.
-
-    Registering this today fails (the hookspec has no correlation_id on
-    on_message); that is the expected red failure.
-    """
-
-    @hookimpl
-    async def on_message(self, channel, sender: str, text: str,
-                         correlation_id: str) -> None:
-        # Gate, then reject-wins, then exactly one of rejected/admitted --
-        # all with the PASSED id.
-        results = await self.pm.ahook.should_process_message(
-            channel=channel, sender=sender, text=text, correlation_id=correlation_id,
-        )
-        if resolve_reject_wins(results) is False:
-            await self.pm.ahook.on_message_rejected(
-                channel=channel, correlation_id=correlation_id, sender=sender, text=text,
-            )
-            return
-        await self.pm.ahook.on_message_admitted(
-            channel=channel, correlation_id=correlation_id, sender=sender, text=text,
-        )
-        self.calls.append((channel, sender, text, correlation_id))
-
-
-def _use_cid_agent(env: Env) -> None:
-    """Swap the fixture's AgentStub for a CidAgentStub."""
-    env.pm.unregister(env.agent)
-    env.agent = CidAgentStub(env.pm)
-    env.pm.register(env.agent, name="agent")
-
 
 class TestTransportMintedIds:
 
@@ -1555,7 +1520,6 @@ class TestTransportMintedIds:
         a no-op: held entries are neither removed nor marked admitted, and
         the rejected frame carries id None."""
         env = await make_env()
-        _use_cid_agent(env)
         conn = await env.connect("main")
         # Hold one send inside the gate so its entry is unsent and unadmitted.
         gate = HoldGate()

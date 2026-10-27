@@ -1,7 +1,7 @@
 """Tests for corvidae.channels.irc.IRCPlugin."""
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -168,7 +168,11 @@ class TestIRCClientEvents:
                 channel=expected_channel,
                 sender="user",
                 text="hello bot",
+                correlation_id=ANY,
             )
+            # The transport mints a real (non-empty string) correlation id.
+            cid = pm.ahook.on_message.await_args.kwargs["correlation_id"]
+            assert isinstance(cid, str) and cid
 
     async def test_on_channel_message_ignores_self(self):
         """Messages from own nick are filtered out."""
@@ -217,7 +221,10 @@ class TestIRCClientEvents:
                 channel=expected_channel,
                 sender="user",
                 text="private message",
+                correlation_id=ANY,
             )
+            cid = pm.ahook.on_message.await_args.kwargs["correlation_id"]
+            assert isinstance(cid, str) and cid
 
 
 # ---------------------------------------------------------------------------

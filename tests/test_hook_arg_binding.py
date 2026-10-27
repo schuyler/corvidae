@@ -179,7 +179,7 @@ class TestRuntimeStartupCoverage:
         pm = create_plugin_manager()
         pm.load_setuptools_entrypoints("corvidae")
 
-        # on_message(self, channel, sender, text) declares `text` as a
+        # on_message(self, channel, sender, text, correlation_id) declares `text` as a
         # spec-required param (no default). An impl that redeclares it WITH
         # a default silently drops the caller's value — exactly the bug
         # class. Register it as a real plugin would be, then run the

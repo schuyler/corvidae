@@ -209,6 +209,61 @@ class _VetoGatePlugin:
 
 
 # ---------------------------------------------------------------------------
+# Fake agent: the harness's on_message
+# ---------------------------------------------------------------------------
+
+
+class _FakeAgent:
+    """Stands in for Agent.on_message, mirroring corvidae/agent.py's sequence:
+    should_process_message -> reject-wins -> on_message_rejected | admitted,
+    all using the correlation id the *caller passed*.
+
+    ``ready=False`` models the agent-not-ready path: return without firing
+    any hook. ``block`` holds an admitted call open. Installed as ``pm.ahook.on_message = AsyncMock(side_effect=...)``
+    so the transport's real call (including its keyword names) is exercised.
+    """
+
+    def __init__(self, pm, ready: bool = True) -> None:
+        self.pm = pm
+        self.ready = ready
+        # When set, the call blocks on this event after the message has been
+        # admitted (or rejected), modelling a turn that is still running.
+        self.block: asyncio.Event | None = None
+        # (text, correlation_id, channel) for each on_message call.
+        self.calls: list[tuple[str, str, object]] = []
+
+    def install(self) -> None:
+        """Install this fake agent as the harness's ``on_message``."""
+        # A bound async method, not the instance: AsyncMock only awaits a
+        # side_effect it recognizes as a coroutine function.
+        self.pm.ahook.on_message = AsyncMock(side_effect=self.__call__)
+
+    def cid_for(self, text: str) -> str:
+        """The correlation id the transport passed for the message `text`."""
+        return next(cid for t, cid, _ in self.calls if t == text)
+
+    async def __call__(self, channel, sender, text, correlation_id):
+        # Record first so tests can find the id even on early return.
+        self.calls.append((text, correlation_id, channel))
+        if not self.ready:
+            return
+        # Gate, then reject-wins, then the matching lifecycle hook.
+        results = await self.pm.ahook.should_process_message(
+            channel=channel, sender=sender, text=text, correlation_id=correlation_id,
+        )
+        if resolve_reject_wins(results) is False:
+            await self.pm.ahook.on_message_rejected(
+                channel=channel, correlation_id=correlation_id, sender=sender, text=text,
+            )
+            return
+        await self.pm.ahook.on_message_admitted(
+            channel=channel, correlation_id=correlation_id, sender=sender, text=text,
+        )
+        if self.block is not None:
+            await self.block.wait()
+
+
+# ---------------------------------------------------------------------------
 # Harness: wires a FakeSignalServer + SignalPlugin together
 # ---------------------------------------------------------------------------
 
@@ -221,6 +276,8 @@ class Harness:
     server: FakeSignalServer
     config: dict
     socket_dir: str
+    # The fake agent installed as on_message (see _FakeAgent).
+    agent: "_FakeAgent"
 
 
 def _short_socket_path() -> Path:
@@ -269,7 +326,11 @@ async def _start_plugin(
     pm = create_plugin_manager()
     registry = ChannelRegistry(AGENT_DEFAULTS)
     pm.register(registry, name="registry")
-    pm.ahook.on_message = AsyncMock()
+    # on_message is a fake agent that runs the gate and fires the lifecycle
+    # hooks with the transport's id, as the real Agent does; it is an
+    # AsyncMock underneath so await_count / await_args still work.
+    agent = _FakeAgent(pm)
+    agent.install()
 
     config: dict = {}
     if not omit_signal_block:
@@ -295,7 +356,7 @@ async def _start_plugin(
 
     return Harness(
         pm=pm, registry=registry, plugin=plugin, server=server, config=config,
-        socket_dir=str(socket_path.parent),
+        socket_dir=str(socket_path.parent), agent=agent,
     )
 
 
@@ -974,10 +1035,12 @@ class TestLiveness:
         order: list[str] = []
         h.server.on_request = lambda frame: order.append(f"request:{frame.get('method')}")
         block = asyncio.Event()
+        # Wrap the fake agent: note the call, then admit and hold the turn open.
+        h.agent.block = block
 
         async def blocking_on_message(*args, **kwargs):
             order.append("on_message_start")
-            await block.wait()
+            await h.agent(*args, **kwargs)
 
         h.pm.ahook.on_message = AsyncMock(side_effect=blocking_on_message)
         try:
@@ -1012,10 +1075,12 @@ class TestLiveness:
             with pytest.raises(asyncio.TimeoutError):
                 await h.server.next_request(timeout=0.5)
 
-            channel = h.pm.ahook.on_message.await_args.kwargs["channel"]
-            await h.plugin.on_message_admitted(channel=channel, correlation_id="corr-1", sender=AUTH_ACI, text="hi")
+            # The fake agent already admitted the message under the id the
+            # transport minted; persist it under that same id, as the
+            # agent's queue consumer would when processing starts.
+            _, correlation_id, channel = h.agent.calls[0]
             await h.plugin.on_message_persisted(
-                channel=channel, correlation_id="corr-1", rowid=1, text="hi", meta={}
+                channel=channel, correlation_id=correlation_id, rowid=1, text="hi", meta={}
             )
 
             receipt_request = await h.server.next_request(timeout=5)
@@ -1035,12 +1100,9 @@ class TestLiveness:
         """
         with _fast_typing_refresh():
             h = await _start_plugin(tmp_path)
+            # Admit the message, then hold the turn open.
             block = asyncio.Event()
-
-            async def blocking_on_message(*args, **kwargs):
-                await block.wait()
-
-            h.pm.ahook.on_message = AsyncMock(side_effect=blocking_on_message)
+            h.agent.block = block
             try:
                 await h.server.push_notification(
                     "receive", make_data_envelope(source_uuid=AUTH_ACI, source_number=None, text="slow turn")
@@ -1087,11 +1149,10 @@ class TestLiveness:
                     )
                 await _wait_until(lambda: h.pm.ahook.on_message.await_count >= 3, timeout=5)
                 channel = h.pm.ahook.on_message.await_args.kwargs["channel"]
-
-                decision = await _drive_gate(
-                    h.pm, channel=channel, sender=AUTH_ACI, text="vetoed", correlation_id="corr-veto",
-                )
-                assert decision is False
+                # The fake agent ran the gate for each message: the veto has
+                # been broadcast, and the transport gave its slot back once
+                # on_message returned without admitting it.
+                await _wait_until(lambda: h.plugin._outstanding.get(channel.id) == 2, timeout=5)
 
                 await h.plugin.send_message(channel=channel, text="reply to one")
                 # One reply is still owed, so typing must keep refreshing. This
@@ -1319,53 +1380,8 @@ class TestResolveChannel:
 
 
 # ---------------------------------------------------------------------------
-# Issue #95: the transport mints the correlation id (RED tests)
+# Issue #95: the transport mints the correlation id
 # ---------------------------------------------------------------------------
-
-
-class _FakeAgent:
-    """Stands in for Agent.on_message, mirroring corvidae/agent.py's sequence:
-    should_process_message -> reject-wins -> on_message_rejected | admitted,
-    all using the correlation id the *caller passed*.
-
-    ``ready=False`` models the agent-not-ready path: return without firing
-    any hook. Installed as ``pm.ahook.on_message = AsyncMock(side_effect=...)``
-    so the transport's real call (including its keyword names) is exercised.
-    """
-
-    def __init__(self, pm, ready: bool = True) -> None:
-        self.pm = pm
-        self.ready = ready
-        # (text, correlation_id, channel) for each on_message call.
-        self.calls: list[tuple[str, str, object]] = []
-
-    def install(self) -> None:
-        """Replace the harness's plain AsyncMock with this fake agent."""
-        # A bound async method, not the instance: AsyncMock only awaits a
-        # side_effect it recognizes as a coroutine function.
-        self.pm.ahook.on_message = AsyncMock(side_effect=self.__call__)
-
-    def cid_for(self, text: str) -> str:
-        """The correlation id the transport passed for the message `text`."""
-        return next(cid for t, cid, _ in self.calls if t == text)
-
-    async def __call__(self, channel, sender, text, correlation_id):
-        # Record first so tests can find the id even on early return.
-        self.calls.append((text, correlation_id, channel))
-        if not self.ready:
-            return
-        # Gate, then reject-wins, then the matching lifecycle hook.
-        results = await self.pm.ahook.should_process_message(
-            channel=channel, sender=sender, text=text, correlation_id=correlation_id,
-        )
-        if resolve_reject_wins(results) is False:
-            await self.pm.ahook.on_message_rejected(
-                channel=channel, correlation_id=correlation_id, sender=sender, text=text,
-            )
-            return
-        await self.pm.ahook.on_message_admitted(
-            channel=channel, correlation_id=correlation_id, sender=sender, text=text,
-        )
 
 
 async def _push_text(h: Harness, text: str, **envelope_kwargs) -> None:

@@ -6,6 +6,7 @@ Design requirements covered:
 - C3: (covered in test_agent_loop_plugin.py)
 """
 
+from corvidae.correlation import mint_correlation_id
 import asyncio
 import pytest
 
@@ -286,7 +287,7 @@ class TestQueueItemRole:
         q.start(fake_process)
         plugin.queues[ch.id] = q
 
-        await plugin.on_message(channel=ch, sender="alice", text="hello")
+        await plugin.on_message(channel=ch, sender="alice", text="hello", correlation_id=mint_correlation_id())
         await q.drain()
 
         assert len(captured_items) == 1

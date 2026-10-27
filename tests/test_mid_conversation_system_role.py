@@ -6,6 +6,7 @@ builder renders every non-leading system message as ``user``; the stored
 window and the DB rows keep ``role: system``.
 """
 
+from corvidae.correlation import mint_correlation_id
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -184,7 +185,7 @@ class TestAgentWiring:
     async def test_funnel_context_sent_as_user(self, make_agent):
         plugin, channel, db, client = await make_agent("user")
         plugin.pm.register(_ContextInjector(), name="injector")
-        await plugin.on_message(channel=channel, sender="u", text="hi")
+        await plugin.on_message(channel=channel, sender="u", text="hi", correlation_id=mint_correlation_id())
         await drain(plugin, channel)
         assert _sent_roles(client) == ["system", "user", "user"]
         # Window and DB keep the system role.
@@ -206,7 +207,7 @@ class TestAgentWiring:
     async def test_default_is_system(self, make_agent):
         plugin, channel, db, client = await make_agent(None)
         plugin.pm.register(_ContextInjector(), name="injector")
-        await plugin.on_message(channel=channel, sender="u", text="hi")
+        await plugin.on_message(channel=channel, sender="u", text="hi", correlation_id=mint_correlation_id())
         await drain(plugin, channel)
         assert _sent_roles(client) == ["system", "user", "system"]
 
@@ -214,7 +215,7 @@ class TestAgentWiring:
         plugin, channel, db, client = await make_agent("assistant")
         assert "mid_conversation_system_role" in caplog.text
         plugin.pm.register(_ContextInjector(), name="injector")
-        await plugin.on_message(channel=channel, sender="u", text="hi")
+        await plugin.on_message(channel=channel, sender="u", text="hi", correlation_id=mint_correlation_id())
         await drain(plugin, channel)
         assert _sent_roles(client) == ["system", "user", "system"]
 
@@ -223,6 +224,6 @@ class TestAgentWiring:
         plugin.pm.register(_ContextInjector(), name="injector")
         await plugin.on_config_reload(config={"agent": {"mid_conversation_system_role": "user"}})
         plugin._client = client  # reload re-borrows from the (absent) llm plugin
-        await plugin.on_message(channel=channel, sender="u", text="hi")
+        await plugin.on_message(channel=channel, sender="u", text="hi", correlation_id=mint_correlation_id())
         await drain(plugin, channel)
         assert _sent_roles(client)[-1] == "user"

@@ -1,3 +1,4 @@
+from corvidae.correlation import mint_correlation_id
 import pytest
 import apluggy as pluggy
 from pluggy import HookimplMarker, HookspecMarker
@@ -64,7 +65,7 @@ async def test_multiple_plugins_receive_hook():
     pm.register(PluginA())
     pm.register(PluginB())
     ch = Channel(transport="test", scope="scope")
-    await pm.ahook.on_message(channel=ch, sender="user", text="hi")
+    await pm.ahook.on_message(channel=ch, sender="user", text="hi", correlation_id=mint_correlation_id())
 
     assert sorted(received) == ["A", "B"]
 
