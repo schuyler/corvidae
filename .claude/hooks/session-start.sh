@@ -16,10 +16,11 @@ fi
 
 cd "${CLAUDE_PROJECT_DIR:-$(pwd)}"
 
-# Install runtime deps plus the dev extra (pytest, pytest-asyncio) and the dev
+# Install runtime deps plus the dev extra (pytest, pytest-asyncio), the dev
 # dependency group (pytest-timeout, required by the global timeout in
-# tool.pytest.ini_options). uv sync is idempotent and reuses its cache.
+# tool.pytest.ini_options), and the acp extra (the ACP transport tests import
+# the SDK; CI syncs it too). uv sync is idempotent and reuses its cache.
 echo "session-start: installing dependencies with uv"
-uv sync --extra dev
+uv sync --extra dev --extra acp
 
 echo "session-start: dependencies ready"

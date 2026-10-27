@@ -46,10 +46,10 @@ uv sync
 uv run corvidae
 ```
 
-For development (includes pytest):
+For development (includes pytest, and the ACP SDK its tests import):
 
 ```sh
-uv sync --extra dev
+uv sync --extra dev --extra acp
 uv run pytest
 ```
 
