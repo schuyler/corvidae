@@ -18,8 +18,11 @@ REPO = Path(__file__).resolve().parent.parent
 KERNEL = REPO / "corvidae"
 COGNITION = REPO / "packages" / "corvidae-cognition" / "corvidae_cognition"
 
-# Kernel modules a cognition module may import (Part 2 §2's table).
+# Kernel modules a cognition module may import: Part 2 §2's table plus
+# corvidae.outbound, the event types for the send hook (added by WP3).
+# Keep in step with docs/plugin-guide.md, "What the kernel exports to plugins".
 ALLOWED_KERNEL_MODULES = {
+    "corvidae.outbound",
     "corvidae.hooks",
     "corvidae.fork",
     "corvidae.attribution",

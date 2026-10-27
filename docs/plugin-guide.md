@@ -455,6 +455,30 @@ For common cases the standard library and ecosystem offer native async alternati
 
 As a last-resort safety net, `execute_tool_call` detects a sync callable registered as a bare `Tool(name=..., fn=sync_fn, schema=...)` (bypassing `Tool.from_function()`) and wraps the call in `asyncio.to_thread()`, logging a warning. Treat that warning as a bug to fix in the plugin, not a supported registration path.
 
+## What the kernel exports to plugins
+
+A plugin outside the `corvidae` package (the `corvidae-cognition` plugins,
+or your own) should import only these kernel modules. This is the API the
+cognition plugins use, and `tests/test_kernel_boundary.py` fails if
+`corvidae_cognition` imports any other kernel module. Changing a signature
+here is a plugin-API change and needs a line in this guide.
+
+| Module | Names |
+|---|---|
+| `corvidae.hooks` | `CorvidaePlugin`, `TransportPlugin`, `hookimpl`, `get_dependency`, `resolve_single_result` |
+| `corvidae.fork` | `fork_agent`, `quote`, `window_db_ids` (see [Forking the window](#forking-the-window)) |
+| `corvidae.attribution` | `set_attribution`, `reset_attribution` |
+| `corvidae.tuning` | `config_value`, `resolve_tunable` |
+| `corvidae.context` | `MessageType`, `ContextWindow`, `count_tokens` |
+| `corvidae.task` | `Task` |
+| `corvidae.tool` | `Tool`, `tool_to_schema` |
+| `corvidae.persistence` | `PersistencePlugin`, `add_column_if_missing` |
+| `corvidae.llm_plugin` | `LLMPlugin` |
+| `corvidae.outbound` | `OutboundMessage`, `OutboundThinking`, `OutboundToolStatus`, `OutboundProgress` (for senders and transports) |
+
+The kernel never imports a plugin outside it. A plugin that needs another
+plugin resolves it at runtime with `get_dependency(self.pm, "<name>", Type)`.
+
 ## Plugin dependencies
 
 Declare `depends_on` as a class attribute (a set of plugin names). `validate_dependencies()` raises `RuntimeError` at startup if any declared dependency is not registered, or if the dependency graph contains a cycle. The error message includes the full cycle path, e.g. `Dependency cycle detected: a -> b -> a`.
@@ -900,6 +924,11 @@ Registered by `SchedulerPlugin` (entry point name: `scheduler`). All three act o
 
 ## Bundled plugins
 
+The kernel's plugins follow. The cognition plugins (`MemoryPlugin`,
+`MemoryToolsPlugin`, `FunnelPlugin`, `AppraisalPlugin`, `CritiquePlugin`,
+`OutcomeLogPlugin`) ship in the `cognition` extra and are documented in
+[cognition.md](cognition.md#plugin-reference).
+
 These plugins ship with Corvidae and are registered via entry points as part of the default daemon. They can be omitted if the application does not need their functionality; each degrades gracefully when absent.
 
 ### McpClientPlugin (`corvidae/mcp_client.py`)
@@ -1074,38 +1103,6 @@ daemon:
 **Without these plugins:** the `on_llm_request`/`on_llm_response` hooks
 still fire from LLMPlugin's observer; nothing records them.
 
-### OutcomeLogPlugin (`corvidae/outcome_log.py`)
-
-Owns the `exchange_log` table — one row per exchange (everything one
-trace covers, keyed by its `trace_id`), accumulating the
-retrieval/appraisal/outcome profile used to correlate memory retrieval,
-appraisal, and critique for calibration. Entry point name:
-`"outcome_log"`; depends on `"persistence"`.
-
-Implements the message-lifecycle hooks (`on_message_admitted`,
-`on_message_rejected`, `on_message_persisted`) to record the identity row
-for every exchange (origin, channel, originating message rowid). The
-remaining columns — retrieval score/raw similarity/hit count, appraisal probe score and
-stage-2 JSON, critique's provenance snapshot, and merged outcomes — are
-filled in by `MemoryPlugin`, `AppraisalPlugin`, and `CritiquePlugin`
-through the writer API below, not by `OutcomeLogPlugin` itself.
-
-Writer API (used by other plugins, not hooks):
-
-- `record_exchange(trace_id, channel_id, origin=None, message_rowid=None)`
-  — idempotent insert (`INSERT OR IGNORE`).
-- `update_exchange(trace_id, **columns)` — guarded update of the
-  nullable profile columns only; unknown or immutable column names raise
-  `ValueError` (SQL is never built from arbitrary kwargs).
-- `upsert_exchange(trace_id, channel_id, origin=None, **columns)` —
-  create-or-update in one call: `INSERT OR IGNORE` the identity row, then
-  a guarded update applying `**columns`. For gate-time writers (e.g.
-  `AppraisalPlugin`'s stage 1, `appraisal.py:970`) that run before or race
-  `on_message_admitted`/`on_message_persisted`'s own inserts — without it,
-  those hooks' `INSERT OR IGNORE` would no-op against a row that doesn't
-  exist yet, silently dropping the gate-path columns. Idempotent and
-  write-order independent.
-
 ### LLMPlugin (`corvidae/llm_plugin.py`)
 
 Owns the `LLMClient` instance lifecycle. Entry point name: `"llm"`. Other plugins retrieve clients via
@@ -1225,125 +1222,6 @@ tools_dict, schemas = tools_plugin.get_tools()
 
 **Without this plugin:** `Agent` cannot retrieve tools and will raise
 `RuntimeError` during startup.
-
-### MemoryPlugin (`corvidae/memory.py`)
-
-Autobiographical memory: consolidates compacted dialog into first-person
-memory records (SQLite + sqlite-vec + FTS5) and retrieves them into the
-prompt through the admission funnel. Entry point name: `"memory"`;
-`depends_on = {"persistence", "llm"}`. Absorbs the removed `DreamPlugin`.
-
-Implements six hooks:
-
-- `on_start` — creates the memory schema on the persistence connection
-  (retried lazily on first use; on_start ordering is LIFO across plugins).
-- `before_compaction` — with `agent.forks` on for `consolidation`, forks
-  the memory record from the prefix about to be dropped (when every
-  dialog row of the range is in it) and stashes it for the task below.
-- `on_compaction` — spawns a tracked background task consolidating the
-  `compacted_ids` range above the per-channel watermark, using the stashed
-  fork record when there is one for that range and watermark, else one
-  standalone `llm.background` call.
-- `on_idle` — consolidates the un-consolidated tail of channels inactive
-  past `memory.idle_consolidate_after` seconds, forking the live window
-  when forks are on and the range is in it.
-- `before_agent_turn` — embeds the inbound user text, scores candidates
-  (`similarity × exp(-age_days / half_life)`, with age from `created_at` or,
-  under `memory.retrieval.recency_from: last_used`, from the last
-  retrieval), bands them (strong/moderate/weak, on the score or, under
-  `memory.retrieval.band_on: similarity`, on raw similarity), admits winners through the funnel, bumps access
-  stats for admitted records, and writes a `retrieval_log` row.
-- `on_stop` — cancels in-flight background tasks.
-
-The importance prior is pluggable (`MemoryPlugin.importance_prior`,
-default `RubricPrior`); `AppraisalPlugin` wraps it in `AppraisalPrior`
-when appraisal is enabled. Configuration is documented in
-[configuration.md](configuration.md) (`memory.*`, `llm.embedding`).
-
-**Without this plugin:** no memory records form and no retrieval happens;
-compaction remains plain lossy summarization.
-
-A malformed consolidation reply is retried once; if the retry is also
-unusable, the range is stored with its raw transcript as the summary rather
-than being dropped (the LLM call has already been paid for).
-
-### MemoryToolsPlugin (`corvidae/tools/memory_tools.py`)
-
-Registers the `search_memory` and `recall_raw` agent tools — the active
-memory surface ("remember harder"). Entry point
-name: `"memory_tools"`; `depends_on = frozenset({"memory"})`. Reaches the
-DB and channel-scope logic through `get_dependency(pm, "memory",
-MemoryPlugin)`.
-
-Implements one hook:
-
-- `register_tools` — appends `search_memory` and `recall_raw` to
-  `tool_registry`.
-
-**Compartment scoping:** both tools enforce the calling channel's
-`_channel_scope` (the channel itself plus any group siblings configured in
-`memory.channel_groups` — identical to the scope `MemoryPlugin`'s passive
-retrieval uses). `_channel_scope` returns a `ChannelScope`, not a list:
-group members may be `*` / `?` globs, so test membership with
-`scope.contains(channel_id)` and build SQL with
-`scope.sql("m.channel_id")`, which emits `IN (...)` for literal ids and
-`GLOB ?` for patterns (an empty `ChannelScope` emits `(0)` and matches
-nothing). `search_memory`'s `channel=` argument narrows by equality and is
-never treated as a pattern. The calling channel comes from `_ctx.channel`; when
-`_ctx.channel is None` both tools return an error string and never fall
-back to unscoped access. The tools are broader than passive retrieval in
-*status* (they reach demoted, superseded, and redacted-tombstone records)
-but never broader in *compartment* — channel B cannot enumerate or raw-recall
-channel A's memories.
-
-Both tools retry briefly when the memory schema is still being created by
-another task. If `search_memory`'s FTS5 query fails, it falls back to a
-`LIKE` scan over record summaries instead of returning an internal error.
-
-**Tools:**
-
-| Tool | Parameters | What it does |
-|------|------------|--------------|
-| `search_memory` | `query: str`, `channel: str\|None` (default `None`), `tags: list[str]\|None` (default `None`), `after: str\|None` (default `None`), `before: str\|None` (default `None`), `include_demoted: bool` (default `True`), `max_tokens: int` (default `2000`) | FTS5 keyword search over `memory_fts`. Returns a numbered list `id. score (age)[flags] summary` sorted by FTS relevance, capped at approximately `max_tokens`. `channel` narrows within the calling channel's scope; a value outside scope returns an error string naming visible channels. `after`/`before` are ISO-8601 (`YYYY-MM-DD` or full timestamp; naive values treated as UTC) compared against `created_at` (`after` ⇒ `≥`, `before` ⇒ `<`); unparseable values return an error string. `include_demoted=False` restricts to `indexed=1` records, hiding demoted, superseded, and redacted-tombstone records (all are `indexed=0`). `tags` filters by `topic_tags` JSON array intersection. **Does not update access stats.** |
-| `recall_raw` | `memory_id: int`, `max_tokens: int` (default `1000`) | Replays the raw `message_log` dialog for the record's `[msg_id_start, msg_id_end]` range using `WHERE channel_id = record.channel_id AND id BETWEEN ...` — the channel predicate is load-bearing because the `message_log` id sequence is global across all channels. Returns a participants header (`[memory N: messages S–E, participants: {...}]`) followed by verbatim `role: content` lines, truncated at `max_tokens` with an explicit marker. Works on demoted, superseded, and tombstoned records. Rejects out-of-scope record IDs without bumping stats. **Bumps `retrieval_count` and `last_retrieved_at`** on the record — the bump is what makes the record eligible for re-promotion by the next retention job run. |
-
-**Recall-stat semantics:** `recall_raw` bumps the record's access stats;
-`search_memory` does not. `search_memory` is a catalog for choosing what
-to recall; bumping every listed record would inflate scores for marginal
-matches and distort retention scoring. The re-promotion path is:
-`search_memory` surfaces a demoted record (flagged `[demoted]`) → agent
-calls `recall_raw` → next retention job run finds the score above the
-demotion threshold and re-promotes.
-
-**Without this plugin:** the `search_memory` and `recall_raw` tools are
-not available. Memory records are still formed and passively retrieved
-by `MemoryPlugin`; only the agent's active access surface is absent.
-
-### FunnelPlugin (`corvidae/funnel.py`)
-
-The context-admission funnel — the single chokepoint for tail CONTEXT
-admission. Entry point name: `"funnel"`. Exposes
-`admit(channel, conv, source, entries, budget_tokens=None) -> int`:
-dedupes against CONTEXT already in the window, budgets tokens per source
-(drops are logged, never silent), wraps everything in explicit
-data-not-instructions framing with a source label, appends one CONTEXT
-message at the tail, and persists it with the rowid attached.
-
-**Without this plugin:** sources that route through the funnel (memory
-retrieval) log a warning and admit nothing.
-
-`register_and_wake(channel, origin, source, entries)` is the deferred
-admission path for notification producers without a `tool_call_id`:
-`origin` is stamped into the wake stub's `meta["origin"]` (see
-[Traces](#traces)) so `before_agent_turn`'s drain, and any
-plugin gating eligibility off that origin, never has to infer it from
-stub text. The `'user'|'reminder'|'critique'|'heartbeat'|'task'`
-taxonomy is a convention cognition plugins (AppraisalPlugin,
-CritiquePlugin, OutcomeLogPlugin) share over this key — not a core
-concept. `'user'` is recognized by subscribing to `on_message_admitted`
-rather than by a value in `meta`; `'task'` is the default OutcomeLogPlugin
-applies when `meta["origin"]` is absent on a notification-born
-trace.
 
 ### IdleMonitorPlugin (`corvidae/idle.py`)
 
