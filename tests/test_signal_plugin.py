@@ -1337,3 +1337,188 @@ class TestResolveChannel:
             assert h.registry.get("internal:heartbeat") is None
         finally:
             await _stop_plugin(h)
+
+
+# ---------------------------------------------------------------------------
+# Issue #95: the transport mints the correlation id (RED tests)
+# ---------------------------------------------------------------------------
+
+
+class _FakeAgent:
+    """Stands in for Agent.on_message, mirroring corvidae/agent.py's sequence:
+    should_process_message -> reject-wins -> on_message_rejected | admitted,
+    all using the correlation id the *caller passed*.
+
+    ``ready=False`` models the agent-not-ready path: return without firing
+    any hook. Installed as ``pm.ahook.on_message = AsyncMock(side_effect=...)``
+    so the transport's real call (including its keyword names) is exercised.
+    """
+
+    def __init__(self, pm, ready: bool = True) -> None:
+        self.pm = pm
+        self.ready = ready
+        # (text, correlation_id, channel) for each on_message call.
+        self.calls: list[tuple[str, str, object]] = []
+
+    def install(self) -> None:
+        """Replace the harness's plain AsyncMock with this fake agent."""
+        # A bound async method, not the instance: AsyncMock only awaits a
+        # side_effect it recognizes as a coroutine function.
+        self.pm.ahook.on_message = AsyncMock(side_effect=self.__call__)
+
+    def cid_for(self, text: str) -> str:
+        """The correlation id the transport passed for the message `text`."""
+        return next(cid for t, cid, _ in self.calls if t == text)
+
+    async def __call__(self, channel, sender, text, correlation_id):
+        # Record first so tests can find the id even on early return.
+        self.calls.append((text, correlation_id, channel))
+        if not self.ready:
+            return
+        # Gate, then reject-wins, then the matching lifecycle hook.
+        results = await self.pm.ahook.should_process_message(
+            channel=channel, sender=sender, text=text, correlation_id=correlation_id,
+        )
+        if resolve_reject_wins(results) is False:
+            await self.pm.ahook.on_message_rejected(
+                channel=channel, correlation_id=correlation_id, sender=sender, text=text,
+            )
+            return
+        await self.pm.ahook.on_message_admitted(
+            channel=channel, correlation_id=correlation_id, sender=sender, text=text,
+        )
+
+
+async def _push_text(h: Harness, text: str, **envelope_kwargs) -> None:
+    """Push one allowlisted inbound message."""
+    await h.server.push_notification(
+        "receive",
+        make_data_envelope(
+            source_uuid=AUTH_ACI, source_number=None, text=text, **envelope_kwargs
+        ),
+    )
+
+
+class TestTransportMintedIds:
+    async def test_receipt_targets_right_message_after_veto(self, tmp_path):
+        """O4: two allowlisted messages, the first vetoed by a second gate;
+        persisting the second yields a read receipt for the SECOND's
+        timestamp, not the vetoed first's."""
+        h = await _start_plugin(tmp_path)
+        agent = _FakeAgent(h.pm)
+        agent.install()
+        h.pm.register(_VetoGatePlugin("vetoed"), name="veto_gate")
+        try:
+            # Fresh timestamps: stale ones get a "[sent ...]" prefix, which
+            # would stop the text-matching veto gate from firing.
+            ts_first = _now_ms()
+            ts_second = ts_first + 1
+            # Send the to-be-vetoed message, then the one that is admitted.
+            await _push_text(h, "vetoed", timestamp=ts_first)
+            await _push_text(h, "kept", timestamp=ts_second)
+            await _wait_until(lambda: len(agent.calls) >= 2, timeout=3)
+
+            # Persist the second message, as the agent's queue consumer would.
+            channel = agent.calls[1][2]
+            await h.plugin.on_message_persisted(
+                channel=channel, correlation_id=agent.cid_for("kept"),
+                rowid=1, text="kept", meta={},
+            )
+
+            await _wait_until(lambda: h.server.requests_matching("receipt"), timeout=3)
+            receipt = h.server.requests_matching("receipt")[0]
+            assert frame_contains(receipt, ts_second)
+            assert not frame_contains(receipt, ts_first)
+        finally:
+            await _stop_plugin(h)
+
+    async def test_agent_not_ready_leaves_no_residue(self, tmp_path):
+        """O6: on_message returning without any hook (agent not ready)
+        leaves no pending receipt, no outstanding slot, and typing stops."""
+        with _fast_typing_refresh():
+            h = await _start_plugin(tmp_path)
+            agent = _FakeAgent(h.pm, ready=False)
+            agent.install()
+            try:
+                await _push_text(h, "anyone home")
+                await _wait_until(lambda: len(agent.calls) >= 1, timeout=3)
+                channel = agent.calls[0][2]
+                # Wait for the transport's post-call cleanup to settle.
+                await _wait_until(
+                    lambda: not h.plugin._pending_receipts.get(channel.id)
+                    and h.plugin._outstanding.get(channel.id, 0) == 0,
+                    timeout=3,
+                )
+
+                # Typing must go quiet: nothing new across several intervals.
+                settled = len(h.server.requests_matching("typing"))
+                await asyncio.sleep(TYPING_SILENCE_WINDOW)
+                assert len(h.server.requests_matching("typing")) == settled
+            finally:
+                await _stop_plugin(h)
+
+    async def test_vetoed_message_leaves_no_residue(self, tmp_path):
+        """O6: a message vetoed by a second gate leaves no pending receipt,
+        no outstanding slot, and typing stops."""
+        with _fast_typing_refresh():
+            h = await _start_plugin(tmp_path)
+            agent = _FakeAgent(h.pm)
+            agent.install()
+            h.pm.register(_VetoGatePlugin("vetoed"), name="veto_gate")
+            try:
+                await _push_text(h, "vetoed")
+                await _wait_until(lambda: len(agent.calls) >= 1, timeout=3)
+                channel = agent.calls[0][2]
+                # Wait for the transport's post-call cleanup to settle.
+                await _wait_until(
+                    lambda: not h.plugin._pending_receipts.get(channel.id)
+                    and h.plugin._outstanding.get(channel.id, 0) == 0,
+                    timeout=3,
+                )
+
+                # Typing must go quiet: nothing new across several intervals.
+                settled = len(h.server.requests_matching("typing"))
+                await asyncio.sleep(TYPING_SILENCE_WINDOW)
+                assert len(h.server.requests_matching("typing")) == settled
+            finally:
+                await _stop_plugin(h)
+
+    async def test_veto_without_timestamp_keeps_other_messages_slot(self, tmp_path):
+        """O6/O1: an allowlisted sender's envelope with NO timestamp never
+        took a typing slot, so its veto must not give back the slot owed to
+        another admitted message."""
+        h = await _start_plugin(tmp_path)
+        agent = _FakeAgent(h.pm)
+        agent.install()
+        h.pm.register(_VetoGatePlugin("vetoed"), name="veto_gate")
+        try:
+            # An admitted message that is still owed a reply.
+            await _push_text(h, "owed")
+            await _wait_until(lambda: len(agent.calls) >= 1, timeout=3)
+            channel = agent.calls[0][2]
+            assert h.plugin._outstanding[channel.id] == 1
+
+            # A vetoed message whose envelope carries no timestamp at all.
+            envelope = make_data_envelope(
+                source_uuid=AUTH_ACI, source_number=None, text="vetoed",
+            )
+            envelope["envelope"].pop("timestamp")
+            envelope["envelope"]["dataMessage"].pop("timestamp")
+            await h.server.push_notification("receive", envelope)
+            await _wait_until(lambda: len(agent.calls) >= 2, timeout=3)
+            await asyncio.sleep(0.2)
+
+            # The owed message's slot is still held.
+            assert h.plugin._outstanding[channel.id] == 1
+        finally:
+            await _stop_plugin(h)
+
+    async def test_no_inference_state_remains(self, tmp_path):
+        """O3: the FIFO timestamp queue and the admitted-id registry that
+        inferred message identity are gone."""
+        h = await _start_plugin(tmp_path)
+        try:
+            assert not hasattr(h.plugin, "_pending_timestamps")
+            assert not hasattr(h.plugin, "_admitted_correlation_ids")
+        finally:
+            await _stop_plugin(h)

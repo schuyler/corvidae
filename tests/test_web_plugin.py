@@ -1536,3 +1536,108 @@ class TestPackaging:
         pm.register(ChannelRegistry(), name="registry")
         pm.register(WebPlugin(pm), name="web")
         _check_hook_arg_binding(pm)
+
+
+# ===========================================================================
+# Issue #95: the transport mints the correlation id (RED tests)
+# ===========================================================================
+
+class CidAgentStub(AgentStub):
+    """Like AgentStub, but on_message takes the caller's correlation_id and
+    uses it for every hook, as the real Agent will once #95 lands.
+
+    Registering this today fails (the hookspec has no correlation_id on
+    on_message); that is the expected red failure.
+    """
+
+    @hookimpl
+    async def on_message(self, channel, sender: str, text: str,
+                         correlation_id: str) -> None:
+        # Gate, then reject-wins, then exactly one of rejected/admitted --
+        # all with the PASSED id.
+        results = await self.pm.ahook.should_process_message(
+            channel=channel, sender=sender, text=text, correlation_id=correlation_id,
+        )
+        if resolve_reject_wins(results) is False:
+            await self.pm.ahook.on_message_rejected(
+                channel=channel, correlation_id=correlation_id, sender=sender, text=text,
+            )
+            return
+        await self.pm.ahook.on_message_admitted(
+            channel=channel, correlation_id=correlation_id, sender=sender, text=text,
+        )
+        self.calls.append((channel, sender, text, correlation_id))
+
+
+def _use_cid_agent(env: Env) -> None:
+    """Swap the fixture's AgentStub for a CidAgentStub."""
+    env.pm.unregister(env.agent)
+    env.agent = CidAgentStub(env.pm)
+    env.pm.register(env.agent, name="agent")
+
+
+class TestTransportMintedIds:
+
+    def test_no_context_inheritance_machinery(self):
+        """O3: the web transport no longer uses a ContextVar to link an
+        entry to its admission/rejection."""
+        import inspect
+        import re
+
+        assert not hasattr(web_mod, "_CURRENT_SEND")
+        source = inspect.getsource(web_mod)
+        assert not re.search(r"^\s*(import contextvars|from contextvars)", source, re.M)
+        assert not hasattr(web_mod, "contextvars")
+
+    async def test_unknown_id_leaves_entries_untouched(self, make_env):
+        """O1/O3: an admission or rejection carrying an id no entry owns is
+        a no-op: held entries are neither removed nor marked admitted, and
+        the rejected frame carries id None."""
+        env = await make_env()
+        _use_cid_agent(env)
+        conn = await env.connect("main")
+        # Hold one send inside the gate so its entry is unsent and unadmitted.
+        gate = HoldGate()
+        env.pm.register(gate, name="gate")
+        await conn.send(type="send", conversation="main", text="t")
+        await asyncio.wait_for(gate.entered.wait(), 3)
+        before = list(env.plugin._unsent["web:main"])
+        held = before[0]
+        assert held.admitted is False
+        try:
+            ch = env.channel("main")
+            # A rejection for an unknown id: broadcast with no entry id.
+            await env.pm.ahook.on_message_rejected(
+                channel=ch, correlation_id="unknown-id", sender="web", text="t")
+            rej = await conn.wait_type("rejected")
+            assert rej["id"] is None
+            assert env.plugin._unsent["web:main"] == before
+
+            # An admission for an unknown id: no new entry, nothing marked.
+            await env.pm.ahook.on_message_admitted(
+                channel=ch, correlation_id="unknown-id", sender="web", text="t2")
+            assert env.plugin._unsent["web:main"] == before
+            assert held.admitted is False
+        finally:
+            gate.release.set()
+
+    async def test_later_send_vetoed_marks_only_itself(self, make_env):
+        """O1 (REGRESSION GUARD; passes today too): the LATER send is vetoed
+        while the earlier is admitted and not yet persisted -- only the later
+        is marked rejected and the earlier entry survives."""
+        env = await make_env()
+        # First call admitted; second call vetoed.
+        gate = OrderedGate([None, None], [None, False])
+        env.pm.register(gate, name="gate")
+        a = await env.connect("main")
+        await a.send(type="send", conversation="main", text="first")
+        await wait_until(lambda: len(env.agent.calls) == 1)
+        await a.send(type="send", conversation="main", text="second")
+        id_first = (await a.wait_type("user", text="first"))["id"]
+        id_second = (await a.wait_type("user", text="second"))["id"]
+        assert id_first != id_second
+
+        rej = await a.wait_type("rejected")
+        assert rej["id"] == id_second
+        # The earlier, admitted-and-unpersisted entry is still there.
+        assert [e.text for e in env.plugin._unsent["web:main"]] == ["first"]
