@@ -4,7 +4,7 @@ Provides the ContextWindow class, MessageType enum, count_tokens function, and
 DEFAULT_CHARS_PER_TOKEN constant. Token counting uses tiktoken (cl100k_base
 encoding) when available, falling back to character-based estimation if tiktoken
 cannot be imported. This module is purely in-memory: no database access, no
-async I/O. Persistence is handled externally via the on_conversation_event and
+async I/O. Persistence is handled externally via the persist_message and
 on_compaction hook infrastructure.
 
 Logging:
@@ -85,7 +85,7 @@ class ContextWindow:
 
     Maintains a list of tagged message dicts. All operations are synchronous
     and purely in-memory. Persistence is handled externally by plugins that
-    implement the on_conversation_event and on_compaction hooks.
+    implement the persist_message and on_compaction hooks.
 
     Attributes:
         channel_id: Identifies the channel this window belongs to.

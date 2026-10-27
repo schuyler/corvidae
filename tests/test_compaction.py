@@ -16,7 +16,7 @@ class TestCompactCarriesForwardSummaries:
     """Tests for compaction handling of prior summaries in the older portion."""
 
     async def test_compact_carries_forward_prior_summaries(self):
-        """compact_conversation must carry forward existing SUMMARY entries
+        """resolve_compaction must carry forward existing SUMMARY entries
         from the older portion into the new summary.
 
         This prevents the "death spiral" where repeated compaction of
@@ -55,7 +55,7 @@ class TestCompactCarriesForwardSummaries:
         channel = _make_channel()
 
         with patch.object(plugin, "_summarize", side_effect=capture_summarize):
-            await plugin.compact_conversation(
+            await plugin.resolve_compaction(
                 channel=channel, conversation=conv, max_tokens=50
             )
 
@@ -72,7 +72,7 @@ class TestCompactCarriesForwardSummaries:
             )
 
     async def test_compact_filters_non_message_non_summary_from_older(self):
-        """compact_conversation must exclude CONTEXT-typed entries from both
+        """resolve_compaction must exclude CONTEXT-typed entries from both
         the new messages and prior summaries passed to the summarizer.
         """
         conv = ContextWindow("chan1")
@@ -100,7 +100,7 @@ class TestCompactCarriesForwardSummaries:
         channel = _make_channel()
 
         with patch.object(plugin, "_summarize", side_effect=capture_summarize):
-            await plugin.compact_conversation(
+            await plugin.resolve_compaction(
                 channel=channel, conversation=conv, max_tokens=50
             )
 
@@ -120,7 +120,7 @@ class TestOnCompactionHookFired:
     """Tests that CompactionPlugin fires the on_compaction hook after replace_with_summary."""
 
     async def test_on_compaction_hook_fired_after_compaction(self):
-        """compact_conversation must fire pm.ahook.on_compaction after replace_with_summary."""
+        """resolve_compaction must fire pm.ahook.on_compaction after replace_with_summary."""
         from corvidae.compaction import CompactionPlugin
 
         mock_pm = MagicMock()
@@ -143,7 +143,7 @@ class TestOnCompactionHookFired:
         )
         plugin._llm_client = mock_client
 
-        await plugin.compact_conversation(
+        await plugin.resolve_compaction(
             channel=channel, conversation=conv, max_tokens=50
         )
 
@@ -154,7 +154,7 @@ class TestOnCompactionHookFired:
         assert "retain_count" in call_kwargs
 
     async def test_on_compaction_not_fired_when_no_compaction(self):
-        """compact_conversation must NOT fire on_compaction when below threshold."""
+        """resolve_compaction must NOT fire on_compaction when below threshold."""
         from corvidae.compaction import CompactionPlugin
 
         mock_pm = MagicMock()
@@ -169,7 +169,7 @@ class TestOnCompactionHookFired:
         # Small messages — will not trigger compaction
         conv.messages = [{"role": "user", "content": "hi"} for _ in range(5)]
 
-        await plugin.compact_conversation(
+        await plugin.resolve_compaction(
             channel=channel, conversation=conv, max_tokens=10000
         )
 
@@ -327,7 +327,7 @@ class TestDeathSpiralPrevention:
         channel = _make_channel()
 
         with patch.object(plugin, "_summarize", side_effect=capture_summarize):
-            result = await plugin.compact_conversation(
+            result = await plugin.resolve_compaction(
                 channel=channel, conversation=conv, max_tokens=50
             )
 
@@ -371,7 +371,7 @@ class TestDeathSpiralPrevention:
         channel = _make_channel()
 
         with patch.object(plugin, "_summarize", side_effect=capture_summarize):
-            await plugin.compact_conversation(
+            await plugin.resolve_compaction(
                 channel=channel, conversation=conv, max_tokens=50
             )
 
@@ -435,8 +435,8 @@ class TestSummarizeTruncation:
         assert len(sent) == 50
         assert all("messages omitted" not in m.get("content", "") for m in sent)
 
-    def test_compact_conversation_hookimpl_has_no_client_parameter(self):
-        """compact_conversation hookimpl must NOT have a 'client' parameter.
+    def test_resolve_compaction_hookimpl_has_no_client_parameter(self):
+        """resolve_compaction hookimpl must NOT have a 'client' parameter.
 
         After Part 3, client is obtained from LLMPlugin internally, so the
         hook signature drops the 'client' parameter. This test inspects the
@@ -445,12 +445,12 @@ class TestSummarizeTruncation:
         import inspect
         from corvidae.compaction import CompactionPlugin
 
-        method = CompactionPlugin.compact_conversation
+        method = CompactionPlugin.resolve_compaction
         sig = inspect.signature(method)
         param_names = list(sig.parameters.keys())
 
         assert "client" not in param_names, (
-            f"compact_conversation hookimpl must not have a 'client' parameter "
+            f"resolve_compaction hookimpl must not have a 'client' parameter "
             f"after Part 3. Current parameters: {param_names}"
         )
 
@@ -486,7 +486,7 @@ class TestSizingUnifiesAcrossSites:
         return conv
 
     async def test_compaction_succeeds_despite_large_reasoning_content(self):
-        """compact_conversation must trigger and complete without raising
+        """resolve_compaction must trigger and complete without raising
         when content is small but reasoning_content is large, and the
         payload it sends to the LLM must stay within budget.
         """
@@ -509,7 +509,7 @@ class TestSizingUnifiesAcrossSites:
         channel = _make_channel()
 
         max_tokens = 4000
-        result = await plugin.compact_conversation(
+        result = await plugin.resolve_compaction(
             channel=channel, conversation=conv, max_tokens=max_tokens
         )
 

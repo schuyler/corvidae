@@ -247,7 +247,7 @@ class TestMinimalProfile:
             await rt.stop()
 
         # (e) After Runtime.stop() and a fresh Runtime.start() on the same
-        # session_db, load_conversation restores history and the channel
+        # session_db, resolve_conversation restores history and the channel
         # still answers.
         rt2 = Runtime(config_path=config_path)
         await rt2.start()
@@ -276,7 +276,7 @@ class TestMinimalProfile:
             ]
             assert any(
                 c and "hello there" in c for c in reloaded_contents
-            ), "restart must reload prior history via load_conversation"
+            ), "restart must reload prior history via resolve_conversation"
             assert main_channel2.conversation.messages[-1]["role"] == "assistant"
         finally:
             await rt2.stop()

@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 class JsonlLogPlugin(CorvidaePlugin):
     """Plugin that writes conversation events to per-channel JSONL files.
 
-    Implements on_conversation_event and on_compaction hookimpls. Each
+    Implements persist_message and on_compaction hookimpls. Each
     append and compaction summary produces one JSON line in the log file
     for that channel.
 
@@ -56,7 +56,7 @@ class JsonlLogPlugin(CorvidaePlugin):
         logger.info("JSONL log directory: %s", self._log_dir)
 
     @hookimpl
-    async def on_conversation_event(self, channel, message: dict, message_type) -> None:
+    async def persist_message(self, channel, message: dict, message_type) -> None:
         """Write a JSONL record for a conversation message event."""
         if self._log_dir is None:
             return

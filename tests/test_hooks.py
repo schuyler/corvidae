@@ -170,24 +170,24 @@ def test_agentspec_has_should_process_message():
     )
 
 
-def test_agentspec_has_on_llm_error():
-    """on_llm_error hookspec exists on AgentSpec."""
-    assert hasattr(AgentSpec, "on_llm_error"), (
-        "AgentSpec must have an on_llm_error hookspec"
+def test_agentspec_has_resolve_llm_error():
+    """resolve_llm_error hookspec exists on AgentSpec."""
+    assert hasattr(AgentSpec, "resolve_llm_error"), (
+        "AgentSpec must have an resolve_llm_error hookspec"
     )
 
 
-def test_agentspec_has_compact_conversation():
-    """compact_conversation hookspec exists on AgentSpec."""
-    assert hasattr(AgentSpec, "compact_conversation"), (
-        "AgentSpec must have a compact_conversation hookspec"
+def test_agentspec_has_resolve_compaction():
+    """resolve_compaction hookspec exists on AgentSpec."""
+    assert hasattr(AgentSpec, "resolve_compaction"), (
+        "AgentSpec must have a resolve_compaction hookspec"
     )
 
 
-def test_agentspec_has_process_tool_result():
-    """process_tool_result hookspec exists on AgentSpec."""
-    assert hasattr(AgentSpec, "process_tool_result"), (
-        "AgentSpec must have a process_tool_result hookspec"
+def test_agentspec_has_transform_tool_result():
+    """transform_tool_result hookspec exists on AgentSpec."""
+    assert hasattr(AgentSpec, "transform_tool_result"), (
+        "AgentSpec must have a transform_tool_result hookspec"
     )
 
 
@@ -320,7 +320,7 @@ def test_validate_dependencies_does_not_raise_on_valid_dag():
 
 class TestWrapperChainIntegration:
     """Integration tests for wrapper chain semantics on transform_display_text
-    and process_tool_result hooks.
+    and transform_tool_result hooks.
 
     These tests encode the NEW behavior where:
     - Both hookspecs are firstresult=True
@@ -428,26 +428,26 @@ class TestWrapperChainIntegration:
         assert result == "from non-wrapper!"
 
     # ------------------------------------------------------------------
-    # process_tool_result
+    # transform_tool_result
     # ------------------------------------------------------------------
 
-    async def test_process_tool_result_seed_only_returns_input(self):
+    async def test_transform_tool_result_seed_only_returns_input(self):
         """Seed-only (no wrappers): result equals the input result unchanged."""
         pm = create_plugin_manager()
         # No additional plugins registered — only the seed.
 
-        result = await pm.ahook.process_tool_result(
+        result = await pm.ahook.transform_tool_result(
             tool_name="my_tool", result="tool output", channel=None
         )
 
         # firstresult=True returns a single value, not a list.
         assert result == "tool output"
 
-    async def test_process_tool_result_wrapper_transforms_result(self):
-        """A wrapper on process_tool_result transforms the seed's result."""
+    async def test_transform_tool_result_wrapper_transforms_result(self):
+        """A wrapper on transform_tool_result transforms the seed's result."""
         class TagWrapper:
             @hookimpl(wrapper=True)
-            def process_tool_result(self, **kwargs):
+            def transform_tool_result(self, **kwargs):
                 result = yield
                 if result is not None:
                     return f"[processed] {result}"
@@ -456,7 +456,7 @@ class TestWrapperChainIntegration:
         pm = create_plugin_manager()
         pm.register(TagWrapper(), name="tagger")
 
-        result = await pm.ahook.process_tool_result(
+        result = await pm.ahook.transform_tool_result(
             tool_name="my_tool", result="raw output", channel=None
         )
 

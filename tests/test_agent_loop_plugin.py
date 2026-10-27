@@ -764,9 +764,9 @@ class TestOnMessageThinkingTokens:
 
 class TestOnMessageCompactionAndConfig:
     async def test_on_message_compacts_before_agent_turn(self):
-        """compact_conversation hook fires before run_agent_turn.
+        """resolve_compaction hook fires before run_agent_turn.
 
-        Registers a tracking plugin to confirm compact_conversation is called
+        Registers a tracking plugin to confirm resolve_compaction is called
         with the correct client and max_tokens, and that it runs before the LLM.
         """
         from corvidae.hooks import hookimpl
@@ -781,13 +781,13 @@ class TestOnMessageCompactionAndConfig:
         await plugin.on_message(channel=channel, sender="user", text="hi", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
-        # Register a compact_conversation hook that records calls and returns None
+        # Register a resolve_compaction hook that records calls and returns None
         compact_calls = []
         call_order = []
 
         class TrackingCompactPlugin:
             @hookimpl
-            async def compact_conversation(self, conversation, max_tokens):
+            async def resolve_compaction(self, conversation, max_tokens):
                 compact_calls.append((max_tokens,))
                 call_order.append("compact")
                 return None  # defer — no actual compaction needed in this test
@@ -1367,13 +1367,13 @@ class TestShouldProcessMessage:
 
 
 # ---------------------------------------------------------------------------
-# Section 15 — on_llm_error hook (red phase)
+# Section 15 — resolve_llm_error hook (red phase)
 # ---------------------------------------------------------------------------
 
 
-class TestOnLlmError:
+class TestResolveLlmError:
     async def test_hook_returns_string_sent_as_error_message(self):
-        """When on_llm_error returns a string, that string is sent via send_message."""
+        """When resolve_llm_error returns a string, that string is sent via send_message."""
         from corvidae.hooks import hookimpl
 
         plugin, channel, db = await build_plugin_and_channel()
@@ -1384,7 +1384,7 @@ class TestOnLlmError:
 
         class ErrorPlugin:
             @hookimpl
-            async def on_llm_error(self, channel, error):
+            async def resolve_llm_error(self, channel, error):
                 return "Custom error: please try again later."
 
         plugin.pm.register(ErrorPlugin(), name="error_plugin")
@@ -1399,7 +1399,7 @@ class TestOnLlmError:
         await db.close()
 
     async def test_hook_returns_none_uses_default_error_message(self):
-        """When on_llm_error returns None, the default error message is used."""
+        """When resolve_llm_error returns None, the default error message is used."""
         from corvidae.hooks import hookimpl
 
         plugin, channel, db = await build_plugin_and_channel()
@@ -1410,7 +1410,7 @@ class TestOnLlmError:
 
         class NullErrorPlugin:
             @hookimpl
-            async def on_llm_error(self, channel, error):
+            async def resolve_llm_error(self, channel, error):
                 return None
 
         plugin.pm.register(NullErrorPlugin(), name="null_error_plugin")
@@ -1426,7 +1426,7 @@ class TestOnLlmError:
         await db.close()
 
     async def test_no_hook_impl_uses_default_error_message(self):
-        """With no on_llm_error implementation, the default error message is used."""
+        """With no resolve_llm_error implementation, the default error message is used."""
         plugin, channel, db = await build_plugin_and_channel()
 
         mock_client = MagicMock()
@@ -1444,7 +1444,7 @@ class TestOnLlmError:
         await db.close()
 
     async def test_exception_object_passed_to_hook(self):
-        """The exception object is passed to on_llm_error as the 'error' parameter."""
+        """The exception object is passed to resolve_llm_error as the 'error' parameter."""
         from corvidae.hooks import hookimpl
 
         plugin, channel, db = await build_plugin_and_channel()
@@ -1458,7 +1458,7 @@ class TestOnLlmError:
 
         class InspectPlugin:
             @hookimpl
-            async def on_llm_error(self, channel, error):
+            async def resolve_llm_error(self, channel, error):
                 received_error["exc"] = error
                 return "handled"
 
@@ -1474,13 +1474,13 @@ class TestOnLlmError:
 
 
 # ---------------------------------------------------------------------------
-# Section 16 — compact_conversation hook (red phase)
+# Section 16 — resolve_compaction hook (red phase)
 # ---------------------------------------------------------------------------
 
 
-class TestCompactConversation:
+class TestResolveCompaction:
     async def test_custom_plugin_returning_true_short_circuits(self):
-        """A custom compact_conversation plugin that returns True is invoked
+        """A custom resolve_compaction plugin that returns True is invoked
         and the agent turn still runs. The hook call completes normally."""
         from corvidae.hooks import hookimpl
         from corvidae.turn import AgentTurnResult
@@ -1499,7 +1499,7 @@ class TestCompactConversation:
 
         class CompactPlugin:
             @hookimpl
-            async def compact_conversation(self, conversation, max_tokens):
+            async def resolve_compaction(self, conversation, max_tokens):
                 compact_called.append(True)
                 return True  # handled
 
@@ -1517,13 +1517,13 @@ class TestCompactConversation:
             await drain(plugin, channel)
 
         # Custom plugin was called and agent turn ran without error.
-        assert compact_called, "CompactPlugin.compact_conversation must have been called"
+        assert compact_called, "CompactPlugin.resolve_compaction must have been called"
         plugin.pm.ahook.send_message.assert_called()
 
         await db.close()
 
     async def test_no_compaction_plugin_agent_turn_still_runs(self):
-        """When no compact_conversation impl returns a non-None result,
+        """When no resolve_compaction impl returns a non-None result,
         the agent loop continues normally without error."""
         from corvidae.hooks import hookimpl
         from corvidae.turn import AgentTurnResult
@@ -1537,7 +1537,7 @@ class TestCompactConversation:
         # Register a plugin that returns None (defers)
         class DeferPlugin:
             @hookimpl
-            async def compact_conversation(self, conversation, max_tokens):
+            async def resolve_compaction(self, conversation, max_tokens):
                 return None
 
         plugin.pm.register(DeferPlugin(), name="defer_plugin")
@@ -1559,7 +1559,7 @@ class TestCompactConversation:
         await db.close()
 
     async def test_hook_exception_caught_and_logged(self, caplog):
-        """An exception in compact_conversation is caught and logged as WARNING.
+        """An exception in resolve_compaction is caught and logged as WARNING.
         The agent turn still runs after the compaction block fails."""
         import logging
         from corvidae.hooks import hookimpl
@@ -1577,7 +1577,7 @@ class TestCompactConversation:
 
         class ExplodingPlugin:
             @hookimpl
-            async def compact_conversation(self, conversation, max_tokens):
+            async def resolve_compaction(self, conversation, max_tokens):
                 raise RuntimeError("compaction plugin exploded")
 
         plugin.pm.register(ExplodingPlugin(), name="exploding_plugin")
@@ -1607,7 +1607,7 @@ class TestCompactConversation:
         await db.close()
 
     async def test_compaction_hook_receives_correct_args(self):
-        """compact_conversation is called with conversation and max_tokens
+        """resolve_compaction is called with conversation and max_tokens
         matching the channel's resolved config."""
         from corvidae.hooks import hookimpl
         from corvidae.turn import AgentTurnResult
@@ -1626,7 +1626,7 @@ class TestCompactConversation:
 
         class CapturingPlugin:
             @hookimpl
-            async def compact_conversation(self, conversation, max_tokens):
+            async def resolve_compaction(self, conversation, max_tokens):
                 captured["conversation"] = conversation
                 captured["max_tokens"] = max_tokens
                 return None
@@ -1651,13 +1651,13 @@ class TestCompactConversation:
 
 
 # ---------------------------------------------------------------------------
-# Section 17 — process_tool_result hook (red phase)
+# Section 17 — transform_tool_result hook (red phase)
 # ---------------------------------------------------------------------------
 
 
-class TestProcessToolResult:
+class TestTransformToolResult:
     async def test_hook_returns_string_replaces_tool_result(self):
-        """When process_tool_result returns a string, that string replaces the
+        """When transform_tool_result returns a string, that string replaces the
         original tool result in the conversation."""
         from corvidae.hooks import hookimpl
         from corvidae.tools.subagent import run_agent_loop
@@ -1677,7 +1677,7 @@ class TestProcessToolResult:
 
         class TransformPlugin:
             @hookimpl
-            async def process_tool_result(self, tool_name, result, channel):
+            async def transform_tool_result(self, tool_name, result, channel):
                 return "transformed: " + result
 
         pm.register(TransformPlugin(), name="transform")
@@ -1696,7 +1696,7 @@ class TestProcessToolResult:
         assert tool_messages[0]["content"] == "transformed: original tool output"
 
     async def test_hook_returns_none_keeps_original_result(self):
-        """When process_tool_result returns None, the original tool result is kept."""
+        """When transform_tool_result returns None, the original tool result is kept."""
         from corvidae.tools.subagent import run_agent_loop
         from corvidae.hooks import hookimpl
 
@@ -1715,7 +1715,7 @@ class TestProcessToolResult:
 
         class PassthroughPlugin:
             @hookimpl
-            async def process_tool_result(self, tool_name, result, channel):
+            async def transform_tool_result(self, tool_name, result, channel):
                 return None
 
         pm.register(PassthroughPlugin(), name="passthrough")
@@ -1734,7 +1734,7 @@ class TestProcessToolResult:
         assert tool_messages[0]["content"] == "original output"
 
     async def test_pm_no_impls_keeps_original_result(self):
-        """When pm is provided but has no process_tool_result implementations,
+        """When pm is provided but has no transform_tool_result implementations,
         the original tool result is kept.
 
         This tests the 'no impl, fallback to default' path which requires BOTH
@@ -1753,7 +1753,7 @@ class TestProcessToolResult:
             ]
         )
 
-        # A real pm with no process_tool_result impls registered
+        # A real pm with no transform_tool_result impls registered
         pm = create_plugin_manager()
 
         messages = [{"role": "user", "content": "go"}]
@@ -1770,7 +1770,7 @@ class TestProcessToolResult:
         assert tool_messages[0]["content"] == "original result"
 
     async def test_hook_receives_correct_tool_name_and_result(self):
-        """process_tool_result receives the correct tool_name and result args."""
+        """transform_tool_result receives the correct tool_name and result args."""
         from corvidae.tools.subagent import run_agent_loop
         from corvidae.hooks import hookimpl
 
@@ -1790,7 +1790,7 @@ class TestProcessToolResult:
 
         class InspectPlugin:
             @hookimpl
-            async def process_tool_result(self, tool_name, result, channel):
+            async def transform_tool_result(self, tool_name, result, channel):
                 received["tool_name"] = tool_name
                 received["result"] = result
                 return None

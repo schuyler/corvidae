@@ -834,7 +834,7 @@ class TestCompactionFailureResilience:
     ):
         """A compaction failure does not prevent run_agent_turn or send_message.
 
-        Registers a plugin whose compact_conversation hookimpl raises RuntimeError,
+        Registers a plugin whose resolve_compaction hookimpl raises RuntimeError,
         simulating a plugin crash. The agent's try/except must catch it, log a
         WARNING, and continue.
         """
@@ -856,7 +856,7 @@ class TestCompactionFailureResilience:
 
         class CrashingCompactionPlugin:
             @hookimpl
-            async def compact_conversation(self, conversation, max_tokens):
+            async def resolve_compaction(self, conversation, max_tokens):
                 raise RuntimeError("compaction boom")
 
         plugin.pm.register(CrashingCompactionPlugin(), name="crashing_compaction")

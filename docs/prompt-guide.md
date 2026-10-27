@@ -122,7 +122,7 @@ class MemoryPlugin(CorvidaePlugin):
 
 `CONTEXT` entries survive compaction — `CompactionPlugin` only summarizes `MESSAGE` entries.
 
-Each message injected during `before_agent_turn` is individually persisted by `Agent` via `on_conversation_event`, in a loop that runs after the hook completes (agent.py:633–650).
+Each message injected during `before_agent_turn` is individually persisted by `Agent` via `persist_message`, in a loop that runs after the hook completes (agent.py:741–758).
 
 ### Avoiding duplicate injections
 
@@ -144,14 +144,14 @@ After the LLM responds, two steps affect what `build_prompt()` returns on the **
 
 The full sequence for processing a queue item (`agent.py:_process_queue_item`):
 
-1. **Lazy-init conversation** — on first message, resolve config, call `resolve_system_prompt()`, restore persisted history via the `load_conversation` hook (the return value is assigned directly to `conv.messages`).
+1. **Lazy-init conversation** — on first message, resolve config, call `resolve_system_prompt()`, restore persisted history via the `resolve_conversation` hook (the return value is assigned directly to `conv.messages`).
 2. **Append user message** — add to `conv.messages` as `MessageType.MESSAGE`.
-3. **Persist** — fire `on_conversation_event` hook for the user message.
-4. **Compact if needed** — fire `compact_conversation` hook. `CompactionPlugin` summarizes old messages if the token budget is near full (runs `trylast=True`, returns `True` to stop the chain).
-5. **Inject context** — fire `before_agent_turn` hook; plugins append `CONTEXT` entries. Each injected entry is then individually persisted via `on_conversation_event`.
+3. **Persist** — fire `persist_message` hook for the user message.
+4. **Compact if needed** — fire `resolve_compaction` hook. `CompactionPlugin` summarizes old messages if the token budget is near full (runs `trylast=True`, returns `True` to stop the chain).
+5. **Inject context** — fire `before_agent_turn` hook; plugins append `CONTEXT` entries. Each injected entry is then individually persisted via `persist_message`.
 6. **Build prompt** — call `conv.build_prompt()` to produce the final message list.
 7. **Call LLM** — send `[system, ...history, ...injected context]` plus tool schemas.
-8. **Append assistant response** — add to `conv.messages`, fire `on_conversation_event`.
+8. **Append assistant response** — add to `conv.messages`, fire `persist_message`.
 9. **Post-process in-memory message** — fire `after_persist_assistant`; `ThinkingPlugin` may strip `reasoning_content` from the in-memory dict.
 10. **Dispatch** — handle tool calls (re-enters the pipeline) or send text response to the channel.
 
@@ -194,17 +194,17 @@ Retrieval quality depends on `llm.embedding.document_prefix` and `llm.embedding.
 
 | Component | File | What it does |
 |-----------|------|--------------|
-| `resolve_system_prompt()` | `corvidae/channel.py:216` | Reads file list or returns literal string |
-| `ChannelConfig.resolve()` | `corvidae/channel.py:40` | Merges agent defaults, channel overrides, runtime overrides |
-| `ContextWindow` | `corvidae/context.py:63` | Holds messages and system prompt in memory |
-| `ContextWindow.build_prompt()` | `corvidae/context.py:118` | Assembles final message list for LLM |
-| `count_tokens()` | `corvidae/context.py:32` | Tiktoken-based token count (cl100k_base); char-based fallback |
-| `ContextWindow.token_estimate()` | `corvidae/context.py:131` | Token count for all messages; delegates to `count_tokens()` |
-| `ContextWindow.remove_by_type()` | `corvidae/context.py:146` | Clears in-memory entries of a given type |
-| Lazy initialization | `corvidae/agent.py:538` | First-message conversation setup |
-| `before_agent_turn` hook | `corvidae/agent.py:626` | Context injection point |
-| `compact_conversation` hook | `corvidae/agent.py:614` | Compaction trigger |
-| `after_persist_assistant` hook | `corvidae/agent.py:695` | Post-LLM in-memory message post-processing |
+| `resolve_system_prompt()` | `corvidae/channel.py:303` | Reads file list or returns literal string |
+| `ChannelConfig.resolve()` | `corvidae/channel.py:115` | Merges agent defaults, channel overrides, runtime overrides |
+| `ContextWindow` | `corvidae/context.py:83` | Holds messages and system prompt in memory |
+| `ContextWindow.build_prompt()` | `corvidae/context.py:139` | Assembles final message list for LLM |
+| `count_tokens()` | `corvidae/context.py:33` | Tiktoken-based token count (cl100k_base); char-based fallback |
+| `ContextWindow.token_estimate()` | `corvidae/context.py:230` | Token count for all messages; delegates to `count_tokens()` |
+| `ContextWindow.remove_by_type()` | `corvidae/context.py:242` | Clears in-memory entries of a given type |
+| Lazy initialization | `corvidae/agent.py:636` | First-message conversation setup |
+| `before_agent_turn` hook | `corvidae/agent.py:734` | Context injection point |
+| `resolve_compaction` hook | `corvidae/agent.py:722` | Compaction trigger |
+| `after_persist_assistant` hook | `corvidae/agent.py:800` | Post-LLM in-memory message post-processing |
 | `ThinkingPlugin` | `corvidae/thinking.py` | Strips `reasoning_content` from in-memory history |
 
 For full configuration details, see [configuration.md](configuration.md).

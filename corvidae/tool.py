@@ -269,9 +269,9 @@ async def dispatch_tool_call(
 
     Handles the full lifecycle of a tool call: JSON parsing, unknown-tool
     detection, invocation via execute_tool_call, error wrapping, logging,
-    and firing the process_tool_result hook.
+    and firing the transform_tool_result hook.
 
-    The process_tool_result hook fires ONLY when execute_tool_call was
+    The transform_tool_result hook fires ONLY when execute_tool_call was
     invoked (success or exception). Pre-dispatch errors (JSON parse failure,
     unknown tool) return early and skip the hook.
 
@@ -281,7 +281,7 @@ async def dispatch_tool_call(
         channel: Channel for ToolContext injection. None when unavailable.
         task_queue: TaskQueue for ToolContext injection. None when unavailable.
         max_result_chars: Maximum length of tool result strings before truncation.
-        pm: pluggy PluginManager for firing process_tool_result. None to skip.
+        pm: pluggy PluginManager for firing transform_tool_result. None to skip.
 
     Returns:
         ToolCallResult with the content, error flag, and timing information.
@@ -376,9 +376,9 @@ async def dispatch_tool_call(
         content = f"Error: tool '{fn_name}' failed"
         error = True
 
-    # Step 5: Fire process_tool_result hook (only when the tool was invoked)
+    # Step 5: Fire transform_tool_result hook (only when the tool was invoked)
     if pm is not None:
-        hook_result = await pm.ahook.process_tool_result(
+        hook_result = await pm.ahook.transform_tool_result(
             tool_name=fn_name, result=content, channel=channel,
         )
         if hook_result is not None:

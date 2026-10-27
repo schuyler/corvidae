@@ -417,10 +417,10 @@ class Agent(CorvidaePlugin):
             # The error hook is optional policy: if it raises, fall back to the
             # default message rather than leaving the user with silence.
             try:
-                error_msg = await self.pm.ahook.on_llm_error(channel=channel, error=exc)
+                error_msg = await self.pm.ahook.resolve_llm_error(channel=channel, error=exc)
             except Exception:
                 logger.warning(
-                    "on_llm_error hook failed",
+                    "resolve_llm_error hook failed",
                     exc_info=True,
                     extra={"channel": channel.id},
                 )
@@ -642,7 +642,7 @@ class Agent(CorvidaePlugin):
             if base_dir is None:
                 base_dir = Path(".")
             conv.system_prompt = resolve_system_prompt(resolved_cfg["system_prompt"], base_dir)
-            history = await self.pm.ahook.load_conversation(channel=channel)
+            history = await self.pm.ahook.resolve_conversation(channel=channel)
             if history:
                 conv.messages = history
             channel.conversation = conv
@@ -671,16 +671,16 @@ class Agent(CorvidaePlugin):
         conv.append(conversation_message)
         rowid = None
         try:
-            results = await self.pm.ahook.on_conversation_event(
+            results = await self.pm.ahook.persist_message(
                 channel=channel,
                 message=conversation_message,
                 message_type=MessageType.MESSAGE,
             )
-            rowid = resolve_single_result(results, "on_conversation_event")
+            rowid = resolve_single_result(results, "persist_message")
             if rowid is not None:
                 conv.messages[-1]["_db_id"] = rowid
         except Exception:
-            logger.warning("on_conversation_event hook failed", exc_info=True)
+            logger.warning("persist_message hook failed", exc_info=True)
         _phases["persist"] = _time.monotonic() - _t_persist_start
 
         # 4c. Fire on_message_persisted only when this item originates its
@@ -719,7 +719,7 @@ class Agent(CorvidaePlugin):
         # 5. Compact if approaching context limit
         _t_compact_start = _time.monotonic()
         try:
-            await self.pm.ahook.compact_conversation(
+            await self.pm.ahook.resolve_compaction(
                 channel=channel, conversation=conv,
                 max_tokens=resolved["max_context_tokens"],
             )
@@ -738,7 +738,7 @@ class Agent(CorvidaePlugin):
             logger.warning(
                 "before_agent_turn hook failed, skipping", exc_info=True
             )
-        # Fire on_conversation_event for any messages injected by
+        # Fire persist_message for any messages injected by
         # before_agent_turn. Messages already carrying a _db_id were
         # persisted by their producer — firing again would double-store
         # them.
@@ -748,14 +748,14 @@ class Agent(CorvidaePlugin):
             mt = msg.get("_message_type", MessageType.MESSAGE)
             clean = {k: v for k, v in msg.items() if not k.startswith("_")}
             try:
-                results = await self.pm.ahook.on_conversation_event(
+                results = await self.pm.ahook.persist_message(
                     channel=channel, message=clean, message_type=mt,
                 )
-                rowid = resolve_single_result(results, "on_conversation_event")
+                rowid = resolve_single_result(results, "persist_message")
                 if rowid is not None:
                     msg["_db_id"] = rowid
             except Exception:
-                logger.warning("on_conversation_event hook failed", exc_info=True)
+                logger.warning("persist_message hook failed", exc_info=True)
         _phases["before_turn"] = _time.monotonic() - _t_before_turn_start
 
         # 7. Build prompt and call run_agent_turn (single LLM invocation)
@@ -776,16 +776,16 @@ class Agent(CorvidaePlugin):
         # the resolved rowid to the window copy (same rule as step 4).
         conv.append(result.message)
         try:
-            results = await self.pm.ahook.on_conversation_event(
+            results = await self.pm.ahook.persist_message(
                 channel=channel,
                 message=result.message,
                 message_type=MessageType.MESSAGE,
             )
-            rowid = resolve_single_result(results, "on_conversation_event")
+            rowid = resolve_single_result(results, "persist_message")
             if rowid is not None:
                 conv.messages[-1]["_db_id"] = rowid
         except Exception:
-            logger.warning("on_conversation_event hook failed", exc_info=True)
+            logger.warning("persist_message hook failed", exc_info=True)
 
         # 8b. Fire send_thinking if the LLM produced reasoning_content
         reasoning_text = result.message.get("reasoning_content")
@@ -946,7 +946,7 @@ class Agent(CorvidaePlugin):
 
         Each task's work closure calls dispatch_tool_call(), which handles
         JSON parsing, unknown-tool detection, invocation, error wrapping,
-        logging, and the process_tool_result hook. Returns the result
+        logging, and the transform_tool_result hook. Returns the result
         string; the TaskPlugin delivers it via on_notify.
 
         Logs an error and delivers an error tool result directly (via

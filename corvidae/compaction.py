@@ -1,7 +1,7 @@
 """CompactionPlugin — token-budget conversation compaction.
 
 Extracts compaction logic from ContextWindow into a standalone plugin that
-implements the compact_conversation hookspec. Registers in main.py before
+implements the resolve_compaction hookspec. Registers in main.py before
 Agent so it runs as the default compaction strategy.
 
 Algorithm:
@@ -168,7 +168,7 @@ class CompactionPlugin(CorvidaePlugin):
         logger.info("on_config_reload: compaction thresholds updated")
 
     @hookimpl(trylast=True)
-    async def compact_conversation(self, channel, conversation, max_tokens):
+    async def resolve_compaction(self, channel, conversation, max_tokens):
         """Compact the conversation if it exceeds 80% of max_tokens.
 
         Returns True if compaction was performed, None otherwise.

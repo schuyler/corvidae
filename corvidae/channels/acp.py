@@ -299,7 +299,7 @@ class CorvidaeAcpAgent:
         channel = registry.get_or_create("acp", session_id)
         channel.runtime_overrides["cwd"] = cwd
 
-        history = await self._plugin.pm.ahook.load_conversation(channel=channel)
+        history = await self._plugin.pm.ahook.resolve_conversation(channel=channel)
         if history is None and not existed:
             # Brand-new id with no DB rows is not a loadable session — drop the
             # empty registry entry so a later call does not treat it as live.

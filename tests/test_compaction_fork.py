@@ -85,7 +85,7 @@ async def _compact(conv, agent=None, summary="sum", max_tokens=MAX_TOKENS):
     channel = MagicMock()
     channel.id = "test:scope"
     with patch.object(plugin, "_summarize", summarize):
-        result = await plugin.compact_conversation(channel=channel, conversation=conv, max_tokens=max_tokens)
+        result = await plugin.resolve_compaction(channel=channel, conversation=conv, max_tokens=max_tokens)
     return result, order, summarize
 
 
@@ -175,7 +175,7 @@ async def test_large_system_prompt_does_not_stall_compaction():
             conv.messages.append(_msg("user" if step % 2 else "assistant", "word " * 60, step))
         before, count = conv.token_estimate(), len(conv.messages)
         with patch.object(plugin, "_summarize", AsyncMock(return_value="s " * 600)):
-            if await plugin.compact_conversation(channel=channel, conversation=conv, max_tokens=8192):
+            if await plugin.resolve_compaction(channel=channel, conversation=conv, max_tokens=8192):
                 rounds.append((count - len(conv.messages) + 1, before / 8192))
     assert rounds
     assert all(dropped > 2 for dropped, _ in rounds)
@@ -235,7 +235,7 @@ async def test_fork_miss_falls_back_to_standalone(agent):
     channel = MagicMock()
     channel.id = "test:scope"
     with patch.object(plugin, "_summarize", side_effect=summarize):
-        assert await plugin.compact_conversation(channel=channel, conversation=conv, max_tokens=MAX_TOKENS)
+        assert await plugin.resolve_compaction(channel=channel, conversation=conv, max_tokens=MAX_TOKENS)
     assert conv.messages[0]["content"].endswith("standalone summary")
     assert (seen["stage"], seen["mode"]) == ("compaction", "standalone")
 
@@ -255,7 +255,7 @@ async def test_fork_through_real_agent_is_prefix_of_main_render():
 
         plugin = CompactionPlugin(pm=agent.pm)
         await plugin.on_init(agent.pm, {"agent": {"compaction_fork_prompt": "Sum it up."}})
-        assert await plugin.compact_conversation(channel=channel, conversation=conv, max_tokens=MAX_TOKENS)
+        assert await plugin.resolve_compaction(channel=channel, conversation=conv, max_tokens=MAX_TOKENS)
         assert client.chat.call_args.args[0] == full[:7] + [{"role": "user", "content": "Sum it up."}]
         assert conv.messages[0]["content"].endswith("real fork")
     finally:

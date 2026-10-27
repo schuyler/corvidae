@@ -1,6 +1,6 @@
 """Tests for corvidae.jsonl_log.JsonlLogPlugin — hook-based dispatch.
 
-JsonlLogPlugin implements on_conversation_event and on_compaction as peer
+JsonlLogPlugin implements persist_message and on_compaction as peer
 persistence hooks, writing JSONL logs alongside SQLite persistence.
 """
 
@@ -43,8 +43,8 @@ class TestJsonlPluginNoOp:
 
         channel = _make_channel("cli:default")
 
-        # on_conversation_event must not raise when plugin is disabled
-        await plugin.on_conversation_event(
+        # persist_message must not raise when plugin is disabled
+        await plugin.persist_message(
             channel=channel,
             message={"role": "user", "content": "hi"},
             message_type=MessageType.MESSAGE,
@@ -100,18 +100,18 @@ class TestJsonlPluginCreatesDirectory:
 
 
 # ---------------------------------------------------------------------------
-# TestOnConversationEvent
+# TestPersistMessage
 # ---------------------------------------------------------------------------
 
 
-class TestOnConversationEvent:
-    """Tests for JsonlLogPlugin.on_conversation_event hookimpl.
+class TestPersistMessage:
+    """Tests for JsonlLogPlugin.persist_message hookimpl.
 
-    RED phase: fails because on_conversation_event does not exist yet.
+    RED phase: fails because persist_message does not exist yet.
     """
 
-    async def test_on_conversation_event_writes_jsonl_record(self, tmp_path):
-        """on_conversation_event writes a JSONL record to the channel's log file."""
+    async def test_persist_message_writes_jsonl_record(self, tmp_path):
+        """persist_message writes a JSONL record to the channel's log file."""
         from corvidae.jsonl_log import JsonlLogPlugin
         from corvidae.context import MessageType
 
@@ -125,7 +125,7 @@ class TestOnConversationEvent:
         msg = {"role": "user", "content": "hello"}
 
         before = time.time()
-        await plugin.on_conversation_event(
+        await plugin.persist_message(
             channel=channel, message=msg, message_type=MessageType.MESSAGE
         )
         after = time.time()
@@ -142,8 +142,8 @@ class TestOnConversationEvent:
         assert record["type"] == "message"
         assert record["message"] == msg
 
-    async def test_on_conversation_event_context_type(self, tmp_path):
-        """on_conversation_event with CONTEXT type writes type='context' in record."""
+    async def test_persist_message_context_type(self, tmp_path):
+        """persist_message with CONTEXT type writes type='context' in record."""
         from corvidae.jsonl_log import JsonlLogPlugin
         from corvidae.context import MessageType
 
@@ -155,7 +155,7 @@ class TestOnConversationEvent:
 
         channel = _make_channel("cli:default")
 
-        await plugin.on_conversation_event(
+        await plugin.persist_message(
             channel=channel,
             message={"role": "system", "content": "ctx"},
             message_type=MessageType.CONTEXT,
@@ -165,8 +165,8 @@ class TestOnConversationEvent:
         record = json.loads(log_file.read_text().strip())
         assert record["type"] == "context"
 
-    async def test_on_conversation_event_multiple_messages(self, tmp_path):
-        """Multiple on_conversation_event calls append lines in order."""
+    async def test_persist_message_multiple_messages(self, tmp_path):
+        """Multiple persist_message calls append lines in order."""
         from corvidae.jsonl_log import JsonlLogPlugin
         from corvidae.context import MessageType
 
@@ -184,7 +184,7 @@ class TestOnConversationEvent:
         ]
 
         for msg in messages:
-            await plugin.on_conversation_event(
+            await plugin.persist_message(
                 channel=channel, message=msg, message_type=MessageType.MESSAGE
             )
 
@@ -196,8 +196,8 @@ class TestOnConversationEvent:
             record = json.loads(line)
             assert record["message"]["content"] == messages[i]["content"]
 
-    async def test_on_conversation_event_noop_when_disabled(self, tmp_path):
-        """on_conversation_event must be a no-op when log_dir is not configured."""
+    async def test_persist_message_noop_when_disabled(self, tmp_path):
+        """persist_message must be a no-op when log_dir is not configured."""
         from corvidae.jsonl_log import JsonlLogPlugin
         from corvidae.context import MessageType
 
@@ -208,7 +208,7 @@ class TestOnConversationEvent:
 
         channel = _make_channel("cli:default")
         # Must not raise
-        await plugin.on_conversation_event(
+        await plugin.persist_message(
             channel=channel,
             message={"role": "user", "content": "hi"},
             message_type=MessageType.MESSAGE,
@@ -217,8 +217,8 @@ class TestOnConversationEvent:
         # No files should have been created
         assert not list(tmp_path.glob("**/*.jsonl"))
 
-    async def test_on_conversation_event_strips_message_type_tag(self, tmp_path):
-        """on_conversation_event must not write _message_type into the JSONL record's message."""
+    async def test_persist_message_strips_message_type_tag(self, tmp_path):
+        """persist_message must not write _message_type into the JSONL record's message."""
         from corvidae.jsonl_log import JsonlLogPlugin
         from corvidae.context import MessageType
 
@@ -232,7 +232,7 @@ class TestOnConversationEvent:
         # Pass a message that has _message_type already tagged (shouldn't appear in output)
         msg = {"role": "user", "content": "hello", "_message_type": MessageType.MESSAGE}
 
-        await plugin.on_conversation_event(
+        await plugin.persist_message(
             channel=channel, message=msg, message_type=MessageType.MESSAGE
         )
 
@@ -326,7 +326,7 @@ class TestJsonlPluginSanitizesChannelId:
         await plugin.on_start(config=config)
 
         channel = _make_channel("cli:default")
-        await plugin.on_conversation_event(
+        await plugin.persist_message(
             channel=channel,
             message={"role": "user", "content": "test"},
             message_type=MessageType.MESSAGE,
@@ -347,7 +347,7 @@ class TestJsonlPluginSanitizesChannelId:
         await plugin.on_start(config=config)
 
         channel = _make_channel("irc:#general/topic")
-        await plugin.on_conversation_event(
+        await plugin.persist_message(
             channel=channel,
             message={"role": "user", "content": "hi"},
             message_type=MessageType.MESSAGE,
@@ -377,7 +377,7 @@ class TestJsonlPluginStop:
         await plugin.on_start(config=config)
 
         channel = _make_channel("cli:default")
-        await plugin.on_conversation_event(
+        await plugin.persist_message(
             channel=channel,
             message={"role": "user", "content": "before stop"},
             message_type=MessageType.MESSAGE,
@@ -414,7 +414,7 @@ class TestJsonlPluginValidJson:
             {"role": "user", "content": "third"},
         ]
         for msg in messages:
-            await plugin.on_conversation_event(
+            await plugin.persist_message(
                 channel=channel, message=msg, message_type=MessageType.MESSAGE
             )
 
@@ -440,7 +440,7 @@ class TestJsonlPluginValidJson:
         await plugin.on_start(config=config)
 
         channel = _make_channel("cli:default")
-        await plugin.on_conversation_event(
+        await plugin.persist_message(
             channel=channel,
             message={"role": "user", "content": "check fields"},
             message_type=MessageType.MESSAGE,
@@ -479,7 +479,7 @@ class TestWriteFailure:
         monkeypatch.setattr("builtins.open", denied)
 
         with caplog.at_level(logging.WARNING, logger="corvidae.jsonl_log"):
-            await plugin.on_conversation_event(
+            await plugin.persist_message(
                 channel=channel,
                 message={"role": "user", "content": "hi"},
                 message_type=MessageType.MESSAGE,

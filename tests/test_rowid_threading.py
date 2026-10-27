@@ -1,11 +1,11 @@
 """Tests for rowid threading (Phase 1a WP1a.2, bootstrap-mapping §4.8).
 
 Window messages carry their message_log rowid as an internal ``_db_id`` tag:
-- PersistencePlugin.on_conversation_event returns the inserted rowid.
+- PersistencePlugin.persist_message returns the inserted rowid.
 - The agent resolves the broadcast results and attaches the rowid to the
   in-window copy of the message.
 - Every serialization boundary strips all ``_``-prefixed keys.
-- load_conversation re-attaches ids on reload.
+- resolve_conversation re-attaches ids on reload.
 - Compaction fires on_compaction with the ids of exactly the compacted
   messages.
 """
@@ -65,11 +65,11 @@ class TestRowidAttachment:
             assert json.loads(row[0])["content"] == tagged["content"]
 
     async def test_persistence_returns_rowid(self, db):
-        """on_conversation_event returns the inserted message_log rowid."""
+        """persist_message returns the inserted message_log rowid."""
         persistence = PersistencePlugin()
         persistence.db = db
         channel = Channel(transport="test", scope="rowid")
-        rowid = await persistence.on_conversation_event(
+        rowid = await persistence.persist_message(
             channel=channel,
             message={"role": "user", "content": "x"},
             message_type=MessageType.MESSAGE,
@@ -109,7 +109,7 @@ class TestUnderscoreStrips:
             "_message_type": MessageType.MESSAGE,
             "_db_id": 7,
         }
-        rowid = await persistence.on_conversation_event(
+        rowid = await persistence.persist_message(
             channel=channel, message=message, message_type=MessageType.MESSAGE
         )
         async with db.execute(
@@ -137,8 +137,8 @@ class TestUnderscoreStrips:
 
 
 class TestReloadReattachesIds:
-    async def test_load_conversation_returns_db_ids(self, db):
-        """load_conversation re-attaches the id column as _db_id."""
+    async def test_resolve_conversation_returns_db_ids(self, db):
+        """resolve_conversation re-attaches the id column as _db_id."""
         persistence = PersistencePlugin()
         persistence.db = db
         channel = Channel(transport="test", scope="reload")
@@ -146,23 +146,23 @@ class TestReloadReattachesIds:
         rowids = []
         for content in ("one", "two"):
             rowids.append(
-                await persistence.on_conversation_event(
+                await persistence.persist_message(
                     channel=channel,
                     message={"role": "user", "content": content},
                     message_type=MessageType.MESSAGE,
                 )
             )
 
-        loaded = await persistence.load_conversation(channel=channel)
+        loaded = await persistence.resolve_conversation(channel=channel)
         assert [m["_db_id"] for m in loaded] == rowids
 
-    async def test_load_conversation_after_summary_carries_ids(self, db):
+    async def test_resolve_conversation_after_summary_carries_ids(self, db):
         """The post-summary reload path also re-attaches ids."""
         persistence = PersistencePlugin()
         persistence.db = db
         channel = Channel(transport="test", scope="reload2")
 
-        await persistence.on_conversation_event(
+        await persistence.persist_message(
             channel=channel,
             message={"role": "user", "content": "old"},
             message_type=MessageType.MESSAGE,
@@ -173,13 +173,13 @@ class TestReloadReattachesIds:
             retain_count=1,
             compacted_ids=[],
         )
-        recent_id = await persistence.on_conversation_event(
+        recent_id = await persistence.persist_message(
             channel=channel,
             message={"role": "user", "content": "recent"},
             message_type=MessageType.MESSAGE,
         )
 
-        loaded = await persistence.load_conversation(channel=channel)
+        loaded = await persistence.resolve_conversation(channel=channel)
         # Summary first, then the retained messages, all carrying _db_id.
         assert all(isinstance(m.get("_db_id"), int) for m in loaded)
         assert loaded[-1]["_db_id"] == recent_id
@@ -203,7 +203,7 @@ class TestCompactionCarriesCompactedIds:
             conv.append({"role": "user", "content": f"message number {i} " * 10})
             conv.messages[-1]["_db_id"] = 100 + i
 
-        result = await plugin.compact_conversation(channel, conv, max_tokens=10)
+        result = await plugin.resolve_compaction(channel, conv, max_tokens=10)
         assert result is True
 
         call_kwargs = plugin.pm.ahook.on_compaction.call_args.kwargs
@@ -233,7 +233,7 @@ class TestCompactionCarriesCompactedIds:
             conv.append({"role": "user", "content": f"message number {i} " * 10})
             conv.messages[-1]["_db_id"] = 200 + i
 
-        await plugin.compact_conversation(channel, conv, max_tokens=10)
+        await plugin.resolve_compaction(channel, conv, max_tokens=10)
         assert seen, "summarizer was not called"
         for msg in seen[0]:
             assert not any(k.startswith("_") for k in msg)

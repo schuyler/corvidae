@@ -94,7 +94,7 @@ async def test_recall_across_restart_and_channel_compartments(tmp_path):
         ("assistant", "try a silicone-based lubricant on the track"),
         ("user", "that worked, thanks!"),
     ]:
-        rowids.append(await persistence.on_conversation_event(
+        rowids.append(await persistence.persist_message(
             channel=channel,
             message={"role": role, "content": content},
             message_type=MessageType.MESSAGE,

@@ -156,7 +156,7 @@ def test_filler_corpus_crosses_the_compact_threshold_with_margin():
 # ---------------------------------------------------------------------------
 # C: compaction verdict — the probe must not be able to pass when compaction
 # did not mechanically fire. has_summary_row_since and compaction_calls_since
-# are two orthogonal observers of one compact_conversation call; a summary
+# are two orthogonal observers of one resolve_compaction call; a summary
 # row with no compaction-stage usage_log row means the persistence hook wrote
 # without a real call behind it, and that must not pass.
 # ---------------------------------------------------------------------------

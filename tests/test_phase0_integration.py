@@ -129,7 +129,7 @@ class TestPhase0Acceptance:
                 conv.append({"role": "user", "content": f"message {i} " + "x " * 40})
             channel.conversation = conv
 
-            result = await compaction.compact_conversation(
+            result = await compaction.resolve_compaction(
                 channel=channel, conversation=conv, max_tokens=120
             )
             assert result is True

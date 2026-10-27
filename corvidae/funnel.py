@@ -28,7 +28,7 @@ Behavior, in order:
      framing with a source label (injection defense — everything the
      funnel admits is data that arrived, not instructions).
   4. Append + persist: one CONTEXT message at the tail, persisted through
-     on_conversation_event with the rowid attached — CONTEXT must persist
+     persist_message with the rowid attached — CONTEXT must persist
      or the window diverges from its reload.
 
 Config:
@@ -299,10 +299,10 @@ class FunnelPlugin(CorvidaePlugin):
         message = {"role": "system", "content": framed}
         conv.append(message, MessageType.CONTEXT)
         try:
-            results = await self.pm.ahook.on_conversation_event(
+            results = await self.pm.ahook.persist_message(
                 channel=channel, message=message, message_type=MessageType.CONTEXT,
             )
-            rowid = resolve_single_result(results, "on_conversation_event")
+            rowid = resolve_single_result(results, "persist_message")
             if rowid is not None:
                 conv.messages[-1]["_db_id"] = rowid
         except Exception:

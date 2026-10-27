@@ -248,7 +248,7 @@ class LLMPlugin(CorvidaePlugin):
             asyncio.create_task(_close_after(old_client, delay=5.0))
 
     @hookimpl(trylast=True)
-    async def on_llm_error(self, channel, error: Exception) -> str | None:
+    async def resolve_llm_error(self, channel, error: Exception) -> str | None:
         """Explain LLM failures instead of falling back to the generic text.
 
         Covers an unloaded backend model (a llama-server router with

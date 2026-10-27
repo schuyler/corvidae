@@ -294,7 +294,7 @@ async def test_llm_plugin_on_stop_safe_when_clients_are_none():
 
 
 # ---------------------------------------------------------------------------
-# on_llm_error — explain transport and provider failures, not just unloaded
+# resolve_llm_error — explain transport and provider failures, not just unloaded
 # models. Without this every 401/429/connection failure reaches the user as
 # the generic "Sorry, I encountered an error" message.
 # ---------------------------------------------------------------------------
@@ -316,13 +316,13 @@ def _http_error(status: int, body: str = "") -> "object":
     return LLMHTTPError(cause, body=body, model="test-model")
 
 
-class TestOnLlmErrorExplainsFailures:
+class TestResolveLlmErrorExplainsFailures:
     async def test_401_names_the_api_key(self):
         """A 401 must point at llm.main.api_key, not just say 'an error'."""
         from corvidae.llm_plugin import LLMPlugin
 
         plugin = LLMPlugin(pm=None)
-        message = await plugin.on_llm_error(
+        message = await plugin.resolve_llm_error(
             channel=None, error=_http_error(401, '{"error":"bad key"}')
         )
 
@@ -336,7 +336,7 @@ class TestOnLlmErrorExplainsFailures:
 
         plugin = LLMPlugin(pm=None)
         body = '{"error":{"message":"Insufficient balance"}}'
-        message = await plugin.on_llm_error(channel=None, error=_http_error(429, body))
+        message = await plugin.resolve_llm_error(channel=None, error=_http_error(429, body))
 
         assert message is not None
         assert "429" in message
@@ -347,7 +347,7 @@ class TestOnLlmErrorExplainsFailures:
         from corvidae.llm_plugin import LLMPlugin
 
         plugin = LLMPlugin(pm=None)
-        message = await plugin.on_llm_error(channel=None, error=_http_error(502, "bad gateway"))
+        message = await plugin.resolve_llm_error(channel=None, error=_http_error(502, "bad gateway"))
 
         assert message is not None
         assert "502" in message
@@ -359,7 +359,7 @@ class TestOnLlmErrorExplainsFailures:
         from corvidae.llm_plugin import LLMPlugin
 
         plugin = LLMPlugin(pm=None)
-        message = await plugin.on_llm_error(
+        message = await plugin.resolve_llm_error(
             channel=None, error=aiohttp.ClientConnectionError("Connection refused")
         )
 
@@ -371,7 +371,7 @@ class TestOnLlmErrorExplainsFailures:
         from corvidae.llm_plugin import LLMPlugin
 
         plugin = LLMPlugin(pm=None)
-        message = await plugin.on_llm_error(channel=None, error=asyncio.TimeoutError())
+        message = await plugin.resolve_llm_error(channel=None, error=asyncio.TimeoutError())
 
         assert message is not None
         assert "timed out" in message.lower() or "timeout" in message.lower()
@@ -381,7 +381,7 @@ class TestOnLlmErrorExplainsFailures:
         from corvidae.llm_plugin import LLMPlugin
 
         plugin = LLMPlugin(pm=None)
-        message = await plugin.on_llm_error(
+        message = await plugin.resolve_llm_error(
             channel=None, error=RuntimeError("something else")
         )
 

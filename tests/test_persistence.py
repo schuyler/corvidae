@@ -194,28 +194,28 @@ class TestOnStop:
 
 
 # ---------------------------------------------------------------------------
-# TestLoadConversation (NEW — RED phase)
+# TestResolveConversation (NEW — RED phase)
 # ---------------------------------------------------------------------------
 
 
-class TestLoadConversation:
-    """Tests for PersistencePlugin.load_conversation hookimpl.
+class TestResolveConversation:
+    """Tests for PersistencePlugin.resolve_conversation hookimpl.
 
-    RED phase: these fail because load_conversation does not exist yet on
+    RED phase: these fail because resolve_conversation does not exist yet on
     PersistencePlugin.
     """
 
-    async def test_load_conversation_returns_none_when_no_rows(self, db):
-        """load_conversation must return None when no rows exist for the channel."""
+    async def test_resolve_conversation_returns_none_when_no_rows(self, db):
+        """resolve_conversation must return None when no rows exist for the channel."""
         plugin, registry, _ = await _make_plugin_with_db(db)
         channel = _make_channel(registry)
 
-        result = await plugin.load_conversation(channel=channel)
+        result = await plugin.resolve_conversation(channel=channel)
 
         assert result is None
 
-    async def test_load_conversation_returns_tagged_message_dicts(self, db):
-        """load_conversation returns list of dicts tagged with _message_type."""
+    async def test_resolve_conversation_returns_tagged_message_dicts(self, db):
+        """resolve_conversation returns list of dicts tagged with _message_type."""
         from corvidae.context import MessageType
 
         plugin, registry, _ = await _make_plugin_with_db(db)
@@ -230,15 +230,15 @@ class TestLoadConversation:
         )
         await db.commit()
 
-        result = await plugin.load_conversation(channel=channel)
+        result = await plugin.resolve_conversation(channel=channel)
 
         assert result is not None
         assert len(result) == 1
         assert result[0]["content"] == "hello"
         assert result[0]["_message_type"] == MessageType.MESSAGE
 
-    async def test_load_conversation_excludes_other_channels(self, db):
-        """load_conversation only returns rows for the given channel."""
+    async def test_resolve_conversation_excludes_other_channels(self, db):
+        """resolve_conversation only returns rows for the given channel."""
         plugin, registry, _ = await _make_plugin_with_db(db)
         channel1 = registry.get_or_create("test", "scope1", config=ChannelConfig())
         channel2 = registry.get_or_create("test", "scope2", config=ChannelConfig())
@@ -256,14 +256,14 @@ class TestLoadConversation:
         )
         await db.commit()
 
-        result = await plugin.load_conversation(channel=channel1)
+        result = await plugin.resolve_conversation(channel=channel1)
 
         assert result is not None
         assert len(result) == 1
         assert result[0]["content"] == "ch1"
 
-    async def test_load_conversation_with_summary_filters_old_messages(self, db):
-        """load_conversation respects summary boundary — returns summary + newer rows only."""
+    async def test_resolve_conversation_with_summary_filters_old_messages(self, db):
+        """resolve_conversation respects summary boundary — returns summary + newer rows only."""
         from corvidae.context import MessageType
 
         plugin, registry, _ = await _make_plugin_with_db(db)
@@ -296,7 +296,7 @@ class TestLoadConversation:
         )
         await db.commit()
 
-        result = await plugin.load_conversation(channel=channel)
+        result = await plugin.resolve_conversation(channel=channel)
 
         assert result is not None
         # summary + 1 new message (2 old excluded by boundary)
@@ -305,8 +305,8 @@ class TestLoadConversation:
         assert MessageType.SUMMARY in types
         assert MessageType.MESSAGE in types
 
-    async def test_load_conversation_orders_messages_by_timestamp(self, db):
-        """load_conversation returns messages in chronological order."""
+    async def test_resolve_conversation_orders_messages_by_timestamp(self, db):
+        """resolve_conversation returns messages in chronological order."""
         plugin, registry, _ = await _make_plugin_with_db(db)
         channel = _make_channel(registry)
 
@@ -324,32 +324,32 @@ class TestLoadConversation:
         )
         await db.commit()
 
-        result = await plugin.load_conversation(channel=channel)
+        result = await plugin.resolve_conversation(channel=channel)
 
         assert result[0]["content"] == "first"
         assert result[1]["content"] == "second"
 
 
 # ---------------------------------------------------------------------------
-# TestOnConversationEvent (NEW — RED phase)
+# TestPersistMessage (NEW — RED phase)
 # ---------------------------------------------------------------------------
 
 
-class TestOnConversationEvent:
-    """Tests for PersistencePlugin.on_conversation_event hookimpl.
+class TestPersistMessage:
+    """Tests for PersistencePlugin.persist_message hookimpl.
 
-    RED phase: these fail because on_conversation_event does not exist yet.
+    RED phase: these fail because persist_message does not exist yet.
     """
 
-    async def test_on_conversation_event_inserts_row(self, db):
-        """on_conversation_event must insert a row into message_log."""
+    async def test_persist_message_inserts_row(self, db):
+        """persist_message must insert a row into message_log."""
         from corvidae.context import MessageType
 
         plugin, registry, _ = await _make_plugin_with_db(db)
         channel = _make_channel(registry)
         msg = {"role": "user", "content": "hello"}
 
-        await plugin.on_conversation_event(
+        await plugin.persist_message(
             channel=channel, message=msg, message_type=MessageType.MESSAGE
         )
 
@@ -364,15 +364,15 @@ class TestOnConversationEvent:
         assert json.loads(row[1]) == msg
         assert row[2] == "message"
 
-    async def test_on_conversation_event_persists_context_type(self, db):
-        """on_conversation_event with CONTEXT type must write message_type='context'."""
+    async def test_persist_message_persists_context_type(self, db):
+        """persist_message with CONTEXT type must write message_type='context'."""
         from corvidae.context import MessageType
 
         plugin, registry, _ = await _make_plugin_with_db(db)
         channel = _make_channel(registry)
         msg = {"role": "system", "content": "ctx"}
 
-        await plugin.on_conversation_event(
+        await plugin.persist_message(
             channel=channel, message=msg, message_type=MessageType.CONTEXT
         )
 
@@ -384,8 +384,8 @@ class TestOnConversationEvent:
 
         assert row[0] == "context"
 
-    async def test_on_conversation_event_strips_message_type_tag_from_db(self, db):
-        """on_conversation_event must not write _message_type into the JSON column."""
+    async def test_persist_message_strips_message_type_tag_from_db(self, db):
+        """persist_message must not write _message_type into the JSON column."""
         from corvidae.context import MessageType
 
         plugin, registry, _ = await _make_plugin_with_db(db)
@@ -393,7 +393,7 @@ class TestOnConversationEvent:
         # Simulate a tagged message that might arrive
         msg = {"role": "user", "content": "hello", "_message_type": MessageType.MESSAGE}
 
-        await plugin.on_conversation_event(
+        await plugin.persist_message(
             channel=channel, message=msg, message_type=MessageType.MESSAGE
         )
 
@@ -405,17 +405,17 @@ class TestOnConversationEvent:
 
         stored = json.loads(row[0])
         assert "_message_type" not in stored, (
-            "on_conversation_event must strip _message_type before writing to DB"
+            "persist_message must strip _message_type before writing to DB"
         )
 
-    async def test_on_conversation_event_commits(self, db):
-        """on_conversation_event must commit so the row is visible to a fresh query."""
+    async def test_persist_message_commits(self, db):
+        """persist_message must commit so the row is visible to a fresh query."""
         from corvidae.context import MessageType
 
         plugin, registry, _ = await _make_plugin_with_db(db)
         channel = _make_channel(registry)
 
-        await plugin.on_conversation_event(
+        await plugin.persist_message(
             channel=channel,
             message={"role": "user", "content": "committed?"},
             message_type=MessageType.MESSAGE,
@@ -466,7 +466,7 @@ class TestOnCompaction:
     async def test_on_compaction_timestamp_boundary_with_retain(self, db):
         """on_compaction with retain_count > 0 sets summary_ts = oldest_retained - 1e-6.
 
-        Verifies the exact arithmetic AND that load_conversation returns the
+        Verifies the exact arithmetic AND that resolve_conversation returns the
         correct working set afterward.
         """
         import pytest
@@ -506,8 +506,8 @@ class TestOnCompaction:
             f"Summary timestamp {summary_ts} must be oldest_retained - 1e-6 = {expected_ts}"
         )
 
-        # End-to-end: load_conversation returns summary + 1 retained message
-        loaded = await plugin.load_conversation(channel=channel)
+        # End-to-end: resolve_conversation returns summary + 1 retained message
+        loaded = await plugin.resolve_conversation(channel=channel)
         assert loaded is not None
         assert len(loaded) == 2, (
             f"Expected 2 messages (summary + 1 retained), got {len(loaded)}"
@@ -564,10 +564,10 @@ class TestOnCompaction:
 
 
 class TestHookIntegration:
-    async def test_load_conversation_callable_via_broadcast_dispatch(self, db):
-        """PersistencePlugin.load_conversation must be reachable via ahook dispatch.
+    async def test_resolve_conversation_callable_via_broadcast_dispatch(self, db):
+        """PersistencePlugin.resolve_conversation must be reachable via ahook dispatch.
 
-        RED phase: fails because load_conversation hookimpl does not exist yet.
+        RED phase: fails because resolve_conversation hookimpl does not exist yet.
         """
         from corvidae.persistence import PersistencePlugin
 
@@ -582,16 +582,16 @@ class TestHookIntegration:
 
         channel = _make_channel(registry)
 
-        # load_conversation hookspec must exist and dispatch correctly
-        result = await pm.ahook.load_conversation(channel=channel)
+        # resolve_conversation hookspec must exist and dispatch correctly
+        result = await pm.ahook.resolve_conversation(channel=channel)
 
         # No rows — should resolve to None
         assert result is None
 
-    async def test_on_conversation_event_callable_via_broadcast_dispatch(self, db):
-        """PersistencePlugin.on_conversation_event must be reachable via ahook dispatch.
+    async def test_persist_message_callable_via_broadcast_dispatch(self, db):
+        """PersistencePlugin.persist_message must be reachable via ahook dispatch.
 
-        RED phase: fails because on_conversation_event hookimpl does not exist yet.
+        RED phase: fails because persist_message hookimpl does not exist yet.
         """
         from corvidae.context import MessageType
         from corvidae.persistence import PersistencePlugin
@@ -608,7 +608,7 @@ class TestHookIntegration:
         msg = {"role": "user", "content": "broadcast test"}
 
         # Must not raise
-        await pm.ahook.on_conversation_event(
+        await pm.ahook.persist_message(
             channel=channel, message=msg, message_type=MessageType.MESSAGE
         )
 
@@ -619,12 +619,12 @@ class TestHookIntegration:
             row = await cursor.fetchone()
         assert row[0] == 1
 
-    async def test_no_persistence_plugin_load_conversation_returns_none(self):
-        """When no PersistencePlugin is registered, load_conversation resolves to None."""
+    async def test_no_persistence_plugin_resolve_conversation_returns_none(self):
+        """When no PersistencePlugin is registered, resolve_conversation resolves to None."""
         pm = create_plugin_manager()
         channel = _make_channel()
 
-        result = await pm.ahook.load_conversation(channel=channel)
+        result = await pm.ahook.resolve_conversation(channel=channel)
 
         assert result is None
 
@@ -636,10 +636,10 @@ class TestHookIntegration:
 
 class TestGracefulDegradation:
     async def test_no_persistence_plugin_agent_creates_context_window(self, caplog):
-        """Agent must create a ContextWindow directly when load_conversation
+        """Agent must create a ContextWindow directly when resolve_conversation
         returns no results, and must log an appropriate error/warning.
 
-        Agent creates a ContextWindow directly and calls load_conversation
+        Agent creates a ContextWindow directly and calls resolve_conversation
         to restore history from persistence.
         """
         from corvidae.agent import Agent
@@ -794,7 +794,7 @@ async def test_on_start_invalid_journal_mode_lists_allowed_values(tmp_path):
 
 
 class TestPersistenceDegradation:
-    async def test_load_conversation_skips_corrupt_row(self, db, caplog):
+    async def test_resolve_conversation_skips_corrupt_row(self, db, caplog):
         """One unparseable row is skipped; the rest of the history loads."""
         from corvidae.context import MessageType  # noqa: F401  (row types)
         from corvidae.persistence import PersistencePlugin
@@ -820,7 +820,7 @@ class TestPersistenceDegradation:
         await db.commit()
 
         with caplog.at_level(logging.WARNING, logger="corvidae.persistence"):
-            result = await plugin.load_conversation(channel=channel)
+            result = await plugin.resolve_conversation(channel=channel)
 
         assert [m["content"] for m in result] == ["one", "three"]
         warnings = [
@@ -828,7 +828,7 @@ class TestPersistenceDegradation:
         ]
         assert any(str(corrupt_id) in message for message in warnings), warnings
 
-    async def test_on_conversation_event_db_error_returns_none(
+    async def test_persist_message_db_error_returns_none(
         self, db, monkeypatch, caplog
     ):
         """A locked DB is logged and swallowed so the turn keeps running."""
@@ -843,7 +843,7 @@ class TestPersistenceDegradation:
         monkeypatch.setattr(db, "execute", locked)
 
         with caplog.at_level(logging.WARNING, logger="corvidae.persistence"):
-            result = await plugin.on_conversation_event(
+            result = await plugin.persist_message(
                 channel=channel,
                 message={"role": "user", "content": "hi"},
                 message_type=MessageType.MESSAGE,

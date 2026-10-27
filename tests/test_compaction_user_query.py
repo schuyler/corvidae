@@ -19,7 +19,7 @@ from test_mid_conversation_system_role import TemplateError, render_swift
 
 
 def _channel() -> MagicMock:
-    """A minimal stand-in channel for compact_conversation."""
+    """A minimal stand-in channel for resolve_compaction."""
     channel = MagicMock()
     channel.id = "test:anchor"
     return channel
@@ -80,7 +80,7 @@ async def _compact(plugin: CompactionPlugin, conv: ContextWindow, max_tokens: in
         return "summary text"
 
     with patch.object(plugin, "_summarize", side_effect=fake_summarize):
-        return await plugin.compact_conversation(
+        return await plugin.resolve_compaction(
             channel=_channel(), conversation=conv, max_tokens=max_tokens
         )
 

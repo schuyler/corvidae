@@ -183,12 +183,12 @@ async def test_tool_exception_latency_ms_is_set():
 
 
 # ---------------------------------------------------------------------------
-# 5. process_tool_result hook fires on successful execution
+# 5. transform_tool_result hook fires on successful execution
 # ---------------------------------------------------------------------------
 
 
 async def test_hook_fires_on_success():
-    """process_tool_result hook is called when the tool executes successfully."""
+    """transform_tool_result hook is called when the tool executes successfully."""
     from corvidae.hooks import create_plugin_manager, hookimpl
 
     tool_fn = AsyncMock(return_value="raw result")
@@ -199,7 +199,7 @@ async def test_hook_fires_on_success():
 
     class RecordingPlugin:
         @hookimpl
-        async def process_tool_result(self, tool_name, result, channel):
+        async def transform_tool_result(self, tool_name, result, channel):
             hook_calls.append({"tool_name": tool_name, "result": result})
             return None
 
@@ -215,7 +215,7 @@ async def test_hook_fires_on_success():
 
 
 async def test_hook_replacement_used_on_success():
-    """When process_tool_result returns a string, it replaces the tool result content."""
+    """When transform_tool_result returns a string, it replaces the tool result content."""
     from corvidae.hooks import create_plugin_manager, hookimpl
 
     tool_fn = AsyncMock(return_value="original output")
@@ -225,7 +225,7 @@ async def test_hook_replacement_used_on_success():
 
     class TransformPlugin:
         @hookimpl
-        async def process_tool_result(self, tool_name, result, channel):
+        async def transform_tool_result(self, tool_name, result, channel):
             return "transformed: " + result
 
     pm.register(TransformPlugin(), name="transform")
@@ -237,7 +237,7 @@ async def test_hook_replacement_used_on_success():
 
 
 async def test_hook_none_return_keeps_original_result():
-    """When process_tool_result returns None, the original content is kept."""
+    """When transform_tool_result returns None, the original content is kept."""
     from corvidae.hooks import create_plugin_manager, hookimpl
 
     tool_fn = AsyncMock(return_value="keep this")
@@ -247,7 +247,7 @@ async def test_hook_none_return_keeps_original_result():
 
     class PassthroughPlugin:
         @hookimpl
-        async def process_tool_result(self, tool_name, result, channel):
+        async def transform_tool_result(self, tool_name, result, channel):
             return None
 
     pm.register(PassthroughPlugin(), name="passthrough")
@@ -258,12 +258,12 @@ async def test_hook_none_return_keeps_original_result():
 
 
 # ---------------------------------------------------------------------------
-# 6. process_tool_result hook fires on tool exception
+# 6. transform_tool_result hook fires on tool exception
 # ---------------------------------------------------------------------------
 
 
 async def test_hook_fires_on_tool_exception():
-    """process_tool_result hook is called even when the tool raises an exception."""
+    """transform_tool_result hook is called even when the tool raises an exception."""
     from corvidae.hooks import create_plugin_manager, hookimpl
 
     async def bad_tool(**kwargs):
@@ -276,7 +276,7 @@ async def test_hook_fires_on_tool_exception():
 
     class RecordingPlugin:
         @hookimpl
-        async def process_tool_result(self, tool_name, result, channel):
+        async def transform_tool_result(self, tool_name, result, channel):
             hook_calls.append({"tool_name": tool_name, "result": result})
             return None
 
@@ -289,12 +289,12 @@ async def test_hook_fires_on_tool_exception():
 
 
 # ---------------------------------------------------------------------------
-# 7. process_tool_result hook does NOT fire on JSON parse error
+# 7. transform_tool_result hook does NOT fire on JSON parse error
 # ---------------------------------------------------------------------------
 
 
 async def test_hook_does_not_fire_on_json_parse_error():
-    """process_tool_result hook is NOT called for JSON parse errors."""
+    """transform_tool_result hook is NOT called for JSON parse errors."""
     from corvidae.hooks import create_plugin_manager, hookimpl
 
     call = _make_call_raw("call_bad", "my_tool", "{not valid json")
@@ -304,7 +304,7 @@ async def test_hook_does_not_fire_on_json_parse_error():
 
     class RecordingPlugin:
         @hookimpl
-        async def process_tool_result(self, tool_name, result, channel):
+        async def transform_tool_result(self, tool_name, result, channel):
             hook_calls.append(True)
             return None
 
@@ -316,12 +316,12 @@ async def test_hook_does_not_fire_on_json_parse_error():
 
 
 # ---------------------------------------------------------------------------
-# 8. process_tool_result hook does NOT fire on unknown tool
+# 8. transform_tool_result hook does NOT fire on unknown tool
 # ---------------------------------------------------------------------------
 
 
 async def test_hook_does_not_fire_on_unknown_tool():
-    """process_tool_result hook is NOT called for unknown tool errors."""
+    """transform_tool_result hook is NOT called for unknown tool errors."""
     from corvidae.hooks import create_plugin_manager, hookimpl
 
     call = _make_call("call_ghost", "nonexistent_tool", {})
@@ -331,7 +331,7 @@ async def test_hook_does_not_fire_on_unknown_tool():
 
     class RecordingPlugin:
         @hookimpl
-        async def process_tool_result(self, tool_name, result, channel):
+        async def transform_tool_result(self, tool_name, result, channel):
             hook_calls.append(True)
             return None
 

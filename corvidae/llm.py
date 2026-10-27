@@ -38,7 +38,7 @@ class LLMHTTPError(aiohttp.ClientResponseError):
     """A non-2xx LLM API response, carrying the response body and model.
 
     Subclasses ClientResponseError so existing handlers keep working; the
-    extra fields let error handlers (on_llm_error) tell failures apart.
+    extra fields let error handlers (resolve_llm_error) tell failures apart.
     """
 
     def __init__(self, cause: aiohttp.ClientResponseError, body: str, model: str) -> None:
