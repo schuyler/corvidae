@@ -21,7 +21,7 @@ import discord
 
 from corvidae.channel import Channel, ChannelRegistry
 from corvidae.channels.split import split_message
-from corvidae.correlation import mint_correlation_id
+from corvidae.trace import mint_trace_id
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 
 logger = logging.getLogger("corvidae.discord_plugin")
@@ -436,10 +436,10 @@ class DiscordPlugin(CorvidaePlugin):
         if sender in self._allow:
             await self._begin_typing(channel)
 
-        # Mint the correlation id here; the Agent uses it verbatim (#95).
+        # Mint the trace id here; the Agent uses it verbatim (#95).
         await self.pm.ahook.on_message(
             channel=channel, sender=sender, text=text,
-            correlation_id=mint_correlation_id(),
+            trace_id=mint_trace_id(),
         )
 
     # -----------------------------------------------------------------
@@ -488,10 +488,10 @@ class DiscordPlugin(CorvidaePlugin):
 
     @hookimpl
     async def should_process_message(
-        self, channel: Channel, sender: str, text: str, correlation_id: str
+        self, channel: Channel, sender: str, text: str, trace_id: str
     ) -> bool | None:
         """Default-deny gate: only allowlisted user ids may drive the agent.
-        correlation_id is bound without a default -- see
+        trace_id is bound without a default -- see
         tests/test_hook_arg_binding.py."""
         if not channel.matches_transport("discord"):
             return None
@@ -502,7 +502,7 @@ class DiscordPlugin(CorvidaePlugin):
 
     @hookimpl
     async def on_message_rejected(
-        self, channel: Channel, correlation_id: str, sender: str, text: str
+        self, channel: Channel, trace_id: str, sender: str, text: str
     ) -> None:
         """Give back the outstanding slot of a message another gate vetoed,
         so the typing refresh loop still reaches zero.

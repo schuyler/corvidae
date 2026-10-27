@@ -22,7 +22,7 @@ Config:
         stages: null                  # null = every stage; or a list of names
 
 Stage names are opaque here: core never names the cognition plugins
-(tests/test_correlation_core.py), so each plugin passes its own stage name
+(tests/test_trace_core.py), so each plugin passes its own stage name
 to :func:`fork_agent` and a name nobody uses simply matches nothing.
 """
 

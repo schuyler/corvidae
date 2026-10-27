@@ -1,4 +1,4 @@
-"""Correlation id minting.
+"""Trace id minting.
 
 A leaf module (stdlib imports only) so transports can mint the id for a
 user message without importing ``corvidae.agent`` and its dependencies.
@@ -10,8 +10,8 @@ import time
 import uuid
 
 
-def mint_correlation_id() -> str:
-    """Mint a time-sortable, globally-unique correlation id.
+def mint_trace_id() -> str:
+    """Mint a time-sortable, globally-unique trace id.
 
     Shape: ``<hex-time>-<hex12>``. The hex-time prefix is
     monotone-nondecreasing across calls (wall-clock seconds); the uuid4

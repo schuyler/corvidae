@@ -512,13 +512,13 @@ END
 
 # The per-retrieval raw profile stream (§3.7 wants this accumulating from
 # day one). Phase 2 keys it by exchange and copies it into exchange_log;
-# until then exchange_key stays NULL.
+# until then trace_id stays NULL.
 RETRIEVAL_LOG_DDL = """
 CREATE TABLE IF NOT EXISTS retrieval_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts REAL NOT NULL,
     channel_id TEXT NOT NULL,
-    exchange_key TEXT,              -- NULL until Phase 2 wires the key
+    trace_id TEXT,              -- NULL until Phase 2 wires the key
     top_score REAL,                 -- recency-decayed score of the top-ranked candidate
     top_similarity REAL,            -- raw similarity of that same candidate
     hit_count INTEGER NOT NULL,
@@ -1251,15 +1251,15 @@ class MemoryPlugin(CorvidaePlugin):
     # ------------------------------------------------------------------
 
     @hookimpl
-    async def before_agent_turn(self, channel, correlation_id, meta) -> None:
+    async def before_agent_turn(self, channel, trace_id, meta) -> None:
         """Retrieve memories for the inbound user text and admit them.
 
         Runs only when the window tail is a plain user MESSAGE — retrieval
         is skipped entirely on notification-triggered turns. Everything
         here is fail-soft: retrieval trouble must never break the turn.
 
-        ``correlation_id``: when present, the retrieval profile is written
-        into retrieval_log.exchange_key and copied into exchange_log via
+        ``trace_id``: when present, the retrieval profile is written
+        into retrieval_log.trace_id and copied into exchange_log via
         the OutcomeLogPlugin's update_exchange (retrieval_top_score,
         retrieval_top_similarity, retrieval_hit_count).
         """
@@ -1330,13 +1330,13 @@ class MemoryPlugin(CorvidaePlugin):
             top_similarity = candidates[0]["similarity"] if candidates else None
             hit_count = len(candidates)
             await db.execute(
-                "INSERT INTO retrieval_log (ts, channel_id, exchange_key, top_score, "
+                "INSERT INTO retrieval_log (ts, channel_id, trace_id, top_score, "
                 "top_similarity, hit_count, admitted_count, degraded_to_fts) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     time.time(),
                     channel.id,
-                    correlation_id,
+                    trace_id,
                     top_score,
                     top_similarity,
                     hit_count,
@@ -1349,12 +1349,12 @@ class MemoryPlugin(CorvidaePlugin):
             # Copy the retrieval profile into exchange_log under the key —
             # best-effort; OutcomeLogPlugin may not be registered, or the
             # row may not exist yet.
-            if correlation_id is not None:
+            if trace_id is not None:
                 outcome_log = self.pm.get_plugin("outcome_log")
                 if outcome_log is not None:
                     try:
                         await outcome_log.update_exchange(
-                            correlation_id,
+                            trace_id,
                             retrieval_top_score=top_score,
                             retrieval_top_similarity=top_similarity,
                             retrieval_hit_count=hit_count,

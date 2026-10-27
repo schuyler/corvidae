@@ -195,7 +195,7 @@ class TestDeletedSurfaceAbsent:
         # rebuild_registry itself stays -- on_start still uses it.
         assert hasattr(ToolCollectionPlugin, "rebuild_registry")
 
-    def test_mint_trace_id_replaces_mint_trace_id(self):
+    def test_mint_trace_id_replaces_old_minters(self):
         import corvidae.agent as agent_module
         assert hasattr(agent_module, "mint_trace_id")
         assert not hasattr(agent_module, "mint_exchange_key")

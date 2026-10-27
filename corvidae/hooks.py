@@ -337,7 +337,7 @@ class AgentSpec:
 
     @hookspec
     async def on_message(
-        self, channel: Channel, sender: str, text: str, correlation_id: str
+        self, channel: Channel, sender: str, text: str, trace_id: str
     ) -> None:
         """Called when an inbound message arrives on a channel.
 
@@ -345,8 +345,8 @@ class AgentSpec:
             channel: The Channel object for this conversation scope.
             sender: The user or entity that sent the message.
             text: The message content.
-            correlation_id: Id minted by the transport for this message
-                (``corvidae.correlation.mint_correlation_id()``). Required,
+            trace_id: Id minted by the transport for this message
+                (``corvidae.trace.mint_trace_id()``). Required,
                 with no default: pluggy would silently drop a defaulted
                 param. The Agent uses it verbatim for the gate, the
                 admitted/rejected hooks and persistence, and raises
@@ -433,7 +433,7 @@ class AgentSpec:
         channel: Channel,
         request_text: str,
         response_text: str,
-        correlation_id: str | None,
+        trace_id: str | None,
         meta: dict,
         logprobs: dict | None,
     ) -> None:
@@ -452,11 +452,11 @@ class AgentSpec:
                 For a tool-using exchange this is the last tool-result
                 turn's text, never the exchange's true originating text.
             response_text: The final text produced by the agent loop.
-            correlation_id: The correlation id this response belongs to,
+            trace_id: The trace id this response belongs to,
                 or None.
-            meta: The correlation metadata dict; producers of notifications
+            meta: The trace metadata dict; producers of notifications
                 may stamp keys into it via ``on_notify`` meta, and the dict
-                travels with the correlation id through task cycles.
+                travels with the trace id through task cycles.
             logprobs: The response's logprobs envelope, or None.
 
         Note:
@@ -497,7 +497,7 @@ class AgentSpec:
 
     @hookspec
     async def should_process_message(
-        self, channel: Channel, sender: str, text: str, correlation_id: str | None
+        self, channel: Channel, sender: str, text: str, trace_id: str | None
     ) -> bool | None:
         """Gate hook: decide whether to process an incoming message.
 
@@ -508,7 +508,7 @@ class AgentSpec:
             channel: The Channel object for this conversation scope.
             sender: The user or entity that sent the message.
             text: The message content.
-            correlation_id: The id minted by the transport for this message
+            trace_id: The id minted by the transport for this message
                 (passed to ``on_message``). Present for every USER message.
 
         Note:
@@ -520,7 +520,7 @@ class AgentSpec:
 
     @hookspec
     async def on_message_admitted(
-        self, channel: Channel, correlation_id: str, sender: str, text: str
+        self, channel: Channel, trace_id: str, sender: str, text: str
     ) -> None:
         """Broadcast after should_process_message admits a USER message.
 
@@ -530,14 +530,14 @@ class AgentSpec:
 
         Args:
             channel: The Channel the message arrived on.
-            correlation_id: The id minted by the transport for this message.
+            trace_id: The id minted by the transport for this message.
             sender: The user or entity that sent the message.
             text: The message content.
         """
 
     @hookspec
     async def on_message_rejected(
-        self, channel: Channel, correlation_id: str, sender: str, text: str
+        self, channel: Channel, trace_id: str, sender: str, text: str
     ) -> None:
         """Broadcast after should_process_message vetoes a USER message.
 
@@ -545,7 +545,7 @@ class AgentSpec:
 
         Args:
             channel: The Channel the message arrived on.
-            correlation_id: The id minted by the transport for this message.
+            trace_id: The id minted by the transport for this message.
             sender: The user or entity that sent the message.
             text: The message content.
         """
@@ -554,14 +554,14 @@ class AgentSpec:
     async def on_message_persisted(
         self,
         channel: Channel,
-        correlation_id: str,
+        trace_id: str,
         rowid: int | None,
         text: str,
         meta: dict,
     ) -> None:
-        """Broadcast after the correlation-originating message row is persisted.
+        """Broadcast after the trace-originating message row is persisted.
 
-        Fired only when the current queue item originates its correlation
+        Fired only when the current queue item originates its trace
         (USER items, and notification items whose id was minted at
         dequeue) — never for mid-exchange tool-result rows, injected
         CONTEXT, or assistant rows (per-row firing under one id would
@@ -571,10 +571,10 @@ class AgentSpec:
 
         Args:
             channel: The Channel the message was persisted on.
-            correlation_id: The correlation id this row originates.
+            trace_id: The trace id this row originates.
             rowid: The message_log rowid of the persisted row, or None.
             text: The originating row's content.
-            meta: The correlation metadata dict carried by the item.
+            meta: The trace metadata dict carried by the item.
         """
 
     @hookspec(firstresult=True)
@@ -842,7 +842,7 @@ class AgentSpec:
     async def before_agent_turn(
         self,
         channel: "Channel",
-        correlation_id: str | None,
+        trace_id: str | None,
         meta: dict,
     ) -> None:
         """Called before each LLM invocation, after compaction.
@@ -859,10 +859,10 @@ class AgentSpec:
         Args:
             channel: The Channel being processed. Use ``channel.conversation``
                 to access the ContextWindow for appending context entries.
-            correlation_id: The current turn's correlation id, or None.
-            meta: The correlation metadata dict; producers of notifications
+            trace_id: The current turn's trace id, or None.
+            meta: The trace metadata dict; producers of notifications
                 may stamp keys into it via ``on_notify`` meta, and the dict
-                travels with the correlation id through task cycles.
+                travels with the trace id through task cycles.
         """
 
     @hookspec

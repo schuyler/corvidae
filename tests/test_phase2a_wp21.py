@@ -671,7 +671,7 @@ class TestBeforeAgentTurnEnrichment:
     async def test_retrieval_profile_lands_in_exchange_log_under_the_key(self):
         """MemoryPlugin.before_agent_turn (updated for WP2.1 point 8) writes
         retrieval_top_score/retrieval_hit_count into exchange_log under the
-        exchange key via update_exchange."""
+        trace id via update_exchange."""
         plugin, channel, db = await build_plugin_and_channel()
         await _setup_outcome_log(plugin.pm, db)
 
@@ -797,6 +797,11 @@ class TestUsageLogAttributionWiring:
         assert row[0] == gate.seen_keys[0]
 
         await db.close()
+
+
+# ---------------------------------------------------------------------------
+# 9. upsert_exchange write-order independence
+# ---------------------------------------------------------------------------
 
 
 class TestUpsertExchangeWriteOrderIndependence:
