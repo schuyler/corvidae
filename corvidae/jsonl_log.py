@@ -91,10 +91,36 @@ class JsonlLogPlugin(CorvidaePlugin):
         await asyncio.to_thread(self._write_record, channel.id, record)
 
     def _write_record(self, channel_id: str, record: dict) -> None:
-        """Write a single JSON record to the channel's log file (sync, for use with to_thread)."""
-        fh = self._get_handle(channel_id)
-        fh.write(json.dumps(record) + "\n")
-        fh.flush()
+        """Write a single JSON record to the channel's log file (sync, for use with to_thread).
+
+        A disk or permission failure is logged and swallowed: JSONL logging is
+        an audit side channel and must never break the conversation hook.
+        """
+        path = self._log_dir / f"{self._sanitize_channel_id(channel_id)}.jsonl"
+        fh = None
+        try:
+            fh = self._get_handle(channel_id)
+            fh.write(json.dumps(record) + "\n")
+            fh.flush()
+        except Exception:
+            logger.warning(
+                "JSONL log write failed for channel %s at %s",
+                channel_id,
+                path,
+                exc_info=True,
+            )
+            # Drop the cached handle so a later event reopens the file instead
+            # of retrying a broken one.
+            self._handles.pop(channel_id, None)
+            if fh is not None:
+                try:
+                    fh.close()
+                except Exception:
+                    logger.warning(
+                        "could not close failed JSONL handle for %s",
+                        channel_id,
+                        exc_info=True,
+                    )
 
     def _close_all_handles(self) -> None:
         """Flush and close all open file handles (sync, for use with to_thread)."""

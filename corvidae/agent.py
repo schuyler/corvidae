@@ -371,7 +371,17 @@ class Agent(CorvidaePlugin):
             return await run_agent_turn(self._client, messages, tool_schemas, extra_body=llm_overrides)
         except Exception as exc:
             logger.exception("run_agent_turn failed for channel %s", channel.id)
-            error_msg = await self.pm.ahook.on_llm_error(channel=channel, error=exc)
+            # The error hook is optional policy: if it raises, fall back to the
+            # default message rather than leaving the user with silence.
+            try:
+                error_msg = await self.pm.ahook.on_llm_error(channel=channel, error=exc)
+            except Exception:
+                logger.warning(
+                    "on_llm_error hook failed",
+                    exc_info=True,
+                    extra={"channel": channel.id},
+                )
+                error_msg = None
             if error_msg is None:
                 error_msg = DEFAULT_LLM_ERROR_MESSAGE
             try:
@@ -893,8 +903,10 @@ class Agent(CorvidaePlugin):
         logging, and the process_tool_result hook. Returns the result
         string; the TaskPlugin delivers it via on_notify.
 
-        Logs an error and returns without enqueuing if the TaskQueue is
-        unavailable (TaskPlugin not registered).
+        Logs an error and delivers an error tool result directly (via
+        on_notify) when the TaskQueue is unavailable (TaskPlugin not
+        registered), so the model can finish the turn instead of waiting
+        forever for a result that will never arrive.
 
         Stamps each Task with the current turn's trace id/meta, read
         from the attribution contextvar set by _process_queue_item at
@@ -902,9 +914,6 @@ class Agent(CorvidaePlugin):
         a tool cycle inherits its trace this way, however many hops.
         """
         task_queue = getattr(self.pm.get_plugin("task"), "task_queue", None)
-        if task_queue is None:
-            logger.error("tool calls requested but no TaskQueue available")
-            return
 
         current_attribution = get_attribution()
         trace_id = current_attribution.get("trace_id")
@@ -915,6 +924,24 @@ class Agent(CorvidaePlugin):
         # call fires once the pending set empties, i.e. after the last
         # result of the last outstanding batch.
         channel.pending_tool_call_ids |= {call["id"] for call in tool_calls}
+
+        if task_queue is None:
+            logger.error("tool calls requested but no TaskQueue available")
+            # No queue means no TaskPlugin to deliver results; inject an error
+            # result per call so the tool cycle can complete.
+            for call in tool_calls:
+                await self.pm.ahook.on_notify(
+                    channel=channel,
+                    source="task",
+                    text=(
+                        f"[Task unavailable] Error: tool "
+                        f"'{call['function']['name']}' was not executed "
+                        "because the task queue is unavailable"
+                    ),
+                    tool_call_id=call["id"],
+                    meta={"trace_id": trace_id, **meta},
+                )
+            return
 
         for call in tool_calls:
             call_id = call["id"]
