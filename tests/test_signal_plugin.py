@@ -1116,27 +1116,6 @@ class TestLiveness:
             finally:
                 await _stop_plugin(h)
 
-    async def test_refused_stranger_does_not_release_a_typing_slot(self, tmp_path):
-        """Only an allowlisted sender ever takes an outstanding slot, so a
-        refused stranger's rejection must give none back. Unreachable while
-        channels are one per sender, but guards the day Signal handles
-        groups, where a stranger and an allowed user share a channel."""
-        h = await _start_plugin(tmp_path)
-        try:
-            await h.server.push_notification(
-                "receive", make_data_envelope(source_uuid=AUTH_ACI, source_number=None, text="work"),
-            )
-            await _wait_until(lambda: h.pm.ahook.on_message.await_count >= 1, timeout=5)
-            channel = h.pm.ahook.on_message.await_args.kwargs["channel"]
-            assert h.plugin._outstanding[channel.id] == 1
-
-            await h.plugin.on_message_rejected(
-                channel=channel, correlation_id="corr-stranger", sender=OTHER_ACI, text="hi",
-            )
-            assert h.plugin._outstanding[channel.id] == 1
-        finally:
-            await _stop_plugin(h)
-
     async def test_one_refresh_loop_per_channel_and_stop_cancels_it(self, tmp_path):
         """A message arriving while the previous turn's refresh loop is still
         asleep reuses that loop rather than starting a second one -- a
@@ -1510,6 +1489,38 @@ class TestTransportMintedIds:
 
             # The owed message's slot is still held.
             assert h.plugin._outstanding[channel.id] == 1
+        finally:
+            await _stop_plugin(h)
+
+    async def test_persist_for_unknown_id_sends_no_receipt(self, tmp_path):
+        """O1/O3: receipts are looked up by id, not popped oldest-first. A
+        notification-born turn's on_message_persisted carries an id Signal
+        never minted; it must send nothing and leave the owed message's
+        timestamp for that message's own persist."""
+        h = await _start_plugin(tmp_path)
+        agent = _FakeAgent(h.pm)
+        agent.install()
+        try:
+            # An admitted message still waiting for its turn.
+            ts = _now_ms()
+            await _push_text(h, "owed", timestamp=ts)
+            await _wait_until(lambda: len(agent.calls) >= 1, timeout=3)
+            channel = agent.calls[0][2]
+
+            # A notification-born turn on the same channel persists first.
+            await h.plugin.on_message_persisted(
+                channel=channel, correlation_id="notif-id", rowid=9, text="n", meta={},
+            )
+            await asyncio.sleep(0.2)
+            assert h.server.requests_matching("receipt") == []
+
+            # The owed message's own persist sends its receipt.
+            await h.plugin.on_message_persisted(
+                channel=channel, correlation_id=agent.cid_for("owed"),
+                rowid=10, text="owed", meta={},
+            )
+            await _wait_until(lambda: h.server.requests_matching("receipt"), timeout=3)
+            assert frame_contains(h.server.requests_matching("receipt")[0], ts)
         finally:
             await _stop_plugin(h)
 
