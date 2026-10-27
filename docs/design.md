@@ -93,8 +93,10 @@ hookspecs.
 
 ### Broadcast dispatch and result resolution
 
-All hooks are called via `pm.ahook.<hook_name>(...)`, which broadcasts to
-every registered implementation and returns a list of results. Gate hooks
+All hooks are called via `pm.ahook.<hook_name>(...)`. A broadcast hook
+runs every registered implementation and returns a list of results; a
+`firstresult=True` hook (below) stops at the first non-None result and
+returns that single value. Gate hooks
 that need a single resolved value pass the result list to
 `resolve_reject_wins(results)` from `hooks.py`: any `False` in the results
 returns `False`; otherwise any `True` returns `True`; otherwise `None`.
@@ -140,7 +142,7 @@ adding a hook are in [plugin-guide.md](plugin-guide.md#hook-grammar);
 | `on_message_rejected` | broadcast | `on_message`, after a USER message is vetoed; fires exactly once per rejected message |
 | `on_message_persisted` | broadcast | dequeue, after the trace-originating row is persisted; fires once per originating item regardless of outcome (`rowid` may be None) |
 | `resolve_llm_error` | firstresult=True | `_run_turn`, after LLM exception; return error string or None for default |
-| `resolve_compaction` | firstresult=True | `_process_queue_item`, step 5; the first non-None return stops the chain (`CompactionPlugin` is `trylast`, so a default-priority replacement runs first); the caller ignores the value |
+| `resolve_compaction` | firstresult=True | `_process_queue_item`, step 6; the first non-None return stops the chain (`CompactionPlugin` is `trylast`, so a default-priority replacement runs first); the caller ignores the value |
 | `transform_tool_result` | firstresult=True wrapper chain | `dispatch_tool_call` (both subagent and main agent paths), after tool execution; return replacement string or None for default |
 | `before_agent_turn` | broadcast | `_process_queue_item`, before LLM call; plugins inject context into conversation log |
 | `after_persist_assistant` | broadcast | `_process_queue_item`, after assistant message is persisted; plugins may mutate the in-memory dict |
@@ -850,8 +852,8 @@ per-turn token stats now live in the `usage_log` table.
 ### resolve_compaction
 
 Implements the `resolve_compaction` hook (`firstresult=True`) at
-`trylast`, so it runs only if no default-priority replacement returned
-non-None first. The caller does not use the return value.
+`trylast`, so it runs only if no earlier implementation (tryfirst or
+default priority) returned non-None first. The caller does not use the return value.
 
 **Algorithm:**
 

@@ -194,7 +194,7 @@ Retrieval quality depends on `llm.embedding.document_prefix` and `llm.embedding.
 
 | Component | File | What it does |
 |-----------|------|--------------|
-| `resolve_system_prompt()` | `corvidae/channel.py:216` | Reads file list or returns literal string |
+| `resolve_system_prompt()` | `corvidae/channel.py:303` | Reads file list or returns literal string |
 | `ChannelConfig.resolve()` | `corvidae/channel.py:115` | Merges agent defaults, channel overrides, runtime overrides |
 | `ContextWindow` | `corvidae/context.py:83` | Holds messages and system prompt in memory |
 | `ContextWindow.build_prompt()` | `corvidae/context.py:139` | Assembles final message list for LLM |
