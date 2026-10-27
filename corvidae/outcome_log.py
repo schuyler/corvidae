@@ -31,7 +31,7 @@ MERGE_COLUMNS = frozenset({"outcomes", "appraisal"})
 
 EXCHANGE_LOG_DDL = """
 CREATE TABLE IF NOT EXISTS exchange_log (
-    exchange_key TEXT PRIMARY KEY,
+    trace_id TEXT PRIMARY KEY,
     channel_id TEXT NOT NULL,
     origin TEXT,
     message_rowid INTEGER,
@@ -50,7 +50,7 @@ EXCHANGE_LOG_INDEX_DDL = (
     "ON exchange_log (channel_id, created_at)"
 )
 
-# Columns update_exchange may touch. The identity columns (exchange_key,
+# Columns update_exchange may touch. The identity columns (trace_id,
 # channel_id, created_at) are immutable after record_exchange; everything
 # else is a nullable profile/outcome column filled in by other plugins.
 UPDATABLE_COLUMNS = frozenset(
@@ -136,23 +136,23 @@ class OutcomeLogPlugin(CorvidaePlugin):
     # ------------------------------------------------------------------
 
     @hookimpl
-    async def on_message_admitted(self, channel, correlation_id: str, sender: str, text: str) -> None:
+    async def on_message_admitted(self, channel, trace_id: str, sender: str, text: str) -> None:
         try:
-            await self.record_exchange(correlation_id, channel.id, origin="user")
+            await self.record_exchange(trace_id, channel.id, origin="user")
         except Exception:
             logger.warning("on_message_admitted: record_exchange failed", exc_info=True)
 
     @hookimpl
-    async def on_message_rejected(self, channel, correlation_id: str, sender: str, text: str) -> None:
+    async def on_message_rejected(self, channel, trace_id: str, sender: str, text: str) -> None:
         try:
-            await self.record_exchange(correlation_id, channel.id, origin="user")
-            await self.update_exchange(correlation_id, outcomes={"gate": "rejected"})
+            await self.record_exchange(trace_id, channel.id, origin="user")
+            await self.update_exchange(trace_id, outcomes={"gate": "rejected"})
         except Exception:
             logger.warning("on_message_rejected: record_exchange failed", exc_info=True)
 
     @hookimpl
     async def on_message_persisted(
-        self, channel, correlation_id: str, rowid: int | None, text: str, meta: dict,
+        self, channel, trace_id: str, rowid: int | None, text: str, meta: dict,
     ) -> None:
         try:
             # INSERT OR IGNORE covers notification-born exchanges (no prior
@@ -162,15 +162,15 @@ class OutcomeLogPlugin(CorvidaePlugin):
             # admitted-time INSERT OR IGNORE row (origin="user") already
             # exists for user messages by the time this hook fires.
             origin = meta.get("origin") or "task"
-            await self.record_exchange(correlation_id, channel.id, origin=origin)
+            await self.record_exchange(trace_id, channel.id, origin=origin)
             if rowid is not None:
-                await self.update_exchange(correlation_id, message_rowid=rowid)
+                await self.update_exchange(trace_id, message_rowid=rowid)
         except Exception:
             logger.warning("on_message_persisted: record_exchange failed", exc_info=True)
 
     async def record_exchange(
         self,
-        exchange_key: str,
+        trace_id: str,
         channel_id: str,
         origin: str | None = None,
         message_rowid: int | None = None,
@@ -178,7 +178,7 @@ class OutcomeLogPlugin(CorvidaePlugin):
         """Insert a new exchange row. Idempotent (INSERT OR IGNORE).
 
         Args:
-            exchange_key: The correlation id minted for this exchange.
+            trace_id: The trace id minted for this exchange.
             channel_id: The channel the exchange happened on.
             origin: 'user'|'reminder'|'critique'|'heartbeat'|'task', or
                 None if the producer didn't stamp one.
@@ -188,9 +188,9 @@ class OutcomeLogPlugin(CorvidaePlugin):
         db = await self._ensure_table()
         await db.execute(
             "INSERT OR IGNORE INTO exchange_log "
-            "(exchange_key, channel_id, origin, message_rowid, created_at) "
+            "(trace_id, channel_id, origin, message_rowid, created_at) "
             "VALUES (?, ?, ?, ?, ?)",
-            (exchange_key, channel_id, origin, message_rowid, time.time()),
+            (trace_id, channel_id, origin, message_rowid, time.time()),
         )
         await db.commit()
 
@@ -240,7 +240,7 @@ class OutcomeLogPlugin(CorvidaePlugin):
                 params.append(value)
         return ", ".join(set_parts), params
 
-    async def update_exchange(self, exchange_key: str, **columns) -> None:
+    async def update_exchange(self, trace_id: str, **columns) -> None:
         """Update named nullable columns of an existing exchange row.
 
         Only the columns in UPDATABLE_COLUMNS are accepted — SQL is never
@@ -260,14 +260,14 @@ class OutcomeLogPlugin(CorvidaePlugin):
         db = await self._ensure_table()
         set_clause, params = self._build_set_clause(columns)
         await db.execute(
-            f"UPDATE exchange_log SET {set_clause} WHERE exchange_key = ?",
-            (*params, exchange_key),
+            f"UPDATE exchange_log SET {set_clause} WHERE trace_id = ?",
+            (*params, trace_id),
         )
         await db.commit()
 
     async def upsert_exchange(
         self,
-        exchange_key: str,
+        trace_id: str,
         channel_id: str,
         origin: str | None = None,
         **columns,
@@ -292,9 +292,9 @@ class OutcomeLogPlugin(CorvidaePlugin):
         db = await self._ensure_table()
         await db.execute(
             "INSERT OR IGNORE INTO exchange_log "
-            "(exchange_key, channel_id, origin, message_rowid, created_at) "
+            "(trace_id, channel_id, origin, message_rowid, created_at) "
             "VALUES (?, ?, ?, ?, ?)",
-            (exchange_key, channel_id, origin, None, time.time()),
+            (trace_id, channel_id, origin, None, time.time()),
         )
         merged_columns = dict(columns)
         if origin is not None:
@@ -302,7 +302,7 @@ class OutcomeLogPlugin(CorvidaePlugin):
         if merged_columns:
             set_clause, params = self._build_set_clause(merged_columns)
             await db.execute(
-                f"UPDATE exchange_log SET {set_clause} WHERE exchange_key = ?",
-                (*params, exchange_key),
+                f"UPDATE exchange_log SET {set_clause} WHERE trace_id = ?",
+                (*params, trace_id),
             )
         await db.commit()

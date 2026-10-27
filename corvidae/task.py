@@ -53,11 +53,11 @@ class Task:
             inside this context so attribution set by the enqueuer is
             visible to the task body — worker coroutines are created once
             at startup and would otherwise never see it.
-        correlation_id: The correlation this task belongs to. Stamped by
+        trace_id: The trace this task belongs to. Stamped by
             Agent._dispatch_tool_calls from the current turn's attribution
-            so the tool cycle carries its correlation forward.
+            so the tool cycle carries its trace forward.
         meta: Extensible metadata, opaque to core. Stamped alongside
-            correlation_id and merged into the completion notification's
+            trace_id and merged into the completion notification's
             meta by TaskPlugin.
         deliver: When False, the task is silent: completion fires no
             send_tool_status, no on_notify, and therefore no main-model
@@ -71,7 +71,7 @@ class Task:
     tool_call_id: str | None = None
     description: str = ""
     ctx: contextvars.Context = field(default_factory=contextvars.copy_context)
-    correlation_id: str | None = None
+    trace_id: str | None = None
     meta: dict = field(default_factory=dict)
     deliver: bool = True
 
@@ -312,7 +312,7 @@ class TaskPlugin(CorvidaePlugin):
                 tool_call_id=task.tool_call_id,
                 meta={
                     "task_id": task.task_id,
-                    "correlation_id": task.correlation_id,
+                    "trace_id": task.trace_id,
                     **task.meta,
                 },
             )

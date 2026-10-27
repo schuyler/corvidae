@@ -1,10 +1,10 @@
 """RED tests for the core-generalization work (disentangle-buster.md Design
-§1 correlation mechanism, §2 deletions).
+§1 trace mechanism, §2 deletions).
 
 R1's acceptance made executable: a grep test asserting no core module
 references the cognition vocabulary, plus structural assertions (QueueItem/
 Task field names, the new hookspec signatures, absence of the deleted
-surface); then behavioral round-trip tests for the generic correlation
+surface); then behavioral round-trip tests for the generic trace
 mechanism (dequeue resolution, attribution, Task/TaskPlugin meta
 propagation, on_message_persisted firing discipline).
 """
@@ -19,6 +19,7 @@ import pytest
 
 from helpers import build_plugin_and_channel, drain
 from llm_response_fixtures import _make_text_response
+from corvidae.trace import mint_trace_id
 
 CORVIDAE_ROOT = Path(__file__).resolve().parent.parent / "corvidae"
 
@@ -89,9 +90,10 @@ class TestQueueItemStructure:
         from corvidae.agent import QueueItem
 
         names = {f.name for f in dataclasses.fields(QueueItem)}
-        assert "correlation_id" in names
+        assert "trace_id" in names
         assert "originating" in names
         assert "exchange_key" not in names
+        assert "correlation_id" not in names
         assert "origin" not in names
         assert "originates_exchange" not in names
 
@@ -101,9 +103,10 @@ class TestTaskStructure:
         from corvidae.task import Task
 
         names = {f.name for f in dataclasses.fields(Task)}
-        assert "correlation_id" in names
+        assert "trace_id" in names
         assert "meta" in names
         assert "exchange_key" not in names
+        assert "correlation_id" not in names
         assert "origin" not in names
 
 
@@ -120,38 +123,38 @@ class TestHookspecSignatures:
     def test_should_process_message(self):
         from corvidae.hooks import AgentSpec
         assert _params(AgentSpec.should_process_message) == [
-            "channel", "sender", "text", "correlation_id",
+            "channel", "sender", "text", "trace_id",
         ]
 
     def test_on_message_admitted(self):
         from corvidae.hooks import AgentSpec
         assert _params(AgentSpec.on_message_admitted) == [
-            "channel", "correlation_id", "sender", "text",
+            "channel", "trace_id", "sender", "text",
         ]
 
     def test_on_message_rejected(self):
         from corvidae.hooks import AgentSpec
         assert _params(AgentSpec.on_message_rejected) == [
-            "channel", "correlation_id", "sender", "text",
+            "channel", "trace_id", "sender", "text",
         ]
 
     def test_on_message_persisted(self):
         from corvidae.hooks import AgentSpec
         assert _params(AgentSpec.on_message_persisted) == [
-            "channel", "correlation_id", "rowid", "text", "meta",
+            "channel", "trace_id", "rowid", "text", "meta",
         ]
 
     def test_before_agent_turn(self):
         from corvidae.hooks import AgentSpec
         assert _params(AgentSpec.before_agent_turn) == [
-            "channel", "correlation_id", "meta",
+            "channel", "trace_id", "meta",
         ]
 
     def test_on_agent_response(self):
         from corvidae.hooks import AgentSpec
         assert _params(AgentSpec.on_agent_response) == [
             "channel", "request_text", "response_text",
-            "correlation_id", "meta", "logprobs",
+            "trace_id", "meta", "logprobs",
         ]
 
 
@@ -192,14 +195,15 @@ class TestDeletedSurfaceAbsent:
         # rebuild_registry itself stays -- on_start still uses it.
         assert hasattr(ToolCollectionPlugin, "rebuild_registry")
 
-    def test_mint_correlation_id_replaces_mint_exchange_key(self):
+    def test_mint_trace_id_replaces_old_minters(self):
         import corvidae.agent as agent_module
-        assert hasattr(agent_module, "mint_correlation_id")
+        assert hasattr(agent_module, "mint_trace_id")
         assert not hasattr(agent_module, "mint_exchange_key")
+        assert not hasattr(agent_module, "mint_correlation_id")
 
 
 # ---------------------------------------------------------------------------
-# Behavioral: dequeue correlation resolution
+# Behavioral: dequeue trace resolution
 # ---------------------------------------------------------------------------
 
 
@@ -213,8 +217,8 @@ async def plugin_and_channel():
     await db.close()
 
 
-class TestDequeueCorrelationResolution:
-    async def test_inherits_correlation_id_from_meta(self, plugin_and_channel):
+class TestDequeueTraceResolution:
+    async def test_inherits_trace_id_from_meta(self, plugin_and_channel):
         plugin, channel, db = plugin_and_channel
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("hi"))
@@ -222,13 +226,13 @@ class TestDequeueCorrelationResolution:
 
         await plugin.on_notify(
             channel=channel, source="task", text="standalone",
-            tool_call_id=None, meta={"correlation_id": "inherited-123"},
+            tool_call_id=None, meta={"trace_id": "inherited-123"},
         )
         await drain(plugin, channel)
 
         call_kwargs = plugin.pm.ahook.on_agent_response.call_args.kwargs
-        assert call_kwargs["correlation_id"] == "inherited-123"
-        assert call_kwargs["meta"] == {"correlation_id": "inherited-123"}
+        assert call_kwargs["trace_id"] == "inherited-123"
+        assert call_kwargs["meta"] == {"trace_id": "inherited-123"}
 
     async def test_mints_when_absent(self, plugin_and_channel):
         plugin, channel, db = plugin_and_channel
@@ -243,13 +247,13 @@ class TestDequeueCorrelationResolution:
         await drain(plugin, channel)
 
         call_kwargs = plugin.pm.ahook.on_agent_response.call_args.kwargs
-        assert call_kwargs["correlation_id"] is not None
-        assert isinstance(call_kwargs["correlation_id"], str)
+        assert call_kwargs["trace_id"] is not None
+        assert isinstance(call_kwargs["trace_id"], str)
         # No origin field anywhere at the core level (R1).
         assert "origin" not in call_kwargs
 
 
-class TestAttributionCarriesCorrelationAndMeta:
+class TestAttributionCarriesTraceAndMeta:
     async def test_attribution_snapshot(self, plugin_and_channel):
         from corvidae.attribution import get_attribution
 
@@ -270,7 +274,7 @@ class TestAttributionCarriesCorrelationAndMeta:
         )
         await drain(plugin, channel)
 
-        assert captured.get("correlation_id") is not None
+        assert captured.get("trace_id") is not None
         assert captured.get("meta") == {"task_id": "t-1"}
 
 
@@ -296,7 +300,7 @@ class TestTaskPluginMetaRoundTrip:
             return "result"
 
         task = Task(
-            work=work, channel=channel, correlation_id="cid-1",
+            work=work, channel=channel, trace_id="tid-1",
             meta={"origin": "critique"}, tool_call_id=None,
         )
         await plugin._on_task_complete(task, "the result")
@@ -304,7 +308,7 @@ class TestTaskPluginMetaRoundTrip:
         call_kwargs = pm.ahook.on_notify.call_args.kwargs
         assert call_kwargs["meta"] == {
             "task_id": task.task_id,
-            "correlation_id": "cid-1",
+            "trace_id": "tid-1",
             "origin": "critique",
         }
 
@@ -328,11 +332,13 @@ class TestOnMessagePersistedFiringDiscipline:
         mock_client.chat = AsyncMock(return_value=_make_text_response("hi"))
         plugin._client = mock_client
 
-        await plugin.on_message(channel=channel, sender="user", text="hello")
+        # The transport-minted id passed to on_message must reach the hook.
+        tid = mint_trace_id()
+        await plugin.on_message(channel=channel, sender="user", text="hello", trace_id=tid)
         await drain(plugin, channel)
 
         persisted.assert_awaited_once()
         call_kwargs = persisted.call_args.kwargs
         assert call_kwargs["rowid"] is None
         assert call_kwargs["text"] == "hello"
-        assert call_kwargs["correlation_id"] is not None
+        assert call_kwargs["trace_id"] == tid

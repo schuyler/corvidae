@@ -26,7 +26,7 @@ async def _run(tmp_path, agent, window_rowids=(41, 42), rowid=41, config=None, o
     env.channel.runtime_overrides.update(overrides or {})
     await env.outcome.record_exchange("k", env.channel.id, origin="user")
     await env.appraisal.on_message_persisted(
-        channel=env.channel, correlation_id="k", rowid=rowid, text="is the heater the culprit?", meta={})
+        channel=env.channel, trace_id="k", rowid=rowid, text="is the heater the culprit?", meta={})
     await env.appraisal._run_stage2(env.channel, "k", "is the heater the culprit?", "yes, brownout", None)
     stored = (await _read_appraisal(env.db, "k"))["stage2"]
     await _teardown(env)
@@ -42,7 +42,7 @@ async def test_fork_used_when_exchange_is_in_window(tmp_path):
     assert call["instruction"].startswith(DEFAULT_STAGE2_FORK_PROMPT)
     for part in ("«is the heater the culprit?»", "«yes, brownout»", "no retrieval recorded"):
         assert part in call["instruction"]
-    assert (call["attribution"]["stage"], call["attribution"]["correlation_id"]) == ("appraisal", "k")
+    assert (call["attribution"]["stage"], call["attribution"]["trace_id"]) == ("appraisal", "k")
     assert stored["valence"] == 0.1
     assert env.appraisal.get_last_stage2(env.channel.id)["novelty"] == 0.6
 

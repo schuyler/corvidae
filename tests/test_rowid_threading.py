@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock
 import aiosqlite
 import pytest
 
+from corvidae.trace import mint_trace_id
 from corvidae.channel import Channel
 from corvidae.compaction import CompactionPlugin
 from corvidae.context import ContextWindow, MessageType
@@ -46,7 +47,7 @@ class TestRowidAttachment:
         mock_client.chat = AsyncMock(return_value=_make_text_response("hi there"))
         plugin._client = mock_client
 
-        await plugin.on_message(channel=channel, sender="user", text="hello")
+        await plugin.on_message(channel=channel, sender="user", text="hello", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
         conv = channel.conversation

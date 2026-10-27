@@ -2,6 +2,7 @@ import pytest
 import apluggy as pluggy
 from pluggy import HookimplMarker, HookspecMarker
 
+from corvidae.trace import mint_trace_id
 from corvidae.hooks import AgentSpec, hookimpl, hookspec
 from corvidae.hooks import create_plugin_manager
 from corvidae.hooks import get_dependency, validate_dependencies
@@ -64,7 +65,7 @@ async def test_multiple_plugins_receive_hook():
     pm.register(PluginA())
     pm.register(PluginB())
     ch = Channel(transport="test", scope="scope")
-    await pm.ahook.on_message(channel=ch, sender="user", text="hi")
+    await pm.ahook.on_message(channel=ch, sender="user", text="hi", trace_id=mint_trace_id())
 
     assert sorted(received) == ["A", "B"]
 
