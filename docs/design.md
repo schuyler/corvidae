@@ -148,7 +148,7 @@ adding a hook are in [plugin-guide.md](plugin-guide.md#hook-grammar);
 | `on_idle` | broadcast | `IdleMonitor`, when all queues empty and cooldown elapsed |
 | `resolve_conversation` | firstresult=True | `_process_queue_item`, when `channel.conversation is None`; return list of tagged message dicts or None to defer |
 | `resolve_channel` | firstresult=True | `SchedulerPlugin`, for a persisted channel id the registry does not hold (e.g. a reminder due after a restart); a transport returns the live Channel for ids it owns, created with transport-specific config, or None to defer. `SignalPlugin` and `DiscordPlugin` implement it; callers fall back to `registry.get_or_create` from the split id |
-| `persist_message` | broadcast (imperative) | `_process_queue_item`, after every `conv.append()`; every implementation runs (persistence, JSONL logging). `PersistencePlugin` returns the `message_log` rowid and the caller resolves the list with `resolve_single_result` into `_db_id` |
+| `persist_message` | broadcast (imperative) | `_process_queue_item` after every `conv.append()`, and `FunnelPlugin` for the CONTEXT it persists; every implementation runs (persistence, JSONL logging). `PersistencePlugin` returns the `message_log` rowid and the caller resolves the list with `resolve_single_result` into `_db_id` |
 | `before_compaction` | broadcast, awaited | `CompactionPlugin`, after the summary succeeded and before `replace_with_summary()`; the window still holds `messages[:cut]`, so a plugin can fork over the dropped prefix (see [Forks](#forks)); failures logged, never block compaction |
 | `on_compaction` | broadcast | `CompactionPlugin`, after `replace_with_summary()`; side effects only (persistence) |
 | `on_llm_request` | broadcast | `LLMClient.chat()` via LLMPlugin's injected observer, before the retry loop; side effects only (observability) |
@@ -613,7 +613,8 @@ per-channel `SerialQueue`. The queue's consumer calls
    responses and have every later tool call suppressed.
 4. Resolves channel config (including `max_turns`)
 5. Appends the inbound message to conversation; fires `persist_message`
-   (broadcast, side effects only — persistence plugins write to storage)
+   (broadcast: every implementation runs; `PersistencePlugin`'s rowid is
+   resolved with `resolve_single_result` and stored as `_db_id`)
 5b. **Tool result batching** — if the item is a tool-result notification
     (`role=NOTIFICATION` with `tool_call_id` set), removes the ID from
     `channel.pending_tool_call_ids`. If the set is non-empty after the
@@ -626,8 +627,9 @@ per-channel `SerialQueue`. The queue's consumer calls
 7. Calls `before_agent_turn` hook (broadcast); fires `persist_message`
    for any messages injected by the hook
 8. **`_run_turn`** — calls `run_agent_turn` (single LLM invocation).
-   On exception, broadcasts `resolve_llm_error` (`firstresult=True`), sends
-   the error message to the channel, and returns `None` to abort
+   On exception, calls `resolve_llm_error` (`firstresult=True`; if the hook
+   itself raises, the failure is logged at WARNING and the default message
+   is used), sends the error message to the channel, and returns `None` to abort
    processing. `LLMPlugin` implements it `trylast`: for an unloaded
    backend model it returns a message naming the model; for any non-2xx
    `LLMHTTPError` it names the status, an actionable hint (API key,
@@ -667,7 +669,7 @@ instances in `self.queues` are empty and `TaskQueue.is_idle` is `True`
 `idle_cooldown_seconds` have elapsed since the last `on_idle` firing,
 it broadcasts the `on_idle` hook.
 
-**`_resolve_display_text`** broadcasts `transform_display_text`
+**`_resolve_display_text`** calls `transform_display_text`
 (`firstresult=True` wrapper chain). If the hook returns a value,
 that value is used; otherwise falls back to `result.text`. When a
 `fallback` is provided and the resolved text is falsy, the fallback is

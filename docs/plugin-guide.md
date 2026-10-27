@@ -147,10 +147,12 @@ implementer answers only for ids under its own `transport:` prefix and
 returns `None` for the rest, so the order pluggy calls them in cannot change
 the answer.
 
-The bare imperative allowlist is `register_tools` (implementers append to
-the list passed in), `persist_message` (every implementation runs; the
-caller resolves the list with `resolve_single_result`), and the four
-`send_*` hooks, which are being folded into a single `send` hook.
+The bare imperative allowlist is `send`, `register_tools` (implementers
+append to the list passed in) and `persist_message` (every implementation
+runs; the caller resolves the list with `resolve_single_result`). The four
+`send_*` hooks are the known exceptions: they are not on the allowlist and
+the grammar test marks them as expected failures until they are folded
+into the single `send` hook (plans/kernel-split.md, WP3).
 
 ### Adding a hook
 
