@@ -23,6 +23,7 @@ Config (top-level 'mcp:' key in agent.yaml):
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
@@ -67,6 +68,9 @@ class McpClientPlugin(CorvidaePlugin):
         self._cached_tools: list[Tool] = []
         self._exit_stack: AsyncExitStack | None = None
         self._servers_config: dict = {}
+        # Configs for servers that did not connect at startup, retried on the
+        # next MCP tool call (name -> config).
+        self._pending_servers: dict[str, dict] = {}
 
     @hookimpl
     async def on_init(self, pm, config: dict) -> None:
@@ -83,6 +87,7 @@ class McpClientPlugin(CorvidaePlugin):
 
         self._exit_stack = AsyncExitStack()
         await self._exit_stack.__aenter__()
+        self._pending_servers = {}
 
         for server_name, server_cfg in servers_config.items():
             try:
@@ -93,6 +98,10 @@ class McpClientPlugin(CorvidaePlugin):
                     extra={"server": server_name},
                     exc_info=True,
                 )
+            # A server that did not register (exception or timeout) is kept
+            # for a lazy reconnect rather than skipped for the process lifetime.
+            if not any(server.name == server_name for server in self._servers):
+                self._pending_servers[server_name] = server_cfg
 
         self._cached_tools = self._build_tool_list()
         logger.info(
@@ -121,6 +130,44 @@ class McpClientPlugin(CorvidaePlugin):
     def register_tools(self, tool_registry: list) -> None:
         """Append cached Tool instances to tool_registry (sync delivery)."""
         tool_registry.extend(self._cached_tools)
+
+    async def _retry_pending_servers(self) -> None:
+        """Reconnect servers that failed at startup, on demand.
+
+        Called from every MCP tool call. Successful reconnects refresh the
+        cached tool list and the shared registry.
+
+        shortcut: retries need a working MCP tool to trigger them, so a
+        daemon whose servers all failed at startup never retries; upgrade to
+        a background retry loop if all-server outage recovery matters.
+        """
+        if not self._pending_servers:
+            return
+
+        reconnected = False
+        for name, cfg in list(self._pending_servers.items()):
+            try:
+                await self._connect_server(name, cfg)
+            except Exception:
+                logger.warning(
+                    "MCP server lazy reconnect failed",
+                    extra={"server": name},
+                    exc_info=True,
+                )
+                continue
+            if any(server.name == name for server in self._servers):
+                self._pending_servers.pop(name, None)
+                reconnected = True
+            # A timeout leaves the server pending for the next tool call.
+
+        if reconnected:
+            self._cached_tools = self._build_tool_list()
+            # Refresh the shared registry so later tool consumers (e.g.
+            # subagents) see the reconnected server's tools.
+            tools_plugin = self.pm.get_plugin("tools") if self.pm is not None else None
+            rebuild = getattr(tools_plugin, "rebuild_registry", None)
+            if inspect.iscoroutinefunction(rebuild):
+                await rebuild()
 
     async def _connect_server(self, name: str, cfg: dict) -> None:
         """Connect to one MCP server and register its tools.
@@ -253,7 +300,7 @@ class McpClientPlugin(CorvidaePlugin):
         seen: dict[str, str] = {}  # tool_name -> server_name
         for server in self._servers:
             for mcp_tool in server.mcp_tools:
-                tool = _make_tool(server, mcp_tool)
+                tool = _make_tool(server, mcp_tool, self)
                 if tool.name in seen:
                     logger.warning(
                         "MCP tool name collision: %r from server %r "
@@ -266,7 +313,7 @@ class McpClientPlugin(CorvidaePlugin):
         return tools
 
 
-def _make_tool(server: _McpServerState, mcp_tool) -> Tool:
+def _make_tool(server: _McpServerState, mcp_tool, plugin=None) -> Tool:
     """Build a Corvidae Tool from one MCP tool definition.
 
     Captures session, original tool name, and timeout in the closure.
@@ -283,6 +330,9 @@ def _make_tool(server: _McpServerState, mcp_tool) -> Tool:
     server_name = server.name
 
     async def tool_fn(**kwargs) -> str:
+        # Give startup-failed servers a chance to come back before the call.
+        if plugin is not None:
+            await plugin._retry_pending_servers()
         return await _call_mcp_tool(session, original_name, kwargs, timeout, server_name)
 
     tool_fn.__name__ = tool_name

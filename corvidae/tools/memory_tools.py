@@ -12,8 +12,10 @@ Tool semantics:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import re
 import time
 from datetime import datetime, timezone
 
@@ -25,6 +27,11 @@ logger = logging.getLogger("corvidae.tools.memory_tools")
 
 # Rough characters-per-token approximation for the token cap.
 _CHARS_PER_TOKEN = 4
+
+# A None schema can mean another task is still creating it, so wait briefly
+# before reporting it unavailable.
+_SCHEMA_RETRY_ATTEMPTS = 3
+_SCHEMA_RETRY_DELAY = 0.05
 
 
 class MemoryToolsPlugin(CorvidaePlugin):
@@ -46,6 +53,16 @@ class MemoryToolsPlugin(CorvidaePlugin):
     def _memory(self):
         from corvidae.memory import MemoryPlugin
         return get_dependency(self.pm, "memory", MemoryPlugin)
+
+    async def _wait_for_schema(self, memory):
+        """Return the memory DB, retrying briefly while schema setup finishes."""
+        for attempt in range(_SCHEMA_RETRY_ATTEMPTS):
+            db = await memory._ensure_schema()
+            if db is not None:
+                return db
+            if attempt < _SCHEMA_RETRY_ATTEMPTS - 1:
+                await asyncio.sleep(_SCHEMA_RETRY_DELAY)
+        return None
 
     @hookimpl
     def register_tools(self, tool_registry: list) -> None:
@@ -109,7 +126,7 @@ class MemoryToolsPlugin(CorvidaePlugin):
                         "Use YYYY-MM-DD or ISO-8601 format."
                     )
 
-            db = await memory._ensure_schema()
+            db = await plugin._wait_for_schema(memory)
             if db is None:
                 return "Error: memory schema not available"
 
@@ -165,8 +182,29 @@ class MemoryToolsPlugin(CorvidaePlugin):
                 async with db.execute(sql, (match, *params)) as cursor:
                     rows = await cursor.fetchall()
             except Exception:
-                logger.warning("search_memory FTS query failed", exc_info=True)
-                return "Error: search failed internally"
+                logger.warning(
+                    "search_memory FTS query failed; falling back to summary scan",
+                    exc_info=True,
+                )
+                # Degrade to a plain LIKE scan over summaries using the same
+                # word tokens, so a broken FTS index does not fail the search.
+                tokens = re.findall(r"\w+", query)[:20]
+                like_sql = (
+                    "SELECT m.id, m.summary, m.created_at, m.indexed, "
+                    "m.superseded_by, 0.0 FROM memory m "
+                    f"WHERE {where} AND ("
+                    + " OR ".join("m.summary LIKE ?" for _ in tokens)
+                    + ") ORDER BY m.created_at DESC LIMIT 50"
+                )
+                like_params = [f"%{token}%" for token in tokens]
+                try:
+                    async with db.execute(like_sql, (*params, *like_params)) as cursor:
+                        rows = await cursor.fetchall()
+                except Exception:
+                    logger.warning(
+                        "search_memory fallback scan failed", exc_info=True
+                    )
+                    return "Error: search failed internally"
 
             if not rows:
                 return "No memories found matching your query."
@@ -216,7 +254,7 @@ class MemoryToolsPlugin(CorvidaePlugin):
             calling_channel = _ctx.channel
             scope = memory._channel_scope(calling_channel.id)
 
-            db = await memory._ensure_schema()
+            db = await plugin._wait_for_schema(memory)
             if db is None:
                 return "Error: memory schema not available"
 

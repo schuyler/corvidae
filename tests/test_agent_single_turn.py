@@ -676,6 +676,61 @@ class TestNoTaskQueueLogsError:
         await db.close()
 
 
+class TestNoTaskQueueEmitsToolResult:
+    async def test_no_task_queue_returns_error_tool_result_to_model(self):
+        """Without a TaskQueue the model must still get a tool result, not silence."""
+        db = await aiosqlite.connect(":memory:")
+        await init_db(db)
+
+        pm = create_plugin_manager()
+        registry = ChannelRegistry(AGENT_DEFAULTS)
+        pm.register(registry, name="registry")
+        pm.ahook.send_message = AsyncMock()
+        pm.ahook.on_agent_response = AsyncMock()
+        # No TaskPlugin registered on purpose.
+
+        persistence = PersistencePlugin(pm)
+        persistence.db = db
+        persistence._registry = registry
+        pm.register(persistence, name="persistence")
+
+        plugin = Agent(pm)
+        pm.register(plugin, name="agent")
+        plugin._registry = registry
+
+        async def my_tool(x: str) -> str:
+            """A tool."""
+            return "result"
+
+        plugin._tools = {"my_tool": my_tool}
+
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(side_effect=[
+            _make_tool_call_response(
+                [_make_tool_call("call-notq", "my_tool", {"x": "v"})]
+            ),
+            _make_text_response("done"),
+        ])
+        plugin._client = mock_client
+
+        channel = registry.get_or_create("test", "scope_notq")
+
+        await plugin.on_message(channel=channel, sender="user", text="hi")
+        await drain(plugin, channel)
+
+        # The model saw an error tool result for the call it asked for...
+        tool_messages = [
+            m for m in channel.conversation.messages if m.get("role") == "tool"
+        ]
+        assert tool_messages, "model never received a tool result"
+        assert tool_messages[0]["tool_call_id"] == "call-notq"
+        assert "error" in tool_messages[0]["content"].lower()
+        # ...and the turn completed with a second LLM call.
+        assert mock_client.chat.await_count == 2
+
+        await db.close()
+
+
 # ---------------------------------------------------------------------------
 # Test 12: assistant message with tool_calls persisted in conversation
 # ---------------------------------------------------------------------------
