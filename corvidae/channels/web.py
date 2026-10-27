@@ -444,15 +444,11 @@ class WebPlugin(CorvidaePlugin):
         self._stopping = True
 
         # 1. Close every fan-out socket and finish pending drop-path closes;
-        #    each is bounded by _close_client.
+        #    each is bounded by _close_client, which logs and absorbs its own
+        #    errors, so only a cancellation can come back here.
         closes = [self._close_client(c, 1001, b"server shutting down")
                   for c in list(self._clients)]
-        results = await asyncio.gather(*closes, *list(self._close_tasks),
-                                       return_exceptions=True)
-        for result in results:
-            if isinstance(result, BaseException) and not isinstance(
-                    result, asyncio.CancelledError):
-                logger.warning("web: error closing a socket", exc_info=result)
+        await asyncio.gather(*closes, *list(self._close_tasks), return_exceptions=True)
 
         # 2. Cancel every handler still running — including those of clients
         #    the drop path already removed from _clients.

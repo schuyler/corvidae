@@ -1272,13 +1272,17 @@ class TestUnsent:
         env = await make_env()
         a = await env.connect()
         await a.send(type="send", conversation="main", text="hi")
-        await wait_until(lambda: env.agent.calls)
+        await a.send(type="send", conversation="main", text="still waiting")
+        await wait_until(lambda: len(env.agent.calls) == 2)
         await _persist(env, _cid_of(env, "hi"))
-        assert "web:main" not in env.plugin._unsent
+        # Only the persisted message leaves; the other stays visible.
+        assert [e.text for e in env.plugin._unsent["web:main"]] == ["still waiting"]
         b = await env.connect()
         await b.send(type="subscribe", conversation="main")
         history = await b.wait_type("history")
-        assert _history_users(history) == []
+        assert [u["text"] for u in _history_users(history)] == ["still waiting"]
+        await _persist(env, _cid_of(env, "still waiting"))
+        assert "web:main" not in env.plugin._unsent
 
     async def test_rejected_message_leaves_unsent(self, make_env):
         env = await make_env()
@@ -1340,6 +1344,13 @@ class TestUnsent:
         ev_a.set()
         rej = await b.wait_type("rejected")
         assert rej["id"] == id_a
+        # Removing A's entry must leave B's (admitted, unpersisted) in place.
+        await a.sync()
+        remaining = env.plugin._unsent["web:main"]
+        assert [e.text for e in remaining] == ["b-msg"]
+        c = await env.connect()
+        await c.send(type="subscribe", conversation="main")
+        assert [u["text"] for u in _history_users(await c.wait_type("history"))] == ["b-msg"]
 
     async def test_mid_gate_subscriber_sees_refusal_id(self, make_env):
         env = await make_env()

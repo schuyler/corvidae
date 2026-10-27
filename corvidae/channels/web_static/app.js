@@ -7,6 +7,10 @@
   const SLUG = /^[a-z0-9][a-z0-9_-]{0,63}$/;
   let ws = null, backoff = 1000, failures = 0, opened = false, stopped = false;
   let current = "main", knownNames = new Set(), lastSent = "", convos = [];
+  // Texts sent on this socket and not yet echoed back as `user` frames; if
+  // the socket dies first, the server may never have seen them.
+  let pending = [];
+  const sendBtn = $("send");
 
   // ---- Markdown sanitising: links open in a new tab safely ----
   DOMPurify.addHook("afterSanitizeAttributes", (node) => {
@@ -133,7 +137,9 @@
     if (location.hash.slice(1) !== name) location.hash = name; // triggers hashchange
   }
   function hashName() {
-    const h = decodeURIComponent(location.hash.slice(1));
+    // A malformed escape (e.g. "#%") must not kill the page.
+    let h = "";
+    try { h = decodeURIComponent(location.hash.slice(1)); } catch (e) { h = ""; }
     return SLUG.test(h) ? h : "main";
   }
   window.addEventListener("hashchange", () => {
@@ -149,7 +155,7 @@
     stopped = true;
     bannerEl.textContent = "session expired — log in again with the URL from the daemon log";
     bannerEl.classList.remove("hidden");
-    $("send").disabled = true;
+    sendBtn.disabled = true;
   }
 
   // ---- Incoming frame dispatch ----
@@ -167,6 +173,8 @@
     } else if (f.type === "working") {
       setWorking(!!f.value);
     } else {
+      // Our own send echoed back: the server has it.
+      if (f.type === "user" && pending.length && f.text === pending[0]) pending.shift();
       renderFrame(f);
     }
   }
@@ -177,6 +185,7 @@
       else if (f.request === "subscribe") setTimeout(() => send({ type: "subscribe", conversation: current }), 2000);
       else if (f.request === "send") {
         notice("server is starting — message not sent");
+        pending.shift();  // answered: it won't be echoed
         if (!inputEl.value) inputEl.value = lastSent;
       }
       return;
@@ -202,6 +211,13 @@
     ws.addEventListener("close", (ev) => onClose(ev));
   }
   async function onClose(ev) {
+    // Sends never echoed back may not have reached the server (a half-open
+    // socket after sleep): hand the oldest back rather than lose it.
+    if (pending.length) {
+      if (!inputEl.value) inputEl.value = pending[0];
+      notice("message may not have been sent — check and resend");
+      pending = [];
+    }
     if (ev.code === 4001) { expired(); return; }
     if (!opened && ++failures >= 3) {
       // Repeated connect failures: probe the page to detect an expired session.
@@ -225,6 +241,7 @@
       return;
     }
     lastSent = text;
+    pending.push(text);
     inputEl.value = "";
     // A send to an unlisted conversation should show up in the list.
     if (!knownNames.has(current)) send({ type: "list" });
