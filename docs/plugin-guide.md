@@ -574,7 +574,10 @@ async def resolve_channel(self, channel_id: str) -> Channel | None:
 `AcpPlugin` (`corvidae` entry point `acp`) speaks Agent Client Protocol v1
 over stdio when launched via `corvidae acp`. It does **not** connect under
 `serve` / `cli` unless `config["_acp_mode"]` is set (only the `acp`
-command does that).
+command does that). Startup misconfiguration — a missing config file, an
+invalid YAML document, or an invalid config value — exits non-zero with a
+single `Error:` line naming the config path, so an editor shows the
+diagnosis instead of a traceback.
 
 Optional YAML block (all keys optional today; presence is enough to
 document intent):

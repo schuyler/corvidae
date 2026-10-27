@@ -6,9 +6,12 @@ command entry point, and SDK-missing guard land.
 
 from __future__ import annotations
 
+import logging
 import importlib
 import sys
 from unittest.mock import patch
+
+import pytest
 
 from click.testing import CliRunner
 
@@ -61,3 +64,84 @@ class TestServeAndCliDoNotImportAcp:
         importlib.import_module("corvidae.channels.cli")
 
         assert "acp" not in sys.modules
+
+
+class TestAcpConfigErrors:
+    """Startup misconfiguration must be one clean line, not a traceback."""
+
+    @pytest.fixture(autouse=True)
+    def _restore_logging_state(self):
+        """Restore global logging after acp_command reconfigures it on startup."""
+        root = logging.getLogger()
+        corvidae_logger = logging.getLogger("corvidae")
+        before = (
+            list(root.handlers),
+            root.level,
+            list(corvidae_logger.handlers),
+            corvidae_logger.level,
+            corvidae_logger.propagate,
+        )
+        yield
+        # Close only the handlers configure_logging installed, then restore.
+        installed = (set(root.handlers) | set(corvidae_logger.handlers)) - (
+            set(before[0]) | set(before[2])
+        )
+        for handler in installed:
+            handler.close()
+        root.handlers[:] = before[0]
+        root.setLevel(before[1])
+        corvidae_logger.handlers[:] = before[2]
+        corvidae_logger.setLevel(before[3])
+        corvidae_logger.propagate = before[4]
+
+    def _invoke(self, config_path):
+        from corvidae.channels.acp import acp_command
+
+        runner = CliRunner()
+        result = runner.invoke(acp_command, ["--config", str(config_path)])
+        combined = (result.output or "") + (result.stderr or "")
+        return result, combined
+
+    def test_missing_config_file_reports_the_path(self, tmp_path):
+        missing = tmp_path / "nope.yaml"
+
+        result, combined = self._invoke(missing)
+
+        assert result.exit_code != 0
+        assert "config file not found" in combined.lower()
+        assert str(missing) in combined
+        assert "Traceback" not in combined
+
+    def test_invalid_yaml_reports_the_path(self, tmp_path):
+        bad = tmp_path / "agent.yaml"
+        bad.write_text("agent: [unclosed\n")
+
+        result, combined = self._invoke(bad)
+
+        assert result.exit_code != 0
+        assert "invalid yaml" in combined.lower()
+        assert str(bad) in combined
+        assert "Traceback" not in combined
+
+    def test_removed_config_key_reports_the_key(self, tmp_path):
+        bad = tmp_path / "agent.yaml"
+        bad.write_text(
+            "agent:\n"
+            "  system_prompt: hi\n"
+            "  max_context_tokens: 8000\n"
+            "  keep_thinking_in_history: true\n"
+        )
+
+        result, combined = self._invoke(bad)
+
+        assert result.exit_code != 0
+        assert "invalid config" in combined.lower()
+        assert "reasoning_history" in combined
+        assert "Traceback" not in combined
+
+    def test_directory_as_config_reports_that(self, tmp_path):
+        result, combined = self._invoke(tmp_path)
+
+        assert result.exit_code != 0
+        assert str(tmp_path) in combined
+        assert "Traceback" not in combined

@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import click
+import yaml
 
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 from corvidae.runtime import Runtime
@@ -681,6 +682,16 @@ def acp_command(config: str) -> None:
         )
         sys.exit(1)
 
+    # Fail on an unusable config path before starting, with one clean line:
+    # an editor surfaces stderr, not a Python traceback.
+    config_path = Path(config)
+    if not config_path.exists():
+        click.echo(f"Error: config file not found: {config}", err=True)
+        sys.exit(1)
+    if not config_path.is_file():
+        click.echo(f"Error: config path is not a regular file: {config}", err=True)
+        sys.exit(1)
+
     # ACP mode: keep JSON-RPC on stdout; route logs to a file (A2).
     runtime = Runtime(
         config_path=config,
@@ -689,4 +700,12 @@ def acp_command(config: str) -> None:
             "logging": {"file": "corvidae-acp.log"},
         },
     )
-    asyncio.run(runtime.run())
+    try:
+        asyncio.run(runtime.run())
+    except yaml.YAMLError as exc:
+        click.echo(f"Error: invalid YAML in {config}: {exc}", err=True)
+        sys.exit(1)
+    except ValueError as exc:
+        # Config validation raises ValueError (removed keys, bad values).
+        click.echo(f"Error: invalid config {config}: {exc}", err=True)
+        sys.exit(1)
