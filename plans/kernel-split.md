@@ -4,8 +4,39 @@ This document specifies two changes: moving the cognition plugins into a
 second distribution in the same repository, and giving the hook set a grammar
 so that a hook's name tells you its resolution semantics. It is written for a
 Rule of Two implementer: tagged requirements first, then the design, then
-ordered work packages with red tests named. Status: proposed 2026-10-26,
-re-measured 2026-10-27 (#117), nothing implemented.
+ordered work packages with red tests named. Status: implemented
+2026-10-27. Proposed 2026-10-26, re-measured the next day (#117), then
+landed in the order WP1, WP3, WP2:
+
+- WP1, hook grammar test and five renames: `4f4220c` (#123, closes #97).
+- WP3, `send` hook and `TransportPlugin`: `a40a4f5` (#124, closes #98).
+- WP2, package split and the `discord` extra: `86c34fd` (#127, closes #38).
+- WP4: the README tables, the R7 paragraph and the design.md architecture
+  sentence landed with WP2; this status block is the rest.
+
+Found and fixed on the way, as separate PRs: compaction and `on_idle` were
+skipped for the first 30 s after boot (`9aaf3ec`, #126), and the redact
+CLI's `range` form crashed on every call and its `memory` form crashed on a
+database without the memory schema (`e5f785f`, #128).
+
+Where the result differs from the text below:
+
+- The CLAUDE.md broadcast-filter bullet was rewritten, not deleted: inbound
+  hooks still reach every transport and still need an ownership check.
+- `resolve_single_result` logs and uses the first value; it does not raise.
+- `redact` prints no skip notices on a database without the memory schema
+  (Part 2 §2 assumed it did); design.md describes what it does.
+- `harness/consolidate_replay.py` also imported a cognition module.
+- The boundary allowlist includes `corvidae.outbound`, which WP3 added.
+
+Not verified: R4's harness criterion (`harness/run.sh` needs a
+llama-server) and WP2's `sessions.db` schema diff against a pre-split
+database (no schema-creating code changed, but the diff was not run). The
+other acceptance items are tests that run in CI. Still open:
+switching `AcpPlugin` to `OutboundToolStatus.tool_call_id` (Open
+questions), R8.
+
+The rest of this document is the plan as approved, kept for its reasoning.
 
 Every number in this document was measured against `618c831` (main,
 2026-10-27), after the Discord, web and ACP transports and after #116 and
