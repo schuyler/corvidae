@@ -31,9 +31,12 @@ commit the lock change: `uv lock --upgrade-package apluggy` for one package,
 `uv lock --upgrade` for all. After editing dependencies in `pyproject.toml`,
 run `uv lock`; CI syncs with `--locked` and fails on a stale lock.
 
-CI (`.github/workflows/tests.yml`) runs `uv run pytest -q` on every push to `main`
-and every PR, after checking that sqlite-vec loads. It doesn't run the harness
-or `--run-eval`.
+CI (`.github/workflows/tests.yml`) runs two jobs on every push to `main` and
+every PR: `kernel` (`--extra dev --extra acp`; checks that sqlite-vec, the
+Discord SDK and `corvidae_cognition` are absent, then runs everything outside
+`tests/cognition/`) and `full` (every extra; checks sqlite-vec and the Discord
+SDK load, then runs the whole suite). It doesn't run the harness or
+`--run-eval`.
 
 `tool.pytest.ini_options` sets a global `timeout = 15`. Every async test inherits
 it — this is the hang safety net AGENTS.md calls for, so don't disable it. If a
@@ -54,7 +57,9 @@ Three layers: an apluggy plugin system, the agent loop, and transport plugins.
 Things that are easy to get wrong and won't fail loudly:
 
 - **A new plugin must be registered** in `[project.entry-points.corvidae]` in
-  `pyproject.toml`. Without it the plugin is simply never loaded — no error.
+  `pyproject.toml` (the root one for kernel plugins,
+  `packages/corvidae-cognition/pyproject.toml` for cognition plugins).
+  Without it the plugin is simply never loaded — no error.
 - **Transports subclass `TransportPlugin`** (`corvidae/hooks.py`), which
   filters outbound `send` events for them. Inbound hooks
   (`should_process_message`, `on_message_admitted`/`rejected`/`persisted`)

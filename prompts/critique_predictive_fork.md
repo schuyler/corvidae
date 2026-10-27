@@ -1,7 +1,7 @@
 # Critique fork instruction: predictive
 
 The documented copy of `DEFAULT_FORK_PROMPTS["predictive"]` in
-`corvidae/critique.py`. With `agent.forks.enabled` (and `critique` in
+`packages/corvidae-cognition/corvidae_cognition/critique.py`. With `agent.forks.enabled` (and `critique` in
 `agent.forks.stages`), the lens runs as a fork of the live window instead
 of a separate critic call: the main turn's render of the whole window,
 followed by this text as a `user` turn (GitHub issue #51). It runs on

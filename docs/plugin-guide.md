@@ -926,8 +926,9 @@ Registered by `SchedulerPlugin` (entry point name: `scheduler`). All three act o
 
 The kernel's plugins follow. The cognition plugins (`MemoryPlugin`,
 `MemoryToolsPlugin`, `FunnelPlugin`, `AppraisalPlugin`, `CritiquePlugin`,
-`OutcomeLogPlugin`) ship in the `cognition` extra and are documented in
-[cognition.md](cognition.md#plugin-reference).
+`OutcomeLogPlugin`) ship in the `cognition` extra and are described in
+[cognition.md](cognition.md), which has reference sections for the memory,
+funnel and outcome-log plugins.
 
 These plugins ship with Corvidae and are registered via entry points as part of the default daemon. They can be omitted if the application does not need their functionality; each degrades gracefully when absent.
 

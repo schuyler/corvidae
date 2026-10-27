@@ -1,7 +1,7 @@
 # Stage-2 appraisal fork instruction
 
 The documented copy of `DEFAULT_STAGE2_FORK_PROMPT` in
-`corvidae/appraisal.py`. With `agent.forks.enabled` (and `appraisal` in
+`packages/corvidae-cognition/corvidae_cognition/appraisal.py`. With `agent.forks.enabled` (and `appraisal` in
 `agent.forks.stages`), the silent stage-2 task forks the live window at run
 time instead of making its own tier-3 call: the prompt is the main turn's
 render of the whole window, followed by this text as a `user` turn (GitHub

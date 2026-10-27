@@ -423,10 +423,10 @@ What it doesn't protect against, so you know:
 - No secrets in `prompts/` or `docs/`.
 - The memory surfaces (`memory`, `memory_vec`, `memory_fts`,
   `message_fts`) exist only when the cognition extra has been installed.
-  `corvidae redact` probes for each and skips a missing one with a notice.
-  `message_fts` and its triggers on `message_log` stay in `sessions.db` if
-  the extra is later removed, and keep indexing message text; `redact`
-  still clears them.
+  `corvidae redact` probes for each and silently skips one that is absent;
+  its `memory` form fails without the `memory` table. `message_fts` and its
+  triggers on `message_log` stay in `sessions.db` if the extra is later
+  removed, and keep indexing message text; `redact` still clears them.
 
 ## Privilege separation
 

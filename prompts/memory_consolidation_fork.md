@@ -1,7 +1,7 @@
 # Memory consolidation fork instruction
 
 The documented copy of `DEFAULT_CONSOLIDATION_FORK_PROMPT` in
-`corvidae/memory.py`. With `agent.forks.enabled` (and `consolidation` in
+`packages/corvidae-cognition/corvidae_cognition/memory.py`. With `agent.forks.enabled` (and `consolidation` in
 `agent.forks.stages`), the memory record isn't written by a separate
 background-model call. It's written by a fork of the live window: the main
 turn's render (up to the compaction cut, or the whole window for the idle

@@ -18,7 +18,7 @@ transports.
 | `MemoryPlugin` | `memory` | Consolidates compacted conversation into durable memories and retrieves them into context; owns `sqlite-vec` |
 | `MemoryToolsPlugin` | `memory_tools` | `search_memory` and `recall_raw` tools for the model |
 | `FunnelPlugin` | `funnel` | Admits retrieved context into the window under a budget |
-| `AppraisalPlugin` | `appraisal` | Scores each exchange (salience, engagement) after it is persisted |
+| `AppraisalPlugin` | `appraisal` | Scores every inbound message at the gate (novelty, commitment density, disagreement, question, salience), then appraises the exchange once the agent has answered |
 | `CritiquePlugin` | `critique` | Reviews the agent's replies for unsupported claims |
 | `OutcomeLogPlugin` | `outcome_log` | Records each exchange and its outcome in `exchange_log` |
 
@@ -73,7 +73,7 @@ TaskQueue — every TaskQueue completion wakes the main model). The task
 reads the per-channel **consolidation watermark**, fetches the working
 range, produces the record (first-person summary with epistemic framing,
 JSON out) — from a fork of the live window when one is available (see
-[Forks](#forks)), else one standalone `llm.background` call
+[Forks](design.md#forks)), else one standalone `llm.background` call
 (`prompts/memory_consolidation.md`) —
 scores an importance prior through the pluggable
 `MemoryPlugin.importance_prior` (default: cheap-model `RubricPrior`,
@@ -294,7 +294,7 @@ retrieval) log a warning and admit nothing.
 `register_and_wake(channel, origin, source, entries)` is the deferred
 admission path for notification producers without a `tool_call_id`:
 `origin` is stamped into the wake stub's `meta["origin"]` (see
-[Traces](#traces)) so `before_agent_turn`'s drain, and any
+[Traces](plugin-guide.md#traces)) so `before_agent_turn`'s drain, and any
 plugin gating eligibility off that origin, never has to infer it from
 stub text. The `'user'|'reminder'|'critique'|'heartbeat'|'task'`
 taxonomy is a convention cognition plugins (AppraisalPlugin,
@@ -330,7 +330,7 @@ Writer API (used by other plugins, not hooks):
 - `upsert_exchange(trace_id, channel_id, origin=None, **columns)` —
   create-or-update in one call: `INSERT OR IGNORE` the identity row, then
   a guarded update applying `**columns`. For gate-time writers (e.g.
-  `AppraisalPlugin`'s stage 1, `appraisal.py:970`) that run before or race
+  `AppraisalPlugin._persist_stage1`) that run before or race
   `on_message_admitted`/`on_message_persisted`'s own inserts — without it,
   those hooks' `INSERT OR IGNORE` would no-op against a row that doesn't
   exist yet, silently dropping the gate-path columns. Idempotent and

@@ -298,7 +298,7 @@ uv run python harness/consolidate_replay.py \
 `--range` is inclusive at both ends, matching how a `memory` row's
 `msg_id_start`/`msg_id_end` read. Rows are selected and filtered by the same
 functions the daemon uses — `fetch_range_rows` and `dialog_from_rows` in
-`corvidae/memory.py` — and sent as the same two-message call
+`packages/corvidae-cognition/corvidae_cognition/memory.py` — and sent as the same two-message call
 `_summarize_range` builds, so a result here is a result about production
 rather than about a lookalike that drifted.
 

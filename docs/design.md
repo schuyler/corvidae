@@ -793,15 +793,16 @@ the mode is not WAL, it aborts with a message naming the current mode and
 how to convert. The `corvidae` daemon configures WAL on startup; a
 daemon-created DB is always WAL.
 
-**Schema-presence probe (pre-memory-schema DBs).** Before touching any
-surface, the CLI probes `sqlite_master` for the tables and triggers it
-needs. If `message_fts` is absent, the message tombstone is still written
-but the FTS surface is skipped with a printed notice — safe because the
-`message_log_ai`/`message_log_au` triggers will index the tombstone (not
-the original content) the next time the daemon runs its `message_fts`
-backfill. If `memory` or `memory_vec` are absent, the memory cascade is
-skipped with a notice. The CLI never creates schema; schema is
-daemon-owned.
+**Schema-presence probe (pre-memory-schema and kernel-only DBs).** Before
+touching any surface, the CLI probes `sqlite_master` for the tables it
+needs. The `message` and `range` forms always write the message
+tombstone and skip each absent surface without printing anything: no
+`message_fts` means there is nothing to clear (if `MemoryPlugin` creates
+it later, its backfill indexes the tombstone, not the original); no
+`memory` means no memory cascade; no `memory_vec` skips only the vec-row
+delete. The `memory` form needs the `memory` table and exits with an error
+(`memory table not present in this database`) without it. The CLI never
+creates schema; schema is daemon-owned.
 
 **Cascade (per-form behavior).**
 
@@ -836,12 +837,14 @@ completeness. Skipped when `--dry-run` is in effect or when no suitable
 sample token can be extracted.
 
 The memory cascade above needs the cognition extra's tables. On a kernel-only
-database (`memory`, `memory_vec`, `memory_fts` and `message_fts` absent)
-`redact` tombstones `message_log` rows and prints a SKIP notice for each
-missing surface. If the extra was installed once and later removed,
-`message_fts` and its `message_log_ai`/`message_log_au` triggers stay in
-`sessions.db` and keep indexing into a table nothing reads; `redact` still
-clears them because it probes for them ([cognition.md](cognition.md)).
+database (`memory`, `memory_vec`, `memory_fts` and `message_fts` absent) the
+`message` and `range` forms tombstone the `message_log` rows, and the
+verification line reports `verified: no FTS surfaces present`; the
+`memory` form exits with the error above. If the extra was installed once
+and later removed, `message_fts` and its `message_log_ai`/`message_log_au`
+triggers stay in `sessions.db` and keep indexing into a table nothing reads;
+`redact` still clears them because it probes for them
+([cognition.md](cognition.md)).
 
 ## JsonlLogPlugin
 
