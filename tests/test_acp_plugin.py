@@ -423,3 +423,64 @@ class TestConcurrentPrompt:
         await agent.cancel(session_id=created.session_id)
         response = await asyncio.wait_for(first, timeout=2)
         assert response.stop_reason == "cancelled"
+
+
+# ---------------------------------------------------------------------------
+# The ACP loop owns stdin/stdout: when it ends the process must stop, and a
+# crash must surface as a non-zero exit instead of a live process with a dead
+# transport. Cancellation from on_stop must not re-signal shutdown.
+# ---------------------------------------------------------------------------
+
+
+class TestAcpLoopLiveness:
+    async def test_loop_error_marks_failed_and_requests_shutdown(self, monkeypatch):
+        import os
+
+        plugin, _registry, agent = await _init_acp_plugin()
+
+        async def _boom(_agent):
+            raise RuntimeError("stdio exploded")
+
+        monkeypatch.setattr("acp.run_agent", _boom)
+        kills: list[tuple[int, int]] = []
+        monkeypatch.setattr(os, "kill", lambda pid, sig: kills.append((pid, sig)))
+
+        await plugin._run_acp(agent)
+
+        assert plugin._failed is True
+        assert kills
+
+    async def test_loop_normal_exit_requests_shutdown_without_failure(self, monkeypatch):
+        import os
+
+        plugin, _registry, agent = await _init_acp_plugin()
+
+        async def _return(_agent):
+            return None
+
+        monkeypatch.setattr("acp.run_agent", _return)
+        kills: list[tuple[int, int]] = []
+        monkeypatch.setattr(os, "kill", lambda pid, sig: kills.append((pid, sig)))
+
+        await plugin._run_acp(agent)
+
+        assert plugin._failed is False
+        assert kills
+
+    async def test_on_stop_cancellation_does_not_request_shutdown(self, monkeypatch):
+        import os
+
+        plugin, _registry, agent = await _init_acp_plugin()
+
+        async def _wait(_agent):
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr("acp.run_agent", _wait)
+        kills: list[tuple[int, int]] = []
+        monkeypatch.setattr(os, "kill", lambda pid, sig: kills.append((pid, sig)))
+
+        plugin._task = asyncio.create_task(plugin._run_acp(agent))
+        await asyncio.sleep(0)
+        await plugin.on_stop()
+
+        assert kills == []

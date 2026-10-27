@@ -622,6 +622,11 @@ cleared so a later prompt cannot inherit it. A second `session/prompt`
 on a session that already has one in flight is `invalidRequest`; the
 first prompt is left untouched (see the concurrent-prompt policy issue).
 
+The ACP loop owns stdin/stdout, so the process stops when the loop ends:
+a client disconnect initiates a normal shutdown, and a loop crash is
+logged and then exits non-zero, so a client sees a failed provider
+instead of a live process with a dead transport.
+
 ## Registration order
 
 Plugins are loaded via `pm.load_setuptools_entrypoints("corvidae")`. The entry point loading order is non-deterministic — it is not guaranteed to match any specific sequence. The following plugins are registered:

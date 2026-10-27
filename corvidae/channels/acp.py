@@ -12,6 +12,8 @@ from __future__ import annotations
 import asyncio
 import importlib.metadata
 import logging
+import os
+import signal
 import sys
 import time
 from datetime import datetime, timezone
@@ -424,6 +426,10 @@ class AcpPlugin(CorvidaePlugin):
         self._task: asyncio.Task | None = None
         self._conn: Any = None
         self._registry = None
+        # ACP loop crashed (surfaced as a non-zero exit by the command).
+        self._failed = False
+        # on_stop is cancelling the loop: do not re-signal shutdown.
+        self._stopping = False
         # session_id -> Future[PromptResponse] for the in-flight ACP prompt (A9).
         self._active_prompts: dict[str, asyncio.Future] = {}
         # (channel.id, tool_name) -> synthetic toolCallId for ACP updates.
@@ -580,19 +586,23 @@ class AcpPlugin(CorvidaePlugin):
         except asyncio.CancelledError:
             raise
         except Exception:
+            self._failed = True
             logger.exception("ACP stdio server exited with error")
-            raise
         else:
-            # Client closed the connection — ask Runtime.run() to shut down
-            # (same pattern as CLI EOF).
             logger.info("ACP client disconnected, initiating shutdown")
-            try:
-                import os
-                import signal
+        finally:
+            # ACP owns stdin/stdout: once the loop ends the process cannot do
+            # anything useful, so always ask Runtime.run() to stop. on_stop
+            # sets _stopping before cancelling, so that exit must stay quiet.
+            if not self._stopping:
+                self._request_shutdown()
 
-                os.kill(os.getpid(), signal.SIGINT)
-            except OSError:
-                logger.exception("failed to signal shutdown after ACP disconnect")
+    def _request_shutdown(self) -> None:
+        """Ask Runtime.run() to stop, reusing its SIGINT handler (CLI EOF does)."""
+        try:
+            os.kill(os.getpid(), signal.SIGINT)
+        except OSError:
+            logger.exception("failed to signal shutdown after the ACP loop exited")
 
     async def _session_update(self, channel, update: Any) -> None:
         """Send a session/update if we have a live ACP connection."""
@@ -687,6 +697,8 @@ class AcpPlugin(CorvidaePlugin):
         """Cancel the ACP server task if it was started."""
         if self._task is None:
             return
+        # Runtime is already stopping; the loop's exit must not re-signal.
+        self._stopping = True
         self._task.cancel()
         try:
             await self._task
@@ -739,4 +751,15 @@ def acp_command(config: str) -> None:
     except ValueError as exc:
         # Config validation raises ValueError (removed keys, bad values).
         click.echo(f"Error: invalid config {config}: {exc}", err=True)
+        sys.exit(1)
+
+    # A crashed ACP loop asked the runtime to stop; exit non-zero so the client
+    # sees a failed provider instead of a process that still looks alive.
+    plugin = runtime.pm.get_plugin("acp") if runtime.pm is not None else None
+    if getattr(plugin, "_failed", False):
+        click.echo(
+            "Error: the ACP server exited unexpectedly; see corvidae-acp.log "
+            "next to the config file.",
+            err=True,
+        )
         sys.exit(1)

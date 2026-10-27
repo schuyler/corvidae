@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import importlib
 import sys
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -145,3 +145,45 @@ class TestAcpConfigErrors:
         assert result.exit_code != 0
         assert str(tmp_path) in combined
         assert "Traceback" not in combined
+
+
+class TestAcpRunFailure:
+    """A crashed ACP loop must exit non-zero, not leave a live-looking process."""
+
+    def _invoke_with_fake_runtime(self, monkeypatch, tmp_path, *, failed: bool):
+        cfg = tmp_path / "agent.yaml"
+        cfg.write_text("agent:\n  system_prompt: hi\n  max_context_tokens: 8000\n")
+
+        plugin = type("_FakePlugin", (), {})()
+        plugin._failed = failed
+
+        class _FakeRuntime:
+            def __init__(self, *args, **kwargs):
+                self.pm = MagicMock()
+                self.pm.get_plugin.return_value = plugin
+
+            async def run(self):
+                return
+
+        monkeypatch.setattr("corvidae.channels.acp.Runtime", _FakeRuntime)
+
+        from corvidae.channels.acp import acp_command
+
+        result = CliRunner().invoke(acp_command, ["--config", str(cfg)])
+        combined = (result.output or "") + (result.stderr or "")
+        return result, combined
+
+    def test_crashed_server_exits_nonzero(self, monkeypatch, tmp_path):
+        result, combined = self._invoke_with_fake_runtime(
+            monkeypatch, tmp_path, failed=True
+        )
+
+        assert result.exit_code != 0
+        assert "exited unexpectedly" in combined.lower()
+
+    def test_clean_exit_is_zero(self, monkeypatch, tmp_path):
+        result, _combined = self._invoke_with_fake_runtime(
+            monkeypatch, tmp_path, failed=False
+        )
+
+        assert result.exit_code == 0
