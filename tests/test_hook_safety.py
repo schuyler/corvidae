@@ -4,10 +4,10 @@ These are RED TDD tests — they fail because the hooks listed below do not
 currently wrap exceptions in try/except blocks:
 
   corvidae/agent.py _process_queue_item:
-    - Line ~285: send_message on the error path (after run_agent_turn fails)
+    - Line ~285: the OutboundMessage send on the error path (after run_agent_turn fails)
     - Line ~295: after_persist_assistant
     - Line ~329: on_agent_response
-    - Line ~334: send_message on the normal response path
+    - Line ~334: the OutboundMessage send on the normal response path
 
   corvidae/task.py TaskPlugin._on_task_complete:
     - Line ~244: on_notify
@@ -25,7 +25,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from corvidae.trace import mint_trace_id
-from corvidae.hooks import hookimpl
+from corvidae.channel import Channel
+from corvidae.hooks import TransportPlugin, hookimpl
+from corvidae.outbound import OutboundMessage
 from corvidae.task import Task
 
 from helpers import build_plugin_and_channel, drain, drain_task_queue
@@ -37,14 +39,20 @@ from llm_response_fixtures import _make_text_response
 # ---------------------------------------------------------------------------
 
 
-class RaisingPlugin:
+class RaisingPlugin(TransportPlugin):
     """A plugin that raises RuntimeError from a specified hook.
+
+    It is also a transport for the "test" channels, so naming
+    ``"send_message"`` makes the transport's delivery raise (the exception
+    propagates out of ``TransportPlugin.send``).
 
     Registered by tests to inject a failure into a specific hook call.
     Each hookimpl is marked with ``trylast=True`` so it runs after the
     normal implementation (e.g. after FakeTransport's send_message) and
     the failure is always visible to the caller.
     """
+
+    transport = "test"
 
     def __init__(self, hook_name: str, error_msg: str = "hook explosion") -> None:
         self._hook_name = hook_name
@@ -63,8 +71,8 @@ class RaisingPlugin:
             self._call_count += 1
             raise RuntimeError(self._error_msg)
 
-    @hookimpl(trylast=True)
-    async def send_message(self, channel, text, latency_ms=None):
+    async def send_message(self, channel: Channel, event: OutboundMessage) -> None:
+        """Raise from the transport's delivery when configured to."""
         if self._hook_name == "send_message":
             self._call_count += 1
             raise RuntimeError(self._error_msg)
@@ -85,12 +93,12 @@ class TestAfterPersistAssistantHookSafety:
     """after_persist_assistant raising must not crash the queue consumer.
 
     Expected behavior (not yet implemented):
-      - Processing continues: send_message IS still called
+      - Processing continues: the reply IS still sent
       - A WARNING is logged
 
     Current behavior (causing test to FAIL):
       - The exception propagates out of _process_queue_item and crashes
-        the SerialQueue consumer, so send_message is never reached.
+        the SerialQueue consumer, so the reply is never sent.
     """
 
     async def test_after_persist_assistant_raise_continues_processing(
@@ -100,13 +108,16 @@ class TestAfterPersistAssistantHookSafety:
         try:
             pm = plugin.pm
 
-            # Track send_message calls via a real hookimpl
+            # Track delivered replies via a real transport
             sent: list[str] = []
 
-            class CapturingSendPlugin:
-                @hookimpl
-                async def send_message(self, channel, text, latency_ms=None):
-                    sent.append(text)
+            class CapturingSendPlugin(TransportPlugin):
+                transport = "test"
+
+                async def send_message(
+                    self, channel: Channel, event: OutboundMessage
+                ) -> None:
+                    sent.append(event.text)
 
             pm.register(CapturingSendPlugin(), name="capturing_send")
 
@@ -161,11 +172,11 @@ class TestOnAgentResponseHookSafety:
     """on_agent_response raising must not prevent send_message from firing.
 
     Expected behavior (not yet implemented):
-      - send_message IS called after on_agent_response raises
+      - the reply IS sent after on_agent_response raises
       - A WARNING is logged
 
     Current behavior (causing test to FAIL):
-      - The exception propagates and send_message is never reached.
+      - The exception propagates and the reply is never sent.
     """
 
     async def test_on_agent_response_raise_does_not_skip_send_message(
@@ -177,10 +188,13 @@ class TestOnAgentResponseHookSafety:
 
             sent: list[str] = []
 
-            class CapturingSendPlugin:
-                @hookimpl
-                async def send_message(self, channel, text, latency_ms=None):
-                    sent.append(text)
+            class CapturingSendPlugin(TransportPlugin):
+                transport = "test"
+
+                async def send_message(
+                    self, channel: Channel, event: OutboundMessage
+                ) -> None:
+                    sent.append(event.text)
 
             pm.register(CapturingSendPlugin(), name="capturing_send")
 
@@ -248,7 +262,7 @@ class TestSendMessageNormalPathHookSafety:
         try:
             pm = plugin.pm
 
-            # Register a send_message plugin that always raises
+            # Register a transport that always raises
             raising = RaisingPlugin("send_message", error_msg="transport down")
             pm.register(raising, name="raising")
 
@@ -319,7 +333,7 @@ class TestSendMessageErrorPathHookSafety:
         try:
             pm = plugin.pm
 
-            # Register a send_message plugin that always raises
+            # Register a transport that always raises
             raising = RaisingPlugin("send_message", error_msg="send failed during error handling")
             pm.register(raising, name="raising")
 
@@ -391,9 +405,9 @@ class TestOnNotifyInTaskCompleteSafety:
         try:
             pm = plugin.pm
 
-            # We need send_message to not fail so on_agent_response / send_message
+            # We need send to not fail so on_agent_response / send
             # don't interfere. Set both as no-op AsyncMocks.
-            pm.ahook.send_message = AsyncMock()
+            pm.ahook.send = AsyncMock()
             pm.ahook.on_agent_response = AsyncMock()
 
             raising = RaisingPlugin("on_notify")

@@ -142,10 +142,11 @@ class IntegrationHarness:
             await queue.drain()
         if self.task_plugin.task_queue:
             await self.task_plugin.task_queue.queue.join()
-            # Worker needs 3 cycles: resume → await on_complete → on_notify → enqueue
-            await asyncio.sleep(0)
-            await asyncio.sleep(0)
-            await asyncio.sleep(0)
+            # Worker needs several loop cycles: resume → await on_complete →
+            # send(OutboundToolStatus) through the transport → on_notify →
+            # enqueue. Yield generously rather than counting exact awaits.
+            for _ in range(10):
+                await asyncio.sleep(0)
         # Second drain for notification re-entry
         for queue in self.agent.queues.values():
             await queue.drain()
