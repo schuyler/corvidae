@@ -15,9 +15,9 @@ landed in the order WP1, WP3, WP2:
   sentence landed with WP2; this status block is the rest.
 
 Found and fixed on the way, as separate PRs: compaction and `on_idle` were
-skipped for the first 30 s after boot (`9aaf3ec`, #126), and the redact
-CLI's `range` form crashed on every call and its `memory` form crashed on a
-database without the memory schema (`e5f785f`, #128).
+skipped for the first 30 s of machine uptime (`9aaf3ec`, #126), and the redact
+CLI's `range` form crashed on every call and its `memory` form (without `--dry-run`)
+crashed on a database without the memory schema (`e5f785f`, #128).
 
 Where the result differs from the text below:
 
@@ -32,7 +32,9 @@ Where the result differs from the text below:
 Not verified: R4's harness criterion (`harness/run.sh` needs a
 llama-server) and WP2's `sessions.db` schema diff against a pre-split
 database (no schema-creating code changed, but the diff was not run). The
-other acceptance items are tests that run in CI. Still open:
+other acceptance items are covered by tests in CI, or were checked by grep
+and by the reviews on `86c34fd` (the retired-name and `matches_transport`
+greps, the plugin-guide grammar section, the README tables). Still open:
 switching `AcpPlugin` to `OutboundToolStatus.tool_call_id` (Open
 questions), R8.
 
