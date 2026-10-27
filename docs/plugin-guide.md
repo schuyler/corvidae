@@ -8,6 +8,7 @@ from corvidae.hooks import CorvidaePlugin, hookimpl
 class GreetPlugin(CorvidaePlugin):
     @hookimpl
     async def on_message(self, channel, sender: str, text: str) -> None:
+        # An impl may take any subset of the spec's args; correlation_id is omitted here.
         if text.strip().lower() == "hello":
             await self.pm.ahook.send_message(channel=channel, text=f"Hello, {sender}!")
 ```
@@ -156,7 +157,7 @@ The `config` parameter is optional in `on_config_reload` hookimpls. Pluggy forwa
 
 | Hook | Type | When |
 |------|------|------|
-| `on_message(channel, sender: str, text: str)` | async broadcast | Inbound message arrives |
+| `on_message(channel, sender: str, text: str, correlation_id: str)` | async broadcast | Inbound message arrives; the transport mints and passes the id (see [Correlation](#correlation)) |
 | `should_process_message(channel, sender: str, text: str, correlation_id: str \| None)` | async broadcast, reject-wins | Gate: decide whether to process a message. Return False to reject, True to accept, None for no opinion. |
 | `on_message_admitted(channel, correlation_id: str, sender: str, text: str)` | async broadcast | After should_process_message admits a USER message |
 | `on_message_rejected(channel, correlation_id: str, sender: str, text: str)` | async broadcast | After should_process_message vetoes a USER message |
@@ -200,7 +201,24 @@ Window messages carry internal `_`-prefixed tags (`_message_type`, `_db_id`). Ev
 
 ### Correlation
 
-An opaque `correlation_id` is minted for every inbound user message and for every notification-born queue item that isn't itself a continuation of an existing correlation. It travels alongside a `meta` dict — an extensible, framework-opaque metadata bag — through the messaging and extension-point hooks above, into `Task.correlation_id`/`Task.meta`, and back out through the completion notification's `meta` (`TaskPlugin._on_task_complete` merges `{"task_id", "correlation_id", **task.meta}`). This is how a tool cycle several hops deep still carries the correlation and metadata its originating message started with.
+An opaque `correlation_id` exists for every inbound user message and for every notification-born queue item that isn't itself a continuation of an existing correlation. The transport mints a user message's id with `corvidae.correlation.mint_correlation_id()` and passes it to `on_message`; the Agent mints at dequeue for a notification-born item with no inherited id. It travels alongside a `meta` dict — an extensible, framework-opaque metadata bag — through the messaging and extension-point hooks above, into `Task.correlation_id`/`Task.meta`, and back out through the completion notification's `meta` (`TaskPlugin._on_task_complete` merges `{"task_id", "correlation_id", **task.meta}`). This is how a tool cycle several hops deep still carries the correlation and metadata its originating message started with.
+
+**Transport contract.** A transport mints a fresh, unique id per inbound message, passes it as `correlation_id` to `on_message`, and matches `should_process_message`, `on_message_admitted`, `on_message_rejected` and `on_message_persisted` back to its message by that id, never by ordering or context inheritance. Import `mint_correlation_id` from `corvidae.correlation` (stdlib only), not from `corvidae.agent`. The Agent uses the id verbatim. Omitting the argument raises `HookCallError`; a falsy id raises `ValueError`.
+
+`on_message_admitted` or `on_message_rejected` fires before `on_message` returns, unless the agent drops the message without either (for example, it is not ready yet). State a transport took before the call (a typing slot, a pending read receipt, an unsent-message entry) can therefore be released in a `finally` when the id was not admitted:
+
+```python
+cid = mint_correlation_id()
+self._pending[cid] = state          # taken before the call
+try:
+    await self.pm.ahook.on_message(
+        channel=channel, sender=sender, text=text, correlation_id=cid,
+    )
+finally:
+    if cid not in self._admitted:   # set by on_message_admitted
+        self._pending.pop(cid, None)
+    self._admitted.discard(cid)
+```
 
 The framework itself never stamps meaning into `meta` — it is a pass-through. Cognition plugins (see below) use the convention `meta["origin"]` to record where a queue item came from ("user" recognized by subscribing to `on_message_admitted`, or an explicit string like `"reminder"` stamped by a producer); that convention is plugin-side, not a core concept.
 
