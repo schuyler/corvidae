@@ -483,13 +483,6 @@ class TestDryRun:
 
 
 # ---------------------------------------------------------------------------
-# WP1b.4 non-WAL journal mode
-# ---------------------------------------------------------------------------
-
-
-
-
-# ---------------------------------------------------------------------------
 # WP1b.4 pre-Phase-1b DB (schema-presence probe, step 0)
 # ---------------------------------------------------------------------------
 
@@ -572,8 +565,6 @@ class TestVerificationPass:
     """
 
 
-
-
     async def test_verify_fts_clean_returns_zero_hits_after_redact(self):
         """_verify_fts_clean returns 'verified: 0 hits' after the cascade clears FTS.
 
@@ -629,14 +620,9 @@ class TestVerificationPass:
         await db.close()
 
 
-
 # ---------------------------------------------------------------------------
 # Redact CLI error context and honest affected counts
 # ---------------------------------------------------------------------------
-
-
-
-
 
 
 async def test_redact_messages_counts_only_rows_found():
