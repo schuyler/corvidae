@@ -30,10 +30,11 @@ jobs:
           enable-cache: true
 
       # The dev extra (pytest, pytest-asyncio) and the dev dependency group
-      # (pytest-timeout), which the pytest config needs; see CLAUDE.md.
+      # (pytest-timeout), which the pytest config needs; see CLAUDE.md. The acp
+      # extra is needed because the ACP transport tests import the SDK.
       # --locked fails the run if uv.lock is out of date with pyproject.toml.
       - name: Install dependencies
-        run: uv sync --locked --extra dev
+        run: uv sync --locked --extra dev --extra acp
 
       # About 26 test sites skip when sqlite-vec can't load, which would turn
       # the vector-retrieval tests into silent skips on a green run. Fail
