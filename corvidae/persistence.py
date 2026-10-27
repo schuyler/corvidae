@@ -124,7 +124,11 @@ class PersistencePlugin(CorvidaePlugin):
         # Set journal mode (WAL by default for concurrent access)
         journal_mode = config.get("daemon", {}).get("sqlite_journal_mode", "wal").lower()
         if journal_mode not in _ALLOWED_JOURNAL_MODES:
-            raise ValueError(f"Invalid sqlite_journal_mode: {journal_mode!r}")
+            allowed = ", ".join(sorted(_ALLOWED_JOURNAL_MODES))
+            raise ValueError(
+                f"Invalid sqlite_journal_mode: {journal_mode!r} "
+                f"(accepted values: {allowed})"
+            )
         async with self.db.execute(f"PRAGMA journal_mode={journal_mode}") as cursor:
             row = await cursor.fetchone()
         actual_mode = row[0] if row else journal_mode

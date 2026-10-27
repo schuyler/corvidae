@@ -240,7 +240,10 @@ response is retried with the same backoff until a total of
 fit), independently of `max_retries`; `0` disables it. Any terminal non-2xx
 response raises `LLMHTTPError`, a `ClientResponseError` subclass carrying the
 response `body` (truncated to 2000 characters) and the client's `model`;
-`is_model_not_loaded(error)` recognizes the unloaded-model case.
+`is_model_not_loaded(error)` recognizes the unloaded-model case. A malformed
+response envelope (missing `choices`, an empty choice list, or a choice with
+no `message`) raises `ValueError` naming the provider model and endpoint, the
+missing key, and the top-level keys actually received.
 
 ### Observability
 
@@ -939,7 +942,10 @@ written out as text (`<tool_call>`, a `<function…>` tag, a bare
 `{"name", "arguments"}` object), raises `ForkRefused`. No live window or
 no main client raises `ForkUnavailable`.
 Every caller treats any fork exception, or an empty or unparseable reply,
-as a miss: it logs at WARNING and makes its standalone call instead.
+as a miss: it logs at WARNING and makes its standalone call instead. A
+standalone JSON parse failure names the failing phase (consolidation,
+appraisal, or critique) and includes up to 500 characters of the provider
+text in the `ValueError`.
 
 **Which process forks from where.** Plugins reach the Agent through
 `fork_agent(pm, stage)`, which returns it only when that stage is enabled.
@@ -1244,7 +1250,12 @@ corvidae redact --db sessions.db memory <memory_id>        # a record + its raw 
 corvidae redact --db sessions.db range <start_id> <end_id> # message_log id range (inclusive)
 ```
 
-`--dry-run` prints affected row counts without writing.
+`--dry-run` prints affected row counts without writing. Both dry-run and
+real runs count only rows that exist and were actually touched, and the
+`message` and `range` forms print `<found> of <requested>` so a mistyped id
+is visible. A `--db` path that is not an existing file aborts with
+`Database not found: <path>` before opening a connection (opening would
+silently create an empty database).
 
 **WAL requirement.** The CLI opens its own connection (`PRAGMA busy_timeout
 = 5000`, short transactions) and asserts WAL journal mode at startup. If
@@ -1672,7 +1683,8 @@ during a hung startup ends the process at once.
 ### IRC (`channels/irc.py`)
 
 `IRCPlugin` — IRC transport via pydle. Connects with exponential
-backoff retry (10s→300s cap). Joins configured channels on connect.
+backoff retry (10s→300s cap); each retry WARNING names the host, port and
+nick it failed to reach. Joins configured channels on connect.
 Forwards both channel and private messages. `split_message` splits
 outgoing text into 400-byte chunks preserving paragraph/sentence
 boundaries.
@@ -2250,6 +2262,10 @@ The full entry-point plugin set (`[project.entry-points.corvidae]` in `pyproject
 `runtime_settings`, `tools`, `metrics`, `usage_log`, `metrics_jsonl`,
 `outcome_log`, `appraisal`, `critique`, `scheduler`, `agent`,
 `idle_monitor`, `config_watcher`.
+
+An entry point that fails to import or instantiate is logged at WARNING
+with the entry-point name and the failure type, and is skipped; the other
+plugins still load.
 
 Entry-point loading does not guarantee a meaningful cross-plugin order;
 plugins that need another plugin's state resolve it lazily via

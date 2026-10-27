@@ -72,7 +72,13 @@ class IRCClient(pydle.Client):
                         if not self.connected:
                             break
                 except (OSError, pydle.Error) as exc:
-                    logger.warning("IRC connection error, retrying: %s", exc)
+                    logger.warning(
+                        "IRC connection error to %s:%s as %s, retrying: %s",
+                        self._server,
+                        self._port,
+                        self.nickname,
+                        exc,
+                    )
                 if self.plugin._connect_task is None:
                     return
                 await asyncio.sleep(delay)

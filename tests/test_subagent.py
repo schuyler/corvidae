@@ -158,7 +158,10 @@ class TestLaunchWithMockedDependencies:
             task_queue=None,
         )
         result = await plugin._launch("do something", "test task", ctx)
-        assert result == "Error: task queue not available"
+        assert result == (
+            "Error: task queue not available — ensure the task plugin is loaded, "
+            "then retry."
+        )
 
     async def test_launch_no_channel_returns_error(self):
         """When ctx.channel is None, _launch returns the channel error string."""
@@ -173,7 +176,10 @@ class TestLaunchWithMockedDependencies:
             task_queue=task_queue,
         )
         result = await plugin._launch("do something", "test task", ctx)
-        assert result == "Error: no channel context available for subagent"
+        assert result == (
+            "Error: no channel context available for subagent — call this tool "
+            "from an agent turn that has a channel, then retry."
+        )
 
     async def test_launch_enqueues_exactly_one_task(self):
         """When both channel and task_queue are present, exactly one Task is enqueued."""

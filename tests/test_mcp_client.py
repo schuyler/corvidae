@@ -991,3 +991,13 @@ class TestNonTextContentBlocks:
         result = await _call_mcp_tool(mock_session, "tool", {}, 30.0, "myserver")
 
         assert result == "first\nsecond"
+
+
+async def test_generic_exception_names_the_server():
+    """A generic tool-call failure names the MCP server, like the timeout branch."""
+    mock_session = AsyncMock()
+    mock_session.call_tool = AsyncMock(side_effect=RuntimeError("protocol error"))
+
+    result = await _call_mcp_tool(mock_session, "read_file", {}, 30.0, "myserver")
+
+    assert "myserver" in result

@@ -283,7 +283,7 @@ def _parse_json_block(text: str) -> dict:
     start = text.find("{")
     end = text.rfind("}")
     if start == -1 or end == -1 or end <= start:
-        raise ValueError(f"no JSON object in LLM output: {text[:200]!r}")
+        raise ValueError(f"critique: no JSON object in LLM output: {text[:500]!r}")
     return json.loads(text[start:end + 1])
 
 

@@ -20,6 +20,23 @@ logger = logging.getLogger(__name__)
 LOG_TRUNCATION_LENGTH = 200
 
 
+def _malformed_response(client, response, missing: str) -> ValueError:
+    """Build a provider-identifying error for a malformed response envelope."""
+    # Name the provider by model and endpoint so an operator can trace the call.
+    model = getattr(client, "model", None) or "unknown model"
+    base_url = getattr(client, "base_url", None)
+    provider = f"{model} at {base_url}" if base_url else model
+    # List the keys actually received; a non-dict body is named by its type.
+    received = (
+        sorted(response.keys()) if isinstance(response, dict)
+        else type(response).__name__
+    )
+    return ValueError(
+        f"Malformed response from LLM provider '{provider}': missing {missing}; "
+        f"top-level keys received: {received!r}"
+    )
+
+
 @dataclass
 class AgentTurnResult:
     """Result of a single agent turn (one LLM invocation).
@@ -80,9 +97,20 @@ async def run_agent_turn(
         kwargs["extra_body"] = extra_body
     response = await client.chat(list(messages), **kwargs)  # Shallow copy: prevents mock assertion issues; client.chat() is read-only.
     latency_ms = round((time.monotonic() - start) * 1000, 1)
+
+    # Validate the provider envelope before indexing it, so an error body
+    # produces a diagnosable error instead of a bare KeyError/IndexError.
+    choices = response.get("choices") if isinstance(response, dict) else None
+    if not isinstance(choices, list) or not choices:
+        raise _malformed_response(client, response, "'choices' list")
+    choice = choices[0]
+    if not isinstance(choice, dict):
+        raise _malformed_response(client, response, "'choices[0]' object")
+    if not isinstance(choice.get("message"), dict):
+        raise _malformed_response(client, response, "'choices[0].message' object")
+
     # Logprobs live on the choice envelope, which is otherwise discarded —
     # extract them before keeping only the message (Phase 2, WP2.2).
-    choice = response["choices"][0]
     logprobs = choice.get("logprobs")
     usage = response.get("usage")
     msg = choice["message"]

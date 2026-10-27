@@ -349,7 +349,10 @@ async def _call_mcp_tool(
             extra={"server": server_name, "tool": original_name},
             exc_info=True,
         )
-        return f"Error: MCP tool '{original_name}' failed: {exc}"
+        return (
+            f"Error: MCP tool '{original_name}' on server '{server_name}' "
+            f"failed: {exc}"
+        )
 
     parts = []
     for block in result.content:

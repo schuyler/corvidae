@@ -26,6 +26,7 @@ import json
 import logging
 import re
 from datetime import datetime, timezone
+from pathlib import Path
 
 import aiosqlite
 import click
@@ -66,8 +67,10 @@ def _extract_sample_token(text: str) -> str | None:
     try:
         msg = json.loads(text)
         content = msg.get("content", "") or ""
-    except Exception:
-        pass
+    except (json.JSONDecodeError, AttributeError) as exc:
+        # Plain-text memory summaries are expected; log at DEBUG so a genuine
+        # parse failure is visible when diagnosing redaction, then continue.
+        logger.debug("sample token: message is not JSON, using raw text: %s", exc)
     # Find words of 4+ alpha characters; skip tombstone text
     words = [w for w in re.findall(r"[a-zA-Z]{4,}", content)
              if w.lower() not in {"redacted", "operator", "that", "this", "with"}]
@@ -144,6 +147,13 @@ async def redact_messages(
     Step 2: cascade to same-channel intersecting memory records.
     Step 3: (caller prints verification; function returns stats).
 
+    Returns:
+        ``affected_messages`` is the number of supplied ids that actually
+        existed and were tombstoned (in dry-run mode, would have been),
+        ``affected_memories`` is the cascade count, and ``requested_messages``
+        is the number of ids supplied. The CLI prints ``found of requested``
+        so a mistyped id is visible instead of reporting a confident hit.
+
     WAL mode is required and asserted.
     """
     await _check_wal(db)
@@ -163,32 +173,39 @@ async def redact_messages(
             notices.append("SKIP: memory table not present (pre-1b DB); memory cascade skipped")
 
     if dry_run:
-        # Count without writing
-        affected_messages = len(message_ids)
+        # Count without writing, counting only ids that actually exist.
+        affected_messages = 0
         affected_memories = 0
-        if has_memory:
-            for msg_id in message_ids:
-                async with db.execute(
-                    "SELECT channel_id FROM message_log WHERE id = ?", (msg_id,)
-                ) as cursor:
-                    ch_row = await cursor.fetchone()
-                if ch_row is None:
-                    continue
-                ch = ch_row[0]
-                async with db.execute(
-                    "SELECT COUNT(*) FROM memory "
-                    "WHERE channel_id = ? AND msg_id_start <= ? AND msg_id_end >= ? "
-                    "AND redacted = 0",
-                    (ch, msg_id, msg_id),
-                ) as cursor:
-                    cnt_row = await cursor.fetchone()
-                affected_memories += cnt_row[0] if cnt_row else 0
-        return {"affected_messages": affected_messages, "affected_memories": affected_memories}
+        for msg_id in message_ids:
+            async with db.execute(
+                "SELECT channel_id FROM message_log WHERE id = ?", (msg_id,)
+            ) as cursor:
+                ch_row = await cursor.fetchone()
+            if ch_row is None:
+                continue
+            affected_messages += 1
+            if not has_memory:
+                continue
+            ch = ch_row[0]
+            async with db.execute(
+                "SELECT COUNT(*) FROM memory "
+                "WHERE channel_id = ? AND msg_id_start <= ? AND msg_id_end >= ? "
+                "AND redacted = 0",
+                (ch, msg_id, msg_id),
+            ) as cursor:
+                cnt_row = await cursor.fetchone()
+            affected_memories += cnt_row[0] if cnt_row else 0
+        return {
+            "affected_messages": affected_messages,
+            "affected_memories": affected_memories,
+            "requested_messages": len(message_ids),
+        }
 
     iso_date = _iso_date()
 
     # Step 1: tombstone message rows
     # The message_log_au trigger propagates the change to message_fts if present.
+    affected_messages = 0
     for msg_id in message_ids:
         async with db.execute(
             "SELECT message FROM message_log WHERE id = ?", (msg_id,)
@@ -200,6 +217,7 @@ async def redact_messages(
         await db.execute(
             "UPDATE message_log SET message = ? WHERE id = ?", (tombstone, msg_id)
         )
+        affected_messages += 1
     await db.commit()
 
     # Step 2: memory cascade (per-channel intersection)
@@ -242,8 +260,9 @@ async def redact_messages(
         await db.commit()
 
     return {
-        "affected_messages": len(message_ids),
+        "affected_messages": affected_messages,
         "affected_memories": affected_memories,
+        "requested_messages": len(message_ids),
     }
 
 
@@ -393,6 +412,10 @@ def redact_command(ctx, db_path, dry_run):
     Tombstones message_log rows, cascades to intersecting memory records,
     clears both FTS surfaces. Requires WAL journal mode.
     """
+    # Check the path before connecting: aiosqlite silently creates an empty
+    # database for a typo, which then fails later with "no such table".
+    if not Path(db_path).is_file():
+        raise click.ClickException(f"Database not found: {db_path}")
     ctx.ensure_object(dict)
     ctx.obj["db_path"] = db_path
     ctx.obj["dry_run"] = dry_run
@@ -422,14 +445,18 @@ def _message_cmd(ctx, ids):
                     sample_token = _extract_sample_token(msg_row[0])
 
             result = await redact_messages(conn, list(ids), dry_run=dry_run)
+            # Report found-vs-requested so a mistyped id is visible.
+            requested = result.get("requested_messages", len(ids))
             if dry_run:
                 click.echo(
-                    f"[dry-run] would redact {result['affected_messages']} messages, "
+                    f"[dry-run] would redact {result['affected_messages']} of "
+                    f"{requested} messages, "
                     f"{result.get('affected_memories', 0)} memory records"
                 )
             else:
                 click.echo(
-                    f"Redacted {result['affected_messages']} messages, "
+                    f"Redacted {result['affected_messages']} of {requested} "
+                    f"messages, "
                     f"{result.get('affected_memories', 0)} memory records"
                 )
                 if sample_token:
@@ -511,14 +538,17 @@ def _range_cmd(ctx, start_id, end_id):
                     sample_token = _extract_sample_token(range_row[0])
 
             result = await redact_range(conn, start_id, end_id, dry_run=dry_run)
+            requested = result.get("requested_messages", len(ids))
             if dry_run:
                 click.echo(
-                    f"[dry-run] would redact {result['affected_messages']} messages, "
+                    f"[dry-run] would redact {result['affected_messages']} of "
+                    f"{requested} messages, "
                     f"{result.get('affected_memories', 0)} memory records"
                 )
             else:
                 click.echo(
-                    f"Redacted {result['affected_messages']} messages, "
+                    f"Redacted {result['affected_messages']} of {requested} "
+                    f"messages, "
                     f"{result.get('affected_memories', 0)} memory records"
                 )
                 if sample_token:

@@ -28,10 +28,13 @@ import asyncio
 import logging
 import time
 import uuid
+
+import aiohttp
 from collections.abc import Callable
 from dataclasses import dataclass, field, fields as dc_fields
 from enum import Enum
 
+from corvidae.llm import LLMHTTPError
 from corvidae.turn import AgentTurnResult, run_agent_turn
 from corvidae.attribution import get_attribution, reset_attribution, set_attribution
 from corvidae.channel import Channel, ChannelConfig, ChannelRegistry, resolve_system_prompt
@@ -62,9 +65,43 @@ logger = logging.getLogger("corvidae.agent")
 # Derived at module load time so it stays in sync when new fields are added.
 FRAMEWORK_KEYS = {f.name for f in dc_fields(ChannelConfig)}
 
-DEFAULT_LLM_ERROR_MESSAGE = "Sorry, I encountered an error and could not process your message."
+# User-facing wording: names the failure class in calm language and gives the
+# user a concrete next step. The template is private because every call site
+# must supply the failure it caught; there is no bare default to send.
+_LLM_ERROR_TEMPLATE = (
+    "Sorry — {cause}, so I couldn't process your message. "
+    "Please try again in a moment."
+)
 # Note: same text as MAX_ROUNDS_REACHED_MESSAGE in tools/subagent.py — kept in sync.
 MAX_TURNS_FALLBACK_MESSAGE = "(max tool-calling rounds reached)"
+
+
+def _describe_llm_failure(exc: Exception) -> str:
+    """Map an LLM failure to a calm, human-readable cause for the user.
+
+    Keeps Python type names out of user-facing text while still telling the
+    user which class of failure happened.
+    """
+    # A timeout is the most common transient failure: say so plainly.
+    if isinstance(exc, TimeoutError):
+        return "the model request timed out"
+    # Connection failures mean the model server could not be reached at all.
+    if isinstance(exc, aiohttp.ClientConnectionError):
+        return "I couldn't reach the model server"
+    # HTTP failures from the provider are still request failures to the user.
+    if isinstance(exc, LLMHTTPError):
+        return f"the model server returned an error (HTTP {exc.status})"
+    # Anything else: name the class without guessing at a more specific cause.
+    return "the model request failed"
+
+
+def _llm_error_message(exc: Exception) -> str:
+    """Build the complete user-facing message for a specific LLM failure.
+
+    The exception is required: callers always know which failure happened, so
+    omitting the cause is a programming error rather than a supported default.
+    """
+    return _LLM_ERROR_TEMPLATE.format(cause=_describe_llm_failure(exc))
 
 
 def mint_correlation_id() -> str:
@@ -378,7 +415,8 @@ class Agent(CorvidaePlugin):
             logger.exception("run_agent_turn failed for channel %s", channel.id)
             error_msg = await self.pm.ahook.on_llm_error(channel=channel, error=exc)
             if error_msg is None:
-                error_msg = DEFAULT_LLM_ERROR_MESSAGE
+                # Build a complete message with the human-readable failure class.
+                error_msg = _llm_error_message(exc)
             try:
                 await self.pm.ahook.send_message(
                     channel=channel,

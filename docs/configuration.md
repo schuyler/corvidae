@@ -608,6 +608,9 @@ No restart is required for the changes listed below. Changes that require restar
 
 ### Error handling
 
+At startup (not reload), a missing or malformed config file prints
+`Config error: <detail> — check <path>` to stderr and exits non-zero.
+
 - **Invalid YAML**: logged at `ERROR`; reload is skipped and the running config is unchanged.
 - **Missing `llm.main` after merge**: logged at `ERROR`; reload is skipped.
 - **Config file deleted**: logged at `WARNING`; polling continues. The file may reappear.

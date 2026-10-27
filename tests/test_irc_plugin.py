@@ -529,3 +529,35 @@ class TestReconnection:
             assert retry_delays[2] >= retry_delays[1] * 2
         # All delays should be <= 300s cap
         assert all(d <= 300 for d in retry_delays)
+
+
+async def test_retry_warning_names_host_port_and_nick(caplog):
+    """The IRC retry warning names the connection target it failed to reach."""
+    import logging
+
+    pm, _registry = _make_pm_with_registry()
+    plugin = IRCPlugin(pm)
+    pm.register(plugin, name="irc")
+
+    client = IRCClient(
+        plugin, "TestBot", server="irc.example.com", port=6667, tls=False
+    )
+    plugin.client = client
+    plugin._connect_task = asyncio.get_event_loop().create_future()
+
+    async def failing_connect(*args, **kwargs):
+        plugin._connect_task = None
+        raise OSError("connection refused")
+
+    client.connect = AsyncMock(side_effect=failing_connect)
+
+    # The suite mocks pydle, so its Error base is a MagicMock; give the
+    # handler a real exception class for the except tuple.
+    with patch.object(_irc_module.pydle, "Error", Exception), caplog.at_level(
+        logging.WARNING, logger="corvidae.irc_plugin"
+    ):
+        await client.connect_with_retry()
+
+    assert "irc.example.com" in caplog.text
+    assert "6667" in caplog.text
+    assert "TestBot" in caplog.text

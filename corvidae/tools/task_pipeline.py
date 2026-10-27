@@ -344,7 +344,12 @@ class TaskPipelinePlugin:
                         status = "done"
                     except Exception as exc:
                         status = "failed"
-                        result = f"Error: {exc}"
+                        # Name the step and the command so the model can tell
+                        # which task failed and what was being run.
+                        result = (
+                            f"Error: task '{task_name}' failed running "
+                            f"command {command!r}: {exc}"
+                        )
                         failed_tasks.add(task_name)
 
                 plugin._task_status[task_name] = status

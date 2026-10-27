@@ -758,3 +758,30 @@ class TestWALMode:
             and "wal" in r.getMessage().lower()
         ]
         assert info_records
+
+
+async def test_on_start_invalid_journal_mode_lists_allowed_values(tmp_path):
+    """An invalid sqlite_journal_mode names the accepted values."""
+    from corvidae.persistence import PersistencePlugin
+
+    pm = create_plugin_manager()
+    registry = _make_registry()
+    pm.register(registry, name="registry")
+
+    plugin = PersistencePlugin(pm)
+    config = {
+        "daemon": {
+            "session_db": str(tmp_path / "invalid_mode.db"),
+            "sqlite_journal_mode": "bogus",
+        }
+    }
+
+    with pytest.raises(ValueError) as excinfo:
+        await plugin.on_start(config=config)
+
+    message = str(excinfo.value)
+    assert "bogus" in message
+    for mode in ("delete", "truncate", "persist", "memory", "wal", "off"):
+        assert mode in message
+
+    await plugin.db.close()
