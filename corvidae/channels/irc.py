@@ -71,8 +71,13 @@ class IRCClient(pydle.Client):
                         await asyncio.sleep(self._CONNECTION_POLL_INTERVAL)
                         if not self.connected:
                             break
-                except (OSError, pydle.Error) as exc:
-                    logger.warning("IRC connection error, retrying: %s", exc)
+                except Exception as exc:
+                    # Any failure at all must re-enter backoff: an exception
+                    # type outside (OSError, pydle.Error) otherwise ends the
+                    # connect task and leaves the bot offline for good.
+                    logger.warning(
+                        "IRC connection failed, retrying: %s", exc, exc_info=True
+                    )
                 if self.plugin._connect_task is None:
                     return
                 await asyncio.sleep(delay)
@@ -156,6 +161,13 @@ class IRCPlugin(CorvidaePlugin):
         if not channel.matches_transport("irc"):
             return
         if self.client is None or not self.client.connected:
+            # Say so rather than dropping the reply into the void.
+            logger.warning(
+                "IRC message not delivered: client not connected "
+                "(channel=%s, chars=%d)",
+                channel.id,
+                len(text),
+            )
             return
         chunks = split_message(text, max_len=self._message_chunk_size)
         for chunk in chunks:

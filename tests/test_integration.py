@@ -1373,7 +1373,9 @@ class TestGroupEErrorHandling:
         mock_client.chat = AsyncMock(
             side_effect=[
                 _make_tool_call_response([_make_tool_call("e3c1", "test_tool", {"x": "v"})]),
-                _make_text_response("text only"),  # fallback for text-only
+                # The missing TaskQueue now yields an error tool result, so the
+                # model gets another turn and this reply is the tool cycle's end.
+                _make_text_response("tool cycle completed"),
             ]
         )
 
@@ -1390,12 +1392,16 @@ class TestGroupEErrorHandling:
             for r in error_records
         )
 
-        # No crash; subsequent text-only message works
+        # No crash; the tool cycle completed and the subsequent text-only
+        # message works too.
         mock_client.chat = AsyncMock(return_value=_make_text_response("text only"))
         await pm.ahook.on_message(channel=channel, sender="user", text="just text")
         await agent_loop.queues[channel.id].drain()
 
-        assert len(fake_transport.sent) == 1
+        assert [text for _channel, text, _latency in fake_transport.sent] == [
+            "tool cycle completed",
+            "text only",
+        ]
 
         await agent_loop.on_stop()
         await pm.ahook.on_stop()

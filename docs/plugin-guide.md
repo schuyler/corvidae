@@ -788,7 +788,11 @@ produces tools like `filesystem__read_file`. Set `tool_prefix: ""` to
 disable prefixing. If two servers produce the same tool name, the first
 wins and the duplicate is skipped with a WARNING. A server that does not
 complete its handshake within `connect_timeout_seconds` is skipped with a
-WARNING and its subprocess terminated; startup continues without it.
+WARNING and its subprocess terminated; startup continues without it. A
+server that fails to connect at startup is kept and retried lazily on the
+next MCP tool call; a successful retry adds its tools to the cached list and
+the shared registry, while a failed retry logs a WARNING and leaves the
+current tool call untouched.
 
 **Without this plugin:** MCP servers cannot be used. No tools are affected
 if the `mcp:` config key is absent — the plugin no-ops.
@@ -1105,6 +1109,10 @@ when appraisal is enabled. Configuration is documented in
 **Without this plugin:** no memory records form and no retrieval happens;
 compaction remains plain lossy summarization.
 
+A malformed consolidation reply is retried once; if the retry is also
+unusable, the range is stored with its raw transcript as the summary rather
+than being dropped (the LLM call has already been paid for).
+
 ### MemoryToolsPlugin (`corvidae/tools/memory_tools.py`)
 
 Registers the `search_memory` and `recall_raw` agent tools — the active
@@ -1133,6 +1141,10 @@ back to unscoped access. The tools are broader than passive retrieval in
 *status* (they reach demoted, superseded, and redacted-tombstone records)
 but never broader in *compartment* — channel B cannot enumerate or raw-recall
 channel A's memories.
+
+Both tools retry briefly when the memory schema is still being created by
+another task. If `search_memory`'s FTS5 query fails, it falls back to a
+`LIKE` scan over record summaries instead of returning an internal error.
 
 **Tools:**
 
