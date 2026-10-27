@@ -5,10 +5,15 @@ second distribution in the same repository, and giving the hook set a grammar
 so that a hook's name tells you its resolution semantics. It is written for a
 Rule of Two implementer: tagged requirements first, then the design, then
 ordered work packages with red tests named. Status: proposed 2026-10-26,
-nothing implemented.
+re-measured 2026-10-27 (#117), nothing implemented.
 
-Every number in this document was measured against `3109d84` (main,
-2026-10-23). Re-measure before trusting them if the tree has moved.
+Every number in this document was measured against `618c831` (main,
+2026-10-27), after the Discord, web and ACP transports and after #116 and
+#100 landed. The first draft was measured at `3109d84`; re-running its
+commands there reproduces its numbers exactly, so where this document
+gives both, the difference is the tree moving, not the method. File counts
+use `grep -rl --include='*.py'`; without the include, `__pycache__` adds one
+or two. Re-measure before trusting them if the tree has moved.
 
 ## Why
 
@@ -18,20 +23,23 @@ drifted far enough apart that the sentence now misleads.
 
 The kernel really is small. `Agent.depends_on` names four plugins: registry,
 task, llm, tools. The agent loop, turn, queue, context window, channel,
-hooks, tool, LLM client and task plugin come to roughly 4,000 of 15,900
-source lines. A test (`tests/test_correlation_core.py`, rule R1) greps every
+hooks, tool, LLM client and task plugin come to roughly 4,100 of 19,000
+source lines. A test (`tests/test_trace_core.py`, rule R1) greps every
 non-cognition module for the words appraisal, critique, funnel, salience,
 withheld and engagement and fails if any appear. The core is forbidden from
 naming the cognition plugins even in a comment.
 
 The distribution is not small. Memory, retention, appraisal, critique,
 funnel, outcome_log and memory_tools are about 4,900 lines, own six of the
-nine tables in `sessions.db`, and pull in sqlite-vec. They are on by default;
+ten tables in `sessions.db`, and pull in sqlite-vec. They are on by default;
 `agent.minimal.yaml.example` is a list of six things to switch off. The
 README's claim that "without PersistencePlugin, messages drop but the daemon
 doesn't crash" is no longer true: appraisal, scheduler, outcome_log,
 usage_log and memory all declare `depends_on = {"persistence"}`, and
 `validate_dependencies` aborts startup if a dependent is loaded without it.
+The transports drifted the same way: ACP's SDK is an optional extra
+(`--extra acp`), but `discord-py` is a hard dependency of every install,
+used by one of six transports.
 
 The hook set grew the same way. There are 31 hookspecs. Each is a cell in a
 grid, a point in the pipeline crossed with one of a handful of resolution
@@ -53,10 +61,16 @@ Measured implementer counts, in-tree, excluding tests and the
 | Hook | Implementers |
 |---|---|
 | `process_tool_result`, `on_llm_request` | 0 |
-| `after_persist_assistant`, `transform_display_text`, `resolve_channel`, `before_compaction`, `on_metrics`, `send_thinking`, `send_tool_status`, `on_llm_error`, `load_conversation`, `compact_conversation` | 1 |
+| `after_persist_assistant`, `transform_display_text`, `before_compaction`, `on_metrics`, `on_llm_error`, `load_conversation`, `compact_conversation` | 1 |
 | `on_llm_response` | 2 (both in `metrics.py`) |
-| `send_message`, `send_progress` | 3 (one per transport) |
-| `on_init`, `on_start`, `on_stop` | 16 to 20 |
+| `resolve_channel` | 2 (Discord, Signal) |
+| `send_thinking`, `send_tool_status` | 3 (ACP, CLI, web) |
+| `send_message`, `send_progress` | 6 (one per transport) |
+| `on_init`, `on_start`, `on_stop` | 18 to 23 |
+
+Counts here and in Part 1 §2 are `@hookimpl` methods under `corvidae/`,
+found by walking the AST, excluding `scaffold.py` and the
+`_SeedHooksPlugin` seeds.
 
 None of this is a bug. It is what a working project looks like when it is
 driven by one consumer. The fix is to make the structure explicit, and to put
@@ -77,7 +91,8 @@ cognition extra yields a working daemon.
 outside `tests/cognition/` green; `uv run corvidae` with
 `agent.minimal.yaml.example` boots and answers a CLI message (the existing
 `tests/test_minimal_profile.py` boot test, run in that job); `sqlite-vec` is
-absent from the kernel's dependency list.
+absent from the kernel's dependency list. (`discord-py` leaves too; that is
+R10.)
 
 **R2 (stated).** A hook's name tells you its resolution semantics without
 reading `hooks.py`, and there is a written rule for when a new hook may be
@@ -94,8 +109,9 @@ the grammar and the criterion.
 **R3 (stated).** The outbound transport surface has one broadcast filter, in
 one place, that a transport author cannot forget.
 *So that* the `CLAUDE.md` warning can be deleted rather than maintained.
-*Acceptance:* `CLIPlugin`, `IRCPlugin` and `SignalPlugin` contain no call to
-`matches_transport` inside a send path; a test registers a transport that
+*Acceptance:* none of the six transports (`AcpPlugin`, `CLIPlugin`,
+`DiscordPlugin`, `IRCPlugin`, `SignalPlugin`, `WebPlugin`) contains a call
+to `matches_transport` inside a send path; a test registers a transport that
 implements only `send_message` on the base class and shows that thinking,
 tool-status and progress events for another transport's channel never reach
 it.
@@ -104,10 +120,11 @@ it.
 configuration: same `sessions.db` schema, same channel ids, same jsonl log
 format, same replies.
 *So that* existing deployments (the harness, Schuyler's daemon) keep working
-with a `uv sync --extra cognition` and nothing else.
-*Acceptance:* the full test suite (1,925 tests at `3109d84`) is green with the
-cognition extra installed; `harness/run.sh` passes `--extra cognition` and
-the harness pass criteria are unchanged.
+with a `uv sync --extra cognition` and nothing else, plus `--extra discord`
+for a deployment that uses Discord (R10).
+*Acceptance:* the full test suite (2,278 collected at `618c831`; 1,925 at
+`3109d84`) is green with every extra installed; `harness/run.sh` passes
+`--extra cognition` and the harness pass criteria are unchanged.
 
 **R5 (inferred).** Renamed hooks get no compatibility aliases.
 *So that* `hooks.py` does not carry two names for one thing. The README
@@ -136,6 +153,18 @@ document depends on the answer.
 (`SubagentPlugin` imports `strip_thinking`, `tests/helpers.py` registers it,
 and it contains none of the R1 vocabulary), and removes it from the test's
 `COGNITION_MODULES` set. Veto if you think of it as cognition.
+
+**R10 (stated, 2026-10-27, #117).** `discord-py` leaves the kernel's
+dependency list. The Discord transport stays in the `corvidae` package and
+keeps its entry point, but its SDK installs with `--extra discord`, the way
+ACP's installs with `--extra acp`.
+*So that* the kernel install does not pull a chat client for one of six
+transports, and R1's "minimalist" covers transports too.
+*Acceptance:* after `uv sync --extra dev --extra acp`,
+`import discord` fails and `import corvidae.channels.discord` succeeds;
+the daemon boots with that install (the R1 boot test); a test shows that
+with a `discord:` config block and no SDK, startup fails with a message
+naming `uv sync --extra discord`. Part 2 §2a has the design.
 
 ## Decisions taken in discussion
 
@@ -176,11 +205,25 @@ and it contains none of the R1 vocabulary), and removes it from the test's
   `agent.yaml.example` cite several of them by path. Leaving the directory
   where it is costs nothing and avoids a path churn.
 - **Minimum commitment on the message-admission trio.**
-  `on_message_admitted`, `on_message_rejected` and `on_message_persisted` are
-  all used by `SignalPlugin` for distinct bookkeeping (correlation ids, the
-  typing-indicator count, read receipts at processing start) and by
-  `outcome_log`, `critique` and `appraisal`. They are correctly named under the grammar
-  and stay as they are.
+  `on_message_admitted`, `on_message_rejected` and `on_message_persisted`
+  have four, three and five implementers. `outcome_log` uses all three;
+  `WebPlugin` uses all three to track each browser send through its
+  lifecycle by trace id; `SignalPlugin` uses admitted and persisted (the
+  typing indicator and read receipts at processing start) and since #116
+  releases veto or never-admitted state in a `finally` around `on_message`
+  instead of implementing rejected; `DiscordPlugin` uses rejected only;
+  `critique` uses admitted and persisted, `appraisal` persisted. They are
+  correctly named under the grammar and stay as they are.
+- **Order WP1, WP3, WP2, WP4** (decided 2026-10-27, #117). The first draft
+  put the send consolidation last. Its cost grows with every transport (it
+  doubled from three to six between drafts) while the package split's cost
+  has not moved (the import surface between kernel and cognition is
+  byte-identical at both measurements). See Work packages.
+- **Discord's SDK becomes an extra** (R10), folded into WP2.
+- **`OutboundToolStatus` carries `tool_call_id`** (decided 2026-10-27).
+  WP3 adds the field and passes the id through; it changes no behaviour.
+  Switching `AcpPlugin` to use it is a separate pull request (Open
+  questions).
 
 # Part 1 — The hook grammar
 
@@ -196,6 +239,12 @@ its resolution semantics, or is a bare imperative verb on a short allowlist.
 | `resolve_` | `firstresult=True` | first non-`None` | yes | any number; first to answer wins, so order matters and the docstring must say who answers |
 | `transform_` | `firstresult=True` wrapper chain with a seed in `_SeedHooksPlugin` | chain | yes | any number, LIFO |
 | bare imperative | broadcast | caller-defined over the result list | sometimes | any number; the docstring states what the caller does with results |
+
+`resolve_channel` shows the other safe shape for `resolve_`: its two
+implementers (Discord and Signal) each answer only for ids under their own
+`transport:` prefix and return `None` for the rest, so the order pluggy
+calls them in cannot change the answer. A keyed `resolve_` hook's docstring
+says what the key is.
 
 The observe class gets three prefixes because `before_agent_turn`,
 `before_compaction` and `after_persist_assistant` are observations placed
@@ -216,57 +265,59 @@ returned. `on_message` is the same shape.
 
 ## 2. Disposition of every hook
 
-Counts are in-tree implementers at `3109d84`. "Keep" means no rename.
+Counts are in-tree implementers at `618c831` (method in Why). "Keep"
+means no rename.
 
 | Current name | Class | Impls | Disposition |
 |---|---|---|---|
-| `on_init` | observe | 19 | keep |
-| `on_start` | observe | 20 | keep |
-| `on_stop` | observe | 16 | keep |
-| `on_config_reload` | observe | 8 | keep |
+| `on_init` | observe | 23 | keep |
+| `on_start` | observe | 22 | keep |
+| `on_stop` | observe | 18 | keep |
+| `on_config_reload` | observe | 9 | keep |
 | `on_idle` | observe | 2 | keep |
 | `on_message` | observe | 1 (agent) | keep |
 | `on_notify` | observe | 1 (agent) | keep |
-| `should_process_message` | veto | 2 | keep; `should_` is the veto prefix, and Phase 2 already plans `should_send_response` |
-| `on_message_admitted` | observe | 3 | keep |
-| `on_message_rejected` | observe | 2 | keep |
-| `on_message_persisted` | observe | 4 | keep |
+| `should_process_message` | veto | 3 | keep; `should_` is the veto prefix, and Phase 2 already plans `should_send_response` |
+| `on_message_admitted` | observe | 4 | keep |
+| `on_message_rejected` | observe | 3 | keep |
+| `on_message_persisted` | observe | 5 | keep |
 | `before_agent_turn` | observe | 4 | keep |
 | `on_agent_response` | observe | 2 | keep |
 | `after_persist_assistant` | observe | 1 | keep; docstring already says in-place mutation is allowed |
 | `transform_display_text` | transform | 1 | keep |
 | `process_tool_result` | transform | 0 | **rename** `transform_tool_result`; it is a wrapper chain with a seed and the name hides that |
 | `on_llm_error` | resolve | 1 | **rename** `resolve_llm_error`; `firstresult=True`, returns the error text the core sends |
-| `load_conversation` | resolve | 1 | **rename** `resolve_conversation`; `firstresult=True` |
-| `resolve_channel` | resolve | 1 | keep |
+| `load_conversation` | resolve | 1 | **rename** `resolve_conversation`; `firstresult=True`. Called by `agent.py` and, since ACP, by `channels/acp.py` for `session/load` |
+| `resolve_channel` | resolve | 2 | keep; keyed by `transport:` prefix (§1) |
 | `on_conversation_event` | imperative | 2 | **rename** `persist_message`; all implementations run (jsonl_log logs and returns `None`), the caller applies `resolve_single_result` and expects at most one rowid. The docstring must say that. |
-| `compact_conversation` | resolve | 1 | **rename** `resolve_compaction`; keep `firstresult=True`. The chain stops at the first non-`None` return, which is how `plugin-guide.md` says to replace the built-in compactor (`FancyCompactionPlugin`). The core ignores the value (`agent.py` step 5), so "resolve" here means "resolve who compacts". Fix `design.md` lines 134, 593 and 816, which say broadcast. |
+| `compact_conversation` | resolve | 1 | **rename** `resolve_compaction`; keep `firstresult=True`. The chain stops at the first non-`None` return, which is how `plugin-guide.md` says to replace the built-in compactor (`FancyCompactionPlugin`). The core ignores the value (`agent.py` step 5), so "resolve" here means "resolve who compacts". Fix `design.md` lines 134, 614 and 840, which say broadcast. |
 | `before_compaction` | observe | 1 | keep |
 | `on_compaction` | observe | 3 | keep |
-| `register_tools` | imperative | 8 | keep; implementers append to the list passed as `tool_registry` |
-| `send_message` | imperative | 3 | **fold into `send`** (§3) |
-| `send_thinking` | imperative | 1 | fold into `send` |
-| `send_tool_status` | imperative | 1 | fold into `send` |
-| `send_progress` | imperative | 3 | fold into `send` |
+| `register_tools` | imperative | 7 | keep; implementers append to the list passed as `tool_registry` |
+| `send_message` | imperative | 6 | **fold into `send`** (§3) |
+| `send_thinking` | imperative | 3 | fold into `send` |
+| `send_tool_status` | imperative | 3 | fold into `send` |
+| `send_progress` | imperative | 6 | fold into `send` |
 | `on_llm_request` | observe | 0 | keep; observability hooks come in request/response pairs and are for consumers outside the tree. This is the one zero-consumer hook retained deliberately; say so in its docstring |
 | `on_llm_response` | observe | 2 | keep |
 | `on_metrics` | observe | 1 | keep |
 
 Net: 31 hooks become 28. Five renames, no spec-option changes, one
 consolidation. Parameter lists and pluggy options do not change for any
-renamed hook, so `TestHookspecSignatures` in `tests/test_correlation_core.py`
+renamed hook, so `TestHookspecSignatures` in `tests/test_trace_core.py`
 and the three chain-stop tests in `tests/test_hook_dispatch.py` keep passing
 once the names are substituted.
 
-Rename blast radius, measured by files that mention the name:
+Rename blast radius, measured by `.py` files (docs: any file) that mention
+the name, at `618c831`:
 
 | Rename | `corvidae/` | `tests/` | `docs/` + README |
 |---|---|---|---|
 | `compact_conversation` → `resolve_compaction` | 3 | 13 | 3 |
 | `on_conversation_event` → `persist_message` | 6 | 12 | 3 |
 | `process_tool_result` → `transform_tool_result` | 3 | 3 | 3 |
-| `load_conversation` → `resolve_conversation` | 3 | 5 | 3 |
-| `on_llm_error` → `resolve_llm_error` | 4 | 5 | 2 |
+| `load_conversation` → `resolve_conversation` | 4 | 5 | 3 |
+| `on_llm_error` → `resolve_llm_error` | 4 | 6 | 2 |
 
 These are mechanical: the hook name appears as a method name, a
 `pm.ahook.<name>` call, an `AsyncMock` assignment or a docs table row. A
@@ -278,11 +329,25 @@ single `grep -rl` and `sed` per rename, then run the suite.
 
 Four hookspecs with one shape: broadcast to every transport, each transport
 checks `channel.matches_transport("<name>")` and returns if the channel is
-not its own. `CLIPlugin` implements all four; `IRCPlugin` and
-`SignalPlugin` implement `send_message` and `send_progress` only, so
-reasoning and tool status are silently not shown there (which is the
-intended behaviour on a chat channel, and the kind of fact that should be a
-no-op default rather than an absence).
+not its own. `AcpPlugin`, `CLIPlugin` and `WebPlugin` implement all four;
+`DiscordPlugin`, `IRCPlugin` and `SignalPlugin` implement `send_message`
+and `send_progress` only, so reasoning and tool status are silently not
+shown there (which is the intended behaviour on a chat channel, and the
+kind of fact that should be a no-op default rather than an absence).
+
+Two transports deviate from the plain filter, and the base class has to
+absorb both:
+
+- `WebPlugin` filters through `_mine(channel)`, which is
+  `self._enabled and channel.matches_transport("web")`. A base-class check
+  on the transport name alone would drop the `_enabled` half. The base
+  class therefore filters through an overridable `owns(channel)`, and
+  `WebPlugin` overrides it with what `_mine` does today.
+- `AcpPlugin` maps tool status onto ACP `tool_call` updates and needs a
+  call id. `send_tool_status` does not carry one, so it mints a uuid on
+  `dispatched` and keys it on `(channel.id, tool_name)`. Both call sites
+  have the real id in scope (`call["id"]` in `agent.py`, `task.tool_call_id`
+  in `task.py`), so the event carries it.
 
 ### What replaces it
 
@@ -304,6 +369,7 @@ class OutboundToolStatus:
     status: str                      # "dispatched" | "completed", as today
     args_summary: str | None = None
     result_summary: str | None = None
+    tool_call_id: str | None = None  # the LLM's call id; None if unknown
 
 @dataclass(frozen=True, slots=True)
 class OutboundProgress:
@@ -337,12 +403,18 @@ class TransportPlugin(CorvidaePlugin):
     ``send_*`` methods they can display; the rest default to no-ops."""
 
     transport: ClassVar[str]
+    depends_on = frozenset({"registry"})
+
+    def owns(self, channel: "Channel") -> bool:
+        """The broadcast filter. Override to narrow it (WebPlugin adds
+        its enabled flag); never to widen it past ``transport``."""
+        return channel.matches_transport(self.transport)
 
     @hookimpl
     async def send(self, channel: "Channel", event: "Outbound") -> None:
         # The one broadcast filter. Nothing below this line runs for a
         # channel another transport owns.
-        if not channel.matches_transport(self.transport):
+        if not self.owns(channel):
             return
         match event:
             case OutboundMessage():    await self.send_message(channel, event)
@@ -361,18 +433,23 @@ class TransportPlugin(CorvidaePlugin):
 The `send_*` methods keep their names but become plain methods, not
 hookimpls, so a transport's code reads the same as before minus the filter.
 `depends_on = frozenset({"registry"})` moves onto the base class, since all
-three transports declare it.
+six transports declare it. Inbound hookimpls that filter by transport
+(`should_process_message` and the `on_message_*` trio in Discord, Signal
+and web; eight methods) may call `self.owns(channel)` so that a transport
+has one predicate, but WP3 does not fold them: they are observe and veto
+hooks with distinct signatures, not one shape.
 
 Call sites change from `pm.ahook.send_message(channel=c, text=t,
 latency_ms=ms)` to `pm.ahook.send(channel=c, event=OutboundMessage(t, ms))`.
 There are two in `corvidae/agent.py` for messages, one for thinking, one for
 tool status, one for progress, and one in `corvidae/task.py` for tool
-status; the subagent tool and the scheduler should be grepped too.
+status; at `618c831` `grep -rn 'ahook.send_' corvidae` finds exactly
+those six, and nothing in the subagent tool or the scheduler.
 
 ### Why this and not a smaller change
 
-The filter moves from twelve places (four hooks across three transports,
-counting the ones that are missing) to one. A new outbound kind, say a
+The filter moves from 24 places (four hooks across six transports; 18
+written today and six missing) to one. A new outbound kind, say a
 withheld-response marker from Phase 2's output gate, becomes a dataclass and
 a no-op method rather than a hookspec, a seed and three transport edits. The
 single `event` parameter also cannot be silently dropped by pluggy's
@@ -382,10 +459,16 @@ because of this).
 
 ### Blast radius
 
-`send_message` is named in 18 test files, mostly as
+`send_message` is named in 23 test files (18 at `3109d84`), mostly as
 `pm.ahook.send_message = AsyncMock()` in `tests/helpers.py` and then
 `send_message.assert_called...` in the tests that use it. The helper changes
-once; the assertions change to unpack the event. Two files,
+once; the assertions change to unpack the event. The larger half is now the
+transport tests: 67 direct calls to a transport's `send_*` method across
+nine files (`test_acp_plugin.py`, `test_acp_conformance.py`,
+`test_acp_session_durability.py`, `test_cli_plugin.py`,
+`test_cli_thinking_tools.py`, `test_discord_plugin.py`,
+`test_irc_plugin.py`, `test_signal_plugin.py`, `test_web_plugin.py`; 35 at
+`3109d84`). Each changes to pass an event. Two files,
 `tests/test_integration.py` and `tests/test_hook_safety.py`, register fake
 transports with `send_*` hookimpls of their own (four defs); once the specs
 are gone those become spec-less hookimpls that never fire, so they must be
@@ -422,13 +505,19 @@ What it costs: two mechanisms (pluggy decisions, bus observations); plugins
 dispatch on `isinstance`; pluggy stops validating observation argument names
 against the spec; `TestHookspecSignatures` has to be rewritten against
 dataclass fields; and the observe hooks most worth converting
-(`on_message_admitted`/`rejected`/`persisted`) have three, two and four
-implementers and carefully specified signatures from Phase 2.
+(`on_message_admitted`/`rejected`/`persisted`) have four, three and five
+implementers and carefully specified signatures from Phase 2 and #116.
 
 Go criterion: build the bus when a third `send`-shaped consolidation turns
 up, or when the observe class passes 20 hookspecs (it is 18 after this
-work). Until then the grammar does the job the bus would do, at the cost of
-one prefix per hook.
+work, and the hookspec set did not change between `3109d84` and
+`618c831`). Until then the grammar does the job the bus would do, at the
+cost of one prefix per hook.
+
+The nearest candidate at `618c831` is not `send`-shaped: eight inbound
+hookimpls in three transports open with the same transport filter
+(`TransportPlugin.owns` gives them one predicate). If a fourth transport
+adds inbound bookkeeping, that is the place to look again.
 
 # Part 2 — The package split
 
@@ -470,10 +559,12 @@ Root `pyproject.toml` changes:
 
 ```toml
 [project]
-dependencies = [ ... ]            # sqlite-vec removed
+dependencies = [ ... ]            # sqlite-vec and discord-py removed
 
 [project.optional-dependencies]
 dev = [ ... ]
+acp = [ ... ]                     # unchanged
+discord = ["discord-py>=2.4"]     # R10, §2a
 cognition = ["corvidae-cognition"]
 
 [tool.uv.workspace]
@@ -572,8 +663,8 @@ kernel exports to plugins", and `tests/test_kernel_boundary.py` (§4)
 enforces that `corvidae_cognition` imports nothing else.
 
 Dependencies that leave the kernel: `sqlite-vec` (memory and retention
-only). `tiktoken` stays (`context.count_tokens`), `ddgs` stays
-(`tools/web.py`).
+only), and `discord-py` to its own extra (§2a). `tiktoken` stays
+(`context.count_tokens`), `ddgs` stays (`tools/web.py`).
 
 `corvidae/commands/redact.py` does not move (Decisions). Its memory cascade
 is already guarded by a schema probe, so on a kernel-only database it
@@ -592,9 +683,41 @@ the `corvidae.memory` import removed, and the cascade tests move to
 `tests/cognition/test_redact_cascade.py`. So the 22 "move" files are 21
 moves and one split.
 
+## 2a. Discord to an extra (R10)
+
+The Discord transport stays where it is (`corvidae/channels/discord.py`,
+entry point `discord`); only its SDK becomes optional. That rules out a
+module-level `import discord`: `Runtime.start()` loads every entry point
+with `ep.load()`, which in pluggy 1.7.0 has no exception handling, so an
+`ImportError` in that module would abort startup for every install
+without the extra, Discord configured or not.
+
+What uses the SDK today is small: `import discord` at line 20, the
+module-level `_DiscordClient(discord.Client)` subclass, and ten `discord.`
+references, all reached through `_make_client()`. The change follows
+`AcpPlugin`, which imports `acp` inside the functions that need it:
+
+- Move `import discord` and the `_DiscordClient` class body into a
+  function that `_make_client()` calls, so the module imports without the
+  SDK. Type annotations that name `discord.Message` become strings or
+  `Any`.
+- When a `discord:` block is configured and the import fails, fail
+  startup with the error style #115 set: what failed, which plugin, and
+  the next step (`uv sync --extra discord`). `acp.py`'s `except
+  ImportError` branch (the `acp_command` path) is the existing example.
+  With no `discord:` block the plugin stays inert and never imports the
+  SDK.
+- `tests/test_discord_plugin.py` imports `discord` at module level; it
+  gains `pytest.importorskip("discord")` so the kernel job skips it, and
+  the full job's install check (§5) makes sure that skip never fires
+  there.
+
+`docs/configuration.md`'s Discord section and `docs/discord-ops.md` get the
+install line.
+
 ## 3. The vocabulary test becomes a boundary test
 
-`tests/test_correlation_core.py` R1 currently exempts a hand-maintained
+`tests/test_trace_core.py` R1 currently exempts a hand-maintained
 `COGNITION_MODULES` set. After the split the set is empty: every file under
 `corvidae/` is kernel and must pass the vocabulary grep. The set is deleted
 and `_core_python_files()` yields everything. This also resolves R9 for
@@ -618,7 +741,8 @@ working from the subdirectory.
 
 The files to move are the ones matching
 `grep -rlE 'corvidae\.(memory|appraisal|critique|funnel|outcome_log|retention)|corvidae\.tools\.memory_tools' tests --include='*.py'`,
-which is 23 files at `3109d84`: 22 move and one
+which is 23 files at `618c831` (the same list as at `3109d84`): 22 move
+and one
 (`test_depends_on_declarations.py`, below) is adjusted in place. The 22
 include `tests/test_phase2a_wp21.py`, which matches only through a
 function-local import and moves anyway, and
@@ -633,7 +757,7 @@ The module rename is import-only. Tests patch kernel modules by dotted
 string in about a hundred places (`corvidae.runtime.validate_dependencies`,
 `corvidae.agent.run_agent_turn`, and so on), but none patches a cognition
 module: `grep -rnE 'patch\("corvidae\.(memory|appraisal|critique|funnel|outcome_log|retention|tools\.memory_tools)' tests`
-is empty at `3109d84`. The cognition dotted strings that do appear are nine `caplog.at_level(..., logger="corvidae.memory")`
+is empty at `618c831`. The cognition dotted strings that do appear are nine `caplog.at_level(..., logger="corvidae.memory")`
 and `logger="corvidae.funnel"` lines in `test_memory_schema.py`,
 `test_memory_consolidation.py` and `test_funnel.py`; those name loggers, not
 modules, and stay exactly as they are because logger names do not change
@@ -667,22 +791,30 @@ rather than moved:
   proves the boot.
 
 `tests/test_driver_scheduler.py` mentions `plugins.disabled` but imports no
-cognition module; it stays.
+cognition module; it stays. `tests/test_acp_stdio_smoke.py` disables the
+six cognition plugins by name in its generated config, like the minimal
+profile; with the extra absent that list is a no-op, and it stays.
 
 ## 5. CI
 
 `.github/workflows/tests.yml` gets two jobs:
 
-- **kernel**: `uv sync --locked --extra dev`, then
-  `uv run pytest -q --ignore=tests/cognition`. No sqlite-vec check. This job
-  is R1's acceptance test.
-- **full**: `uv sync --locked --extra dev --extra cognition`, the existing
-  sqlite-vec load check, then `uv run pytest -q`.
+- **kernel**: `uv sync --locked --extra dev --extra acp`, then
+  `uv run pytest -q --ignore=tests/cognition`. No sqlite-vec check. The
+  `acp` extra is in because the ACP tests import the SDK and CI already
+  installs it; `discord` is out, so this job also proves R10. This job is
+  R1's acceptance test.
+- **full**: `uv sync --locked --extra dev --extra acp --extra discord
+  --extra cognition`, the existing sqlite-vec load check, a one-line
+  `import discord` check beside it (so the Discord tests' importorskip
+  cannot pass silently), then `uv run pytest -q`.
 
 `uv.lock` stays single; a workspace has one lock. `harness/run.sh` line 113
-becomes `uv sync --project "$REPO_DIR" --extra cognition`. The CLAUDE.md
-`uv sync --extra dev` line becomes `uv sync --extra dev --extra cognition`
-with a sentence saying the kernel alone is `--extra dev`.
+becomes `uv sync --project "$REPO_DIR" --extra cognition` (the harness
+drives IRC, so it needs no `discord`). The CLAUDE.md sync line (`uv sync
+--extra dev --extra acp` once #120 lands) becomes `uv sync --extra dev
+--extra acp --extra discord --extra cognition`, with a sentence saying
+the kernel alone is `--extra dev --extra acp`.
 
 ## 6. Config, README, docs
 
@@ -714,11 +846,13 @@ with a sentence saying the kernel alone is `--extra dev`.
   line that the memory tables only exist with the extra and that `redact`
   skips its memory cascade without them.
 - `README.md` Installation: `uv sync --extra cognition` for the full
-  daemon, `uv sync` for the kernel; the development line becomes
-  `uv sync --extra dev --extra cognition`.
-- `.claude/hooks/session-start.sh`: its `uv sync --extra dev` becomes
-  `uv sync --extra dev --extra cognition`, or every web session's
-  `uv run pytest` errors on the `tests/cognition/` imports.
+  daemon (plus `--extra discord` to use Discord), `uv sync` for the
+  kernel; the development line becomes
+  `uv sync --extra dev --extra acp --extra discord --extra cognition`.
+- `.claude/hooks/session-start.sh`: its sync line (`--extra dev --extra
+  acp` once #120 lands) gains `--extra discord --extra cognition`, or
+  every web session's `uv run pytest` errors on the `tests/cognition/`
+  imports and skips the Discord tests.
 - `CLAUDE.md`: update the sync command and delete the "every `send_*` hook
   must broadcast-filter" bullet once WP3 lands.
 
@@ -750,6 +884,12 @@ with a sentence saying the kernel alone is `--extra dev`.
 - **The vocabulary grep now covers every kernel file.** `retention.py`
   moves out; `thinking.py` stays and passes today. If a future kernel change
   trips the grep, rename the thing; do not re-add an exemption set.
+- **A module-level SDK import in a transport aborts every install
+  without the extra.** pluggy loads every entry point eagerly and does not
+  catch `ImportError` (§2a). `AcpPlugin` and, after WP2, `DiscordPlugin`
+  import their SDKs lazily; a new transport with an optional SDK must too.
+  WP2's test imports `corvidae.channels.discord` with `discord` blocked in
+  `sys.modules` and asserts it succeeds.
 - **`add_column_if_missing` is now public.** It is imported by two cognition
   plugins; a signature change is an API change and needs a docs line.
 - **`__name__` loggers change meaning when a module moves.**
@@ -776,14 +916,22 @@ then a cold review, per `plans/implementation/README.md` conventions and
 AGENTS.md. Effort letters are relative: S is an afternoon, M is a day or two,
 L is more.
 
-Order: WP1, WP2, WP3, WP4. WP1 and WP2 both touch the cognition modules
-(WP1 renames hook methods in them, WP2 moves them), so they are sequenced.
-WP3 touches transports, `agent.py`, `task.py` and `hooks.py`, none of which
-WP2 moves; on the test side the two overlap (`tests/test_phase2a_wp21.py`
-is in both WP2's move list and WP3's `send_message` list), which is why WP3
-is sequenced after WP2 and re-greps for `send_message` on its own base
-rather than using the 18-file count measured at `3109d84`. WP4 is docs that each earlier package already updated,
-plus the parts that only make sense once all three are in.
+Order: WP1, WP3, WP2, WP4 (decided 2026-10-27, #117). The packages keep
+their first-draft numbers so that `PENDING_WP3` and the cross-references
+stay valid; WP3 simply runs second.
+
+WP1 and WP2 both touch the cognition modules (WP1 renames hook methods in
+them, WP2 moves them), so WP1 goes first. WP3 touches transports,
+`agent.py`, `task.py` and `hooks.py`, none of which WP2 moves; on the test
+side the two overlap in one file (`tests/test_phase2a_wp21.py` is in both
+WP2's move list and WP3's `send_message` list), which is a conflict to
+take on rebase, not a reason to order them. WP3 goes before WP2 because
+its cost grows with each transport (three at `3109d84`, six at `618c831`)
+while WP2's has not moved, and because it shortens the time the WP1
+strict xfails sit in the tree. Whichever runs later re-greps on its own
+base rather than trusting the counts here. WP4 is docs that each earlier
+package already updated, plus the parts that only make sense once all
+three are in.
 
 ## WP1 — Hook grammar: test and renames (M)
 
@@ -827,7 +975,7 @@ Test 2 only checks names that matched a prefix in test 1; a name with no
 prefix is test 1's failure, not test 2's, so test 2 skips it rather than
 failing twice for one cause.
 
-At `3109d84` the non-xfail rows fail as follows: test 1 on
+At `618c831` (as at `3109d84`) the non-xfail rows fail as follows: test 1 on
 `process_tool_result`, `load_conversation` and `compact_conversation`; test
 2 on `on_llm_error` (it matches `on_` and is `firstresult=True`); test 4 on
 `persist_message` (no hookcaller yet); test 5 on all five old names. Test 3
@@ -852,7 +1000,7 @@ it.
   (13 test files) and all seven tests in `tests/test_hook_dispatch.py`
   (three on compaction, two on `load_conversation`, two on `on_llm_error`)
   must still pass after the substitution, unchanged in what they assert.
-- `docs/design.md` lines 134, 593 and 816: `resolve_compaction` is
+- `docs/design.md` lines 134, 614 and 840: `resolve_compaction` is
   `firstresult=True`; the first non-`None` return stops the chain. The
   worked `FancyCompactionPlugin` example in `plugin-guide.md` is renamed,
   not rewritten.
@@ -870,7 +1018,7 @@ strict xfail rows listed above;
 `grep -rn 'on_conversation_event\|process_tool_result\|load_conversation\|on_llm_error\|compact_conversation' corvidae tests docs README.md CLAUDE.md`
 returns nothing (historical mentions in `plans/` are fine).
 
-## WP2 — Package split (M–L)
+## WP2 — Package split and Discord extra (M–L; runs third)
 
 **Red.**
 
@@ -879,7 +1027,7 @@ returns nothing (historical mentions in `plans/` are fine).
   `packages/corvidae-cognition/` is absent and runs against its source once
   WP2 creates it; write it before the move so it goes red the moment a
   moved module imports something off the allowlist.
-- Emptying `COGNITION_MODULES` in `test_correlation_core.py` is the red
+- Emptying `COGNITION_MODULES` in `test_trace_core.py` is the red
   state for the vocabulary rule: prove the test can fail by temporarily
   adding the word "appraisal" to a kernel comment, watch it fail, revert.
 - A test in `tests/test_runtime.py` that reads
@@ -898,6 +1046,12 @@ returns nothing (historical mentions in `plans/` are fine).
 - CI: the kernel job itself is the red test for R1; it cannot pass until
   `sqlite-vec` is out of the root dependencies and the moved tests are in
   `tests/cognition/`.
+- `tests/test_discord_plugin.py` (or a sibling): import
+  `corvidae.channels.discord` with `sys.modules["discord"] = None` and
+  assert it succeeds; build a runtime with a `discord:` block and no SDK
+  and assert startup fails with a message naming `uv sync --extra
+  discord`. Red today on the first: the module imports `discord` at line
+  20.
 
 **Green.**
 
@@ -926,21 +1080,25 @@ returns nothing (historical mentions in `plans/` are fine).
    two `__file__`-relative paths the §4 table marks. Split the two
    `_REGISTERED_PLUGIN_CLASSES` rows out of `test_depends_on_declarations.py`
    into `tests/cognition/test_depends_on_declarations.py`.
-5. Empty `COGNITION_MODULES` in `test_correlation_core.py`; make
+5. Empty `COGNITION_MODULES` in `test_trace_core.py`; make
    `_core_python_files()` yield everything under `corvidae/`.
-6. Two CI jobs (Part 2 §5). Sync lines in `harness/run.sh`, `CLAUDE.md`,
+6. Discord (Part 2 §2a): move `discord-py` from the root dependencies to
+   the `discord` extra, make the SDK import lazy, add the startup error
+   and the importorskip. `uv lock` again.
+7. Two CI jobs (Part 2 §5). Sync lines in `harness/run.sh`, `CLAUDE.md`,
    `README.md` and `.claude/hooks/session-start.sh`.
 
 **Docs.** Part 2 §6, all bullets except the `send_*` CLAUDE.md deletion.
 
-**Acceptance.** Both CI jobs green. `uv sync --extra dev` followed by
-`uv run python -c "import sqlite_vec"` fails (sqlite-vec really is gone from
-the kernel). `uv sync --extra dev --extra cognition` followed by a `harness/run.sh`
+**Acceptance.** Both CI jobs green. `uv sync --extra dev --extra acp`
+followed by `uv run python -c "import sqlite_vec"` fails, and so does
+`import discord` (both really are gone from the kernel), while
+`uv run python -c "import corvidae.channels.discord"` succeeds. `uv sync --extra dev --extra cognition` followed by a `harness/run.sh`
 smoke run (it generates its own `agent.yaml` under `$STATE_DIR`) behaves as
 before. `sessions.db` schema diff against a pre-split database is
 empty.
 
-## WP3 — Outbound `send` consolidation (M)
+## WP3 — Outbound `send` consolidation (M–L; runs second)
 
 **Red.**
 
@@ -950,8 +1108,11 @@ empty.
   `pm.ahook.send` with each of the four event types on a channel owned by
   `"fake"` and on one owned by `"other"`; assert `fake` saw exactly one
   message and nothing else, `other` saw nothing, and no exception was
-  raised for the no-op defaults. Fails today: no `TransportPlugin`, no
-  `send`.
+  raised for the no-op defaults. A third subclass overrides `owns` to
+  return `False` and sees nothing even for its own transport's channel
+  (the `WebPlugin` disabled case). A tool-status event built with a
+  `tool_call_id` reaches `send_tool_status` with the id intact. Fails
+  today: no `TransportPlugin`, no `send`.
 - The four strict xfails in `test_hook_grammar.py` flip to passing (the
   implementer removes the `xfail` markers; the test then asserts absence).
 - Existing transport tests under `tests/` that assert on
@@ -961,24 +1122,32 @@ empty.
 
 **Green.**
 
-1. `corvidae/outbound.py` with the four dataclasses and the `Outbound`
-   union.
+1. `corvidae/outbound.py` with the four dataclasses (including
+   `OutboundToolStatus.tool_call_id`) and the `Outbound` union.
 2. `hooks.py`: delete the four `send_*` specs; add `send`; add
    `TransportPlugin` after `CorvidaePlugin` (Part 1 §3).
-3. `CLIPlugin`, `IRCPlugin`, `SignalPlugin`: subclass `TransportPlugin`, set
-   `transport`, delete `depends_on` and every `matches_transport` call in a
-   send path, turn the `send_*` hookimpls into plain overrides taking an
-   event. Keep the `should_process_message` and `on_message_*` filters in
-   `SignalPlugin`; they are inbound and not this package's business.
-   `IRCPlugin.send_progress` currently delegates to `self.send_message`;
-   after the change it must build an `OutboundMessage` from the progress
-   event's text to do so, or format the line itself.
+3. All six transports (`AcpPlugin`, `CLIPlugin`, `DiscordPlugin`,
+   `IRCPlugin`, `SignalPlugin`, `WebPlugin`): subclass `TransportPlugin`,
+   set `transport`, delete `depends_on` and every `matches_transport` call
+   in a send path, turn the `send_*` hookimpls into plain overrides taking
+   an event. `WebPlugin` overrides `owns` with today's `_mine` body and
+   keeps using it for its inbound hooks. Keep the `should_process_message`
+   and `on_message_*` filters in Discord, Signal and web; they are inbound
+   and not this package's business. `IRCPlugin.send_progress` currently
+   delegates to `self.send_message`; after the change it must build an
+   `OutboundMessage` from the progress event's text to do so, or format
+   the line itself. `AcpPlugin.send_message` completes the pending ACP
+   prompt in a `finally`; keep that. `AcpPlugin.send_tool_status` keeps
+   its `(channel.id, tool_name)` keying; switching to
+   `event.tool_call_id` is a follow-up (Open questions).
 4. Call sites: `agent.py` (message ×2, thinking, tool status, progress),
    `task.py` (tool status), and whatever `grep -rn 'ahook.send_' corvidae`
-   finds beyond those.
+   finds beyond those. The two tool-status sites pass `tool_call_id`
+   (`call["id"]` in `agent.py`, `task.tool_call_id` in `task.py`).
 5. `tests/helpers.py`: `pm.ahook.send = AsyncMock()`; re-grep
-   `send_message` under `tests/` (18 files at `3109d84`, one of which WP2
-   moved) and update the assertions. Rewrite the fake transports in
+   `send_message` under `tests/` (23 files at `618c831`; WP2 has not run,
+   so nothing has moved) and update the assertions, and the 67 direct
+   transport-method calls (Part 1 §3). Rewrite the fake transports in
    `tests/test_integration.py` and `tests/test_hook_safety.py` as
    `TransportPlugin` subclasses; a bare `send_message` hookimpl with no spec
    is silently never called, which is exactly the failure this package
@@ -992,8 +1161,9 @@ empty.
 `design.md` Transports section. CLAUDE.md: delete the `send_*`
 broadcast-filter bullet. `threat-model.md`: no change.
 
-**Acceptance.** Both CI jobs green; `grep -rn matches_transport
-corvidae/channels` shows only inbound uses; `test_outbound.py` green;
+**Acceptance.** CI green (WP2's two jobs do not exist yet); `grep -rn
+matches_transport corvidae/channels` shows only inbound uses and
+`WebPlugin.owns`; `test_outbound.py` green;
 `test_hook_grammar.py` fully green with no xfails.
 
 ## WP4 — README and the closing docs pass (S)
@@ -1018,6 +1188,12 @@ the extra" from the plugin tables alone. Cold review of the docs diff.
   `resolve_compaction` means the rename is the only change for them. If you
   would rather the hook were broadcast, that is a plugin-API change and
   needs its own requirement; this document does not make it.
+- **ACP tool-call ids.** After WP3, `AcpPlugin` can key ACP `tool_call`
+  updates on `event.tool_call_id` instead of minting a uuid per
+  `(channel.id, tool_name)`. Not yet verified: whether two concurrent
+  calls to the same tool in one turn collide today. If they do, the
+  switch is a bug fix with its own test; it is a separate pull request
+  either way, so WP3 stays behaviour-neutral (R4).
 - **Version numbers.** Both distributions are `0.0.1`. Nothing here needs
   them to differ. If the kernel is ever published, the cognition member pins
   `corvidae` to a compatible range at that point, not now.
@@ -1027,7 +1203,7 @@ the extra" from the plugin tables alone. Cold review of the docs diff.
 
 # Definition of done
 
-- R1 through R7 acceptance criteria met, in CI, on main.
+- R1 through R7 and R10 acceptance criteria met, in CI, on main.
 - `tests/test_hook_grammar.py`, `tests/test_kernel_boundary.py` and
   `tests/test_outbound.py` exist and are green with no xfails.
 - The CLAUDE.md `send_*` bullet is gone.
