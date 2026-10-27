@@ -1,4 +1,4 @@
-# Web transport — design (issue #87), revision 8
+# Web transport — design (issue #87), revision 9
 
 Implementation plan for the web transport plugin requested in #87. Delete
 this file once the plugin is implemented; the finished code and
@@ -6,14 +6,20 @@ this file once the plugin is implemented; the finished code and
 
 ## Status
 
-Design gate: **not yet passed.** Seven cold design reviews ran. Review 7
+Design gate: **not yet passed.** Eight cold design reviews ran. Review 7
 confirmed rev 7's bounded-close fix by probe, and found two critical
 issues: a handler stuck in a gate is never cancelled at shutdown (aiohttp
 drops its handler-task reference on `connection_lost`, so `runner.cleanup()`
 cancels nothing), and client-chosen send ids collide across tabs, so a
 `rejected` frame can mark another tab's message. Revision 8 applies its
 fixes (on_stop cancels handler tasks itself; the server mints send ids)
-and its cosmetic findings.
+and its cosmetic findings. Review 8 found on_stop still missed the
+handler of a client the backpressure path had dropped, and that rev 8's
+`client_id` had no consumer. After a meta-review (the user chose the
+structural fix), revision 9 makes each connection owned by its handler
+task: one `_handlers` set, separate from the fan-out set `_clients`, is
+the only thing `on_stop` walks, and each handler's `finally` releases its
+own resources. `client_id` is gone.
 
 Process: requirements gated by the user; design → cold review → gate;
 red tests → review → gate; green → review → gate; docs → review → gate;
@@ -27,7 +33,10 @@ then a PR. Earlier revisions, for context:
   identity via a `ContextVar`; `error` frames naming their request;
 - rev 7: bounded shutdown; review 6's cosmetics;
 - rev 8: explicit handler-task cancellation in `on_stop`; server-minted
-  send ids (`id`) with the tab's own id echoed as `client_id`.
+  send ids;
+- rev 9: connection ownership by handler task (`_handlers`), so no path
+  that shrinks `_clients` can hide a connection from shutdown; no
+  client-chosen ids.
 
 ## Approved requirements (user-gated)
 
@@ -82,7 +91,6 @@ Everything arriving from the network is untrusted. One rule per input:
 | `Origin` header | `_normalise_origin`; any exception → treated as absent → refused |
 | `Host` header | `.lower()`, set membership; no parsing |
 | WS frame | `json.loads` in try catching `(ValueError, RecursionError)` (deep nesting raises the latter); must be a dict; `type`, `conversation`, `text` must be `str` where required; `conversation` via `re.fullmatch` (not `match`, whose `$` accepts a trailing newline); `text` must survive `text.encode("utf-8")` (rejects lone surrogates, which would poison the stored conversation for the LLM backend) |
-| WS `send` `id` | optional; when present must be a `str` of ≤ 64 chars, else `bad_request`; echoed only as `client_id` |
 | config `token` | must `re.fullmatch` `[A-Za-z0-9._~-]{16,}` (RFC 3986 unreserved): it is pasted into a URL by hand, where `+`, `&`, `%`, `#` would corrupt it |
 | config `host`, `allowed_origins` | canonicalised by the same helpers as the headers they're compared with |
 
@@ -181,7 +189,7 @@ the bind origin.
   causes first), aiohttp's `RequestHandler.connection_lost` drops its
   reference to the handler task (`handler_cancellation` is off), so
   `cleanup()` waits 0.5 s and cancels nothing. `on_stop` therefore cancels
-  handler tasks itself (below). `handler_cancellation=True` is not used:
+  handler tasks itself (Connection ownership, below). `handler_cancellation=True` is not used:
   it would also cancel `on_message` whenever a tab closes mid-gate,
   dropping the user's message or stranding a bound entry between admission
   and enqueue.
@@ -196,17 +204,45 @@ the bind origin.
   f-string containing the login URL (`record.args` empty, no `extra`).
   Provided token → INFO `"web: listening on <base>/"`, no token.
 
+### Connection ownership
+
+Each WebSocket connection is owned by its handler task, and nothing else.
+Two sets, with different jobs:
+- `self._handlers: set[asyncio.Task]` — every live WS handler. The handler
+  adds `asyncio.current_task()` as its first statement (before `prepare`)
+  and removes it as the last step of its outermost `finally`. No other
+  code removes from it. This is the only set `on_stop` uses to find
+  connections.
+- `self._clients: set[_Client]` — fan-out membership only. The handler
+  adds its client after `prepare`; the handler's `finally`, the
+  backpressure drop path and token rotation's close may remove it.
+
+The handler's outermost `finally` releases everything the connection
+holds, in this order, each step independent of the others (exceptions
+logged at DEBUG): discard from `_clients`; cancel its writer task; remove
+an unsent entry its in-flight `send` still owns (that's the `send`
+handler's own `finally`, which has already run by unwinding); if the
+transport isn't closed, `abort()` it; discard from `_handlers`. So a
+connection is fully released exactly when its handler task finishes,
+whichever path ended it.
+
 `on_stop`, in order (idempotent; no-op when inert):
-1. close every client socket concurrently via `_close_client`, and
-   **await** (not cancel) any pending drop-path close tasks — each is
-   already bounded at ~1 s, and cancelling one inside its `wait_for` would
-   skip the abort;
-2. cancel every client's handler task still running (`_Client.handler`,
-   set from `asyncio.current_task()` at the top of the WS handler) and
-   `await asyncio.wait(handlers, timeout=0.5)`. The cancellation
-   propagates into a `send` stuck in `on_message` (e.g. a gate), so that
-   handler's `finally` removes its unsent entry and discards the client;
-3. cancel writer tasks; `await runner.cleanup()`.
+1. set `self._stopping = True`; close every socket in `_clients`
+   concurrently via `_close_client`, and **await** (not cancel) any
+   pending drop-path close tasks — each is already bounded at ~1 s, and
+   cancelling one inside its `wait_for` would skip the abort;
+2. cancel every task in a copy of `_handlers` and `await
+   asyncio.wait(handlers, timeout=0.5)`. This reaches handlers whose
+   clients the drop path already removed from `_clients`. The
+   cancellation propagates into a `send` stuck in `on_message` (e.g. a
+   gate), so its `finally` removes its unsent entry, and then the
+   handler's `finally` releases the rest. A handler still not done after
+   the wait is logged at WARNING;
+3. `await runner.cleanup()`.
+
+While `_stopping`, the drop path calls `client.transport.abort()`
+synchronously instead of scheduling a close task, so no close task is
+created after step 1 has awaited them.
 
 Worst case ≈ 1 s of closes + ≤ 0.5 s of handler wait + ≤ 0.5 s of
 cleanup, inside Runtime's 3 s budget.
@@ -289,8 +325,8 @@ Routes:
 - `GET /ws` → WebSocket. Before `prepare`: normalised `Origin` in the
   allowed origins, else 403. `WebSocketResponse(max_msg_size=1 MiB,
   heartbeat=30)`. The handler body after `prepare` catches its own
-  exceptions (logged), and its `finally` discards the client from
-  `_clients` and cancels its writer.
+  exceptions (logged); its outermost `finally` releases the connection
+  (Connection ownership, above).
 
 Static directory: `Path(str(importlib.resources.files("corvidae.channels") / "web_static"))`.
 
@@ -305,7 +341,7 @@ Client → server:
 |---|---|---|
 | `list` | — | not ready → `error` code `starting`; else enqueue `conversations` (no persistence → registry-only list) |
 | `subscribe` | `conversation` | not ready → `error` code `starting`; else (synchronously, before any await) set this socket's subscription, start buffering, snapshot the channel's unsent messages; then fetch history; enqueue `history`, then the buffered live frames |
-| `send` | `conversation`, `text`, optional `id` (client-chosen str ≤ 64 chars, echoed back as `client_id`) | not ready → `error` code `starting`; else record an unsent entry (with a server-minted id), broadcast `user`, then `await on_message(channel=registry.get_or_create("web", name), sender="web", text=text)` in try/finally (below) |
+| `send` | `conversation`, `text` (other fields ignored) | not ready → `error` code `starting`; else record an unsent entry (with a server-minted id), broadcast `user`, then `await on_message(channel=registry.get_or_create("web", name), sender="web", text=text)` in try/finally (below) |
 
 Validation per the boundary table; failures → `error` (code `bad_request`)
 with a message; the socket stays open. `send` with empty/whitespace text
@@ -328,13 +364,13 @@ Server → client (live frames carry `conversation`):
 |---|---|---|
 | `conversations` | `items: [{name, last_active}]` | `list` |
 | `history` | `conversation`, `items: [frame…]`, `working: bool` | `subscribe` |
-| `user` | `text`, `id` (server-minted per unsent entry; null for rows from `message_log`), `client_id` (the sending tab's `id`, or null) | inbound `send`; history snapshot entries carry both too |
+| `user` | `text`, `id` (server-minted per unsent entry; null for rows from `message_log`) | inbound `send`; history snapshot entries carry it too |
 | `message` | `text` | `send_message` |
 | `thinking` | `text` | `send_thinking` |
 | `progress` | `text` | `send_progress` (through `strip_thinking`) |
 | `tool_status` | `tool`, `status`, `summary` | `send_tool_status` (`summary` = args_summary or result_summary) |
 | `working` | `value: bool` | indicator changes |
-| `rejected` | `text`, `id` (the refused entry's server id, or null when the plugin didn't originate it), `client_id` | `on_message_rejected` |
+| `rejected` | `text`, `id` (the refused entry's server id, or null when the plugin didn't originate it) | `on_message_rejected` |
 | `divider` | `text` | replay only (compaction summary) |
 | `error` | `request` (the client frame's `type` when it is a `str`, else null — never other echoed JSON), `code` (`starting` / `bad_request`), `message` | requests |
 
@@ -351,8 +387,8 @@ until the next reload.
 
 ## Fan-out, ordering and backpressure
 
-`_Client`: `ws`, `transport` (from `request.transport`), `handler: Task`
-(the WS handler's own task), `queue: asyncio.Queue(maxsize=1024)`, `writer: Task`,
+`_Client`: `ws`, `transport` (from `request.transport`), `queue:
+asyncio.Queue(maxsize=1024)`, `writer: Task`,
 `conversation: str | None`, `buffer: list[dict] | None` (non-None while a
 history fetch is in flight).
 
@@ -360,7 +396,9 @@ history fetch is in flight).
 - `_enqueue(client, frame)`: `put_nowait`; on `QueueFull` → WARNING,
   `_clients.discard(client)` immediately, and
   `asyncio.create_task(self._close_client(client, 1008, b"too slow"))`
-  (task kept in a set until done; `on_stop` cancels any still pending).
+  (task kept in a set until done; `on_stop` awaits any still pending;
+  while `_stopping`, `abort()` instead of a task — see Connection
+  ownership).
   Never awaits.
 - `_broadcast(channel_id, frame)`: iterating over a copy of `_clients`
   (the drop path discards from it), for each client whose `conversation ==
@@ -369,8 +407,8 @@ history fetch is in flight).
 - `subscribe` handler: synchronously set `conversation`, `buffer = []`,
   and `snapshot = list(self._unsent.get(channel_id, []))`;
   then, in try/finally, await the history fetch; `_enqueue(history)` with
-  items = row frames + one `user` frame per snapshot entry (its `text`,
-  `id`, `client_id`); `_enqueue`
+  items = row frames + one `user` frame per snapshot entry (its `text`
+  and `id`); `_enqueue`
   each buffered frame; `finally: buffer = None` (if building the history
   raises — an odd row — the client must not be left buffering forever).
   `_rows_to_frames` tolerates malformed rows (missing or null `function`,
@@ -404,8 +442,8 @@ reload.
 A user message is visible in the pane from the moment it's sent, but its
 row only reaches `message_log` at dequeue. Between the two it lives in
 `self._unsent: dict[str, list[_Unsent]]` (channel id → entries, oldest
-first; `_Unsent` has `text: str`, `cid: str | None`, `id: str`
-(`secrets.token_hex(8)`, minted by the plugin) and `client_id: str | None`). The plugin
+first; `_Unsent` has `text: str`, `cid: str | None` and `id: str`
+(`secrets.token_hex(8)`, minted by the plugin)). The plugin
 originates every message on a `web:*` channel, so it can track the whole
 window:
 
@@ -418,17 +456,24 @@ and apluggy's `gather` tasks inherit the context, so the admitted /
 rejected impls running inside that call see exactly that entry (probed
 against apluggy).
 
-1. `send` handler, before broadcasting `user`: create the entry (server
-   `id`, plus the send's `id` as `client_id`), append it, set
-   `_CURRENT_SEND` to it.
+Context is copied when a task is created, so a task spawned inside the
+`await on_message(...)` — notably the queue consumer `Agent` creates on
+the first message to a new channel — keeps that entry in
+`_CURRENT_SEND` for its whole life (corvidae/attribution.py documents the
+same rule). The admitted and rejected impls therefore only trust the
+var when its entry is still in `self._unsent.get(channel.id, [])`, and
+otherwise take the unset branch.
+
+1. `send` handler, before broadcasting `user`: create the entry (with a
+   fresh server `id`), append it, set `_CURRENT_SEND` to it.
 2. `on_message_admitted`: `entry = _CURRENT_SEND.get()`; if set and still
    present, bind `entry.cid = correlation_id`. If unset (an admission on a
    web channel the plugin didn't originate, e.g. a test calling the hook
-   directly), append a new bound entry with the hook's text, a fresh
-   server id and `client_id` None.
-3. `on_message_rejected`: if `_CURRENT_SEND.get()` is set, remove that
-   entry and broadcast `rejected` with its `id` and `client_id`; if unset,
-   broadcast `rejected` with both null.
+   directly), append a new bound entry with the hook's text and a fresh
+   server id.
+3. `on_message_rejected`: if `_CURRENT_SEND.get()` is set and present,
+   remove that entry and broadcast `rejected` with its `id`; otherwise
+   broadcast `rejected` with `id` null.
 4. `send` handler `finally`, after `on_message` returns or raises: reset
    `_CURRENT_SEND`; if its own entry is still present and unbound (neither
    admitted nor rejected — the agent dropped it, or a gate raised), remove
@@ -590,10 +635,11 @@ Plain JS, no build. `index.html` (no inline script/style), `app.css`,
     `afterSanitizeAttributes` hook sets `rel="noopener noreferrer"` and
     `target="_blank"` on links.
   - `rejected` marks the `user` item with the same (server) `id` as
-    refused; with a null id, the latest `user` item with equal text and a
-    null id. Each tab tags its own sends with a counter `id`; it uses the
-    echoed `client_id` only to recognise its own `error` replies, never
-    for marking.
+    refused. A null-id `rejected` (only from a message the plugin didn't
+    originate) renders as a standalone "a message was refused" notice
+    instead of marking an item.
+  - `error` for a `send` needs no id: it goes only to the requesting
+    socket, and frames are answered in order.
 
 ## Tests (`tests/test_web_plugin.py`)
 
@@ -691,16 +737,17 @@ calling the admitted/rejected hooks directly.
      directly on a web channel (no `_CURRENT_SEND`) → a bound entry is
      appended, a `subscribe` lists it, `on_message_persisted` removes it.
    - `rejected` carries the refused entry's server `id` (equal to the `id`
-     on its live `user` frame) and the send's `client_id`.
-   - two tabs, colliding client ids: sockets A and B on `main` each send
-     with `id: "1"`; a gate holds A's and admits B's, then vetoes A's →
-     the `rejected` frame's `id` equals A's `user` frame `id` and differs
-     from B's.
+     on its live `user` frame).
+   - two tabs: sockets A and B on `main` each send; a gate holds A's and
+     admits B's, then vetoes A's → the `rejected` frame's `id` equals A's
+     `user` frame `id` and differs from B's.
    - mid-gate subscriber: A's send held in the gate; socket C subscribes
      → its `history` ends with a `user` item whose `id` equals the `id` of
      the `rejected` frame C receives when the gate vetoes.
-   - `send` with a non-str `id`, or a str longer than 64 → `error`
-     `bad_request`, no `on_message`.
+   - stale context: with `_CURRENT_SEND` set to an entry no longer in
+     `_unsent` (simulating the queue consumer's inherited context),
+     `on_message_rejected` broadcasts `rejected` with `id` null and
+     removes nothing; `on_message_admitted` appends a new bound entry.
    - `list` before ready → `error` with `request: "list"`, code `starting`; every `error` carries the `request` of the frame it answers.
    - frames carry the bare slug in `conversation`.
 8. ordering: subscribe with `WebPlugin._fetch_history_rows` patched to
@@ -721,7 +768,13 @@ calling the admitted/rejected hooks directly.
      `_close_client` cancelled mid-close also calls it; a None transport
      doesn't raise;
    - a drop-path close task pending when `on_stop` starts is awaited, not
-     cancelled (its transport is aborted).
+     cancelled (its transport is aborted);
+   - dropped client stuck in a gate: a raw-socket client subscribes to
+     `main`, sends a message a gate holds forever, and stops reading;
+     broadcasts on `main` overflow its queue so the drop path removes it
+     from `_clients`; then `on_stop` → returns in time, the handler task
+     is done, `_handlers` is empty, and that send's unsent entry is gone;
+   - after any of the above, `_handlers` and `_clients` are empty.
    Subscribe robustness: `_rows_to_frames` raising inside `subscribe` →
    `buffer` is None afterwards and later live frames still arrive.
 10. replay: seeded rows → expected frames (thinking stripped, reasoning as
