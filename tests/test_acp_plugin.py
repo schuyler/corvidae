@@ -9,6 +9,7 @@ import pytest
 
 from corvidae.channel import ChannelRegistry
 from corvidae.hooks import create_plugin_manager
+from corvidae.outbound import OutboundMessage, OutboundProgress, OutboundThinking, OutboundToolStatus
 
 
 AGENT_DEFAULTS = {
@@ -93,7 +94,7 @@ class TestAcpSendMessageFilter:
         plugin._conn.session_update = AsyncMock()
 
         cli_channel = registry.get_or_create("cli", "local")
-        await plugin.send_message(channel=cli_channel, text="hello")
+        await plugin.send(channel=cli_channel, event=OutboundMessage(text="hello"))
 
         plugin._conn.session_update.assert_not_called()
 
@@ -123,7 +124,7 @@ class TestAcpSessionsAndPrompt:
             # The transport mints a real (non-empty string) trace id (#95).
             assert isinstance(trace_id, str) and trace_id
             # Simulate the agent loop finishing a text-only turn.
-            await plugin.send_message(channel=channel, text=f"reply:{text}")
+            await plugin.send(channel=channel, event=OutboundMessage(text=f"reply:{text}"))
 
         plugin.pm.ahook.on_message = _fake_on_message
 
@@ -141,14 +142,10 @@ class TestAcpSessionsAndPrompt:
         created = await agent.new_session(cwd=str(tmp_path))
         channel = plugin._registry.get(f"acp:{created.session_id}")
 
-        await plugin.send_thinking(channel=channel, text="hmm")
-        await plugin.send_tool_status(
-            channel=channel, tool_name="shell", status="dispatched", args_summary="ls"
-        )
-        await plugin.send_tool_status(
-            channel=channel, tool_name="shell", status="completed", result_summary="ok"
-        )
-        await plugin.send_progress(channel=channel, text="working…")
+        await plugin.send(channel=channel, event=OutboundThinking(text="hmm"))
+        await plugin.send(channel=channel, event=OutboundToolStatus(tool_name="shell", status="dispatched", args_summary="ls"))
+        await plugin.send(channel=channel, event=OutboundToolStatus(tool_name="shell", status="completed", result_summary="ok"))
+        await plugin.send(channel=channel, event=OutboundProgress(text="working…"))
 
         assert plugin._conn.session_update.await_count >= 4
 
@@ -166,7 +163,7 @@ class TestAcpSessionsAndPrompt:
             channel.pending_tool_call_ids.add("call_1")
             await gate.wait()
             channel.pending_tool_call_ids.discard("call_1")
-            await plugin.send_message(channel=channel, text="done")
+            await plugin.send(channel=channel, event=OutboundMessage(text="done"))
 
         plugin.pm.ahook.on_message = _fake_on_message
 
@@ -299,7 +296,7 @@ class TestAcpIgnoredClientInput:
         created = await agent.new_session(cwd=str(tmp_path))
 
         async def _fake_on_message(channel, sender: str, text: str, trace_id: str) -> None:
-            await plugin.send_message(channel=channel, text=f"reply:{text}")
+            await plugin.send(channel=channel, event=OutboundMessage(text=f"reply:{text}"))
 
         plugin.pm.ahook.on_message = _fake_on_message
 
@@ -354,10 +351,10 @@ class TestPromptAlwaysCompletes:
 
         async def _fake_on_message(channel, sender: str, text: str, trace_id: str) -> None:
             # Mimic the agent loop: delivery happens on its own task, and the
-            # Agent logs (does not re-raise) a failed send_message hook.
+            # Agent logs (does not re-raise) a failed send hook.
             async def _deliver() -> None:
                 try:
-                    await plugin.send_message(channel=channel, text="reply")
+                    await plugin.send(channel=channel, event=OutboundMessage(text="reply"))
                 except Exception:
                     pass
 

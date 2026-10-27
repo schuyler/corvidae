@@ -14,7 +14,8 @@ from unittest.mock import ANY, AsyncMock, MagicMock
 
 import pytest
 
-from helpers import build_plugin_and_channel, drain
+from corvidae.outbound import OutboundMessage
+from helpers import build_plugin_and_channel, drain, sent
 from llm_response_fixtures import (
     _make_text_response,
     _make_tool_call_response,
@@ -76,9 +77,9 @@ class TestBatchedToolResults:
             f"Expected exactly 2 LLM calls, got {llm_call_count}. "
             "Before the fix, this would be 3+ (one per tool result)."
         )
-        plugin.pm.ahook.send_message.assert_awaited_once_with(
-            channel=channel, text="done with both tools", latency_ms=ANY,
-        )
+        assert sent(plugin.pm, OutboundMessage) == [
+            (channel, OutboundMessage(text="done with both tools", latency_ms=ANY)),
+        ]
         assert tool_results == {"a": "hello_a", "b": "hello_b"}
 
         await task_plugin.on_stop()
@@ -131,9 +132,9 @@ class TestBatchedToolResults:
         await drain(plugin, channel)
 
         assert llm_call_count == 2, f"Expected 2 LLM calls, got {llm_call_count}"
-        plugin.pm.ahook.send_message.assert_awaited_once_with(
-            channel=channel, text="all three done", latency_ms=ANY,
-        )
+        assert sent(plugin.pm, OutboundMessage) == [
+            (channel, OutboundMessage(text="all three done", latency_ms=ANY)),
+        ]
 
         await task_plugin.on_stop()
         await db.close()
@@ -187,9 +188,9 @@ class TestBatchedToolResults:
         await asyncio.sleep(0)
         await drain(plugin, channel)
 
-        plugin.pm.ahook.send_message.assert_awaited_once_with(
-            channel=channel, text="final answer", latency_ms=ANY,
-        )
+        assert sent(plugin.pm, OutboundMessage) == [
+            (channel, OutboundMessage(text="final answer", latency_ms=ANY)),
+        ]
         await task_plugin.on_stop()
         await db.close()
 
@@ -240,8 +241,8 @@ class TestBatchedToolResults:
         await task_plugin.on_stop()
         await db.close()
 
-    async def test_no_duplicate_send_message_with_multi_tool(self):
-        """send_message must be called exactly once, not multiple times."""
+    async def test_no_duplicate_outbound_message_with_multi_tool(self):
+        """An OutboundMessage must be sent exactly once, not multiple times."""
         plugin, channel, db = await build_plugin_and_channel()
 
         async def tool_a(x: str) -> str:
@@ -274,8 +275,8 @@ class TestBatchedToolResults:
         await asyncio.sleep(0)
         await drain(plugin, channel)
 
-        assert plugin.pm.ahook.send_message.await_count == 1, (
-            f"send_message called {plugin.pm.ahook.send_message.await_count} times, expected 1"
+        assert len(sent(plugin.pm, OutboundMessage)) == 1, (
+            f"OutboundMessage sent {len(sent(plugin.pm, OutboundMessage))} times, expected 1"
         )
         await task_plugin.on_stop()
         await db.close()
@@ -412,7 +413,7 @@ class TestBatchedToolResults:
 
         # Tool result triggers final LLM call
         assert llm_call_count == 3
-        plugin.pm.ahook.send_message.assert_awaited()
+        assert sent(plugin.pm, OutboundMessage)
 
         await task_plugin.on_stop()
         await db.close()

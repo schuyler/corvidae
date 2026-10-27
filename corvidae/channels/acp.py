@@ -22,7 +22,13 @@ from typing import Any
 
 import click
 
-from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
+from corvidae.hooks import TransportPlugin, get_dependency, hookimpl
+from corvidae.outbound import (
+    OutboundMessage,
+    OutboundProgress,
+    OutboundThinking,
+    OutboundToolStatus,
+)
 from corvidae.runtime import Runtime
 from corvidae.trace import mint_trace_id
 
@@ -421,10 +427,10 @@ def _warn_ignored_session_input(
         )
 
 
-class AcpPlugin(CorvidaePlugin):
+class AcpPlugin(TransportPlugin):
     """Transport plugin for Agent Client Protocol sessions (``acp:<sessionId>``)."""
 
-    depends_on = frozenset({"registry"})
+    transport = "acp"
 
     def __init__(self) -> None:
         self._task: asyncio.Task | None = None
@@ -630,14 +636,9 @@ class AcpPlugin(CorvidaePlugin):
             return
         await self._conn.session_update(session_id=channel.scope, update=update)
 
-    @hookimpl
-    async def send_message(
-        self, channel, text: str, latency_ms: float | None = None
-    ) -> None:
+    async def send_message(self, channel, event: OutboundMessage) -> None:
         """Forward final assistant text and complete the ACP prompt when idle."""
-        # Broadcast-filter: ignore other transports (A11).
-        if not channel.matches_transport("acp"):
-            return
+        text = event.text
         if self._conn is None:
             logger.debug("AcpPlugin.send_message: no ACP connection yet")
             # Still allow tests / prompt completion without a live client.
@@ -652,36 +653,22 @@ class AcpPlugin(CorvidaePlugin):
             # leaving the future pending would hang the ACP prompt forever.
             self._complete_prompt_if_idle(channel)
 
-    @hookimpl
-    async def send_thinking(self, channel, text: str) -> None:
+    async def send_thinking(self, channel, event: OutboundThinking) -> None:
         """Map reasoning content to agent_thought_chunk updates."""
-        if not channel.matches_transport("acp"):
-            return
         from acp import update_agent_thought_text
 
-        await self._session_update(channel, update_agent_thought_text(text))
+        await self._session_update(channel, update_agent_thought_text(event.text))
 
-    @hookimpl
-    async def send_progress(self, channel, text: str) -> None:
+    async def send_progress(self, channel, event: OutboundProgress) -> None:
         """Map intermediate assistant text to agent_message_chunk updates."""
-        if not channel.matches_transport("acp"):
-            return
         from acp import text_block, update_agent_message
 
-        await self._session_update(channel, update_agent_message(text_block(text)))
+        await self._session_update(channel, update_agent_message(text_block(event.text)))
 
-    @hookimpl
-    async def send_tool_status(
-        self,
-        channel,
-        tool_name: str,
-        status: str,
-        args_summary: str | None = None,
-        result_summary: str | None = None,
-    ) -> None:
+    async def send_tool_status(self, channel, event: OutboundToolStatus) -> None:
         """Map tool lifecycle events to tool_call / tool_call_update."""
-        if not channel.matches_transport("acp"):
-            return
+        tool_name, status = event.tool_name, event.status
+        args_summary, result_summary = event.args_summary, event.result_summary
         from uuid import uuid4
 
         from acp import start_tool_call, tool_content, text_block, update_tool_call

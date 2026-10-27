@@ -26,7 +26,8 @@ from corvidae.agent import (
 )
 from corvidae.turn import AgentTurnResult
 
-from helpers import build_plugin_and_channel, drain
+from corvidae.outbound import OutboundMessage
+from helpers import build_plugin_and_channel, drain, sent, sent_texts
 from llm_response_fixtures import _make_text_response
 
 
@@ -242,7 +243,7 @@ class TestRunTurn:
         assert result is None
 
     async def test_llm_error_sends_error_message(self, plugin_and_channel):
-        """run_agent_turn raises -> error message sent to channel via send_message hook."""
+        """run_agent_turn raises -> error message sent to channel via the send hook."""
         plugin, channel, db = plugin_and_channel
         plugin._client = MagicMock()
 
@@ -257,12 +258,12 @@ class TestRunTurn:
                 llm_overrides=None,
             )
 
-        plugin.pm.ahook.send_message.assert_called_once()
-        call_kwargs = plugin.pm.ahook.send_message.call_args.kwargs
-        assert call_kwargs["channel"] is channel
+        messages = sent(plugin.pm, OutboundMessage)
+        assert len(messages) == 1
+        assert messages[0][0] is channel
         # The error message should be a non-empty string
-        assert isinstance(call_kwargs["text"], str)
-        assert call_kwargs["text"]
+        assert isinstance(messages[0][1].text, str)
+        assert messages[0][1].text
 
     async def test_llm_error_fires_resolve_llm_error_hook(self, plugin_and_channel):
         """run_agent_turn raises -> resolve_llm_error hook is called with channel and error."""
@@ -309,11 +310,11 @@ class TestRunTurn:
             )
 
         assert result is None
-        plugin.pm.ahook.send_message.assert_called_once()
-        sent = plugin.pm.ahook.send_message.call_args.kwargs["text"]
+        assert len(sent(plugin.pm, OutboundMessage)) == 1
+        reply = sent_texts(plugin.pm, OutboundMessage)[0]
         # Delivery, not wording: the user still gets a complete, formatted reply.
-        assert isinstance(sent, str) and sent.strip()
-        assert "{" not in sent
+        assert isinstance(reply, str) and reply.strip()
+        assert "{" not in reply
 
     async def test_passes_llm_overrides_to_run_agent_turn(self, plugin_and_channel):
         """llm_overrides dict -> forwarded to run_agent_turn as extra_body."""
@@ -433,7 +434,7 @@ class TestHandleResponse:
     """Tests for _handle_response."""
 
     async def test_text_response_sends_message(self, plugin_and_channel):
-        """No tool calls -> send_message called with the text."""
+        """No tool calls -> an OutboundMessage sent with the text."""
         plugin, channel, db = plugin_and_channel
         result = _make_turn_result(text="the answer")
 
@@ -447,9 +448,8 @@ class TestHandleResponse:
             request_text="the question",
         )
 
-        plugin.pm.ahook.send_message.assert_called_once()
-        call_kwargs = plugin.pm.ahook.send_message.call_args.kwargs
-        assert "the answer" in call_kwargs["text"]
+        assert len(sent(plugin.pm, OutboundMessage)) == 1
+        assert "the answer" in sent_texts(plugin.pm, OutboundMessage)[0]
 
     async def test_text_response_increments_turn_counter(self, plugin_and_channel):
         """No tool calls -> channel.turn_counter incremented by 1."""
@@ -486,10 +486,10 @@ class TestHandleResponse:
         assert call_kwargs["request_text"] == "the question"
         assert "the answer" in call_kwargs["response_text"]
 
-    async def test_tool_calls_under_limit_dispatched_no_send_message(
+    async def test_tool_calls_under_limit_dispatched_no_outbound_message(
         self, plugin_and_channel
     ):
-        """Tool calls + counter < max_turns -> dispatch, NO send_message."""
+        """Tool calls + counter < max_turns -> dispatch, NO OutboundMessage."""
         plugin, channel, db = plugin_and_channel
         channel.turn_counter = 0
         tool_call = {
@@ -511,8 +511,8 @@ class TestHandleResponse:
             request_text="use the tool",
         )
 
-        # send_message must NOT be called when tool calls are dispatched
-        plugin.pm.ahook.send_message.assert_not_called()
+        # no OutboundMessage may be sent when tool calls are dispatched
+        assert sent(plugin.pm, OutboundMessage) == []
 
     async def test_tool_calls_under_limit_increment_turn_counter(
         self, plugin_and_channel
@@ -574,8 +574,8 @@ class TestHandleResponse:
         # No tasks dispatched
         assert not enqueued_tasks
         # Fallback message sent
-        plugin.pm.ahook.send_message.assert_called_once()
-        sent_text = plugin.pm.ahook.send_message.call_args.kwargs["text"]
+        assert len(sent(plugin.pm, OutboundMessage)) == 1
+        sent_text = sent_texts(plugin.pm, OutboundMessage)[0]
         assert "max tool-calling rounds reached" in sent_text
 
     async def test_tool_calls_at_max_turns_does_not_increment_counter(
@@ -601,8 +601,8 @@ class TestHandleResponse:
         # Counter stays at 3 — not incremented because dispatch was suppressed
         assert channel.turn_counter == 3
 
-    async def test_latency_ms_passed_to_send_message(self, plugin_and_channel):
-        """send_message receives latency_ms from the AgentTurnResult."""
+    async def test_latency_ms_passed_to_send(self, plugin_and_channel):
+        """the OutboundMessage carries latency_ms from the AgentTurnResult."""
         plugin, channel, db = plugin_and_channel
         result = _make_turn_result(text="done")
         result = AgentTurnResult(
@@ -620,9 +620,9 @@ class TestHandleResponse:
             request_text="go",
         )
 
-        plugin.pm.ahook.send_message.assert_called_once()
-        call_kwargs = plugin.pm.ahook.send_message.call_args.kwargs
-        assert call_kwargs.get("latency_ms") == 123.4
+        messages = sent(plugin.pm, OutboundMessage)
+        assert len(messages) == 1
+        assert messages[0][1].latency_ms == 123.4
 
 
 # ===========================================================================
@@ -697,7 +697,7 @@ class TestDefaultLlmErrorMessage:
                 llm_overrides=None,
             )
 
-        sent_text = plugin.pm.ahook.send_message.call_args.kwargs["text"]
+        sent_text = sent_texts(plugin.pm, OutboundMessage)[-1]
         assert "timed out" in sent_text.lower()
         assert "try again" in sent_text.lower()
         assert "TimeoutError" not in sent_text
@@ -721,7 +721,7 @@ class TestDefaultLlmErrorMessage:
                 llm_overrides=None,
             )
 
-        sent_text = plugin.pm.ahook.send_message.call_args.kwargs["text"]
+        sent_text = sent_texts(plugin.pm, OutboundMessage)[-1]
         assert "model request failed" in sent_text.lower()
         assert "try again" in sent_text.lower()
         assert "RuntimeError" not in sent_text

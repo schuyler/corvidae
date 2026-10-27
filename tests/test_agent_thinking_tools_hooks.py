@@ -1,4 +1,4 @@
-"""Tests for agent firing send_thinking and send_tool_status hooks."""
+"""Tests for the agent sending OutboundThinking and OutboundToolStatus events."""
 
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
@@ -13,7 +13,8 @@ from corvidae.persistence import PersistencePlugin, init_db
 from corvidae.hooks import create_plugin_manager
 from corvidae.task import TaskPlugin
 
-from helpers import build_plugin_and_channel, drain, drain_task_queue
+from corvidae.outbound import OutboundMessage, OutboundThinking, OutboundToolStatus
+from helpers import build_plugin_and_channel, drain, drain_task_queue, sent
 from llm_response_fixtures import (
     _make_text_response,
     _make_tool_call_response,
@@ -21,18 +22,31 @@ from llm_response_fixtures import (
 )
 
 
+def _raise_for(kind: type, recorded: list) -> "AsyncMock":
+    """Build a ``send`` mock that raises for events of ``kind``.
+
+    Events of other kinds are recorded in ``recorded`` and succeed, so a
+    test can check that one failing event kind does not stop the others.
+    """
+
+    # Side effect: raise on the chosen event kind, record the rest.
+    async def _send(channel, event):
+        if isinstance(event, kind):
+            raise RuntimeError("boom")
+        recorded.append((channel, event))
+
+    return AsyncMock(side_effect=_send)
+
+
 # ---------------------------------------------------------------------------
-# send_thinking hook
+# OutboundThinking event
 # ---------------------------------------------------------------------------
 
 
 class TestSendThinkingHook:
     async def test_fired_when_reasoning_content_present(self):
-        """Agent fires send_thinking when LLM response includes reasoning_content."""
+        """Agent sends OutboundThinking when LLM response includes reasoning_content."""
         plugin, channel, db = await build_plugin_and_channel()
-
-        # Mock send_thinking to track calls
-        plugin.pm.ahook.send_thinking = AsyncMock()
 
         # Mock LLM to return reasoning_content
         reasoning_text = "I need to think about this carefully"
@@ -48,17 +62,14 @@ class TestSendThinkingHook:
         await plugin.pm.ahook.on_message(channel=channel, sender="user", text="hello", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
-        plugin.pm.ahook.send_thinking.assert_awaited_once_with(
-            channel=channel,
-            text=reasoning_text,
-        )
+        assert sent(plugin.pm, OutboundThinking) == [
+            (channel, OutboundThinking(text=reasoning_text)),
+        ]
         await db.close()
 
     async def test_not_fired_when_no_reasoning_content(self):
-        """Agent does not fire send_thinking when LLM response has no reasoning_content."""
+        """Agent does not send OutboundThinking when LLM response has no reasoning_content."""
         plugin, channel, db = await build_plugin_and_channel()
-
-        plugin.pm.ahook.send_thinking = AsyncMock()
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(
@@ -72,14 +83,15 @@ class TestSendThinkingHook:
         await plugin.pm.ahook.on_message(channel=channel, sender="user", text="hello", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
-        plugin.pm.ahook.send_thinking.assert_not_awaited()
+        assert sent(plugin.pm, OutboundThinking) == []
         await db.close()
 
     async def test_failure_does_not_break_agent(self):
-        """If send_thinking hook raises, the agent still delivers the response."""
+        """If sending OutboundThinking raises, the agent still delivers the response."""
         plugin, channel, db = await build_plugin_and_channel()
 
-        plugin.pm.ahook.send_thinking = AsyncMock(side_effect=RuntimeError("boom"))
+        delivered: list = []
+        plugin.pm.ahook.send = _raise_for(OutboundThinking, delivered)
 
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(
@@ -93,24 +105,22 @@ class TestSendThinkingHook:
         await plugin.pm.ahook.on_message(channel=channel, sender="user", text="hello", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
-        # Response should still be delivered via send_message
-        plugin.pm.ahook.send_message.assert_awaited_once()
-        call_kwargs = plugin.pm.ahook.send_message.call_args[1]
-        assert "My answer" in call_kwargs["text"]
+        # Response should still be delivered as an OutboundMessage
+        messages = [e for _c, e in delivered if isinstance(e, OutboundMessage)]
+        assert len(messages) == 1
+        assert "My answer" in messages[0].text
         await db.close()
 
 
 # ---------------------------------------------------------------------------
-# send_tool_status hook
+# OutboundToolStatus event
 # ---------------------------------------------------------------------------
 
 
 class TestSendToolStatusHook:
     async def test_dispatched_fired_on_tool_call(self):
-        """Agent fires send_tool_status(dispatched) when LLM requests a tool call."""
+        """Agent sends OutboundToolStatus(dispatched) when LLM requests a tool call."""
         plugin, channel, db = await build_plugin_and_channel()
-
-        plugin.pm.ahook.send_tool_status = AsyncMock()
 
         tool_call = _make_tool_call("tc1", "shell", {"command": "echo hi"})
 
@@ -144,20 +154,22 @@ class TestSendToolStatusHook:
         await drain_task_queue(plugin)
 
         # Check dispatched was called
-        dispatched_calls = [
-            c for c in plugin.pm.ahook.send_tool_status.call_args_list
-            if c[1].get("status") == "dispatched"
+        dispatched = [
+            e for _c, e in sent(plugin.pm, OutboundToolStatus)
+            if e.status == "dispatched"
         ]
-        assert len(dispatched_calls) == 1
-        assert dispatched_calls[0][1]["tool_name"] == "shell"
-        assert dispatched_calls[0][1]["args_summary"] is not None
+        assert len(dispatched) == 1
+        assert dispatched[0].tool_name == "shell"
+        assert dispatched[0].args_summary is not None
+        # The dispatch event carries the LLM's id for the call.
+        assert dispatched[0].tool_call_id == "tc1"
         await db.close()
 
     async def test_dispatched_failure_does_not_break_agent(self):
-        """If send_tool_status raises on dispatch, tool still gets enqueued."""
+        """If sending OutboundToolStatus raises on dispatch, tool still gets enqueued."""
         plugin, channel, db = await build_plugin_and_channel()
 
-        plugin.pm.ahook.send_tool_status = AsyncMock(side_effect=RuntimeError("boom"))
+        plugin.pm.ahook.send = _raise_for(OutboundToolStatus, [])
 
         tool_call = _make_tool_call("tc1", "shell", {"command": "echo hi"})
 
@@ -194,10 +206,8 @@ class TestSendToolStatusHook:
         await db.close()
 
     async def test_completed_fired_on_tool_result(self):
-        """send_tool_status(completed) fires when tool result is delivered."""
+        """OutboundToolStatus(completed) is sent when tool result is delivered."""
         plugin, channel, db = await build_plugin_and_channel()
-
-        plugin.pm.ahook.send_tool_status = AsyncMock()
 
         tool_call = _make_tool_call("tc1", "shell", {"command": "echo hi"})
 
@@ -235,11 +245,13 @@ class TestSendToolStatusHook:
         await drain(plugin, channel)  # drain again for the tool-result turn
 
         # Check completed was called
-        completed_calls = [
-            c for c in plugin.pm.ahook.send_tool_status.call_args_list
-            if c[1].get("status") == "completed"
+        completed = [
+            e for _c, e in sent(plugin.pm, OutboundToolStatus)
+            if e.status == "completed"
         ]
-        assert len(completed_calls) == 1
-        assert completed_calls[0][1]["tool_name"] == "shell"
-        assert completed_calls[0][1]["result_summary"] is not None
+        assert len(completed) == 1
+        assert completed[0].tool_name == "shell"
+        assert completed[0].result_summary is not None
+        # The completion event pairs with the dispatch via the LLM call id.
+        assert completed[0].tool_call_id == "tc1"
         await db.close()

@@ -8,6 +8,7 @@ import pytest
 
 from corvidae.channel import Channel, ChannelConfig, ChannelRegistry
 from corvidae.hooks import create_plugin_manager
+from corvidae.outbound import OutboundMessage
 
 from corvidae.channels.cli import CLIPlugin
 
@@ -39,7 +40,7 @@ def _make_pm_with_registry(transport: str | None = None):
     pm.register(registry, name="registry")
 
     pm.ahook.on_message = AsyncMock()
-    pm.ahook.send_message = AsyncMock()
+    pm.ahook.send = AsyncMock()
 
     if transport is not None:
         registry.get_or_create(transport, "local")
@@ -335,7 +336,7 @@ class TestSendMessage:
         pm.register(plugin, name="cli")
 
         channel = registry.get_or_create("cli", "local")
-        await plugin.send_message(channel=channel, text="hello from agent")
+        await plugin.send(channel=channel, event=OutboundMessage(text="hello from agent"))
 
         captured = capsys.readouterr()
         assert "hello from agent" in captured.out
@@ -347,7 +348,7 @@ class TestSendMessage:
         pm.register(plugin, name="cli")
 
         irc_channel = registry.get_or_create("irc", "#general")
-        await plugin.send_message(channel=irc_channel, text="should not appear")
+        await plugin.send(channel=irc_channel, event=OutboundMessage(text="should not appear"))
 
         captured = capsys.readouterr()
         assert "should not appear" not in captured.out
@@ -360,7 +361,7 @@ class TestSendMessage:
         pm.register(plugin, name="cli")
 
         channel = registry.get_or_create("cli", "local")
-        await plugin.send_message(channel=channel, text="hello", latency_ms=1500.0)
+        await plugin.send(channel=channel, event=OutboundMessage(text="hello", latency_ms=1500.0))
 
         captured = capsys.readouterr()
         assert "(1.5s)" in captured.out
@@ -374,7 +375,7 @@ class TestSendMessage:
         pm.register(plugin, name="cli")
 
         channel = registry.get_or_create("cli", "local")
-        await plugin.send_message(channel=channel, text="hello", latency_ms=None)
+        await plugin.send(channel=channel, event=OutboundMessage(text="hello", latency_ms=None))
 
         captured = capsys.readouterr()
         assert "\033[2m" not in captured.out

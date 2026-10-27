@@ -10,20 +10,26 @@ import click
 
 from corvidae.channel import ChannelRegistry
 from corvidae.trace import mint_trace_id
-from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
+from corvidae.hooks import TransportPlugin, get_dependency, hookimpl
+from corvidae.outbound import (
+    OutboundMessage,
+    OutboundProgress,
+    OutboundThinking,
+    OutboundToolStatus,
+)
 from corvidae.runtime import Runtime
 
 logger = logging.getLogger(__name__)
 
 
-class CLIPlugin(CorvidaePlugin):
+class CLIPlugin(TransportPlugin):
     """Transport plugin for stdin/stdout interaction.
 
-    Implements on_start, send_message, and on_stop hooks. Only active when
-    at least one cli channel is configured.
+    Implements on_start and on_stop, and displays every outbound event
+    kind. Only active when at least one cli channel is configured.
     """
 
-    depends_on = frozenset({"registry"})
+    transport = "cli"
 
     def __init__(self, pm=None) -> None:
         if pm is not None:
@@ -111,18 +117,14 @@ class CLIPlugin(CorvidaePlugin):
                 trace_id=mint_trace_id(),
             )
 
-    @hookimpl
-    async def send_message(self, channel, text: str, latency_ms: float | None = None) -> None:
-        """Print agent response to stdout if this is a cli channel.
+    async def send_message(self, channel, event: OutboundMessage) -> None:
+        """Print agent response to stdout.
 
         If latency_ms is provided, appends a dim ANSI-formatted timing line
         (e.g. `(32.5s)`). Prints the next `>` prompt after the response so
         timing is correct now that on_message is fire-and-enqueue.
         """
-        # Broadcast-filter: pluggy calls all transports; return early if this
-        # channel does not belong to the CLI transport.
-        if not channel.matches_transport("cli"):
-            return
+        text, latency_ms = event.text, event.latency_ms
         if latency_ms is not None:
             print(f"\n{text}\n\033[2m({latency_ms/1000:.1f}s)\033[0m\n")
         else:
@@ -136,19 +138,16 @@ class CLIPlugin(CorvidaePlugin):
         sys.stdout.write("> ")
         sys.stdout.flush()
 
-    @hookimpl
-    async def send_thinking(self, channel, text: str) -> None:
+    async def send_thinking(self, channel, event: OutboundThinking) -> None:
         """Display reasoning/thinking content in bright blue."""
-        if not channel.matches_transport("cli"):
-            return
+        text = event.text
         print(f"[94m{text}[0m")
         sys.stdout.flush()
 
-    @hookimpl
-    async def send_tool_status(self, channel, tool_name: str, status: str, args_summary: str | None = None, result_summary: str | None = None) -> None:
+    async def send_tool_status(self, channel, event: OutboundToolStatus) -> None:
         """Display tool call status in dim yellow."""
-        if not channel.matches_transport("cli"):
-            return
+        tool_name, status = event.tool_name, event.status
+        args_summary, result_summary = event.args_summary, event.result_summary
         if status == "dispatched":
             args_display = ""
             if args_summary:
@@ -167,11 +166,9 @@ class CLIPlugin(CorvidaePlugin):
             print(f"\033[95m✓ {tool_name}{result_display}\033[0m")
         sys.stdout.flush()
 
-    @hookimpl
-    async def send_progress(self, channel, text: str) -> None:
+    async def send_progress(self, channel, event: OutboundProgress) -> None:
         """Display intermediate assistant text in grey before tool dispatch."""
-        if not channel.matches_transport("cli"):
-            return
+        text = event.text
         print(f"\033[90m{text}\033[0m")
         sys.stdout.flush()
 

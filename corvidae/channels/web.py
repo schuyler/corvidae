@@ -43,7 +43,13 @@ from aiohttp import WSMsgType, web
 
 from corvidae.channel import Channel, ChannelRegistry
 from corvidae.trace import mint_trace_id
-from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
+from corvidae.hooks import TransportPlugin, get_dependency, hookimpl
+from corvidae.outbound import (
+    OutboundMessage,
+    OutboundProgress,
+    OutboundThinking,
+    OutboundToolStatus,
+)
 from corvidae.thinking import strip_thinking
 
 logger = logging.getLogger(__name__)
@@ -345,10 +351,10 @@ def _slug(value: object) -> str:
 # Plugin
 # ---------------------------------------------------------------------------
 
-class WebPlugin(CorvidaePlugin):
+class WebPlugin(TransportPlugin):
     """Browser chat transport. Inert unless agent.yaml has a ``web`` block."""
 
-    depends_on = frozenset({"registry"})
+    transport = "web"
 
     def __init__(self, pm=None) -> None:
         if pm is not None:
@@ -960,9 +966,13 @@ class WebPlugin(CorvidaePlugin):
 
     # -- outbound hooks -------------------------------------------------------
 
-    def _mine(self, channel: Channel) -> bool:
-        """Broadcast filter: enabled, and the channel belongs to this transport."""
-        return self._enabled and channel.matches_transport("web")
+    def owns(self, channel: Channel) -> bool:
+        """Broadcast filter, narrowed: enabled, and the channel is a web one.
+
+        TransportPlugin.send uses it for every outbound event; the inbound
+        lifecycle hooks below call it too.
+        """
+        return self._enabled and super().owns(channel)
 
     def _set_working(self, channel: Channel, value: bool) -> None:
         """Change the indicator, broadcasting only on a change."""
@@ -985,41 +995,32 @@ class WebPlugin(CorvidaePlugin):
             return True
         return bool(channel.pending_tool_call_ids)
 
-    @hookimpl
-    async def send_message(self, channel: Channel, text: str) -> None:
-        if not self._mine(channel):
-            return
+    async def send_message(self, channel: Channel, event: OutboundMessage) -> None:
+        """Push the reply to the conversation's browsers; clear "working"
+        once no more work is owed."""
         self._broadcast(channel.id, {"type": "message", "conversation": channel.scope,
-                                     "text": text})
+                                     "text": event.text})
         if not self._work_owed(channel):
             self._set_working(channel, False)
 
-    @hookimpl
-    async def send_thinking(self, channel: Channel, text: str) -> None:
-        if not self._mine(channel):
-            return
+    async def send_thinking(self, channel: Channel, event: OutboundThinking) -> None:
+        """Push reasoning content to the conversation's browsers."""
         self._broadcast(channel.id, {"type": "thinking", "conversation": channel.scope,
-                                     "text": text})
+                                     "text": event.text})
 
-    @hookimpl
-    async def send_progress(self, channel: Channel, text: str) -> None:
-        if not self._mine(channel):
-            return
-        visible = strip_thinking(text)
+    async def send_progress(self, channel: Channel, event: OutboundProgress) -> None:
+        """Push intermediate text, minus any inline thinking, if any is left."""
+        visible = strip_thinking(event.text)
         if visible:
             self._broadcast(channel.id, {"type": "progress", "conversation": channel.scope,
                                          "text": visible})
 
-    @hookimpl
-    async def send_tool_status(
-        self, channel: Channel, tool_name: str, status: str,
-        args_summary: str | None = None, result_summary: str | None = None,
-    ) -> None:
-        if not self._mine(channel):
-            return
+    async def send_tool_status(self, channel: Channel, event: OutboundToolStatus) -> None:
+        """Push a tool call's status line to the conversation's browsers."""
         self._broadcast(channel.id, {
-            "type": "tool_status", "conversation": channel.scope, "tool": tool_name,
-            "status": status, "summary": args_summary or result_summary or "",
+            "type": "tool_status", "conversation": channel.scope, "tool": event.tool_name,
+            "status": event.status,
+            "summary": event.args_summary or event.result_summary or "",
         })
 
     # -- message lifecycle hooks ---------------------------------------------
@@ -1028,7 +1029,7 @@ class WebPlugin(CorvidaePlugin):
     async def on_message_admitted(
         self, channel: Channel, trace_id: str, sender: str, text: str
     ) -> None:
-        if not self._mine(channel):
+        if not self.owns(channel):
             return
         # Only _on_send calls on_message on a web channel, and it registers
         # its entry under this id first, so an unmatched id has no real
@@ -1044,7 +1045,7 @@ class WebPlugin(CorvidaePlugin):
     async def on_message_rejected(
         self, channel: Channel, trace_id: str, sender: str, text: str
     ) -> None:
-        if not self._mine(channel):
+        if not self.owns(channel):
             return
         # Match this send's own entry by id; an unknown id removes nothing
         # and is reported to clients with a null id.
@@ -1058,7 +1059,7 @@ class WebPlugin(CorvidaePlugin):
     async def on_message_persisted(
         self, channel: Channel, trace_id: str, rowid: int | None, text: str, meta: dict
     ) -> None:
-        if not self._mine(channel):
+        if not self.owns(channel):
             return
         # Ids we never saw (notification-originated turns) are a no-op.
         entry = self._entry_for(channel.id, trace_id)

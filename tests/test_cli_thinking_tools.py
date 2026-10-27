@@ -6,6 +6,7 @@ import pytest
 
 from corvidae.channel import ChannelRegistry
 from corvidae.hooks import create_plugin_manager
+from corvidae.outbound import OutboundProgress, OutboundThinking, OutboundToolStatus
 from corvidae.channels.cli import CLIPlugin
 
 
@@ -26,7 +27,7 @@ def _make_cli_plugin():
     registry = ChannelRegistry(AGENT_DEFAULTS)
     pm.register(registry, name="registry")
     pm.ahook.on_message = AsyncMock()
-    pm.ahook.send_message = AsyncMock()
+    pm.ahook.send = AsyncMock()
 
     channel = registry.get_or_create("cli", "local")
     plugin = CLIPlugin(pm)
@@ -55,7 +56,7 @@ class TestSendThinking:
     async def test_cli_channel_prints_thinking_in_blue(self, capsys):
         """send_thinking on a cli channel prints text in bright blue ANSI."""
         plugin, channel = _make_cli_plugin()
-        await plugin.send_thinking(channel=channel, text="I am reasoning about this")
+        await plugin.send(channel=channel, event=OutboundThinking(text="I am reasoning about this"))
         captured = capsys.readouterr()
         assert "I am reasoning about this" in captured.out
         assert "\033[94m" in captured.out
@@ -64,7 +65,7 @@ class TestSendThinking:
     async def test_non_cli_channel_ignored(self, capsys):
         """send_thinking on a non-cli channel produces no output."""
         plugin, channel = _make_non_cli_channel()
-        await plugin.send_thinking(channel=channel, text="should not appear")
+        await plugin.send(channel=channel, event=OutboundThinking(text="should not appear"))
         captured = capsys.readouterr()
         assert captured.out == ""
 
@@ -72,7 +73,7 @@ class TestSendThinking:
         """send_thinking displays full reasoning content without truncation."""
         plugin, channel = _make_cli_plugin()
         long_text = "x" * 2000
-        await plugin.send_thinking(channel=channel, text=long_text)
+        await plugin.send(channel=channel, event=OutboundThinking(text=long_text))
         captured = capsys.readouterr()
         # Full content must appear — no truncation
         assert long_text in captured.out
@@ -88,12 +89,7 @@ class TestSendToolStatusDispatched:
     async def test_cli_channel_prints_dispatched_tool(self, capsys):
         """send_tool_status dispatched on a cli channel prints in bright magenta with ⚙."""
         plugin, channel = _make_cli_plugin()
-        await plugin.send_tool_status(
-            channel=channel,
-            tool_name="shell",
-            status="dispatched",
-            args_summary='{"command": "ls"}',
-        )
+        await plugin.send(channel=channel, event=OutboundToolStatus(tool_name="shell", status="dispatched", args_summary='{"command": "ls"}'))
         captured = capsys.readouterr()
         assert "⚙" in captured.out
         assert "shell" in captured.out
@@ -103,12 +99,7 @@ class TestSendToolStatusDispatched:
     async def test_dispatched_includes_args_summary(self, capsys):
         """send_tool_status dispatched shows pretty-printed JSON args."""
         plugin, channel = _make_cli_plugin()
-        await plugin.send_tool_status(
-            channel=channel,
-            tool_name="read_file",
-            status="dispatched",
-            args_summary='{"path": "/tmp/test.txt"}',
-        )
+        await plugin.send(channel=channel, event=OutboundToolStatus(tool_name="read_file", status="dispatched", args_summary='{"path": "/tmp/test.txt"}'))
         captured = capsys.readouterr()
         assert "read_file" in captured.out
         assert "path" in captured.out
@@ -116,12 +107,7 @@ class TestSendToolStatusDispatched:
     async def test_dispatched_without_args_summary(self, capsys):
         """send_tool_status dispatched with no args_summary shows just the tool name."""
         plugin, channel = _make_cli_plugin()
-        await plugin.send_tool_status(
-            channel=channel,
-            tool_name="shell",
-            status="dispatched",
-            args_summary=None,
-        )
+        await plugin.send(channel=channel, event=OutboundToolStatus(tool_name="shell", status="dispatched", args_summary=None))
         captured = capsys.readouterr()
         assert "⚙" in captured.out
         assert "shell" in captured.out
@@ -129,11 +115,7 @@ class TestSendToolStatusDispatched:
     async def test_non_cli_channel_ignored(self, capsys):
         """send_tool_status dispatched on a non-cli channel produces no output."""
         plugin, channel = _make_non_cli_channel()
-        await plugin.send_tool_status(
-            channel=channel,
-            tool_name="shell",
-            status="dispatched",
-        )
+        await plugin.send(channel=channel, event=OutboundToolStatus(tool_name="shell", status="dispatched"))
         captured = capsys.readouterr()
         assert captured.out == ""
 
@@ -147,12 +129,7 @@ class TestSendToolStatusCompleted:
     async def test_cli_channel_prints_completed_tool(self, capsys):
         """send_tool_status completed on a cli channel prints ✓ in bright magenta."""
         plugin, channel = _make_cli_plugin()
-        await plugin.send_tool_status(
-            channel=channel,
-            tool_name="shell",
-            status="completed",
-            result_summary="hello world",
-        )
+        await plugin.send(channel=channel, event=OutboundToolStatus(tool_name="shell", status="completed", result_summary="hello world"))
         captured = capsys.readouterr()
         assert "✓" in captured.out
         assert "shell" in captured.out
@@ -162,12 +139,7 @@ class TestSendToolStatusCompleted:
     async def test_completed_without_result_summary(self, capsys):
         """send_tool_status completed with no result_summary shows just ✓ and name."""
         plugin, channel = _make_cli_plugin()
-        await plugin.send_tool_status(
-            channel=channel,
-            tool_name="shell",
-            status="completed",
-            result_summary=None,
-        )
+        await plugin.send(channel=channel, event=OutboundToolStatus(tool_name="shell", status="completed", result_summary=None))
         captured = capsys.readouterr()
         assert "✓" in captured.out
         assert "shell" in captured.out
@@ -177,12 +149,7 @@ class TestSendToolStatusCompleted:
         """send_tool_status completed truncates result_summary to 80 chars."""
         plugin, channel = _make_cli_plugin()
         long_result = "x" * 200
-        await plugin.send_tool_status(
-            channel=channel,
-            tool_name="shell",
-            status="completed",
-            result_summary=long_result,
-        )
+        await plugin.send(channel=channel, event=OutboundToolStatus(tool_name="shell", status="completed", result_summary=long_result))
         captured = capsys.readouterr()
         assert "→" in captured.out
         # Should not contain full 200-char result
@@ -198,7 +165,7 @@ class TestSendProgress:
     async def test_cli_channel_prints_progress_in_grey(self, capsys):
         """send_progress on a cli channel prints text in grey (bright black)."""
         plugin, channel = _make_cli_plugin()
-        await plugin.send_progress(channel=channel, text="Let me look that up...")
+        await plugin.send(channel=channel, event=OutboundProgress(text="Let me look that up..."))
         captured = capsys.readouterr()
         assert "Let me look that up..." in captured.out
         assert "\033[90m" in captured.out
@@ -207,6 +174,6 @@ class TestSendProgress:
     async def test_non_cli_channel_ignored(self, capsys):
         """send_progress on a non-cli channel produces no output."""
         plugin, channel = _make_non_cli_channel()
-        await plugin.send_progress(channel=channel, text="should not appear")
+        await plugin.send(channel=channel, event=OutboundProgress(text="should not appear"))
         captured = capsys.readouterr()
         assert captured.out == ""

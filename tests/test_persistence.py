@@ -650,7 +650,7 @@ class TestGracefulDegradation:
         registry = _make_registry()
         pm.register(registry, name="registry")
 
-        pm.ahook.send_message = AsyncMock()
+        pm.ahook.send = AsyncMock()
         pm.ahook.on_agent_response = AsyncMock()
 
         task_plugin = TaskPlugin(pm)

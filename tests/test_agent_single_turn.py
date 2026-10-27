@@ -23,7 +23,8 @@ from corvidae.persistence import PersistencePlugin
 from corvidae.task import Task, TaskPlugin, TaskQueue
 from corvidae.tool import ToolContext
 
-from helpers import build_plugin_and_channel, drain, drain_task_queue
+from corvidae.outbound import OutboundMessage
+from helpers import build_plugin_and_channel, drain, drain_task_queue, sent, sent_texts
 from llm_response_fixtures import (
     _make_text_response,
     _make_tool_call_response,
@@ -122,7 +123,7 @@ class TestToolCallDispatchesTask:
 class TestToolCallResultTriggersContinuation:
     async def test_tool_call_result_triggers_continuation(self, plugin_and_channel):
         """Full cycle: user -> tool call -> task executes -> notification ->
-        second LLM call -> text response -> send_message called.
+        second LLM call -> text response -> OutboundMessage sent.
         """
         plugin, channel, db = plugin_and_channel
 
@@ -154,11 +155,11 @@ class TestToolCallResultTriggersContinuation:
         # The task completion triggers on_notify -> new QueueItem -> second LLM turn
         await drain(plugin, channel)
 
-        # After full cycle, send_message is called with the final text
-        plugin.pm.ahook.send_message.assert_called_once()
-        call_kwargs = plugin.pm.ahook.send_message.call_args.kwargs
-        assert call_kwargs["channel"] is channel
-        assert "answer" in call_kwargs["text"].lower()
+        # After full cycle, one OutboundMessage is sent with the final text
+        messages = sent(plugin.pm, OutboundMessage)
+        assert len(messages) == 1
+        assert messages[0][0] is channel
+        assert "answer" in messages[0][1].text.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -434,9 +435,9 @@ class TestMaxTurnsExceededSuppressesToolCalls:
             await drain_task_queue(plugin)
             await drain(plugin, channel)
 
-            # Second LLM turn hit max_turns -> no second task, but send_message called
+            # Second LLM turn hit max_turns -> no second task, but an OutboundMessage sent
             assert len(enqueued_tasks) == 1  # still only 1
-            assert plugin.pm.ahook.send_message.called
+            assert sent(plugin.pm, OutboundMessage)
         finally:
             task_plugin = plugin.pm.get_plugin("task")
             if task_plugin:
@@ -485,8 +486,8 @@ class TestMaxTurnsExceededSendsFallbackText:
             await drain_task_queue(plugin)
             await drain(plugin, channel)
 
-            plugin.pm.ahook.send_message.assert_called_once()
-            sent_text = plugin.pm.ahook.send_message.call_args.kwargs["text"]
+            assert len(sent(plugin.pm, OutboundMessage)) == 1
+            sent_text = sent_texts(plugin.pm, OutboundMessage)[0]
             assert "max tool-calling rounds reached" in sent_text
         finally:
             task_plugin = plugin.pm.get_plugin("task")
@@ -632,7 +633,7 @@ class TestNoTaskQueueLogsError:
         pm = create_plugin_manager()
         registry = ChannelRegistry(AGENT_DEFAULTS)
         pm.register(registry, name="registry")
-        pm.ahook.send_message = AsyncMock()
+        pm.ahook.send = AsyncMock()
         pm.ahook.on_agent_response = AsyncMock()
         # NOTE: No TaskPlugin registered — pm.get_plugin("task") will return None
 
@@ -686,7 +687,7 @@ class TestNoTaskQueueEmitsToolResult:
         pm = create_plugin_manager()
         registry = ChannelRegistry(AGENT_DEFAULTS)
         pm.register(registry, name="registry")
-        pm.ahook.send_message = AsyncMock()
+        pm.ahook.send = AsyncMock()
         pm.ahook.on_agent_response = AsyncMock()
         # No TaskPlugin registered on purpose.
 
@@ -774,19 +775,19 @@ class TestAssistantMessageWithToolCallsPersisted:
 
 
 # ---------------------------------------------------------------------------
-# Test 13: send_message NOT called when tool calls are dispatched
+# Test 13: OutboundMessage NOT sent when tool calls are dispatched
 # ---------------------------------------------------------------------------
 
 
 class TestNoSendMessageWhenToolCallsDispatched:
-    async def test_no_send_message_when_tool_calls_dispatched(self, plugin_and_channel):
-        """When tool calls are dispatched, send_message is NOT called immediately.
+    async def test_no_outbound_message_when_tool_calls_dispatched(self, plugin_and_channel):
+        """When tool calls are dispatched, no OutboundMessage is sent immediately.
 
         Under single-turn dispatch (Phase 3), _process_queue_item dispatches
-        tool calls as Tasks and returns WITHOUT calling send_message. The
+        tool calls as Tasks and returns WITHOUT sending an OutboundMessage. The
         response is deferred until tool results arrive via notification.
 
-        Under the old run_agent_loop, send_message IS called after the full
+        Under the old run_agent_loop, an OutboundMessage IS sent after the full
         loop completes, so this test should FAIL (Red TDD).
         """
         plugin, channel, db = plugin_and_channel
@@ -818,9 +819,9 @@ class TestNoSendMessageWhenToolCallsDispatched:
 
         # Under Phase 3 single-turn dispatch: after the first drain,
         # _process_queue_item dispatches the tool Task and returns.
-        # send_message should NOT have been called yet.
-        # Under old run_agent_loop: send_message IS called -> test fails.
-        plugin.pm.ahook.send_message.assert_not_called()
+        # No OutboundMessage should have been sent yet.
+        # Under old run_agent_loop: an OutboundMessage IS sent -> test fails.
+        assert sent(plugin.pm, OutboundMessage) == []
 
 
 # ---------------------------------------------------------------------------
@@ -832,7 +833,7 @@ class TestCompactionFailureResilience:
     async def test_compaction_failure_does_not_prevent_response(
         self, plugin_and_channel, caplog
     ):
-        """A compaction failure does not prevent run_agent_turn or send_message.
+        """A compaction failure does not prevent run_agent_turn or sending the reply.
 
         Registers a plugin whose resolve_compaction hookimpl raises RuntimeError,
         simulating a plugin crash. The agent's try/except must catch it, log a
@@ -866,10 +867,10 @@ class TestCompactionFailureResilience:
             await drain(plugin, channel)
 
         # Despite compaction failure, run_agent_turn must have been called
-        # (evidenced by mock_client.chat being called) and send_message must have fired.
+        # (evidenced by mock_client.chat being called) and an OutboundMessage must have been sent.
         mock_client.chat.assert_called_once()
-        plugin.pm.ahook.send_message.assert_called_once()
-        sent_text = plugin.pm.ahook.send_message.call_args.kwargs["text"]
+        assert len(sent(plugin.pm, OutboundMessage)) == 1
+        sent_text = sent_texts(plugin.pm, OutboundMessage)[0]
         assert "response after failed compaction" in sent_text
 
         # The failure must be logged as a warning, not silently swallowed.

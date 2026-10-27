@@ -36,7 +36,8 @@ import pytest
 from corvidae.trace import mint_trace_id
 from corvidae.hooks import CorvidaePlugin, create_plugin_manager, hookimpl
 
-from helpers import build_plugin_and_channel, drain, drain_task_queue
+from corvidae.outbound import OutboundMessage
+from helpers import build_plugin_and_channel, drain, drain_task_queue, sent
 from llm_response_fixtures import (
     _make_text_response,
     _make_tool_call,
@@ -316,7 +317,7 @@ class TestGateRejection:
         assert len(recorder.rejected) == 1
         assert recorder.rejected[0]["trace_id"] == tid
         assert len(recorder.admitted) == 0
-        plugin.pm.ahook.send_message.assert_not_awaited()
+        assert sent(plugin.pm, OutboundMessage) == []
 
         await db.close()
 

@@ -11,7 +11,8 @@ logger = logging.getLogger("corvidae.irc_plugin")
 from corvidae.channel import Channel, ChannelRegistry
 from corvidae.channels.split import split_message
 from corvidae.trace import mint_trace_id
-from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
+from corvidae.hooks import TransportPlugin, get_dependency, hookimpl
+from corvidae.outbound import OutboundMessage, OutboundProgress
 
 
 class IRCClient(pydle.Client):
@@ -94,10 +95,10 @@ class IRCClient(pydle.Client):
             raise
 
 
-class IRCPlugin(CorvidaePlugin):
+class IRCPlugin(TransportPlugin):
     """IRC transport plugin following CLIPlugin pattern."""
 
-    depends_on = frozenset({"registry"})
+    transport = "irc"
 
     def __init__(self, pm=None):
         if pm is not None:
@@ -164,12 +165,9 @@ class IRCPlugin(CorvidaePlugin):
             trace_id=mint_trace_id(),
         )
 
-    @hookimpl
-    async def send_message(self, channel: Channel, text: str, latency_ms: float | None = None) -> None:
-        # Broadcast-filter: pluggy calls all transports; return early if this
-        # channel does not belong to the IRC transport.
-        if not channel.matches_transport("irc"):
-            return
+    async def send_message(self, channel: Channel, event: OutboundMessage) -> None:
+        """Deliver a reply as one PRIVMSG per non-blank line, split to fit."""
+        text = event.text
         if self.client is None or not self.client.connected:
             # Say so rather than dropping the reply into the void.
             logger.warning(
@@ -187,9 +185,9 @@ class IRCPlugin(CorvidaePlugin):
                     continue
                 await self.client.message(channel.scope, line)
 
-    @hookimpl
-    async def send_progress(self, channel: Channel, text: str) -> None:
-        await self.send_message(channel, text)
+    async def send_progress(self, channel: Channel, event: OutboundProgress) -> None:
+        """Show intermediate text as an ordinary message."""
+        await self.send_message(channel, OutboundMessage(text=event.text))
 
     @hookimpl
     async def on_stop(self) -> None:

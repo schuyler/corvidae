@@ -7,9 +7,7 @@ against pluggy options. Whether the core reads a hook's return value is not
 something pluggy exposes, so that half of the grammar is enforced at review
 time by the admission criterion, not here.
 
-Every test is parametrized per hook name so that single rows can be marked
-``xfail(strict=True)`` for the four ``send_*`` hooks until WP3 folds them
-into one ``send`` hook.
+Every test is parametrized per hook name, so a failure names the hook.
 """
 
 from collections.abc import Iterable
@@ -30,17 +28,17 @@ GRAMMAR: dict[str, tuple[tuple[str, ...], dict[str, bool]]] = {
 # Bare imperative names: broadcast, caller-defined use of the result list.
 IMPERATIVE = {"send", "register_tools", "persist_message"}
 
-# The four outbound hooks WP3 replaces with ``send``. Until then they have no
-# grammar prefix, and ``send`` has no hookcaller.
-PENDING_WP3 = {"send_message", "send_thinking", "send_tool_status", "send_progress"}
-
-# Names the WP1 renames retired; none may come back as a hookspec.
+# Names retired by renames or folds; none may come back as a hookspec.
 RETIRED = {
     "on_conversation_event",  # -> persist_message
     "process_tool_result",  # -> transform_tool_result
     "load_conversation",  # -> resolve_conversation
     "on_llm_error",  # -> resolve_llm_error
     "compact_conversation",  # -> resolve_compaction
+    "send_message",  # -> send(event=OutboundMessage)
+    "send_thinking",  # -> send(event=OutboundThinking)
+    "send_tool_status",  # -> send(event=OutboundToolStatus)
+    "send_progress",  # -> send(event=OutboundProgress)
 }
 
 
@@ -70,16 +68,9 @@ def _grammar_class(name: str) -> str | None:
     return None
 
 
-def _pending(name: str) -> list:
-    """Strict xfail marks for rows that only pass once WP3 lands."""
-    if name in PENDING_WP3 or name == "send":
-        return [pytest.mark.xfail(strict=True, reason="send consolidation is WP3")]
-    return []
-
-
 def _rows(names: Iterable[str]) -> list:
-    """Parametrize rows, one per hook name, with WP3 xfails attached."""
-    return [pytest.param(n, id=n, marks=_pending(n)) for n in sorted(names)]
+    """Parametrize rows, one per hook name."""
+    return [pytest.param(n, id=n) for n in sorted(names)]
 
 
 # --- Test 1: every name is in the grammar ------------------------------------
@@ -155,7 +146,7 @@ def test_imperative_hook_exists_and_is_broadcast(name: str) -> None:
 # --- Test 5: retired names stay retired ----------------------------------------
 
 
-@pytest.mark.parametrize("name", _rows(RETIRED | PENDING_WP3))
+@pytest.mark.parametrize("name", _rows(RETIRED))
 def test_retired_name_is_not_a_hookspec(name: str) -> None:
     """A renamed or folded hook's old name is gone from AgentSpec.
 

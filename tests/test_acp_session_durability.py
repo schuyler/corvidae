@@ -10,6 +10,7 @@ import pytest
 
 from corvidae.channel import ChannelRegistry
 from corvidae.hooks import create_plugin_manager
+from corvidae.outbound import OutboundMessage
 from corvidae.persistence import PersistencePlugin, init_db
 
 
@@ -162,7 +163,7 @@ class TestLoadSessionReplay:
 
         # Prompt against the loaded id must not mint a second channel.
         async def _reply(*, channel, sender: str, text: str, trace_id: str) -> None:
-            await plugin.send_message(channel=channel, text="ok")
+            await plugin.send(channel=channel, event=OutboundMessage(text="ok"))
 
         plugin.pm.ahook.on_message = _reply
         await agent.prompt(session_id=session_id, prompt=[text_block("again")])

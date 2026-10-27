@@ -22,7 +22,8 @@ import discord
 from corvidae.channel import Channel, ChannelRegistry
 from corvidae.channels.split import split_message
 from corvidae.trace import mint_trace_id
-from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
+from corvidae.hooks import TransportPlugin, get_dependency, hookimpl
+from corvidae.outbound import OutboundMessage, OutboundProgress
 
 logger = logging.getLogger("corvidae.discord_plugin")
 
@@ -191,10 +192,10 @@ class _DiscordClient(discord.Client):
         self._plugin._enqueue(message, self.user.id if self.user is not None else None)
 
 
-class DiscordPlugin(CorvidaePlugin):
+class DiscordPlugin(TransportPlugin):
     """Transport plugin for Discord DMs, server channels, and threads."""
 
-    depends_on = frozenset({"registry"})
+    transport = "discord"
 
     def __init__(self, pm=None) -> None:
         if pm is not None:
@@ -594,18 +595,12 @@ class DiscordPlugin(CorvidaePlugin):
             except Exception as exc:
                 logger.warning("discord: failed to deliver message: %s", exc, exc_info=True)
 
-    @hookimpl
-    async def send_message(self, channel: Channel, text: str, latency_ms: float | None = None) -> None:
+    async def send_message(self, channel: Channel, event: OutboundMessage) -> None:
         """Deliver a final reply and close out one outstanding slot."""
-        if not channel.matches_transport("discord"):
-            return
-        await self._deliver(channel, text)
+        await self._deliver(channel, event.text)
         self._decrement_outstanding(channel)
 
-    @hookimpl
-    async def send_progress(self, channel: Channel, text: str) -> None:
+    async def send_progress(self, channel: Channel, event: OutboundProgress) -> None:
         """Deliver intermediate assistant text without closing out the
         outstanding slot (the final reply still owes one)."""
-        if not channel.matches_transport("discord"):
-            return
-        await self._deliver(channel, text)
+        await self._deliver(channel, event.text)

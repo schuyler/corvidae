@@ -290,7 +290,7 @@ class TestTaskPluginMetaRoundTrip:
 
         pm = MagicMock()
         pm.ahook.on_notify = AsyncMock()
-        pm.ahook.send_tool_status = AsyncMock()
+        pm.ahook.send = AsyncMock()
         plugin = TaskPlugin()
         plugin.pm = pm
 

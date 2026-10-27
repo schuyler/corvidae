@@ -6,7 +6,7 @@ WP2.2, as corrected by Design Review finding 1 / Fixes Applied / Re-review #1):
 1. Task.deliver: bool = True + __post_init__ raising ValueError when
    deliver=False and tool_call_id is not None (trap #5).
    TaskPlugin._on_task_complete returns immediately for deliver=False tasks
-   -- no send_tool_status, no on_notify, no main-model turn.
+   -- no OutboundToolStatus, no on_notify, no main-model turn.
 2. run_agent_turn extracts response["choices"][0].get("logprobs") before
    discarding the choice envelope (turn.py:75 currently keeps only
    ["message"]); AgentTurnResult gains logprobs: dict | None = None.
@@ -38,7 +38,8 @@ from corvidae.hooks import create_plugin_manager
 from corvidae.task import Task, TaskPlugin
 from corvidae.turn import AgentTurnResult, run_agent_turn
 
-from helpers import build_plugin_and_channel, drain
+from corvidae.outbound import OutboundToolStatus
+from helpers import build_plugin_and_channel, drain, sent
 from llm_response_fixtures import _make_text_response
 
 
@@ -106,10 +107,10 @@ class TestTaskDeliverField:
 class TestSilentTaskCompletion:
     async def test_deliver_false_task_completion_does_not_fire_on_notify(self):
         """deliver=False task completes without firing on_notify (spy) --
-        no send_tool_status, no on_notify, no downstream main-model turn."""
+        no OutboundToolStatus, no on_notify, no downstream main-model turn."""
         pm = create_plugin_manager()
         pm.ahook.on_notify = AsyncMock()
-        pm.ahook.send_tool_status = AsyncMock()
+        pm.ahook.send = AsyncMock()
         plugin = TaskPlugin(pm)
         await plugin.on_start(config={})
 
@@ -128,7 +129,7 @@ class TestSilentTaskCompletion:
         await plugin._on_task_complete(task, "silent work output")
 
         pm.ahook.on_notify.assert_not_awaited()
-        pm.ahook.send_tool_status.assert_not_awaited()
+        assert sent(pm, OutboundToolStatus) == []
 
         await plugin.on_stop()
 
@@ -169,7 +170,7 @@ class TestSilentTaskCompletion:
         WP2.2's scope and is unaffected by the deliver flag either way."""
         pm = create_plugin_manager()
         pm.ahook.on_notify = AsyncMock()
-        pm.ahook.send_tool_status = AsyncMock()
+        pm.ahook.send = AsyncMock()
         plugin = TaskPlugin(pm)
         await plugin.on_start(config={})
 
@@ -190,7 +191,7 @@ class TestSilentTaskCompletion:
         await plugin._on_task_complete(task, failure_result)
 
         pm.ahook.on_notify.assert_not_awaited()
-        pm.ahook.send_tool_status.assert_not_awaited()
+        assert sent(pm, OutboundToolStatus) == []
 
         await plugin.on_stop()
 

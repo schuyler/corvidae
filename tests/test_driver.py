@@ -98,10 +98,10 @@ async def test_send_and_await_any_reply_advances_on_mismatched_reply_content():
     scheme expects but the turn still completed.
 
     Caveat (design review): this assumes Buster's PRIVMSGs are only emitted
-    after an LLM call returns (send_message/send_progress both fire
+    after an LLM call returns (OutboundMessage/OutboundProgress both fire
     post-completion), so "any reply" still means "a turn completed." If a
-    filler turn calls a tool, send_progress could fire before the final
-    send_message and drift pacing by one turn — the verdict doesn't depend
+    filler turn calls a tool, OutboundProgress could fire before the final
+    OutboundMessage and drift pacing by one turn — the verdict doesn't depend
     on counting, so correctness holds regardless.
     """
     from harness import driver

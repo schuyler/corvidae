@@ -23,7 +23,8 @@ from corvidae.fork import (
 )
 from corvidae.hooks import hookimpl
 
-from helpers import build_plugin_and_channel
+from corvidae.outbound import OutboundMessage
+from helpers import build_plugin_and_channel, sent
 from llm_response_fixtures import _make_text_response, _make_tool_call, _make_tool_call_response
 
 INSTRUCTION = "Summarize the conversation above."
@@ -194,7 +195,7 @@ async def test_fork_request_matches_main_turn(forking_agent):
     # Nothing mutated, persisted, or sent.
     assert channel.conversation.messages == before
     assert recorder.events == []
-    plugin.pm.ahook.send_message.assert_not_called()
+    assert sent(plugin.pm, OutboundMessage) == []
 
 
 @pytest.mark.parametrize("response", [

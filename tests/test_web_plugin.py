@@ -50,6 +50,7 @@ from corvidae.hooks import (
     hookimpl,
     resolve_reject_wins,
 )
+from corvidae.outbound import OutboundMessage, OutboundProgress, OutboundThinking, OutboundToolStatus
 from corvidae.persistence import PersistencePlugin
 
 # The plugin under test does not exist until the green phase; this import
@@ -459,7 +460,7 @@ class TestConfig:
         assert plugin._runner is None
         # Hooks on a web channel are no-ops when inert.
         ch = registry.get_or_create("web", "main")
-        await plugin.send_message(channel=ch, text="x")
+        await plugin.send(channel=ch, event=OutboundMessage(text="x"))
         await plugin.on_message_admitted(channel=ch, trace_id="c", sender="web", text="x")
         await plugin.on_config_reload(config={})
         await plugin.on_stop()
@@ -892,11 +893,10 @@ class TestOutbound:
         calls = []
         env.plugin._broadcast = lambda *a, **k: calls.append(a)
         irc = env.registry.get_or_create("irc", "main")
-        await env.plugin.send_message(channel=irc, text="x")
-        await env.plugin.send_thinking(channel=irc, text="x")
-        await env.plugin.send_progress(channel=irc, text="x")
-        await env.plugin.send_tool_status(channel=irc, tool_name="t", status="dispatched",
-                                          args_summary="a", result_summary=None)
+        await env.plugin.send(channel=irc, event=OutboundMessage(text="x"))
+        await env.plugin.send(channel=irc, event=OutboundThinking(text="x"))
+        await env.plugin.send(channel=irc, event=OutboundProgress(text="x"))
+        await env.plugin.send(channel=irc, event=OutboundToolStatus(tool_name="t", status="dispatched", args_summary="a", result_summary=None))
         await env.plugin.on_message_admitted(channel=irc, trace_id="c",
                                              sender="x", text="x")
         await env.plugin.on_message_rejected(channel=irc, trace_id="c",
@@ -912,7 +912,7 @@ class TestOutbound:
         a = await env.connect("main")
         b = await env.connect("main")
         other = await env.connect("other")
-        await env.pm.ahook.send_message(channel=env.channel("main"), text="reply")
+        await env.pm.ahook.send(channel=env.channel("main"), event=OutboundMessage(text="reply"))
         for c in (a, b):
             f = await c.wait_type("message", text="reply")
             assert f["conversation"] == "main"
@@ -923,12 +923,10 @@ class TestOutbound:
         env = await make_env()
         conn = await env.connect("main")
         ch = env.channel("main")
-        await env.pm.ahook.send_thinking(channel=ch, text="pondering")
-        await env.pm.ahook.send_progress(channel=ch, text="<think>secret</think>visible")
-        await env.pm.ahook.send_tool_status(channel=ch, tool_name="read_file",
-                                            status="dispatched", args_summary='{"p":1}')
-        await env.pm.ahook.send_tool_status(channel=ch, tool_name="read_file",
-                                            status="completed", result_summary="contents")
+        await env.pm.ahook.send(channel=ch, event=OutboundThinking(text="pondering"))
+        await env.pm.ahook.send(channel=ch, event=OutboundProgress(text="<think>secret</think>visible"))
+        await env.pm.ahook.send(channel=ch, event=OutboundToolStatus(tool_name="read_file", status="dispatched", args_summary='{"p":1}'))
+        await env.pm.ahook.send(channel=ch, event=OutboundToolStatus(tool_name="read_file", status="completed", result_summary="contents"))
         assert (await conn.wait_type("thinking"))["text"] == "pondering"
         assert (await conn.wait_type("progress"))["text"] == "visible"
         d = await conn.wait_type("tool_status", status="dispatched")
@@ -963,14 +961,14 @@ class TestWorking:
         await conn.wait_type("working", value=True)
         await wait_until(lambda: env.agent.calls)
         # Admitted but not yet persisted: a reply doesn't turn it off.
-        await env.pm.ahook.send_message(channel=ch, text="r1")
+        await env.pm.ahook.send(channel=ch, event=OutboundMessage(text="r1"))
         await conn.wait_type("message", text="r1")
         await conn.sync()
         assert "web:main" in env.plugin._working
         assert not any(f["type"] == "working" and f["value"] is False for f in conn.frames)
         # Persisted, queue empty, nothing pending → off.
         await _persist(env, _tid_of(env, "one"))
-        await env.pm.ahook.send_message(channel=ch, text="r2")
+        await env.pm.ahook.send(channel=ch, event=OutboundMessage(text="r2"))
         await conn.wait_type("working", value=False)
         assert "web:main" not in env.plugin._working
 
@@ -1131,7 +1129,7 @@ class TestOrdering:
         conn = await env.connect()
         await conn.send(type="subscribe", conversation="main")
         await asyncio.wait_for(entered.wait(), 3)
-        await env.pm.ahook.send_message(channel=env.channel("main"), text="live")
+        await env.pm.ahook.send(channel=env.channel("main"), event=OutboundMessage(text="live"))
         await asyncio.sleep(0.05)
         assert "message" not in conn.types()
         release.set()
@@ -1152,7 +1150,7 @@ class TestOrdering:
         await conn.wait_type("error", request="subscribe")
         client = env.client_for("web:main")
         assert client.buffer is None
-        await env.pm.ahook.send_message(channel=env.channel("main"), text="still here")
+        await env.pm.ahook.send(channel=env.channel("main"), event=OutboundMessage(text="still here"))
         await conn.wait_type("message", text="still here")
 
 

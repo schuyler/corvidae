@@ -57,16 +57,15 @@ Defined in `hooks.py`. All hooks are async (called via `pm.ahook`)
 except `register_tools` which is sync. This is a representative subset of
 `AgentSpec` covering the turn-loop and message-lifecycle hooks; the
 [Hook reference](#hook-reference) table below is the complete, authoritative
-list of every hook (including lifecycle hooks like `on_init` and the
-outbound-display hooks `send_thinking`/`send_tool_status`/`send_progress`
-not shown here).
+list of every hook (including lifecycle hooks like `on_init` not shown
+here).
 
 ```python
 class AgentSpec:
     async def on_start(self, config: dict) -> None
     async def on_stop(self) -> None
     async def on_message(self, channel: Channel, sender: str, text: str, trace_id: str) -> None
-    async def send_message(self, channel: Channel, text: str, latency_ms: float | None = None) -> None
+    async def send(self, channel: Channel, event: Outbound) -> None  # corvidae/outbound.py
     def register_tools(self, tool_registry: list) -> None  # sync; plugins append Tool instances or bare callables
     async def on_agent_response(self, channel: Channel, request_text: str, response_text: str, trace_id: str | None, meta: dict, logprobs: dict | None) -> None
     async def on_notify(self, channel: Channel, source: str, text: str, tool_call_id: str | None, meta: dict | None) -> None
@@ -130,10 +129,7 @@ adding a hook are in [plugin-guide.md](plugin-guide.md#hook-grammar);
 | `on_start` | broadcast | daemon startup, after config load |
 | `on_stop` | broadcast | SIGINT/SIGTERM |
 | `on_message` | broadcast | inbound message from any transport; the transport mints and passes `trace_id` (required, no default) |
-| `send_message` | broadcast | outbound message delivery |
-| `send_thinking` | broadcast | `Agent`, when the LLM response carries `reasoning_content` |
-| `send_tool_status` | broadcast | `Agent`/`TaskPlugin`, tool call dispatched and completed |
-| `send_progress` | broadcast | `Agent`, intermediate LLM text alongside tool calls |
+| `send` | broadcast (imperative) | outbound delivery. `Agent` sends `OutboundMessage` (replies, error text), `OutboundThinking` (when the LLM response carries `reasoning_content`), `OutboundProgress` (intermediate text alongside tool calls) and `OutboundToolStatus` (tool call dispatched); `TaskPlugin` sends `OutboundToolStatus` on completion. Transports receive it through `TransportPlugin.send`, which filters by `owns(channel)` and dispatches by event type |
 | `register_tools` | broadcast (sync) | startup tool collection |
 | `on_agent_response` | broadcast | after agent loop produces a text response; no default implementation |
 | `on_notify` | broadcast | inject a notification into a channel queue |
@@ -146,7 +142,7 @@ adding a hook are in [plugin-guide.md](plugin-guide.md#hook-grammar);
 | `transform_tool_result` | firstresult=True wrapper chain | `dispatch_tool_call` (both subagent and main agent paths), after tool execution; return replacement string or None for default |
 | `before_agent_turn` | broadcast | `_process_queue_item`, before LLM call; plugins inject context into conversation log |
 | `after_persist_assistant` | broadcast | `_process_queue_item`, after assistant message is persisted; plugins may mutate the in-memory dict |
-| `transform_display_text` | firstresult=True wrapper chain | `_resolve_display_text`, before `send_message`; return transformed text or None to leave unchanged |
+| `transform_display_text` | firstresult=True wrapper chain | `_resolve_display_text`, before the reply is sent; return transformed text or None to leave unchanged |
 | `on_idle` | broadcast | `IdleMonitor`, when all queues empty and cooldown elapsed |
 | `resolve_conversation` | firstresult=True | `_process_queue_item`, when `channel.conversation is None`; return list of tagged message dicts or None to defer |
 | `resolve_channel` | firstresult=True | `SchedulerPlugin`, for a persisted channel id the registry does not hold (e.g. a reminder due after a restart); a transport returns the live Channel for ids it owns, created with transport-specific config, or None to defer. `SignalPlugin` and `DiscordPlugin` implement it; callers fall back to `registry.get_or_create` from the split id |
@@ -1414,11 +1410,11 @@ await pm.ahook.on_notify(
 ```
 
 From there the normal pipeline runs: serial queue, persistence,
-origin-keyed consumers, attribution, and `send_message`, whose reply on
-the row's channel is the unprompted message. A heartbeat on a channel no
+origin-keyed consumers, attribution, and `send`, whose reply on the
+row's channel is the unprompted message. A heartbeat on a channel no
 transport owns (`internal:heartbeat`) reaches the log and persistence
-only, because every transport's `send_*` hooks filter on
-`matches_transport`. The originating notification resets `turn_counter`
+only, because `TransportPlugin.send` delivers only to the transport that
+owns a channel. The originating notification resets `turn_counter`
 (step 3 of [Message processing](#message-processing)).
 
 **Framing and role.** Reminder text is framed as data:
@@ -1686,6 +1682,22 @@ registers `task_status` as tool closures during `on_start`.
 | `cancel_reminder(id)` | `scheduler.py` | Cancel a tool-created reminder on this channel |
 
 ## Transports
+
+Every transport (CLI, IRC, Signal, Discord, web, ACP) subclasses
+`TransportPlugin` (`hooks.py`) and sets `transport` to the name its
+channel ids start with. The base class implements the outbound `send`
+hook once: it drops events for channels the transport does not own
+(`owns(channel)`, by default `channel.matches_transport(self.transport)`;
+`WebPlugin` narrows it to also require that it is enabled), then
+dispatches by event type to the plain methods `send_message`,
+`send_thinking`, `send_tool_status` and `send_progress`. Those take the
+channel and an event from `outbound.py` and default to no-ops, so a
+transport overrides only what it can display; the per-transport sections
+below name them as that transport's methods. The base class also declares
+`depends_on = frozenset({"registry"})`. Inbound hooks
+(`should_process_message`, `on_message_admitted`/`rejected`/`persisted`)
+are not filtered by the base class; each transport's implementations open
+with their own ownership check.
 
 ### CLI (`channels/cli.py`)
 
@@ -1986,7 +1998,8 @@ Known limits of the splitter, none of which loses text:
   and its combining marks, because splitting is by codepoint.
 
 Outbound is text only. `send_thinking` and `send_tool_status` are not
-implemented, so reasoning and tool traffic never reach Discord.
+overridden (the `TransportPlugin` no-ops apply), so reasoning and tool
+traffic never reach Discord.
 
 There is no local Discord server, so there is no harness end-to-end test
 for this transport; behavior is pinned by `tests/test_discord_plugin.py`
@@ -2200,8 +2213,10 @@ drops the in-memory channel while leaving `message_log` intact.
 `session/list` reads an `acp_session_index` sidecar table in the same DB
 (cwd + `updated_at`).
 
-**Hooks.** Every `send_*` broadcast-filters with
-`channel.matches_transport("acp")`. `session/prompt` mints the message's
+**Hooks.** `AcpPlugin` is a `TransportPlugin` with `transport = "acp"`,
+so outbound events reach it only for `acp:` channels. Tool status is
+keyed on `(channel.id, tool_name)`; the event's `tool_call_id` is not used
+yet. `session/prompt` mints the message's
 trace id and passes it to `on_message`, and completes with `end_turn`
 after tool drain; `session/cancel` yields `cancelled`. The stdio loop
 starts reading only once `Agent.started` is true: Runtime starts Agent

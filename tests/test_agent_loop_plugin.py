@@ -19,7 +19,8 @@ from corvidae.agent import Agent
 from corvidae.persistence import PersistencePlugin
 from corvidae.tool import ToolRegistry
 
-from helpers import build_plugin_and_channel, drain
+from corvidae.outbound import OutboundMessage
+from helpers import build_plugin_and_channel, drain, sent, sent_texts
 from llm_response_fixtures import (
     _make_text_response,
     _make_tool_call_response,
@@ -76,7 +77,7 @@ class TestOnStart:
         pm = create_plugin_manager()
         registry = ChannelRegistry(AGENT_DEFAULTS)
         pm.register(registry, name="registry")
-        pm.ahook.send_message = AsyncMock()
+        pm.ahook.send = AsyncMock()
         pm.ahook.on_agent_response = AsyncMock()
 
         # Register PersistencePlugin with injected in-memory DB
@@ -131,7 +132,7 @@ class TestOnStart:
 
         pm = create_plugin_manager()
         pm.register(ChannelRegistry(AGENT_DEFAULTS), name="registry")
-        pm.ahook.send_message = AsyncMock()
+        pm.ahook.send = AsyncMock()
         pm.ahook.on_agent_response = AsyncMock()
 
         tool_plugin = ToolPlugin()
@@ -166,7 +167,7 @@ class TestOnStart:
         pm = create_plugin_manager()
         registry = ChannelRegistry(AGENT_DEFAULTS)
         pm.register(registry, name="registry")
-        pm.ahook.send_message = AsyncMock()
+        pm.ahook.send = AsyncMock()
         pm.ahook.on_agent_response = AsyncMock()
 
         db = await aiosqlite.connect(":memory:")
@@ -206,7 +207,7 @@ class TestOnStart:
         pm = create_plugin_manager()
         registry = ChannelRegistry(AGENT_DEFAULTS)
         pm.register(registry, name="registry")
-        pm.ahook.send_message = AsyncMock()
+        pm.ahook.send = AsyncMock()
         pm.ahook.on_agent_response = AsyncMock()
 
         db = await aiosqlite.connect(":memory:")
@@ -263,7 +264,7 @@ class TestOnStart:
 
         pm = create_plugin_manager()
         pm.register(ChannelRegistry(AGENT_DEFAULTS), name="registry")
-        pm.ahook.send_message = AsyncMock()
+        pm.ahook.send = AsyncMock()
         pm.ahook.on_agent_response = AsyncMock()
 
         mock_main_client = MagicMock()
@@ -424,7 +425,7 @@ class TestOnMessagePersistenceAndLoop:
         await db.close()
 
     async def test_on_message_sends_response(self):
-        """Verify send_message hook and on_agent_response hook are called
+        """Verify send hook and on_agent_response hook are called
         with the display text."""
         plugin, channel, db = await build_plugin_and_channel()
 
@@ -435,11 +436,9 @@ class TestOnMessagePersistenceAndLoop:
         await plugin.on_message(channel=channel, sender="user", text="question", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
-        plugin.pm.ahook.send_message.assert_awaited_once_with(
-            channel=channel,
-            text="my answer",
-            latency_ms=ANY,
-        )
+        assert sent(plugin.pm, OutboundMessage) == [
+            (channel, OutboundMessage(text="my answer", latency_ms=ANY)),
+        ]
         plugin.pm.ahook.on_agent_response.assert_awaited_once()
         call_kwargs = plugin.pm.ahook.on_agent_response.call_args.kwargs
         assert call_kwargs["channel"] == channel
@@ -626,7 +625,7 @@ class TestOnMessagePersistenceAndLoop:
 class TestOnMessageThinkingTokens:
     async def test_on_message_strips_thinking_for_display(self):
         """If raw response contains <think> tags, the displayed text
-        (sent via send_message and on_agent_response) has them stripped."""
+        (sent via send and on_agent_response) has them stripped."""
         plugin, channel, db = await build_plugin_and_channel()
 
         raw = "<think>internal reasoning</think>clean answer"
@@ -637,11 +636,9 @@ class TestOnMessageThinkingTokens:
         await plugin.on_message(channel=channel, sender="user", text="hi", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
-        plugin.pm.ahook.send_message.assert_awaited_once_with(
-            channel=channel,
-            text="clean answer",
-            latency_ms=ANY,
-        )
+        assert sent(plugin.pm, OutboundMessage) == [
+            (channel, OutboundMessage(text="clean answer", latency_ms=ANY)),
+        ]
 
         await db.close()
 
@@ -830,7 +827,7 @@ class TestOnMessageCompactionAndConfig:
             "reasoning_history": "drop",
         })
         pm.register(registry, name="registry")
-        pm.ahook.send_message = AsyncMock()
+        pm.ahook.send = AsyncMock()
         pm.ahook.on_agent_response = AsyncMock()
 
         persistence = PersistencePlugin(pm)
@@ -889,7 +886,7 @@ class TestOnStop:
         """on_stop cancels all channel queue consumers."""
         pm = create_plugin_manager()
         pm.register(ChannelRegistry(AGENT_DEFAULTS), name="registry")
-        pm.ahook.send_message = AsyncMock()
+        pm.ahook.send = AsyncMock()
         pm.ahook.on_agent_response = AsyncMock()
 
         plugin = Agent(pm)
@@ -975,11 +972,9 @@ class TestOnMessageToolCallRoundTrip:
         await drain(plugin, channel)
 
         assert tool_result_store.get("called_with") == "test query"
-        plugin.pm.ahook.send_message.assert_awaited_once_with(
-            channel=channel,
-            text="final response after tool",
-            latency_ms=ANY,
-        )
+        assert sent(plugin.pm, OutboundMessage) == [
+            (channel, OutboundMessage(text="final response after tool", latency_ms=ANY)),
+        ]
 
         await task_plugin.on_stop()
         await db.close()
@@ -1122,7 +1117,7 @@ class TestConversationInitPromptResolution:
 class TestOnMessageErrorHandling:
     async def test_on_message_run_agent_turn_error(self):
         """When run_agent_turn raises an exception:
-        - send_message is called with an error message
+        - send is called with an OutboundMessage with an error message
         - on_agent_response is NOT called
         - on_message returns without re-raising
         - The user message persisted before the failure remains in the log
@@ -1138,10 +1133,9 @@ class TestOnMessageErrorHandling:
         await plugin.on_message(channel=channel, sender="user", text="trigger error", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
-        # send_message should be called with the error text
-        plugin.pm.ahook.send_message.assert_awaited_once()
-        call_kwargs = plugin.pm.ahook.send_message.call_args
-        sent_text = call_kwargs.kwargs["text"]
+        # send should carry an OutboundMessage with the error text
+        assert len(sent(plugin.pm, OutboundMessage)) == 1
+        sent_text = sent_texts(plugin.pm, OutboundMessage)[-1]
         assert "error" in sent_text.lower() or "sorry" in sent_text.lower()
 
         # on_agent_response must NOT be called
@@ -1164,7 +1158,7 @@ class TestOnMessageErrorHandling:
 
 class TestOnNotify:
     async def test_on_notify_enqueues_and_triggers_agent_loop(self):
-        """on_notify enqueues a notification item; after draining, send_message
+        """on_notify enqueues a notification item; after draining, send
         is called with the agent's response to the notification."""
         plugin, channel, db = await build_plugin_and_channel()
 
@@ -1178,11 +1172,9 @@ class TestOnNotify:
         )
         await drain(plugin, channel)
 
-        plugin.pm.ahook.send_message.assert_awaited_once_with(
-            channel=channel,
-            text="notified response",
-            latency_ms=ANY,
-        )
+        assert sent(plugin.pm, OutboundMessage) == [
+            (channel, OutboundMessage(text="notified response", latency_ms=ANY)),
+        ]
 
         await db.close()
 
@@ -1250,7 +1242,7 @@ class TestToolSchema:
 class TestShouldProcessMessage:
     async def test_returns_false_rejects_message(self):
         """When should_process_message returns False, on_message does not enqueue
-        the message and send_message is never called."""
+        the message and no OutboundMessage is ever sent."""
         from corvidae.hooks import hookimpl
 
         plugin, channel, db = await build_plugin_and_channel()
@@ -1269,7 +1261,7 @@ class TestShouldProcessMessage:
         await plugin.on_message(channel=channel, sender="user", text="blocked message", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
-        plugin.pm.ahook.send_message.assert_not_awaited()
+        assert sent(plugin.pm, OutboundMessage) == []
 
         await db.close()
 
@@ -1294,7 +1286,7 @@ class TestShouldProcessMessage:
         await plugin.on_message(channel=channel, sender="user", text="accepted message", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
-        plugin.pm.ahook.send_message.assert_awaited_once()
+        assert len(sent(plugin.pm, OutboundMessage)) == 1
 
         await db.close()
 
@@ -1319,7 +1311,7 @@ class TestShouldProcessMessage:
         await plugin.on_message(channel=channel, sender="user", text="hi", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
-        plugin.pm.ahook.send_message.assert_awaited_once()
+        assert len(sent(plugin.pm, OutboundMessage)) == 1
 
         await db.close()
 
@@ -1335,7 +1327,7 @@ class TestShouldProcessMessage:
         await plugin.on_message(channel=channel, sender="user", text="hi", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
-        plugin.pm.ahook.send_message.assert_awaited_once()
+        assert len(sent(plugin.pm, OutboundMessage)) == 1
 
         await db.close()
 
@@ -1361,7 +1353,7 @@ class TestShouldProcessMessage:
         await drain(plugin, channel)
 
         # 0 is falsy but not `is False`, so message should proceed
-        plugin.pm.ahook.send_message.assert_awaited_once()
+        assert len(sent(plugin.pm, OutboundMessage)) == 1
 
         await db.close()
 
@@ -1373,7 +1365,7 @@ class TestShouldProcessMessage:
 
 class TestResolveLlmError:
     async def test_hook_returns_string_sent_as_error_message(self):
-        """When resolve_llm_error returns a string, that string is sent via send_message."""
+        """When resolve_llm_error returns a string, that string is sent as an OutboundMessage."""
         from corvidae.hooks import hookimpl
 
         plugin, channel, db = await build_plugin_and_channel()
@@ -1392,9 +1384,8 @@ class TestResolveLlmError:
         await plugin.on_message(channel=channel, sender="user", text="trigger error", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
-        plugin.pm.ahook.send_message.assert_awaited_once()
-        call_kwargs = plugin.pm.ahook.send_message.call_args
-        assert call_kwargs.kwargs["text"] == "Custom error: please try again later."
+        assert len(sent(plugin.pm, OutboundMessage)) == 1
+        assert sent_texts(plugin.pm, OutboundMessage)[-1] == "Custom error: please try again later."
 
         await db.close()
 
@@ -1418,9 +1409,8 @@ class TestResolveLlmError:
         await plugin.on_message(channel=channel, sender="user", text="trigger error", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
-        plugin.pm.ahook.send_message.assert_awaited_once()
-        call_kwargs = plugin.pm.ahook.send_message.call_args
-        sent_text = call_kwargs.kwargs["text"]
+        assert len(sent(plugin.pm, OutboundMessage)) == 1
+        sent_text = sent_texts(plugin.pm, OutboundMessage)[-1]
         assert "error" in sent_text.lower() or "sorry" in sent_text.lower()
 
         await db.close()
@@ -1436,9 +1426,8 @@ class TestResolveLlmError:
         await plugin.on_message(channel=channel, sender="user", text="trigger error", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
-        plugin.pm.ahook.send_message.assert_awaited_once()
-        call_kwargs = plugin.pm.ahook.send_message.call_args
-        sent_text = call_kwargs.kwargs["text"]
+        assert len(sent(plugin.pm, OutboundMessage)) == 1
+        sent_text = sent_texts(plugin.pm, OutboundMessage)[-1]
         assert "error" in sent_text.lower() or "sorry" in sent_text.lower()
 
         await db.close()
@@ -1518,7 +1507,7 @@ class TestResolveCompaction:
 
         # Custom plugin was called and agent turn ran without error.
         assert compact_called, "CompactPlugin.resolve_compaction must have been called"
-        plugin.pm.ahook.send_message.assert_called()
+        assert sent(plugin.pm, OutboundMessage)
 
         await db.close()
 
@@ -1553,8 +1542,8 @@ class TestResolveCompaction:
             await plugin.on_message(channel=channel, sender="user", text="second", trace_id=mint_trace_id())
             await drain(plugin, channel)
 
-        # Agent turn ran without error; send_message was called.
-        plugin.pm.ahook.send_message.assert_called()
+        # Agent turn ran without error; an OutboundMessage was sent.
+        assert sent(plugin.pm, OutboundMessage)
 
         await db.close()
 
@@ -1602,7 +1591,7 @@ class TestResolveCompaction:
         assert warning_records, "Expected WARNING log about compaction failure"
 
         # Agent turn must still have run despite the exception
-        plugin.pm.ahook.send_message.assert_called()
+        assert sent(plugin.pm, OutboundMessage)
 
         await db.close()
 
