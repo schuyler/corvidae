@@ -2174,8 +2174,9 @@ drops the in-memory channel while leaving `message_log` intact.
 (cwd + `updated_at`).
 
 **Hooks.** Every `send_*` broadcast-filters with
-`channel.matches_transport("acp")`. `session/prompt` completes with
-`end_turn` after tool drain; `session/cancel` yields `cancelled`.
+`channel.matches_transport("acp")`. `session/prompt` mints the message's
+trace id and passes it to `on_message`, and completes with `end_turn`
+after tool drain; `session/cancel` yields `cancelled`.
 
 Design of record: `plans/acp-transport-design.md`. Gate B harness:
 `tests/test_acp_conformance.py`. Subprocess stdio smoke (mocked LLM, no
