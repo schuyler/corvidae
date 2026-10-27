@@ -17,7 +17,8 @@ from typing import Any, Optional
 from corvidae.channel import Channel, ChannelConfig, ChannelRegistry
 from corvidae.channels.split import split_message
 from corvidae.trace import mint_trace_id
-from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
+from corvidae.hooks import TransportPlugin, get_dependency, hookimpl
+from corvidae.outbound import OutboundMessage, OutboundProgress
 
 logger = logging.getLogger("corvidae.signal_plugin")
 
@@ -46,10 +47,10 @@ def _format_stale_prefix(timestamp_ms: int) -> str:
     return f"[sent {dt.strftime('%Y-%m-%d %H:%M')} UTC]\n"
 
 
-class SignalPlugin(CorvidaePlugin):
+class SignalPlugin(TransportPlugin):
     """Transport plugin for a Signal DM conversation via signal-cli's daemon."""
 
-    depends_on = frozenset({"registry"})
+    transport = "signal"
 
     def __init__(self, pm=None) -> None:
         if pm is not None:
@@ -722,21 +723,15 @@ class SignalPlugin(CorvidaePlugin):
             except Exception as exc:
                 logger.warning("signal: failed to deliver message: %s", exc, exc_info=True)
 
-    @hookimpl
-    async def send_message(self, channel: Channel, text: str, latency_ms: float | None = None) -> None:
+    async def send_message(self, channel: Channel, event: OutboundMessage) -> None:
         """Deliver a final reply, split to fit and never truncated, and
         close out one outstanding slot."""
-        if not channel.matches_transport("signal"):
-            return
-        await self._deliver(channel, text)
+        await self._deliver(channel, event.text)
         self._decrement_outstanding(channel)
 
-    @hookimpl
-    async def send_progress(self, channel: Channel, text: str) -> None:
+    async def send_progress(self, channel: Channel, event: OutboundProgress) -> None:
         """Deliver intermediate assistant text through the same path as
         send_message, but without the reply bookkeeping -- it is real
         liveness (unlike raw tool traces), fires mid-turn, and does not
         close out the outstanding count."""
-        if not channel.matches_transport("signal"):
-            return
-        await self._deliver(channel, text)
+        await self._deliver(channel, event.text)

@@ -48,11 +48,12 @@ Things that are easy to get wrong and won't fail loudly:
 
 - **A new plugin must be registered** in `[project.entry-points.corvidae]` in
   `pyproject.toml`. Without it the plugin is simply never loaded — no error.
-- **Every `send_*` hook must broadcast-filter.** pluggy calls all transports for
-  every send, so each transport's `send_message`, `send_thinking`,
-  `send_tool_status`, and `send_progress` must open with
-  `if not channel.matches_transport("<name>"): return`. Omitting it makes one
-  transport emit another's output.
+- **Transports subclass `TransportPlugin`** (`corvidae/hooks.py`), which
+  filters outbound `send` events for them. Inbound hooks
+  (`should_process_message`, `on_message_admitted`/`rejected`/`persisted`)
+  still reach every transport, so a transport's inbound hookimpls must open
+  with `if not self.owns(channel): return`. Omitting it makes one transport
+  act on another's messages.
 - **Declare dependencies** with `depends_on = frozenset({"registry"})` and
   resolve them via `get_dependency(self.pm, "registry", ChannelRegistry)`.
   Entry-point load order is not deterministic.

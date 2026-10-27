@@ -4,13 +4,16 @@ Corvidae plugins extend the agent daemon using [apluggy](https://pypi.org/projec
 
 ```python
 from corvidae.hooks import CorvidaePlugin, hookimpl
+from corvidae.outbound import OutboundMessage
 
 class GreetPlugin(CorvidaePlugin):
     @hookimpl
     async def on_message(self, channel, sender: str, text: str) -> None:
         # An impl may take any subset of the spec's args; trace_id is omitted here.
         if text.strip().lower() == "hello":
-            await self.pm.ahook.send_message(channel=channel, text=f"Hello, {sender}!")
+            await self.pm.ahook.send(
+                channel=channel, event=OutboundMessage(text=f"Hello, {sender}!")
+            )
 ```
 
 `CorvidaePlugin.on_init` stores `pm` and `config` as instance attributes. Subclasses that need extra initialization override `on_init` and call `super().on_init(pm, config)` first.
@@ -147,12 +150,11 @@ implementer answers only for ids under its own `transport:` prefix and
 returns `None` for the rest, so the order pluggy calls them in cannot change
 the answer.
 
-The bare imperative allowlist is `send`, `register_tools` (implementers
-append to the list passed in) and `persist_message` (every implementation
-runs; the caller resolves the list with `resolve_single_result`). The four
-`send_*` hooks are the known exceptions: they are not on the allowlist and
-the grammar test marks them as expected failures until they are folded
-into the single `send` hook (plans/kernel-split.md, WP3).
+The bare imperative allowlist is `send` (transports receive it through
+`TransportPlugin`; see [Writing a transport](#writing-a-transport)),
+`register_tools` (implementers append to the list passed in) and
+`persist_message` (every implementation runs; the caller resolves the list
+with `resolve_single_result`).
 
 ### Adding a hook
 
@@ -212,20 +214,10 @@ The `config` parameter is optional in `on_config_reload` hookimpls. Pluggy forwa
 | `on_message_admitted(channel, trace_id: str, sender: str, text: str)` | async broadcast | After should_process_message admits a USER message |
 | `on_message_rejected(channel, trace_id: str, sender: str, text: str)` | async broadcast | After should_process_message vetoes a USER message |
 | `on_message_persisted(channel, trace_id: str, rowid: int \| None, text: str, meta: dict)` | async broadcast | After the trace-originating message is persisted to the database. Fires once per originating item regardless of persistence outcome (`rowid` may be None). |
-| `send_message(channel, text: str, latency_ms: float \| None)` | async broadcast | Outbound delivery request |
+| `send(channel, event: Outbound)` | async broadcast | Outbound delivery: `event` is an `OutboundMessage`, `OutboundThinking`, `OutboundToolStatus` or `OutboundProgress` (`corvidae/outbound.py`). Transports receive it through `TransportPlugin` (see [Writing a transport](#writing-a-transport)) |
 | `on_notify(channel, source: str, text: str, tool_call_id: str \| None, meta: dict \| None)` | async broadcast | Notification injected into channel |
 
-`send_message` is broadcast to all plugins. Transport plugins filter for their own channels:
-
-```python
-@hookimpl
-async def send_message(self, channel, text: str) -> None:
-    if not channel.matches_transport("mytransport"):
-        return
-    # deliver text to this channel
-```
-
-`latency_ms` is optional in `send_message` — omit it from your hookimpl signature if your transport doesn't use it. Pluggy tolerates missing optional parameters.
+Any plugin can send: `await self.pm.ahook.send(channel=channel, event=OutboundMessage(text="..."))`. `send` is broadcast to every plugin, and `TransportPlugin` drops the events for channels a transport does not own, so a sender never addresses a transport by name.
 
 ### Extension points
 
@@ -253,7 +245,7 @@ Window messages carry internal `_`-prefixed tags (`_message_type`, `_db_id`). Ev
 
 A trace is everything one inbound item causes: its turns, its tool tasks, follow-up turns from their completions, and every LLM call in them. Each trace has an opaque `trace_id`. One exists for every inbound user message and for every notification-born queue item that isn't itself a continuation of an existing trace. The transport mints a user message's id with `corvidae.trace.mint_trace_id()` and passes it to `on_message`; the Agent mints at dequeue for a notification-born item with no inherited id. It travels alongside a `meta` dict — an extensible, framework-opaque metadata bag — through the messaging and extension-point hooks above, into `Task.trace_id`/`Task.meta`, and back out through the completion notification's `meta` (`TaskPlugin._on_task_complete` merges `{"task_id", "trace_id", **task.meta}`). This is how a tool cycle several hops deep still carries the trace id and metadata its originating message started with.
 
-**Transport contract.** A transport mints a fresh, unique id per inbound message, passes it as `trace_id` to `on_message`, and matches `should_process_message`, `on_message_admitted`, `on_message_rejected` and `on_message_persisted` back to its message by that id, never by ordering or context inheritance. Import `mint_trace_id` from `corvidae.trace` (stdlib only), not from `corvidae.agent`. The Agent uses the id verbatim. Omitting the argument raises `pluggy.HookCallError`; a falsy id raises `ValueError`. Like the `send_*` hooks, the lifecycle hooks broadcast to every plugin, so each of a transport's lifecycle hookimpls opens with `if not channel.matches_transport("<name>"): return` and ignores ids it never minted.
+**Transport contract.** A transport mints a fresh, unique id per inbound message, passes it as `trace_id` to `on_message`, and matches `should_process_message`, `on_message_admitted`, `on_message_rejected` and `on_message_persisted` back to its message by that id, never by ordering or context inheritance. Import `mint_trace_id` from `corvidae.trace` (stdlib only), not from `corvidae.agent`. The Agent uses the id verbatim. Omitting the argument raises `pluggy.HookCallError`; a falsy id raises `ValueError`. The lifecycle hooks broadcast to every plugin, and unlike `send` they get no filtering from `TransportPlugin`, so each of a transport's lifecycle hookimpls opens with `if not self.owns(channel): return` and ignores ids it never minted.
 
 `on_message_admitted` or `on_message_rejected` fires before `on_message` returns, unless the agent drops the message without either (for example, it is not ready yet). State a transport took before the call (a typing slot, a pending read receipt, an unsent-message entry) can therefore be released in a `finally` when the id was not admitted:
 
@@ -271,7 +263,7 @@ finally:
 
 @hookimpl
 async def on_message_admitted(self, channel, trace_id, sender, text):
-    if not channel.matches_transport("mytransport"):
+    if not self.owns(channel):
         return
     self._admitted.add(trace_id)
 ```
@@ -641,7 +633,33 @@ async def resolve_channel(self, channel_id: str) -> Channel | None:
     return self._channel_for(scope)   # the same path inbound messages take
 ```
 
-`SignalPlugin` implements it so an ACI it has not seen since startup still gets its E.164 alias's `ChannelConfig`. IRC and CLI don't need it; the registry fallback is already correct for them. Channels no transport owns (`internal:heartbeat`) also take the fallback, and since every `send_*` hook filters on `matches_transport`, replies there go only to the log and `sessions.db`.
+`SignalPlugin` implements it so an ACI it has not seen since startup still gets its E.164 alias's `ChannelConfig`. IRC and CLI don't need it; the registry fallback is already correct for them. Channels no transport owns (`internal:heartbeat`) also take the fallback, and since `TransportPlugin.send` delivers only to the transport that owns a channel, replies there go only to the log and `sessions.db`.
+
+### Writing a transport
+
+Subclass `TransportPlugin` (in `corvidae.hooks`), set `transport` to the name your channel ids start with, and override the outbound methods your transport can display. They are plain methods, not hookimpls, and each takes the channel and an event from `corvidae.outbound`:
+
+| Method | Event | Fields |
+|---|---|---|
+| `send_message` | `OutboundMessage` | `text`, `latency_ms` (None if unknown) |
+| `send_thinking` | `OutboundThinking` | `text` |
+| `send_tool_status` | `OutboundToolStatus` | `tool_name`, `status` (`"dispatched"` or `"completed"`), `args_summary`, `result_summary`, `tool_call_id` (None if unknown) |
+| `send_progress` | `OutboundProgress` | `text` |
+
+The base class implements the `send` hook once: it drops events for channels the transport does not own, then dispatches by event type. Methods you don't override are no-ops, which is how a chat transport skips reasoning and tool status. `TransportPlugin` also declares `depends_on = frozenset({"registry"})`.
+
+```python
+from corvidae.hooks import TransportPlugin
+from corvidae.outbound import OutboundMessage
+
+class MyTransport(TransportPlugin):
+    transport = "mytransport"
+
+    async def send_message(self, channel, event: OutboundMessage) -> None:
+        await self.client.post(channel.scope, event.text)
+```
+
+The filter is `owns(channel)`, which by default is `channel.matches_transport(self.transport)`. Override it only to narrow it: `WebPlugin` also requires that it is enabled. Inbound hooks are not filtered for you; open each inbound hookimpl with `if not self.owns(channel): return`.
 ### ACP transport
 
 `AcpPlugin` (`corvidae` entry point `acp`) speaks Agent Client Protocol v1
@@ -766,7 +784,7 @@ otherwise.
 
 ## Hook exception safety
 
-Broadcast hook calls from `Agent` are wrapped in `try/except`. If a plugin raises an exception from `before_agent_turn`, `after_persist_assistant`, `on_agent_response`, or `send_message`, the exception is logged at WARNING or ERROR level and processing continues. Plugins do not need to catch their own exceptions to protect the queue consumer.
+Broadcast hook calls from `Agent` are wrapped in `try/except`. If a plugin raises an exception from `before_agent_turn`, `after_persist_assistant`, `on_agent_response`, or `send`, the exception is logged at WARNING or ERROR level and processing continues. Plugins do not need to catch their own exceptions to protect the queue consumer.
 
 For `firstresult=True` hooks (`resolve_compaction`, `resolve_conversation`, `resolve_llm_error`), pluggy propagates the first handler's exception immediately — the chain stops and no further handlers run. The call sites in `Agent` handle these as follows:
 

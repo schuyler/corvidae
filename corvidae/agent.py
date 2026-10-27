@@ -63,6 +63,12 @@ from corvidae.hooks import (
     resolve_reject_wins,
     resolve_single_result,
 )
+from corvidae.outbound import (
+    OutboundMessage,
+    OutboundProgress,
+    OutboundThinking,
+    OutboundToolStatus,
+)
 from corvidae.queue import SerialQueue
 from corvidae.task import Task
 from corvidae.tool import dispatch_tool_call
@@ -408,7 +414,7 @@ class Agent(CorvidaePlugin):
         """Call run_agent_turn and handle LLM errors.
 
         Returns the AgentTurnResult on success, or None on error (error message
-        already sent to the channel via send_message hook).
+        already sent to the channel via the send hook).
         """
         try:
             return await run_agent_turn(self._client, messages, tool_schemas, extra_body=llm_overrides)
@@ -429,13 +435,13 @@ class Agent(CorvidaePlugin):
                 # Build a complete message with the human-readable failure class.
                 error_msg = _llm_error_message(exc)
             try:
-                await self.pm.ahook.send_message(
+                await self.pm.ahook.send(
                     channel=channel,
-                    text=error_msg,
+                    event=OutboundMessage(text=error_msg),
                 )
             except Exception:
                 logger.warning(
-                    "send_message hook failed on error path",
+                    "send hook failed on error path",
                     exc_info=True,
                     extra={"channel": channel.id},
                 )
@@ -497,9 +503,11 @@ class Agent(CorvidaePlugin):
             # Show intermediate text (e.g. "Let me look that up...") before dispatching tools
             if result.text:
                 try:
-                    await self.pm.ahook.send_progress(channel=channel, text=result.text)
+                    await self.pm.ahook.send(
+                        channel=channel, event=OutboundProgress(text=result.text)
+                    )
                 except Exception:
-                    logger.warning("send_progress hook failed", exc_info=True, extra={"channel": channel.id})
+                    logger.warning("send hook failed for progress", exc_info=True, extra={"channel": channel.id})
             await self._dispatch_tool_calls(result.tool_calls, channel)
             # Do NOT send text response; return and wait for tool results
             return
@@ -546,14 +554,13 @@ class Agent(CorvidaePlugin):
                 extra={"channel": channel.id},
             )
         try:
-            await self.pm.ahook.send_message(
+            await self.pm.ahook.send(
                 channel=channel,
-                text=display_response,
-                latency_ms=result.latency_ms,
+                event=OutboundMessage(text=display_response, latency_ms=result.latency_ms),
             )
         except Exception:
             logger.error(
-                "send_message hook failed, response not delivered",
+                "send hook failed, response not delivered",
                 exc_info=True,
                 extra={"channel": channel.id},
             )
@@ -787,13 +794,15 @@ class Agent(CorvidaePlugin):
         except Exception:
             logger.warning("persist_message hook failed", exc_info=True)
 
-        # 8b. Fire send_thinking if the LLM produced reasoning_content
+        # 8b. Send an OutboundThinking event if the LLM produced reasoning_content
         reasoning_text = result.message.get("reasoning_content")
         if reasoning_text:
             try:
-                await self.pm.ahook.send_thinking(channel=channel, text=reasoning_text)
+                await self.pm.ahook.send(
+                    channel=channel, event=OutboundThinking(text=reasoning_text)
+                )
             except Exception:
-                logger.warning("send_thinking hook failed", exc_info=True, extra={"channel": channel.id})
+                logger.warning("send hook failed for thinking", exc_info=True, extra={"channel": channel.id})
 
         # 9. Let plugins post-process the in-memory assistant message (e.g., strip reasoning_content)
         try:
@@ -1006,14 +1015,17 @@ class Agent(CorvidaePlugin):
 
             # Notify transports that a tool call has been dispatched
             try:
-                await self.pm.ahook.send_tool_status(
+                await self.pm.ahook.send(
                     channel=channel,
-                    tool_name=fn_name,
-                    status="dispatched",
-                    args_summary=call["function"].get("arguments", "")[:200],
+                    event=OutboundToolStatus(
+                        tool_name=fn_name,
+                        status="dispatched",
+                        args_summary=call["function"].get("arguments", "")[:200],
+                        tool_call_id=call_id,
+                    ),
                 )
             except Exception:
-                logger.warning("send_tool_status hook failed", exc_info=True, extra={"channel": channel.id})
+                logger.warning("send hook failed for tool status", exc_info=True, extra={"channel": channel.id})
 
             task = Task(
                 work=make_work,

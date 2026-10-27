@@ -9,6 +9,9 @@ Exports:
     hookimpl        — decorator for plugin implementations
     AgentSpec       — hook specifications for all lifecycle, messaging,
                       and extension-point hooks
+    CorvidaePlugin  — optional plugin base class (stores pm and config)
+    TransportPlugin — transport base class: the outbound ``send`` filter
+                      and dispatch to send_* methods
     create_plugin_manager()     — create and configure the PluginManager
     resolve_reject_wins()       — resolve broadcast gate-hook result lists
     get_dependency()            — typed plugin lookup
@@ -18,9 +21,17 @@ from __future__ import annotations
 
 import logging
 import warnings
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, ClassVar, TypeVar
 
 import apluggy as pluggy
+
+from corvidae.outbound import (
+    Outbound,
+    OutboundMessage,
+    OutboundProgress,
+    OutboundThinking,
+    OutboundToolStatus,
+)
 
 if TYPE_CHECKING:
     from corvidae.channel import Channel
@@ -34,6 +45,7 @@ hookimpl = pluggy.HookimplMarker("corvidae")
 
 _pm_logger = logging.getLogger("corvidae.plugin_manager")
 _resolve_logger = logging.getLogger("corvidae.hooks")
+_transport_logger = logging.getLogger("corvidae.hooks")
 
 
 def resolve_reject_wins(results: list) -> bool | None:
@@ -302,6 +314,71 @@ class CorvidaePlugin:
         self.config = config
 
 
+class TransportPlugin(CorvidaePlugin):
+    """Base class for transports: the one outbound broadcast filter.
+
+    The ``send`` hook reaches every transport. This class implements it
+    once: it drops events for channels the transport does not own and
+    dispatches the rest by type to ``send_message``, ``send_thinking``,
+    ``send_tool_status`` and ``send_progress``. Those are plain methods,
+    not hookimpls, and default to no-ops, so a transport overrides only
+    what it can display.
+
+    Class attributes:
+        transport: The transport name, the ``transport`` half of the
+            channel ids it owns (``"irc"`` owns ``irc:#lex``).
+        depends_on: Every transport resolves channels through the
+            registry.
+    """
+
+    transport: ClassVar[str]
+    depends_on: frozenset[str] = frozenset({"registry"})
+
+    def owns(self, channel: Channel) -> bool:
+        """The broadcast filter: True if this transport delivers to ``channel``.
+
+        Override to narrow it (WebPlugin also requires that it is
+        enabled); never to widen it past ``transport``.
+        """
+        return channel.matches_transport(self.transport)
+
+    @hookimpl
+    async def send(self, channel: Channel, event: Outbound) -> None:
+        """Filter, then dispatch the event to the matching send_* method."""
+        # The one broadcast filter. Nothing below runs for a channel
+        # another transport owns.
+        if not self.owns(channel):
+            return
+        # Dispatch by event type; an unknown type is a programming error
+        # in the sender, so log it rather than raise into the agent loop.
+        match event:
+            case OutboundMessage():
+                await self.send_message(channel, event)
+            case OutboundThinking():
+                await self.send_thinking(channel, event)
+            case OutboundToolStatus():
+                await self.send_tool_status(channel, event)
+            case OutboundProgress():
+                await self.send_progress(channel, event)
+            case _:
+                _transport_logger.warning(
+                    "%s: unknown outbound event %r",
+                    self.transport, type(event).__name__,
+                )
+
+    async def send_message(self, channel: Channel, event: OutboundMessage) -> None:
+        """Deliver the agent's reply. Default: no-op."""
+
+    async def send_thinking(self, channel: Channel, event: OutboundThinking) -> None:
+        """Show reasoning content. Default: no-op."""
+
+    async def send_tool_status(self, channel: Channel, event: OutboundToolStatus) -> None:
+        """Show a tool call's lifecycle. Default: no-op."""
+
+    async def send_progress(self, channel: Channel, event: OutboundProgress) -> None:
+        """Show intermediate assistant text. Default: no-op."""
+
+
 class AgentSpec:
     """Hook specifications for the agent daemon.
 
@@ -365,75 +442,26 @@ class AgentSpec:
         """
 
     @hookspec
-    async def send_message(self, channel: Channel, text: str, latency_ms: float | None = None) -> None:
-        """Called to deliver an outbound message to a channel.
+    async def send(self, channel: Channel, event: "Outbound") -> None:
+        """Deliver an outbound event to the transport that owns ``channel``.
 
         Grammar class: bare imperative (broadcast; the caller decides what to do with the result list).
 
-        Pluggy broadcasts this hook to all registered transport plugins.
-        Each transport must filter for its own channels by calling
-        ``channel.matches_transport("<transport_name>")`` and returning
-        early if the channel does not belong to it.
-
-        ``latency_ms`` is optional — transports that do not display
-        timing information (e.g. IRC) may omit it from their hookimpl
-        signature entirely. Pluggy tolerates hookimpls that omit
-        optional parameters.
+        Every transport receives every event. ``TransportPlugin.send``
+        drops events for channels the transport does not own (its
+        ``owns()`` check) and dispatches the rest by type to the
+        transport's ``send_message``, ``send_thinking``,
+        ``send_tool_status`` or ``send_progress`` method, which default to
+        no-ops. Transports subclass ``TransportPlugin`` and never implement
+        this hook directly, so none of them can forget the filter.
 
         Args:
-            channel: The Channel object identifying the target.
-            text: The message content to send.
-            latency_ms: Optional agent loop latency in milliseconds.
-                        Transport plugins may use this to display timing to the user.
+            channel: The Channel the event is for.
+            event: An ``OutboundMessage``, ``OutboundThinking``,
+                ``OutboundToolStatus`` or ``OutboundProgress``
+                (corvidae/outbound.py).
         """
 
-
-    @hookspec
-    async def send_thinking(self, channel: Channel, text: str) -> None:
-        """Called to display reasoning/thinking content from the LLM.
-
-        Grammar class: bare imperative (broadcast; the caller decides what to do with the result list).
-
-        Transport plugins may render this differently from the main response
-        (e.g., in a dim or distinct color). Only fires when the LLM returns
-        reasoning_content in its response.
-
-        Args:
-            channel: The Channel the thinking is associated with.
-            text: The reasoning/thinking content from the LLM.
-        """
-
-    @hookspec
-    async def send_tool_status(self, channel: Channel, tool_name: str, status: str, args_summary: str | None = None, result_summary: str | None = None) -> None:
-        """Called to display tool call lifecycle events.
-
-        Grammar class: bare imperative (broadcast; the caller decides what to do with the result list).
-
-        Transport plugins may render tool activity as inline status
-        indicators. Fires when a tool is dispatched and when it completes.
-
-        Args:
-            channel: The Channel the tool call is associated with.
-            tool_name: Name of the tool being called.
-            status: One of "dispatched" or "completed".
-            args_summary: Short summary of arguments (for "dispatched"), or None.
-            result_summary: Short summary of result (for "completed"), or None.
-        """
-
-    @hookspec
-    async def send_progress(self, channel: Channel, text: str) -> None:
-        """Called to display intermediate assistant text before tool dispatch.
-
-        Grammar class: bare imperative (broadcast; the caller decides what to do with the result list).
-
-        Fires when the LLM produces text content alongside tool calls.
-        Transport plugins may render this as a status indicator (e.g., grey text)
-        since it is not the final response.
-
-        Args:
-            channel: The Channel the text is associated with.
-            text: Intermediate text content from the LLM response.
-        """
     @hookspec
     def register_tools(self, tool_registry: list) -> None:
         """Called during startup so plugins can add tools to the agent loop.

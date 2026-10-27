@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from corvidae.channel import Channel
 
 from corvidae.hooks import CorvidaePlugin, hookimpl
+from corvidae.outbound import OutboundToolStatus
 from corvidae.tool import Tool
 
 logger = logging.getLogger(__name__)
@@ -60,7 +61,7 @@ class Task:
             trace_id and merged into the completion notification's
             meta by TaskPlugin.
         deliver: When False, the task is silent: completion fires no
-            send_tool_status, no on_notify, and therefore no main-model
+            tool-status event, no on_notify, and therefore no main-model
             turn. Failures are still logged by the worker.
     """
 
@@ -288,21 +289,24 @@ class TaskPlugin(CorvidaePlugin):
                 "deliver": task.deliver,
             },
         )
-        # Silent tasks (task.deliver=False): log and stop — no send_tool_status,
+        # Silent tasks (task.deliver=False): log and stop — no tool-status event,
         # no on_notify, no main-model turn.
         if not task.deliver:
             return
         # Notify transports that a tool call has completed
         if task.tool_call_id:
             try:
-                await self.pm.ahook.send_tool_status(
+                await self.pm.ahook.send(
                     channel=task.channel,
-                    tool_name=task.description.split(":", 1)[-1] if task.description and task.description.startswith("tool:") else "unknown",
-                    status="completed",
-                    result_summary=result[:200] if result else None,
+                    event=OutboundToolStatus(
+                        tool_name=task.description.split(":", 1)[-1] if task.description and task.description.startswith("tool:") else "unknown",
+                        status="completed",
+                        result_summary=result[:200] if result else None,
+                        tool_call_id=task.tool_call_id,
+                    ),
                 )
             except Exception:
-                logger.warning("send_tool_status hook failed", exc_info=True, extra={"channel": task.channel.id})
+                logger.warning("send hook failed for tool status", exc_info=True, extra={"channel": task.channel.id})
 
         try:
             await self.pm.ahook.on_notify(

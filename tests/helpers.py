@@ -5,11 +5,30 @@ import asyncio
 import aiosqlite
 
 
+def sent(pm, kind: type) -> list[tuple[object, object]]:
+    """Return (channel, event) for every ``send`` of an event of ``kind``.
+
+    Reads the AsyncMock that ``build_plugin_and_channel`` installs as
+    ``pm.ahook.send``, in call order. ``kind`` is an outbound event class
+    from corvidae.outbound, e.g. ``sent(pm, OutboundMessage)``.
+    """
+    return [
+        (call.kwargs["channel"], call.kwargs["event"])
+        for call in pm.ahook.send.await_args_list
+        if isinstance(call.kwargs["event"], kind)
+    ]
+
+
+def sent_texts(pm, kind: type) -> list[str]:
+    """Return the ``text`` of every sent event of ``kind``, in call order."""
+    return [event.text for _channel, event in sent(pm, kind)]
+
+
 async def build_plugin_and_channel(
     agent_defaults=None,
     channel_config=None,
     *,
-    mock_send_message: bool = True,
+    mock_send: bool = True,
     mock_on_agent_response: bool = True,
 ):
     """Assemble plugin graph with in-memory DB.
@@ -20,7 +39,8 @@ async def build_plugin_and_channel(
     Args:
         agent_defaults: Override AGENT_DEFAULTS for channel registry.
         channel_config: Override default ChannelConfig.
-        mock_send_message: If True, replace send_message hook with AsyncMock.
+        mock_send: If True, replace the outbound ``send`` hook with an
+            AsyncMock; read what was sent with ``sent()``.
         mock_on_agent_response: If True, replace on_agent_response hook with AsyncMock.
     """
     from unittest.mock import AsyncMock
@@ -49,8 +69,8 @@ async def build_plugin_and_channel(
     registry.agent_defaults = agent_defaults
     pm.register(registry, name="registry")
 
-    if mock_send_message:
-        pm.ahook.send_message = AsyncMock()
+    if mock_send:
+        pm.ahook.send = AsyncMock()
     if mock_on_agent_response:
         pm.ahook.on_agent_response = AsyncMock()
 
