@@ -10,7 +10,14 @@ those divergences rest on. It also folds in the adjustments implied by the
 `agent-directions.md` follow-on note — the design seams in Phases 0–2, the
 surprise specification (§3.2), the semantic-fact generalization (§3.6), and
 the Phase 6 toggle set (§7) — so that this document remains the single plan
-of record; that note stands as the rationale for those changes. The document
+of record; that note stands as the rationale for those changes. A second
+follow-on note, `personality-and-autonomy.md`, contributes the
+personality/autonomy adjustments — the endogenous heartbeat-slot inputs
+(§3.4), the goal-retirement invariant (§3.5), the `self` subject type
+(§3.6), self-poisoning in the trust model (§3.9), the interoception line
+and self-model compile (§3.11), divergence 16 (§5), the longitudinal
+evaluation tier (§6), and the Phase 6 / 6+ rows (§7) — and stands as their
+rationale record. The document
 has also been through iterated code-grounded adversarial review — each round
 auditing the previous round's edits, and every round so far finding real
 defects *inside* the prior round's corrections, which is why the cadence
@@ -789,7 +796,15 @@ wake the daemon at 9am Friday. This plugin adds real scheduling:
   cross-episode regularities as semantic facts (§3.6) and optionally pre-load
   an open goal's next step. Per `agent-directions.md`, this is a heartbeat
   *template* plus result-caching, not new architecture — the base model does
-  the simulating; the beat asks and caches.
+  the simulating; the beat asks and caches. Two further slot inputs are
+  hypothesis-tier (Phase 6+, built only on the named duck-test failure in
+  `personality-and-autonomy.md` §5.5): **curiosity** — unresolved
+  high-surprise episodes from the outcome log surface as candidate goals,
+  giving the §3.2 surprise signal a third consumer — and **care** — dormant
+  commitments and long-quiet valued relationships (§3.6) surface as
+  candidate check-ins. Both are candidate *reasons*, not scheduled deeds;
+  the act-if-warranted discipline and the §3.3 outbound gate apply
+  unchanged, so the busywork objection (§5 divergence 8) does not reopen.
 - Bootstrapped exactly once with a durable deleted-flag in SQLite so restart
   doesn't resurrect a deleted heartbeat (the spec is explicit and right about
   this: sleep is a durable state).
@@ -812,7 +827,15 @@ not cover: goals are mutable *state*, not archival memory — a retired goal's
 earlier CONTEXT entry persists in the window until compaction, alongside the
 updated list. Goal entries therefore carry as-of framing, and the standing
 prompt rule is that a later goals entry supersedes every earlier one — cheap
-to state given the funnel's per-entry source labels (§2.2). **Effort: S–M.**
+to state given the funnel's per-entry source labels (§2.2). One invariant
+from `personality-and-autonomy.md` §3a: **goal retirement is a consolidation
+event.** Retiring a goal writes a memory record ("I concluded X, because…"),
+and the heartbeat's goal review reads retired-goal records alongside the
+open list. An agent with a clock but no memory of its own conclusions
+re-adopts concluded purposes from the same evidence that produced them —
+pursuit without conclusion, the degenerate loop of autonomy-without-drift —
+and a scheduler-driven corvidae is one missing record away from it.
+**Effort: S–M.**
 
 ### 3.6 PeoplePlugin — persons, observations, contact directory (Persyn §4.4–4.5)
 
@@ -820,13 +843,23 @@ Today `sender` is a bare string. Add: `person` records keyed by
 `(transport, scope, sender)` — precisely the spec's "service + channel +
 speaker identifier" lookup key — auto-created on first contact; `observation`
 records generalized to **subject-typed semantic facts** —
-`(subject_type ∈ {person, channel, topic}, subject_id, type, value,
+`(subject_type ∈ {person, channel, topic, self}, subject_id, type, value,
 timestamp, source episode ids)`. The generalization is deliberate: an
 observation *is* a semantic fact distilled from episodes and a dossier is its
 consolidated schema (`agent-directions.md` #2), so building the person-only
-table and migrating later means paying twice for one schema. Ship with
-**person-subject extraction only** (exactly the spec behavior); channel/topic
-extraction stays unbuilt until the §6 suite demands it (Phase 6 toggle).
+table and migrating later means paying twice for one schema. The `self`
+subject (`personality-and-autonomy.md` §5.2) holds the agent's own distilled
+runtime regularities ("I tend to over-hedge numeric claims") — the purest
+application of the frozen-weights criterion, since the agent's idiosyncratic
+stream is exactly what the weights cannot contain — under two provisos:
+epistemic framing is mandatory (the author is the agent, and a prior
+instance's note arrives with internal-voice authority — §3.9), and
+self-distilled facts never satisfy the provenance gate as corroboration (a
+self-note is not evidence for itself). `self` facts are the input corpus for
+the §3.11 self-model compile. Ship with
+**person-subject extraction only** (exactly the spec behavior); channel,
+topic, and self extraction stay unbuilt until the §6 suite demands them
+(Phase 6 toggles).
 Reconciliation of a new fact against existing ones (supersede/contradict) via
 a cheap-model judgment, written once against the general schema; a `dossier`
 synthesis path; operator curation (fold/detach) as CLI commands via the
@@ -921,6 +954,21 @@ Additions, all in this plugin cluster:
   promotes them. Semantic facts (§3.6) inherit the *minimum* trust of the
   episodes they were distilled from — distillation must not launder trust —
   and low-trust facts quarantine exactly like low-trust memories.
+- **Self-poisoning** (`personality-and-autonomy.md` §3b). The most intimate
+  write-side channel is the agent's own consolidation path: a prior
+  instance's summary re-enters the window with the authority of an internal
+  voice, and the future instance cannot interrogate the writer. `self`
+  facts (§3.6) need no gate of their own: they are memory-tier data that
+  re-enter only through the funnel's framing, and the trust inheritance
+  above plus the provenance-gate exclusion already answer a poisoned one.
+  The self-model compile (§3.11) is different in kind — the one
+  agent-authored write into a prompt position the funnel's framing does
+  not reach — so its input is trust-floored there. Two §3.1 mechanisms are
+  hereby named as anti-self-manipulation machinery, not merely style:
+  epistemic framing preserved at consolidation forces every note to confess
+  what kind of note it is, and the append-only `message_log` + `recall_raw`
+  keeps the negatives — however far a consolidated memory drifts, the
+  verbatim past stays reachable for audit.
 - **Read-side sensitivity** (spec §5): a sensitivity column + retrieval
   filter in §3.1 — a record surfaces only if current-channel participants
   satisfy its access designation. Participant-aware policy needs §3.6.
@@ -944,6 +992,68 @@ corvidae agents already meet on IRC, so this is config plus one gate plugin.
 The spec's "randomized delays to simulate natural turn-taking" is cosmetic —
 budgets and the right to silence are the real safety mechanisms; timing
 theatrics are persona. **Effort: S.**
+
+### 3.11 Interoception and the self-model (not in the spec)
+
+Two mechanisms from `personality-and-autonomy.md` (§5.1, §5.3), both closing
+the same loop from opposite ends: the system computes rich state about
+itself that nothing lets the agent perceive, and the agent accumulates a
+history that nothing lets feed back into its standing character. Both are
+plugins outside the kernel, like the rest of this cluster; the kernel's
+only addition is the system-prompt seam the compile needs (below).
+
+- **The interoception line** (Phase 6 toggle, riding on Phase 2's signals).
+  The signals worth reporting are already computed and consumed
+  *subcortically*, by gates, thresholds, and the outcome log, and the model
+  sees little of them. Admitted memory lines carry their own relevance
+  band, but the aggregate retrieval profile (§3.1) does not reach the
+  model — top score, hit count, or that nothing matched at all. Nor do the
+  appraisal vector (§3.2: stage 1 for the current exchange, stage 2 for the
+  previous one), the entropy summary of the previous reply (mean and max
+  per response, present only when `agent.request_logprobs` is on), or
+  window fill. One compact funnel-admitted CONTEXT line per turn
+  ("retrieval: nothing matched / window at 72% / last reply: high
+  entropy") lets the agent perceive and narrate its own state instead of
+  confabulating it. Exposure of existing state, not new machinery; a few
+  tokens per turn; never load-bearing (absent signals degrade to an absent
+  line, per the tier discipline in §3.2). **Eval:** do self-reports about
+  own state become accurate, and does behavioral consistency improve at
+  fixed token budget? Accuracy is checked against the outcome log, which
+  records the retrieval profile, both appraisal stages, and entropy, but
+  not window fill; the toggle adds that column to `exchange_log`.
+  **Effort: S.**
+- **The self-model compile** (later-phase; blocked on §3.6 `self` facts
+  accumulating). A compact block compiled from `self`-subject facts into the
+  **stable prompt region**, refreshed rarely — the KV-cache argument is
+  §3.8's skills-index argument verbatim: personality changes slowly, so a
+  refresh is a legitimate, infrequent cache break. The stable region is the
+  one prompt position outside the funnel's data framing, so the compile
+  reads only `self` facts whose inherited trust (§3.9) meets a configured
+  floor, and each refresh notifies the operator with the diff of the block
+  — review after the fact, not approval before it; the operator is already
+  reading those diffs for the §6 longitudinal tier. When the compile is
+  built, `docs/threat-model.md` gains an entry for the path from untrusted
+  text through consolidation into the stable region. The compile needs a
+  seam the kernel lacks: today the system prompt is resolved from config
+  once, when a channel's conversation is first created, and no plugin can
+  contribute to it. The seam is one `transform_` hook over the resolved
+  system prompt, shared with the §3.8 skills index (the second implementer
+  the hook-admission rule asks for), re-run only at a compaction boundary
+  or when a conversation starts. Compaction already rebuilds the KV cache
+  for everything after the system prompt, so a refresh there costs only
+  the system prompt's own tokens. A refresh that can't wait is appended to
+  the current window as a CONTEXT entry instead, and moved into the system
+  prompt at the next boundary (PRD §3.3.8). This supplies the feedback edge that "memory
+  is the personality" (§5 divergence 6) promises but the current design only
+  half-delivers: memory writes the self-model; the prompt reads it. Today's
+  persona layer is a static one-line `SOUL.md` and `set_settings` rightly
+  excludes the system prompt — character is frozen at config time, with no
+  legitimate path for accumulated drift to feed back. **Eval:** the
+  self-model's diffs over months read as coherent evolution, not thrash or
+  flattening toward the generic (§6, longitudinal tier). **Effort: S**
+  (compile, refresh policy, trust floor, diff notice; trust tags already
+  exist from §3.9) plus the kernel seam, which the skills index needs
+  anyway.
 
 ---
 
@@ -1152,6 +1262,16 @@ harness checks the prediction per deployed model. Specific divergences:
 15. **Time-sortable IDs adopted for new records only.** `message_log`'s
     autoincrement ids are already monotonic and timestamp-paired; no
     retrofit.
+16. **The continuity bar is extended to a personality bar, judged
+    longitudinally.** The spec's §9 criteria test continuity ("the same
+    someone… who remembers"); whether a *someone* with a personality —
+    consistency, distinctiveness, coherent drift, generalization — emerges
+    from that ground is duck-typed and judged over weeks by the operator,
+    not by fixtures (§6 third tier; rationale in
+    `personality-and-autonomy.md`). The machinery that claim might seem to
+    demand (commitment ledgers, drive modules) stays hypothesis-tier,
+    pulled in only by named longitudinal failures — the §6 stance applied
+    to the project's own ambitions.
 
 ---
 
@@ -1197,8 +1317,28 @@ them). Corvidae's TDD culture (AGENTS.md: red/green) forces the fix:
   surprise-gated encoding vs. rubric-only importance; the semantic tier vs.
   episodic-only *and* vs. operator-authored facts; salience-ranked admission
   vs. per-source budgets under tail contention; encode/retrieve gate on vs.
-  off (tokens saved against recall lost). Authored as fixture benchmarks
+  off (tokens saved against recall lost); interoception line on vs. off
+  (self-report accuracy against the outcome log, consistency at fixed
+  budget — §3.11). Authored as fixture benchmarks
   *before* their toggles are built — red tests first, per AGENTS.md.
+- **The longitudinal duck test** (`personality-and-autonomy.md` §6) — a
+  third tier below CI and the scheduled LLM-judged benchmarks, because
+  personality verisimilitude is a property no fixture can measure: it is
+  longitudinal (weeks, not turns), relational (judged at call sites by
+  interlocutors — the judge is outside the system by construction), and its
+  primary failure mode, **genericness** (regression to what any deployment
+  on the same weights would present), is invisible to fixtures since every
+  fixture run starts from the same weights. The tier is: operator-as-judge
+  over weeks — consistency of voice, distinctiveness, legible drift,
+  generalization under novel probes — plus
+  one cheap instrument, a periodic diff of the self-describing store
+  (`self` facts §3.6; the compiled self-model §3.11 once built) with three
+  readable outcomes: coherent drift, thrash, or flattening. The diff does
+  not judge; it makes drift inspectable so the operator's judgment has an
+  object. This is the one place "failures pull machinery in" runs through a
+  human — the failure is noticed, not asserted — and the hypothesis-tier
+  triggers (§3.4 endogenous goal candidates; commitment records,
+  `personality-and-autonomy.md` §5.4) are defined against it.
 
 ---
 
@@ -1216,7 +1356,8 @@ AGENTS.md):
 | 3 | SchedulerPlugin (USER-like enqueue semantics) + heartbeat (with distillation slot) + goals (§3.4, §3.5) | unprompted messages; durable heartbeat deletion → dormancy | M |
 | 4 | PeoplePlugin with subject-typed semantic facts (person extraction only) + operator fact authoring + directory curation commands; participant-match retrieval upgrade (§3.6) | knows who it's talking to; agent-to-agent with budgets (with phase-2 gates) | M |
 | 5 | Trust/quarantine (incl. distilled-fact trust inheritance), sensitivity, pattern guardrails, skills; appraisal tier-2 readout head (§3.8, §3.9) | safe to leave running | M (aggregate) |
-| 6 | A/B toggles behind the §6 harness: surprise term in the importance prior; semantic-tier extraction/promotion beyond persons; salience-arbitration policy in the funnel; encode/retrieve gate | — (refinements; each ships only if it beats its baseline) | S per toggle |
+| 6 | A/B toggles behind the §6 harness: surprise term in the importance prior; semantic-tier extraction/promotion beyond persons (incl. `self`, §3.6); salience-arbitration policy in the funnel; encode/retrieve gate; interoception line (§3.11) | — (refinements; each ships only if it beats its baseline) | S per toggle |
+| 6+ | Self-model compile (§3.11), once `self` facts have accumulated — gated on data, not on a failure. Hypothesis-tier items, built only on named duck-test failures (§6 third tier): commitment records; endogenous goal candidates in the heartbeat slot (§3.4) — triggers specified in `personality-and-autonomy.md` §5.4–5.5 | — (the personality bar is watched, not scheduled) | S–M per item |
 
 Phase 6 has no fixed contents: it is where the toggles the earlier seams
 enable are measured against their simpler baselines — with the expectation,
@@ -1227,4 +1368,11 @@ graduate into defaults.
 
 The spec's week-long continuity bar — "the same someone you talked to
 yesterday, who remembers, who learned, and who occasionally tells you you're
-wrong" — is substantially met at the end of Phase 3.
+wrong" — is substantially met at the end of Phase 3. The personality bar —
+whether a *someone* shows up, in the duck-typed sense of
+`personality-and-autonomy.md` — is not met by any phase; it is watched for,
+longitudinally, per §6, on the expectation that a capable model given
+retention, a clock, and permission implements most of the interface out of
+exactly that ground. The most informative experiment the phasing enables is
+deliberately minimal: build through Phase 3, enable the two cheap toggles
+(`self` facts, interoception line), and watch.
