@@ -29,10 +29,10 @@ from corvidae.trace import mint_trace_id
 
 logger = logging.getLogger(__name__)
 
-# Sidecar index for session/list (cwd + activity); lives in sessions.db.
 # How often the stdio loop re-checks whether Agent has finished on_start.
 AGENT_READY_POLL_SECONDS = 0.05
 
+# Sidecar index for session/list (cwd + activity); lives in sessions.db.
 _ACP_SESSION_INDEX_DDL = """
 CREATE TABLE IF NOT EXISTS acp_session_index (
     session_id TEXT PRIMARY KEY,
