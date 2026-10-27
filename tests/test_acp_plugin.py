@@ -471,8 +471,10 @@ class TestAcpLoopLiveness:
         import os
 
         plugin, _registry, agent = await _init_acp_plugin()
+        entered = asyncio.Event()
 
         async def _wait(_agent):
+            entered.set()
             await asyncio.Event().wait()
 
         monkeypatch.setattr("acp.run_agent", _wait)
@@ -480,7 +482,36 @@ class TestAcpLoopLiveness:
         monkeypatch.setattr(os, "kill", lambda pid, sig: kills.append((pid, sig)))
 
         plugin._task = asyncio.create_task(plugin._run_acp(agent))
-        await asyncio.sleep(0)
+        # Prove the loop is inside run_agent before cancelling it: cancelling a
+        # task that never started would pass even without the _stopping guard.
+        await asyncio.wait_for(entered.wait(), timeout=2)
+
         await plugin.on_stop()
 
         assert kills == []
+
+    async def test_cancellation_outside_on_stop_still_requests_shutdown(
+        self, monkeypatch
+    ):
+        """The counterpart: an unexpected cancellation must still stop the process."""
+        import os
+
+        plugin, _registry, agent = await _init_acp_plugin()
+        entered = asyncio.Event()
+
+        async def _wait(_agent):
+            entered.set()
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr("acp.run_agent", _wait)
+        kills: list[tuple[int, int]] = []
+        monkeypatch.setattr(os, "kill", lambda pid, sig: kills.append((pid, sig)))
+
+        task = asyncio.create_task(plugin._run_acp(agent))
+        await asyncio.wait_for(entered.wait(), timeout=2)
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert kills
