@@ -605,8 +605,11 @@ per-channel `SerialQueue`. The queue's consumer calls
    On exception, broadcasts `on_llm_error` (`firstresult=True`), sends
    the error message to the channel, and returns `None` to abort
    processing. `LLMPlugin` implements it `trylast`: for an unloaded
-   backend model it returns a message naming the model, and it defers
-   (`None`) on every other error, so the generic message still applies.
+   backend model it returns a message naming the model; for any non-2xx
+   `LLMHTTPError` it names the status, an actionable hint (API key,
+   quota, endpoint/model) and a short provider body; for connection and
+   timeout failures it points at `llm.main.base_url`. It defers (`None`)
+   on every other error, so the generic message still applies.
 9. Appends the assistant message to conversation; fires `on_conversation_event`
 10. Calls `after_persist_assistant` hook (broadcast); `ThinkingPlugin`
     uses this to strip `reasoning_content` from the in-memory copy

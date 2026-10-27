@@ -29,11 +29,30 @@ import asyncio
 import logging
 import math
 
+import aiohttp
+
 from corvidae.attribution import get_attribution
 from corvidae.hooks import CorvidaePlugin, hookimpl
-from corvidae.llm import LLMClient, is_model_not_loaded
+from corvidae.llm import LLMClient, LLMHTTPError, is_model_not_loaded
 
 logger = logging.getLogger(__name__)
+
+# Actionable hints for LLM HTTP failures. Unknown statuses still get the code.
+_HTTP_STATUS_HINTS = {
+    400: "the request was rejected",
+    401: "the API key was rejected — check llm.main.api_key",
+    403: "the API key is not allowed to use this model — check the provider account",
+    404: "the endpoint or model was not found — check llm.main.base_url and llm.main.model",
+    429: "the provider is rate-limiting or the account is out of quota",
+}
+# Provider error bodies are untrusted and can be long; show one short line.
+_ERROR_BODY_PREVIEW_CHARS = 200
+
+
+def _one_line(text: str, limit: int = _ERROR_BODY_PREVIEW_CHARS) -> str:
+    """Collapse whitespace and truncate a provider error body for display."""
+    collapsed = " ".join(text.split())
+    return collapsed[:limit] + ("..." if len(collapsed) > limit else "")
 
 
 class _HookObserver:
@@ -230,20 +249,45 @@ class LLMPlugin(CorvidaePlugin):
 
     @hookimpl(trylast=True)
     async def on_llm_error(self, channel, error: Exception) -> str | None:
-        """Explain an unloaded backend model instead of the generic error.
+        """Explain LLM failures instead of falling back to the generic text.
 
-        A llama-server router with --no-models-autoload rejects requests for
-        an unloaded model (GitHub issue #55); LLMClient has already waited
-        model_not_loaded_wait seconds by the time this runs. trylast so any
-        other plugin's message takes precedence; other errors defer (None).
+        Covers an unloaded backend model (a llama-server router with
+        --no-models-autoload rejects requests for an unloaded model, GitHub
+        issue #55), HTTP rejections that name the status and any actionable
+        cause (bad key, quota, wrong endpoint), and connection/timeout
+        failures that point at the configured endpoint.
+
+        trylast so another plugin's message takes precedence, and defers with
+        None for errors this plugin cannot explain.
         """
-        if not is_model_not_loaded(error):
-            return None
-        return (
-            f"The model `{error.model}` isn't loaded on the LLM server "
-            "(another model may be swapped in). Load it and send your "
-            "message again."
-        )
+        # Unloaded model first: its 400 body also matches the HTTP branch.
+        if is_model_not_loaded(error):
+            return (
+                f"The model `{error.model}` isn't loaded on the LLM server "
+                "(another model may be swapped in). Load it and send your "
+                "message again."
+            )
+        # Provider returned a non-2xx response: name the status and hint.
+        if isinstance(error, LLMHTTPError):
+            hint = _HTTP_STATUS_HINTS.get(
+                error.status, "the provider rejected the request"
+            )
+            message = f"LLM request failed with HTTP {error.status}: {hint}."
+            if error.body:
+                message += f" Provider said: {_one_line(error.body)}"
+            return message
+        # Never reached the provider: point at the endpoint configuration.
+        if isinstance(error, asyncio.TimeoutError):
+            return (
+                "The LLM request timed out. Check llm.main.timeout and the "
+                "endpoint's load; the full error is in the log."
+            )
+        if isinstance(error, aiohttp.ClientConnectionError):
+            return (
+                "Could not reach the LLM endpoint — check llm.main.base_url "
+                "and that the server is running. The full error is in the log."
+            )
+        return None
 
     def get_client(self, role: str = "main") -> LLMClient:
         """Return the client for the given role.
