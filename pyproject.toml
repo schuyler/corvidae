@@ -41,6 +41,7 @@ cli = "corvidae.channels.cli:CLIPlugin"
 irc = "corvidae.channels.irc:IRCPlugin"
 signal = "corvidae.channels.signal:SignalPlugin"
 discord = "corvidae.channels.discord:DiscordPlugin"
+web = "corvidae.channels.web:WebPlugin"
 task = "corvidae.task:TaskPlugin"
 subagent = "corvidae.tools.subagent:SubagentPlugin"
 mcp = "corvidae.mcp_client:McpClientPlugin"
@@ -65,6 +66,10 @@ config_watcher = "corvidae.config_watcher:ConfigWatcherPlugin"
 
 [tool.setuptools.packages.find]
 include = ["corvidae*"]
+
+# The web transport's browser UI ships inside the package.
+[tool.setuptools.package-data]
+"corvidae.channels" = ["web_static/*", "web_static/vendor/*"]
 
 [build-system]
 requires = ["setuptools>=75"]

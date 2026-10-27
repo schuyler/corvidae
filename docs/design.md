@@ -1948,6 +1948,184 @@ against fake clients. The first real connection is the real test.
 Out of scope: voice, slash commands, embeds, attachments in either
 direction, reactions, and agent-initiated (unprompted) sends.
 
+### Web (`channels/web.py`)
+
+`WebPlugin` serves a browser chat UI over `aiohttp.web`: a single page,
+one WebSocket per tab, JSON frames both ways. Configuration and remote
+access are in [configuration.md](configuration.md#web); what an attacker
+can do with the listener is in [threat-model.md](threat-model.md).
+
+With no `web:` block the plugin is inert: no listener, nothing logged above
+DEBUG. A malformed block raises in `on_init`, naming the field. A bind
+failure raises out of `on_start`.
+
+**Identity.** One channel per named conversation: `web:<slug>`, where the
+slug matches `[a-z0-9][a-z0-9_-]{0,63}`. Every message on a `web:*`
+channel originates here, with sender `web`. Frames carry the bare slug
+(`main`); internal state is keyed by channel id (`web:main`).
+
+**Auth.** The token comes from `web.token`, then `CORVIDAE_WEB_TOKEN`, then
+`secrets.token_urlsafe(32)`, which is logged once at WARNING as a login URL
+(pre-formatted into the message, so it's never in `args` or an `extra`
+field). Opening `/?token=…` returns a 200 page that refreshes to `/` and
+sets `corvidae_web` (`HttpOnly; SameSite=Strict; Path=/; Max-Age` 400
+days, plus `Secure` when the request's `Host` belongs to an `https://`
+allowed origin). A 200 rather than a redirect, because a redirect after a
+cross-site navigation wouldn't carry the Strict cookie. The cookie value is
+`HMAC-SHA256(token, "corvidae-web-session")`, so it survives restarts with
+the same token and dies when the token changes. Every route needs it.
+Comparisons are constant-time and treat non-ASCII input as unequal.
+
+Middlewares, outermost first:
+1. security headers on every response, errors included: a strict CSP
+   (`default-src 'self'`, scripts and styles from `'self'` only, `img-src
+   'self' data:`, `connect-src 'self'` plus an explicit `ws://`/`wss://`
+   source per allowed origin, IPv6 literals excepted since CSP can't
+   express them), `nosniff`, `no-referrer`, `no-store`. An unexpected
+   exception becomes a 500 logged without the URL (it may carry `?token=`);
+2. a `Host` check against values derived from the allowed origins (a
+   DNS-rebinding guard);
+3. auth, as above.
+
+The WebSocket also needs an `Origin` in the allowed set. Allowed origins
+are the bind origin (for a loopback bind, all of `127.0.0.1`, `localhost`
+and `[::1]` on the bound port) plus `web.allowed_origins`, all
+canonicalised the same way the incoming headers are. The `AppRunner` runs
+with `access_log=None`: aiohttp's access log would write `?token=` to disk.
+
+**Protocol.** Client → server: `list`, `subscribe {conversation}`,
+`send {conversation, text}`. Server → client: `conversations`,
+`history {conversation, items, working}`, `user {text, id}`, `message`,
+`thinking`, `progress`, `tool_status {tool, status, summary}`,
+`working {value}`, `rejected {text, id}`, `divider` (replay only), and
+`error {request, code, message}` with code `starting` (the agent hasn't
+started; the client retries) or `bad_request`. Each socket handles its
+frames one at a time, in order. Malformed input (invalid JSON, deep
+nesting, a non-object, a bad slug, non-string text, lone surrogates, an
+unknown type) gets `bad_request`, and the socket stays open; an exception
+out of `on_message` (a third-party gate raising) is logged with its
+traceback and answered the same way. Empty text is ignored.
+
+**Unsent messages.** A user message is shown from the moment it's sent,
+but its row reaches `message_log` only at dequeue. Between the two it's an
+`_Unsent` entry with a server-minted id. The send handler sets a
+`ContextVar` to its entry around `await on_message(...)`; apluggy runs
+hook impls in `gather` tasks, which copy the context, so the admitted and
+rejected impls fired inside that call see exactly that entry. Admission
+binds the entry to its correlation id, rejection removes it (and the
+`rejected` frame carries its id, so the right item is marked even when two
+tabs send the same text), `on_message_persisted` removes the bound entry,
+and the send handler's `finally` removes an entry that was neither
+admitted nor rejected. Entries are matched by identity, never by text.
+Tasks created inside that `await` (Agent's queue consumer, on a channel's
+first message) inherit the variable for life, so the hooks only trust it
+while its entry is still tracked.
+
+**Working indicator.** On at admission. After each `send_message`, off
+unless a reply is still owed: an admitted-but-unpersisted entry, a
+non-empty queue for the channel, or pending tool calls.
+
+**Replay.** `subscribe` sets the subscription, starts buffering live
+frames and snapshots the unsent entries, all before its first `await`;
+then it reads the newest 200 `message_log` rows (`ORDER BY timestamp
+DESC, id DESC`, reversed) and queues `history` (rows mapped to frames,
+then one `user` frame per snapshot entry), then the buffered frames. A
+summary row becomes a `divider` at its timestamp; `context` rows and
+`system` messages are skipped; assistant rows give `thinking` (from
+`reasoning_content`), then `progress` or `message` (text through
+`strip_thinking`), then a `dispatched` chip per tool call; tool rows give a
+`completed` chip, named via the call id, with task.py's `[Task <id>] `
+prefix removed. History favors duplicates over losses: a reply persisted
+just before the read and broadcast while buffering can show twice until
+the next reload. The 200-row window counts rows that render as nothing
+(`context`), so visible history can be shorter. Without the persistence
+plugin, history is empty (WARNING once, then DEBUG).
+
+Replay and live differ in these ways:
+- the LLM error text is sent live but never persisted, so it doesn't replay;
+- a vetoed message has no row, so on reload it's gone entirely;
+- an assistant message whose tool calls `max_turns` suppressed replays as
+  progress plus `dispatched` chips for calls that never ran;
+- with the `thinking` plugin disabled, live `message` text keeps `<think>`
+  blocks and replay strips them;
+- a `completed` chip is sent when the tool finishes, but its row is written
+  when the result is dequeued, so a reload in between shows the call
+  without its completion.
+
+The conversation list merges `message_log`'s `web:*` channels with the
+registry's live ones (the later `last_active` wins), drops names that fail
+the slug rule, and sorts newest first.
+
+**Fan-out and backpressure.** Every server frame goes through the client's
+queue (1024) and a writer task. Enqueueing never awaits. A client whose
+queue fills, or whose subscribe buffer passes 512 frames, is removed from
+fan-out and closed with 1008 in a tracked task.
+
+**Connection ownership and shutdown.** Each connection is owned by its
+handler task. `_handlers` holds every live handler, and only the handler
+removes itself; `_clients` is just the fan-out set, which the drop path
+and token rotation shrink. The handler's `finally` releases the
+connection: out of fan-out, writer cancelled, and the transport aborted if
+it still holds unsent bytes. `on_stop`:
+1. closes every fan-out socket (each close bounded at 1 s, then
+   `abort()`) and awaits pending drop-path closes;
+2. cancels every handler still in `_handlers` and waits up to 0.5 s. This
+   matters: once a connection is lost, aiohttp drops its own reference to
+   the handler task, so `runner.cleanup()` can't cancel a handler stuck in
+   a gate. The cancellation unwinds through `on_message`, and the send
+   handler's `finally` removes its entry;
+3. runs `runner.cleanup()` (`shutdown_timeout=0.5`).
+
+The worst case is about 2.5 s, inside Runtime's 3 s budget.
+New WebSocket handshakes during shutdown get 503. Aborting rather than
+closing matters with a peer that stopped reading (a phone asleep):
+`transport.close()` waits to flush a full buffer forever, and aiohttp's
+own close paths (a timed-out close, a write error, a heartbeat timeout)
+only call `close()`.
+
+**Config reload.** A token change swaps the session value and closes
+every socket with 4001 ("token changed"); the page then shows "session
+expired" and stops reconnecting. A `web.token` removed from config falls
+back to `CORVIDAE_WEB_TOKEN` (as the daemon started with it), else a fresh
+generated one (logged); a generated token is kept while none is provided.
+Only `web.token` rotates on reload: the daemon's environment can't change
+under it, so rotating `CORVIDAE_WEB_TOKEN` takes a restart. `host`, `port` and `allowed_origins` changes log "restart to
+apply". A removed block logs the same and changes nothing. A malformed
+block raises (the watcher logs it) and changes nothing.
+
+**Frontend.** `web_static/` ships as package data: `index.html`,
+`app.css`, `app.js` (plain JS, no build) and vendored marked 15.0.12 and
+DOMPurify 3.2.6 (`vendor/README.md` records versions, hashes and
+licences). Model text reaches the DOM through one sink:
+`DOMPurify.sanitize(marked.parse(text))` with `style` attributes and tags
+forbidden; links get `target="_blank" rel="noopener noreferrer"`.
+Everything else uses `textContent`. Thinking and dividers render in closed
+`<details>`. The page reconnects with backoff (1 s → 30 s) and, after
+three failed connects, checks `/` for a 401 to detect an expired session.
+
+Known limitations:
+- a turn that ends in an exception without a `send_message` leaves the
+  indicator on until the channel's next `send_message`;
+- an exception in the agent after dequeue but before step 4c
+  (`on_message_persisted`) leaves that message's entry until restart: the
+  indicator stays on and the message keeps appearing at the end of
+  history. That path is logged at ERROR, and such a channel gets no
+  replies at all;
+- a gate that's slow to decide holds up the socket's later frames, since
+  frames are handled in order;
+- messages in a gate, admitted or queued at shutdown are lost, as with
+  every transport, and in the pane they simply disappear on reload;
+- a message sent into a socket that looks open but is dead (a phone waking
+  from sleep on a half-open connection) is lost: the composer clears and
+  the server never sees it, so it's missing after the reconnect. Fixing
+  that needs a per-send acknowledgement in the protocol.
+
+Out of scope for v1: paging back past 200 rows, token streaming, an
+inspector pane, and views of other transports' channels.
+
+Behavior is pinned by `tests/test_web_plugin.py`, which drives a real
+listener with aiohttp's client and raw sockets.
+
 ## Configuration
 
 ```yaml
@@ -2038,6 +2216,12 @@ discord:                        # optional; omit to leave the transport inert
     - 123456789012345678
   message_chunk_size: 2000      # 100-2000
 
+web:                            # optional; omit to leave the transport inert
+  host: 127.0.0.1
+  port: 8765
+  token: null                   # or CORVIDAE_WEB_TOKEN; else generated and logged
+  allowed_origins: null         # extra origins, e.g. https://box.tailnet.ts.net
+
 logging:                        # optional, falls back to defaults
   level: INFO                   # DEBUG | INFO | WARNING | ERROR | CRITICAL
   file: corvidae.log            # omit for stderr; CLI mode defaults to corvidae.log
@@ -2061,7 +2245,7 @@ fixed hand-written order:
    never instantiated.
 
 The full entry-point plugin set (`[project.entry-points.corvidae]` in `pyproject.toml`): `persistence`,
-`jsonl_log`, `core_tools`, `cli`, `irc`, `signal`, `discord`, `task`, `subagent`, `mcp`, `llm`,
+`jsonl_log`, `core_tools`, `cli`, `irc`, `signal`, `discord`, `web`, `task`, `subagent`, `mcp`, `llm`,
 `compaction`, `memory`, `memory_tools`, `funnel`, `thinking`,
 `runtime_settings`, `tools`, `metrics`, `usage_log`, `metrics_jsonl`,
 `outcome_log`, `appraisal`, `critique`, `scheduler`, `agent`,
@@ -2108,6 +2292,7 @@ dependency and the plugin that declared it. Runs once at startup.
 Agent               → "registry", "task", "llm", "tools"
 CLIPlugin           → "registry"    (ChannelRegistry)
 IRCPlugin           → "registry"    (ChannelRegistry)
+WebPlugin           → "registry"    (ChannelRegistry); looks up "agent" and "persistence" lazily
 SubagentPlugin      → "llm", "tools"
 CompactionPlugin    → "llm"         (LLMPlugin); soft-uses "agent" for forks
 ThinkingPlugin      → "registry"    (ChannelRegistry)
@@ -2167,6 +2352,8 @@ corvidae/
 │   ├── irc.py            # IRCPlugin
 │   ├── signal.py         # SignalPlugin (signal-cli JSON-RPC transport)
 │   ├── discord.py        # DiscordPlugin (discord.py gateway transport)
+│   ├── web.py            # WebPlugin (browser chat UI over aiohttp)
+│   ├── web_static/       # its page, script, styles, vendored marked + DOMPurify
 │   └── split.py          # split_message() — shared outbound chunking
 ├── commands/
 │   └── redact.py         # corvidae redact CLI (operator-only)
@@ -2233,4 +2420,4 @@ seamlessly. Not implemented; current compaction is stop-the-world.
 ### Additional transports
 
 BlueSky and other transports are future work. The hook system supports
-them; the implemented transports are CLI, IRC, Signal, and Discord.
+them; the implemented transports are CLI, IRC, Signal, Discord, and Web.

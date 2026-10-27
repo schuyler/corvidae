@@ -143,6 +143,17 @@ agent:
 #     - 123456789012345678
 #   message_chunk_size: 2000           # max UTF-8 bytes per message, 100-2000
 
+# Web transport: a browser chat UI (optional — omit to disable). Log in at
+# http://127.0.0.1:8765/?token=<token>. The token is shell access to this
+# machine; see docs/configuration.md ("web") for remote access and
+# docs/threat-model.md finding 9.
+# web:
+#   host: 127.0.0.1                    # non-loopback binds log a WARNING
+#   port: 8765
+#   token: null                        # or CORVIDAE_WEB_TOKEN; else generated and logged each start
+#   allowed_origins:                   # extra origins: Tailscale name, reverse proxy
+#     - https://box.tailnet.ts.net
+
 # Scheduler: reminders (remind_me tool) and operator jobs (optional;
 # without this block the tools still work, in UTC, with these defaults).
 # A job can target any channel; see docs/threat-model.md finding 7.

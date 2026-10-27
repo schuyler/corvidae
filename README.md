@@ -1,6 +1,6 @@
 # corvidae
 
-Corvidae is a minimalist, extensible architecture for building LLM agent harnesses. It connects a local LLM to chat transports — IRC and CLI are built in — routes messages through any OpenAI-compatible Chat Completions API, runs a multi-turn tool-calling loop, and sends replies. It's designed as a personal agent daemon for a single machine.
+Corvidae is a minimalist, extensible architecture for building LLM agent harnesses. It connects a local LLM to chat transports — CLI, IRC, Signal, Discord, and a browser UI are built in — routes messages through any OpenAI-compatible Chat Completions API, runs a multi-turn tool-calling loop, and sends replies. It's designed as a personal agent daemon for a single machine.
 
 **WARNING: This is a personal project, not a formal release. Interfaces will change without warning.**
 
@@ -34,6 +34,8 @@ uv run corvidae          # reads agent.yaml from cwd
 ```
 
 The daemon connects to configured transports, listens for messages, and runs until SIGINT or SIGTERM.
+
+For a chat page in your browser, add a `web:` block (an empty one will do) and open the login URL the daemon logs. It listens on `127.0.0.1:8765`, and its token is shell access to the machine, so read the [`web` section](docs/configuration.md#web--browser-chat-ui) before you point it anywhere else.
 
 ## Installation
 

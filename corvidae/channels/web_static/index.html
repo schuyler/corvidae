@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>corvidae</title>
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/vendor/marked.min.js" defer></script>
+<script src="/static/vendor/purify.min.js" defer></script>
+<script src="/static/app.js" defer></script>
+</head>
+<body>
+<div id="layout">
+  <!-- Sidebar: conversation list and new-conversation form -->
+  <aside id="sidebar">
+    <header class="side-head">
+      <h1>corvidae</h1>
+      <button type="button" id="sidebar-toggle" aria-expanded="false" aria-controls="side-body">Conversations</button>
+    </header>
+    <div id="side-body">
+      <ul id="conversations"></ul>
+      <form id="new-form" autocomplete="off">
+        <input id="new-name" type="text" placeholder="new conversation" aria-label="new conversation name"
+               pattern="[a-z0-9][a-z0-9_\-]{0,63}" maxlength="64" title="lowercase letters, digits, - and _ (max 64)">
+        <button type="submit">Go</button>
+      </form>
+    </div>
+  </aside>
+  <!-- Main pane: banner, items, working indicator, composer -->
+  <main id="main">
+    <div id="banner" class="hidden" role="alert"></div>
+    <div id="items" aria-live="polite"></div>
+    <div id="working" class="hidden">working…</div>
+    <form id="composer">
+      <textarea id="input" rows="2" placeholder="Message" aria-label="message"></textarea>
+      <button type="submit" id="send">Send</button>
+    </form>
+  </main>
+</div>
+</body>
+</html>
