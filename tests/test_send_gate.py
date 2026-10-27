@@ -24,7 +24,7 @@ import pytest
 
 from corvidae.agent import MAX_TURNS_FALLBACK_MESSAGE
 from corvidae.channel import ChannelConfig
-from corvidae.context import MessageType
+from corvidae.context import MessageType, unsent_marker_emission
 from corvidae.hooks import _check_hook_arg_binding, create_plugin_manager, hookimpl
 from corvidae.outbound import OutboundMessage, OutboundProgress, OutboundThinking
 from corvidae.trace import mint_trace_id
@@ -100,12 +100,10 @@ async def _rows(db, channel_id):
 
 def _markers(messages):
     """Window CONTEXT messages that are not-sent markers."""
-    from corvidae.agent import UNSENT_MARKER_LABEL
-
     return [
         m for m in messages
         if m.get("_message_type") == MessageType.CONTEXT
-        and UNSENT_MARKER_LABEL in (m.get("content") or "")
+        and unsent_marker_emission(m.get("content")) is not None
     ]
 
 
@@ -182,10 +180,15 @@ class TestFinalVeto:
         assert tagged[0]["_message_type"] == MessageType.UNSENT
         markers = _markers(conv.messages)
         assert len(markers) == 1
-        assert "the secret answer" in markers[0]["content"]
+        assert unsent_marker_emission(markers[0]["content"]) == "final"
+        assert "the secret answer" not in markers[0]["content"]
         assert conv.messages[-1] is markers[0]
+        assert conv.messages[-2] is tagged[0]
         # The marker row is persisted too (it must survive restart).
-        assert any(t == "context" and "the secret answer" in m["content"] for m, t in rows)
+        assert any(
+            t == "context" and unsent_marker_emission(m["content"]) == "final"
+            for m, t in rows
+        )
         # The gate saw exactly what would have been sent.
         assert gate.calls[-1]["emission"] == "final"
         assert gate.calls[-1]["text"] == "the secret answer"
@@ -432,7 +435,9 @@ class TestThinkingVeto:
         assert [t for _m, t in assistant] == ["message"]
         markers = _markers(channel.conversation.messages)
         assert len(markers) == 1
-        assert "pondering deeply" in markers[0]["content"]
+        assert unsent_marker_emission(markers[0]["content"]) == "thinking"
+        # Reasoning must not outlive reasoning_history: drop in a marker.
+        assert "pondering deeply" not in markers[0]["content"]
         assert "thinking" in gate.emissions()
 
 
@@ -496,6 +501,89 @@ class TestNoGate:
         assert _markers(channel.conversation.messages) == []
 
 
+class TestReviewGaps:
+    async def test_vetoed_final_withholds_its_reasoning(self, env):
+        plugin, channel, db = env
+        gate = SpyGate(veto={"final"})
+        plugin.pm.register(gate, name="spy_gate")
+        plugin._client = _client(_make_text_response("the answer", reasoning="the answer is 42"))
+
+        await _say(plugin, channel)
+
+        assert sent_texts(plugin.pm, OutboundThinking) == []
+        assert sent_texts(plugin.pm, OutboundMessage) == []
+        # The thinking gate is not consulted for a withheld response.
+        assert gate.emissions() == ["final"]
+        assert [unsent_marker_emission(m["content"]) for m in _markers(channel.conversation.messages)] == ["final"]
+
+    async def test_progress_veto_reloads_identically(self, env):
+        plugin, channel, db = env
+        plugin.pm.register(SpyGate(veto={"progress", "thinking"}), name="spy_gate")
+        tool_calls: list[str] = []
+        _install_tool(plugin, tool_calls)
+        plugin._client = _client(
+            _make_mixed_response("Let me look that up", [_make_tool_call("call-1", "my_tool", {"x": "a"})]),
+            _make_text_response("Found it", reasoning="hmm"),
+        )
+        await _say(plugin, channel)
+        await drain_task_queue(plugin)
+        await drain(plugin, channel)
+
+        live = [{k: v for k, v in m.items() if k != "_db_id"} for m in channel.conversation.messages]
+        reloaded = await plugin.pm.get_plugin("persistence").resolve_conversation(channel=channel)
+        # reasoning_history: drop strips reasoning from the live window only.
+        reloaded_clean = [
+            {k: v for k, v in m.items() if k not in ("_db_id", "reasoning_content")}
+            for m in reloaded
+        ]
+        assert reloaded_clean == live
+        assert [unsent_marker_emission(m["content"]) for m in _markers(reloaded)] == ["progress", "thinking"]
+
+    @pytest.mark.parametrize("emission", ["progress", "thinking", "error"])
+    async def test_raising_gate_fails_open_for_every_emission(self, env, emission):
+        plugin, channel, db = env
+        plugin.pm.register(SpyGate(raises=True), name="spy_gate")
+        tool_calls: list[str] = []
+        _install_tool(plugin, tool_calls)
+        if emission == "error":
+            client = MagicMock()
+            client.chat = AsyncMock(side_effect=RuntimeError("llm down"))
+            plugin._client = client
+        else:
+            plugin._client = _client(
+                _make_mixed_response("Let me look that up", [_make_tool_call("call-1", "my_tool", {"x": "a"})]),
+                _make_text_response("Found it", reasoning="hmm"),
+            )
+        await _say(plugin, channel)
+        await drain_task_queue(plugin)
+        await drain(plugin, channel)
+
+        if emission == "progress":
+            assert sent_texts(plugin.pm, OutboundProgress) == ["Let me look that up"]
+        elif emission == "thinking":
+            assert sent_texts(plugin.pm, OutboundThinking) == ["hmm"]
+        else:
+            assert len(sent_texts(plugin.pm, OutboundMessage)) == 1
+        assert _markers(channel.conversation.messages) == []
+
+    async def test_reject_wins_across_gates(self, env):
+        plugin, channel, db = env
+        plugin.pm.register(SpyGate(), name="no_opinion_gate")
+        plugin.pm.register(SpyGate(veto={"final"}), name="vetoing_gate")
+
+        class Accepting:
+            @hookimpl
+            async def should_send_response(self, channel, text, emission, trace_id, meta):
+                return True
+
+        plugin.pm.register(Accepting(), name="accepting_gate")
+        plugin._client = _client(_make_text_response("the secret answer"))
+
+        await _say(plugin, channel)
+
+        assert sent_texts(plugin.pm, OutboundMessage) == []
+
+
 # ---------------------------------------------------------------------------
 # Replay paths: transports never see an UNSENT row
 # ---------------------------------------------------------------------------
@@ -512,6 +600,28 @@ class TestReplay:
         ]
         frames = WebPlugin()._rows_to_frames(rows)
         assert [f.get("text") for f in frames] == ["hi"]
+
+    def test_web_history_holds_back_suppressed_progress_and_thinking(self):
+        from corvidae.channels.web import WebPlugin
+        from corvidae.context import unsent_marker_text
+
+        call = {"id": "call-1", "function": {"name": "my_tool", "arguments": "{}"}}
+        rows = [
+            (1, json.dumps({"role": "user", "content": "hi"}), "message"),
+            (2, json.dumps({
+                "role": "assistant", "content": "Let me look", "tool_calls": [call],
+                "reasoning_content": "private plan",
+            }), "message"),
+            (3, json.dumps({"role": "system", "content": unsent_marker_text("thinking", "private plan")}), "context"),
+            (4, json.dumps({"role": "system", "content": unsent_marker_text("progress", "Let me look")}), "context"),
+            (5, json.dumps({"role": "tool", "tool_call_id": "call-1", "content": "r"}), "message"),
+            (6, json.dumps({"role": "assistant", "content": "Found it"}), "message"),
+        ]
+        frames = WebPlugin()._rows_to_frames(rows)
+        types = [f["type"] for f in frames]
+        assert "thinking" not in types
+        assert "progress" not in types
+        assert [f.get("text") for f in frames if f["type"] in ("user", "message")] == ["hi", "Found it"]
 
     async def test_acp_load_session_skips_unsent_rows(self, tmp_path):
         from acp import PROTOCOL_VERSION
@@ -542,9 +652,15 @@ class TestReplay:
         try:
             await agent.initialize(protocol_version=PROTOCOL_VERSION)
             session_id = "unsentreplay1"
+            from corvidae.context import unsent_marker_text
+
             for role, text, ts, mtype in (
                 ("user", "visible-user", 1.0, "message"),
                 ("assistant", "never-sent", 2.0, "unsent"),
+                ("system", unsent_marker_text("final", "never-sent"), 2.5, "context"),
+                ("assistant", "suppressed-progress", 3.0, "message"),
+                ("system", unsent_marker_text("progress", "suppressed-progress"), 3.5, "context"),
+                ("assistant", "visible-answer", 4.0, "message"),
             ):
                 await db.execute(
                     "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
@@ -556,6 +672,6 @@ class TestReplay:
             await agent.load_session(cwd=str(tmp_path), session_id=session_id)
 
             texts = [c.kwargs["update"].content.text for c in conn.session_update.await_args_list]
-            assert texts == ["visible-user"]
+            assert texts == ["visible-user", "visible-answer"]
         finally:
             await db.close()

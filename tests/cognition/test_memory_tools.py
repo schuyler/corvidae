@@ -1270,3 +1270,26 @@ class TestSchemaAndSearchDegradation:
             for r in caplog.records if r.levelno >= logging.WARNING
         ), [r.getMessage() for r in caplog.records]
         await db.close()
+
+
+class TestRecallRawUnsent:
+    """WP2.8 follow-through: a withheld (UNSENT) row was never said."""
+
+    async def test_recall_raw_labels_unsent_rows(self):
+        memory, memory_tools, db = await build_tools_env()
+        channel = Channel(transport="irc", scope="#electronics")
+        msg1_id = await seed_message_log_row(db, channel.id, "user", "anything new?")
+        cursor = await db.execute(
+            "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
+            "VALUES (?, ?, ?, ?)",
+            (channel.id, json.dumps({"role": "assistant", "content": "kept quiet"}), time.time(), "unsent"),
+        )
+        msg2_id = cursor.lastrowid
+        await db.commit()
+        mid = await seed_memory(db, channel.id, "quiet exchange", msg_id_start=msg1_id, msg_id_end=msg2_id)
+
+        result = await get_tools(memory_tools)["recall_raw"](mid, _ctx=make_ctx(channel))
+
+        assert "assistant (withheld, not sent): kept quiet" in result
+        assert "\nassistant: kept quiet" not in result
+        await db.close()

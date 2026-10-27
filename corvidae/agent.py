@@ -43,7 +43,13 @@ from corvidae.channel import (
     RUNTIME_META_KEYS,
     resolve_system_prompt,
 )
-from corvidae.context import ContextWindow, MessageType, DEFAULT_CHARS_PER_TOKEN
+from corvidae.context import (
+    DEFAULT_CHARS_PER_TOKEN,
+    UNSENT_MARKER_LABEL,  # noqa: F401 (re-exported for tests and plugins)
+    ContextWindow,
+    MessageType,
+    unsent_marker_text,
+)
 # Re-exported: mint_trace_id lives in a leaf module so transports can
 # import it without this module; existing imports from here keep working.
 from corvidae.trace import mint_trace_id  # noqa: F401
@@ -90,30 +96,6 @@ _LLM_ERROR_TEMPLATE = (
 # Note: same text as MAX_ROUNDS_REACHED_MESSAGE in tools/subagent.py — kept in sync.
 MAX_TURNS_FALLBACK_MESSAGE = "(max tool-calling rounds reached)"
 
-# The not-sent marker appended after a should_send_response veto. It quotes
-# the start of the unsent text because build_prompt moves a tool-calls block
-# to its last result, so the marker's position alone can't say which
-# emission it means.
-UNSENT_MARKER_LABEL = "not sent"
-_UNSENT_MARKER_EXCERPT_CHARS = 80
-_UNSENT_MARKER_SUBJECT = {
-    "final": "response",
-    "progress": "progress text",
-    "thinking": "reasoning",
-}
-
-
-def _unsent_marker_text(emission: str, text: str) -> str:
-    """The marker content for a vetoed emission of ``text``."""
-    excerpt = " ".join(text.split())
-    if len(excerpt) > _UNSENT_MARKER_EXCERPT_CHARS:
-        excerpt = excerpt[:_UNSENT_MARKER_EXCERPT_CHARS].rstrip() + "…"
-    subject = _UNSENT_MARKER_SUBJECT.get(emission, emission)
-    return (
-        f"[{UNSENT_MARKER_LABEL}]\n\n"
-        f"The channel did not see your {subject} beginning «{excerpt}». "
-        "Don't refer to it as something you said."
-    )
 
 
 def _describe_llm_failure(exc: Exception) -> str:
@@ -535,7 +517,7 @@ class Agent(CorvidaePlugin):
         conv = channel.conversation
         if conv is None:
             return
-        marker = {"role": "system", "content": _unsent_marker_text(emission, text)}
+        marker = {"role": "system", "content": unsent_marker_text(emission, text)}
         conv.append(marker, MessageType.CONTEXT)
         try:
             results = await self.pm.ahook.persist_message(
@@ -963,7 +945,10 @@ class Agent(CorvidaePlugin):
         if unsent:
             unsent_markers.append(("final", display_text or ""))
         reasoning_text = result.message.get("reasoning_content")
-        if reasoning_text:
+        # A vetoed final withholds its reasoning with it: the reasoning
+        # often carries the answer, and the final marker already covers
+        # the whole response, so the thinking gate is not consulted.
+        if reasoning_text and not unsent:
             if await self._gate_send(channel, reasoning_text, "thinking", item):
                 try:
                     await self.pm.ahook.send(

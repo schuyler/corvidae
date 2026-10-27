@@ -19,6 +19,7 @@ import re
 import time
 from datetime import datetime, timezone
 
+from corvidae.context import MessageType
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 from corvidae_cognition.memory import ChannelScope, _format_age, _fts_match_query
 from corvidae.tool import Tool, tool_to_schema
@@ -283,7 +284,7 @@ class MemoryToolsPlugin(CorvidaePlugin):
             # the numeric range [msg_id_start, msg_id_end] contains interleaved
             # foreign-channel rows. The channel_id predicate is load-bearing.
             async with db.execute(
-                "SELECT id, message FROM message_log "
+                "SELECT id, message, message_type FROM message_log "
                 "WHERE channel_id = ? AND id BETWEEN ? AND ? ORDER BY id",
                 (channel_id, msg_id_start, msg_id_end),
             ) as cursor:
@@ -310,12 +311,16 @@ class MemoryToolsPlugin(CorvidaePlugin):
             used_chars = len(header)
             truncated = False
 
-            for _row_id, msg_json in msg_rows:
+            for _row_id, msg_json, message_type in msg_rows:
                 try:
                     msg = json.loads(msg_json)
                 except Exception:
                     continue
                 role = msg.get("role", "?")
+                # A withheld response was never said; label it so the
+                # agent doesn't read it back as part of the dialog.
+                if message_type == MessageType.UNSENT.value:
+                    role = f"{role} (withheld, not sent)"
                 content = msg.get("content", "")
                 if not isinstance(content, str):
                     content = str(content)

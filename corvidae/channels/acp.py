@@ -220,7 +220,7 @@ class CorvidaeAcpAgent:
         """Restore ``acp:<sessionId>`` from sessions.db and replay history (A16)."""
         from acp import LoadSessionResponse
         from acp import update_agent_message_text, update_user_message_text
-        from corvidae.context import MessageType
+        from corvidae.context import MessageType, unsent_marker_emission
 
         channel, history = await self._reattach_session(
             session_id, cwd, mcp_servers, additional_directories
@@ -229,7 +229,7 @@ class CorvidaeAcpAgent:
         # Replay text turns to the client; leave channel.conversation None so
         # the agent loop lazy-loads the same DB rows on the next prompt.
         if history and self._conn is not None:
-            for msg in history:
+            for i, msg in enumerate(history):
                 text = _message_text(msg)
                 if not text:
                     continue
@@ -237,6 +237,15 @@ class CorvidaeAcpAgent:
                 msg_type = msg.get("_message_type")
                 if msg_type == MessageType.UNSENT:
                     # A send gate vetoed it; the client never saw it live.
+                    continue
+                following = history[i + 1] if i + 1 < len(history) else {}
+                if (
+                    role == "assistant"
+                    and following.get("_message_type") == MessageType.CONTEXT
+                    and unsent_marker_emission(following.get("content")) == "progress"
+                ):
+                    # Its progress text was suppressed live; the marker
+                    # right after the row says so.
                     continue
                 if role == "user":
                     update = update_user_message_text(text)
