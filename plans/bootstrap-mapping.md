@@ -957,11 +957,13 @@ Additions, all in this plugin cluster:
 - **Self-poisoning** (`personality-and-autonomy.md` §3b). The most intimate
   write-side channel is the agent's own consolidation path: a prior
   instance's summary re-enters the window with the authority of an internal
-  voice, and the future instance cannot interrogate the writer. Any
-  agent-authored write to a self-describing surface — `self` facts (§3.6),
-  the self-model compile (§3.11) — is a persistence-of-influence channel of
-  the same shape as skill-directory writes (§3.8) and joins the same gated
-  surface (operator confirmation or trust gate). Two §3.1 mechanisms are
+  voice, and the future instance cannot interrogate the writer. `self`
+  facts (§3.6) need no gate of their own: they are memory-tier data that
+  re-enter only through the funnel's framing, and the trust inheritance
+  above plus the provenance-gate exclusion already answer a poisoned one.
+  The self-model compile (§3.11) is different in kind — the one
+  agent-authored write into a prompt position the funnel's framing does
+  not reach — so its input is trust-floored there. Two §3.1 mechanisms are
   hereby named as anti-self-manipulation machinery, not merely style:
   epistemic framing preserved at consolidation forces every note to confess
   what kind of note it is, and the append-only `message_log` + `recall_raw`
@@ -1016,9 +1018,14 @@ history that nothing lets feed back into its standing character.
   accumulating). A compact block compiled from `self`-subject facts into the
   **stable prompt region**, refreshed rarely — the KV-cache argument is
   §3.8's skills-index argument verbatim: personality changes slowly, so a
-  refresh is a legitimate, infrequent cache break. The compile is
-  operator-gated per §3.9 (an agent-authored write into the stable region is
-  the self-poisoning channel). This supplies the feedback edge that "memory
+  refresh is a legitimate, infrequent cache break. The stable region is the
+  one prompt position outside the funnel's data framing, so the compile
+  reads only `self` facts whose inherited trust (§3.9) meets a configured
+  floor, and each refresh notifies the operator with the diff of the block
+  — review after the fact, not approval before it; the operator is already
+  reading those diffs for the §6 longitudinal tier. When the compile is
+  built, `docs/threat-model.md` gains an entry for the path from untrusted
+  text through consolidation into the stable region. This supplies the feedback edge that "memory
   is the personality" (§5 divergence 6) promises but the current design only
   half-delivers: memory writes the self-model; the prompt reads it. Today's
   persona layer is a static one-line `SOUL.md` and `set_settings` rightly
@@ -1026,8 +1033,8 @@ history that nothing lets feed back into its standing character.
   legitimate path for accumulated drift to feed back. **Eval:** the
   self-model's diffs over months read as coherent evolution, not thrash or
   flattening toward the generic (§6, longitudinal tier). **Effort: S**
-  (compile + refresh policy; the gating surface already exists in
-  §3.8/§3.9).
+  (compile, refresh policy, trust floor, diff notice; trust tags already
+  exist from §3.9).
 
 ---
 

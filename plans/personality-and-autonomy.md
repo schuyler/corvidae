@@ -121,13 +121,14 @@ future instance receives it with the authority of an internal voice,
 unable to interrogate the writer. Generalized: **the most intimate
 write-side poisoner of an agent's memory is the agent's own prior
 instance.** §3.9's threat model previously named only third-party poisoning.
-Folded in: consolidation summaries are the channel, and any agent-authored
-write to a self-describing surface (self-facts, the self-model compile —
-§3.11) is a persistence-of-influence channel of the same shape as
-skill-directory writes, and joins the same gated surface. Ordinary
-consolidation summaries do not pass that gate — gating every memory record
-on operator confirmation would make memory unusable — and are answered
-instead by two already-planned mechanisms, hereby re-described as
+Folded in: consolidation summaries and self-facts are the channel, and
+they stay ungated — they are memory-tier data that re-enter only through
+the funnel's framing, distilled facts inherit the minimum trust of their
+sources, and a self-note never corroborates itself. The exception is the
+self-model compile (§3.11), the one agent-authored write into a prompt
+position the funnel's framing does not reach; its inputs are trust-floored
+and each refresh is shown to the operator as a diff (5.3). Beyond that,
+two already-planned mechanisms are hereby re-described as
 anti-self-manipulation machinery, not merely style:
 epistemic framing preserved at consolidation ("I speculated that…") forces
 every note to confess what kind of note it is; and the append-only
@@ -210,8 +211,11 @@ shape nothing unless retrieved. The self-model is a compact block compiled
 from `self` facts into the **stable prompt region**, refreshed rarely — the
 KV-cache argument is the same one §3.8 makes for the skills index:
 personality changes slowly, so a refresh is a legitimate, infrequent cache
-break. The compile is operator-gated per §3.9 (it is an agent-authored write
-into the stable region — the planted-license-plate channel, §3b). This
+break. Because the stable region sits outside the funnel's data framing,
+the compile is the planted-license-plate channel in its strongest form
+(§3b): it reads only self-facts whose inherited trust meets a floor, and
+each refresh notifies the operator with the diff of the block — review
+after the fact, not approval before it. This
 closes the loop the slogan "memory is the personality" (divergence 6)
 promises but only half-delivers: memory writes the self-model; the prompt
 reads it. Note the current gap this fills: the persona layer today is a
@@ -221,7 +225,7 @@ for drift to feed back.
 
 **Eval:** self-model diffs over months — coherent evolution vs. thrash vs.
 flattening toward the generic. Blocked on 5.2 having accumulated data;
-effort S for the compile, and the gating surface already exists in §3.8/§3.9.
+effort S for the compile, refresh policy, trust floor, and diff notice.
 
 ### 5.4 Commitment records (stakes made operational) — hypothesis tier
 

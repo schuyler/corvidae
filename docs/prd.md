@@ -493,7 +493,7 @@ Per transport:
 ### 3.7 Cognition
 
 The design of record is `plans/bootstrap-mapping.md`, which translates
-Persyn's BOOTSTRAP architecture through principles 1–3 and records fifteen
+Persyn's BOOTSTRAP architecture through principles 1–3 and records sixteen
 divergences. The output of every subsystem here enters the main window
 only through the funnel.
 
@@ -673,11 +673,13 @@ retrievable but quarantined with a provenance warning and never satisfy
 the provenance gate as corroboration; distilled facts inherit minimum
 trust. The most intimate write-side channel is the agent's own
 consolidation path: a prior instance's note re-enters with the authority
-of an internal voice, so every agent-authored write to a self-describing
-surface (`self` facts, the self-model below) joins the same gated surface
-as skill-directory writes, and epistemic framing at consolidation plus the
-append-only log with `recall_raw` are named anti-self-manipulation
-machinery, not style. A sensitivity column filters retrieval by who is
+of an internal voice. `self` facts need no gate of their own: they are
+memory-tier data, re-entering only through the funnel's framing, and
+trust inheritance plus the provenance-gate exclusion already answer a
+poisoned one. The self-model below is the exception, because it is the
+one agent-authored write outside that framing. Epistemic framing at
+consolidation plus the append-only log with `recall_raw` are named
+anti-self-manipulation machinery, not style. A sensitivity column filters retrieval by who is
 present. An idle
 scan over recent memory looks for escalating conflict, repeated
 elicitation, behavioural anomalies, repeated low-trust assertions on one
@@ -697,8 +699,13 @@ absent signals degrade to an absent line, and its eval is whether
 self-reports become accurate against the outcome log. The self-model is a
 compact block compiled from `self` facts into the stable prompt region,
 refreshed rarely (a legitimate, infrequent cache break, the same argument
-as the skills index), operator-gated because it is an agent-authored
-write into the stable region; its eval is the diff of the compiled block
+as the skills index). Because the stable region is the one prompt position
+the funnel's data framing does not reach, the compile reads only `self`
+facts whose inherited trust meets a configured floor, and each refresh
+notifies the operator with the diff of the block: a review after the
+fact, not an approval before it. When the compile is built,
+`docs/threat-model.md` gains an entry for the path from untrusted text
+through consolidation into the stable region. Its eval is the diff of the compiled block
 over months, read as coherent drift, thrash, or flattening toward the
 generic. This is the feedback edge that "memory is the personality"
 otherwise only half-delivers.
@@ -932,7 +939,7 @@ record that holds the reasoning.
 | ACP keeps rejecting a concurrent prompt unless a real client is shown to steer with a bare prompt; a failed final delivery is `end_turn` | #93, #99 |
 | Summary role follows the mode: fork `assistant`, standalone `user` with data framing | `threat-model.md` finding 3 |
 | No process separation until corvidae runs on a machine the operator does not own | `threat-model.md`, Privilege separation |
-| Personality is duck-typed and judged longitudinally; goal retirement is a consolidation event; `self` is a fact subject; self-authored writes join the trust gate; interoception line and self-model compile; commitment records and endogenous goals only on a named failure | `plans/personality-and-autonomy.md` (PR #48) |
+| Personality is duck-typed and judged longitudinally; goal retirement is a consolidation event; `self` is a fact subject, ungated beyond trust inheritance; the self-model compile reads only facts above a trust floor and sends the operator each diff; interoception line and self-model compile; commitment records and endogenous goals only on a named failure | `plans/personality-and-autonomy.md` (PR #48) |
 | No runtime plugin loading; changing the plugin set is a restart | #28 |
 | No container image until a second deployment needs one | #37 |
 | Retrieval scoped by channel; topic structure is the `topic` subject's job, not a retrieval dimension | `shakedown-findings.md` |
