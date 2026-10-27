@@ -19,7 +19,10 @@ handler of a client the backpressure path had dropped, and that rev 8's
 structural fix), revision 9 makes each connection owned by its handler
 task: one `_handlers` set, separate from the fan-out set `_clients`, is
 the only thing `on_stop` walks, and each handler's `finally` releases its
-own resources. `client_id` is gone.
+own resources. `client_id` is gone. Review 9 found two line-level
+defects (an empty `asyncio.wait` raising; the `finally` aborting the
+pre-prepare 403) and cosmetics, folded in below. **The user then passed
+the design gate**: remaining detail is settled in code and tests.
 
 Process: requirements gated by the user; design → cold review → gate;
 red tests → review → gate; green → review → gate; docs → review → gate;
@@ -208,9 +211,10 @@ the bind origin.
 
 Each WebSocket connection is owned by its handler task, and nothing else.
 Two sets, with different jobs:
-- `self._handlers: set[asyncio.Task]` — every live WS handler. The handler
-  adds `asyncio.current_task()` as its first statement (before `prepare`)
-  and removes it as the last step of its outermost `finally`. No other
+- `self._handlers: set[asyncio.Task]` — every live WS handler. Pre-prepare
+  refusals (`_stopping` → 503; Origin → 403) happen first, outside the
+  try; then the handler adds `asyncio.current_task()` and removes it as
+  the last step of its outermost `finally`. No other
   code removes from it. This is the only set `on_stop` uses to find
   connections.
 - `self._clients: set[_Client]` — fan-out membership only. The handler
@@ -219,10 +223,12 @@ Two sets, with different jobs:
 
 The handler's outermost `finally` releases everything the connection
 holds, in this order, each step independent of the others (exceptions
-logged at DEBUG): discard from `_clients`; cancel its writer task; remove
-an unsent entry its in-flight `send` still owns (that's the `send`
+logged at DEBUG; steps for a `_Client` only once one exists after
+`prepare`): discard from `_clients`; cancel its writer task; remove an
+unsent entry its in-flight `send` still owns (that's the `send`
 handler's own `finally`, which has already run by unwinding); if the
-transport isn't closed, `abort()` it; discard from `_handlers`. So a
+`_Client`'s transport is not None and not closing, `abort()` it; discard
+from `_handlers`. So a
 connection is fully released exactly when its handler task finishes,
 whichever path ended it.
 
@@ -230,21 +236,22 @@ whichever path ended it.
 1. set `self._stopping = True`; close every socket in `_clients`
    concurrently via `_close_client`, and **await** (not cancel) any
    pending drop-path close tasks — each is already bounded at ~1 s, and
-   cancelling one inside its `wait_for` would skip the abort;
-2. cancel every task in a copy of `_handlers` and `await
+   a cancelled one would skip the graceful close frame;
+2. cancel every task in a copy of `_handlers` and, if the copy is
+   non-empty (`asyncio.wait` raises on an empty set), `await
    asyncio.wait(handlers, timeout=0.5)`. This reaches handlers whose
    clients the drop path already removed from `_clients`. The
    cancellation propagates into a `send` stuck in `on_message` (e.g. a
    gate), so its `finally` removes its unsent entry, and then the
    handler's `finally` releases the rest. A handler still not done after
    the wait is logged at WARNING;
-3. `await runner.cleanup()`.
+3. `await runner.cleanup()`; set `self._runner = None`.
 
-While `_stopping`, the drop path calls `client.transport.abort()`
-synchronously instead of scheduling a close task, so no close task is
+While `_stopping`, the drop path calls `client.transport.abort()` (when
+not None) synchronously instead of scheduling a close task, so no close task is
 created after step 1 has awaited them.
 
-Worst case ≈ 1 s of closes + ≤ 0.5 s of handler wait + ≤ 0.5 s of
+Worst case ≈ 1 s of closes + ≤ 0.5 s of handler wait + ≤ ~1 s of
 cleanup, inside Runtime's 3 s budget.
 
 Every socket close in the plugin (stop, token rotation, backpressure
