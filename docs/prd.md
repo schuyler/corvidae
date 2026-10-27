@@ -778,10 +778,13 @@ if it wins. The encode/retrieve gate is expected to lose.
    firing is a persisted conversation row.
 2. One timer task sleeps until the earliest due row (at most an hour),
    woken early by any change, and fires only after the DB is open and the
-   Agent has started. A due row is advanced or disabled before anything
-   else happens, so it fires at most once.
+   Agent has started. A due row's channel is resolved first. If the owning
+   transport declines (§3.2.7), the row stays due and is retried. Then the
+   row is advanced or disabled before anything else happens, so it fires
+   at most once.
 3. A firing resolves the channel (registry, `resolve_channel`, then
-   `get_or_create`), touches it so idle consolidation does not run
+   `get_or_create` for ids no resolving transport owns), touches it so
+   idle consolidation does not run
    mid-exchange, and injects through `on_notify` with
    `meta={"origin", "schedule_id"}`; the whole pipeline then runs. A
    heartbeat on a channel no transport owns reaches persistence only.

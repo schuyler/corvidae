@@ -231,7 +231,7 @@ Any plugin can send: `await self.pm.ahook.send(channel=channel, event=OutboundMe
 | `before_compaction(channel, compacted_ids: list[int], cut: int)` | async broadcast, awaited | After the compaction summary succeeded and before `replace_with_summary`. The window still holds the messages about to be dropped (`channel.conversation.messages[:cut]`; `cut` is moved off tool cycles where compaction can afford it, see design.md), so this is where to fork over that prefix (see "Forking the window"). Runs on the response path; failures are logged and never block compaction. |
 | `on_compaction(channel, summary_msg: dict, retain_count: int, compacted_ids: list[int])` | async broadcast | After compaction replaces older messages with a summary; `summary_msg` is the untagged summary dict. `compacted_ids` carries the `message_log` rowids of exactly the removed messages (empty when unknown) — the consolidation range consumed by `MemoryPlugin`. |
 | `on_idle()` | async broadcast | All queues empty and cooldown elapsed; only fires when `IdleMonitorPlugin` is registered |
-| `resolve_channel(channel_id: str) -> Channel \| None` | async firstresult | A caller holding only a persisted `transport:scope` id (`SchedulerPlugin` firing a row after a restart) asks transports for the live channel. Return it for ids your transport owns, else None. See [Channels](#channels). |
+| `resolve_channel(channel_id: str) -> Channel \| None` | async firstresult | A caller holding only a persisted `transport:scope` id (`SchedulerPlugin` firing a row after a restart) asks transports for the live channel. Return it for ids your transport owns, else None. Return None for your own id only when it cannot be built yet; the scheduler then retries. See [Channels](#channels). |
 
 `after_persist_assistant` — the DB row is already written when this
 hook fires. Mutations to `message` affect in-memory prompt construction
@@ -657,7 +657,7 @@ async def resolve_channel(self, channel_id: str) -> Channel | None:
     return self._channel_for(scope)   # the same path inbound messages take
 ```
 
-`SignalPlugin` implements it so an ACI it has not seen since startup still gets its E.164 alias's `ChannelConfig`. IRC and CLI don't need it; the registry fallback is already correct for them. Channels no transport owns (`internal:heartbeat`) also take the fallback, and since `TransportPlugin.send` delivers only to the transport that owns a channel, replies there go only to the log and `sessions.db`.
+`SignalPlugin` implements it so an ACI it has not seen since startup still gets its E.164 alias's `ChannelConfig`. When your transport owns the id but cannot apply its config yet (Signal before its first alias resolution), return None. The scheduler sees that a plugin with `transport` equal to the id's prefix implements the hook, so it holds the row and retries every few seconds rather than falling back to a default-configured channel. Don't return None for an id you own and will never be able to build: the row would retry forever. IRC and CLI don't need it; the registry fallback is already correct for them. Channels no transport owns (`internal:heartbeat`) also take the fallback, and since `TransportPlugin.send` delivers only to the transport that owns a channel, replies there go only to the log and `sessions.db`.
 
 ### Writing a transport
 

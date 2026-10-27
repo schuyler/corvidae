@@ -153,7 +153,7 @@ adding a hook are in [plugin-guide.md](plugin-guide.md#hook-grammar);
 | `transform_display_text` | firstresult=True wrapper chain | `_resolve_display_text`, before the reply is sent; return transformed text or None to leave unchanged |
 | `on_idle` | broadcast | `IdleMonitor`, when all queues empty and cooldown elapsed |
 | `resolve_conversation` | firstresult=True | `_process_queue_item`, when `channel.conversation is None`; return list of tagged message dicts or None to defer |
-| `resolve_channel` | firstresult=True | `SchedulerPlugin`, for a persisted channel id the registry does not hold (e.g. a reminder due after a restart); a transport returns the live Channel for ids it owns, created with transport-specific config, or None to defer. `SignalPlugin` and `DiscordPlugin` implement it; callers fall back to `registry.get_or_create` from the split id |
+| `resolve_channel` | firstresult=True | `SchedulerPlugin`, for a persisted channel id the registry does not hold (e.g. a reminder due after a restart); a transport returns the live Channel for ids it owns, created with transport-specific config, or None to defer. `SignalPlugin` and `DiscordPlugin` implement it. A transport may also return None for an id it owns but cannot build yet (Signal before its first alias resolution). For an id whose prefix names a transport that implements the hook, the scheduler retries; for other ids, callers fall back to `registry.get_or_create` from the split id |
 | `persist_message` | broadcast (imperative) | `_process_queue_item` after every `conv.append()`, and `FunnelPlugin` for the CONTEXT it persists; every implementation runs (persistence, JSONL logging). `PersistencePlugin` returns the `message_log` rowid and the caller resolves the list with `resolve_single_result` into `_db_id` |
 | `before_compaction` | broadcast, awaited | `CompactionPlugin`, after the summary succeeded and before `replace_with_summary()`; the window still holds `messages[:cut]`, so a plugin can fork over the dropped prefix (see [Forks](#forks)); failures logged, never block compaction |
 | `on_compaction` | broadcast | `CompactionPlugin`, after `replace_with_summary()`; side effects only (persistence) |
@@ -1280,10 +1280,17 @@ firing anything it waits until the persistence DB is open and
 `Agent.started` is True. Clock and sleeper are constructor arguments, so
 tests inject fakes and never sleep.
 
-**Firing.** A due row is first advanced (recurring) or disabled as
-`fired` (one-shot): at most once. Then the channel is resolved
-(`registry.get`, then the `resolve_channel` hook, then
-`registry.get_or_create` from the split id), `channel.touch()` runs so
+**Firing.** The channel is resolved first: `registry.get`, then the
+`resolve_channel` hook, then `registry.get_or_create` from the split id.
+The last step is skipped for a transport that implements `resolve_channel`,
+meaning a plugin whose `transport` attribute is the id's prefix. For that
+transport, None means "not yet": the transport cannot apply the channel's
+config, for example Signal before its first alias resolution (PRD §3.2.7,
+#76). The row is then left untouched and due, its overdue note is kept, and
+the pass re-arms after `CHANNEL_RETRY_SECONDS` (5 s). A WARNING is logged
+once per row, not once per retry. Once the channel resolves, the row is
+advanced (recurring) or disabled as `fired` (one-shot), at most once.
+`channel.touch()` then runs so
 MemoryPlugin's inactivity check does not consolidate mid-exchange, and
 the plugin calls:
 
@@ -1684,10 +1691,21 @@ number, which is indistinguishable from "not found".
 `SignalPlugin.resolve_channel` goes through the same alias path as an
 inbound message under phone-number privacy: ACI as scope, no
 `sourceNumber`, so an E.164-keyed `channels:` override is applied through
-forward resolution. It returns None for ids it does not own. Known gap:
-forward resolution starts only after a connect, so a call that lands
-before the first connect finds no alias and creates the channel with the
-default config, which the registry then keeps for the process lifetime.
+forward resolution. It returns None for ids it does not own. It also
+returns None for its own ids while the override cannot be applied yet: before
+`on_start` has resolved the registry, and while any E.164 `channels:` key
+that is also in `allow:` is still unresolved and no resolution attempt has
+finished. Forward resolution starts only after a connect, so before the
+first connect the alias's ACI is unknown. A call that lands while a
+resolution is in flight waits for it, bounded at
+`ALIAS_RESOLUTION_WAIT_SECONDS` (5 s). The caller retries (the scheduler
+holds the row, see SchedulerPlugin) rather than caching a default-configured
+channel (#76). Once an attempt has finished, an alias that failed to resolve
+stops blocking. A batch failure is retried only after the next connect, so
+deferring until then could hold a reminder for the life of the connection.
+The channel is created without the alias's config, and a WARNING names the
+channel and the unresolved aliases. An E.164 `channels:` key missing from
+`allow:` is never resolved, so it never blocks.
 
 **Inbound filtering.** An envelope is dropped unless it carries a
 `dataMessage` with non-empty text from someone other than the bot's own
@@ -1706,7 +1724,13 @@ sender's ACI must appear in `allow:` directly, or be what a configured
 E.164 `allow` entry resolved to. A refusal is logged at INFO naming the
 sender's ACI, and nothing is sent back. The transport fires `on_message`
 for every decoded envelope regardless: the gate is the one place that
-vetoes and the one place that logs the attempt.
+vetoes and the one place that logs the attempt. The transport checks its
+allowlist before it resolves the channel, so a refused sender never
+creates a registry entry (#103). Their message is gated on a transient
+`Channel("signal", <aci>)` that is never registered, or on the live
+entry if one already exists (a sender since dropped from `allow:`).
+Otherwise anyone who knows the number could grow the registry by one
+channel per distinct ACI.
 
 **Liveness.** Two indicators, both gated on the allowlist — an
 unauthorized sender gets no evidence that the account is live and
@@ -1737,7 +1761,18 @@ monitored.
   id and popped by that id when the matching turn starts, so a vetoed or
   dropped message cannot shift a later receipt onto the wrong timestamp.
   `on_message_persisted` also fires for notification-originated turns,
-  whose ids were never recorded, so those are a no-op. That
+  whose ids were never recorded, so those are a no-op. An admitted message
+  whose turn dies before persistence (conversation init raised, the item
+  was dropped) would otherwise keep its entry and its typing slot forever,
+  and the slot would keep the indicator refreshing (#104). The cleanup
+  relies on ordering. Entries are inserted in enqueue order, and the
+  channel's serial queue processes items in that order. So when an id is
+  persisted, every entry recorded before it belongs to a message whose
+  turn has already ended without persisting. Those entries are dropped
+  without a receipt, their slots are given back, and each is logged at
+  WARNING. If every turn on a channel fails before persistence, entries
+  accumulate until the fault clears, and the next message that persists
+  then sweeps them all. That
   `sendReceipt`'s `targetTimestamp` takes the inbound envelope's
   `timestamp` is convention, not documented by signal-cli — it matches
   `sendReaction`, `remoteDelete`, and `quoteTimestamp`, but it has not been

@@ -618,7 +618,11 @@ class TestChannelScopeAndIdentity:
         """A `channels:` alias keyed by E.164 lands its config on the ACI channel
         when the envelope carries a matching sourceNumber."""
         channels_config = {f"signal:{OTHER_NUMBER}": {"system_prompt": "alias prompt"}}
-        h = await _start_plugin(tmp_path, channels=channels_config)
+        # The sender is allowlisted: a refused one gets no registered
+        # channel at all (#103), so identity is pinned on an allowed one.
+        h = await _start_plugin(
+            tmp_path, signal_overrides={"allow": [AUTH_ACI, OTHER_ACI]}, channels=channels_config,
+        )
         try:
             await h.server.push_notification(
                 "receive", make_data_envelope(source_uuid=OTHER_ACI, source_number=OTHER_NUMBER, text="hi")
@@ -670,7 +674,11 @@ class TestChannelScopeAndIdentity:
         and it is not the alias id. Two ids here would fork the history that
         sessions.db, the jsonl logs, and memory are all keyed on."""
         channels_config = {f"signal:{OTHER_NUMBER}": {"system_prompt": "alias prompt"}}
-        h = await _start_plugin(tmp_path, channels=channels_config)
+        # The sender is allowlisted: a refused one gets no registered
+        # channel at all (#103), so identity is pinned on an allowed one.
+        h = await _start_plugin(
+            tmp_path, signal_overrides={"allow": [AUTH_ACI, OTHER_ACI]}, channels=channels_config,
+        )
         try:
             # The number form is pre-registered by load_channel_config.
             alias_channel = h.registry.get(f"signal:{OTHER_NUMBER}")
@@ -699,7 +707,11 @@ class TestChannelScopeAndIdentity:
         message carries sourceNumber -- an identity change must not fork
         the history."""
         channels_config = {f"signal:{OTHER_NUMBER}": {"system_prompt": "alias prompt"}}
-        h = await _start_plugin(tmp_path, channels=channels_config)
+        # The sender is allowlisted: a refused one gets no registered
+        # channel at all (#103), so identity is pinned on an allowed one.
+        h = await _start_plugin(
+            tmp_path, signal_overrides={"allow": [AUTH_ACI, OTHER_ACI]}, channels=channels_config,
+        )
         try:
             h.server.respond_when_contains(OTHER_ACI, [{"number": OTHER_NUMBER, "uuid": OTHER_ACI}])
 
@@ -1551,5 +1563,205 @@ class TestTransportMintedIds:
         try:
             assert not hasattr(h.plugin, "_pending_timestamps")
             assert not hasattr(h.plugin, "_admitted_correlation_ids")
+        finally:
+            await _stop_plugin(h)
+
+
+# ---------------------------------------------------------------------------
+# Issue #103: a refused sender never creates a persistent channel
+# ---------------------------------------------------------------------------
+
+
+class TestRefusedSenderCreatesNoChannel:
+    async def test_stranger_does_not_enter_the_registry(self, tmp_path):
+        """PRD §3.2.6: an envelope from a sender outside allow: reaches the
+        gate (on_message still fires) but leaves no channel behind."""
+        h = await _start_plugin(tmp_path, signal_overrides={"allow": [AUTH_ACI]})
+        try:
+            await h.server.push_notification(
+                "receive", make_data_envelope(source_uuid=OTHER_ACI, text="uninvited"),
+            )
+            await _wait_until(lambda: len(h.agent.calls) >= 1, timeout=5)
+            assert h.registry.get(f"signal:{OTHER_ACI}") is None
+            assert h.registry.by_transport("signal") == []
+        finally:
+            await _stop_plugin(h)
+
+    async def test_refusal_still_reaches_the_gate_with_the_aci_channel_id(self, tmp_path, caplog):
+        """The transient channel carries the same id a registered one would,
+        so the gate's veto and its INFO line name the right sender."""
+        h = await _start_plugin(tmp_path, signal_overrides={"allow": [AUTH_ACI]})
+        rejected = AsyncMock()
+        h.pm.ahook.on_message_rejected = rejected
+        try:
+            with caplog.at_level(logging.INFO, logger="corvidae.signal_plugin"):
+                await h.server.push_notification(
+                    "receive", make_data_envelope(source_uuid=OTHER_ACI, text="uninvited"),
+                )
+                await _wait_until(lambda: rejected.await_count >= 1, timeout=5)
+            assert rejected.await_args.kwargs["channel"].id == f"signal:{OTHER_ACI}"
+            assert rejected.await_args.kwargs["sender"] == OTHER_ACI
+            assert any(
+                "unauthorized sender" in r.getMessage() and OTHER_ACI in r.getMessage()
+                for r in caplog.records
+            )
+        finally:
+            await _stop_plugin(h)
+
+    async def test_allowlisted_sender_still_gets_a_registered_channel(self, tmp_path):
+        """Discriminating control: the allowed sender's channel is created."""
+        h = await _start_plugin(tmp_path, signal_overrides={"allow": [AUTH_ACI]})
+        try:
+            await _push_text(h, "hello")
+            await _wait_until(lambda: len(h.agent.calls) >= 1, timeout=5)
+            channel = h.registry.get(f"signal:{AUTH_ACI}")
+            assert channel is not None
+            assert h.agent.calls[0][2] is channel
+        finally:
+            await _stop_plugin(h)
+
+
+# ---------------------------------------------------------------------------
+# Issue #104: an admitted message that is never persisted is swept
+# ---------------------------------------------------------------------------
+
+
+class TestOrphanedPendingReceipts:
+    async def test_later_persist_sweeps_an_earlier_never_persisted_message(self, tmp_path, caplog):
+        """A and B are admitted; A's turn dies before persistence. When B
+        persists, the serial queue guarantees A is finished, so A's pending
+        timestamp and typing slot are released: no receipt for A, one for
+        B, and the outstanding count drops by A's slot."""
+        h = await _start_plugin(tmp_path)
+        try:
+            ts_a = _now_ms()
+            ts_b = ts_a + 1
+            await _push_text(h, "a", timestamp=ts_a)
+            await _push_text(h, "b", timestamp=ts_b)
+            await _wait_until(lambda: len(h.agent.calls) >= 2, timeout=3)
+            channel = h.agent.calls[0][2]
+            assert h.plugin._outstanding[channel.id] == 2
+
+            with caplog.at_level(logging.WARNING, logger="corvidae.signal_plugin"):
+                await h.plugin.on_message_persisted(
+                    channel=channel, trace_id=h.agent.tid_for("b"),
+                    rowid=2, text="b", meta={},
+                )
+
+            await _wait_until(lambda: h.server.requests_matching("receipt"), timeout=3)
+            receipts = h.server.requests_matching("receipt")
+            assert len(receipts) == 1
+            assert frame_contains(receipts[0], ts_b)
+            assert not frame_contains(receipts[0], ts_a)
+            # A's entry is gone and its slot given back; B still owes a reply.
+            assert channel.id not in h.plugin._pending_receipts
+            assert h.plugin._outstanding[channel.id] == 1
+            # The rescue is logged at WARNING naming the channel and A's id.
+            assert any(
+                channel.id in r.getMessage() and h.agent.tid_for("a") in r.getMessage()
+                for r in caplog.records if r.levelno == logging.WARNING
+            )
+        finally:
+            await _stop_plugin(h)
+
+    async def test_persist_does_not_sweep_messages_admitted_after_it(self, tmp_path):
+        """Only entries older than the persisted id are orphans; a later
+        message still queued keeps its receipt and slot."""
+        h = await _start_plugin(tmp_path)
+        try:
+            ts_a = _now_ms()
+            ts_b = ts_a + 1
+            await _push_text(h, "a", timestamp=ts_a)
+            await _push_text(h, "b", timestamp=ts_b)
+            await _wait_until(lambda: len(h.agent.calls) >= 2, timeout=3)
+            channel = h.agent.calls[0][2]
+
+            await h.plugin.on_message_persisted(
+                channel=channel, trace_id=h.agent.tid_for("a"),
+                rowid=1, text="a", meta={},
+            )
+            await _wait_until(lambda: h.server.requests_matching("receipt"), timeout=3)
+            assert h.plugin._pending_receipts[channel.id] == {h.agent.tid_for("b"): ts_b}
+            assert h.plugin._outstanding[channel.id] == 2
+        finally:
+            await _stop_plugin(h)
+
+
+# ---------------------------------------------------------------------------
+# Issue #76: resolve_channel defers until alias config can be applied
+# ---------------------------------------------------------------------------
+
+
+class TestResolveChannelBeforeConnect:
+    async def test_defers_before_first_connect_when_an_alias_is_configured(self, tmp_path):
+        """PRD §3.2.7: before the first connect the E.164 alias cannot be
+        matched to an ACI, so resolve_channel returns None and caches
+        nothing, rather than a default-configured channel."""
+        channels_config = {f"signal:{OTHER_NUMBER}": {"system_prompt": "alias prompt"}}
+        h = await _start_plugin(
+            tmp_path,
+            signal_overrides={"allow": [OTHER_NUMBER]},
+            channels=channels_config,
+            wait_connect=False,
+        )
+        # Hold the connect off: the plugin is started but signal-cli has
+        # not been reached, so no alias resolution has run.
+        await h.server.stop()
+        try:
+            channel = await h.pm.ahook.resolve_channel(channel_id=f"signal:{OTHER_ACI}")
+            assert channel is None
+            assert h.registry.get(f"signal:{OTHER_ACI}") is None
+        finally:
+            await _stop_plugin(h)
+
+    async def test_no_alias_configured_resolves_without_waiting(self, tmp_path):
+        """With no E.164 channels: key there is nothing to wait for."""
+        h = await _start_plugin(tmp_path, wait_connect=False)
+        await h.server.stop()
+        try:
+            channel = await h.pm.ahook.resolve_channel(channel_id=f"signal:{OTHER_ACI}")
+            assert channel is not None and channel.id == f"signal:{OTHER_ACI}"
+        finally:
+            await _stop_plugin(h)
+
+    async def test_alias_outside_allow_does_not_block(self, tmp_path):
+        """An E.164 channels: key that is not in allow: is never resolved
+        (it is inert), so it must not hold resolve_channel back."""
+        channels_config = {f"signal:{OTHER_NUMBER}": {"system_prompt": "alias prompt"}}
+        h = await _start_plugin(
+            tmp_path, signal_overrides={"allow": [AUTH_ACI]},
+            channels=channels_config, wait_connect=False,
+        )
+        await h.server.stop()
+        try:
+            channel = await h.pm.ahook.resolve_channel(channel_id=f"signal:{AUTH_ACI}")
+            assert channel is not None
+        finally:
+            await _stop_plugin(h)
+
+    async def test_failed_resolution_attempt_no_longer_blocks(self, tmp_path, caplog):
+        """Once an attempt has completed, a batch failure (retried only on
+        the next connect) must not defer reminders indefinitely: the
+        channel is created and the reduced config is logged at WARNING."""
+        channels_config = {f"signal:{OTHER_NUMBER}": {"system_prompt": "alias prompt"}}
+        h = await _start_plugin(
+            tmp_path,
+            signal_overrides={"allow": [OTHER_NUMBER]},
+            channels=channels_config,
+            pre_fail=[("getUserStatus", "rate limited")],
+        )
+        try:
+            await _wait_until(
+                lambda: h.plugin._allow_resolution_task is not None
+                and h.plugin._allow_resolution_task.done(),
+                timeout=5,
+            )
+            with caplog.at_level(logging.WARNING, logger="corvidae.signal_plugin"):
+                channel = await h.pm.ahook.resolve_channel(channel_id=f"signal:{OTHER_ACI}")
+            assert channel is not None
+            assert any(
+                OTHER_NUMBER in r.getMessage() and channel.id in r.getMessage()
+                for r in caplog.records if r.levelno == logging.WARNING
+            )
         finally:
             await _stop_plugin(h)

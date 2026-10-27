@@ -244,7 +244,9 @@ consolidate a near-duplicate of a member's memory and supersede it, so its
 own wording replaces the original record and inherits its importance and
 retrieval count. Only
 Signal's allowlist bounds which channels can come into existence under
-`signal:*`. At minimum, PMs should be off by default or
+`signal:*`: Signal checks it before resolving the channel, so a refused
+sender adds nothing to the registry (#103). Discord and IRC still create
+the channel before their gate runs. At minimum, PMs should be off by default or
 gated by an `irc.allow` list, bringing it in line with Signal.
 
 Discord is built like Signal, not like IRC. The transport's
