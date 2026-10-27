@@ -150,3 +150,34 @@ class TestTopologicalSort:
     def test_single_task(self):
         tasks = [{"name": "solo", "depends_on": []}]
         assert _topological_sort(tasks) == ["solo"]
+
+
+class TestPipelineExecutionErrors:
+    async def test_failure_names_the_task_and_command(self, monkeypatch):
+        """A failing task names the task and the command that failed."""
+        import importlib
+
+        from corvidae.tools.task_pipeline import TaskPipelinePlugin
+
+        async def failing_shell(command, timeout=30):
+            raise RuntimeError("boom")
+
+        shell_module = importlib.import_module("corvidae.tools.shell")
+        monkeypatch.setattr(shell_module, "shell", failing_shell)
+
+        plugin = TaskPipelinePlugin(None)
+        registry: list = []
+        plugin.register_tools(registry)
+        tool = next(t for t in registry if t.name == "task_pipeline")
+
+        definition = """
+tasks:
+  - name: build
+    command: "make all"
+    depends_on: []
+"""
+        result = await tool.fn(definition)
+
+        assert "build" in result
+        assert "make all" in result
+        assert "boom" in result

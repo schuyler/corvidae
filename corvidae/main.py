@@ -37,9 +37,12 @@ def discover_commands():
     for ep in importlib.metadata.entry_points(group="corvidae.commands"):
         try:
             corvidae.add_command(ep.load(), ep.name)
-        except Exception:
+        except Exception as exc:
             logger.warning(
-                "failed to load command %r, skipping", ep.name, exc_info=True
+                "failed to load command %r (%s), skipping",
+                ep.name,
+                type(exc).__name__,
+                exc_info=True,
             )
 
 

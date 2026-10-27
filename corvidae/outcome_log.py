@@ -77,6 +77,10 @@ class OutcomeLogPlugin(CorvidaePlugin):
         if pm is not None:
             self.pm = pm
         self._table_ready = False
+        # Remember the configured DB path and whether on_start has run, so a
+        # missing DB can be diagnosed as startup ordering or a real failure.
+        self._db_path = "sessions.db"
+        self._started = False
 
     def _resolve_db(self) -> aiosqlite.Connection | None:
         """Return the persistence plugin's DB connection, or None if not open yet."""
@@ -94,7 +98,11 @@ class OutcomeLogPlugin(CorvidaePlugin):
         """
         db = self._resolve_db()
         if db is None:
-            raise RuntimeError("persistence DB not available for exchange_log")
+            raise RuntimeError(
+                "persistence DB not available for exchange_log: "
+                f"daemon.session_db={self._db_path!r}, "
+                f"on_start completed: {self._started}"
+            )
         if not self._table_ready:
             await db.execute(EXCHANGE_LOG_DDL)
             # Schema upgrade: exchange_log tables from before #66 gain
@@ -109,12 +117,17 @@ class OutcomeLogPlugin(CorvidaePlugin):
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
+        # Record the configured path before attempting the early DDL so the
+        # guard message can name it even if the persistence DB is not open.
+        self._db_path = config.get("daemon", {}).get("session_db", "sessions.db")
         # Best-effort early DDL; falls back to lazy creation on first write
         # if the persistence DB hasn't opened yet (hook-ordering dependent).
         try:
             await self._ensure_table()
         except Exception:
             logger.warning("exchange_log table creation deferred", exc_info=True)
+        finally:
+            self._started = True
 
     # ------------------------------------------------------------------
     # Hook consumers — all fail-soft (log + continue), since these are

@@ -222,3 +222,26 @@ class TestRfc7386NoneDeletes:
         envelope = json.loads(row[0])
         assert "entropy" not in envelope
         assert envelope["stage1"] == {"salience": 0.4}
+
+
+async def test_missing_persistence_db_names_path_and_start_status():
+    """The exchange_log DB guard names the configured path and start status."""
+    from corvidae.outcome_log import OutcomeLogPlugin
+    from corvidae.persistence import PersistencePlugin
+
+    pm = create_plugin_manager()
+    persistence = PersistencePlugin()
+    pm.register(persistence, name="persistence")
+    plugin = OutcomeLogPlugin()
+    pm.register(plugin, name="outcome_log")
+    await plugin.on_init(pm, {})
+    # on_start runs with the persistence DB still closed, so the early DDL
+    # attempt is deferred; the writer then hits the guard.
+    await plugin.on_start({"daemon": {"session_db": "custom-sessions.db"}})
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await plugin.record_exchange("ex-missing", "cli:local")
+
+    message = str(excinfo.value)
+    assert "custom-sessions.db" in message
+    assert "on_start completed: True" in message

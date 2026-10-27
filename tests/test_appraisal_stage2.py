@@ -614,3 +614,16 @@ class TestAppraisalPrior:
         assert memory.importance_prior._fallback is original_prior
         await appraisal.on_stop()
         await db.close()
+
+
+def test_parse_json_block_error_names_appraisal_phase_and_long_text():
+    """The appraisal JSON parse error names its phase and keeps >200 chars."""
+    from corvidae.appraisal import _parse_json_block
+
+    text = "x" * 300 + " PROVIDER_ERROR_MARKER"
+    with pytest.raises(ValueError) as excinfo:
+        _parse_json_block(text)
+
+    message = str(excinfo.value)
+    assert "appraisal" in message.lower()
+    assert "PROVIDER_ERROR_MARKER" in message
