@@ -1399,3 +1399,44 @@ class TestStartupPluginSetLogging:
         assert "compaction" in record.loaded, (
             f"the real plugin is still loaded and must show it; got {record.loaded!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Cognition entry points live in corvidae-cognition (plans/kernel-split.md)
+# ---------------------------------------------------------------------------
+
+# The plugins the cognition extra provides, by entry-point name.
+_COGNITION_ENTRY_POINTS = {
+    "memory", "memory_tools", "funnel", "outcome_log", "appraisal", "critique",
+}
+
+
+def test_cognition_entry_points_come_from_the_cognition_package() -> None:
+    """With the extra installed, every cognition entry point names a
+    ``corvidae_cognition.`` module; without it, none is registered.
+
+    pluggy skips an entry point whose name is already registered, so a
+    stale ``memory = "corvidae.memory:..."`` left in the root pyproject
+    would load nothing or raise ImportError depending on distribution
+    order. The value prefix is what catches it.
+    """
+    import importlib.metadata
+    import importlib.util
+
+    # Every cognition-named entry point from every installed distribution.
+    # Not deduplicated by name: two distributions may both register
+    # "memory", and a stale duplicate is exactly what this test must see.
+    cognition = [
+        ep for ep in importlib.metadata.entry_points(group="corvidae")
+        if ep.name in _COGNITION_ENTRY_POINTS
+    ]
+
+    if importlib.util.find_spec("corvidae_cognition") is None:
+        # Kernel-only install: the extra's plugins are simply absent.
+        assert cognition == []
+    else:
+        # Each name registered exactly once, by the cognition package.
+        assert sorted(ep.name for ep in cognition) == sorted(_COGNITION_ENTRY_POINTS)
+        stale = [f"{ep.name} = {ep.value}" for ep in cognition
+                 if not ep.value.startswith("corvidae_cognition.")]
+        assert stale == [], f"entry points outside corvidae_cognition: {stale}"

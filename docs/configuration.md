@@ -154,7 +154,7 @@ as does a stage whose rows have left the window. See [design.md](design.md#forks
 |-----|------|---------|-------------|
 | `agent.forks.enabled` | boolean | `false` | Master switch. `false` leaves every stage on its standalone call. |
 | `agent.forks.reasoning_budget_tokens` | integer or null | `2048` | Sent as `reasoning_budget_tokens` on every fork. A fork keeps the main reasoning effort, because the chat template renders it into the system block and changing it would break the cached prefix; this per-request budget bounds the fork's think instead. `null` sends nothing (server default). llama-server applies it only when the template declares thinking tags. |
-| `agent.forks.stages` | list of strings or null | `null` | Which stages fork: `compaction`, `consolidation`, `appraisal`, `critique`. `null` means all of them. A name no plugin uses matches nothing. |
+| `agent.forks.stages` | list of strings or null | `null` | Which stages fork: `compaction`, `consolidation`, `appraisal`, `critique`. `null` means all of them. A name no plugin uses matches nothing. `consolidation`, `appraisal` and `critique` belong to the cognition extra; without it only `compaction` exists. |
 
 Any other key under `agent.forks`, a non-boolean `enabled`, a negative or
 non-integer budget, or `stages` that isn't a list of strings fails at
@@ -243,6 +243,8 @@ Any *dotted* key not on that list is operator-only: it is read once at init or r
 
 #### `appraisal.*` — stage-1 appraisal
 
+Requires the cognition extra (`--extra cognition` on your `uv sync` line; see [cognition.md](cognition.md)). Without it these keys are ignored.
+
 `AppraisalPlugin` scores every inbound message at the gate: surface heuristics plus an FTS5 familiarity probe on a dedicated read-only connection, under a hard latency budget, failing open. All keys resolve per-decision.
 
 | Key | Default | Description |
@@ -267,7 +269,9 @@ Any *dotted* key not on that list is operator-only: it is read once at init or r
 
 ## `memory` — autobiographical memory
 
-`MemoryPlugin` consolidates compacted dialog into first-person memory records and retrieves them into the prompt (see [design.md](design.md)). The former `dream.*` keys are gone with `DreamPlugin` (absorbed by this plugin).
+Requires the cognition extra (`--extra cognition` on your `uv sync` line; see [cognition.md](cognition.md)). Without it these keys are ignored.
+
+`MemoryPlugin` consolidates compacted dialog into first-person memory records and retrieves them into the prompt (see [cognition.md](cognition.md#memoryplugin)). The former `dream.*` keys are gone with `DreamPlugin` (absorbed by this plugin).
 
 A record's `created_at` is the `sessions.db` timestamp of the last message in its source range, i.e. when the conversation happened, not when consolidation ran. When a near-duplicate merge folds an older record into a new one, the survivor keeps the later of the two dates. Everything that ages a record (the retrieval score, the displayed `(age)`, retention decay and `memory.retention.grace_days`, and the `search_memory` date filters) measures from that date, so history consolidated long after the fact is aged correctly.
 
@@ -343,6 +347,8 @@ A heartbeat costs a main-model turn per beat on the shared backend; keep the int
 ---
 
 ## `funnel` — context-admission funnel
+
+Requires the cognition extra (`--extra cognition` on your `uv sync` line; see [cognition.md](cognition.md)). Without it these keys are ignored.
 
 `FunnelPlugin` is the single chokepoint for tail CONTEXT admission (dedupe, budgets, injection framing). It also owns deferred registration: non-tool-call notification payloads queue per `(channel, origin)` via `register_and_wake()`, one stub notification wakes the channel per pending pair, and the drain in `before_agent_turn` admits everything queued for the triggering exchange's origin. The deferred registry is in-memory by design (payloads pending at shutdown are dropped) and adds no config keys — drained payloads spend the same per-source budgets below.
 
@@ -425,6 +431,8 @@ Pass the ids explicitly rather than using the `range` form: `message_log` ids ar
 
 ## `discord` — Discord transport
 
+The transport needs the Discord SDK: add `--extra discord` to your `uv sync` line. A `discord:` block without it fails at startup with a message saying so; with no block, the SDK is never loaded.
+
 The `discord` section is optional. If absent, `DiscordPlugin` loads but stays inert: no client, no tasks, nothing logged above `DEBUG`. If present, it must be well-formed — no token (in the block or the environment), an `allow` that is not a list, or a `message_chunk_size` that is not an integer from 100 to 2000 raises at startup naming the offending field.
 
 corvidae logs in as a Discord bot account. Creating the application, getting the token, and inviting the bot are covered in [discord-ops.md](discord-ops.md). In DMs the bot answers every message from an allowed user; in servers and threads it answers only messages that @-mention it.
@@ -504,7 +512,7 @@ Whichever you pick, the origin you browse to has to be in the allowed set. Don't
 
 The `acp` section is optional and does not enable ACP by itself. ACP mode
 starts only via `corvidae acp`, which sets an internal `_acp_mode` flag.
-Install the SDK with `uv sync --extra acp`.
+Install the SDK by adding `--extra acp` to your `uv sync` line.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|

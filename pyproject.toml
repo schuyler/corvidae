@@ -13,8 +13,6 @@ dependencies = [
     "pydantic>=2.13.3",
     "pyyaml>=6.0.3",
     "tiktoken>=0.7",
-    "sqlite-vec>=0.1.9",
-    "discord-py>=2.4",
 ]
 
 [project.optional-dependencies]
@@ -25,6 +23,15 @@ dev = [
 ]
 acp = [
     "agent-client-protocol>=0.12.1,<0.13",
+]
+# The Discord transport's SDK (R10); the transport itself is in the kernel.
+discord = [
+    "discord-py>=2.4",
+]
+# Memory, appraisal, critique, funnel and outcome log
+# (packages/corvidae-cognition, docs/cognition.md).
+cognition = [
+    "corvidae-cognition",
 ]
 
 [project.scripts]
@@ -52,18 +59,12 @@ subagent = "corvidae.tools.subagent:SubagentPlugin"
 mcp = "corvidae.mcp_client:McpClientPlugin"
 llm = "corvidae.llm_plugin:LLMPlugin"
 compaction = "corvidae.compaction:CompactionPlugin"
-memory = "corvidae.memory:MemoryPlugin"
-memory_tools = "corvidae.tools.memory_tools:MemoryToolsPlugin"
-funnel = "corvidae.funnel:FunnelPlugin"
 thinking = "corvidae.thinking:ThinkingPlugin"
 runtime_settings = "corvidae.tools.settings:RuntimeSettingsPlugin"
 tools = "corvidae.tool_collection:ToolCollectionPlugin"
 metrics = "corvidae.metrics:MetricsPlugin"
 usage_log = "corvidae.metrics:UsageLogPlugin"
 metrics_jsonl = "corvidae.metrics:MetricsJsonlPlugin"
-outcome_log = "corvidae.outcome_log:OutcomeLogPlugin"
-appraisal = "corvidae.appraisal:AppraisalPlugin"
-critique = "corvidae.critique:CritiquePlugin"
 scheduler = "corvidae.scheduler:SchedulerPlugin"
 agent = "corvidae.agent:Agent"
 idle_monitor = "corvidae.idle:IdleMonitorPlugin"
@@ -95,3 +96,10 @@ filterwarnings = [
 ]
 timeout = 15
 timeout_method = "thread"
+
+# The cognition plugins are a workspace member in this repository.
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[tool.uv.sources]
+corvidae-cognition = { workspace = true }

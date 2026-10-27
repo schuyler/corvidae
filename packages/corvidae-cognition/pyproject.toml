@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "corvidae-cognition"
+version = "0.0.1"
+description = "Cognition plugins for corvidae: memory, appraisal, critique, funnel, outcome log"
+requires-python = ">=3.13"
+dependencies = ["corvidae", "sqlite-vec>=0.1.9"]
+
+[project.entry-points.corvidae]
+memory = "corvidae_cognition.memory:MemoryPlugin"
+memory_tools = "corvidae_cognition.memory_tools:MemoryToolsPlugin"
+funnel = "corvidae_cognition.funnel:FunnelPlugin"
+outcome_log = "corvidae_cognition.outcome_log:OutcomeLogPlugin"
+appraisal = "corvidae_cognition.appraisal:AppraisalPlugin"
+critique = "corvidae_cognition.critique:CritiquePlugin"
+
+[tool.uv.sources]
+corvidae = { workspace = true }
+
+# Explicit, so a later tests/ or docs/ directory here can't break the build.
+[tool.setuptools.packages.find]
+include = ["corvidae_cognition*"]

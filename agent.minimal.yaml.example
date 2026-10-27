@@ -1,8 +1,12 @@
 # Minimal profile — the cognition plugin set (long-term memory, appraisal,
-# and critique) disabled. What this profile gives up: no memory retrieval
-# or consolidation across sessions, no appraisal scoring, and no deferred
-# self-critique. What it keeps: the core agent loop, multi-turn tool
-# calling, compaction, and persistence/restart recovery.
+# and critique) disabled. A kernel-only install (`uv sync` without
+# `--extra cognition`) doesn't have those plugins, so it needs no disable
+# list; the list below is for installs that have the extra.
+#
+# What this profile gives up: no memory retrieval or consolidation across
+# sessions, no appraisal scoring, and no deferred self-critique. What it
+# keeps: the core agent loop, multi-turn tool calling, compaction, and
+# persistence/restart recovery.
 
 llm:
   main:

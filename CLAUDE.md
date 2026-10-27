@@ -3,14 +3,21 @@
 ## Environment
 
 Dependencies are installed by `.claude/hooks/session-start.sh` in Claude Code on
-the web. If an import fails, run `uv sync --extra dev --extra acp` — that
+the web. If an import fails, run
+`uv sync --extra dev --extra acp --extra discord --extra cognition` — that
 installs the `dev` extra (pytest, pytest-asyncio), the `dev` dependency group
-(pytest-timeout), which the pytest config needs, and the `acp` extra, which the
-ACP transport tests import. CI syncs the same set.
+(pytest-timeout), which the pytest config needs, the `acp` and `discord`
+extras, whose transport tests import the SDKs, and the `cognition` extra
+(`packages/corvidae-cognition`: memory, appraisal, critique, funnel,
+outcome_log), which `tests/cognition/` imports. That is CI's `full` job. The
+kernel alone is `--extra dev --extra acp`; CI's `kernel` job runs everything
+outside `tests/cognition/` that way, so a kernel module must never import
+`corvidae_cognition` (`tests/test_kernel_boundary.py`).
 
 ```sh
-uv sync --extra dev --extra acp  # install everything
+uv sync --extra dev --extra acp --extra discord --extra cognition  # everything
 uv run pytest                    # full suite
+uv run pytest --ignore=tests/cognition  # the kernel suite
 uv run pytest tests/test_foo.py  # one file
 uv run pytest --run-eval         # include live-LLM eval tests (deselected by default)
 uv run corvidae                  # run the daemon; reads ./agent.yaml
@@ -24,9 +31,12 @@ commit the lock change: `uv lock --upgrade-package apluggy` for one package,
 `uv lock --upgrade` for all. After editing dependencies in `pyproject.toml`,
 run `uv lock`; CI syncs with `--locked` and fails on a stale lock.
 
-CI (`.github/workflows/tests.yml`) runs `uv run pytest -q` on every push to `main`
-and every PR, after checking that sqlite-vec loads. It doesn't run the harness
-or `--run-eval`.
+CI (`.github/workflows/tests.yml`) runs two jobs on every push to `main` and
+every PR: `kernel` (`--extra dev --extra acp`; checks that sqlite-vec, the
+Discord SDK and `corvidae_cognition` are absent, then runs everything outside
+`tests/cognition/`) and `full` (every extra; checks sqlite-vec and the Discord
+SDK load, then runs the whole suite). It doesn't run the harness or
+`--run-eval`.
 
 `tool.pytest.ini_options` sets a global `timeout = 15`. Every async test inherits
 it — this is the hang safety net AGENTS.md calls for, so don't disable it. If a
@@ -47,7 +57,9 @@ Three layers: an apluggy plugin system, the agent loop, and transport plugins.
 Things that are easy to get wrong and won't fail loudly:
 
 - **A new plugin must be registered** in `[project.entry-points.corvidae]` in
-  `pyproject.toml`. Without it the plugin is simply never loaded — no error.
+  `pyproject.toml` (the root one for kernel plugins,
+  `packages/corvidae-cognition/pyproject.toml` for cognition plugins).
+  Without it the plugin is simply never loaded — no error.
 - **Transports subclass `TransportPlugin`** (`corvidae/hooks.py`), which
   filters outbound `send` events for them. Inbound hooks
   (`should_process_message`, `on_message_admitted`/`rejected`/`persisted`)
@@ -81,6 +93,7 @@ that means one or more of:
 - `docs/design.md` — architecture, hook specs, transports, schemas
 - `docs/configuration.md` — any new or changed `agent.yaml` key
 - `docs/plugin-guide.md` — anything a plugin author would need
+- `docs/cognition.md` — the cognition plugins (`packages/corvidae-cognition`)
 - `docs/threat-model.md` — anything that changes what untrusted text can
   reach or what a tool can do (new tools, transports, tunables, roles)
 - `agent.yaml.example` — new config keys, commented out

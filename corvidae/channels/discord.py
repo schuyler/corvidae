@@ -7,17 +7,24 @@ reach it. Only allowlisted Discord user ids may drive the agent.
 The client deliberately does not request the privileged Message Content
 intent: Discord still delivers message content for DMs and for messages that
 mention the bot, which are the only messages this transport processes.
+
+The SDK (discord-py) is optional: add ``--extra discord`` to the ``uv sync``
+line. This module
+never imports it at load time, because pluggy loads every entry point
+eagerly and an ImportError here would stop every install without the extra
+from starting. It is imported on first use, and ``on_init`` fails with an
+install hint when a ``discord:`` block is configured without it.
 """
 
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import os
 import re
+from types import ModuleType
 from typing import Any, Optional
-
-import discord
 
 from corvidae.channel import Channel, ChannelRegistry
 from corvidae.channels.split import split_message
@@ -170,26 +177,45 @@ def split_discord_message(text: str, max_len: int = DISCORD_MESSAGE_LIMIT) -> li
     return [p + b + s for p, b, s in _split_discord_segments(text, max_len)]
 
 
-class _DiscordClient(discord.Client):
-    """discord.Client wired to a DiscordPlugin.
+def _sdk() -> ModuleType:
+    """Return the discord.py module, imported on first use (see the module
+    docstring for why it is not imported at load time)."""
+    import discord
 
-    discord.py runs each gateway event as its own task, so on_message does
-    nothing but hand the message to the plugin's synchronous inbound queue.
+    return discord
+
+
+@functools.cache
+def _client_class() -> type:
+    """Build the gateway client class on first use.
+
+    It subclasses ``discord.Client``, so it can only exist once the SDK is
+    imported; it is built once and reused.
     """
+    discord = _sdk()
 
-    def __init__(self, plugin: "DiscordPlugin", *, intents: discord.Intents) -> None:
-        super().__init__(intents=intents)
-        self._plugin = plugin
+    class _DiscordClient(discord.Client):
+        """discord.Client wired to a DiscordPlugin.
 
-    async def on_ready(self) -> None:
-        """Log the connected account and tell the plugin the connection is good."""
-        user_id = self.user.id if self.user is not None else None
-        logger.info("discord: connected as user id %s", user_id)
-        self._plugin._on_ready()
+        discord.py runs each gateway event as its own task, so on_message does
+        nothing but hand the message to the plugin's synchronous inbound queue.
+        """
 
-    async def on_message(self, message: discord.Message) -> None:
-        """Queue an inbound message for the plugin's single consumer task."""
-        self._plugin._enqueue(message, self.user.id if self.user is not None else None)
+        def __init__(self, plugin: "DiscordPlugin", *, intents: Any) -> None:
+            super().__init__(intents=intents)
+            self._plugin = plugin
+
+        async def on_ready(self) -> None:
+            """Log the connected account and tell the plugin the connection is good."""
+            user_id = self.user.id if self.user is not None else None
+            logger.info("discord: connected as user id %s", user_id)
+            self._plugin._on_ready()
+
+        async def on_message(self, message: Any) -> None:
+            """Queue an inbound message for the plugin's single consumer task."""
+            self._plugin._enqueue(message, self.user.id if self.user is not None else None)
+
+    return _DiscordClient
 
 
 class DiscordPlugin(TransportPlugin):
@@ -240,6 +266,20 @@ class DiscordPlugin(TransportPlugin):
             return
         if not isinstance(block, dict):
             raise ValueError("discord: config block must be a mapping")
+
+        # A configured block needs the SDK. Checked here, at startup, rather
+        # than when the connection loop first builds a client, so a missing
+        # extra fails loudly instead of as a retried connection error. Not
+        # cached: an install can gain or lose the SDK between runs.
+        try:
+            _sdk()
+        except ImportError as exc:
+            raise RuntimeError(
+                "DiscordPlugin: agent.yaml has a discord: block, but the "
+                "Discord SDK (discord-py) is not installed. Install it with "
+                "uv sync --extra discord, adding the other extras you use "
+                "(e.g. --extra cognition): uv sync removes extras you don't name."
+            ) from exc
 
         # The token may live in the environment instead of agent.yaml.
         token = block.get("token") or os.environ.get("DISCORD_TOKEN")
@@ -321,10 +361,10 @@ class DiscordPlugin(TransportPlugin):
     # Connection loop
     # -----------------------------------------------------------------
 
-    def _make_client(self) -> _DiscordClient:
+    def _make_client(self) -> Any:
         """Build a gateway client. Default intents only: no privileged
         Message Content intent (see the module docstring)."""
-        return _DiscordClient(self, intents=discord.Intents.default())
+        return _client_class()(self, intents=_sdk().Intents.default())
 
     def _on_ready(self) -> None:
         """A connection fully came up: the next failure retries quickly."""
@@ -345,7 +385,7 @@ class DiscordPlugin(TransportPlugin):
                 await client.start(self._token)
             except asyncio.CancelledError:
                 raise
-            except discord.LoginFailure as exc:
+            except _sdk().LoginFailure as exc:
                 # A bad token never gets better by retrying.
                 logger.error(
                     "discord: login failed; check that discord.token (or "
@@ -591,7 +631,7 @@ class DiscordPlugin(TransportPlugin):
             try:
                 # Injected text must not be able to mention @everyone, roles,
                 # or users, whatever the client's default says.
-                await target.send(chunk, allowed_mentions=discord.AllowedMentions.none())
+                await target.send(chunk, allowed_mentions=_sdk().AllowedMentions.none())
             except Exception as exc:
                 logger.warning("discord: failed to deliver message: %s", exc, exc_info=True)
 

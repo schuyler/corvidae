@@ -1,7 +1,7 @@
 # Memory consolidation prompt
 
 The documented copy of `DEFAULT_CONSOLIDATION_PROMPT` in
-`corvidae/memory.py` — the system prompt for the background-model call
+`packages/corvidae-cognition/corvidae_cognition/memory.py` — the system prompt for the background-model call
 that turns a compacted conversation segment into a first-person memory
 record (bootstrap-mapping §3.1). Override it with a literal string via the
 `memory.consolidation_prompt` config key.

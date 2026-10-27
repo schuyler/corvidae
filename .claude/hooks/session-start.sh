@@ -18,9 +18,11 @@ cd "${CLAUDE_PROJECT_DIR:-$(pwd)}"
 
 # Install runtime deps plus the dev extra (pytest, pytest-asyncio), the dev
 # dependency group (pytest-timeout, required by the global timeout in
-# tool.pytest.ini_options), and the acp extra (the ACP transport tests import
-# the SDK; CI syncs it too). uv sync is idempotent and reuses its cache.
+# tool.pytest.ini_options), the acp and discord extras (their transport tests
+# import the SDKs) and the cognition extra (tests/cognition/ imports it).
+# This is CI's full job; the kernel alone is --extra dev --extra acp.
+# uv sync is idempotent and reuses its cache.
 echo "session-start: installing dependencies with uv"
-uv sync --extra dev --extra acp
+uv sync --extra dev --extra acp --extra discord --extra cognition
 
 echo "session-start: dependencies ready"

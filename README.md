@@ -10,7 +10,9 @@ Corvidae is a minimalist, extensible architecture for building LLM agent harness
 
 Three layers: a plugin system ([apluggy](https://github.com/nextline-dev/apluggy)), an agent loop, and transport plugins. Each transport converts platform-specific messages to a common Channel abstraction. The agent loop handles prompt construction and LLM interaction. The plugin system wires everything together via lifecycle hooks.
 
-Every built-in plugin is optional. Without PersistencePlugin, messages drop but the daemon doesn't crash. Without CompactionPlugin, history grows unbounded. Without ThinkingPlugin, `<thinking>` blocks pass through to the channel. The system is designed to work with any subset of its parts — add what you need, leave out what you don't.
+The distribution is split the same way. `uv sync` installs the kernel: the agent loop, persistence, compaction, tools and transports. The cognition plugins — long-term memory, appraisal, critique, the context funnel and the outcome log — are a separate package in this repository, installed with `--extra cognition` ([docs/cognition.md](docs/cognition.md)).
+
+Any plugin can be switched off with `plugins.disabled` in `agent.yaml`, but plugins declare what they depend on and startup stops with an error if a dependency is missing: disabling PersistencePlugin, for instance, also means disabling SchedulerPlugin, UsageLogPlugin and the cognition plugins that need the database. The graph is in [docs/design.md](docs/design.md#current-dependency-graph). Without CompactionPlugin, history grows unbounded; without ThinkingPlugin, `<thinking>` blocks pass through to the channel.
 
 The agent loop uses single-turn dispatch: one LLM call per queue item. Tool calls become independent async tasks. When a task completes, the result arrives as a notification that feeds back into the queue, triggering the next LLM call. Multi-turn reasoning emerges from this cycle rather than from a blocking loop. This keeps the channel queue responsive — user messages are never stuck behind a long tool chain.
 
@@ -44,14 +46,20 @@ For a chat page in your browser, add a `web:` block (an empty one will do) and o
 Clone the repo — corvidae isn't published on PyPI.
 
 ```sh
-uv sync
+uv sync --extra cognition    # the daemon with memory, appraisal and critique
 uv run corvidae
 ```
 
-For development (includes pytest, and the ACP SDK its tests import):
+`uv sync` alone installs the kernel: the agent loop, persistence, tools and
+the transports, without the cognition plugins or sqlite-vec. Add
+`--extra discord` for the Discord transport and `--extra acp` for
+`corvidae acp`, on the same line: `uv sync` removes any extra you don't
+name.
+
+For development (pytest, every extra its tests import):
 
 ```sh
-uv sync --extra dev --extra acp
+uv sync --extra dev --extra acp --extra discord --extra cognition
 uv run pytest
 ```
 
@@ -91,6 +99,8 @@ other tenants.
 
 ## Included plugins
 
+### Kernel plugins
+
 | Plugin | Purpose |
 |--------|---------|
 | PersistencePlugin | SQLite database lifecycle and per-channel conversation initialization |
@@ -105,6 +115,21 @@ other tenants.
 | RuntimeSettingsPlugin | Lets the LLM adjust its own per-channel parameters mid-session |
 | IdleMonitorPlugin | Fires `on_idle` when all queues are quiescent |
 | SchedulerPlugin | Reminders the agent sets with `remind_me`, operator-scheduled jobs, and a heartbeat, fired into channels on the clock |
+| SignalPlugin | Signal transport via a running `signal-cli` daemon |
+| DiscordPlugin | Discord transport (needs `--extra discord`) |
+| WebPlugin | Browser chat UI on localhost |
+| AcpPlugin | Agent Client Protocol over stdio for editors (`corvidae acp`, needs `--extra acp`) |
+
+### Cognition plugins (`--extra cognition`)
+
+| Plugin | Purpose |
+|--------|---------|
+| MemoryPlugin | Consolidates compacted conversation into long-term memories and retrieves them into context |
+| MemoryToolsPlugin | `search_memory` and `recall_raw` tools |
+| FunnelPlugin | Admits retrieved context into the prompt under a budget |
+| AppraisalPlugin | Scores each exchange as it happens |
+| CritiquePlugin | Reviews the agent's replies after the fact |
+| OutcomeLogPlugin | Records each exchange and its outcome |
 
 ## CLI subcommands
 

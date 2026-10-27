@@ -19,8 +19,16 @@ Three layers:
    dispatch: one LLM call per queue item, tool calls dispatched as
    background tasks, results arrive as notifications.
 
-3. **Transport plugins** — IRC, CLI, ACP (stdio). Each transport converts
-   platform-specific messages to/from a common Channel abstraction.
+3. **Transport plugins** — CLI, IRC, Signal, Discord, web, ACP (stdio). Each
+   transport converts platform-specific messages to/from a common Channel
+   abstraction.
+
+This document covers the kernel: the `corvidae` package. The cognition
+plugins (memory, funnel, appraisal, critique, outcome log) are a second
+distribution in the same repository, `corvidae-cognition`, installed with
+the `cognition` extra and documented in [cognition.md](cognition.md). The
+kernel never imports them; they use the plugin API listed in
+[plugin-guide.md](plugin-guide.md#what-the-kernel-exports-to-plugins).
 
 ```
 ┌──────────────────────────────────────────────────────┐
@@ -537,7 +545,7 @@ CREATE INDEX idx_log_channel ON message_log(channel_id, timestamp);
 
 Plugins keep their own tables on the same connection, created lazily on
 first use because the `on_start` broadcast is concurrent: `memory` and
-friends ([MemoryPlugin](#memoryplugin)), `exchange_log` (OutcomeLogPlugin),
+friends ([MemoryPlugin](cognition.md#memoryplugin)), `exchange_log` (OutcomeLogPlugin),
 `usage_log` (UsageLogPlugin), and `schedule`
 ([SchedulerPlugin](#schedulerplugin)).
 
@@ -757,6 +765,86 @@ the summary row with `timestamp = boundary - 1e-6`, and commits.
 
 **Graceful degradation:** without `PersistencePlugin`, `resolve_conversation` returns
 no history and conversation events are not persisted.
+
+## Operator redaction (`corvidae redact`)
+
+`corvidae/commands/redact.py` — operator-only CLI for permanent content
+removal. Never a registered agent tool; never reachable from any hook the
+model can influence.
+
+**Forms:**
+
+```
+corvidae redact --db sessions.db message <id> [<id2>...]   # specific message_log rows
+corvidae redact --db sessions.db memory <memory_id>        # a record + its raw range
+corvidae redact --db sessions.db range <start_id> <end_id> # message_log id range (inclusive)
+```
+
+`--dry-run` prints affected row counts without writing. Both dry-run and
+real runs count only rows that exist and were actually touched, and the
+`message` and `range` forms print `<found> of <requested>` so a mistyped id
+is visible. A `--db` path that is not an existing file aborts with
+`Database not found: <path>` before opening a connection (opening would
+silently create an empty database).
+
+**WAL requirement.** The CLI opens its own connection (`PRAGMA busy_timeout
+= 5000`, short transactions) and asserts WAL journal mode at startup. If
+the mode is not WAL, it aborts with a message naming the current mode and
+how to convert. The `corvidae` daemon configures WAL on startup; a
+daemon-created DB is always WAL.
+
+**Schema-presence probe (pre-memory-schema and kernel-only DBs).** Before
+touching any surface, the CLI probes `sqlite_master` for the tables it
+needs. The `message` and `range` forms always write the message
+tombstone and skip each absent surface without printing anything: no
+`message_fts` means there is nothing to clear (if `MemoryPlugin` creates
+it later, its backfill indexes the tombstone, not the original); no
+`memory` means no memory cascade; no `memory_vec` skips only the vec-row
+delete. The `memory` form needs the `memory` table and exits with an error
+(`memory table not present in this database`) without it. The CLI never
+creates schema; schema is daemon-owned.
+
+**Cascade (per-form behavior).**
+
+- **`message` form:** for each supplied `message_log` id, rewrites the
+  `message` JSON — keeping `role` and structural keys, replacing `content`
+  with `[redacted by operator YYYY-MM-DD]`, dropping `tool_calls` and
+  payload fields. Row id and timestamps are unchanged. The `message_log_au`
+  trigger propagates the change to `message_fts` automatically (when
+  present). Then cascades to memory: for every `memory` row whose
+  `[msg_id_start, msg_id_end]` contains the redacted message's id **and**
+  whose `channel_id` matches — the `message_log` id sequence is global
+  across all channels, so a numeric-range match alone would over-redact
+  unrelated channels — tombstones the memory summary to `[redacted by
+  operator]`, sets `redacted=1`, `indexed=0`, `embedded=0`, and deletes its
+  vec row. The `memory_au` trigger propagates to `memory_fts`.
+- **`memory` form:** resolves the record's `[msg_id_start, msg_id_end]`
+  range with `WHERE channel_id = record.channel_id AND id BETWEEN ...` —
+  the per-channel predicate is load-bearing because the global-id range
+  otherwise includes interleaved foreign-channel rows — then tombstones
+  those messages. Tombstones the target memory record itself and cascades
+  to any other same-channel memory records whose ranges intersect the
+  tombstoned message ids.
+- **`range` form:** collects all `message_log` ids in the range and
+  delegates to the `message` form cascade.
+
+**Verification pass.** After each cascade, the CLI extracts a sample token
+from the original content (before tombstoning) and runs FTS `MATCH` queries
+against `message_fts` and `memory_fts`. It prints `"verified: 0 hits for
+'<token>' in <tables>"` when clean or `"WARNING: FTS still contains hits for
+'<token>': <table>: <N> hits"` when the cascade left searchable content — every invocation proves its own
+completeness. Skipped when `--dry-run` is in effect or when no suitable
+sample token can be extracted.
+
+The memory cascade above needs the cognition extra's tables. On a kernel-only
+database (`memory`, `memory_vec`, `memory_fts` and `message_fts` absent) the
+`message` and `range` forms tombstone the `message_log` rows, and the
+verification line reports `verified: no FTS surfaces present`; the
+`memory` form exits with the error above. If the extra was installed once
+and later removed, `message_fts` and its `message_log_ai`/`message_log_au`
+triggers stay in `sessions.db` and keep indexing into a table nothing reads;
+`redact` still clears them because it probes for them
+([cognition.md](cognition.md)).
 
 ## JsonlLogPlugin
 
@@ -1148,209 +1236,6 @@ agent:
 
 **Graceful degradation:** without `ToolCollectionPlugin`, `Agent.depends_on`
 validation fails at startup.
-
-## MemoryPlugin
-
-`memory.py` — autobiographical memory. Entry point
-name: `"memory"`; `depends_on = {"persistence", "llm"}`. Absorbs the former
-`DreamPlugin` embryo (removed): compaction becomes memory formation instead
-of file-based fact scraping.
-
-### Consolidation (write path)
-
-Two triggers, one watermarked code path:
-
-- **`on_compaction(channel, summary_msg, retain_count, compacted_ids)`** —
-  the moment dialog leaves the active window it enters long-term memory.
-  The compacted `message_log` id range rides the hook payload (rowid
-  threading, below); consolidation never depends on the summary row being
-  in the DB.
-- **`on_idle`** — channels inactive past `memory.idle_consolidate_after`
-  seconds get their un-consolidated tail consolidated.
-
-Both spawn a tracked plugin-owned `asyncio.create_task` (never the
-TaskQueue — every TaskQueue completion wakes the main model). The task
-reads the per-channel **consolidation watermark**, fetches the working
-range, produces the record (first-person summary with epistemic framing,
-JSON out) — from a fork of the live window when one is available (see
-[Forks](#forks)), else one standalone `llm.background` call
-(`prompts/memory_consolidation.md`) —
-scores an importance prior through the pluggable
-`MemoryPlugin.importance_prior` (default: cheap-model `RubricPrior`,
-0.5 on failure; `AppraisalPlugin` wraps it in `AppraisalPrior` when
-appraisal is enabled), embeds the summary via
-`llm.embedding`, and commits the memory row together with the watermark
-advance in one compare-and-set section. The row's `created_at` is the
-`message_log.timestamp` of the last row in the source range, i.e. when
-the conversation happened, not when consolidation ran, so history
-consolidated long after the fact is aged correctly by retrieval and
-retention.
-
-**Near-duplicate merge.** Before inserting the new vector, consolidation
-looks for the nearest indexed record with cosine similarity
-≥ `memory.dup_threshold` among the records in the channel's retrieval
-scope (#58). A record on another channel qualifies only if that channel's
-scope has the same reach (`ChannelScope.same_reach`), because groups are
-not transitive: with groups {A, B} and {A, C}, folding C's record into one
-owned by A, and later A's into one owned by B, would hide the fact from C.
-Equal reach keeps the survivor visible to exactly the channels that could
-see the superseded record. Under a single `*` group every channel
-qualifies. The old record is superseded (`superseded_by`, `indexed=0`,
-vector deleted); the survivor takes the summed retrieval count, the
-higher importance, and the later of the two records' dates. Message
-ranges fold only within one channel: `message_log` ids are global, and
-`recall_raw` and `/redact` read a record's range on its own channel, so on
-a cross-channel merge each record keeps its own range and the superseded
-record still leads to its channel's source dialog. Overlapping triggers on the same
-range discard the loser's record — no duplicates. Embedding failure
-stores the record with `embedded=0` for later backfill; the summary text
-is canonical and vectors are a rebuildable cache. All consolidation LLM
-calls carry `stage="consolidation"` attribution, along with the `trigger`
-that started the run (`"compaction"` or `"idle"`) — set once at
-`_consolidate_range`'s entry, so it rides into the `on_llm_response`
-attribution snapshot for that call, into `MetricsPlugin`'s emitted tags,
-the `usage_log.trigger` column, and the `memory consolidated` completion
-log line.
-
-### Retrieval (read path)
-
-`before_agent_turn` runs when the window tail is a plain user MESSAGE
-(notification-triggered turns skip retrieval entirely). The inbound text is embedded and matched against `memory_vec`
-(sqlite-vec exact KNN, cosine distance); candidates are filtered to
-`indexed=1 AND redacted=0` and channel-compartmentalized (`channel_id`
-match, or shared scope via `memory.channel_groups`, whose members may be
-`*` / `?` globs matched with SQLite `GLOB`). Scores are
-`cosine_similarity × exp(-age_days / memory.half_life_days)`, where
-`age_days` runs from `created_at`, or from `max(created_at,
-last_retrieved_at)` under `memory.retrieval.recency_from: last_used`.
-Candidates rank by score and are annotated into relevance bands (strong
-≥ 0.75, moderate ≥ 0.60, else weak; weak drops unless nothing else
-matched). The bands apply to the score by default, or to raw similarity
-under `memory.retrieval.band_on: similarity`, so an old but apt memory is
-not presented as a guess. The `(age)` shown always runs from
-`created_at`. Winners enter the window as
-`[band] (age) summary` lines through the admission funnel — never by
-direct CONTEXT append. Admitted memories get their access statistics
-bumped (`retrieval_count`, `last_retrieved_at` — the write half of
-reconsolidation), and every retrieval writes a `retrieval_log` row
-(the top-ranked candidate's decayed score and raw similarity,
-hit/admitted counts, degradation flag).
-
-**Graceful degradation:** encoder down → FTS5 keyword retrieval over
-`memory_fts` (flagged `degraded_to_fts=1`); sqlite-vec unloadable → FTS5
-with one clear startup warning; no `llm.embedding` role → records stored
-with `embedded=0`, retrieval FTS5-only; a stored encoder differing from
-config → ERROR and embeddings disabled rather than silently mixing
-encoders. Nothing in the memory path raises into the turn loop.
-
-### Schema
-
-`memory` (records, with `indexed`, `superseded_by`, `redacted`, and
-`embedded` columns), `consolidation_watermark`, `embedding_meta`,
-`memory_fts` (external-content FTS5 with insert/update sync triggers; no
-delete trigger — memory rows are never deleted), `memory_vec` (vec0,
-created only when the extension loads), `retrieval_log`, `retention_meta`
-(one-row table persisting `last_run` for the retention job interval), and
-`message_fts` (regular FTS5 table over `message_log` content, maintained by
-`message_log_ai`/`message_log_au` triggers; queried and cleared by `corvidae
-redact` — not by `search_memory`, which queries `memory_fts`). All on the persistence connection in
-`sessions.db`; `message_log` stays append-only except for the
-operator-only redaction tombstone.
-
-The epistemic-calibration prompt fragment (`prompts/memory_calibration.md`)
-is documented but NOT auto-injected — hedging vocabulary is persona, not
-architecture.
-
-### Operator redaction (`corvidae redact`)
-
-`corvidae/commands/redact.py` — operator-only CLI for permanent content
-removal. Never a registered agent tool; never reachable from any hook the
-model can influence.
-
-**Forms:**
-
-```
-corvidae redact --db sessions.db message <id> [<id2>...]   # specific message_log rows
-corvidae redact --db sessions.db memory <memory_id>        # a record + its raw range
-corvidae redact --db sessions.db range <start_id> <end_id> # message_log id range (inclusive)
-```
-
-`--dry-run` prints affected row counts without writing. Both dry-run and
-real runs count only rows that exist and were actually touched, and the
-`message` and `range` forms print `<found> of <requested>` so a mistyped id
-is visible. A `--db` path that is not an existing file aborts with
-`Database not found: <path>` before opening a connection (opening would
-silently create an empty database).
-
-**WAL requirement.** The CLI opens its own connection (`PRAGMA busy_timeout
-= 5000`, short transactions) and asserts WAL journal mode at startup. If
-the mode is not WAL, it aborts with a message naming the current mode and
-how to convert. The `corvidae` daemon configures WAL on startup; a
-daemon-created DB is always WAL.
-
-**Schema-presence probe (pre-memory-schema DBs).** Before touching any
-surface, the CLI probes `sqlite_master` for the tables and triggers it
-needs. If `message_fts` is absent, the message tombstone is still written
-but the FTS surface is skipped with a printed notice — safe because the
-`message_log_ai`/`message_log_au` triggers will index the tombstone (not
-the original content) the next time the daemon runs its `message_fts`
-backfill. If `memory` or `memory_vec` are absent, the memory cascade is
-skipped with a notice. The CLI never creates schema; schema is
-daemon-owned.
-
-**Cascade (per-form behavior).**
-
-- **`message` form:** for each supplied `message_log` id, rewrites the
-  `message` JSON — keeping `role` and structural keys, replacing `content`
-  with `[redacted by operator YYYY-MM-DD]`, dropping `tool_calls` and
-  payload fields. Row id and timestamps are unchanged. The `message_log_au`
-  trigger propagates the change to `message_fts` automatically (when
-  present). Then cascades to memory: for every `memory` row whose
-  `[msg_id_start, msg_id_end]` contains the redacted message's id **and**
-  whose `channel_id` matches — the `message_log` id sequence is global
-  across all channels, so a numeric-range match alone would over-redact
-  unrelated channels — tombstones the memory summary to `[redacted by
-  operator]`, sets `redacted=1`, `indexed=0`, `embedded=0`, and deletes its
-  vec row. The `memory_au` trigger propagates to `memory_fts`.
-- **`memory` form:** resolves the record's `[msg_id_start, msg_id_end]`
-  range with `WHERE channel_id = record.channel_id AND id BETWEEN ...` —
-  the per-channel predicate is load-bearing because the global-id range
-  otherwise includes interleaved foreign-channel rows — then tombstones
-  those messages. Tombstones the target memory record itself and cascades
-  to any other same-channel memory records whose ranges intersect the
-  tombstoned message ids.
-- **`range` form:** collects all `message_log` ids in the range and
-  delegates to the `message` form cascade.
-
-**Verification pass.** After each cascade, the CLI extracts a sample token
-from the original content (before tombstoning) and runs FTS `MATCH` queries
-against `message_fts` and `memory_fts`. It prints `"verified: 0 hits for
-'<token>' in <tables>"` when clean or `"WARNING: FTS still contains hits for
-'<token>': <table>: <N> hits"` when the cascade left searchable content — every invocation proves its own
-completeness. Skipped when `--dry-run` is in effect or when no suitable
-sample token can be extracted.
-
-## FunnelPlugin
-
-`funnel.py` — the context-admission funnel. Entry
-point name: `"funnel"`. The single chokepoint for tail CONTEXT admission:
-
-1. **Dedupe** against CONTEXT already in the window.
-2. **Budget** per source (`funnel.default_budget`, default 512 tokens;
-   `funnel.budgets.<source>` overrides), greedy in given order, drops
-   logged rather than silent.
-3. **Frame** every admitted batch in explicit data-not-instructions
-   wrapping with a source label (injection defense, written once here).
-4. **Append + persist** one CONTEXT message at the tail through
-   `persist_message`, with the rowid attached, so the window matches
-   its reload. Stale CONTEXT retires by aging past the compaction boundary.
-
-Callers: memory retrieval (and optionally date/time grounding). The
-funnel also owns deferred registration: non-tool-call notification
-payloads queue per `(channel, origin)` via `register_and_wake()`, one
-stub notification wakes the channel per pending pair, and the drain in
-`before_agent_turn` admits everything queued for the triggering
-exchange's origin.
 
 ## SchedulerPlugin
 
@@ -2188,7 +2073,7 @@ listener with aiohttp's client and raw sockets.
 
 `AcpPlugin` + `corvidae acp` — Agent Client Protocol **v1** over stdio for
 editors (bb `customAcpAgents`, Zed, …). Requires the optional
-`agent-client-protocol` extra (`uv sync --extra acp`).
+`agent-client-protocol` extra (`--extra acp` on the `uv sync` line).
 
 **Process model.** ACP is a dedicated subprocess (`corvidae acp`), not
 attached to long-lived `corvidae serve`. The command sets
@@ -2348,16 +2233,19 @@ fixed hand-written order:
    via `pm.set_blocked(name)` before this call, so disabled plugins are
    never instantiated.
 
-The full entry-point plugin set (`[project.entry-points.corvidae]` in `pyproject.toml`): `persistence`,
-`jsonl_log`, `core_tools`, `cli`, `irc`, `signal`, `discord`, `web`, `task`, `subagent`, `mcp`, `llm`,
-`compaction`, `memory`, `memory_tools`, `funnel`, `thinking`,
-`runtime_settings`, `tools`, `metrics`, `usage_log`, `metrics_jsonl`,
-`outcome_log`, `appraisal`, `critique`, `scheduler`, `agent`,
-`idle_monitor`, `config_watcher`.
+The kernel's entry points (`[project.entry-points.corvidae]` in the root
+`pyproject.toml`): `persistence`, `jsonl_log`, `core_tools`, `cli`, `irc`,
+`signal`, `discord`, `web`, `acp`, `task`, `subagent`, `mcp`, `llm`,
+`compaction`, `thinking`, `runtime_settings`, `tools`, `metrics`,
+`usage_log`, `metrics_jsonl`, `scheduler`, `agent`, `idle_monitor`,
+`config_watcher`. The cognition extra adds `memory`, `memory_tools`,
+`funnel`, `outcome_log`, `appraisal` and `critique` from
+`packages/corvidae-cognition/pyproject.toml`.
 
-An entry point that fails to import or instantiate is logged at WARNING
-with the entry-point name and the failure type, and is skipped; the other
-plugins still load.
+`Runtime.start()` loads them with pluggy's `load_setuptools_entrypoints`,
+which does not catch errors: an entry point that fails to import stops
+startup. That is why a transport with an optional SDK (ACP, Discord)
+imports it lazily rather than at module load.
 
 Entry-point loading does not guarantee a meaningful cross-plugin order;
 plugins that need another plugin's state resolve it lazily via
@@ -2405,11 +2293,11 @@ AcpPlugin           → "registry"    (ChannelRegistry)
 SubagentPlugin      → "llm", "tools"
 CompactionPlugin    → "llm"         (LLMPlugin); soft-uses "agent" for forks
 ThinkingPlugin      → "registry"    (ChannelRegistry)
-MemoryPlugin        → "persistence", "llm"; soft-uses "agent", "registry" for forks
-MemoryToolsPlugin   → "memory"      (MemoryPlugin)
-CritiquePlugin      → "task", "llm"; soft-uses "agent" for forks
-OutcomeLogPlugin    → "persistence"
-AppraisalPlugin     → "persistence"; soft-uses "agent" for forks
+MemoryPlugin        → "persistence", "llm"; soft-uses "agent", "registry" for forks  (cognition extra)
+MemoryToolsPlugin   → "memory"      (MemoryPlugin)                                (cognition extra)
+CritiquePlugin      → "task", "llm"; soft-uses "agent" for forks                  (cognition extra)
+OutcomeLogPlugin    → "persistence"                                               (cognition extra)
+AppraisalPlugin     → "persistence"; soft-uses "agent" for forks                  (cognition extra)
 UsageLogPlugin      → "persistence"
 SchedulerPlugin     → "registry", "persistence"
 ```
@@ -2418,7 +2306,7 @@ Plugins with `depends_on = set()` (declared but empty):
 `LLMPlugin`, `ToolCollectionPlugin`, `PersistencePlugin`, `IdleMonitorPlugin`,
 `CoreToolsPlugin`, `McpClientPlugin`, `RuntimeSettingsPlugin`, `JsonlLogPlugin`,
 `TaskPlugin`, `MetricsPlugin`, `MetricsJsonlPlugin`, `ConfigWatcherPlugin`,
-`FunnelPlugin`.
+`FunnelPlugin` (cognition extra).
 
 "Soft-uses" means `fork_agent(pm, stage)` (`pm.get_plugin("agent")`,
 duck-typed): with the agent plugin absent or forks off, the stage runs
@@ -2452,9 +2340,6 @@ corvidae/
 ├── fork.py               # fork prompt builder, cut snap, agent.forks parser (#51)
 ├── task.py               # Task, TaskQueue, TaskPlugin
 ├── mcp_client.py         # McpClientPlugin (MCP server bridge)
-├── memory.py             # MemoryPlugin (consolidation + retrieval + message_fts schema)
-├── retention.py          # run_retention_job(), retention_score()
-├── funnel.py             # FunnelPlugin (context-admission funnel)
 ├── main.py               # daemon entry point
 ├── channels/
 │   ├── cli.py            # CLIPlugin
@@ -2474,8 +2359,18 @@ corvidae/
     ├── web.py            # web_fetch, web_search
     ├── subagent.py       # SubagentPlugin, subagent tool, run_agent_loop()
     ├── settings.py       # RuntimeSettingsPlugin, set_settings tool
-    ├── memory_tools.py   # MemoryToolsPlugin, search_memory, recall_raw
     └── task_pipeline.py  # TaskPipelinePlugin, task_pipeline tool
+
+packages/corvidae-cognition/   # the cognition extra (docs/cognition.md)
+├── pyproject.toml        # distribution corvidae-cognition; its entry points
+└── corvidae_cognition/
+    ├── memory.py         # MemoryPlugin (consolidation + retrieval + message_fts schema)
+    ├── retention.py      # run_retention_job(), retention_score()
+    ├── memory_tools.py   # MemoryToolsPlugin, search_memory, recall_raw
+    ├── funnel.py         # FunnelPlugin (context-admission funnel)
+    ├── appraisal.py      # AppraisalPlugin
+    ├── critique.py       # CritiquePlugin
+    └── outcome_log.py    # OutcomeLogPlugin (exchange_log)
 ```
 
 ## Known Risks
