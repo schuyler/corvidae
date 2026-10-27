@@ -341,13 +341,35 @@ class TestRuntimeStart:
         finally:
             os.unlink(config_path)
 
-    async def test_start_missing_config_raises_file_not_found(self):
-        """start() raises FileNotFoundError when config_path does not exist."""
+    async def test_start_missing_config_reports_config_error_and_exits(self, capsys):
+        """A missing config prints a one-line Config error and exits non-zero."""
         from corvidae.runtime import Runtime
 
         rt = Runtime(config_path="nonexistent_config_that_does_not_exist.yaml")
-        with pytest.raises(FileNotFoundError):
+        with pytest.raises(SystemExit) as excinfo:
             await rt.start()
+
+        assert excinfo.value.code != 0
+        stderr = capsys.readouterr().err
+        assert "Config error:" in stderr
+        assert "nonexistent_config_that_does_not_exist.yaml" in stderr
+
+    async def test_start_malformed_config_reports_config_error_and_exits(
+        self, tmp_path, capsys
+    ):
+        """A malformed YAML config prints a one-line Config error and exits non-zero."""
+        from corvidae.runtime import Runtime
+
+        config_path = tmp_path / "malformed.yaml"
+        config_path.write_text(": invalid: yaml: [unclosed")
+        rt = Runtime(config_path=str(config_path))
+        with pytest.raises(SystemExit) as excinfo:
+            await rt.start()
+
+        assert excinfo.value.code != 0
+        stderr = capsys.readouterr().err
+        assert "Config error:" in stderr
+        assert str(config_path) in stderr
 
     async def test_start_sets_base_dir_from_config_path(self):
         """start() sets config['_base_dir'] to the directory of config_path."""

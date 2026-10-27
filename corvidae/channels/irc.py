@@ -76,7 +76,12 @@ class IRCClient(pydle.Client):
                     # type outside (OSError, pydle.Error) otherwise ends the
                     # connect task and leaves the bot offline for good.
                     logger.warning(
-                        "IRC connection failed, retrying: %s", exc, exc_info=True
+                        "IRC connection error to %s:%s as %s, retrying: %s",
+                        self._server,
+                        self._port,
+                        self.nickname,
+                        exc,
+                        exc_info=True,
                     )
                 if self.plugin._connect_task is None:
                     return

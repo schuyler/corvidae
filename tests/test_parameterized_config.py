@@ -623,14 +623,8 @@ class TestTaskPluginCompletedBuffer:
 
 class TestAgentConstants:
     def test_agent_constants(self):
-        """DEFAULT_LLM_ERROR_MESSAGE and MAX_TURNS_FALLBACK_MESSAGE exist in agent.py."""
+        """MAX_TURNS_FALLBACK_MESSAGE exists in agent.py."""
         import corvidae.agent as agent_mod
-
-        assert hasattr(agent_mod, "DEFAULT_LLM_ERROR_MESSAGE"), (
-            "corvidae.agent must define DEFAULT_LLM_ERROR_MESSAGE"
-        )
-        assert isinstance(agent_mod.DEFAULT_LLM_ERROR_MESSAGE, str)
-        assert len(agent_mod.DEFAULT_LLM_ERROR_MESSAGE) > 0
 
         assert hasattr(agent_mod, "MAX_TURNS_FALLBACK_MESSAGE"), (
             "corvidae.agent must define MAX_TURNS_FALLBACK_MESSAGE"

@@ -735,3 +735,79 @@ class TestVerificationPass:
             f"_verify_fts_clean must handle absent FTS tables gracefully; got: {verify_msg!r}"
         )
         await db.close()
+
+
+# ---------------------------------------------------------------------------
+# Redact CLI error context and honest affected counts
+# ---------------------------------------------------------------------------
+
+
+def test_extract_sample_token_logs_plain_text_parse_failure(caplog):
+    """A non-JSON message is still tokenized, and the parse failure is logged."""
+    import logging as _logging
+
+    with caplog.at_level(_logging.DEBUG, logger="corvidae.redact"):
+        token = _extract_sample_token("User discussed the solar panels")
+
+    assert token == "User"
+    assert any(
+        "not JSON" in record.getMessage() for record in caplog.records
+    ), "a message that is not JSON must be logged, not silently swallowed"
+
+
+def test_cli_missing_db_raises_clean_error_without_creating_file(tmp_path):
+    """A typo in --db names the path and does not create an empty database."""
+    from click.testing import CliRunner
+
+    db_path = tmp_path / "typo-sessions.db"
+    result = CliRunner().invoke(
+        redact_command, ["--db", str(db_path), "message", "1"]
+    )
+
+    assert result.exit_code != 0
+    assert str(db_path) in result.output
+    assert not db_path.exists(), "the CLI must not create an empty database"
+
+
+async def test_redact_messages_counts_only_rows_found():
+    """A missing id reports 0 affected out of 1 requested, not 1 affected."""
+    db = await make_full_db()
+    try:
+        result = await redact_messages(db, [99999])
+    finally:
+        await db.close()
+
+    assert result["affected_messages"] == 0
+    assert result["requested_messages"] == 1
+
+
+async def test_redact_messages_dry_run_counts_only_rows_found():
+    """Dry-run also reports how many requested ids actually exist."""
+    db = await make_full_db()
+    try:
+        result = await redact_messages(db, [99999], dry_run=True)
+    finally:
+        await db.close()
+
+    assert result["affected_messages"] == 0
+    assert result["requested_messages"] == 1
+
+
+async def _make_full_db_and_close(path: str) -> None:
+    db = await make_full_db(path)
+    await db.close()
+
+
+def test_cli_message_output_says_how_many_ids_found(tmp_path):
+    """The message command prints N of M ids found."""
+    from click.testing import CliRunner
+
+    db_path = str(tmp_path / "sessions.db")
+    asyncio.run(_make_full_db_and_close(db_path))
+
+    result = CliRunner().invoke(
+        redact_command, ["--db", db_path, "message", "99999"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "0 of 1" in result.output

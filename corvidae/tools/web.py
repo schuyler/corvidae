@@ -84,7 +84,9 @@ async def web_fetch_with_session(
     except asyncio.TimeoutError:
         return TIMEOUT_ERROR_TEMPLATE.format(timeout=timeout)
     except aiohttp.ClientError as exc:
-        return f"Error: {exc}"
+        # Name the request and the failure class so a bare connect error can
+        # be traced back to the URL that produced it.
+        return f"Error fetching {url}: {type(exc).__name__}: {exc}"
 
 
 # DuckDuckGo is synchronous — runs in a thread to avoid blocking the event loop.

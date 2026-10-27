@@ -538,3 +538,28 @@ class TestWebSearch:
             with patch("corvidae.tools.web.DDGS", return_value=mock_ctx):
                 await web_search("to thread test")
         mock_to_thread.assert_called_once()
+
+
+class TestWebFetchErrorContext:
+    async def test_connection_error_names_url_and_failure_class(self):
+        """A connection failure names the request URL and the failure class."""
+        import aiohttp
+
+        mock_session = MagicMock()
+        mock_response_ctx = AsyncMock()
+        mock_response_ctx.__aenter__ = AsyncMock(
+            side_effect=aiohttp.ClientConnectorError(
+                connection_key=MagicMock(), os_error=OSError("refused")
+            )
+        )
+        mock_session.get = MagicMock(return_value=mock_response_ctx)
+
+        mock_session_ctx = AsyncMock()
+        mock_session_ctx.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session_ctx.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("aiohttp.ClientSession", return_value=mock_session_ctx):
+            result = await web_fetch("http://example.com/broken")
+
+        assert "http://example.com/broken" in result
+        assert "ClientConnectorError" in result

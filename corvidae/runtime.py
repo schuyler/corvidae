@@ -72,7 +72,8 @@ class Runtime:
         """Load config, merge overrides, create PM, load plugins, start.
 
         Steps:
-        1.  Load YAML config from config_path. Raises FileNotFoundError if missing.
+        1.  Load YAML config from config_path. Prints a Config error and exits
+            non-zero if missing or malformed.
         2.  Deep-merge self.overrides on top of the YAML config.
         3.  Set config["_base_dir"] from config_path (after merge; cannot be overridden).
         4.  Configure logging (MUST be first operational step after config load).
@@ -91,9 +92,23 @@ class Runtime:
             await agent.on_start(config=config) explicitly, after the broadcast
             so that plugins Agent depends on have already started.
         """
-        # 1. Load YAML config
-        with open(self.config_path) as f:
-            config = yaml.safe_load(f)
+        # 1. Load YAML config, reporting a missing or malformed file as a
+        # one-line operator error instead of an uncaught traceback.
+        try:
+            with open(self.config_path) as f:
+                config = yaml.safe_load(f)
+        except (OSError, yaml.YAMLError) as exc:
+            detail = getattr(exc, "strerror", None) or str(exc)
+            sys.stderr.write(f"Config error: {detail} — check {self.config_path}\n")
+            sys.stderr.flush()
+            raise SystemExit(1) from exc
+        # An empty or scalar config cannot be merged, so treat it as malformed.
+        if not isinstance(config, dict):
+            sys.stderr.write(
+                f"Config error: file is empty or not a mapping — check {self.config_path}\n"
+            )
+            sys.stderr.flush()
+            raise SystemExit(1)
 
         # 2. Deep-merge overrides
         config = deep_merge(config, self.overrides)

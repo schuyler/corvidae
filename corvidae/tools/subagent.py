@@ -156,11 +156,19 @@ class SubagentPlugin(CorvidaePlugin):
         """
         task_queue = ctx.task_queue
         if task_queue is None:
-            return "Error: task queue not available"
+            # Name the internal dependency and the operator action that fixes it.
+            return (
+                "Error: task queue not available — ensure the task plugin is "
+                "loaded, then retry."
+            )
 
         channel = ctx.channel
         if channel is None:
-            return "Error: no channel context available for subagent"
+            # Explain how to give the tool the context it needs.
+            return (
+                "Error: no channel context available for subagent — call this "
+                "tool from an agent turn that has a channel, then retry."
+            )
 
         # Get tools, excluding subagent itself to prevent recursion
         from corvidae.tool_collection import ToolCollectionPlugin

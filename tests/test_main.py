@@ -69,7 +69,7 @@ class TestDiscoverCommands:
 
         bad_ep = MagicMock()
         bad_ep.name = "broken"
-        bad_ep.load.side_effect = Exception("intentional load failure")
+        bad_ep.load.side_effect = ValueError("intentional load failure")
 
         with caplog.at_level(logging.WARNING, logger="corvidae.main"), patch(
             "importlib.metadata.entry_points", return_value=[bad_ep]
@@ -79,6 +79,7 @@ class TestDiscoverCommands:
         # Use caplog.text to avoid relying on record.message which may not be
         # populated before formatting.
         assert "broken" in caplog.text
+        assert "ValueError" in caplog.text
 
     def test_bare_corvidae_shows_help(self, reload_main_clean):
         """Invoking the corvidae group with no subcommand outputs help text."""

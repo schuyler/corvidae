@@ -566,3 +566,21 @@ class TestMalformedConsolidationReply:
             assert client.call_count == 2
         finally:
             await db.close()
+
+# ---------------------------------------------------------------------------
+# Public-facing message of the consolidation JSON parser: names the phase and
+# keeps enough of the provider text to diagnose an HTML error page.
+# ---------------------------------------------------------------------------
+
+
+def test_parse_json_block_error_names_consolidation_phase_and_long_text():
+    """The consolidation parse error names its phase and keeps >200 chars."""
+    from corvidae.memory import _parse_json_block
+
+    text = "x" * 300 + " PROVIDER_ERROR_MARKER"
+    with pytest.raises(ValueError) as excinfo:
+        _parse_json_block(text)
+
+    message = str(excinfo.value)
+    assert "consolidation" in message.lower()
+    assert "PROVIDER_ERROR_MARKER" in message
