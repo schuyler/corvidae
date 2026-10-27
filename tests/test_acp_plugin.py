@@ -517,3 +517,41 @@ class TestAcpLoopLiveness:
             await task
 
         assert kills
+
+
+class TestAcpWaitsForAgent:
+    async def test_stdio_loop_waits_until_agent_started(self, monkeypatch):
+        """A prompt read before Agent finishes on_start would be dropped and
+        its future never resolved, so the stdio loop starts only once the
+        registered agent reports ``started``."""
+        import corvidae.channels.acp as acp_module
+
+        plugin, _registry, agent = await _init_acp_plugin()
+
+        # A registered agent that has not finished on_start yet.
+        class _FakeAgent:
+            started = False
+
+        fake_agent = _FakeAgent()
+        plugin.pm.register(fake_agent, name="agent")
+
+        entered = asyncio.Event()
+
+        async def _wait(_agent):
+            entered.set()
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr("acp.run_agent", _wait)
+        monkeypatch.setattr(acp_module, "AGENT_READY_POLL_SECONDS", 0.01)
+
+        plugin._task = asyncio.create_task(plugin._run_acp(agent))
+        try:
+            # While the agent is starting, the loop must not read stdio.
+            await asyncio.sleep(0.1)
+            assert not entered.is_set()
+
+            # Once it has started, the loop begins serving.
+            fake_agent.started = True
+            await asyncio.wait_for(entered.wait(), timeout=2)
+        finally:
+            await plugin.on_stop()

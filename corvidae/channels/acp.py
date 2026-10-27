@@ -30,6 +30,9 @@ from corvidae.trace import mint_trace_id
 logger = logging.getLogger(__name__)
 
 # Sidecar index for session/list (cwd + activity); lives in sessions.db.
+# How often the stdio loop re-checks whether Agent has finished on_start.
+AGENT_READY_POLL_SECONDS = 0.05
+
 _ACP_SESSION_INDEX_DDL = """
 CREATE TABLE IF NOT EXISTS acp_session_index (
     session_id TEXT PRIMARY KEY,
@@ -579,11 +582,26 @@ class AcpPlugin(CorvidaePlugin):
             name="acp-stdio-server",
         )
 
+    def _agent_ready(self) -> bool:
+        """True when no Agent is registered or it has finished on_start."""
+        agent = self.pm.get_plugin("agent")
+        return agent is None or bool(getattr(agent, "started", True))
+
+    async def _wait_for_agent(self) -> None:
+        """Poll until the Agent can accept on_message (see Agent.started)."""
+        while not self._agent_ready():
+            await asyncio.sleep(AGENT_READY_POLL_SECONDS)
+
     async def _run_acp(self, agent: CorvidaeAcpAgent) -> None:
         """Run the official SDK agent loop on stdio until the client disconnects."""
         from acp import run_agent
 
         try:
+            # Runtime starts Agent only after the on_start broadcast this task
+            # begins in. A prompt read before then is dropped by the Agent and
+            # its future never resolves, so wait before reading stdio; the
+            # client's requests sit in the pipe meanwhile.
+            await self._wait_for_agent()
             await run_agent(agent)
         except asyncio.CancelledError:
             raise
