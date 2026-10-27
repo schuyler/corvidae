@@ -7,8 +7,10 @@
   const SLUG = /^[a-z0-9][a-z0-9_-]{0,63}$/;
   let ws = null, backoff = 1000, failures = 0, opened = false, stopped = false;
   let current = "main", knownNames = new Set(), lastSent = "", convos = [];
-  // Texts sent on this socket and not yet echoed back as `user` frames; if
-  // the socket dies first, the server may never have seen them.
+  // Sends on this socket not yet answered, oldest first, as
+  // {conversation, text}. The server answers each send in order with its
+  // `user` echo or an `error`; whatever is unanswered when the socket dies
+  // may never have reached it.
   let pending = [];
   const sendBtn = $("send");
 
@@ -163,6 +165,10 @@
     if (!f || typeof f !== "object") return;
     if (f.type === "conversations") { renderList(f.items || []); return; }
     if (f.type === "error") { onError(f); return; }
+    // Match our own send's echo before the filter below: the user may have
+    // switched conversation since sending.
+    if (f.type === "user" && pending.length && f.conversation === pending[0].conversation
+        && f.text === pending[0].text) pending.shift();
     // Drop anything for a conversation we are no longer viewing.
     if (f.conversation !== undefined && f.conversation !== current) return;
     if (f.type === "history") {
@@ -173,24 +179,44 @@
     } else if (f.type === "working") {
       setWorking(!!f.value);
     } else {
-      // Our own send echoed back: the server has it.
-      if (f.type === "user" && pending.length && f.text === pending[0]) pending.shift();
       renderFrame(f);
     }
   }
   function onError(f) {
+    // Any error for a send answers it: no echo will follow.
+    if (f.request === "send" && pending.length) pending.shift();
     if (f.code === "starting") {
       // Server not ready: retry list/subscribe after 2s; restore refused send text.
       if (f.request === "list") setTimeout(() => send({ type: "list" }), 2000);
       else if (f.request === "subscribe") setTimeout(() => send({ type: "subscribe", conversation: current }), 2000);
       else if (f.request === "send") {
         notice("server is starting — message not sent");
-        pending.shift();  // answered: it won't be echoed
         if (!inputEl.value) inputEl.value = lastSent;
       }
       return;
     }
     notice("error" + (f.request ? " (" + f.request + ")" : "") + ": " + (f.message || f.code || "unknown"));
+  }
+
+  // ---- Recovering unanswered sends when the socket dies ----
+  // This conversation's texts go back into the composer, ahead of anything
+  // already typed; the banner (which a `history` reload doesn't clear) says
+  // so, and names other conversations that had unanswered sends.
+  function recoverPending() {
+    const here = pending.filter((p) => p.conversation === current).map((p) => p.text);
+    const elsewhere = [...new Set(pending.filter((p) => p.conversation !== current)
+      .map((p) => p.conversation))];
+    pending = [];
+    if (here.length) inputEl.value = [...here, inputEl.value].filter((t) => t).join("\n\n");
+    const parts = [];
+    if (here.length) parts.push((here.length === 1 ? "1 message" : here.length + " messages") +
+      " put back in the composer; check and resend");
+    if (elsewhere.length) parts.push("also check " + elsewhere.join(", "));
+    showBanner("connection lost before the server confirmed your send: " + parts.join("; "));
+  }
+  function showBanner(text) {
+    bannerEl.textContent = text;
+    bannerEl.classList.remove("hidden");
   }
 
   // ---- Connection with exponential backoff ----
@@ -211,13 +237,9 @@
     ws.addEventListener("close", (ev) => onClose(ev));
   }
   async function onClose(ev) {
-    // Sends never echoed back may not have reached the server (a half-open
-    // socket after sleep): hand the oldest back rather than lose it.
-    if (pending.length) {
-      if (!inputEl.value) inputEl.value = pending[0];
-      notice("message may not have been sent — check and resend");
-      pending = [];
-    }
+    // Unanswered sends may not have reached the server (a half-open socket
+    // after sleep): hand them all back rather than lose them.
+    if (pending.length) recoverPending();
     if (ev.code === 4001) { expired(); return; }
     if (!opened && ++failures >= 3) {
       // Repeated connect failures: probe the page to detect an expired session.
@@ -241,8 +263,9 @@
       return;
     }
     lastSent = text;
-    pending.push(text);
+    pending.push({ conversation: current, text });
     inputEl.value = "";
+    if (!stopped) bannerEl.classList.add("hidden");  // a fresh send clears the recovery note
     // A send to an unlisted conversation should show up in the list.
     if (!knownNames.has(current)) send({ type: "list" });
   }

@@ -2085,9 +2085,11 @@ only call `close()`.
 
 **Config reload.** A token change swaps the session value and closes
 every socket with 4001 ("token changed"); the page then shows "session
-expired" and stops reconnecting. A provided token removed from config
-generates a fresh one (logged); a generated token is kept while none is
-provided. `host`, `port` and `allowed_origins` changes log "restart to
+expired" and stops reconnecting. A `web.token` removed from config falls
+back to `CORVIDAE_WEB_TOKEN` (as the daemon started with it), else a fresh
+generated one (logged); a generated token is kept while none is provided.
+Only `web.token` rotates on reload: the daemon's environment can't change
+under it, so rotating `CORVIDAE_WEB_TOKEN` takes a restart. `host`, `port` and `allowed_origins` changes log "restart to
 apply". A removed block logs the same and changes nothing. A malformed
 block raises (the watcher logs it) and changes nothing.
 
@@ -2100,6 +2102,10 @@ forbidden; links get `target="_blank" rel="noopener noreferrer"`.
 Everything else uses `textContent`. Thinking and dividers render in closed
 `<details>`. The page reconnects with backoff (1 s → 30 s) and, after
 three failed connects, checks `/` for a 401 to detect an expired session.
+The server answers every `send`, in order, with its `user` echo or an
+`error`; the page keeps sends it hasn't seen answered, and if the socket
+dies first (a half-open connection after sleep) it puts them back in the
+composer and says so in the banner, rather than lose them.
 
 Known limitations:
 - a turn that ends in an exception without a `send_message` leaves the

@@ -479,7 +479,7 @@ web:
 python -c "import secrets; print(secrets.token_urlsafe(32))"
 ```
 
-If you don't set one, corvidae generates a token at every start and logs the whole login URL once at `WARNING`. That means every restart logs you out, and `logging.level: ERROR` hides the URL entirely: set a token if you run at that level. Changing the token (in `agent.yaml` or the environment, on reload) logs out every browser and closes their sockets. That's also the only way to revoke a session.
+If you don't set one, corvidae generates a token at every start and logs the whole login URL once at `WARNING`. That means every restart logs you out, and `logging.level: ERROR` hides the URL entirely: set a token if you run at that level. Changing `web.token` in `agent.yaml` logs out every browser on the next reload and closes their sockets. That's also the only way to revoke a session. `CORVIDAE_WEB_TOKEN` is read from the daemon's own environment, which can't change under it, so rotating that one takes a restart (which revokes just the same).
 
 **The token is the keys to the machine.** Whoever has it, or the cookie, can make the agent run shell commands as this user. Two places it ends up that you might not think about:
 
@@ -592,7 +592,7 @@ No restart is required for the changes listed below. Changes that require restar
 | Dotted plugin tunables (`appraisal.*`, `critique.*`) | Resolved per-decision via `corvidae.tuning.resolve_tunable`; a reloaded value applies on the next appraisal/critique decision. Per-channel `set_settings` overrides still take precedence. |
 | `agent.immutable_settings` | `RuntimeSettingsPlugin` resets its blocklist and re-applies the new list. Constructor-supplied immutable keys are always retained. |
 | New channel entries in `channels:` | `load_channel_config` registers newly added channels. |
-| `web.token` (or `CORVIDAE_WEB_TOKEN`) | A changed token logs out every browser (their sockets close and the page says the session expired). A provided token removed from config is replaced by a fresh generated one, which is logged. |
+| `web.token` | A changed token logs out every browser (their sockets close and the page says the session expired). A token removed from config falls back to `CORVIDAE_WEB_TOKEN` as the daemon started with it, else a fresh generated one, which is logged. Changing `CORVIDAE_WEB_TOKEN` itself needs a restart. |
 | `agent` defaults | `ChannelRegistry.agent_defaults` is updated; new channels created after the reload use the new defaults. |
 
 ### What requires restart
