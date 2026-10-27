@@ -16,7 +16,9 @@ retrieved context is framed as data, tool `_ctx` is hidden from the model,
 SQL is parameterized, signal-cli is pinned and signature-verified, and the
 docs are candid about plaintext at rest. The Discord transport follows
 Signal's model, not IRC's: default-deny, silent refusal, and outbound
-mentions disabled.
+mentions disabled. The web transport binds loopback by default, needs a
+token that can't be turned off, and renders model output through
+DOMPurify under a strict CSP.
 
 The weak spot is that the model's authority is unbounded and the model's
 inputs are not. Simon Willison's "lethal trifecta" is three things in one
@@ -51,7 +53,10 @@ Assets, roughly in order of how bad it is to lose them:
    `DISCORD_TOKEN`) is the same kind of asset: whoever holds it is the bot,
    and it is read from `agent.yaml` or the environment, both of which
    `read_file` and `shell` can reach. It is revocable (reset it in the
-   Developer Portal), which the Signal identity is not.
+   Developer Portal), which the Signal identity is not. The web token
+   (`web.token` or `CORVIDAE_WEB_TOKEN`, or the generated one in the
+   daemon log) and its session cookie are a third: whoever holds either
+   one drives the agent, tools and all. Changing the token revokes it.
 2. The host account corvidae runs as, and anything it can read or run.
 3. `sessions.db`, the JSONL logs, and the memory tables: plaintext copies
    of every conversation, including end-to-end-encrypted Signal ones.
@@ -68,6 +73,10 @@ Adversaries:
 - **Anyone in a Discord server the bot has been invited to**, who can
   @-mention it, and anyone Discord lets DM it.
   The allowlist refuses them, silently; see finding 5.
+- **Anyone who can reach the web listener**, if it's bound beyond
+  loopback, and anyone who gets the token or cookie; also any web page
+  open in the operator's browser, which can try cross-site requests. See
+  finding 9.
 - **Anyone who controls a page the bot fetches**, or a search result it
   reads.
 - **An MCP server**, via its tool descriptions and results.
@@ -353,7 +362,56 @@ agent's context and persona may share its blind spots. #73 measures it
 behaviorally (planted-defect recall, fork vs standalone) before the
 default flips.
 
-### 9. Smaller things
+### 9. The web transport is a shell behind a bearer token
+
+`channels/web.py` puts the agent, with every tool, behind an HTTP listener.
+The token (or the session cookie derived from it) is shell-equivalent:
+whoever holds it can ask the agent to run commands as this user. What
+stands in the way:
+
+- **Loopback by default.** The default bind is `127.0.0.1`; anything else
+  logs a WARNING at startup. Remote access is meant to go over an SSH
+  tunnel, Tailscale, or a TLS reverse proxy
+  ([configuration.md](configuration.md#web--browser-chat-ui)). A plain-HTTP
+  bind on a network address sends the token and cookie in the clear.
+- **No way to turn auth off.** A provided token must be 16+ URL-safe
+  characters; otherwise a 32-byte one is generated. Comparisons are
+  constant-time.
+- **Cross-site requests can't drive it.** The cookie is `HttpOnly` and
+  `SameSite=Strict`; the WebSocket needs an `Origin` from the allowed set,
+  and every request needs a `Host` from it, which blocks DNS rebinding. A
+  page on another site can't open the socket or ride the cookie.
+- **Model output can't run script in the page.** That's the
+  model-output → XSS path: a prompt-injected reply full of `<script>`,
+  `onerror=` or a remote image. Markdown goes through vendored marked and
+  then DOMPurify (style attributes and tags forbidden too), and it's the
+  only HTML the page ever writes; everything else is `textContent`. A
+  strict CSP backs that up: scripts and styles from the page's own origin
+  only, no inline script, images only from `'self'` or `data:` (so a
+  reply can't beacon to a remote URL), no frames, no plugins, no form
+  posts. No CDNs. If DOMPurify had a bypass, the CSP would still stop
+  inline script.
+
+What it doesn't protect against, so you know:
+
+- **Cookies aren't port-scoped.** Any other service on the same loopback
+  host name (another dev server on `localhost:3000`) receives the
+  `corvidae_web` cookie with every request the browser sends it, so a
+  hostile or compromised service there gets the session. `HttpOnly` keeps
+  it from page script, not from servers. Prefer a host name nothing else
+  uses (an `/etc/hosts` alias in `allowed_origins`), or keep untrusted
+  local web apps off the same name while you're logged in.
+- **The login URL is persistent.** It sits in browser history and
+  autocomplete, and in the access log of any reverse proxy in front of
+  corvidae. corvidae's own access log is off. A generated token is
+  written to the daemon log, which is therefore as sensitive as the token.
+- **Sessions can't be revoked one at a time.** The cookie is stateless
+  (an HMAC of the token) and lasts 400 days. The only revocation is
+  changing the token, which logs out everyone.
+- **What you type is untrusted text too.** Paste a web page into the chat
+  and it's in the context, same as anywhere else; see finding 3.
+
+### 10. Smaller things
 
 - `read_file` has a stat-then-read race and follows symlinks. Irrelevant
   while finding 4 stands.
@@ -374,7 +432,7 @@ default flips.
 There isn't any. Transports, the LLM loop, tool execution, the SQLite
 store, and the Signal socket all run in one process as one user. The
 effective privilege of the `shell` tool is "whoever owns the Signal
-identity, the Discord bot token, and the memory database".
+identity, the Discord bot token, the web token, and the memory database".
 
 The architecture already has the seam to split this. Tool calls dispatch
 through `TaskQueue` and `dispatch_tool_call`, so a separated design would

@@ -451,6 +451,55 @@ To remove a conversation's stored content, use `corvidae redact` as described fo
 
 ---
 
+## `web` — browser chat UI
+
+The `web` section is optional. If absent, `WebPlugin` loads but stays inert: no listener, nothing logged above `DEBUG`. A bare `web:` with no value turns it on with every default. If present, it must be well-formed: a bad field raises at startup naming it, and a port that's already taken fails startup too.
+
+It serves a chat page on `http://127.0.0.1:8765/`. Each named conversation is its own channel, `web:<name>`, kept in `sessions.db` like any other and listed in the page's sidebar. Replies, thinking (collapsed), tool calls and progress show up as they happen; reloading the page, or opening it later, replays the last 200 rows of the conversation, including replies that arrived while no tab was open.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `web.host` | string | `127.0.0.1` | Address to bind. A wildcard (`0.0.0.0`, `::`) needs `allowed_origins`, since no origin a browser could use can be derived from it. Anything other than loopback logs a WARNING at startup. Bracketed IPv6 (`"[::1]"`) is fine. |
+| `web.port` | integer | `8765` | Port to bind, 0 to 65535. `0` (an ephemeral port, for tests) needs `host` to be an IP literal. |
+| `web.token` | string | `$CORVIDAE_WEB_TOKEN`, else generated | The login token. At least 16 characters from `A-Z a-z 0-9 . _ ~ -`, because you paste it into a URL by hand. Null or empty falls through to the environment variable, then to a generated one. There's no way to turn auth off. |
+| `web.allowed_origins` | list of strings | `null` | Extra origins the page may be served from, such as `https://box.tailnet.ts.net` or `http://mybox.local:8765`. Each is `scheme://host[:port]`, nothing more. The `Host` header must match one of the allowed origins too. |
+
+```yaml
+web:
+  host: 127.0.0.1
+  port: 8765
+  token: "paste-a-long-random-token-here"   # or set CORVIDAE_WEB_TOKEN
+  allowed_origins:
+    - https://box.tailnet.ts.net
+```
+
+**Logging in.** Open `http://127.0.0.1:8765/?token=<token>`. That sets a session cookie and drops the token from the address bar. The cookie lasts 400 days and survives restarts as long as the token doesn't change. Generate a token with:
+
+```sh
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+If you don't set one, corvidae generates a token at every start and logs the whole login URL once at `WARNING`. That means every restart logs you out, and `logging.level: ERROR` hides the URL entirely: set a token if you run at that level. Changing the token (in `agent.yaml` or the environment, on reload) logs out every browser and closes their sockets. That's also the only way to revoke a session.
+
+**The token is the keys to the machine.** Whoever has it, or the cookie, can make the agent run shell commands as this user. Two places it ends up that you might not think about:
+
+- *Your log file*, when it's generated. The log is as sensitive as the token, so keep `logging.file` readable only by you.
+- *Your browser history*, and the access log of any reverse proxy in front of corvidae, because the login URL carries it. corvidae's own access log is off for this reason.
+
+There's no second channel for the token (no QR code, no file); the log line is it.
+
+**Remote access.** The default bind is loopback only, and that's the recommended way to keep it. To reach it from elsewhere, pick one:
+
+- *An SSH tunnel.* `ssh -L 8765:127.0.0.1:8765 host`, then open `http://127.0.0.1:8765/` locally. Nothing else to configure.
+- *Tailscale.* Either `tailscale serve --bg 8765` (HTTPS on your tailnet name, with corvidae still on loopback) and `allowed_origins: [https://<machine>.<tailnet>.ts.net]`; or bind `host` to the machine's tailnet address and list `http://<that address>:8765`.
+- *A TLS reverse proxy.* List its public origin in `allowed_origins`. The proxy must pass the original `Host` header through: nginx's default `proxy_set_header Host $proxy_host` breaks both the Host check and the cookie's `Secure` flag, so set `proxy_set_header Host $host`. It must also forward WebSocket upgrades on `/ws`.
+
+Whichever you pick, the origin you browse to has to be in the allowed set. Don't bind a public address without TLS in front: the token and cookie would cross the network in the clear.
+
+**Web content is stored in plaintext on this host**, like every other transport's: `sessions.db`, the JSONL log (`web_<name>.jsonl`, when enabled) and memory. To remove a conversation, use `corvidae redact` as described for Signal above, with `channel_id = 'web:<name>'`.
+
+---
+
 ## `channels` — per-channel overrides
 
 Keys are `transport:scope` identifiers (e.g., `irc:#general`, `cli:local`). Each value is a mapping of overrides applied on top of `agent` defaults. Any key absent from the channel block uses the `agent`-level default.
@@ -543,6 +592,7 @@ No restart is required for the changes listed below. Changes that require restar
 | Dotted plugin tunables (`appraisal.*`, `critique.*`) | Resolved per-decision via `corvidae.tuning.resolve_tunable`; a reloaded value applies on the next appraisal/critique decision. Per-channel `set_settings` overrides still take precedence. |
 | `agent.immutable_settings` | `RuntimeSettingsPlugin` resets its blocklist and re-applies the new list. Constructor-supplied immutable keys are always retained. |
 | New channel entries in `channels:` | `load_channel_config` registers newly added channels. |
+| `web.token` (or `CORVIDAE_WEB_TOKEN`) | A changed token logs out every browser (their sockets close and the page says the session expired). A provided token removed from config is replaced by a fresh generated one, which is logged. |
 | `agent` defaults | `ChannelRegistry.agent_defaults` is updated; new channels created after the reload use the new defaults. |
 
 ### What requires restart
@@ -550,6 +600,7 @@ No restart is required for the changes listed below. Changes that require restar
 | Setting | Reason |
 |---------|--------|
 | `irc.host`, `irc.port`, `irc.nick` | IRC transport is connected at startup; changing connection parameters requires reconnection. |
+| `web.host`, `web.port`, `web.allowed_origins`, adding or removing the `web` block | The listener is bound at startup. A reload logs `restart to apply` and keeps serving with the old values. |
 | Existing channel config in `channels:` | Channels already registered retain their original `ChannelConfig` until restart. |
 | `llm.background` | Not updated on reload. |
 | `memory.*` (including `memory.consolidation_prompt` and `memory.consolidation_fork_prompt`) | `MemoryPlugin` reads its section at init only. |
