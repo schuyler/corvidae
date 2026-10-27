@@ -7,13 +7,13 @@ These tests specify behavior that doesn't exist yet (Red TDD). They fail because
 - ChannelConfig doesn't have max_turns
 """
 
-from corvidae.correlation import mint_correlation_id
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import aiosqlite
 import pytest
 
+from corvidae.correlation import mint_correlation_id
 from corvidae.agent import Agent
 from corvidae.turn import AgentTurnResult, run_agent_turn  # noqa: F401 (used in comments/type checking)
 from corvidae.channel import ChannelConfig, ChannelRegistry

@@ -1,12 +1,12 @@
 """Tests for agent firing send_thinking and send_tool_status hooks."""
 
-from corvidae.correlation import mint_correlation_id
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import aiosqlite
 import pytest
 
+from corvidae.correlation import mint_correlation_id
 from corvidae.turn import AgentTurnResult
 from corvidae.channel import ChannelConfig, ChannelRegistry
 from corvidae.persistence import PersistencePlugin, init_db

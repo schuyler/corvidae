@@ -1,8 +1,8 @@
-from corvidae.correlation import mint_correlation_id
 import pytest
 import apluggy as pluggy
 from pluggy import HookimplMarker, HookspecMarker
 
+from corvidae.correlation import mint_correlation_id
 from corvidae.hooks import AgentSpec, hookimpl, hookspec
 from corvidae.hooks import create_plugin_manager
 from corvidae.hooks import get_dependency, validate_dependencies

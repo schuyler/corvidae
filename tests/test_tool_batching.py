@@ -9,7 +9,6 @@ via on_notify → serial queue → _process_queue_item. The fix ensures that:
 4. No duplicate LLM calls or duplicate assistant responses occur
 """
 
-from corvidae.correlation import mint_correlation_id
 import asyncio
 from unittest.mock import ANY, AsyncMock, MagicMock
 
@@ -21,6 +20,7 @@ from llm_response_fixtures import (
     _make_tool_call_response,
     _make_tool_call,
 )
+from corvidae.correlation import mint_correlation_id
 
 
 class TestBatchedToolResults:

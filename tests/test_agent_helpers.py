@@ -12,12 +12,12 @@ All tests are expected to fail with AttributeError until the helpers are
 implemented (Item 2 of corvidae-cleanup.md).
 """
 
-from corvidae.correlation import mint_correlation_id
 import logging
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from corvidae.correlation import mint_correlation_id
 from corvidae.agent import (
     Agent,
     MAX_TURNS_FALLBACK_MESSAGE,

@@ -1,6 +1,5 @@
 """Tests for corvidae.persistence.PersistencePlugin."""
 
-from corvidae.correlation import mint_correlation_id
 import json
 import logging
 import time
@@ -10,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import aiosqlite
 import pytest
 
+from corvidae.correlation import mint_correlation_id
 from corvidae.channel import Channel, ChannelConfig, ChannelRegistry
 from corvidae.persistence import init_db
 from corvidae.hooks import create_plugin_manager

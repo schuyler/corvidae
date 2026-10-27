@@ -9,7 +9,6 @@ Baseline test count: 525 (all passing before this file was added).
 
 from __future__ import annotations
 
-from corvidae.correlation import mint_correlation_id
 import asyncio
 import logging
 from dataclasses import dataclass, field
@@ -19,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import aiohttp
 import pytest
 
+from corvidae.correlation import mint_correlation_id
 from corvidae.agent import Agent
 from corvidae.channel import Channel, ChannelConfig, ChannelRegistry
 from corvidae.compaction import CompactionPlugin

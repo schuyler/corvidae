@@ -6,10 +6,10 @@ Design requirements covered:
 - C3: (covered in test_agent_loop_plugin.py)
 """
 
-from corvidae.correlation import mint_correlation_id
 import asyncio
 import pytest
 
+from corvidae.correlation import mint_correlation_id
 from corvidae.channel import Channel, ChannelConfig
 from corvidae.queue import SerialQueue, QueueItem
 

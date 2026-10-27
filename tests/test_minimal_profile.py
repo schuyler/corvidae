@@ -12,7 +12,6 @@ per-test would mean re-running the same boot+turns repeatedly for no
 independent value.
 """
 
-from corvidae.correlation import mint_correlation_id
 import asyncio
 import json
 from pathlib import Path
@@ -25,6 +24,7 @@ from llm_response_fixtures import (
     _make_tool_call,
     _make_tool_call_response,
 )
+from corvidae.correlation import mint_correlation_id
 
 MINIMAL_DISABLED_PLUGINS = [
     "memory", "memory_tools", "funnel", "appraisal", "critique", "outcome_log",

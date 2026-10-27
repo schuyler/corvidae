@@ -227,7 +227,7 @@ class _FakeAgent:
         self.pm = pm
         self.ready = ready
         # When set, the call blocks on this event after the message has been
-        # admitted (or rejected), modelling a turn that is still running.
+        # admitted (a rejected message returns before it), modelling a turn that is still running.
         self.block: asyncio.Event | None = None
         # (text, correlation_id, channel) for each on_message call.
         self.calls: list[tuple[str, str, object]] = []
@@ -1537,6 +1537,8 @@ class TestTransportMintedIds:
             )
             await _wait_until(lambda: h.server.requests_matching("receipt"), timeout=3)
             assert frame_contains(h.server.requests_matching("receipt")[0], ts)
+            # The in-flight admitted set is drained once on_message returns.
+            assert not h.plugin._admitted
         finally:
             await _stop_plugin(h)
 

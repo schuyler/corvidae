@@ -10,7 +10,6 @@ Window messages carry their message_log rowid as an internal ``_db_id`` tag:
   messages.
 """
 
-from corvidae.correlation import mint_correlation_id
 import json
 import logging
 from unittest.mock import AsyncMock, MagicMock
@@ -18,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock
 import aiosqlite
 import pytest
 
+from corvidae.correlation import mint_correlation_id
 from corvidae.channel import Channel
 from corvidae.compaction import CompactionPlugin
 from corvidae.context import ContextWindow, MessageType

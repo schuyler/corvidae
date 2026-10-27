@@ -4,7 +4,7 @@ Phase 2A design (plans/implementation/phase-2.md, "Phase 2A — Design",
 WP2.1 section, PASSED re-review #1 at HEAD bb03fa5). Covers:
 
   1. mint_exchange_key() shape.
-  2. USER message: key minted before the gate, gate hook receives it,
+  2. USER message: the transport-supplied key reaches the gate hook,
      admitted -> exchange_log row origin='user', message_rowid populated
      after the turn.
   3. Gate plugin returns False -> on_message_rejected fires, exchange_log
@@ -27,13 +27,13 @@ All tests are new and live only in this file, per the WP2.1 red-author's
 instructions (no edits to shared conftest/other test files).
 """
 
-from corvidae.correlation import mint_correlation_id
 import asyncio
 import re
 from unittest.mock import ANY, AsyncMock, MagicMock
 
 import pytest
 
+from corvidae.correlation import mint_correlation_id
 from corvidae.hooks import CorvidaePlugin, create_plugin_manager, hookimpl
 
 from helpers import build_plugin_and_channel, drain, drain_task_queue

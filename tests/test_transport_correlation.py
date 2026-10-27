@@ -1,13 +1,10 @@
-"""RED tests for issue #95: transports mint the correlation id.
+"""Transports mint the correlation id (issue #95).
 
 Pins the Agent-side contract (a caller-supplied id is used verbatim; a
 missing/falsy id fails loudly), the new ``corvidae.correlation`` leaf
 module, and that cli / irc / discord each pass a minted id to
-``pm.ahook.on_message``.  Outcome labels (O1..O6) refer to
-.claude/plans/issue-95-transport-minted-ids.md.
-
-All of these fail until ``on_message`` gains a required ``correlation_id``
-parameter and the transports supply it.
+``pm.ahook.on_message``.  Outcome labels (O1..O6) are issue #95's
+requirements.
 """
 
 from __future__ import annotations

@@ -7,7 +7,6 @@ modules and the specific log calls have not been added.
 Convention: Use `caplog` (pytest's built-in fixture) to assert on log records.
 """
 
-from corvidae.correlation import mint_correlation_id
 import logging
 import logging.config
 import os
@@ -19,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import yaml
 
+from corvidae.correlation import mint_correlation_id
 from corvidae.channel import ChannelConfig, ChannelRegistry, load_channel_config
 from corvidae.context import ContextWindow
 from corvidae.persistence import init_db

@@ -6,7 +6,6 @@ builder renders every non-leading system message as ``user``; the stored
 window and the DB rows keep ``role: system``.
 """
 
-from corvidae.correlation import mint_correlation_id
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -14,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 import jinja2
 import pytest
 
+from corvidae.correlation import mint_correlation_id
 from corvidae.context import ContextWindow, MessageType
 from corvidae.hooks import hookimpl
 

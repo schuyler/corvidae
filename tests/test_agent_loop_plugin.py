@@ -1,6 +1,5 @@
 """Tests for corvidae.agent.Agent."""
 
-from corvidae.correlation import mint_correlation_id
 import json
 from pathlib import Path
 import unittest.mock
@@ -9,6 +8,7 @@ from unittest.mock import ANY, AsyncMock, MagicMock, patch
 import aiosqlite
 import pytest
 
+from corvidae.correlation import mint_correlation_id
 from corvidae.channel import ChannelConfig, ChannelRegistry
 from corvidae.context import ContextWindow, MessageType as ContextMessageType
 from corvidae.persistence import init_db

@@ -28,11 +28,11 @@ bb03fa5bbc46e31ba757e133b38912b62fc65783 -- the WP2.2 implementation does not
 exist yet.
 """
 
-from corvidae.correlation import mint_correlation_id
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from corvidae.correlation import mint_correlation_id
 from corvidae.channel import Channel, ChannelConfig
 from corvidae.hooks import create_plugin_manager
 from corvidae.task import Task, TaskPlugin

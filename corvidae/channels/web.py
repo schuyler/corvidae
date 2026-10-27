@@ -1061,7 +1061,6 @@ class WebPlugin(CorvidaePlugin):
         if not self._mine(channel):
             return
         # Ids we never saw (notification-originated turns) are a no-op.
-        for entry in self._unsent.get(channel.id, []):
-            if entry.cid == correlation_id:
-                self._remove_entry(channel.id, entry)
-                break
+        entry = self._entry_for(channel.id, correlation_id)
+        if entry is not None:
+            self._remove_entry(channel.id, entry)

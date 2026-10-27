@@ -30,11 +30,11 @@ or AttributeError/behavioral assertion failures for the `agent.py` step-7 and
 `on_init` changes (module exists, new behavior does not).
 """
 
-from corvidae.correlation import mint_correlation_id
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from corvidae.correlation import mint_correlation_id
 from corvidae.agent import Agent, FRAMEWORK_KEYS
 from corvidae.channel import Channel, ChannelConfig
 from corvidae.turn import AgentTurnResult

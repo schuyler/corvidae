@@ -1547,7 +1547,7 @@ class TestTransportMintedIds:
             gate.release.set()
 
     async def test_later_send_vetoed_marks_only_itself(self, make_env):
-        """O1 (REGRESSION GUARD; passes today too): the LATER send is vetoed
+        """O1: the LATER send is vetoed
         while the earlier is admitted and not yet persisted -- only the later
         is marked rejected and the earlier entry survives."""
         env = await make_env()

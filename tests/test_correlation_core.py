@@ -9,7 +9,6 @@ mechanism (dequeue resolution, attribution, Task/TaskPlugin meta
 propagation, on_message_persisted firing discipline).
 """
 
-from corvidae.correlation import mint_correlation_id
 import dataclasses
 import inspect
 import re
@@ -20,6 +19,7 @@ import pytest
 
 from helpers import build_plugin_and_channel, drain
 from llm_response_fixtures import _make_text_response
+from corvidae.correlation import mint_correlation_id
 
 CORVIDAE_ROOT = Path(__file__).resolve().parent.parent / "corvidae"
 

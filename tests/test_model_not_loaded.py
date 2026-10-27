@@ -6,12 +6,12 @@ budget runs out, LLMPlugin's on_llm_error turns that into a reply naming
 the model, instead of the generic error.
 """
 
-from corvidae.correlation import mint_correlation_id
 import json
 from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
 
+from corvidae.correlation import mint_correlation_id
 from corvidae.hooks import hookimpl
 from corvidae.llm import LLMHTTPError
 from corvidae.llm_plugin import LLMPlugin

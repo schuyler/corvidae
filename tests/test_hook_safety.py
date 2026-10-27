@@ -18,13 +18,13 @@ hook calls propagate exceptions rather than catching and logging them.
 
 from __future__ import annotations
 
-from corvidae.correlation import mint_correlation_id
 import asyncio
 import logging
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from corvidae.correlation import mint_correlation_id
 from corvidae.hooks import hookimpl
 from corvidae.task import Task
 
