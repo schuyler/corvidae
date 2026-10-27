@@ -46,8 +46,11 @@ one is a bug even if its tests pass.
    it. The cognition plugins (memory, retention, funnel, appraisal,
    critique, outcome log, memory tools) are a second distribution behind a
    `cognition` extra; the kernel installs, boots, and passes its tests
-   without them and without `sqlite-vec`. A reader of the README can tell
-   what they get without the extra.
+   without them and without `sqlite-vec`. Heavy third-party clients that
+   only one transport needs are extras too (`acp`, `discord`). A reader of
+   the README can tell what they get without the extras. Plugins load once
+   at startup from entry points; there is no runtime plugin loading, and
+   changing the plugin set is a restart.
 
 2. **The context window grows at the tail and truncates at the head.**
    Nothing is inserted, removed, or mutated mid-window, because that
@@ -266,8 +269,8 @@ Per transport:
   every 10 s; the read receipt is sent at processing start, not arrival.
   Notifications are never handled inline in the read loop. Groups,
   unprompted sends, and disappearing-message handling are out of scope.
-- **Discord**: discord.py's gateway, default intents, no privileged
-  Message Content intent. Replies in DMs and when mentioned (not
+- **Discord**: discord.py's gateway behind the `discord` extra, default
+  intents, no privileged Message Content intent. Replies in DMs and when mentioned (not
   `@everyone`, `@here`, or roles); drops bot authors and empty text;
   strips the mention token. Scopes: `discord:<channel_id>`,
   `discord:<thread_id>` (a thread has its own history), `discord:dm:<user_id>`.
@@ -321,9 +324,17 @@ Per transport:
   channels go through a swappable `ToolBackend`, local by default, so
   client-mediated `fs`/`terminal` and `session/request_permission` can
   land without a rewrite. A second `session/prompt` while one is
-  unresolved is rejected with `invalidRequest`, and the first is left
-  untouched. A turn whose final update cannot be delivered still
-  resolves, with `end_turn`, logged at WARNING. The stdio loop starts
+  unresolved is rejected with `invalidRequest` and the first is left
+  untouched, because cancel-and-replace would drop a turn whose tool calls
+  may already have had side effects and queueing adds unbounded state the
+  protocol does not define; a client that wants to steer sends
+  `session/cancel` first. This changes to cancel-and-replace (the first
+  prompt reporting `cancelled`) only if bb or Zed are shown to steer with
+  a bare prompt. A turn whose final update cannot be delivered still
+  resolves with `end_turn`, logged at WARNING: the turn did finish, the
+  reply is in `message_log`, and a reconnecting client's `session/load`
+  replays it, whereas `cancelled` would misreport the agent's state and
+  invite a retry of tools that already ran. The stdio loop starts
   reading only once `Agent.started` is true. Deferred, each with a named
   trigger: client-mediated tools (M-CLIENT-TOOLS), a remote listener on
   the daemon (M-REMOTE), registry auth (M-REGISTRY), v2 (M-V2).
@@ -344,10 +355,17 @@ Per transport:
    budget survives, otherwise keep the walk's cut. Only MESSAGE rows are
    summarized; SUMMARY and CONTEXT rows survive. Prior summaries carry
    forward, bounded to a fraction of the budget.
-3. The summary is role `assistant`, unless the retained tail holds no
-   `user` message, in which case it is `user`, because strict chat
-   templates reject a prompt with no user query. The role is persisted
-   with the summary row, so a reload renders the same prompt.
+3. The summary's role follows how it was written. A forked summary is
+   the agent's own first-person account and persists as `assistant`. A
+   standalone summary is a neutral paraphrase of other people's messages
+   and tool output and persists as `user`, under the same
+   data-not-instructions framing the funnel uses, for the reason
+   `docs/threat-model.md` finding 3 gives for CONTEXT. Either way a
+   retained tail with no `user` message gets a `user`-role summary,
+   because strict chat templates reject a prompt with no user query. The
+   role is persisted with the summary row, so a reload renders the same
+   prompt. The harness compaction probe asserts that the model answers the
+   person and not the summary.
 4. A `tool` row whose call compaction dropped renders as a framed system
    notification, never as an orphan `tool` message. The stored row keeps
    `role: tool`.
@@ -425,7 +443,12 @@ Per transport:
 4. Tool results are truncated to `tools.max_result_chars`. Results from
    MCP servers are framed as data by the default `transform_tool_result`,
    the way the funnel frames CONTEXT.
-5. `set_settings` lets the model adjust, per channel and in memory only:
+5. Tools run in the daemon's process. Process separation (tool workers in
+   another process with a narrowed filesystem and network, credentials and
+   the database on the trusted side) is not built until corvidae runs on
+   a machine the operator does not own; the ACP `ToolBackend` seam is
+   where it attaches when it is.
+6. `set_settings` lets the model adjust, per channel and in memory only:
    inference keys from an allowlist (`temperature`, `top_p`, `top_k`, the
    penalties, `max_tokens`, `seed`), the framework keys (`max_turns`,
    `max_context_tokens`, `reasoning_history`, validated), and dotted plugin
@@ -433,11 +456,11 @@ Per transport:
    always blocked; `agent.immutable_settings` blocks more. The persona may
    tune its own gates by default, with the documented recommended
    blocklist for channels with untrusted participants.
-6. `subagent` launches a background agent on the shared `background`
+7. `subagent` launches a background agent on the shared `background`
    client with the full tool set minus itself and a persona-neutral
    prompt; it returns a task id at once and its result arrives as a
    notification like any other tool.
-7. MCP servers connect at startup over stdio or SSE, each inside its own
+8. MCP servers connect at startup over stdio or SSE, each inside its own
    exit stack with a bounded handshake, fail-soft per server; servers that
    failed at startup are retried on a bounded backoff loop without
    needing a tool call to trigger it; a reconnected server's tools reach
@@ -517,7 +540,10 @@ only through the funnel.
    separate: the record names identifying detail from each, and no fact
    from one is attributed to the other. The consolidation prompt carries
    its own calibration language, since the channel's system prompt does
-   not reach that call.
+   not reach that call. Retrieval stays scoped by channel; topic structure
+   within a channel is the `topic` subject type's job (below), not a
+   retrieval dimension, and the harness conflation probe is what says
+   whether that holds.
 8. `corvidae redact` (`message`, `memory`, `range` forms, `--dry-run`)
    tombstones `message_log` content in place and cascades to every
    derived surface on the same channel: memory summaries, flags, vectors,
@@ -619,26 +645,40 @@ fixture for the retrieval eval set.
 tool or seeded by the operator out of band, enter the window as a deduped
 CONTEXT entry with as-of framing (a later goals entry supersedes every
 earlier one), and are reviewed and retired by the heartbeat. Retirement is
-a consolidation event, so a scheduler-driven agent cannot accumulate
-unretirable goals.
+a consolidation event: retiring a goal writes a memory record ("I
+concluded X, because...") and the heartbeat's review reads retired-goal
+records beside the open list, so an agent with a clock but no memory of
+its own conclusions cannot re-adopt a concluded purpose from the same
+evidence that produced it.
 
 **People, observations, semantic facts.** `person` records keyed by
 `(transport, scope, sender)`, auto-created on first contact, carrying a
 trust level and an identity-assurance level (transport-verified versus
 bare nick), with trust capped by assurance. Semantic facts are
-subject-typed `(person | channel | topic, subject_id, type, value,
+subject-typed `(person | channel | topic | self, subject_id, type, value,
 timestamp, source episodes)`, extracted for persons first and for other
 subjects only when the eval demands it, reconciled against existing facts
 by a cheap-model judgment, synthesized into dossiers, curated by operator
 CLI commands including a first-class verb for operator-authored facts, and
 restricted to agent-specific, post-training regularities. Participant
-match joins the retrieval score here.
+match joins the retrieval score here. `self` facts are the agent's own
+distilled runtime regularities ("I tend to over-hedge numeric claims"),
+the purest case of the frozen-weights criterion; their epistemic framing
+is mandatory, since the author is the agent, and a self-distilled fact
+never satisfies the provenance gate as corroboration.
 
 **Trust, sensitivity, guardrails, skills.** Consolidation tags each record
 with the minimum trust of the participants present; low-trust records are
 retrievable but quarantined with a provenance warning and never satisfy
 the provenance gate as corroboration; distilled facts inherit minimum
-trust. A sensitivity column filters retrieval by who is present. An idle
+trust. The most intimate write-side channel is the agent's own
+consolidation path: a prior instance's note re-enters with the authority
+of an internal voice, so every agent-authored write to a self-describing
+surface (`self` facts, the self-model below) joins the same gated surface
+as skill-directory writes, and epistemic framing at consolidation plus the
+append-only log with `recall_raw` are named anti-self-manipulation
+machinery, not style. A sensitivity column filters retrieval by who is
+present. An idle
 scan over recent memory looks for escalating conflict, repeated
 elicitation, behavioural anomalies, repeated low-trust assertions on one
 theme, and skill-directory writes, and acts through the gates plus
@@ -647,12 +687,39 @@ instructions and resources, indexed in the stable prompt region, loaded
 by a `use_skill` tool, protected by bundled copies, and writable by the
 agent only behind operator confirmation or a trust gate.
 
+**Interoception and the self-model.** The system computes rich state
+about itself (retrieval profile, appraisal vector, output entropy, window
+budget) and consumes all of it subcortically; the model never sees it. The
+interoception line is one compact funnel-admitted CONTEXT line per turn
+exposing that state so the agent can perceive and narrate its own
+condition instead of confabulating it: a few tokens, never load-bearing,
+absent signals degrade to an absent line, and its eval is whether
+self-reports become accurate against the outcome log. The self-model is a
+compact block compiled from `self` facts into the stable prompt region,
+refreshed rarely (a legitimate, infrequent cache break, the same argument
+as the skills index), operator-gated because it is an agent-authored
+write into the stable region; its eval is the diff of the compiled block
+over months, read as coherent drift, thrash, or flattening toward the
+generic. This is the feedback edge that "memory is the personality"
+otherwise only half-delivers.
+
+**Hypothesis tier.** Two mechanisms are built only on a named failure of
+the longitudinal test (§3.12): commitment records (made-to person, terms,
+due, status, episode links, attached to dossiers, broken ones persisting
+as facts about the relationship), triggered by dropped commitments that
+retrieval should have surfaced; and endogenous goal candidates (curiosity:
+unresolved high-surprise episodes from the outcome log; care: dormant
+commitments and long-quiet valued relationships), delivered only as inputs
+to the heartbeat's distillation slot behind the act-if-warranted and
+output gates, triggered by a month of heartbeats in which the agent never
+initiates anything the operator judges worth initiating.
+
 **Phase 6 toggles.** Surprise in the importance prior; semantic-tier
-promotion beyond persons; salience arbitration in the funnel; the
-encode/retrieve gate. Each ships as a toggle with its fixture benchmark
-authored first, is measured against its simpler baseline at a fixed token
-budget, and graduates to a default only if it wins. The encode/retrieve
-gate is expected to lose.
+promotion beyond persons, including `self`; salience arbitration in the
+funnel; the encode/retrieve gate; the interoception line. Each ships as a
+toggle with its fixture benchmark authored first, is measured against its
+simpler baseline at a fixed token budget, and graduates to a default only
+if it wins. The encode/retrieve gate is expected to lose.
 
 ### 3.8 Forks
 
@@ -773,6 +840,10 @@ gate is expected to lose.
 11. `agent.yaml` and the prompt files should be owned by another user and
     read-only to the daemon, and the docs say so, because `write_file`
     plus hot reload otherwise undoes every other control.
+12. There is no container image until a second deployment needs one. When
+    one is written it is a kernel image with `/data` as the working
+    directory and `agent.yaml` bind-mounted, no ports unless `web:` is
+    configured, and signal-cli and llama-server outside the container.
 
 ### 3.12 Evaluation and the harness
 
@@ -802,6 +873,17 @@ gate is expected to lose.
    premises, declines a capable request, initiates unprompted, goes
    dormant on heartbeat deletion.
 7. Phase 6 benchmarks are authored before their toggles are built.
+8. A third evaluation tier, below CI and the scheduled LLM-judged
+   benchmarks, is the operator judging over weeks: consistency of voice,
+   distinctiveness, legible drift, generalization under novel probes.
+   Personality is longitudinal and relational and its main failure mode
+   (regression to the generic base-model character) is invisible to
+   fixtures, which all start from the same weights, so this tier is not
+   automatable and the record says so rather than faking a fixture. Its
+   one instrument is a periodic diff of the self-describing store
+   (`self` facts, and the compiled self-model once it exists), read as
+   coherent drift, thrash, or flattening. The hypothesis-tier triggers in
+   §3.7 are defined against this tier.
 
 ## 4. Decisions
 
@@ -846,33 +928,11 @@ record that holds the reasoning.
 | Typed event bus deferred with a go criterion (observe class past 20 hooks, or a third `send`-shaped consolidation) | `kernel-split.md` Part 1 §5 |
 | `thinking.py` is kernel | `kernel-split.md` R9 |
 | Review findings gate on consequence, not reachability; tests derive from acceptance criteria, not the design's test list; new capability goes through requirements | `retro-web-transport-session.md` |
-
-## 5. Unsettled
-
-Requirements the record poses without answering. Each needs a decision
-written into the section above it.
-
-- **`discord-py` in the kernel.** The split removes `sqlite-vec`; Discord's
-  client library is the other heavy dependency, and ACP already shows the
-  extra pattern (R10 on #117).
-- **ACP steering** (#93): keep rejecting a concurrent prompt, cancel and
-  replace, or queue. Depends on what bb, Cursor and Zed send.
-- **ACP stop reason on failed delivery** (#99): `end_turn` or `cancelled`.
-- **The `system`-role summary.** Compaction summaries paraphrase other
-  people's messages under `role: assistant`; a `user`-role summary with
-  data framing has not been tried.
-- **Process separation.** Tool workers in another process with a narrowed
-  filesystem and network, keeping credentials and the database on the
-  trusted side. The seam exists; whether it is worth doing is open
-  (threat model item 8).
-- **Personality and autonomy** (PR #48): `self` as a fact subject, an
-  interoception CONTEXT line, a self-model compile step, self-poisoning in
-  the trust model, a longitudinal evaluation tier. Accept into the plan of
-  record or close.
-- **Hot-loading plugin modules** from a directory, with
-  `on_plugin_added` / `on_plugin_removed` and a unified startup path
-  (#28). Still listed as unimplemented in the design doc; wanted or not.
-- **Docker** (#37): the existing plan describes a tree that no longer
-  exists and needs rewriting after the split.
-- **Channel-versus-topic retrieval scoping.** Retrieval is scoped by
-  channel with no notion of topic within one channel's history.
+| `discord-py` is a `discord` extra, like `acp` | #117 (R10) |
+| ACP keeps rejecting a concurrent prompt unless a real client is shown to steer with a bare prompt; a failed final delivery is `end_turn` | #93, #99 |
+| Summary role follows the mode: fork `assistant`, standalone `user` with data framing | `threat-model.md` finding 3 |
+| No process separation until corvidae runs on a machine the operator does not own | `threat-model.md`, Privilege separation |
+| Personality is duck-typed and judged longitudinally; goal retirement is a consolidation event; `self` is a fact subject; self-authored writes join the trust gate; interoception line and self-model compile; commitment records and endogenous goals only on a named failure | `plans/personality-and-autonomy.md` (PR #48) |
+| No runtime plugin loading; changing the plugin set is a restart | #28 |
+| No container image until a second deployment needs one | #37 |
+| Retrieval scoped by channel; topic structure is the `topic` subject's job, not a retrieval dimension | `shakedown-findings.md` |
