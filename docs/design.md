@@ -1683,6 +1683,22 @@ registers `task_status` as tool closures during `on_start`.
 
 ## Transports
 
+Every transport (CLI, IRC, Signal, Discord, web, ACP) subclasses
+`TransportPlugin` (`hooks.py`) and sets `transport` to the name its
+channel ids start with. The base class implements the outbound `send`
+hook once: it drops events for channels the transport does not own
+(`owns(channel)`, by default `channel.matches_transport(self.transport)`;
+`WebPlugin` narrows it to also require that it is enabled), then
+dispatches by event type to the plain methods `send_message`,
+`send_thinking`, `send_tool_status` and `send_progress`. Those take the
+channel and an event from `outbound.py` and default to no-ops, so a
+transport overrides only what it can display; the per-transport sections
+below name them as that transport's methods. The base class also declares
+`depends_on = frozenset({"registry"})`. Inbound hooks
+(`should_process_message`, `on_message_admitted`/`rejected`/`persisted`)
+are not filtered by the base class; each transport's implementations open
+with their own ownership check.
+
 ### CLI (`channels/cli.py`)
 
 `CLIPlugin` — stdin/stdout transport. Routes to `cli:local` channel.
@@ -1982,7 +1998,8 @@ Known limits of the splitter, none of which loses text:
   and its combining marks, because splitting is by codepoint.
 
 Outbound is text only. `send_thinking` and `send_tool_status` are not
-implemented, so reasoning and tool traffic never reach Discord.
+overridden (the `TransportPlugin` no-ops apply), so reasoning and tool
+traffic never reach Discord.
 
 There is no local Discord server, so there is no harness end-to-end test
 for this transport; behavior is pinned by `tests/test_discord_plugin.py`
