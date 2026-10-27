@@ -203,7 +203,7 @@ Window messages carry internal `_`-prefixed tags (`_message_type`, `_db_id`). Ev
 
 An opaque `correlation_id` exists for every inbound user message and for every notification-born queue item that isn't itself a continuation of an existing correlation. The transport mints a user message's id with `corvidae.correlation.mint_correlation_id()` and passes it to `on_message`; the Agent mints at dequeue for a notification-born item with no inherited id. It travels alongside a `meta` dict — an extensible, framework-opaque metadata bag — through the messaging and extension-point hooks above, into `Task.correlation_id`/`Task.meta`, and back out through the completion notification's `meta` (`TaskPlugin._on_task_complete` merges `{"task_id", "correlation_id", **task.meta}`). This is how a tool cycle several hops deep still carries the correlation and metadata its originating message started with.
 
-**Transport contract.** A transport mints a fresh, unique id per inbound message, passes it as `correlation_id` to `on_message`, and matches `should_process_message`, `on_message_admitted`, `on_message_rejected` and `on_message_persisted` back to its message by that id, never by ordering or context inheritance. Import `mint_correlation_id` from `corvidae.correlation` (stdlib only), not from `corvidae.agent`. The Agent uses the id verbatim. Omitting the argument raises `HookCallError`; a falsy id raises `ValueError`.
+**Transport contract.** A transport mints a fresh, unique id per inbound message, passes it as `correlation_id` to `on_message`, and matches `should_process_message`, `on_message_admitted`, `on_message_rejected` and `on_message_persisted` back to its message by that id, never by ordering or context inheritance. Import `mint_correlation_id` from `corvidae.correlation` (stdlib only), not from `corvidae.agent`. The Agent uses the id verbatim. Omitting the argument raises `pluggy.HookCallError`; a falsy id raises `ValueError`. Like the `send_*` hooks, the lifecycle hooks broadcast to every plugin, so each of a transport's lifecycle hookimpls opens with `if not channel.matches_transport("<name>"): return` and ignores ids it never minted.
 
 `on_message_admitted` or `on_message_rejected` fires before `on_message` returns, unless the agent drops the message without either (for example, it is not ready yet). State a transport took before the call (a typing slot, a pending read receipt, an unsent-message entry) can therefore be released in a `finally` when the id was not admitted:
 
@@ -218,6 +218,12 @@ finally:
     if cid not in self._admitted:   # set by on_message_admitted
         self._pending.pop(cid, None)
     self._admitted.discard(cid)
+
+@hookimpl
+async def on_message_admitted(self, channel, correlation_id, sender, text):
+    if not channel.matches_transport("mytransport"):
+        return
+    self._admitted.add(correlation_id)
 ```
 
 The framework itself never stamps meaning into `meta` — it is a pass-through. Cognition plugins (see below) use the convention `meta["origin"]` to record where a queue item came from ("user" recognized by subscribing to `on_message_admitted`, or an explicit string like `"reminder"` stamped by a producer); that convention is plugin-side, not a core concept.
