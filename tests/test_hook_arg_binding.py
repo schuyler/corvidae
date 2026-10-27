@@ -179,7 +179,7 @@ class TestRuntimeStartupCoverage:
         pm = create_plugin_manager()
         pm.load_setuptools_entrypoints("corvidae")
 
-        # on_message(self, channel, sender, text, correlation_id) declares `text` as a
+        # on_message(self, channel, sender, text, trace_id) declares `text` as a
         # spec-required param (no default). An impl that redeclares it WITH
         # a default silently drops the caller's value — exactly the bug
         # class. Register it as a real plugin would be, then run the
@@ -207,8 +207,8 @@ class TestEnrichedOnAgentResponseParams:
     defaults, which exempts them from this guard — an impl mirroring the
     defaulted signature would silently receive None forever. The spec is
     default-free; these tests pin both the guard behavior and the real
-    end-to-end delivery. ``correlation_id``/``meta`` replace the deleted
-    ``exchange_key``/``origin``/``originating_text`` params; ``withheld``
+    end-to-end delivery. ``trace_id``/``meta`` replace the deleted
+    ``trace_id``/``origin``/``originating_text`` params; ``withheld``
     is gone entirely (returns generically in a later phase).
     """
 
@@ -218,7 +218,7 @@ class TestEnrichedOnAgentResponseParams:
         class MirroringPlugin:
             @hookimpl
             async def on_agent_response(
-                self, channel, request_text, response_text, correlation_id,
+                self, channel, request_text, response_text, trace_id,
                 meta, logprobs=None,
             ):
                 pass
@@ -240,11 +240,11 @@ class TestEnrichedOnAgentResponseParams:
         class Consumer:
             @hookimpl
             async def on_agent_response(
-                self, channel, request_text, response_text, correlation_id,
+                self, channel, request_text, response_text, trace_id,
                 meta, logprobs,
             ):
                 received.update(
-                    logprobs=logprobs, meta=meta, correlation_id=correlation_id
+                    logprobs=logprobs, meta=meta, trace_id=trace_id
                 )
 
         pm.register(Consumer(), name="consumer")
@@ -254,13 +254,13 @@ class TestEnrichedOnAgentResponseParams:
             channel=None,
             request_text="req",
             response_text="resp",
-            correlation_id="cid-1",
+            trace_id="cid-1",
             meta={"origin": "user"},
             logprobs={"content": [{"token": "resp", "logprob": -0.1}]},
         )
 
         assert received["logprobs"] == {"content": [{"token": "resp", "logprob": -0.1}]}
-        assert received["correlation_id"] == "cid-1"
+        assert received["trace_id"] == "cid-1"
         assert received["meta"] == {"origin": "user"}
 
 

@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import aiohttp
 import pytest
 
-from corvidae.correlation import mint_correlation_id
+from corvidae.trace import mint_trace_id
 from corvidae.agent import Agent
 from corvidae.channel import Channel, ChannelConfig, ChannelRegistry
 from corvidae.compaction import CompactionPlugin
@@ -118,7 +118,7 @@ class IntegrationHarness:
     async def inject_message(self, channel_key: str, sender: str, text: str) -> None:
         transport_name, scope = channel_key.split(":", 1)
         channel = self.registry.get_or_create(transport_name, scope)
-        await self.pm.ahook.on_message(channel=channel, sender=sender, text=text, correlation_id=mint_correlation_id())
+        await self.pm.ahook.on_message(channel=channel, sender=sender, text=text, trace_id=mint_trace_id())
 
     async def drain_all(self) -> None:
         """Drain one cycle: serial queues → task queue → serial queues.
@@ -567,7 +567,7 @@ class TestGroupBRoundTrip:
 
         harness.task_plugin.task_queue.enqueue = spy_enqueue
 
-        await harness.pm.ahook.on_message(channel=channel, sender="user", text="go", correlation_id=mint_correlation_id())
+        await harness.pm.ahook.on_message(channel=channel, sender="user", text="go", trace_id=mint_trace_id())
         await harness.drain_until_stable()
 
         # Only 2 tasks dispatched
@@ -617,11 +617,11 @@ class TestGroupBRoundTrip:
         channel = harness.registry.get_or_create("test", "b5")
 
         # Send msg1 → LLM call → task dispatched, queue slot freed
-        await harness.pm.ahook.on_message(channel=channel, sender="user", text="msg1", correlation_id=mint_correlation_id())
+        await harness.pm.ahook.on_message(channel=channel, sender="user", text="msg1", trace_id=mint_trace_id())
         await channel_queue_drain(harness, channel)
 
         # msg2 arrives while tool is blocked
-        await harness.pm.ahook.on_message(channel=channel, sender="user", text="msg2", correlation_id=mint_correlation_id())
+        await harness.pm.ahook.on_message(channel=channel, sender="user", text="msg2", trace_id=mint_trace_id())
         await channel_queue_drain(harness, channel)
 
         # Release gate → tool completes → notification → third LLM call
@@ -1027,8 +1027,8 @@ class TestGroupDMultiChannel:
 
         harness.mock_client.chat = chat_side_effect
 
-        await harness.pm.ahook.on_message(channel=limited_channel, sender="user", text="limited_go", correlation_id=mint_correlation_id())
-        await harness.pm.ahook.on_message(channel=default_channel, sender="user", text="default_go", correlation_id=mint_correlation_id())
+        await harness.pm.ahook.on_message(channel=limited_channel, sender="user", text="limited_go", trace_id=mint_trace_id())
+        await harness.pm.ahook.on_message(channel=default_channel, sender="user", text="default_go", trace_id=mint_trace_id())
         await harness.drain_until_stable()
 
         # Limited channel sends fallback (max_turns suppressed)
@@ -1162,7 +1162,7 @@ class TestGroupDMultiChannel:
             for i in range(5):
                 await h.pm.ahook.on_message(
                     channel=chan_a, sender="user", text=long_text,
-                correlation_id=mint_correlation_id()
+                trace_id=mint_trace_id()
                 )
                 await channel_queue_drain(h, chan_a)
 
@@ -1170,7 +1170,7 @@ class TestGroupDMultiChannel:
             # task is dispatched (queue slot freed) but the tool is still blocked.
             await h.pm.ahook.on_message(
                 channel=chan_b, sender="user", text="b_msg trigger tool",
-                correlation_id=mint_correlation_id()
+                trace_id=mint_trace_id()
             )
             await channel_queue_drain(h, chan_b)
             # Yield to the event loop so the task worker starts consuming the
@@ -1184,7 +1184,7 @@ class TestGroupDMultiChannel:
             # then the LLM is called for the 6th response.
             await h.pm.ahook.on_message(
                 channel=chan_a, sender="user", text=long_text,
-                correlation_id=mint_correlation_id()
+                trace_id=mint_trace_id()
             )
             await channel_queue_drain(h, chan_a)
 
@@ -1384,7 +1384,7 @@ class TestGroupEErrorHandling:
         channel = registry.get_or_create("test", "e3")
 
         with caplog.at_level(logging.ERROR, logger="corvidae.agent"):
-            await pm.ahook.on_message(channel=channel, sender="user", text="use tool", correlation_id=mint_correlation_id())
+            await pm.ahook.on_message(channel=channel, sender="user", text="use tool", trace_id=mint_trace_id())
             await agent_loop.queues[channel.id].drain()
 
         # Error logged about missing task queue
@@ -1396,7 +1396,7 @@ class TestGroupEErrorHandling:
 
         # No crash; subsequent text-only message works
         mock_client.chat = AsyncMock(return_value=_make_text_response("text only"))
-        await pm.ahook.on_message(channel=channel, sender="user", text="just text", correlation_id=mint_correlation_id())
+        await pm.ahook.on_message(channel=channel, sender="user", text="just text", trace_id=mint_trace_id())
         await agent_loop.queues[channel.id].drain()
 
         assert len(fake_transport.sent) == 1

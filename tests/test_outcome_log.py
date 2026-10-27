@@ -36,7 +36,7 @@ class TestExchangeLogWriter:
         async with db.execute(
             "SELECT channel_id, origin, message_rowid, retrieval_top_score, "
             "retrieval_hit_count, probe_score FROM exchange_log "
-            "WHERE exchange_key = ?",
+            "WHERE trace_id = ?",
             ("ex1",),
         ) as cursor:
             row = await cursor.fetchone()
@@ -49,7 +49,7 @@ class TestExchangeLogWriter:
 
         async with db.execute(
             "SELECT origin, message_rowid, created_at FROM exchange_log "
-            "WHERE exchange_key = ?",
+            "WHERE trace_id = ?",
             ("ex2",),
         ) as cursor:
             row = await cursor.fetchone()
@@ -66,7 +66,7 @@ class TestExchangeLogWriter:
 
         async with db.execute(
             "SELECT COUNT(*), MAX(channel_id) FROM exchange_log "
-            "WHERE exchange_key = ?",
+            "WHERE trace_id = ?",
             ("ex3",),
         ) as cursor:
             row = await cursor.fetchone()
@@ -102,7 +102,7 @@ class TestExchangeLogWriter:
         )
 
         async with db.execute(
-            "SELECT appraisal, outcomes FROM exchange_log WHERE exchange_key = ?",
+            "SELECT appraisal, outcomes FROM exchange_log WHERE trace_id = ?",
             ("ex6",),
         ) as cursor:
             row = await cursor.fetchone()
@@ -114,7 +114,7 @@ class TestExchangeLogWriter:
         await plugin.update_exchange("ex6", appraisal={"stage2": {"score": 0.5}})
 
         async with db.execute(
-            "SELECT appraisal FROM exchange_log WHERE exchange_key = ?",
+            "SELECT appraisal FROM exchange_log WHERE trace_id = ?",
             ("ex6",),
         ) as cursor:
             (merged_appraisal,) = await cursor.fetchone()
@@ -136,7 +136,7 @@ class TestRetrievalTopSimilarity:
         )
         async with db.execute(
             "SELECT retrieval_top_score, retrieval_top_similarity "
-            "FROM exchange_log WHERE exchange_key = ?",
+            "FROM exchange_log WHERE trace_id = ?",
             ("ex-s",),
         ) as cursor:
             assert await cursor.fetchone() == (0.3, 0.82)
@@ -144,14 +144,14 @@ class TestRetrievalTopSimilarity:
     async def test_legacy_table_upgraded(self, db):
         """An exchange_log created before #66 gains the column, rows kept."""
         await db.execute(
-            "CREATE TABLE exchange_log (exchange_key TEXT PRIMARY KEY, "
+            "CREATE TABLE exchange_log (trace_id TEXT PRIMARY KEY, "
             "channel_id TEXT NOT NULL, origin TEXT, message_rowid INTEGER, "
             "created_at REAL NOT NULL, retrieval_top_score REAL, "
             "retrieval_hit_count INTEGER, probe_score REAL, appraisal TEXT, "
             "provenance_snapshot TEXT, outcomes TEXT)"
         )
         await db.execute(
-            "INSERT INTO exchange_log (exchange_key, channel_id, created_at, "
+            "INSERT INTO exchange_log (trace_id, channel_id, created_at, "
             "retrieval_top_score) VALUES ('old', 'irc:#old', 1.0, 0.4)"
         )
         await db.commit()
@@ -160,7 +160,7 @@ class TestRetrievalTopSimilarity:
         await plugin.record_exchange("new", "irc:#new")
         await plugin.update_exchange("new", retrieval_top_similarity=0.9)
         async with db.execute(
-            "SELECT exchange_key, retrieval_top_score, retrieval_top_similarity "
+            "SELECT trace_id, retrieval_top_score, retrieval_top_similarity "
             "FROM exchange_log ORDER BY created_at"
         ) as cursor:
             rows = await cursor.fetchall()
@@ -174,7 +174,7 @@ class TestRetrievalTopSimilarity:
         from corvidae.persistence import PersistencePlugin
 
         await db.execute(
-            "CREATE TABLE exchange_log (exchange_key TEXT PRIMARY KEY, "
+            "CREATE TABLE exchange_log (trace_id TEXT PRIMARY KEY, "
             "channel_id TEXT NOT NULL, origin TEXT, message_rowid INTEGER, "
             "created_at REAL NOT NULL, retrieval_top_score REAL, "
             "retrieval_hit_count INTEGER, probe_score REAL, appraisal TEXT, "
@@ -214,7 +214,7 @@ class TestRfc7386NoneDeletes:
         await plugin.update_exchange("ex-7386", appraisal={"entropy": None})
 
         async with db.execute(
-            "SELECT appraisal FROM exchange_log WHERE exchange_key = ?",
+            "SELECT appraisal FROM exchange_log WHERE trace_id = ?",
             ("ex-7386",),
         ) as cursor:
             row = await cursor.fetchone()

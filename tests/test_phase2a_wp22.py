@@ -32,7 +32,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from corvidae.correlation import mint_correlation_id
+from corvidae.trace import mint_trace_id
 from corvidae.channel import Channel, ChannelConfig
 from corvidae.hooks import create_plugin_manager
 from corvidae.task import Task, TaskPlugin
@@ -293,7 +293,7 @@ class TestLogprobsThreadedIntoOnAgentResponse:
 
         with patch("corvidae.agent.run_agent_turn", new_callable=AsyncMock) as mock_turn:
             mock_turn.return_value = turn_result
-            await plugin.on_message(channel=channel, sender="user", text="query", correlation_id=mint_correlation_id())
+            await plugin.on_message(channel=channel, sender="user", text="query", trace_id=mint_trace_id())
             await drain(plugin, channel)
 
         plugin.pm.ahook.on_agent_response.assert_awaited_once()
@@ -320,7 +320,7 @@ class TestLogprobsThreadedIntoOnAgentResponse:
 
         with patch("corvidae.agent.run_agent_turn", new_callable=AsyncMock) as mock_turn:
             mock_turn.return_value = turn_result
-            await plugin.on_message(channel=channel, sender="user", text="query", correlation_id=mint_correlation_id())
+            await plugin.on_message(channel=channel, sender="user", text="query", trace_id=mint_trace_id())
             await drain(plugin, channel)
 
         plugin.pm.ahook.on_agent_response.assert_awaited_once()
@@ -434,7 +434,7 @@ class TestRequestLogprobsInRequestBody:
 
         with patch("corvidae.agent.run_agent_turn", new_callable=AsyncMock) as mock_turn:
             mock_turn.return_value = turn_result
-            await plugin.on_message(channel=channel, sender="user", text="query", correlation_id=mint_correlation_id())
+            await plugin.on_message(channel=channel, sender="user", text="query", trace_id=mint_trace_id())
             await drain(plugin, channel)
 
         mock_turn.assert_awaited_once()
@@ -469,7 +469,7 @@ class TestRequestLogprobsInRequestBody:
 
         with patch("corvidae.agent.run_agent_turn", new_callable=AsyncMock) as mock_turn:
             mock_turn.return_value = turn_result
-            await plugin.on_message(channel=channel, sender="user", text="query", correlation_id=mint_correlation_id())
+            await plugin.on_message(channel=channel, sender="user", text="query", trace_id=mint_trace_id())
             await drain(plugin, channel)
 
         mock_turn.assert_awaited_once()

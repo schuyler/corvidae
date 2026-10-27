@@ -168,10 +168,10 @@ class TestIRCClientEvents:
                 channel=expected_channel,
                 sender="user",
                 text="hello bot",
-                correlation_id=ANY,
+                trace_id=ANY,
             )
-            # The transport mints a real (non-empty string) correlation id.
-            cid = pm.ahook.on_message.await_args.kwargs["correlation_id"]
+            # The transport mints a real (non-empty string) trace id.
+            cid = pm.ahook.on_message.await_args.kwargs["trace_id"]
             assert isinstance(cid, str) and cid
 
     async def test_on_channel_message_ignores_self(self):
@@ -221,9 +221,9 @@ class TestIRCClientEvents:
                 channel=expected_channel,
                 sender="user",
                 text="private message",
-                correlation_id=ANY,
+                trace_id=ANY,
             )
-            cid = pm.ahook.on_message.await_args.kwargs["correlation_id"]
+            cid = pm.ahook.on_message.await_args.kwargs["trace_id"]
             assert isinstance(cid, str) and cid
 
 

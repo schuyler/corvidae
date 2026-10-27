@@ -99,29 +99,29 @@ class AgentStub:
         self.pm = pm
         self.started = True
         self.queues: dict = {}
-        # (channel, sender, text, correlation_id) per admitted message.
+        # (channel, sender, text, trace_id) per admitted message.
         self.calls: list[tuple] = []
 
     @hookimpl
     async def on_message(self, channel, sender: str, text: str,
-                         correlation_id: str) -> None:
+                         trace_id: str) -> None:
         # Use the transport-minted id for every hook, as Agent does.
-        cid = correlation_id
+        cid = trace_id
         results = await self.pm.ahook.should_process_message(
-            channel=channel, sender=sender, text=text, correlation_id=cid,
+            channel=channel, sender=sender, text=text, trace_id=cid,
         )
         # Reject-wins resolution, then exactly one of rejected/admitted.
         if resolve_reject_wins(results) is False:
             try:
                 await self.pm.ahook.on_message_rejected(
-                    channel=channel, correlation_id=cid, sender=sender, text=text,
+                    channel=channel, trace_id=cid, sender=sender, text=text,
                 )
             except Exception:
                 logging.getLogger(__name__).warning("rejected failed", exc_info=True)
             return
         try:
             await self.pm.ahook.on_message_admitted(
-                channel=channel, correlation_id=cid, sender=sender, text=text,
+                channel=channel, trace_id=cid, sender=sender, text=text,
             )
         except Exception:
             logging.getLogger(__name__).warning("admitted failed", exc_info=True)
@@ -137,7 +137,7 @@ class HoldGate:
         self.release = asyncio.Event()
 
     @hookimpl
-    async def should_process_message(self, channel, sender, text, correlation_id):
+    async def should_process_message(self, channel, sender, text, trace_id):
         self.entered.set()
         await self.release.wait()
         return self.result
@@ -153,7 +153,7 @@ class OrderedGate:
         self.count = 0
 
     @hookimpl
-    async def should_process_message(self, channel, sender, text, correlation_id):
+    async def should_process_message(self, channel, sender, text, trace_id):
         i = self.count
         self.count += 1
         if self.events[i] is not None:
@@ -165,7 +165,7 @@ class VetoGate:
     """Vetoes every message."""
 
     @hookimpl
-    async def should_process_message(self, channel, sender, text, correlation_id):
+    async def should_process_message(self, channel, sender, text, trace_id):
         return False
 
 
@@ -173,7 +173,7 @@ class RaiseGate:
     """Raises out of the gate, as a broken third-party gate would."""
 
     @hookimpl
-    async def should_process_message(self, channel, sender, text, correlation_id):
+    async def should_process_message(self, channel, sender, text, trace_id):
         raise RuntimeError("gate exploded")
 
 
@@ -460,7 +460,7 @@ class TestConfig:
         # Hooks on a web channel are no-ops when inert.
         ch = registry.get_or_create("web", "main")
         await plugin.send_message(channel=ch, text="x")
-        await plugin.on_message_admitted(channel=ch, correlation_id="c", sender="web", text="x")
+        await plugin.on_message_admitted(channel=ch, trace_id="c", sender="web", text="x")
         await plugin.on_config_reload(config={})
         await plugin.on_stop()
         loud = [r for r in caplog.records if r.levelno > logging.DEBUG
@@ -897,11 +897,11 @@ class TestOutbound:
         await env.plugin.send_progress(channel=irc, text="x")
         await env.plugin.send_tool_status(channel=irc, tool_name="t", status="dispatched",
                                           args_summary="a", result_summary=None)
-        await env.plugin.on_message_admitted(channel=irc, correlation_id="c",
+        await env.plugin.on_message_admitted(channel=irc, trace_id="c",
                                              sender="x", text="x")
-        await env.plugin.on_message_rejected(channel=irc, correlation_id="c",
+        await env.plugin.on_message_rejected(channel=irc, trace_id="c",
                                              sender="x", text="x")
-        await env.plugin.on_message_persisted(channel=irc, correlation_id="c",
+        await env.plugin.on_message_persisted(channel=irc, trace_id="c",
                                               rowid=1, text="x", meta={})
         assert calls == []
         assert env.plugin._unsent == {}
@@ -950,7 +950,7 @@ def _cid_of(env, text: str) -> str:
 
 async def _persist(env, cid: str, name: str = "main") -> None:
     await env.pm.ahook.on_message_persisted(
-        channel=env.channel(name), correlation_id=cid, rowid=1, text="", meta={})
+        channel=env.channel(name), trace_id=cid, rowid=1, text="", meta={})
 
 
 class TestWorking:
@@ -1499,7 +1499,7 @@ class TestPackaging:
 
 
 # ===========================================================================
-# Issue #95: the transport mints the correlation id
+# Issue #95: the transport mints the trace id
 # ===========================================================================
 
 class TestTransportMintedIds:
@@ -1533,14 +1533,14 @@ class TestTransportMintedIds:
             ch = env.channel("main")
             # A rejection for an unknown id: broadcast with no entry id.
             await env.pm.ahook.on_message_rejected(
-                channel=ch, correlation_id="unknown-id", sender="web", text="t")
+                channel=ch, trace_id="unknown-id", sender="web", text="t")
             rej = await conn.wait_type("rejected")
             assert rej["id"] is None
             assert env.plugin._unsent["web:main"] == before
 
             # An admission for an unknown id: no new entry, nothing marked.
             await env.pm.ahook.on_message_admitted(
-                channel=ch, correlation_id="unknown-id", sender="web", text="t2")
+                channel=ch, trace_id="unknown-id", sender="web", text="t2")
             assert env.plugin._unsent["web:main"] == before
             assert held.admitted is False
         finally:

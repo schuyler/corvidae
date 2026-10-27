@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 import jinja2
 import pytest
 
-from corvidae.correlation import mint_correlation_id
+from corvidae.trace import mint_trace_id
 from corvidae.context import ContextWindow, MessageType
 from corvidae.hooks import hookimpl
 
@@ -141,7 +141,7 @@ class _ContextInjector:
     """Stand-in for a funnel producer: appends a CONTEXT system message."""
 
     @hookimpl
-    async def before_agent_turn(self, channel, correlation_id, meta):
+    async def before_agent_turn(self, channel, trace_id, meta):
         channel.conversation.append(
             {"role": "system", "content": "[CONTEXT from memory]\nfact\n[end CONTEXT from memory]"},
             MessageType.CONTEXT,
@@ -185,7 +185,7 @@ class TestAgentWiring:
     async def test_funnel_context_sent_as_user(self, make_agent):
         plugin, channel, db, client = await make_agent("user")
         plugin.pm.register(_ContextInjector(), name="injector")
-        await plugin.on_message(channel=channel, sender="u", text="hi", correlation_id=mint_correlation_id())
+        await plugin.on_message(channel=channel, sender="u", text="hi", trace_id=mint_trace_id())
         await drain(plugin, channel)
         assert _sent_roles(client) == ["system", "user", "user"]
         # Window and DB keep the system role.
@@ -207,7 +207,7 @@ class TestAgentWiring:
     async def test_default_is_system(self, make_agent):
         plugin, channel, db, client = await make_agent(None)
         plugin.pm.register(_ContextInjector(), name="injector")
-        await plugin.on_message(channel=channel, sender="u", text="hi", correlation_id=mint_correlation_id())
+        await plugin.on_message(channel=channel, sender="u", text="hi", trace_id=mint_trace_id())
         await drain(plugin, channel)
         assert _sent_roles(client) == ["system", "user", "system"]
 
@@ -215,7 +215,7 @@ class TestAgentWiring:
         plugin, channel, db, client = await make_agent("assistant")
         assert "mid_conversation_system_role" in caplog.text
         plugin.pm.register(_ContextInjector(), name="injector")
-        await plugin.on_message(channel=channel, sender="u", text="hi", correlation_id=mint_correlation_id())
+        await plugin.on_message(channel=channel, sender="u", text="hi", trace_id=mint_trace_id())
         await drain(plugin, channel)
         assert _sent_roles(client) == ["system", "user", "system"]
 
@@ -224,6 +224,6 @@ class TestAgentWiring:
         plugin.pm.register(_ContextInjector(), name="injector")
         await plugin.on_config_reload(config={"agent": {"mid_conversation_system_role": "user"}})
         plugin._client = client  # reload re-borrows from the (absent) llm plugin
-        await plugin.on_message(channel=channel, sender="u", text="hi", correlation_id=mint_correlation_id())
+        await plugin.on_message(channel=channel, sender="u", text="hi", trace_id=mint_trace_id())
         await drain(plugin, channel)
         assert _sent_roles(client)[-1] == "user"

@@ -24,7 +24,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from corvidae.correlation import mint_correlation_id
+from corvidae.trace import mint_trace_id
 from corvidae.hooks import hookimpl
 from corvidae.task import Task
 
@@ -121,7 +121,7 @@ class TestAfterPersistAssistantHookSafety:
             plugin._client = mock_client
 
             with caplog.at_level(logging.WARNING, logger="corvidae.agent"):
-                await plugin.on_message(channel=channel, sender="user", text="hi", correlation_id=mint_correlation_id())
+                await plugin.on_message(channel=channel, sender="user", text="hi", trace_id=mint_trace_id())
                 await drain(plugin, channel)
 
             # The raising plugin must have been called
@@ -194,7 +194,7 @@ class TestOnAgentResponseHookSafety:
             plugin._client = mock_client
 
             with caplog.at_level(logging.WARNING, logger="corvidae.agent"):
-                await plugin.on_message(channel=channel, sender="user", text="hello", correlation_id=mint_correlation_id())
+                await plugin.on_message(channel=channel, sender="user", text="hello", trace_id=mint_trace_id())
                 await drain(plugin, channel)
 
             # on_agent_response must have been called
@@ -259,7 +259,7 @@ class TestSendMessageNormalPathHookSafety:
             plugin._client = mock_client
 
             with caplog.at_level(logging.ERROR, logger="corvidae.agent"):
-                await plugin.on_message(channel=channel, sender="user", text="hi", correlation_id=mint_correlation_id())
+                await plugin.on_message(channel=channel, sender="user", text="hi", trace_id=mint_trace_id())
                 await drain(plugin, channel)
 
             # send_message must have been attempted
@@ -281,7 +281,7 @@ class TestSendMessageNormalPathHookSafety:
                 return_value=_make_text_response("second response")
             )
             second_call_count_before = raising._call_count
-            await plugin.on_message(channel=channel, sender="user", text="second message", correlation_id=mint_correlation_id())
+            await plugin.on_message(channel=channel, sender="user", text="second message", trace_id=mint_trace_id())
             await drain(plugin, channel)
 
             assert raising._call_count > second_call_count_before, (
@@ -329,7 +329,7 @@ class TestSendMessageErrorPathHookSafety:
             plugin._client = mock_client
 
             with caplog.at_level(logging.WARNING, logger="corvidae.agent"):
-                await plugin.on_message(channel=channel, sender="user", text="hi", correlation_id=mint_correlation_id())
+                await plugin.on_message(channel=channel, sender="user", text="hi", trace_id=mint_trace_id())
                 await drain(plugin, channel)
 
             # send_message must have been attempted on the error path
@@ -351,7 +351,7 @@ class TestSendMessageErrorPathHookSafety:
                 return_value=_make_text_response("recovery response")
             )
             second_call_count_before = raising._call_count
-            await plugin.on_message(channel=channel, sender="user", text="try again", correlation_id=mint_correlation_id())
+            await plugin.on_message(channel=channel, sender="user", text="try again", trace_id=mint_trace_id())
             await drain(plugin, channel)
 
             assert raising._call_count > second_call_count_before, (
@@ -438,7 +438,7 @@ class TestOnNotifyInTaskCompleteSafety:
             plugin._client = mock_client
 
             with caplog.at_level(logging.WARNING, logger="corvidae"):
-                await plugin.on_message(channel=channel, sender="user", text="use tool", correlation_id=mint_correlation_id())
+                await plugin.on_message(channel=channel, sender="user", text="use tool", trace_id=mint_trace_id())
                 await drain(plugin, channel)
                 await drain_task_queue(plugin)
                 # Give the event loop a few cycles to let the exception surface

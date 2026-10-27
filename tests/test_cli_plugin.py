@@ -131,10 +131,10 @@ class TestReadLoop:
             channel=expected_channel,
             sender="user",
             text="hello world",
-            correlation_id=ANY,
+            trace_id=ANY,
         )
-        # The transport mints a real (non-empty string) correlation id.
-        cid = pm.ahook.on_message.await_args.kwargs["correlation_id"]
+        # The transport mints a real (non-empty string) trace id.
+        cid = pm.ahook.on_message.await_args.kwargs["trace_id"]
         assert isinstance(cid, str) and cid
         # EOF triggers SIGINT to self for graceful shutdown
         mock_kill.assert_called_once()
@@ -250,7 +250,7 @@ class TestNonInteractiveStdin:
             channel=registry.get_or_create("cli", "local"),
             sender="user",
             text="hi",
-            correlation_id=ANY,
+            trace_id=ANY,
         )
         mock_kill.assert_not_called()
 
