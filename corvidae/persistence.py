@@ -1,7 +1,7 @@
 """PersistencePlugin — SQLite database lifecycle and conversation persistence.
 
-Manages the SQLite database connection. Implements load_conversation,
-on_conversation_event, and on_compaction hooks for persisting conversation
+Manages the SQLite database connection. Implements resolve_conversation,
+persist_message, and on_compaction hooks for persisting conversation
 history to SQLite.
 
 Config:
@@ -150,7 +150,7 @@ class PersistencePlugin(CorvidaePlugin):
             await self.db.close()
 
     @hookimpl(trylast=True)
-    async def load_conversation(self, channel) -> list[dict] | None:
+    async def resolve_conversation(self, channel) -> list[dict] | None:
         """Load conversation history from SQLite for the channel.
 
         Returns a list of tagged message dicts if rows exist, or None if the
@@ -204,7 +204,7 @@ class PersistencePlugin(CorvidaePlugin):
         return result
 
     @hookimpl
-    async def on_conversation_event(
+    async def persist_message(
         self, channel, message: dict, message_type
     ) -> int | None:
         """Persist a conversation message to SQLite and return its rowid.
@@ -244,7 +244,7 @@ class PersistencePlugin(CorvidaePlugin):
         """Persist a compaction summary to SQLite with timestamp boundary logic.
 
         The summary timestamp is set just before the oldest retained message
-        so that load_conversation correctly excludes pre-compaction messages.
+        so that resolve_conversation correctly excludes pre-compaction messages.
         The compacted_ids parameter is ignored here — it exists for
         consolidation consumers (MemoryPlugin).
         """

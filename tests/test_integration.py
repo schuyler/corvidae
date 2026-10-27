@@ -1180,7 +1180,7 @@ class TestGroupDMultiChannel:
             # At this point: chan_b's gated_tool is in flight, gate not set.
             # Phase 3: Trigger compaction on channel A by sending a 6th message.
             # This appends the user message, token_estimate exceeds threshold,
-            # CompactionPlugin.compact_conversation runs (calls fake_summarize),
+            # CompactionPlugin.resolve_compaction runs (calls fake_summarize),
             # then the LLM is called for the 6th response.
             await h.pm.ahook.on_message(
                 channel=chan_a, sender="user", text=long_text,

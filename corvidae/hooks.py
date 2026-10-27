@@ -60,7 +60,7 @@ def resolve_single_result(results: list, hook_name: str) -> object | None:
     """Exactly-one-non-None resolution (bootstrap-mapping §4.8).
 
     For broadcast hooks where exactly one implementation is expected to
-    return a value (e.g. on_conversation_event's rowid from persistence).
+    return a value (e.g. persist_message's rowid from persistence).
     More than one non-None result is a configuration error: log it and
     use the first.
     """
@@ -159,7 +159,7 @@ class _SeedHooksPlugin:
         return text
 
     @hookimpl(trylast=True)
-    async def process_tool_result(self, result, **kwargs) -> str:
+    async def transform_tool_result(self, result, **kwargs) -> str:
         return result
 
 
@@ -315,6 +315,8 @@ class AgentSpec:
     async def on_init(self, pm, config: dict) -> None:
         """Called after all plugins are registered, before on_start.
 
+        Grammar class: observe (broadcast; return value ignored).
+
         Use for storing pm, reading config values, and resolving references
         to other plugins. Do not create runtime resources here — use on_start.
 
@@ -327,19 +329,26 @@ class AgentSpec:
     async def on_start(self, config: dict) -> None:
         """Called once when the daemon starts, after config is loaded.
 
+        Grammar class: observe (broadcast; return value ignored).
+
         Args:
             config: The full parsed YAML config dict.
         """
 
     @hookspec
     async def on_stop(self) -> None:
-        """Called once when the daemon receives SIGINT or SIGTERM."""
+        """Called once when the daemon receives SIGINT or SIGTERM.
+
+        Grammar class: observe (broadcast; return value ignored).
+        """
 
     @hookspec
     async def on_message(
         self, channel: Channel, sender: str, text: str, trace_id: str
     ) -> None:
         """Called when an inbound message arrives on a channel.
+
+        Grammar class: observe (broadcast; return value ignored).
 
         Args:
             channel: The Channel object for this conversation scope.
@@ -358,6 +367,8 @@ class AgentSpec:
     @hookspec
     async def send_message(self, channel: Channel, text: str, latency_ms: float | None = None) -> None:
         """Called to deliver an outbound message to a channel.
+
+        Grammar class: bare imperative (broadcast; the caller decides what to do with the result list).
 
         Pluggy broadcasts this hook to all registered transport plugins.
         Each transport must filter for its own channels by calling
@@ -381,6 +392,8 @@ class AgentSpec:
     async def send_thinking(self, channel: Channel, text: str) -> None:
         """Called to display reasoning/thinking content from the LLM.
 
+        Grammar class: bare imperative (broadcast; the caller decides what to do with the result list).
+
         Transport plugins may render this differently from the main response
         (e.g., in a dim or distinct color). Only fires when the LLM returns
         reasoning_content in its response.
@@ -393,6 +406,8 @@ class AgentSpec:
     @hookspec
     async def send_tool_status(self, channel: Channel, tool_name: str, status: str, args_summary: str | None = None, result_summary: str | None = None) -> None:
         """Called to display tool call lifecycle events.
+
+        Grammar class: bare imperative (broadcast; the caller decides what to do with the result list).
 
         Transport plugins may render tool activity as inline status
         indicators. Fires when a tool is dispatched and when it completes.
@@ -409,6 +424,8 @@ class AgentSpec:
     async def send_progress(self, channel: Channel, text: str) -> None:
         """Called to display intermediate assistant text before tool dispatch.
 
+        Grammar class: bare imperative (broadcast; the caller decides what to do with the result list).
+
         Fires when the LLM produces text content alongside tool calls.
         Transport plugins may render this as a status indicator (e.g., grey text)
         since it is not the final response.
@@ -420,6 +437,8 @@ class AgentSpec:
     @hookspec
     def register_tools(self, tool_registry: list) -> None:
         """Called during startup so plugins can add tools to the agent loop.
+
+        Grammar class: bare imperative (broadcast; the caller decides what to do with the result list).
 
         Args:
             tool_registry: A mutable list. Plugins append callable tool
@@ -438,6 +457,8 @@ class AgentSpec:
         logprobs: dict | None,
     ) -> None:
         """Called after the agent loop produces a response to a message.
+
+        Grammar class: observe (broadcast; return value ignored).
 
         All parameters are required (no defaults): a default on a spec
         param exempts it from the arg-binding guard, so an impl mirroring
@@ -477,6 +498,8 @@ class AgentSpec:
     ) -> None:
         """Called to inject a notification into a channel's processing queue.
 
+        Grammar class: observe (broadcast; return value ignored).
+
         Plugins implementing this hook can inject messages into a channel so
         the agent loop sees and reacts to them. The Agent hookimpl
         enqueues a QueueItem(role=QueueItemRole.NOTIFICATION) on the channel's queue.
@@ -501,6 +524,8 @@ class AgentSpec:
     ) -> bool | None:
         """Gate hook: decide whether to process an incoming message.
 
+        Grammar class: veto (broadcast; resolved with resolve_reject_wins).
+
         Broadcast hook. All implementations run. Any False vetoes (reject-wins).
         Return False to reject, True to accept, None for no opinion.
 
@@ -524,6 +549,8 @@ class AgentSpec:
     ) -> None:
         """Broadcast after should_process_message admits a USER message.
 
+        Grammar class: observe (broadcast; return value ignored).
+
         Fired exactly once per admitted message, after reject-wins
         resolution. Side effects only (e.g. OutcomeLogPlugin's
         record_exchange).
@@ -540,6 +567,8 @@ class AgentSpec:
         self, channel: Channel, trace_id: str, sender: str, text: str
     ) -> None:
         """Broadcast after should_process_message vetoes a USER message.
+
+        Grammar class: observe (broadcast; return value ignored).
 
         Fired exactly once per rejected message.
 
@@ -561,6 +590,8 @@ class AgentSpec:
     ) -> None:
         """Broadcast after the trace-originating message row is persisted.
 
+        Grammar class: observe (broadcast; return value ignored).
+
         Fired only when the current queue item originates its trace
         (USER items, and notification items whose id was minted at
         dequeue) — never for mid-exchange tool-result rows, injected
@@ -578,23 +609,29 @@ class AgentSpec:
         """
 
     @hookspec(firstresult=True)
-    async def on_llm_error(
+    async def resolve_llm_error(
         self, channel: Channel, error: Exception
     ) -> str | None:
-        """Called when run_agent_turn raises an exception.
+        """Resolve the text sent to the channel when run_agent_turn raises.
 
-        Sequential hook (firstresult=True). Return a string to replace the
-        default error message, or None to defer to the next handler. The first
-        non-None return value wins; subsequent handlers are not called.
+        Grammar class: resolve (firstresult=True). Return a string to replace
+        the default error message, or None to defer to the next handler. The
+        first non-None return value wins; subsequent handlers are not called.
+
+        Who answers: LLMPlugin, which names the failure and the next step for
+        LLM client errors. Other plugins return None unless they own the
+        error; if one ever answers, registration order decides who wins.
         """
 
     @hookspec(firstresult=True)
-    async def compact_conversation(
+    async def resolve_compaction(
         self, channel: "Channel", conversation: "ContextWindow", max_tokens: int
     ) -> "bool | None":
-        """Compact the conversation when approaching the context limit.
+        """Resolve who compacts the conversation near the context limit.
 
-        Sequential hook (firstresult=True). Handlers are called in priority
+        Grammar class: resolve (firstresult=True). Here "resolve" means
+        "resolve who compacts": the core ignores the return value, but the
+        chain stops at the first non-None one. Handlers are called in priority
         order. The first handler that returns a non-None value wins and the
         chain stops. Return True to signal that compaction was performed,
         or None to defer to the next handler.
@@ -605,6 +642,9 @@ class AgentSpec:
         - Default-priority handlers run next (third-party replacements).
         - trylast handlers run last (CompactionPlugin as fallback).
 
+        Who answers: CompactionPlugin, unless a default-priority replacement
+        answers first (docs/plugin-guide.md, FancyCompactionPlugin).
+
         Args:
             channel: The Channel being compacted.
             conversation: The ContextWindow to compact.
@@ -612,19 +652,20 @@ class AgentSpec:
         """
 
     @hookspec(firstresult=True)
-    async def process_tool_result(
+    async def transform_tool_result(
         self, tool_name: str, result: str, channel: "Channel | None"
     ) -> str | None:
         """Transform a tool result before it enters the conversation.
 
-        Wrapper chain hook (firstresult=True). Use ``@hookimpl(wrapper=True)``
+        Grammar class: transform (firstresult=True wrapper chain with a
+        trylast seed on _SeedHooksPlugin). Use ``@hookimpl(wrapper=True)``
         to wrap the chain result. The seed plugin returns the input unchanged;
         wrappers above it compose transforms in LIFO order.
 
         Example::
 
             @hookimpl(wrapper=True)
-            def process_tool_result(self, **kwargs):
+            def transform_tool_result(self, **kwargs):
                 result = yield
                 if result is not None:
                     return result.upper()
@@ -646,6 +687,8 @@ class AgentSpec:
     ) -> None:
         """Fired immediately before an LLM chat-completion call is made.
 
+        Grammar class: observe (broadcast; return value ignored).
+
         Broadcast hook (side effects only). Fires from the LLMClient
         chokepoint via an observer injected by LLMPlugin, so every LLM
         call in the system is covered — turn-loop, compaction, subagent,
@@ -655,6 +698,10 @@ class AgentSpec:
         full messages in a broadcast hook would copy the entire prompt per
         call. A debugging consumer needing full payloads is a new hook, not
         a widening of this one.
+
+        No in-tree plugin implements this hook. It is kept deliberately:
+        observability hooks come in request/response pairs (this one pairs
+        with on_llm_response), and it exists for consumers outside the tree.
 
         Args:
             role: The LLMPlugin role that made the call ("main", "background").
@@ -679,6 +726,8 @@ class AgentSpec:
     ) -> None:
         """Fired exactly once per LLM call, after it succeeds or terminally fails.
 
+        Grammar class: observe (broadcast; return value ignored).
+
         Broadcast hook (side effects only). Retried transient attempts do
         NOT fire this hook — one on_llm_request pairs with exactly one
         on_llm_response, matched by request_id.
@@ -699,6 +748,8 @@ class AgentSpec:
         self, name: str, value: float, tags: dict[str, str]
     ) -> None:
         """Broadcast hook: consume a metric event (side effects only).
+
+        Grammar class: observe (broadcast; return value ignored).
 
         The shape follows the StatsD/OpenTelemetry common denominator — a
         named numeric value with dimensional tags (dotted-hierarchy names,
@@ -725,17 +776,22 @@ class AgentSpec:
     async def on_idle(self) -> None:
         """Broadcast hook: fired when all queues are empty and cooldown has elapsed.
 
+        Grammar class: observe (broadcast; return value ignored).
+
         Plugins can use this to perform periodic background work such as
         polling RSS feeds, checking email, or running maintenance tasks.
         """
 
     @hookspec(firstresult=True)
-    async def load_conversation(self, channel: "Channel") -> "list[dict] | None":
-        """Load conversation history for a channel.
+    async def resolve_conversation(self, channel: "Channel") -> "list[dict] | None":
+        """Resolve the persisted conversation history for a channel.
 
-        Sequential hook (firstresult=True). Return a list of tagged message
-        dicts if this plugin has stored history, or None to defer to the next
-        handler. The first non-None return value wins.
+        Grammar class: resolve (firstresult=True). Return a list of tagged
+        message dicts if this plugin has stored history, or None to defer to
+        the next handler. The first non-None return value wins.
+
+        Who answers: PersistencePlugin. Callers are Agent (lazy channel init)
+        and AcpPlugin (``session/load``).
 
         Args:
             channel: The Channel to load history for.
@@ -746,6 +802,8 @@ class AgentSpec:
         """Return the live Channel for a persisted channel id, creating it
         with transport-specific config if needed.
 
+        Grammar class: resolve (firstresult=True).
+
         Sequential hook (firstresult=True). Transports implement this for
         ids they own and return None for others. Callers holding only a
         persisted ``transport:scope`` id (e.g. SchedulerPlugin firing a row
@@ -753,6 +811,11 @@ class AgentSpec:
         ``registry.get_or_create`` would bypass, such as Signal's E.164
         alias ``ChannelConfig``. ``channel_id`` has no default — see the
         arg-binding guard (tests/test_hook_arg_binding.py).
+
+        Who answers: the transport whose name is the id's ``transport:``
+        prefix (DiscordPlugin, SignalPlugin). The hook is keyed on that
+        prefix and every implementation returns None for ids it does not
+        own, so registration order cannot change the answer.
 
         Args:
             channel_id: The ``transport:scope`` persistence key.
@@ -762,17 +825,19 @@ class AgentSpec:
         """
 
     @hookspec
-    async def on_conversation_event(
+    async def persist_message(
         self, channel: "Channel", message: dict, message_type: "MessageType"
     ) -> "int | None":
-        """Fired after a message is appended to the conversation.
+        """Persist a message appended to the conversation.
 
-        Broadcast hook. Called after every conv.append(). Persistence
-        returns the inserted ``message_log`` rowid; exactly one
-        implementation may return non-None; all others return None.
-        Callers resolve the result list with ``resolve_single_result``
-        and attach the rowid to the in-window message copy as ``_db_id``
-        (bootstrap-mapping §4.8).
+        Grammar class: bare imperative (broadcast; the caller decides what to
+        do with the result list). Called after every conv.append(). Every
+        implementation runs. PersistencePlugin returns the inserted
+        ``message_log`` rowid; every other implementation (JsonlLogPlugin)
+        returns None. Callers resolve the result list with
+        ``resolve_single_result``, which logs an error and uses the first
+        value if more than one implementation answers, and attach the rowid
+        to the in-window message copy as ``_db_id`` (bootstrap-mapping §4.8).
 
         Args:
             channel: The Channel where the event occurred.
@@ -792,6 +857,8 @@ class AgentSpec:
         cut: int,
     ) -> None:
         """Fired just before compaction drops the head of the window.
+
+        Grammar class: observe (broadcast; return value ignored).
 
         Broadcast, awaited (it runs on the response path). Fired by
         CompactionPlugin after the summary succeeded and before
@@ -825,6 +892,8 @@ class AgentSpec:
     ) -> None:
         """Fired after compaction replaces older messages with a summary.
 
+        Grammar class: observe (broadcast; return value ignored).
+
         Broadcast hook (side effects only). Called after replace_with_summary.
 
         Args:
@@ -846,6 +915,8 @@ class AgentSpec:
         meta: dict,
     ) -> None:
         """Called before each LLM invocation, after compaction.
+
+        Grammar class: observe (broadcast; return value ignored).
 
         Plugins can inject context entries into the conversation log by calling
         ``channel.conversation.append(msg, message_type=MessageType.CONTEXT)``.
@@ -869,6 +940,8 @@ class AgentSpec:
     async def after_persist_assistant(self, channel: "Channel", message: dict) -> None:
         """Called after the assistant message has been persisted to the conversation log.
 
+        Grammar class: observe (broadcast; return value ignored).
+
         Plugins may mutate the in-memory message dict (e.g., to strip
         reasoning_content). The DB copy is already written at call time;
         mutations affect only subsequent prompt builds. No return value is used.
@@ -884,6 +957,8 @@ class AgentSpec:
         self, channel: "Channel", text: str, result_message: dict
     ) -> "str | None":
         """Called before sending the final text response to the channel.
+
+        Grammar class: transform (firstresult=True wrapper chain with a trylast seed on _SeedHooksPlugin).
 
         Wrapper chain hook (firstresult=True). Use ``@hookimpl(wrapper=True)``
         to wrap the chain result. The seed plugin returns the input text
@@ -910,6 +985,8 @@ class AgentSpec:
     @hookspec
     async def on_config_reload(self, config: dict) -> None:
         """Called when agent.yaml is reloaded from disk.
+
+        Grammar class: observe (broadcast; return value ignored).
 
         Plugins should re-read their configuration from the new config dict.
         The config dict has already been merged with CLI overrides and validated.

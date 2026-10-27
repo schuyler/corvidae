@@ -12,7 +12,10 @@ Every test is parametrized per hook name so that single rows can be marked
 into one ``send`` hook.
 """
 
+from collections.abc import Iterable
+
 import pytest
+from pluggy import HookCaller
 
 from corvidae.hooks import AgentSpec, _SeedHooksPlugin, create_plugin_manager
 
@@ -41,7 +44,7 @@ RETIRED = {
 }
 
 
-def _hookcallers() -> dict:
+def _hookcallers() -> dict[str, HookCaller]:
     """Map hook name -> HookCaller for every hookspec on a fresh manager.
 
     Walks ``pm.hook.__dict__`` the way ``_check_hook_arg_binding`` does;
@@ -74,7 +77,7 @@ def _pending(name: str) -> list:
     return []
 
 
-def _rows(names) -> list:
+def _rows(names: Iterable[str]) -> list:
     """Parametrize rows, one per hook name, with WP3 xfails attached."""
     return [pytest.param(n, id=n, marks=_pending(n)) for n in sorted(names)]
 

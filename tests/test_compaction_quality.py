@@ -198,7 +198,7 @@ class TestDeathSpiralCompaction:
         with patch.object(plugin, "_summarize", side_effect=mock_summarize):
             # Use a small max_tokens to ensure compaction triggers
             # (conversation has many long messages from the fixture)
-            result = await plugin.compact_conversation(
+            result = await plugin.resolve_compaction(
                 channel=channel, conversation=conv, max_tokens=200,
             )
 
@@ -240,7 +240,7 @@ class TestDeathSpiralCompaction:
             return "No user instructions found."
 
         with patch.object(plugin, "_summarize", side_effect=mock_summarize):
-            result = await plugin.compact_conversation(
+            result = await plugin.resolve_compaction(
                 channel=channel, conversation=conv, max_tokens=200,
             )
 
@@ -284,7 +284,7 @@ class TestFirstCompactionAgainstFixture:
             return "First compaction summary"
 
         with patch.object(plugin, "_summarize", side_effect=mock_summarize):
-            result = await plugin.compact_conversation(
+            result = await plugin.resolve_compaction(
                 channel=channel, conversation=conv, max_tokens=500,
             )
 

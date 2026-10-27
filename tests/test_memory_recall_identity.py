@@ -204,7 +204,7 @@ class TestSourceDatedRecords:
                 ("assistant", "did you set WIFI_PS_NONE?"),
             ])
             from corvidae.context import MessageType
-            ctx_id = await persistence.on_conversation_event(
+            ctx_id = await persistence.persist_message(
                 channel=channel,
                 message={"role": "system", "content": "[CONTEXT]"},
                 message_type=MessageType.CONTEXT,

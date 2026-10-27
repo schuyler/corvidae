@@ -323,8 +323,8 @@ class TestOnMessagePersistedFiringDiscipline:
         self, plugin_and_channel
     ):
         plugin, channel, db = plugin_and_channel
-        # Force rowid=None: no on_conversation_event listener returns a value.
-        plugin.pm.ahook.on_conversation_event = AsyncMock(return_value=[None])
+        # Force rowid=None: no persist_message listener returns a value.
+        plugin.pm.ahook.persist_message = AsyncMock(return_value=[None])
         persisted = AsyncMock()
         plugin.pm.ahook.on_message_persisted = persisted
 

@@ -659,7 +659,7 @@ class TestCompactionLogging:
     """CompactionPlugin must log WARNING before compaction."""
 
     async def test_compaction_triggered_logs_warning(self, caplog):
-        """CompactionPlugin.compact_conversation must log WARNING when compaction is triggered."""
+        """CompactionPlugin.resolve_compaction must log WARNING when compaction is triggered."""
         from corvidae.compaction import CompactionPlugin
 
         conv = ContextWindow("test:chan1")
@@ -679,14 +679,14 @@ class TestCompactionLogging:
         plugin = CompactionPlugin(None)
         plugin._llm_client = mock_client
         with caplog.at_level(logging.WARNING, logger="corvidae.compaction"):
-            await plugin.compact_conversation(
+            await plugin.resolve_compaction(
                 channel=mock_channel, conversation=conv, max_tokens=100
             )
 
         records = [r for r in caplog.records if r.name == "corvidae.compaction"]
         warning_records = [r for r in records if r.levelno == logging.WARNING]
         assert warning_records, (
-            "CompactionPlugin.compact_conversation must emit WARNING when compaction is triggered"
+            "CompactionPlugin.resolve_compaction must emit WARNING when compaction is triggered"
         )
 
 
@@ -932,8 +932,8 @@ class TestAgentLogging:
             "on_message must emit an INFO log with latency_ms structured field after response"
         )
 
-    async def test_load_conversation_logs_info(self, db, caplog):
-        """PersistencePlugin.load_conversation must emit an INFO log when loading
+    async def test_resolve_conversation_logs_info(self, db, caplog):
+        """PersistencePlugin.resolve_conversation must emit an INFO log when loading
         an existing conversation for a channel."""
         import json
         import time
@@ -952,7 +952,7 @@ class TestAgentLogging:
 
         channel = registry.get_or_create("test", "scope1")
 
-        # Insert a row so load_conversation returns results and emits the INFO log
+        # Insert a row so resolve_conversation returns results and emits the INFO log
         await db.execute(
             "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
             "VALUES (?, ?, ?, 'message')",
@@ -961,10 +961,10 @@ class TestAgentLogging:
         await db.commit()
 
         with caplog.at_level(logging.INFO, logger="corvidae.persistence"):
-            await persistence.load_conversation(channel=channel)
+            await persistence.resolve_conversation(channel=channel)
 
         records = [r for r in caplog.records if r.name == "corvidae.persistence"]
         info_records = [r for r in records if r.levelno == logging.INFO]
         assert info_records, (
-            "PersistencePlugin.load_conversation must emit INFO log when loading an existing conversation"
+            "PersistencePlugin.resolve_conversation must emit INFO log when loading an existing conversation"
         )

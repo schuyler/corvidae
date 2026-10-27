@@ -264,11 +264,11 @@ class TestRunTurn:
         assert isinstance(call_kwargs["text"], str)
         assert call_kwargs["text"]
 
-    async def test_llm_error_fires_on_llm_error_hook(self, plugin_and_channel):
-        """run_agent_turn raises -> on_llm_error hook is called with channel and error."""
+    async def test_llm_error_fires_resolve_llm_error_hook(self, plugin_and_channel):
+        """run_agent_turn raises -> resolve_llm_error hook is called with channel and error."""
         plugin, channel, db = plugin_and_channel
         plugin._client = MagicMock()
-        plugin.pm.ahook.on_llm_error = AsyncMock(return_value=None)
+        plugin.pm.ahook.resolve_llm_error = AsyncMock(return_value=None)
 
         exc = RuntimeError("bad model")
         with patch(
@@ -282,18 +282,18 @@ class TestRunTurn:
                 llm_overrides=None,
             )
 
-        plugin.pm.ahook.on_llm_error.assert_called_once()
-        call_kwargs = plugin.pm.ahook.on_llm_error.call_args.kwargs
+        plugin.pm.ahook.resolve_llm_error.assert_called_once()
+        call_kwargs = plugin.pm.ahook.resolve_llm_error.call_args.kwargs
         assert call_kwargs["channel"] is channel
         assert call_kwargs["error"] is exc
 
     async def test_llm_error_hook_raising_still_sends_default_message(
         self, plugin_and_channel
     ):
-        """A raising on_llm_error hook must not silence the error reply."""
+        """A raising resolve_llm_error hook must not silence the error reply."""
         plugin, channel, db = plugin_and_channel
         plugin._client = MagicMock()
-        plugin.pm.ahook.on_llm_error = AsyncMock(
+        plugin.pm.ahook.resolve_llm_error = AsyncMock(
             side_effect=RuntimeError("error hook blew up")
         )
 
@@ -684,7 +684,7 @@ class TestDefaultLlmErrorMessage:
         """A timeout produces a human 'timed out' cause plus a retry hint."""
         plugin, channel, db = plugin_and_channel
         plugin._client = MagicMock()
-        plugin.pm.ahook.on_llm_error = AsyncMock(return_value=None)
+        plugin.pm.ahook.resolve_llm_error = AsyncMock(return_value=None)
 
         with patch(
             "corvidae.agent.run_agent_turn",
@@ -708,7 +708,7 @@ class TestDefaultLlmErrorMessage:
         """An unclassified failure still names a cause and gives a retry hint."""
         plugin, channel, db = plugin_and_channel
         plugin._client = MagicMock()
-        plugin.pm.ahook.on_llm_error = AsyncMock(return_value=None)
+        plugin.pm.ahook.resolve_llm_error = AsyncMock(return_value=None)
 
         with patch(
             "corvidae.agent.run_agent_turn",

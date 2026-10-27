@@ -61,7 +61,7 @@ To replace a built-in hook handler, implement the hook at default priority. Buil
 ```python
 class FancyCompactionPlugin(CorvidaePlugin):
     @hookimpl
-    async def compact_conversation(self, channel, conversation, max_tokens):
+    async def resolve_compaction(self, channel, conversation, max_tokens):
         # Custom strategy
         await self.my_compaction(conversation, max_tokens)
         return True  # non-None stops the chain; built-in never runs
@@ -72,7 +72,7 @@ To observe without replacing, use `tryfirst=True` and return None:
 ```python
 class CompactionObserver(CorvidaePlugin):
     @hookimpl(tryfirst=True)
-    async def compact_conversation(self, channel, conversation, max_tokens):
+    async def resolve_compaction(self, channel, conversation, max_tokens):
         self.record_metrics(conversation)
         return None  # chain continues to the actual compaction handler
 ```
@@ -187,7 +187,7 @@ async def send_message(self, channel, text: str) -> None:
 | `on_agent_response(channel, request_text: str, response_text: str, trace_id: str \| None, meta: dict, logprobs: dict \| None)` | async broadcast | After agent produces a response |
 | `before_agent_turn(channel, trace_id: str \| None, meta: dict)` | async broadcast | Before each LLM invocation |
 | `after_persist_assistant(channel, message: dict)` | async broadcast | After assistant message is written to DB; plugins may mutate the in-memory dict |
-| `on_conversation_event(channel, message: dict, message_type: MessageType) -> int \| None` | async broadcast | After every `conv.append()` call; message is the untagged dict (no `_message_type` key). Persistence returns the inserted `message_log` rowid; **exactly one implementation may return non-None** (all others return None). Callers resolve with `resolve_single_result` and attach the rowid to the in-window message as `_db_id`. |
+| `persist_message(channel, message: dict, message_type: MessageType) -> int \| None` | async broadcast | After every `conv.append()` call; message is the untagged dict (no `_message_type` key). Persistence returns the inserted `message_log` rowid; **exactly one implementation may return non-None** (all others return None). Callers resolve with `resolve_single_result` and attach the rowid to the in-window message as `_db_id`. |
 | `before_compaction(channel, compacted_ids: list[int], cut: int)` | async broadcast, awaited | After the compaction summary succeeded and before `replace_with_summary`. The window still holds the messages about to be dropped (`channel.conversation.messages[:cut]`; `cut` is moved off tool cycles where compaction can afford it, see design.md), so this is where to fork over that prefix (see "Forking the window"). Runs on the response path; failures are logged and never block compaction. |
 | `on_compaction(channel, summary_msg: dict, retain_count: int, compacted_ids: list[int])` | async broadcast | After compaction replaces older messages with a summary; `summary_msg` is the untagged summary dict. `compacted_ids` carries the `message_log` rowids of exactly the removed messages (empty when unknown) — the consolidation range consumed by `MemoryPlugin`. |
 | `on_idle()` | async broadcast | All queues empty and cooldown elapsed; only fires when `IdleMonitorPlugin` is registered |
@@ -197,7 +197,7 @@ async def send_message(self, channel, text: str) -> None:
 hook fires. Mutations to `message` affect in-memory prompt construction
 only; they do not update the persisted record.
 
-`before_agent_turn` — messages injected via `channel.conversation.append()` inside this hook are passed through `on_conversation_event` and persisted to the DB, unless they already carry a `_db_id` (i.e. their producer persisted them itself).
+`before_agent_turn` — messages injected via `channel.conversation.append()` inside this hook are passed through `persist_message` and persisted to the DB, unless they already carry a `_db_id` (i.e. their producer persisted them itself).
 
 Window messages carry internal `_`-prefixed tags (`_message_type`, `_db_id`). Every serialization boundary (prompt build, compaction summarizer prep, persistence, JSONL log) strips all `_`-prefixed keys — internal tags never reach the LLM or the DB.
 
@@ -305,15 +305,15 @@ These hooks return a value. Hooks marked `firstresult=True` (sequential) stop at
 | Hook | Strategy | Returns | Behavior |
 |------|----------|---------|----------|
 | `should_process_message(channel, sender, text, trace_id)` | reject-wins (broadcast) | `bool \| None` | Any `False` vetoes the message; any `True` (with no `False`) accepts; `None` if all defer |
-| `on_llm_error(channel, error)` | `firstresult=True` | `str \| None` | First non-None string wins; chain stops. If all return None, the default message names the failure class (timeout, unreachable server, or an HTTP status) and asks the user to try again. `LLMPlugin` registers a `trylast` handler that explains an unloaded router model, any non-2xx `LLMHTTPError` (naming the status, an actionable hint, and a short provider body), and connection/timeout failures that point at `llm.main.base_url`; it defers (`None`) for anything else. To inspect HTTP failures yourself, check `isinstance(error, corvidae.llm.LLMHTTPError)` and read `error.status`, `error.body`, and `error.model`. |
-| `compact_conversation(channel, conversation, max_tokens)` | `firstresult=True` | `bool \| None` | First non-None return stops the chain. `CompactionPlugin` uses `trylast` (returns True). Third-party plugins run at default priority. |
-| `process_tool_result(tool_name, result, channel)` | `firstresult=True` wrapper chain | `str \| None` | Wrappers compose transforms in LIFO order. The seed returns the input unchanged. Non-wrapper hookimpls short-circuit the seed via firstresult. |
+| `resolve_llm_error(channel, error)` | `firstresult=True` | `str \| None` | First non-None string wins; chain stops. If all return None, the default message names the failure class (timeout, unreachable server, or an HTTP status) and asks the user to try again. `LLMPlugin` registers a `trylast` handler that explains an unloaded router model, any non-2xx `LLMHTTPError` (naming the status, an actionable hint, and a short provider body), and connection/timeout failures that point at `llm.main.base_url`; it defers (`None`) for anything else. To inspect HTTP failures yourself, check `isinstance(error, corvidae.llm.LLMHTTPError)` and read `error.status`, `error.body`, and `error.model`. |
+| `resolve_compaction(channel, conversation, max_tokens)` | `firstresult=True` | `bool \| None` | First non-None return stops the chain. `CompactionPlugin` uses `trylast` (returns True). Third-party plugins run at default priority. |
+| `transform_tool_result(tool_name, result, channel)` | `firstresult=True` wrapper chain | `str \| None` | Wrappers compose transforms in LIFO order. The seed returns the input unchanged. Non-wrapper hookimpls short-circuit the seed via firstresult. |
 | `transform_display_text(channel, text, result_message)` | `firstresult=True` wrapper chain | `str \| None` | Wrappers compose transforms in LIFO order. The seed returns the input text unchanged. Non-wrapper hookimpls short-circuit the seed via firstresult. |
-| `load_conversation(channel)` | `firstresult=True` | `list[dict] \| None` | First non-None result wins. `PersistencePlugin` uses `trylast` as fallback. Called once when a channel's conversation is first initialized. |
+| `resolve_conversation(channel)` | `firstresult=True` | `list[dict] \| None` | First non-None result wins. `PersistencePlugin` uses `trylast` as fallback. Called once when a channel's conversation is first initialized. |
 
-`compact_conversation` — sequential hook (`firstresult=True`). The first handler returning a non-None value stops the chain. `CompactionPlugin` runs last (`trylast=True`) as the default strategy and returns True. A third-party plugin at default priority runs before it — if it returns non-None, `CompactionPlugin` is never called.
+`resolve_compaction` — sequential hook (`firstresult=True`). The first handler returning a non-None value stops the chain. `CompactionPlugin` runs last (`trylast=True`) as the default strategy and returns True. A third-party plugin at default priority runs before it — if it returns non-None, `CompactionPlugin` is never called.
 
-`process_tool_result` fires for all tool calls — it is invoked from `dispatch_tool_call` in `corvidae/tool.py`, which is used by both the main agent loop and background subagent loops. It does not fire for pre-dispatch errors (JSON parse failure or unknown tool name).
+`transform_tool_result` fires for all tool calls — it is invoked from `dispatch_tool_call` in `corvidae/tool.py`, which is used by both the main agent loop and background subagent loops. It does not fire for pre-dispatch errors (JSON parse failure or unknown tool name).
 
 `transform_display_text` — `result_message` is the raw assistant message dict from the LLM response. It may contain `reasoning_content` if the model produces thinking tokens. `text` is the string content extracted from that message. Wrapper implementations receive the chain result (the output of inner wrappers or the seed) via `yield`. Non-wrapper implementations that return `None` defer to the seed, which returns `text` unchanged.
 
@@ -719,27 +719,27 @@ otherwise.
 
 Broadcast hook calls from `Agent` are wrapped in `try/except`. If a plugin raises an exception from `before_agent_turn`, `after_persist_assistant`, `on_agent_response`, or `send_message`, the exception is logged at WARNING or ERROR level and processing continues. Plugins do not need to catch their own exceptions to protect the queue consumer.
 
-For `firstresult=True` hooks (`compact_conversation`, `load_conversation`, `on_llm_error`), pluggy propagates the first handler's exception immediately — the chain stops and no further handlers run. The call sites in `Agent` handle these as follows:
+For `firstresult=True` hooks (`resolve_compaction`, `resolve_conversation`, `resolve_llm_error`), pluggy propagates the first handler's exception immediately — the chain stops and no further handlers run. The call sites in `Agent` handle these as follows:
 
-- `compact_conversation` — wrapped in try/except; failure is logged at WARNING and the turn continues without compaction.
-- `load_conversation` — not wrapped; an exception propagates to `_process_queue_item`, which will fail the queue item.
-- `on_llm_error` — called inside the existing try/except in `_run_turn`; an exception from the hook itself is not separately caught (it propagates up from `_run_turn`).
+- `resolve_compaction` — wrapped in try/except; failure is logged at WARNING and the turn continues without compaction.
+- `resolve_conversation` — not wrapped; an exception propagates to `_process_queue_item`, which will fail the queue item.
+- `resolve_llm_error` — called inside the existing try/except in `_run_turn`; an exception from the hook itself is not separately caught (it propagates up from `_run_turn`).
 
 For `should_process_message` (broadcast, resolved with `resolve_reject_wins`), exceptions propagate to the call site.
 
-For `transform_display_text` and `process_tool_result` (wrapper chain hooks), pluggy propagates exceptions from wrapper implementations to the call site. `transform_display_text` is wrapped in try/except in `_resolve_display_text`.
+For `transform_display_text` and `transform_tool_result` (wrapper chain hooks), pluggy propagates exceptions from wrapper implementations to the call site. `transform_display_text` is wrapped in try/except in `_resolve_display_text`.
 
 ## Async considerations
 
 All broadcast hooks are `async`. Corvidae uses apluggy's `pm.ahook.*` for async dispatch.
 
-For hooks with `firstresult=True` (`compact_conversation`, `load_conversation`, `on_llm_error`), `pm.ahook.<hook>(...)` returns a single value (or None) directly:
+For hooks with `firstresult=True` (`resolve_compaction`, `resolve_conversation`, `resolve_llm_error`), `pm.ahook.<hook>(...)` returns a single value (or None) directly:
 
 ```python
-result = await pm.ahook.load_conversation(channel=channel)
+result = await pm.ahook.resolve_conversation(channel=channel)
 ```
 
-For `transform_display_text` and `process_tool_result`, use `@hookimpl(wrapper=True)` to participate in the wrapper chain. The seed plugin returns the input value unchanged as the innermost result; each wrapper receives that result, optionally transforms it, and returns the modified value:
+For `transform_display_text` and `transform_tool_result`, use `@hookimpl(wrapper=True)` to participate in the wrapper chain. The seed plugin returns the input value unchanged as the innermost result; each wrapper receives that result, optionally transforms it, and returns the modified value:
 
 ```python
 from corvidae.hooks import hookimpl
@@ -913,7 +913,7 @@ Compacts conversation history when it approaches the channel's
 
 Implements one hook:
 
-- `compact_conversation` (`trylast=True`) — fires before each LLM call. Checks whether the token estimate exceeds `compaction_threshold * max_tokens`. If so, and if the conversation has more than `min_messages_to_compact` messages, summarizes older messages to fit within `compaction_retention * max_tokens`, moving the cut off any tool cycle that straddles it where that still leaves a useful compaction (design.md, CompactionPlugin step 3). With `agent.forks` on for `compaction`, the summary comes from a fork of the dropped prefix (`agent.compaction_fork_prompt`); otherwise, or if the fork fails, from the standalone summarizer. Fires `before_compaction` before truncating and `on_compaction` after. Returns True to stop the `firstresult` chain. Runs after any third-party handlers at default priority.
+- `resolve_compaction` (`trylast=True`) — fires before each LLM call. Checks whether the token estimate exceeds `compaction_threshold * max_tokens`. If so, and if the conversation has more than `min_messages_to_compact` messages, summarizes older messages to fit within `compaction_retention * max_tokens`, moving the cut off any tool cycle that straddles it where that still leaves a useful compaction (design.md, CompactionPlugin step 3). With `agent.forks` on for `compaction`, the summary comes from a fork of the dropped prefix (`agent.compaction_fork_prompt`); otherwise, or if the fork fails, from the standalone summarizer. Fires `before_compaction` before truncating and `on_compaction` after. Returns True to stop the `firstresult` chain. Runs after any third-party handlers at default priority.
 
 Token counting uses tiktoken (cl100k_base encoding) via `count_tokens()` in `corvidae/context.py`. When tiktoken is unavailable, a character-based fallback is used (3.5 chars per token). `agent.chars_per_token` is deprecated and only takes effect in the fallback path.
 
@@ -933,7 +933,7 @@ receive an error from the API when the context limit is exceeded.
 
 Opens the SQLite database, runs schema migrations, and sets the journal mode.
 Entry point name: `"persistence"`. Implements `on_start`,
-`on_stop`, `load_conversation`, `on_conversation_event`, and `on_compaction`.
+`on_stop`, `resolve_conversation`, `persist_message`, and `on_compaction`.
 
 **Config:**
 ```yaml
@@ -943,20 +943,20 @@ daemon:
                                 # allowed values: delete, truncate, persist, memory, wal, off
 ```
 
-**Without this plugin:** `load_conversation` returns no history; conversation
+**Without this plugin:** `resolve_conversation` returns no history; conversation
 history is not persisted across restarts.
 
 ### JsonlLogPlugin (`corvidae/jsonl_log.py`)
 
 Writes an append-only JSONL log of conversation events alongside the SQLite
-store. Each `on_conversation_event` and `on_compaction` call produces one
+store. Each `persist_message` and `on_compaction` call produces one
 JSON line in a per-channel file. Entry point name: `"jsonl_log"`.
 
 Implements three hooks:
 
 - `on_start` — reads `daemon.jsonl_log_dir` and creates the directory.
   If the key is absent the plugin is a no-op for the rest of its lifetime.
-- `on_conversation_event` — writes a record with fields `ts`, `channel`,
+- `persist_message` — writes a record with fields `ts`, `channel`,
   `type` (message type string), and `message` (the untagged message dict).
 - `on_compaction` — writes a record with `type: "summary"` and the untagged
   summary dict.

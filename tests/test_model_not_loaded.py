@@ -2,7 +2,7 @@
 
 A llama-server router running --no-models-autoload answers a request for an
 unloaded model with HTTP 400 "model is not loaded". After LLMClient's wait
-budget runs out, LLMPlugin's on_llm_error turns that into a reply naming
+budget runs out, LLMPlugin's resolve_llm_error turns that into a reply naming
 the model, instead of the generic error.
 """
 
@@ -33,7 +33,7 @@ def _http_error(body: str, model: str = "swift-1.5", status: int = 400) -> LLMHT
 
 class TestLLMPluginOnLlmError:
     async def test_names_unloaded_model(self):
-        reply = await LLMPlugin().on_llm_error(channel=MagicMock(), error=_http_error(NOT_LOADED_BODY))
+        reply = await LLMPlugin().resolve_llm_error(channel=MagicMock(), error=_http_error(NOT_LOADED_BODY))
         assert reply is not None
         assert "swift-1.5" in reply
         assert "isn't loaded" in reply
@@ -41,14 +41,14 @@ class TestLLMPluginOnLlmError:
     async def test_explains_other_http_errors(self):
         """Non-model-not-loaded HTTP failures get their own message."""
         error = _http_error('{"error": {"message": "context too long"}}')
-        reply = await LLMPlugin().on_llm_error(channel=MagicMock(), error=error)
+        reply = await LLMPlugin().resolve_llm_error(channel=MagicMock(), error=error)
         assert reply is not None
         assert "400" in reply
         assert "context too long" in reply
 
     async def test_defers_on_non_http_errors(self):
         error = RuntimeError("model is not loaded")
-        assert await LLMPlugin().on_llm_error(channel=MagicMock(), error=error) is None
+        assert await LLMPlugin().resolve_llm_error(channel=MagicMock(), error=error) is None
 
 
 class TestCreateClient:
@@ -85,7 +85,7 @@ class TestEndToEnd:
 
         class Override:
             @hookimpl
-            async def on_llm_error(self, channel, error):
+            async def resolve_llm_error(self, channel, error):
                 return "custom"
 
         plugin.pm.register(Override(), name="override")

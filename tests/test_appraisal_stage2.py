@@ -545,7 +545,7 @@ class TestAppraisalPrior:
         rowids = []
         for role, content in [("user", "here is the plan"),
                               ("assistant", "understood, I will do it")]:
-            rowids.append(await persistence.on_conversation_event(
+            rowids.append(await persistence.persist_message(
                 channel=channel,
                 message={"role": role, "content": content},
                 message_type=MessageType.MESSAGE,

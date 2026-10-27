@@ -260,7 +260,7 @@ class TestMidDrainRegistrationWedge:
 
         # Interpose on the persistence hook admit() awaits, so a second
         # registration lands exactly mid-drain (flag already discarded).
-        orig_event = pm.ahook.on_conversation_event
+        orig_event = pm.ahook.persist_message
         fired = {"done": False}
 
         async def registering_event(**kwargs):
@@ -271,7 +271,7 @@ class TestMidDrainRegistrationWedge:
                 )
             return await orig_event(**kwargs)
 
-        pm.ahook.on_conversation_event = registering_event
+        pm.ahook.persist_message = registering_event
 
         # Stub 1 fires for A.
         await funnel.register_and_wake(
@@ -287,7 +287,7 @@ class TestMidDrainRegistrationWedge:
         assert "payload A" in window
         assert "payload B" in window
 
-        pm.ahook.on_conversation_event = orig_event
+        pm.ahook.persist_message = orig_event
 
         # Stub 2's turn arrives with an empty registry — it must clear the
         # stale flag, not early-return past it.

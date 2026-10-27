@@ -1,7 +1,7 @@
 """Tests for Phase 2 hook dispatch migration.
 
-These tests verify firstresult=True semantics on compact_conversation,
-load_conversation, and on_llm_error hookspecs, including trylast/tryfirst
+These tests verify firstresult=True semantics on resolve_compaction,
+resolve_conversation, and resolve_llm_error hookspecs, including trylast/tryfirst
 ordering and chain-stop behavior.
 """
 
@@ -14,25 +14,25 @@ from corvidae.hooks import create_plugin_manager, hookimpl
 
 
 # ---------------------------------------------------------------------------
-# Test 1: compact_conversation — trylast handler is fallback
+# Test 1: resolve_compaction — trylast handler is fallback
 # ---------------------------------------------------------------------------
 
 
-async def test_compact_conversation_firstresult_trylast_fallback():
+async def test_resolve_compaction_firstresult_trylast_fallback():
     """A trylast handler runs and its return value is returned directly (not a list).
 
-    With firstresult=False (current), pm.ahook.compact_conversation returns a list.
+    With firstresult=False (current), pm.ahook.resolve_compaction returns a list.
     With firstresult=True (target), it returns the single non-None value.
 
-    This test fails now because compact_conversation lacks firstresult=True,
-    so pm.ahook.compact_conversation returns a list instead of a scalar True.
+    This test fails now because resolve_compaction lacks firstresult=True,
+    so pm.ahook.resolve_compaction returns a list instead of a scalar True.
     """
     call_log: list[str] = []
 
     class FallbackPlugin:
         # trylast=True marks this as a fallback handler
         @hookimpl(trylast=True)
-        async def compact_conversation(self, channel, conversation, max_tokens):
+        async def resolve_compaction(self, channel, conversation, max_tokens):
             call_log.append("fallback")
             return True
 
@@ -40,30 +40,30 @@ async def test_compact_conversation_firstresult_trylast_fallback():
     pm.register(FallbackPlugin(), name="fallback")
 
     # Dummy channel and conversation objects — the hookimpl does not use them
-    result = await pm.ahook.compact_conversation(
+    result = await pm.ahook.resolve_compaction(
         channel=object(), conversation=object(), max_tokens=8000
     )
 
     # With firstresult=True: result is True (scalar), not [True] (list)
     assert result is True, (
         f"expected True (scalar firstresult), got {result!r} — "
-        "compact_conversation hookspec needs firstresult=True"
+        "resolve_compaction hookspec needs firstresult=True"
     )
     assert call_log == ["fallback"]
 
 
 # ---------------------------------------------------------------------------
-# Test 2: compact_conversation — chain stops when default-priority handler wins
+# Test 2: resolve_compaction — chain stops when default-priority handler wins
 # ---------------------------------------------------------------------------
 
 
-async def test_compact_conversation_firstresult_chain_stops_on_non_none():
+async def test_resolve_compaction_firstresult_chain_stops_on_non_none():
     """A default-priority handler returning True stops the chain before trylast.
 
     With firstresult=True: the chain stops after the default-priority handler
     returns True. The trylast handler is never called.
 
-    This test fails now because compact_conversation is a broadcast hook —
+    This test fails now because resolve_compaction is a broadcast hook —
     all handlers run regardless of return value.
     """
     call_log: list[str] = []
@@ -71,13 +71,13 @@ async def test_compact_conversation_firstresult_chain_stops_on_non_none():
     class ReplacementPlugin:
         # Default priority — runs before trylast
         @hookimpl
-        async def compact_conversation(self, channel, conversation, max_tokens):
+        async def resolve_compaction(self, channel, conversation, max_tokens):
             call_log.append("replacement")
             return True
 
     class FallbackPlugin:
         @hookimpl(trylast=True)
-        async def compact_conversation(self, channel, conversation, max_tokens):
+        async def resolve_compaction(self, channel, conversation, max_tokens):
             call_log.append("fallback")
             return True
 
@@ -86,7 +86,7 @@ async def test_compact_conversation_firstresult_chain_stops_on_non_none():
     pm.register(FallbackPlugin(), name="fallback")
     pm.register(ReplacementPlugin(), name="replacement")
 
-    result = await pm.ahook.compact_conversation(
+    result = await pm.ahook.resolve_compaction(
         channel=object(), conversation=object(), max_tokens=8000
     )
 
@@ -94,22 +94,22 @@ async def test_compact_conversation_firstresult_chain_stops_on_non_none():
     assert result is True
     assert call_log == ["replacement"], (
         f"expected only ['replacement'], got {call_log!r} — "
-        "compact_conversation needs firstresult=True to stop the chain"
+        "resolve_compaction needs firstresult=True to stop the chain"
     )
 
 
 # ---------------------------------------------------------------------------
-# Test 3: compact_conversation — tryfirst returning None does not stop chain
+# Test 3: resolve_compaction — tryfirst returning None does not stop chain
 # ---------------------------------------------------------------------------
 
 
-async def test_compact_conversation_tryfirst_returns_none_chain_continues():
+async def test_resolve_compaction_tryfirst_returns_none_chain_continues():
     """A tryfirst handler returning None does not stop the chain.
 
     With firstresult=True: tryfirst runs first. If it returns None, the chain
     continues to the trylast handler.
 
-    This test fails now because compact_conversation is a broadcast hook and
+    This test fails now because resolve_compaction is a broadcast hook and
     the result is a list. Checking result is True will fail.
     """
     call_log: list[str] = []
@@ -117,13 +117,13 @@ async def test_compact_conversation_tryfirst_returns_none_chain_continues():
     class ObserverPlugin:
         # tryfirst=True — runs before default-priority and trylast handlers
         @hookimpl(tryfirst=True)
-        async def compact_conversation(self, channel, conversation, max_tokens):
+        async def resolve_compaction(self, channel, conversation, max_tokens):
             call_log.append("observer")
             return None  # Does not stop the chain
 
     class FallbackPlugin:
         @hookimpl(trylast=True)
-        async def compact_conversation(self, channel, conversation, max_tokens):
+        async def resolve_compaction(self, channel, conversation, max_tokens):
             call_log.append("fallback")
             return True
 
@@ -131,7 +131,7 @@ async def test_compact_conversation_tryfirst_returns_none_chain_continues():
     pm.register(FallbackPlugin(), name="fallback")
     pm.register(ObserverPlugin(), name="observer")
 
-    result = await pm.ahook.compact_conversation(
+    result = await pm.ahook.resolve_compaction(
         channel=object(), conversation=object(), max_tokens=8000
     )
 
@@ -142,96 +142,96 @@ async def test_compact_conversation_tryfirst_returns_none_chain_continues():
     )
     assert result is True, (
         f"expected True (from fallback), got {result!r} — "
-        "compact_conversation needs firstresult=True"
+        "resolve_compaction needs firstresult=True"
     )
 
 
 # ---------------------------------------------------------------------------
-# Test 4: load_conversation — single handler returns the list directly
+# Test 4: resolve_conversation — single handler returns the list directly
 # ---------------------------------------------------------------------------
 
 
-async def test_load_conversation_firstresult_returns_single_value():
-    """A handler returning a list is returned directly by pm.ahook.load_conversation.
+async def test_resolve_conversation_firstresult_returns_single_value():
+    """A handler returning a list is returned directly by pm.ahook.resolve_conversation.
 
-    With firstresult=False (current): pm.ahook.load_conversation returns
+    With firstresult=False (current): pm.ahook.resolve_conversation returns
     [[{"role": "user", "content": "hi"}]] — a list wrapping the returned list.
     With firstresult=True (target): it returns [{"role": "user", "content": "hi"}] directly.
 
-    This test fails now because load_conversation lacks firstresult=True.
+    This test fails now because resolve_conversation lacks firstresult=True.
     """
     history = [{"role": "user", "content": "hi"}]
 
     class StoragePlugin:
         @hookimpl
-        async def load_conversation(self, channel):
+        async def resolve_conversation(self, channel):
             return history
 
     pm = create_plugin_manager()
     pm.register(StoragePlugin(), name="storage")
 
-    result = await pm.ahook.load_conversation(channel=object())
+    result = await pm.ahook.resolve_conversation(channel=object())
 
     # With firstresult=True: result is the list itself, not wrapped in another list
     assert result == history, (
         f"expected {history!r} directly, got {result!r} — "
-        "load_conversation hookspec needs firstresult=True"
+        "resolve_conversation hookspec needs firstresult=True"
     )
 
 
 # ---------------------------------------------------------------------------
-# Test 5: load_conversation — None fallthrough when no handler returns
+# Test 5: resolve_conversation — None fallthrough when no handler returns
 # ---------------------------------------------------------------------------
 
 
-async def test_load_conversation_firstresult_none_when_no_handlers_return():
-    """When the only handler returns None, pm.ahook.load_conversation returns None.
+async def test_resolve_conversation_firstresult_none_when_no_handlers_return():
+    """When the only handler returns None, pm.ahook.resolve_conversation returns None.
 
     With firstresult=False (current): returns [] (empty list after filtering Nones).
     With firstresult=True (target): returns None directly.
 
-    This test fails now because load_conversation lacks firstresult=True.
+    This test fails now because resolve_conversation lacks firstresult=True.
     """
 
     class NoDataPlugin:
         @hookimpl
-        async def load_conversation(self, channel):
+        async def resolve_conversation(self, channel):
             return None
 
     pm = create_plugin_manager()
     pm.register(NoDataPlugin(), name="no_data")
 
-    result = await pm.ahook.load_conversation(channel=object())
+    result = await pm.ahook.resolve_conversation(channel=object())
 
     # With firstresult=True and all-None returns: result is None, not []
     assert result is None, (
         f"expected None, got {result!r} — "
-        "load_conversation with firstresult=True and all-None returns should be None"
+        "resolve_conversation with firstresult=True and all-None returns should be None"
     )
 
 
 # ---------------------------------------------------------------------------
-# Test 6: on_llm_error — first non-None return value wins
+# Test 6: resolve_llm_error — first non-None return value wins
 # ---------------------------------------------------------------------------
 
 
-async def test_on_llm_error_firstresult_first_non_none_wins():
+async def test_resolve_llm_error_firstresult_first_non_none_wins():
     """First handler returning a non-None string wins; second handler is never called.
 
-    `on_llm_error` is declared `firstresult=True`: pluggy stops the chain
+    `resolve_llm_error` is declared `firstresult=True`: pluggy stops the chain
     after the first non-None result, so a later handler never runs.
     """
     call_log: list[str] = []
 
     class FirstPlugin:
         @hookimpl
-        async def on_llm_error(self, channel, error):
+        async def resolve_llm_error(self, channel, error):
             call_log.append("first")
             return "custom error"
 
     class SecondPlugin:
         @hookimpl
-        async def on_llm_error(self, channel, error):
+        async def resolve_llm_error(self, channel, error):
             call_log.append("second")
             return "other error"
 
@@ -241,13 +241,13 @@ async def test_on_llm_error_firstresult_first_non_none_wins():
     pm.register(FirstPlugin(), name="first")
 
     exc = RuntimeError("boom")
-    result = await pm.ahook.on_llm_error(channel=object(), error=exc)
+    result = await pm.ahook.resolve_llm_error(channel=object(), error=exc)
 
     # With firstresult=True: "first" runs first (registered last), returns "custom error",
     # chain stops, "second" is never called.
     assert result == "custom error", (
         f"expected 'custom error', got {result!r} — "
-        "on_llm_error needs firstresult=True"
+        "resolve_llm_error needs firstresult=True"
     )
     assert call_log == ["first"], (
         f"expected only ['first'], got {call_log!r} — "
@@ -256,32 +256,32 @@ async def test_on_llm_error_firstresult_first_non_none_wins():
 
 
 # ---------------------------------------------------------------------------
-# Test 7: on_llm_error — None fallthrough when no handler returns
+# Test 7: resolve_llm_error — None fallthrough when no handler returns
 # ---------------------------------------------------------------------------
 
 
-async def test_on_llm_error_firstresult_none_fallthrough():
-    """When the only handler returns None, pm.ahook.on_llm_error returns None.
+async def test_resolve_llm_error_firstresult_none_fallthrough():
+    """When the only handler returns None, pm.ahook.resolve_llm_error returns None.
 
     With firstresult=False (current): returns [] (empty list).
     With firstresult=True (target): returns None directly.
 
-    This test fails now because on_llm_error lacks firstresult=True.
+    This test fails now because resolve_llm_error lacks firstresult=True.
     """
 
     class PassthroughPlugin:
         @hookimpl
-        async def on_llm_error(self, channel, error):
+        async def resolve_llm_error(self, channel, error):
             return None
 
     pm = create_plugin_manager()
     pm.register(PassthroughPlugin(), name="passthrough")
 
     exc = RuntimeError("boom")
-    result = await pm.ahook.on_llm_error(channel=object(), error=exc)
+    result = await pm.ahook.resolve_llm_error(channel=object(), error=exc)
 
     # With firstresult=True and all-None returns: result is None, not []
     assert result is None, (
         f"expected None, got {result!r} — "
-        "on_llm_error with firstresult=True and all-None returns should be None"
+        "resolve_llm_error with firstresult=True and all-None returns should be None"
     )

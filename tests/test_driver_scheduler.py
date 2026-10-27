@@ -102,7 +102,7 @@ class TestDbHelpers:
             (row,) = await sched._fetch(conn, "id = ?", (row_id,))
             content = f"[reminder]\n\n{frame_firing(row, sched._tz, None)}"
             channel = Channel(transport="irc", scope=REMIND_CHANNEL)
-            await persistence.on_conversation_event(
+            await persistence.persist_message(
                 channel=channel, message={"role": "system", "content": content},
                 message_type=MessageType.MESSAGE,
             )
@@ -145,7 +145,7 @@ class TestReminderProbeWiring:
             await sched.add_reminder(channel_id, REMIND_TOKEN, time.time())
             messages[channel].append(driver.IRCMessage(time.time(), "buster", f"SCHEDULED {REMIND_TOKEN}"))
             # The scheduler fires: the [reminder] row lands, then the reply.
-            await persistence.on_conversation_event(
+            await persistence.persist_message(
                 channel=Channel(transport="irc", scope=REMIND_CHANNEL),
                 message={"role": "system", "content": f"[reminder]\n\n... «{REMIND_TOKEN}» ..."},
                 message_type=MessageType.MESSAGE,

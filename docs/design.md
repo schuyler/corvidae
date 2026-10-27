@@ -74,16 +74,16 @@ class AgentSpec:
     async def on_message_admitted(self, channel: Channel, trace_id: str, sender: str, text: str) -> None
     async def on_message_rejected(self, channel: Channel, trace_id: str, sender: str, text: str) -> None
     async def on_message_persisted(self, channel: Channel, trace_id: str, rowid: int | None, text: str, meta: dict) -> None
-    async def on_llm_error(self, channel: Channel, error: Exception) -> str | None
-    async def compact_conversation(self, channel: Channel, conversation: ContextWindow, max_tokens: int) -> None
-    async def process_tool_result(self, tool_name: str, result: str, channel: Channel | None) -> str | None
+    async def resolve_llm_error(self, channel: Channel, error: Exception) -> str | None
+    async def resolve_compaction(self, channel: Channel, conversation: ContextWindow, max_tokens: int) -> None
+    async def transform_tool_result(self, tool_name: str, result: str, channel: Channel | None) -> str | None
     async def before_agent_turn(self, channel: Channel, trace_id: str | None, meta: dict) -> None
     async def after_persist_assistant(self, channel: Channel, message: dict) -> None
     async def transform_display_text(self, channel: Channel, text: str, result_message: dict) -> str | None
     async def on_idle(self) -> None
-    async def load_conversation(self, channel: Channel) -> list[dict] | None
+    async def resolve_conversation(self, channel: Channel) -> list[dict] | None
     async def resolve_channel(self, channel_id: str) -> Channel | None
-    async def on_conversation_event(self, channel: Channel, message: dict, message_type: MessageType) -> int | None
+    async def persist_message(self, channel: Channel, message: dict, message_type: MessageType) -> int | None
     async def before_compaction(self, channel: Channel, compacted_ids: list[int], cut: int) -> None
     async def on_compaction(self, channel: Channel, summary_msg: dict, retain_count: int, compacted_ids: list[int]) -> None
 ```
@@ -100,11 +100,11 @@ that need a single resolved value pass the result list to
 returns `False`; otherwise any `True` returns `True`; otherwise `None`.
 `should_process_message` is the only hook resolved this way.
 
-Hooks marked `firstresult=True` in the hookspec (`on_llm_error`,
-`compact_conversation`, `process_tool_result`, `transform_display_text`,
-`load_conversation`, `resolve_channel`) use pluggy's own first-non-None-wins dispatch — the
+Hooks marked `firstresult=True` in the hookspec (`resolve_llm_error`,
+`resolve_compaction`, `transform_tool_result`, `transform_display_text`,
+`resolve_conversation`, `resolve_channel`) use pluggy's own first-non-None-wins dispatch — the
 first handler to return a non-None value stops the chain; no separate
-resolver function is involved. `process_tool_result` and
+resolver function is involved. `transform_tool_result` and
 `transform_display_text` are wrapper chains: `@hookimpl(wrapper=True)`
 implementations compose transforms over an identity seed.
 
@@ -130,16 +130,16 @@ their return values are ignored.
 | `on_message_admitted` | broadcast | `on_message`, after a USER message is admitted; fires exactly once per admitted message |
 | `on_message_rejected` | broadcast | `on_message`, after a USER message is vetoed; fires exactly once per rejected message |
 | `on_message_persisted` | broadcast | dequeue, after the trace-originating row is persisted; fires once per originating item regardless of outcome (`rowid` may be None) |
-| `on_llm_error` | firstresult=True | `_run_turn`, after LLM exception; return error string or None for default |
-| `compact_conversation` | broadcast | `_process_queue_item`, step 5; all implementations run for side effects |
-| `process_tool_result` | firstresult=True wrapper chain | `dispatch_tool_call` (both subagent and main agent paths), after tool execution; return replacement string or None for default |
+| `resolve_llm_error` | firstresult=True | `_run_turn`, after LLM exception; return error string or None for default |
+| `resolve_compaction` | broadcast | `_process_queue_item`, step 5; all implementations run for side effects |
+| `transform_tool_result` | firstresult=True wrapper chain | `dispatch_tool_call` (both subagent and main agent paths), after tool execution; return replacement string or None for default |
 | `before_agent_turn` | broadcast | `_process_queue_item`, before LLM call; plugins inject context into conversation log |
 | `after_persist_assistant` | broadcast | `_process_queue_item`, after assistant message is persisted; plugins may mutate the in-memory dict |
 | `transform_display_text` | firstresult=True wrapper chain | `_resolve_display_text`, before `send_message`; return transformed text or None to leave unchanged |
 | `on_idle` | broadcast | `IdleMonitor`, when all queues empty and cooldown elapsed |
-| `load_conversation` | firstresult=True | `_process_queue_item`, when `channel.conversation is None`; return list of tagged message dicts or None to defer |
+| `resolve_conversation` | firstresult=True | `_process_queue_item`, when `channel.conversation is None`; return list of tagged message dicts or None to defer |
 | `resolve_channel` | firstresult=True | `SchedulerPlugin`, for a persisted channel id the registry does not hold (e.g. a reminder due after a restart); a transport returns the live Channel for ids it owns, created with transport-specific config, or None to defer. `SignalPlugin` and `DiscordPlugin` implement it; callers fall back to `registry.get_or_create` from the split id |
-| `on_conversation_event` | broadcast | `_process_queue_item`, after every `conv.append()`; side effects only (persistence, JSONL logging) |
+| `persist_message` | broadcast | `_process_queue_item`, after every `conv.append()`; side effects only (persistence, JSONL logging) |
 | `before_compaction` | broadcast, awaited | `CompactionPlugin`, after the summary succeeded and before `replace_with_summary()`; the window still holds `messages[:cut]`, so a plugin can fork over the dropped prefix (see [Forks](#forks)); failures logged, never block compaction |
 | `on_compaction` | broadcast | `CompactionPlugin`, after `replace_with_summary()`; side effects only (persistence) |
 | `on_llm_request` | broadcast | `LLMClient.chat()` via LLMPlugin's injected observer, before the retry loop; side effects only (observability) |
@@ -367,7 +367,7 @@ Calls the LLM via `run_agent_turn`, executes tool calls inline, repeats
 until a text response or max_turns. Injects `ToolContext` into tools
 that declare a `_ctx` parameter. Accepts an optional `pm` keyword
 argument; when provided, passes it to `dispatch_tool_call()`, which
-calls the `process_tool_result` hook after each tool execution. When
+calls the `transform_tool_result` hook after each tool execution. When
 `pm` is `None`, the hook is skipped.
 
 Also in `turn.py`:
@@ -461,7 +461,7 @@ All operations are synchronous; no database access:
   with `MessageType.MESSAGE` or `MessageType.SUMMARY`. Plugins use this to clean up
   stale `CONTEXT` entries from an earlier turn before re-injecting fresh ones.
 
-After each `conv.append()`, `Agent` fires `on_conversation_event` (broadcast)
+After each `conv.append()`, `Agent` fires `persist_message` (broadcast)
 so persistence plugins can write to their storage. After `replace_with_summary()`,
 `CompactionPlugin` fires `on_compaction` (broadcast) so persistence plugins can
 update the DB boundary.
@@ -475,7 +475,7 @@ including `reasoning_content`. This invariant applies to all persistence
 paths: SQLite, JSONL, and any future storage backends.
 
 `on_compaction` inserts a summary row whose timestamp encodes the boundary:
-`oldest_retained_message.timestamp - 1e-6`. `load_conversation` filters with
+`oldest_retained_message.timestamp - 1e-6`. `resolve_conversation` filters with
 `WHERE timestamp > summary_ts`, returning only the summary plus retained and new
 messages. Old rows remain in the DB but are invisible to the working set.
 
@@ -513,7 +513,7 @@ In-memory message dicts carry a `_message_type` metadata key (set by `append()`)
 
 The `before_agent_turn` hook gives plugins a chance to inject entries (e.g., `CONTEXT`
 rows) into the conversation before each LLM call. `Agent` fires
-`on_conversation_event` for each injected message after the hook returns.
+`persist_message` for each injected message after the hook returns.
 
 ### Database schema
 
@@ -544,7 +544,7 @@ Retrieves `ChannelRegistry` during `on_start` via
 
 DB lifecycle (open/close) is delegated to `PersistencePlugin`. Conversation
 initialization is handled directly in `Agent._process_queue_item`: a
-`ContextWindow` is created, then `load_conversation` (firstresult=True) is
+`ContextWindow` is created, then `resolve_conversation` (firstresult=True) is
 called so persistence plugins can populate history. `Agent` reads `_chars_per_token`
 and `_base_dir` from config in `_start_plugin`.
 
@@ -590,7 +590,7 @@ per-channel `SerialQueue`. The queue's consumer calls
    conversation message dict and `request_text`. Returns `None` on
    unrecognized role (logged, item dropped).
 2. When `channel.conversation is None`, creates a `ContextWindow`, calls
-   `load_conversation` (firstresult=True) to populate history, and assigns
+   `resolve_conversation` (firstresult=True) to populate history, and assigns
    `channel.conversation`
 3. Resets `turn_counter` to 0 when the item originates a new trace
    (`item.originating`, set during trace resolution: every USER
@@ -603,7 +603,7 @@ per-channel `SerialQueue`. The queue's consumer calls
    by scheduler notifications would otherwise exhaust it after ten
    responses and have every later tool call suppressed.
 4. Resolves channel config (including `max_turns`)
-5. Appends the inbound message to conversation; fires `on_conversation_event`
+5. Appends the inbound message to conversation; fires `persist_message`
    (broadcast, side effects only — persistence plugins write to storage)
 5b. **Tool result batching** — if the item is a tool-result notification
     (`role=NOTIFICATION` with `tool_call_id` set), removes the ID from
@@ -611,12 +611,12 @@ per-channel `SerialQueue`. The queue's consumer calls
     removal, returns immediately (more results still pending). The LLM call
     is deferred until the last result clears the set. User messages can
     interleave during this window — they don't clear the pending set.
-6. Broadcasts `compact_conversation`; all implementations run for side
+6. Broadcasts `resolve_compaction`; all implementations run for side
    effects; return values are not used
-7. Calls `before_agent_turn` hook (broadcast); fires `on_conversation_event`
+7. Calls `before_agent_turn` hook (broadcast); fires `persist_message`
    for any messages injected by the hook
 8. **`_run_turn`** — calls `run_agent_turn` (single LLM invocation).
-   On exception, broadcasts `on_llm_error` (`firstresult=True`), sends
+   On exception, broadcasts `resolve_llm_error` (`firstresult=True`), sends
    the error message to the channel, and returns `None` to abort
    processing. `LLMPlugin` implements it `trylast`: for an unloaded
    backend model it returns a message naming the model; for any non-2xx
@@ -624,7 +624,7 @@ per-channel `SerialQueue`. The queue's consumer calls
    quota, endpoint/model) and a short provider body; for connection and
    timeout failures it points at `llm.main.base_url`. It defers (`None`)
    on every other error, so the generic message still applies.
-9. Appends the assistant message to conversation; fires `on_conversation_event`
+9. Appends the assistant message to conversation; fires `persist_message`
 10. Calls `after_persist_assistant` hook (broadcast); `ThinkingPlugin`
     uses this to strip `reasoning_content` from the in-memory copy
 11. **`_handle_response`** — decision point:
@@ -672,7 +672,7 @@ and enqueues it on the `TaskQueue` (accessed via
 `getattr(pm.get_plugin("task"), "task_queue", None)`). Each task's `work`
 closure calls `dispatch_tool_call()` from `tool.py`, which handles JSON
 parsing, unknown-tool detection, invocation, error wrapping, logging, and
-the `process_tool_result` hook. The closure returns `result.content`; the
+the `transform_tool_result` hook. The closure returns `result.content`; the
 TaskPlugin delivers it via `on_notify`.
 
 `TaskPlugin` is declared in `Agent.depends_on`. Tool dispatch logs an error
@@ -726,17 +726,17 @@ creation. `on_stop` closes the connection.
 `PersistencePlugin.db` is public for test injection: setting `persistence.db`
 before `on_start` causes the `if self.db is None:` guard to skip the open.
 
-### load_conversation
+### resolve_conversation
 
-Implements `load_conversation` (firstresult=True). Called by `Agent` when
+Implements `resolve_conversation` (firstresult=True). Called by `Agent` when
 `channel.conversation is None`. Queries `message_log` for the channel, applying
 the timestamp filter so only the compaction boundary and newer rows are returned.
 Returns a list of tagged message dicts (with `_message_type` set). Logs an INFO
 event when history is loaded.
 
-### on_conversation_event
+### persist_message
 
-Implements `on_conversation_event` (broadcast). Called after every `conv.append()`.
+Implements `persist_message` (broadcast). Called after every `conv.append()`.
 Strips `_message_type` from the message dict before inserting into `message_log`.
 
 ### on_compaction
@@ -745,7 +745,7 @@ Implements `on_compaction` (broadcast). Called after `replace_with_summary()`.
 Determines the timestamp boundary from the most-recent non-retained row, inserts
 the summary row with `timestamp = boundary - 1e-6`, and commits.
 
-**Graceful degradation:** without `PersistencePlugin`, `load_conversation` returns
+**Graceful degradation:** without `PersistencePlugin`, `resolve_conversation` returns
 no history and conversation events are not persisted.
 
 ## JsonlLogPlugin
@@ -758,9 +758,9 @@ absent, the plugin is a complete no-op — all hookimpls return early.
 When configured, `on_start` resolves the directory relative to
 `_base_dir` and creates it if necessary.
 
-### on_conversation_event
+### persist_message
 
-Implements `on_conversation_event` (broadcast). Strips `_message_type`
+Implements `persist_message` (broadcast). Strips `_message_type`
 from the message dict and writes a JSON line with `ts`, `channel`,
 `type`, and `message` fields to a per-channel `.jsonl` file.
 
@@ -826,7 +826,7 @@ in-memory history regardless of `reasoning_history`.
 
 ## CompactionPlugin
 
-`compaction.py` — implements the `compact_conversation` hook to keep
+`compaction.py` — implements the `resolve_compaction` hook to keep
 conversation history within the configured token budget. Registered as
 the `"compaction"` entry point. Declares `depends_on = {"llm"}`.
 Logger name: `corvidae.compaction`.
@@ -835,9 +835,9 @@ Logger name: `corvidae.compaction`.
 by `MemoryPlugin` (compaction-time memory consolidation plus retrieval), and
 per-turn token stats now live in the `usage_log` table.
 
-### compact_conversation
+### resolve_compaction
 
-Implements the `compact_conversation` broadcast hook. The hook is called
+Implements the `resolve_compaction` broadcast hook. The hook is called
 for side effects; its return value is not used by the caller.
 
 **Algorithm:**
@@ -916,7 +916,7 @@ The summary LLM call is attributed `stage="compaction"` plus
 `mode="fork"` or `mode="standalone"`.
 
 **Graceful degradation:** without `CompactionPlugin`, the
-`compact_conversation` hook returns `None` on every turn and compaction
+`resolve_compaction` hook returns `None` on every turn and compaction
 does not run. The conversation history will grow without bound until the
 LLM context window is exceeded.
 
@@ -967,7 +967,7 @@ Stage names are opaque to core (it never names cognition plugins).
 
 | Stage | Cut | Runs | Standalone when |
 |---|---|---|---|
-| `compaction` | dropped prefix | inline in `compact_conversation` | forks off for the stage; fork miss |
+| `compaction` | dropped prefix | inline in `resolve_compaction` | forks off for the stage; fork miss |
 | `consolidation` (compaction trigger) | dropped prefix | inline in `before_compaction`; the record is stashed and the `on_compaction` task consumes it | also: a range dialog row is not in `messages[:cut]`; the watermark moved since the fork |
 | `consolidation` (idle trigger) | full window | in the idle task | also: no registered channel or live window; a range row not in the window |
 | `appraisal` (stage 2) | full window at run time | silent TaskQueue task | also: the exchange's originating rowid has left the window (or was never persisted) |
@@ -1331,7 +1331,7 @@ point name: `"funnel"`. The single chokepoint for tail CONTEXT admission:
 3. **Frame** every admitted batch in explicit data-not-instructions
    wrapping with a source label (injection defense, written once here).
 4. **Append + persist** one CONTEXT message at the tail through
-   `on_conversation_event`, with the rowid attached, so the window matches
+   `persist_message`, with the rowid attached, so the window matches
    its reload. Stale CONTEXT retires by aging past the compaction boundary.
 
 Callers: memory retrieval (and optionally date/time grounding). The
@@ -2409,7 +2409,7 @@ corvidae/
 ├── llm_plugin.py         # LLMPlugin (LLM client lifecycle)
 ├── turn.py               # run_agent_turn(), AgentTurnResult
 ├── context.py            # ContextWindow, MessageType, DEFAULT_CHARS_PER_TOKEN
-├── jsonl_log.py          # JsonlLogPlugin (on_conversation_event, on_compaction)
+├── jsonl_log.py          # JsonlLogPlugin (persist_message, on_compaction)
 ├── logging.py            # StructuredFormatter, configure_logging()
 ├── agent.py              # Agent (single-turn dispatch)
 ├── persistence.py        # PersistencePlugin (DB lifecycle, conversation init)

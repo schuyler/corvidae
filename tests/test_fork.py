@@ -140,7 +140,7 @@ class _EventRecorder:
         self.events = []
 
     @hookimpl
-    async def on_conversation_event(self, channel, message, message_type):
+    async def persist_message(self, channel, message, message_type):
         self.events.append(message)
 
 

@@ -154,7 +154,7 @@ async def seed_dialog(persistence, channel, texts: list[tuple[str, str]]) -> lis
     rowids = []
     for role, content in texts:
         rowids.append(
-            await persistence.on_conversation_event(
+            await persistence.persist_message(
                 channel=channel,
                 message={"role": role, "content": content},
                 message_type=MessageType.MESSAGE,

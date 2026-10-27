@@ -280,7 +280,7 @@ Three more things to know:
 An MCP server's tool descriptions go into the prompt as tool schemas and
 its results come back as tool results, neither of them framed. Schema
 sanitization is shallow by design. An MCP server is therefore a supply-chain
-vector for tool-description injection. `process_tool_result` exists as a
+vector for tool-description injection. `transform_tool_result` exists as a
 hook for exactly this and has only a pass-through default.
 
 ### 7. The scheduler re-enters text later
@@ -460,7 +460,7 @@ of it.
 6. Move CONTEXT out of the `system` role. Opt-in today via
    `agent.mid_conversation_system_role: user`; flipping the default is
    what remains.
-7. Give `process_tool_result` a default that frames MCP results the way
+7. Give `transform_tool_result` a default that frames MCP results the way
    the funnel frames CONTEXT.
 8. Decide whether process separation is worth doing.
 
