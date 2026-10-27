@@ -1,6 +1,7 @@
 """Tests for corvidae.channels.irc.IRCPlugin."""
 
 import asyncio
+import logging
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
@@ -338,6 +339,26 @@ class TestSendMessage:
         calls = [c.args[1] for c in plugin.client.message.await_args_list]
         assert calls == ["line1", "line2"]
 
+    async def test_send_message_warns_when_disconnected(self, caplog):
+        """Dropped output is logged with the channel and its length."""
+        pm, registry = _make_pm_with_registry()
+        plugin = IRCPlugin(pm)
+        pm.register(plugin, name="irc")
+
+        plugin.client = MagicMock()
+        plugin.client.connected = False
+        plugin.client.message = AsyncMock()
+
+        channel = registry.get_or_create("irc", "#test")
+        with caplog.at_level(logging.WARNING, logger="corvidae.irc_plugin"):
+            await plugin.send_message(channel=channel, text="hello world")
+
+        plugin.client.message.assert_not_awaited()
+        warnings = [
+            r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
+        ]
+        assert any("#test" in m and "11" in m for m in warnings), warnings
+
     async def test_send_message_real_split_no_blank_lines(self):
         """Integration: real split_message + send_message produces no blank PRIVMSGs."""
         pm, registry = _make_pm_with_registry()
@@ -526,6 +547,42 @@ class TestReconnection:
                 await task
             except (asyncio.CancelledError, Exception):
                 pass
+
+    async def test_unexpected_exception_reenters_backoff(self, caplog):
+        """A non-pydle exception must retry, not end the connect task."""
+        pm, _registry = _make_pm_with_registry()
+        plugin = IRCPlugin(pm)
+        pm.register(plugin, name="irc")
+
+        client = IRCClient(plugin, "TestBot", server="irc.example.com", port=6667)
+        plugin.client = client
+        plugin._connect_task = MagicMock()
+
+        calls = []
+
+        async def flaky_connect(*args, **kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                raise ValueError("unexpected handshake failure")
+            plugin._connect_task = None  # shutdown after the retry
+
+        client.connect = flaky_connect
+
+        delays = []
+
+        async def fake_sleep(delay):
+            delays.append(delay)
+
+        with caplog.at_level(logging.WARNING, logger="corvidae.irc_plugin"), \
+                patch("corvidae.channels.irc.asyncio.sleep", fake_sleep):
+            await client.connect_with_retry()
+
+        assert len(calls) == 2, "connect_with_retry did not retry after ValueError"
+        assert delays and delays[0] == client._INITIAL_BACKOFF
+        assert any(
+            "unexpected" in r.getMessage().lower()
+            for r in caplog.records if r.levelno >= logging.WARNING
+        ), [r.getMessage() for r in caplog.records]
 
         # Verify exponential backoff: delays should increase (10, 20, 40, ...)
         # Filter out the 86400 sleep (holds connection)

@@ -5,6 +5,7 @@ persistence hooks, writing JSONL logs alongside SQLite persistence.
 """
 
 import json
+import logging
 import time
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -450,3 +451,46 @@ class TestJsonlPluginValidJson:
 
         for field_name in ("ts", "channel", "type", "message"):
             assert field_name in record, f"Record missing field {field_name!r}: {record}"
+
+# ---------------------------------------------------------------------------
+# Degradation: a write failure must not propagate into the conversation hook
+# ---------------------------------------------------------------------------
+
+
+class TestWriteFailure:
+    async def test_write_failure_logs_channel_and_path(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """Disk/permission errors are logged with channel and file, not raised."""
+        from corvidae.jsonl_log import JsonlLogPlugin
+        from corvidae.context import MessageType
+
+        log_dir = tmp_path / "logs"
+        plugin = JsonlLogPlugin(None)
+        config = {"daemon": {"jsonl_log_dir": str(log_dir)}}
+        await plugin.on_init(pm=None, config=config)
+        await plugin.on_start(config=config)
+
+        channel = _make_channel("cli:default")
+
+        def denied(*args, **kwargs):
+            raise PermissionError("permission denied")
+
+        monkeypatch.setattr("builtins.open", denied)
+
+        with caplog.at_level(logging.WARNING, logger="corvidae.jsonl_log"):
+            await plugin.on_conversation_event(
+                channel=channel,
+                message={"role": "user", "content": "hi"},
+                message_type=MessageType.MESSAGE,
+            )
+
+        warnings = [
+            r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
+        ]
+        assert any(
+            "cli:default" in message and "cli_default.jsonl" in message
+            for message in warnings
+        ), warnings
+
+        await plugin.on_stop()

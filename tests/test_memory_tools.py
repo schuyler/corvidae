@@ -21,6 +21,7 @@ Covers:
 
 import asyncio
 import json
+import logging
 import math
 import hashlib
 import re
@@ -1190,4 +1191,82 @@ class TestTokenCap:
             assert str(mid) in result, (
                 f"record {mid} must appear with large max_tokens; got: {result!r}"
             )
+        await db.close()
+
+# ---------------------------------------------------------------------------
+# Schema availability and FTS failure fallbacks
+# ---------------------------------------------------------------------------
+
+
+class TestSchemaAndSearchDegradation:
+    async def test_search_memory_retries_while_schema_initializes(self, monkeypatch):
+        """A None schema may be a concurrent initializer; retry before failing."""
+        memory, memory_tools, db = await build_tools_env()
+        channel = Channel(transport="irc", scope="#electronics")
+        await seed_memory(db, channel.id, "kestrel ESP32 retry probe")
+
+        real = memory._ensure_schema
+        calls = []
+
+        async def flaky():
+            calls.append(1)
+            if len(calls) < 3:
+                return None
+            return await real()
+
+        monkeypatch.setattr(memory, "_ensure_schema", flaky)
+        result = await get_tools(memory_tools)["search_memory"](
+            "kestrel", _ctx=make_ctx(channel)
+        )
+
+        assert "retry probe" in result, result
+        assert len(calls) >= 3
+        await db.close()
+
+    async def test_recall_raw_retries_while_schema_initializes(self, monkeypatch):
+        """recall_raw must also wait out a transiently unavailable schema."""
+        memory, memory_tools, db = await build_tools_env()
+        channel = Channel(transport="irc", scope="#electronics")
+        msg = await seed_message_log_row(db, channel.id, "user", "raw retry probe")
+        mid = await seed_memory(
+            db, channel.id, "probe memory", msg_id_start=msg, msg_id_end=msg
+        )
+
+        real = memory._ensure_schema
+        calls = []
+
+        async def flaky():
+            calls.append(1)
+            if len(calls) < 3:
+                return None
+            return await real()
+
+        monkeypatch.setattr(memory, "_ensure_schema", flaky)
+        result = await get_tools(memory_tools)["recall_raw"](mid, _ctx=make_ctx(channel))
+
+        assert "raw retry probe" in result, result
+        assert len(calls) >= 3
+        await db.close()
+
+    async def test_fts_failure_falls_back_to_scan(self, caplog):
+        """A broken FTS index degrades to a summary scan, not a hard error."""
+        memory, memory_tools, db = await build_tools_env()
+        channel = Channel(transport="irc", scope="#electronics")
+        await seed_memory(db, channel.id, "kestrel ESP32 fallback probe")
+
+        # Simulate FTS corruption/unavailability while the memory table is fine.
+        await db.execute("DROP TABLE memory_fts")
+        await db.commit()
+
+        with caplog.at_level(logging.WARNING, logger="corvidae.tools.memory_tools"):
+            result = await get_tools(memory_tools)["search_memory"](
+                "ESP32 wifi", _ctx=make_ctx(channel)
+            )
+
+        assert "fallback probe" in result, result
+        assert "search failed internally" not in result
+        assert any(
+            "falling back" in r.getMessage()
+            for r in caplog.records if r.levelno >= logging.WARNING
+        ), [r.getMessage() for r in caplog.records]
         await db.close()

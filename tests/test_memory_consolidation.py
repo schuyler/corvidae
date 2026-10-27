@@ -529,3 +529,59 @@ def test_parse_json_block_error_names_consolidation_phase_and_long_text():
     message = str(excinfo.value)
     assert "consolidation" in message.lower()
     assert "PROVIDER_ERROR_MARKER" in message
+
+# ---------------------------------------------------------------------------
+# Malformed consolidation replies (retry once, then degrade to transcript)
+# ---------------------------------------------------------------------------
+
+
+class _SequenceChatClient(StubClient):
+    """Background client that returns replies in order and records call count."""
+
+    def __init__(self, texts: list[str]) -> None:
+        super().__init__("")
+        self.texts = list(texts)
+        self.call_count = 0
+
+    async def chat(self, messages, tools=None, extra_body=None):
+        self.call_count += 1
+        return {
+            "choices": [
+                {"message": {"role": "assistant", "content": self.texts.pop(0)}}
+            ]
+        }
+
+
+class TestMalformedConsolidationReply:
+    async def test_malformed_reply_is_retried_once(self):
+        """One unusable reply costs a retry, not the whole range."""
+        memory, persistence, stub, channel, db = await build_consolidation_env()
+        client = _SequenceChatClient(["not json at all", CONSOLIDATION_JSON])
+        memory._llm()._clients["background"] = client
+        try:
+            await drive_compaction_consolidation(memory, persistence, channel)
+
+            records = await fetch_memories(db)
+            assert len(records) == 1
+            assert records[0]["summary"].startswith("I helped kestrel")
+            assert client.call_count == 2
+        finally:
+            await db.close()
+
+    async def test_two_malformed_replies_degrade_to_transcript(self):
+        """After the retry fails, keep the work as the raw transcript."""
+        memory, persistence, stub, channel, db = await build_consolidation_env()
+        client = _SequenceChatClient(["nope", "still not json", "unused"])
+        memory._llm()._clients["background"] = client
+        try:
+            await drive_compaction_consolidation(memory, persistence, channel)
+
+            records = await fetch_memories(db)
+            assert len(records) == 1
+            summary = records[0]["summary"]
+            assert "the weather station keeps dropping off wifi" in summary
+            assert "assistant: try WIFI_PS_NONE" in summary
+            # Retried exactly once, then degraded.
+            assert client.call_count == 2
+        finally:
+            await db.close()

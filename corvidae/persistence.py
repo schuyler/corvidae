@@ -89,7 +89,14 @@ def _parse_message_rows(rows: list[tuple]) -> list[dict]:
     from corvidae.context import MessageType
     result = []
     for row in rows:
-        msg = json.loads(row[1])
+        try:
+            msg = json.loads(row[1])
+        except json.JSONDecodeError:
+            # One corrupt record must not abort the whole conversation load.
+            logger.warning(
+                "skipping unparseable message row %s", row[0], exc_info=True
+            )
+            continue
         msg["_message_type"] = MessageType(row[2])
         msg["_db_id"] = row[0]
         result.append(msg)
@@ -210,13 +217,24 @@ class PersistencePlugin(CorvidaePlugin):
         ts = time.time()
         # Strip internal window tags (must not be written to the JSON column)
         clean = _strip_internal_keys(message)
-        cursor = await self.db.execute(
-            "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
-            "VALUES (?, ?, ?, ?)",
-            (channel.id, json.dumps(clean), ts, message_type),
-        )
-        rowid = cursor.lastrowid
-        await self.db.commit()
+        try:
+            cursor = await self.db.execute(
+                "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
+                "VALUES (?, ?, ?, ?)",
+                (channel.id, json.dumps(clean), ts, message_type),
+            )
+            rowid = cursor.lastrowid
+            await self.db.commit()
+        except Exception:
+            # A locked or failing DB must not stall the turn; the window still
+            # holds the message, and the next event retries the write.
+            logger.warning(
+                "failed to persist conversation event for channel %s",
+                channel.id,
+                exc_info=True,
+                extra={"channel_id": channel.id},
+            )
+            return None
         return rowid
 
     @hookimpl

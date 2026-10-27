@@ -287,6 +287,34 @@ class TestRunTurn:
         assert call_kwargs["channel"] is channel
         assert call_kwargs["error"] is exc
 
+    async def test_llm_error_hook_raising_still_sends_default_message(
+        self, plugin_and_channel
+    ):
+        """A raising on_llm_error hook must not silence the error reply."""
+        plugin, channel, db = plugin_and_channel
+        plugin._client = MagicMock()
+        plugin.pm.ahook.on_llm_error = AsyncMock(
+            side_effect=RuntimeError("error hook blew up")
+        )
+
+        with patch(
+            "corvidae.agent.run_agent_turn",
+            new=AsyncMock(side_effect=RuntimeError("LLM exploded")),
+        ):
+            result = await plugin._run_turn(
+                channel=channel,
+                messages=[{"role": "user", "content": "hi"}],
+                tool_schemas=[],
+                llm_overrides=None,
+            )
+
+        assert result is None
+        plugin.pm.ahook.send_message.assert_called_once()
+        sent = plugin.pm.ahook.send_message.call_args.kwargs["text"]
+        # Delivery, not wording: the user still gets a complete, formatted reply.
+        assert isinstance(sent, str) and sent.strip()
+        assert "{" not in sent
+
     async def test_passes_llm_overrides_to_run_agent_turn(self, plugin_and_channel):
         """llm_overrides dict -> forwarded to run_agent_turn as extra_body."""
         plugin, channel, db = plugin_and_channel
