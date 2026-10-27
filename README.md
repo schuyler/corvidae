@@ -6,6 +6,8 @@ Corvidae is a minimalist, extensible architecture for building LLM agent harness
 
 ## Design
 
+[docs/prd.md](docs/prd.md) is the requirements of record: what has to be true and why. [docs/design.md](docs/design.md) is how the current tree does it.
+
 Three layers: a plugin system ([apluggy](https://github.com/nextline-dev/apluggy)), an agent loop, and transport plugins. Each transport converts platform-specific messages to a common Channel abstraction. The agent loop handles prompt construction and LLM interaction. The plugin system wires everything together via lifecycle hooks.
 
 The distribution is split the same way. `uv sync` installs the kernel: the agent loop, persistence, compaction, tools and transports. The cognition plugins — long-term memory, appraisal, critique, the context funnel and the outcome log — are a separate package in this repository, installed with `--extra cognition` ([docs/cognition.md](docs/cognition.md)).
