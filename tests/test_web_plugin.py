@@ -377,6 +377,15 @@ class Env:
         self.raws.append(r)
         return r
 
+    async def raw_subscribed(self, name: str = "main") -> RawWS:
+        """A raw peer subscribed to `name`, past its history fetch (so
+        broadcasts reach its queue, not the subscribe buffer)."""
+        r = await self.raw()
+        await r.send(type="subscribe", conversation=name)
+        await wait_until(lambda: any(c.conversation == f"web:{name}" and c.buffer is None
+                                     for c in self.plugin._clients))
+        return r
+
     def channel(self, name: str = "main") -> Channel:
         return self.registry.get_or_create("web", name)
 
@@ -400,7 +409,7 @@ async def make_env(db):
 
     async def make(web_block=None, *, ready: bool = True, persistence: bool = True,
                    start: bool = True, token: str | None = TOKEN,
-                   use_db=True) -> Env:
+                   use_db: bool = True) -> Env:
         env = Env()
         env.pm = create_plugin_manager()
         env.registry = ChannelRegistry()
@@ -429,14 +438,15 @@ async def make_env(db):
 
     yield make
 
-    # Teardown: close clients first, then stop the plugin (idempotent).
+    # Teardown: stop the plugin first (bounded, and it releases handlers a
+    # failed test left stuck), then close what's left client-side.
     for env in envs:
+        await env.plugin.on_stop()
         for r in env.raws:
             r.close()
         for c in env.conns:
             await c.ws.close()
         await env.http.close()
-        await env.plugin.on_stop()
 
 
 # ===========================================================================
@@ -603,6 +613,27 @@ class TestToken:
         _assert_token_not_in_structured_fields(caplog.records, TOKEN)
 
 
+def _parse_csp(header: str) -> dict[str, set[str]]:
+    """CSP header → {directive: set of sources}."""
+    out: dict[str, set[str]] = {}
+    for part in header.split(";"):
+        words = part.split()
+        if words:
+            out[words[0]] = set(words[1:])
+    return out
+
+
+def _expected_csp(ws_sources: set[str]) -> dict[str, set[str]]:
+    """The design's policy, with the given explicit ws sources. IPv6
+    literals have no CSP host-source form, so `ws://[::1]` is never listed."""
+    return {
+        "default-src": {"'self'"}, "script-src": {"'self'"}, "style-src": {"'self'"},
+        "connect-src": {"'self'"} | ws_sources, "img-src": {"'self'", "data:"},
+        "object-src": {"'none'"}, "base-uri": {"'none'"}, "form-action": {"'none'"},
+        "frame-ancestors": {"'none'"},
+    }
+
+
 _STD_ATTRS = set(vars(logging.LogRecord("x", 0, "x", 0, "x", None, None))) | {
     "message", "asctime", "taskName"}
 
@@ -642,7 +673,7 @@ class TestOrigins:
             _normalise_origin(bad)
 
     @staticmethod
-    def _trio(host_for_base: str, port: int = 8000):
+    def _trio(port: int = 8000):
         return {f"http://127.0.0.1:{port}", f"http://localhost:{port}",
                 f"http://[::1]:{port}"}
 
@@ -655,7 +686,7 @@ class TestOrigins:
     ])
     def test_loopback_hosts_get_the_trio(self, host, base):
         origins, hosts, login_base = _compute_origins(host, 8000, None)
-        assert set(origins) == self._trio(base)
+        assert set(origins) == self._trio()
         assert login_base == base
         assert {"127.0.0.1:8000", "localhost:8000", "[::1]:8000"} <= hosts
 
@@ -726,6 +757,12 @@ class TestAuth:
                                 headers={"Host": "box.example"}) as r:
             assert r.status == 200
             assert "secure" in r.headers["Set-Cookie"].lower()
+            csp = _parse_csp(r.headers["Content-Security-Policy"])
+            assert "wss://box.example" in csp["connect-src"]
+        # Same server, plain-http loopback Host: no Secure.
+        async with env.http.get(f"{env.base}/?token={TOKEN}") as r:
+            assert r.status == 200
+            assert "secure" not in r.headers["Set-Cookie"].lower()
 
     @pytest.mark.parametrize("query", [f"wrong-{TOKEN}", "%C3%A9" * 20, ""])
     async def test_bad_token_401(self, make_env, query):
@@ -790,12 +827,8 @@ class TestAuth:
             assert r.status == 200
 
     def _assert_security_headers(self, headers, port):
-        csp = headers["Content-Security-Policy"]
-        assert "default-src 'self'" in csp
-        assert "script-src 'self'" in csp
-        assert "object-src 'none'" in csp
-        assert "frame-ancestors 'none'" in csp
-        assert f"ws://127.0.0.1:{port}" in csp
+        assert _parse_csp(headers["Content-Security-Policy"]) == _expected_csp(
+            {f"ws://127.0.0.1:{port}", f"ws://localhost:{port}"})
         assert headers["X-Content-Type-Options"] == "nosniff"
         assert headers["Referrer-Policy"] == "no-referrer"
         assert headers["Cache-Control"] == "no-store"
@@ -904,11 +937,14 @@ class TestInbound:
         assert text == "hello"
 
     async def test_send_not_ready(self, make_env):
-        env = await make_env(ready=False)
-        conn = await env.connect()
+        env = await make_env()
+        conn = await env.connect("main")
+        env.agent.started = False
         await conn.send(type="send", conversation="main", text="hello")
         err = await conn.wait_type("error")
         assert err["request"] == "send" and err["code"] == "starting"
+        env.agent.started = True
+        await conn.sync()
         assert "user" not in conn.types()
         assert env.agent.calls == []
 
@@ -950,7 +986,7 @@ class TestInbound:
     @pytest.mark.parametrize("text", [5, None, ["x"], "\ud800"])
     async def test_bad_text(self, make_env, text):
         env = await make_env()
-        conn = await env.connect()
+        conn = await env.connect("main")
         await conn.send(type="send", conversation="main", text=text)
         err = await conn.wait_type("error")
         assert err["request"] == "send" and err["code"] == "bad_request"
@@ -961,7 +997,7 @@ class TestInbound:
     @pytest.mark.parametrize("text", ["", "   \n\t"])
     async def test_empty_text_ignored(self, make_env, text):
         env = await make_env()
-        conn = await env.connect()
+        conn = await env.connect("main")
         await conn.send(type="send", conversation="main", text=text)
         await conn.sync()
         assert "error" not in conn.types()
@@ -1330,6 +1366,14 @@ class TestUnsent:
         await conn.send(type="send", conversation="main", text="keep")
         await wait_until(lambda: len(env.agent.calls) == 2)
         keep = env.plugin._unsent["web:main"][0]
+        # And an unbound entry held in a gate, with the text the stale
+        # rejection will carry — a text-matching implementation removes it.
+        gate = HoldGate()
+        env.pm.register(gate, name="gate")
+        await conn.send(type="send", conversation="main", text="t")
+        await asyncio.wait_for(gate.entered.wait(), 3)
+        held = env.plugin._unsent["web:main"][1]
+        assert held.text == "t" and held.cid is None
         # Simulate a task (e.g. the queue consumer) that inherited the var.
         token = _CURRENT_SEND.set(stale)
         try:
@@ -1338,15 +1382,16 @@ class TestUnsent:
                                                    sender="web", text="t")
             rej = await conn.wait_type("rejected", text="t")
             assert rej["id"] is None
-            assert env.plugin._unsent["web:main"] == [keep]
+            assert env.plugin._unsent["web:main"] == [keep, held]
             await env.pm.ahook.on_message_admitted(channel=ch, correlation_id="c2",
                                                    sender="web", text="t2")
             entries = env.plugin._unsent["web:main"]
-            assert len(entries) == 2 and entries[0] is keep
-            assert entries[1] is not stale and entries[1].cid == "c2"
-            assert stale.cid != "c2"
+            assert len(entries) == 3 and entries[:2] == [keep, held]
+            assert entries[2] is not stale and entries[2].cid == "c2"
+            assert stale.cid != "c2" and held.cid is None
         finally:
             _CURRENT_SEND.reset(token)
+            gate.release.set()
 
     async def test_frames_use_bare_slug(self, make_env):
         env = await make_env()
@@ -1437,12 +1482,24 @@ BIG = "x" * 16384
 
 
 async def _flood(env, channel_id: str = "web:main", n: int = 1500) -> None:
-    """Broadcast large frames, yielding occasionally so writers can block."""
+    """Broadcast large frames, yielding so writers can run until they block.
+
+    Stops early if the client is dropped (its queue filled). Loopback
+    kernel buffers hold several MB, so the writer blocks only once those
+    and the transport buffer are full.
+    """
     for i in range(n):
+        if not any(c.conversation == channel_id for c in env.plugin._clients):
+            return
         env.plugin._broadcast(channel_id, {"type": "message", "conversation": "main",
                                            "text": BIG})
         if i % 50 == 0:
-            await asyncio.sleep(0)
+            await asyncio.sleep(0.01)
+
+
+def _writer_blocked(client) -> bool:
+    """True once the transport holds unsent bytes (the peer isn't reading)."""
+    return client.transport.get_write_buffer_size() > 0
 
 
 async def _timed_stop(env) -> float:
@@ -1475,10 +1532,7 @@ class TestBackpressure:
 
     async def test_stop_with_peer_that_never_reads(self, make_env):
         env = await make_env()
-        raw = await env.raw()
-        await raw.send(type="subscribe", conversation="main")
-        await wait_until(lambda: any(c.conversation == "web:main"
-                                     for c in env.plugin._clients))
+        raw = await env.raw_subscribed()
         await _flood(env)
         assert await _timed_stop(env) < 2.5
         assert not env.plugin._handlers
@@ -1502,10 +1556,7 @@ class TestBackpressure:
         env = await make_env()
         gate = HoldGate()
         env.pm.register(gate, name="gate")
-        raw = await env.raw()
-        await raw.send(type="subscribe", conversation="main")
-        await wait_until(lambda: any(c.conversation == "web:main"
-                                     for c in env.plugin._clients))
+        raw = await env.raw_subscribed()
         await raw.send(type="send", conversation="main", text="hi")
         await asyncio.wait_for(gate.entered.wait(), 3)
         client = env.client_for("web:main")
@@ -1522,14 +1573,12 @@ class TestBackpressure:
 
     async def test_pending_drop_close_completes_on_stop(self, make_env):
         env = await make_env()
-        raw = await env.raw()
-        await raw.send(type="subscribe", conversation="main")
-        await wait_until(lambda: any(c.conversation == "web:main"
-                                     for c in env.plugin._clients))
+        raw = await env.raw_subscribed()
         client = env.client_for("web:main")
         spy = SpyTransport(client.transport)
         client.transport = spy
-        await _flood(env, n=200)
+        await _flood(env, n=400)  # enough to fill kernel buffers and block the writer
+        assert _writer_blocked(client)
         _fill(client)
         env.plugin._broadcast("web:main", {"type": "message", "conversation": "main",
                                            "text": "overflow"})
@@ -1546,6 +1595,7 @@ class TestBackpressure:
                 await asyncio.sleep(3600)
 
         transport = MagicMock()
+        transport.is_closing.return_value = False
         client = SimpleNamespace(ws=StuckWS(), transport=transport)
         t0 = time.monotonic()
         await env.plugin._close_client(client, 1001, b"bye")
@@ -1567,6 +1617,21 @@ class TestBackpressure:
         with pytest.raises(asyncio.CancelledError):
             await task
         transport.abort.assert_called_once()
+
+    async def test_heartbeat_timeout_aborts_stuck_socket(self, make_env, monkeypatch):
+        # A peer that stops reading and answering pings (a phone asleep):
+        # aiohttp's heartbeat only calls transport.close(), which would
+        # wait forever on the stuck buffer; the handler's release aborts.
+        monkeypatch.setattr(web_mod, "_HEARTBEAT", 0.4)
+        env = await make_env()
+        raw = await env.raw_subscribed()
+        client = env.client_for("web:main")
+        transport = client.transport
+        await _flood(env, n=400)
+        assert _writer_blocked(client)
+        await wait_until(lambda: not env.plugin._handlers, timeout=5)
+        assert transport.is_closing()
+        assert transport.get_write_buffer_size() == 0
 
     async def test_stop_with_nobody_connected_closes_listener(self, make_env):
         env = await make_env()
@@ -1608,21 +1673,22 @@ class TestBackpressure:
         spy = SpyTransport(client.transport)
         client.transport = spy
         env.plugin._stopping = True
-        _fill(client)
-        env.plugin._broadcast("web:main", {"type": "message", "conversation": "main",
-                                           "text": "overflow"})
-        assert spy.aborted
-        assert not env.plugin._close_tasks
-        assert client not in env.plugin._clients
+        try:
+            _fill(client)
+            env.plugin._broadcast("web:main", {"type": "message", "conversation": "main",
+                                               "text": "overflow"})
+            assert spy.aborted
+            assert not env.plugin._close_tasks
+            assert client not in env.plugin._clients
+        finally:
+            env.plugin._stopping = False
 
     async def test_drop_close_task_awaited_not_cancelled(self, make_env):
         env = await make_env()
-        raw = await env.raw()
-        await raw.send(type="subscribe", conversation="main")
-        await wait_until(lambda: any(c.conversation == "web:main"
-                                     for c in env.plugin._clients))
+        raw = await env.raw_subscribed()
         client = env.client_for("web:main")
-        await _flood(env, n=200)
+        await _flood(env, n=400)  # enough to fill kernel buffers and block the writer
+        assert _writer_blocked(client)
         _fill(client)
         env.plugin._broadcast("web:main", {"type": "message", "conversation": "main",
                                            "text": "overflow"})
@@ -1791,6 +1857,14 @@ class TestReplay:
         await conn.send(type="list")
         items = (await conn.wait_type("conversations"))["items"]
         assert [(i["name"], i["last_active"]) for i in items] == [("a", 500.0), ("b", 300.0)]
+
+    async def test_listing_with_db_none(self, make_env):
+        env = await make_env(use_db=False)
+        env.channel("c").last_active = 200.0
+        conn = await env.connect()
+        await conn.send(type="list")
+        items = (await conn.wait_type("conversations"))["items"]
+        assert [i["name"] for i in items] == ["c"]
 
     async def test_listing_without_persistence(self, make_env):
         env = await make_env(persistence=False)

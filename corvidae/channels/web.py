@@ -64,6 +64,7 @@ _HISTORY_ROWS = 200
 _SUMMARY_CHARS = 200
 _CLOSE_TIMEOUT = 1.0
 _HANDLER_WAIT = 0.5
+_HEARTBEAT = 30.0  # seconds; module-level so tests can shorten it
 _TOKEN_HINT = 'generate one with: python -c "import secrets; print(secrets.token_urlsafe(32))"'
 
 _STATIC_DIR = Path(str(resources.files("corvidae.channels") / "web_static"))
@@ -315,6 +316,24 @@ class _NotReady(Exception):
     """The agent hasn't started yet."""
 
 
+def _abort_if_stuck(transport, force: bool = False) -> None:
+    """Abort a transport that can't finish closing on its own.
+
+    ``transport.close()`` waits to flush its write buffer, which never
+    happens with a peer that stopped reading; ``abort()`` drops the buffer
+    and fires ``connection_lost`` at once. Aborting with an empty buffer
+    would gain nothing and could cut a close handshake short, so only a
+    forced abort or unsent bytes trigger it.
+    """
+    if transport is None:
+        return
+    try:
+        if force or transport.get_write_buffer_size() > 0:
+            transport.abort()
+    except Exception:
+        logger.debug("web: abort failed", exc_info=True)
+
+
 def _text(value: object) -> str:
     """A row field as text; anything that isn't a str is empty."""
     return value if isinstance(value, str) else ""
@@ -509,7 +528,9 @@ class WebPlugin(CorvidaePlugin):
             scheme, netloc = origin.split("://", 1)
             if scheme == "https":
                 self._secure_hosts |= _host_values(origin)
-            ws_sources.append(f"{'wss' if scheme == 'https' else 'ws'}://{netloc}")
+            # CSP host-sources can't express IPv6 literals; 'self' covers those.
+            if not netloc.startswith("["):
+                ws_sources.append(f"{'wss' if scheme == 'https' else 'ws'}://{netloc}")
         self._csp = (
             "default-src 'self'; script-src 'self'; style-src 'self'; "
             f"connect-src 'self' {' '.join(ws_sources)}; img-src 'self' data:; "
@@ -615,7 +636,7 @@ class WebPlugin(CorvidaePlugin):
         self._handlers.add(task)
         client: _Client | None = None
         try:
-            ws = web.WebSocketResponse(max_msg_size=1 << 20, heartbeat=30)
+            ws = web.WebSocketResponse(max_msg_size=1 << 20, heartbeat=_HEARTBEAT)
             transport = request.transport
             await ws.prepare(request)
             client = _Client(ws, transport)
@@ -633,18 +654,16 @@ class WebPlugin(CorvidaePlugin):
             self._release(client, task)
 
     def _release(self, client: _Client | None, task: asyncio.Task | None) -> None:
-        """Release everything a connection holds (handler's last act)."""
+        """Release a connection's fan-out state (the handler's last act)."""
+        # Stop fan-out, then the writer, then abort a socket whose bytes
+        # are stuck (e.g. a heartbeat timeout, where aiohttp only calls
+        # transport.close() and would wait forever on a peer that stopped
+        # reading).
         if client is not None:
-            # Stop fan-out first, then the writer, then the socket.
             self._clients.discard(client)
             if client.writer is not None:
                 client.writer.cancel()
-            transport = client.transport
-            try:
-                if transport is not None and not transport.is_closing():
-                    transport.abort()
-            except Exception:
-                logger.debug("web: abort on release failed", exc_info=True)
+            _abort_if_stuck(client.transport)
         self._handlers.discard(task)
 
     async def _write_loop(self, client: _Client) -> None:
@@ -670,11 +689,10 @@ class WebPlugin(CorvidaePlugin):
             logger.debug("web: close failed; aborting", exc_info=True)
         finally:
             # Also runs on cancellation: an interrupted close still aborts.
-            if not completed and client.transport is not None:
-                try:
-                    client.transport.abort()
-                except Exception:
-                    logger.debug("web: abort failed", exc_info=True)
+            # A "completed" close can still leave unsent bytes behind (aiohttp
+            # returns True after a write error having only called
+            # transport.close()), so those abort too.
+            _abort_if_stuck(client.transport, force=not completed)
 
     def _spawn_close(self, client: _Client, code: int, message: bytes) -> None:
         """Start a tracked close task (on_stop awaits any still pending)."""
@@ -701,8 +719,7 @@ class WebPlugin(CorvidaePlugin):
         # During shutdown, abort at once rather than start a close task
         # nobody would await.
         if self._stopping:
-            if client.transport is not None:
-                client.transport.abort()
+            _abort_if_stuck(client.transport, force=True)
             return
         self._spawn_close(client, 1008, b"too slow")
 
