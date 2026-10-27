@@ -1007,7 +1007,9 @@ it.
 - `persist_message` docstring: "Broadcast. Every implementation runs.
   `PersistencePlugin` returns the `message_log` rowid; every other
   implementation returns `None`. The caller resolves with
-  `resolve_single_result` and raises if two implementations answer."
+  `resolve_single_result`, which logs an error and uses the first value
+  if two implementations answer." (The first draft said "raises"; the
+  code logs, and WP1 documented the code.)
 
 **Docs.** `plugin-guide.md`: new "Hook grammar" section (Part 1 §1 table and
 §4 criterion); rename rows in "Available hooks". `design.md`: Hook reference
@@ -1015,8 +1017,10 @@ table rows. CLAUDE.md: nothing yet.
 
 **Acceptance.** Full suite green; `test_hook_grammar.py` green except the
 strict xfail rows listed above;
-`grep -rn 'on_conversation_event\|process_tool_result\|load_conversation\|on_llm_error\|compact_conversation' corvidae tests docs README.md CLAUDE.md`
-returns nothing (historical mentions in `plans/` are fine).
+`grep -rn --exclude-dir=fixtures 'on_conversation_event\|process_tool_result\|load_conversation\|on_llm_error\|compact_conversation' corvidae tests docs README.md CLAUDE.md`
+returns only `tests/test_hook_grammar.py`, which names the retired hooks
+to assert they are gone (historical mentions in `plans/` are fine, and
+`tests/fixtures/` holds recorded transcripts that keep the old names).
 
 ## WP2 — Package split and Discord extra (M–L; runs third)
 
