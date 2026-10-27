@@ -100,7 +100,7 @@ Before every LLM call, Corvidae fires the `before_agent_turn` hook. Plugins use 
 
 ```python
 # corvidae/hooks.py (hookspec)
-async def before_agent_turn(self, channel, correlation_id, meta) -> None: ...
+async def before_agent_turn(self, channel, trace_id, meta) -> None: ...
 ```
 
 Example plugin (impls may omit parameters they don't use — pluggy passes declared args only — but must never re-declare a spec-required parameter with a default):
@@ -111,7 +111,7 @@ from corvidae.hooks import CorvidaePlugin, hookimpl
 
 class MemoryPlugin(CorvidaePlugin):
     @hookimpl
-    async def before_agent_turn(self, channel, correlation_id, meta) -> None:
+    async def before_agent_turn(self, channel, trace_id, meta) -> None:
         notes = await self.fetch_relevant_notes(channel.id)
         if notes:
             channel.conversation.append(

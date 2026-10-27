@@ -175,7 +175,7 @@ async def _wait_until(predicate, timeout: float = 5.0, interval: float = 0.01) -
     await asyncio.wait_for(_poll(), timeout=timeout)
 
 
-async def _drive_gate(pm, *, channel, sender: str, text: str, correlation_id: str) -> bool | None:
+async def _drive_gate(pm, *, channel, sender: str, text: str, trace_id: str) -> bool | None:
     """Run the message gate the way Agent.on_message runs it.
 
     Broadcasts should_process_message through pluggy, resolves it with
@@ -185,12 +185,12 @@ async def _drive_gate(pm, *, channel, sender: str, text: str, correlation_id: st
     binding, and the follow-on rejection broadcast are all exercised.
     """
     results = await pm.ahook.should_process_message(
-        channel=channel, sender=sender, text=text, correlation_id=correlation_id,
+        channel=channel, sender=sender, text=text, trace_id=trace_id,
     )
     decision = resolve_reject_wins(results)
     if decision is False:
         await pm.ahook.on_message_rejected(
-            channel=channel, correlation_id=correlation_id, sender=sender, text=text,
+            channel=channel, trace_id=trace_id, sender=sender, text=text,
         )
     return decision
 
@@ -204,7 +204,7 @@ class _VetoGatePlugin:
         self.veto_text = veto_text
 
     @hookimpl
-    async def should_process_message(self, channel, sender, text, correlation_id):
+    async def should_process_message(self, channel, sender, text, trace_id):
         return False if text == self.veto_text else None
 
 
@@ -216,7 +216,7 @@ class _VetoGatePlugin:
 class _FakeAgent:
     """Stands in for Agent.on_message, mirroring corvidae/agent.py's sequence:
     should_process_message -> reject-wins -> on_message_rejected | admitted,
-    all using the correlation id the *caller passed*.
+    all using the trace id the *caller passed*.
 
     ``ready=False`` models the agent-not-ready path: return without firing
     any hook. ``block`` holds an admitted call open. Installed as ``pm.ahook.on_message = AsyncMock(side_effect=...)``
@@ -230,7 +230,7 @@ class _FakeAgent:
         # admitted (a rejected message returns before it), modelling a turn
         # that is still running.
         self.block: asyncio.Event | None = None
-        # (text, correlation_id, channel) for each on_message call.
+        # (text, trace_id, channel) for each on_message call.
         self.calls: list[tuple[str, str, object]] = []
 
     def install(self) -> None:
@@ -239,26 +239,26 @@ class _FakeAgent:
         # side_effect it recognizes as a coroutine function.
         self.pm.ahook.on_message = AsyncMock(side_effect=self.__call__)
 
-    def cid_for(self, text: str) -> str:
-        """The correlation id the transport passed for the message `text`."""
-        return next(cid for t, cid, _ in self.calls if t == text)
+    def tid_for(self, text: str) -> str:
+        """The trace id the transport passed for the message `text`."""
+        return next(tid for t, tid, _ in self.calls if t == text)
 
-    async def __call__(self, channel, sender, text, correlation_id):
+    async def __call__(self, channel, sender, text, trace_id):
         # Record first so tests can find the id even on early return.
-        self.calls.append((text, correlation_id, channel))
+        self.calls.append((text, trace_id, channel))
         if not self.ready:
             return
         # Gate, then reject-wins, then the matching lifecycle hook.
         results = await self.pm.ahook.should_process_message(
-            channel=channel, sender=sender, text=text, correlation_id=correlation_id,
+            channel=channel, sender=sender, text=text, trace_id=trace_id,
         )
         if resolve_reject_wins(results) is False:
             await self.pm.ahook.on_message_rejected(
-                channel=channel, correlation_id=correlation_id, sender=sender, text=text,
+                channel=channel, trace_id=trace_id, sender=sender, text=text,
             )
             return
         await self.pm.ahook.on_message_admitted(
-            channel=channel, correlation_id=correlation_id, sender=sender, text=text,
+            channel=channel, trace_id=trace_id, sender=sender, text=text,
         )
         if self.block is not None:
             await self.block.wait()
@@ -731,7 +731,7 @@ class TestAuthorizationGate:
         try:
             channel = h.registry.get_or_create("signal", AUTH_ACI)
             result = await h.plugin.should_process_message(
-                channel=channel, sender=AUTH_ACI, text="hi", correlation_id="corr-1"
+                channel=channel, sender=AUTH_ACI, text="hi", trace_id="corr-1"
             )
             assert result is True
         finally:
@@ -748,11 +748,11 @@ class TestAuthorizationGate:
         try:
             channel = h.registry.get_or_create("signal", OTHER_ACI)
             decision = await _drive_gate(
-                h.pm, channel=channel, sender=OTHER_ACI, text="hi", correlation_id="corr-2",
+                h.pm, channel=channel, sender=OTHER_ACI, text="hi", trace_id="corr-2",
             )
             assert decision is False
             rejected.assert_awaited_once()
-            assert rejected.await_args.kwargs["correlation_id"] == "corr-2"
+            assert rejected.await_args.kwargs["trace_id"] == "corr-2"
             assert rejected.await_args.kwargs["sender"] == OTHER_ACI
         finally:
             await _stop_plugin(h)
@@ -762,14 +762,14 @@ class TestAuthorizationGate:
         try:
             channel = h.registry.get_or_create("signal", AUTH_ACI)
             result = await h.plugin.should_process_message(
-                channel=channel, sender=AUTH_ACI, text="hi", correlation_id="corr-3"
+                channel=channel, sender=AUTH_ACI, text="hi", trace_id="corr-3"
             )
             assert result is False
         finally:
             await _stop_plugin(h)
 
-    def test_should_process_message_binds_correlation_id_without_default(self):
-        """Registration-time guard: correlation_id is spec-required. A
+    def test_should_process_message_binds_trace_id_without_default(self):
+        """Registration-time guard: trace_id is spec-required. A
         hookimpl that defaults it would silently receive None from pluggy
         instead of the caller's value (see hooks.py:489)."""
         pm = create_plugin_manager()
@@ -819,7 +819,7 @@ class TestAllowlistAliasResolution:
         try:
             result = await h.plugin.should_process_message(
                 channel=h.registry.get_or_create("signal", AUTH_ACI),
-                sender=AUTH_ACI, text="hi", correlation_id="corr-1",
+                sender=AUTH_ACI, text="hi", trace_id="corr-1",
             )
             assert result is True
             assert h.plugin._allow_resolution_task is None
@@ -846,7 +846,7 @@ class TestAllowlistAliasResolution:
 
             result = await h.plugin.should_process_message(
                 channel=h.registry.get_or_create("signal", OTHER_ACI),
-                sender=OTHER_ACI, text="hi", correlation_id="corr-1",
+                sender=OTHER_ACI, text="hi", trace_id="corr-1",
             )
             assert result is True
         finally:
@@ -883,11 +883,11 @@ class TestAllowlistAliasResolution:
 
             first = await h.plugin.should_process_message(
                 channel=h.registry.get_or_create("signal", OTHER_ACI),
-                sender=OTHER_ACI, text="hi", correlation_id="corr-1",
+                sender=OTHER_ACI, text="hi", trace_id="corr-1",
             )
             second = await h.plugin.should_process_message(
                 channel=h.registry.get_or_create("signal", third_aci),
-                sender=third_aci, text="hi", correlation_id="corr-2",
+                sender=third_aci, text="hi", trace_id="corr-2",
             )
             assert first is True
             assert second is True
@@ -911,7 +911,7 @@ class TestAllowlistAliasResolution:
             try:
                 result = await h.plugin.should_process_message(
                     channel=h.registry.get_or_create("signal", OTHER_ACI),
-                    sender=OTHER_ACI, text="hi", correlation_id="corr-1",
+                    sender=OTHER_ACI, text="hi", trace_id="corr-1",
                 )
                 assert result is False
                 assert any(
@@ -937,7 +937,7 @@ class TestAllowlistAliasResolution:
             try:
                 result = await h.plugin.should_process_message(
                     channel=h.registry.get_or_create("signal", OTHER_ACI),
-                    sender=OTHER_ACI, text="hi", correlation_id="corr-1",
+                    sender=OTHER_ACI, text="hi", trace_id="corr-1",
                 )
                 assert result is False
                 rpc_failure_logs = [
@@ -1079,9 +1079,9 @@ class TestLiveness:
             # The fake agent already admitted the message under the id the
             # transport minted; persist it under that same id, as the
             # agent's queue consumer would when processing starts.
-            _, correlation_id, channel = h.agent.calls[0]
+            _, trace_id, channel = h.agent.calls[0]
             await h.plugin.on_message_persisted(
-                channel=channel, correlation_id=correlation_id, rowid=1, text="hi", meta={}
+                channel=channel, trace_id=trace_id, rowid=1, text="hi", meta={}
             )
 
             receipt_request = await h.server.next_request(timeout=5)
@@ -1298,7 +1298,7 @@ class TestBacklogTimestamps:
             channel = h.pm.ahook.on_message.await_args.kwargs["channel"]
 
             result = await h.plugin.should_process_message(
-                channel=channel, sender=OTHER_ACI, text="uninvited backlog", correlation_id="corr-x"
+                channel=channel, sender=OTHER_ACI, text="uninvited backlog", trace_id="corr-x"
             )
             assert result is False
         finally:
@@ -1381,7 +1381,7 @@ class TestResolveChannel:
 
 
 # ---------------------------------------------------------------------------
-# Issue #95: the transport mints the correlation id
+# Issue #95: the transport mints the trace id
 # ---------------------------------------------------------------------------
 
 
@@ -1417,7 +1417,7 @@ class TestTransportMintedIds:
             # Persist the second message, as the agent's queue consumer would.
             channel = agent.calls[1][2]
             await h.plugin.on_message_persisted(
-                channel=channel, correlation_id=agent.cid_for("kept"),
+                channel=channel, trace_id=agent.tid_for("kept"),
                 rowid=1, text="kept", meta={},
             )
 
@@ -1526,14 +1526,14 @@ class TestTransportMintedIds:
 
             # A notification-born turn on the same channel persists first.
             await h.plugin.on_message_persisted(
-                channel=channel, correlation_id="notif-id", rowid=9, text="n", meta={},
+                channel=channel, trace_id="notif-id", rowid=9, text="n", meta={},
             )
             await asyncio.sleep(0.2)
             assert h.server.requests_matching("receipt") == []
 
             # The owed message's own persist sends its receipt.
             await h.plugin.on_message_persisted(
-                channel=channel, correlation_id=agent.cid_for("owed"),
+                channel=channel, trace_id=agent.tid_for("owed"),
                 rowid=10, text="owed", meta={},
             )
             await _wait_until(lambda: h.server.requests_matching("receipt"), timeout=3)

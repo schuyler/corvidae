@@ -16,7 +16,7 @@ from typing import Any, Optional
 
 from corvidae.channel import Channel, ChannelConfig, ChannelRegistry
 from corvidae.channels.split import split_message
-from corvidae.correlation import mint_correlation_id
+from corvidae.trace import mint_trace_id
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 
 logger = logging.getLogger("corvidae.signal_plugin")
@@ -97,10 +97,10 @@ class SignalPlugin(CorvidaePlugin):
         # Liveness bookkeeping, per channel id (transport:scope).
         self._outstanding: dict[str, int] = {}
         self._typing_tasks: dict[str, asyncio.Task] = {}
-        # channel id -> {correlation id -> envelope timestamp (ms)} for
+        # channel id -> {trace id -> envelope timestamp (ms)} for
         # messages that took a typing slot and are owed a read receipt.
         self._pending_receipts: dict[str, dict[str, int]] = {}
-        # Correlation ids admitted while their on_message call is still
+        # Trace ids admitted while their on_message call is still
         # running; _handle_notification's finally consumes them.
         self._admitted: set[str] = set()
 
@@ -403,16 +403,16 @@ class SignalPlugin(CorvidaePlugin):
         # gate can veto and log the attempt.
         # The id is minted here and keys everything this message holds, so
         # the lifecycle hooks can be matched back to it without inference.
-        correlation_id = mint_correlation_id()
+        trace_id = mint_trace_id()
         try:
             if await self._is_allowed(source_uuid) and timestamp is not None:
                 # Remember the timestamp (for the read receipt) and take a
                 # typing slot; both are released below if never admitted.
-                self._pending_receipts.setdefault(channel.id, {})[correlation_id] = timestamp
+                self._pending_receipts.setdefault(channel.id, {})[trace_id] = timestamp
                 await self._begin_typing(channel)
 
             await self.pm.ahook.on_message(
-                channel=channel, sender=source_uuid, text=text, correlation_id=correlation_id,
+                channel=channel, sender=source_uuid, text=text, trace_id=trace_id,
             )
         finally:
             # Admission or rejection fires before on_message returns.
@@ -420,18 +420,18 @@ class SignalPlugin(CorvidaePlugin):
             # exception, cancellation) gets no reply and no receipt: drop
             # its timestamp and give its typing slot back, but only if it
             # actually took one (a stranger or timestamp-less envelope did not).
-            if correlation_id not in self._admitted:
-                if self._pop_pending(channel, correlation_id) is not None:
+            if trace_id not in self._admitted:
+                if self._pop_pending(channel, trace_id) is not None:
                     self._decrement_outstanding(channel)
-            self._admitted.discard(correlation_id)
+            self._admitted.discard(trace_id)
 
-    def _pop_pending(self, channel: Channel, correlation_id: str) -> int | None:
+    def _pop_pending(self, channel: Channel, trace_id: str) -> int | None:
         """Remove and return a message's pending receipt timestamp, or None
         if it has none. Drops the channel's dict once it is empty."""
         pending = self._pending_receipts.get(channel.id)
         if pending is None:
             return None
-        timestamp_ms = pending.pop(correlation_id, None)
+        timestamp_ms = pending.pop(trace_id, None)
         # Don't let emptied per-channel dicts accumulate.
         if not pending:
             del self._pending_receipts[channel.id]
@@ -601,10 +601,10 @@ class SignalPlugin(CorvidaePlugin):
 
     @hookimpl
     async def should_process_message(
-        self, channel: Channel, sender: str, text: str, correlation_id: str
+        self, channel: Channel, sender: str, text: str, trace_id: str
     ) -> bool | None:
         """Default-deny gate: only an allowlisted ACI (or its known E.164
-        alias) may drive the agent. correlation_id is bound without a
+        alias) may drive the agent. trace_id is bound without a
         default -- see tests/test_hook_arg_binding.py.
         """
         if not channel.matches_transport("signal"):
@@ -676,7 +676,7 @@ class SignalPlugin(CorvidaePlugin):
 
     @hookimpl
     async def on_message_admitted(
-        self, channel: Channel, correlation_id: str, sender: str, text: str
+        self, channel: Channel, trace_id: str, sender: str, text: str
     ) -> None:
         """Note that this message was admitted, so the inbound handler's
         finally keeps its pending receipt and typing slot (they are released
@@ -684,21 +684,21 @@ class SignalPlugin(CorvidaePlugin):
         before on_message returns."""
         if not channel.matches_transport("signal"):
             return
-        self._admitted.add(correlation_id)
+        self._admitted.add(trace_id)
 
     @hookimpl
     async def on_message_persisted(
-        self, channel: Channel, correlation_id: str, rowid: int | None, text: str, meta: dict
+        self, channel: Channel, trace_id: str, rowid: int | None, text: str, meta: dict
     ) -> None:
         """Fire the read receipt at processing start, not arrival -- a
         message can sit queued behind contended local inference, and a
         "read" marker followed by silence is worse than no marker. Pops this
-        message's own pending timestamp by correlation id and sends a receipt
+        message's own pending timestamp by trace id and sends a receipt
         for it. This hook also fires for notification-originated turns,
         which never had a pending entry, so those are a no-op."""
         if not channel.matches_transport("signal"):
             return
-        timestamp_ms = self._pop_pending(channel, correlation_id)
+        timestamp_ms = self._pop_pending(channel, trace_id)
         if timestamp_ms is None:
             return
         try:

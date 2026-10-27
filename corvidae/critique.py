@@ -63,7 +63,7 @@ PROVENANCE_MAX_TERMS_DEFAULT = 8    # critique.provenance.max_terms
 
 STYLISTIC_LENSES = ("predictive", "constrained", "adversarial")
 
-# Bound on the admitted-correlation-id LRU (CritiquePlugin._admitted): "user"
+# Bound on the admitted-trace-id LRU (CritiquePlugin._admitted): "user"
 # origin recognition is inferred from on_message_admitted subscription
 # (R1 — origin is a plugin-side convention, not a core field).
 ADMITTED_LRU_MAXSIZE = 512
@@ -322,10 +322,10 @@ class CritiquePlugin(CorvidaePlugin):
         # Injectable RNG for the below-threshold sampling draw — tests seed a
         # random.Random; never the module-level random functions (WP2.7 p3).
         self._rng = random.Random()
-        # Bounded set of correlation ids admitted via on_message_admitted —
+        # Bounded set of trace ids admitted via on_message_admitted —
         # the plugin-side definition of "user" origin (R1).
         self._admitted: collections.OrderedDict[str, None] = collections.OrderedDict()
-        # Bounded map of correlation id -> originating row's message_log
+        # Bounded map of trace id -> originating row's message_log
         # rowid, fed by on_message_persisted: a lens forks only while that
         # row is still in the window (#51).
         self._originating_rowid: collections.OrderedDict[str, int] = collections.OrderedDict()
@@ -388,25 +388,25 @@ class CritiquePlugin(CorvidaePlugin):
     # ------------------------------------------------------------------
 
     @hookimpl
-    async def on_message_admitted(self, channel, correlation_id, sender, text) -> None:
-        """Record the admitted correlation id — the definition of "user" origin.
+    async def on_message_admitted(self, channel, trace_id, sender, text) -> None:
+        """Record the admitted trace id — the definition of "user" origin.
 
         Subscribing to on_message_admitted IS the plugin-side definition of
         user origin (R1): the hook fires exactly for admitted USER messages.
         """
-        self._admitted[correlation_id] = None
-        self._admitted.move_to_end(correlation_id)
+        self._admitted[trace_id] = None
+        self._admitted.move_to_end(trace_id)
         while len(self._admitted) > ADMITTED_LRU_MAXSIZE:
             self._admitted.popitem(last=False)
 
     @hookimpl
-    async def on_message_persisted(self, channel, correlation_id, rowid, text, meta) -> None:
+    async def on_message_persisted(self, channel, trace_id, rowid, text, meta) -> None:
         """Record the exchange's originating rowid for the fork containment
         check. Unpersisted exchanges (rowid None) are never forked."""
         if rowid is None:
             return
-        self._originating_rowid[correlation_id] = rowid
-        self._originating_rowid.move_to_end(correlation_id)
+        self._originating_rowid[trace_id] = rowid
+        self._originating_rowid.move_to_end(trace_id)
         while len(self._originating_rowid) > ADMITTED_LRU_MAXSIZE:
             self._originating_rowid.popitem(last=False)
 
@@ -415,13 +415,13 @@ class CritiquePlugin(CorvidaePlugin):
     # ------------------------------------------------------------------
 
     @hookimpl
-    async def before_agent_turn(self, channel, correlation_id, meta) -> None:
-        """Snapshot the CONTEXT messages in the window under the exchange key.
+    async def before_agent_turn(self, channel, trace_id, meta) -> None:
+        """Snapshot the CONTEXT messages in the window under the trace id.
 
         The provenance template's evidence: what the agent could actually see
         when it wrote its response. Best-effort — never breaks the turn.
         """
-        if correlation_id is None:
+        if trace_id is None:
             return
         conv = getattr(channel, "conversation", None)
         if conv is None or not getattr(conv, "messages", None):
@@ -440,12 +440,12 @@ class CritiquePlugin(CorvidaePlugin):
             return
         try:
             await outcome_log.update_exchange(
-                correlation_id, provenance_snapshot=json.dumps(snapshot)
+                trace_id, provenance_snapshot=json.dumps(snapshot)
             )
         except Exception:
             logger.warning(
                 "provenance snapshot persist failed", exc_info=True,
-                extra={"channel": channel.id, "correlation_id": correlation_id},
+                extra={"channel": channel.id, "trace_id": trace_id},
             )
 
     # ------------------------------------------------------------------
@@ -454,13 +454,13 @@ class CritiquePlugin(CorvidaePlugin):
 
     @hookimpl
     async def on_agent_response(
-        self, channel, request_text, response_text, correlation_id, meta, logprobs,
+        self, channel, request_text, response_text, trace_id, meta, logprobs,
     ) -> None:
         """Decide lenses, then enqueue the silent critique task (if any).
 
         Eligibility is by propagated origin (trap #3): eligible iff
         ``meta["origin"] == "reminder"``, or origin is absent AND the
-        correlation id was admitted via on_message_admitted ("user"
+        trace id was admitted via on_message_admitted ("user"
         recognition, R1). Everything else (critique/heartbeat/task/unknown
         background) is exempt — the recursion brake holds because
         critique-origin meta propagates through tool cycles. The gating
@@ -468,11 +468,11 @@ class CritiquePlugin(CorvidaePlugin):
         non-sampled exchanges produce no task at all (they still leave
         their appraisal rows for offline calibration).
         """
-        if correlation_id is None:
+        if trace_id is None:
             return
         origin = (meta or {}).get("origin")
         eligible = origin == "reminder" or (
-            origin is None and correlation_id in self._admitted
+            origin is None and trace_id in self._admitted
         )
         if not eligible:
             return  # critique/heartbeat/task/unadmitted exempt — the recursion brake
@@ -485,7 +485,7 @@ class CritiquePlugin(CorvidaePlugin):
             lenses = [self._random_lens()]
         else:
             try:
-                stage1 = await appraisal.get_appraisal(correlation_id)
+                stage1 = await appraisal.get_appraisal(trace_id)
             except Exception:
                 stage1 = None
             stage2 = None
@@ -506,12 +506,12 @@ class CritiquePlugin(CorvidaePlugin):
 
         # The provenance gate is mechanical and independent of appraisal.
         try:
-            if await self._provenance_should_fire(channel, correlation_id, response_text):
+            if await self._provenance_should_fire(channel, trace_id, response_text):
                 lenses = lenses + ["provenance"]
         except Exception:
             logger.warning(
                 "provenance gate check failed; skipping provenance lens",
-                exc_info=True, extra={"correlation_id": correlation_id},
+                exc_info=True, extra={"trace_id": trace_id},
             )
 
         if not lenses:
@@ -526,12 +526,12 @@ class CritiquePlugin(CorvidaePlugin):
         if appraisal is not None:
             get_originating = getattr(appraisal, "get_originating_text", None)
             if callable(get_originating):
-                originating_text = get_originating(correlation_id)
+                originating_text = get_originating(trace_id)
         text_in = originating_text if originating_text is not None else request_text
 
         async def _work() -> str:
             await self._run_critique(
-                channel, correlation_id, text_in, response_text, lenses, sampled
+                channel, trace_id, text_in, response_text, lenses, sampled
             )
             return ""
 
@@ -540,7 +540,7 @@ class CritiquePlugin(CorvidaePlugin):
                 work=_work,
                 channel=channel,
                 description="critique",
-                correlation_id=correlation_id,
+                trace_id=trace_id,
                 meta=meta,
                 deliver=False,
                 tool_call_id=None,
@@ -548,7 +548,7 @@ class CritiquePlugin(CorvidaePlugin):
         except Exception:
             logger.warning(
                 "failed to enqueue critique task", exc_info=True,
-                extra={"channel": channel.id, "correlation_id": correlation_id},
+                extra={"channel": channel.id, "trace_id": trace_id},
             )
 
     def _select_lenses(self, channel, stage1, stage2) -> list[str]:
@@ -591,7 +591,7 @@ class CritiquePlugin(CorvidaePlugin):
     def _random_lens(self) -> str:
         return self._rng.choice(list(STYLISTIC_LENSES))
 
-    async def _provenance_should_fire(self, channel, exchange_key, response_text) -> bool:
+    async def _provenance_should_fire(self, channel, trace_id, response_text) -> bool:
         """Mechanical two-tier provenance gate (trap #4)."""
         if not resolve_tunable(
             channel, self.config, "critique.provenance.enabled", PROVENANCE_ENABLED_DEFAULT
@@ -600,7 +600,7 @@ class CritiquePlugin(CorvidaePlugin):
         if not response_text or not is_past_claim(response_text):
             return False
         # Tier 1: the exchange's memory retrieval profile.
-        top, hits = await self._retrieval_profile(exchange_key)
+        top, hits = await self._retrieval_profile(trace_id)
         weak_score = resolve_tunable(
             channel, self.config, "critique.provenance.weak_score",
             PROVENANCE_WEAK_SCORE_DEFAULT,
@@ -621,7 +621,7 @@ class CritiquePlugin(CorvidaePlugin):
     # ------------------------------------------------------------------
 
     async def _run_critique(
-        self, channel, exchange_key, originating_text, response_text, lenses, sampled,
+        self, channel, trace_id, originating_text, response_text, lenses, sampled,
     ) -> None:
         """Run each selected lens, record the outcome, register non-empty verdicts.
 
@@ -631,7 +631,7 @@ class CritiquePlugin(CorvidaePlugin):
         re-enter via the funnel as budgeted CONTEXT under origin="critique".
         """
         token = set_attribution(
-            stage="critique", channel_id=channel.id, correlation_id=exchange_key
+            stage="critique", channel_id=channel.id, trace_id=trace_id
         )
         try:
             client = self._critic_client()
@@ -640,7 +640,7 @@ class CritiquePlugin(CorvidaePlugin):
                 # A fork of the live window when one is available; a lens
                 # whose fork misses falls back to its standalone call.
                 objs = await self._fork_lens(
-                    channel, lens, exchange_key, originating_text, response_text,
+                    channel, lens, trace_id, originating_text, response_text,
                 )
                 if objs is None:
                     if client is None:
@@ -648,13 +648,13 @@ class CritiquePlugin(CorvidaePlugin):
                     standalone_token = set_attribution(mode="standalone")
                     try:
                         objs = await self._run_lens(
-                            client, channel, lens, exchange_key,
+                            client, channel, lens, trace_id,
                             originating_text, response_text,
                         )
                     except Exception:
                         logger.warning(
                             "critique lens %s failed", lens, exc_info=True,
-                            extra={"exchange_key": exchange_key},
+                            extra={"trace_id": trace_id},
                         )
                         continue
                     finally:
@@ -668,7 +668,7 @@ class CritiquePlugin(CorvidaePlugin):
             if outcome_log is not None:
                 try:
                     await outcome_log.update_exchange(
-                        exchange_key,
+                        trace_id,
                         outcomes={"critique": {
                             "lenses": lenses,
                             "objections": len(objections),
@@ -678,7 +678,7 @@ class CritiquePlugin(CorvidaePlugin):
                 except Exception:
                     logger.warning(
                         "critique outcome persist failed", exc_info=True,
-                        extra={"exchange_key": exchange_key},
+                        extra={"trace_id": trace_id},
                     )
 
             if not objections:
@@ -696,19 +696,19 @@ class CritiquePlugin(CorvidaePlugin):
             except Exception:
                 logger.warning(
                     "critique verdict registration failed", exc_info=True,
-                    extra={"exchange_key": exchange_key},
+                    extra={"trace_id": trace_id},
                 )
         finally:
             reset_attribution(token)
 
     async def _run_lens(
-        self, client, channel, lens, exchange_key, originating_text, response_text,
+        self, client, channel, lens, trace_id, originating_text, response_text,
     ) -> list[dict]:
         prompt = resolve_tunable(
             channel, self.config, f"critique.prompt.{lens}", DEFAULT_PROMPTS[lens]
         )
         if lens == "provenance":
-            snapshot = await self._read_provenance_snapshot(exchange_key)
+            snapshot = await self._read_provenance_snapshot(trace_id)
             user = (
                 f"Agent's response:\n{response_text or '(none)'}\n\n"
                 f"Retrieved context snapshot (all CONTEXT in the window):\n"
@@ -728,7 +728,7 @@ class CritiquePlugin(CorvidaePlugin):
         )
         return self._objections_from_text(response["choices"][0]["message"]["content"], lens)
 
-    def _fork_target(self, channel, exchange_key):
+    def _fork_target(self, channel, trace_id):
         """The Agent to fork through, or None for the standalone path.
 
         None when forks are off for "critique", the channel has no live
@@ -737,18 +737,18 @@ class CritiquePlugin(CorvidaePlugin):
         agent = fork_agent(self.pm if hasattr(self, "pm") else None, "critique")
         if agent is None:
             return None
-        rowid = self._originating_rowid.get(exchange_key)
+        rowid = self._originating_rowid.get(trace_id)
         conv = getattr(channel, "conversation", None)
         if rowid is None or conv is None or rowid not in window_db_ids(conv.messages):
             logger.debug(
                 "critique exchange not in the window; using the standalone call",
-                extra={"exchange_key": exchange_key},
+                extra={"trace_id": trace_id},
             )
             return None
         return agent
 
     async def _fork_lens(
-        self, channel, lens, exchange_key, originating_text, response_text,
+        self, channel, lens, trace_id, originating_text, response_text,
     ) -> list[dict] | None:
         """One lens as a fork of the full window; None for the standalone path.
 
@@ -775,12 +775,12 @@ class CritiquePlugin(CorvidaePlugin):
             f"«{quote(response_text)}»."
         )
         if lens == "provenance":
-            snapshot = await self._read_provenance_snapshot(exchange_key)
+            snapshot = await self._read_provenance_snapshot(trace_id)
             instruction += (
                 "\n\nRetrieved context snapshot (all CONTEXT in your window "
                 f"when you wrote the response):\n{snapshot or '(no context was retrieved)'}"
             )
-        agent = self._fork_target(channel, exchange_key)
+        agent = self._fork_target(channel, trace_id)
         if agent is None:
             return None
         try:
@@ -789,7 +789,7 @@ class CritiquePlugin(CorvidaePlugin):
         except Exception:
             logger.warning(
                 "critique lens %s fork failed; using the standalone call", lens,
-                exc_info=True, extra={"exchange_key": exchange_key},
+                exc_info=True, extra={"trace_id": trace_id},
             )
             return None
 
@@ -837,15 +837,15 @@ class CritiquePlugin(CorvidaePlugin):
         persistence = self.pm.get_plugin("persistence") if hasattr(self, "pm") else None
         return getattr(persistence, "db", None)
 
-    async def _retrieval_profile(self, exchange_key) -> tuple[float | None, int | None]:
+    async def _retrieval_profile(self, trace_id) -> tuple[float | None, int | None]:
         db = self._exchange_db()
         if db is None:
             return None, None
         try:
             async with db.execute(
                 "SELECT retrieval_top_score, retrieval_hit_count "
-                "FROM exchange_log WHERE exchange_key = ?",
-                (exchange_key,),
+                "FROM exchange_log WHERE trace_id = ?",
+                (trace_id,),
             ) as cursor:
                 row = await cursor.fetchone()
         except Exception:
@@ -854,14 +854,14 @@ class CritiquePlugin(CorvidaePlugin):
             return None, None
         return row[0], row[1]
 
-    async def _read_provenance_snapshot(self, exchange_key) -> str:
+    async def _read_provenance_snapshot(self, trace_id) -> str:
         db = self._exchange_db()
         if db is None:
             return ""
         try:
             async with db.execute(
-                "SELECT provenance_snapshot FROM exchange_log WHERE exchange_key = ?",
-                (exchange_key,),
+                "SELECT provenance_snapshot FROM exchange_log WHERE trace_id = ?",
+                (trace_id,),
             ) as cursor:
                 row = await cursor.fetchone()
         except Exception:

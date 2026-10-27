@@ -201,7 +201,7 @@ class TestBeforeAgentTurn:
         plugin = ThinkingPlugin(_make_pm(reasoning_history="exchange"))
 
         await plugin.before_agent_turn(
-            channel=_window_channel(messages), correlation_id=None, meta={},
+            channel=_window_channel(messages), trace_id=None, meta={},
         )
 
         assert _reasoning(messages) == [None, None, "new-1"]
@@ -213,7 +213,7 @@ class TestBeforeAgentTurn:
         plugin = ThinkingPlugin(_make_pm(reasoning_history="exchange"))
 
         await plugin.before_agent_turn(
-            channel=_window_channel(messages), correlation_id=None, meta={},
+            channel=_window_channel(messages), trace_id=None, meta={},
         )
 
         assert _reasoning(messages) == ["old-1", "old-2"]
@@ -225,7 +225,7 @@ class TestBeforeAgentTurn:
         plugin = ThinkingPlugin(_make_pm(reasoning_history="exchange"))
 
         await plugin.before_agent_turn(
-            channel=_window_channel(messages), correlation_id=None, meta={},
+            channel=_window_channel(messages), trace_id=None, meta={},
         )
 
         assert _reasoning(messages) == ["old-1", "old-2"]
@@ -237,7 +237,7 @@ class TestBeforeAgentTurn:
         plugin = ThinkingPlugin(_make_pm(reasoning_history="drop"))
 
         await plugin.before_agent_turn(
-            channel=_window_channel(messages), correlation_id=None, meta={},
+            channel=_window_channel(messages), trace_id=None, meta={},
         )
 
         assert _reasoning(messages) == [None, None, None]
@@ -248,7 +248,7 @@ class TestBeforeAgentTurn:
         plugin = ThinkingPlugin(_make_pm(reasoning_history="keep"))
 
         await plugin.before_agent_turn(
-            channel=_window_channel(messages), correlation_id=None, meta={},
+            channel=_window_channel(messages), trace_id=None, meta={},
         )
 
         assert _reasoning(messages) == ["old-1", "old-2", "new-1"]
@@ -259,7 +259,7 @@ class TestBeforeAgentTurn:
         plugin = ThinkingPlugin(_make_pm(registry_missing=True))
 
         await plugin.before_agent_turn(
-            channel=_window_channel(messages), correlation_id=None, meta={},
+            channel=_window_channel(messages), trace_id=None, meta={},
         )
 
         assert _reasoning(messages) == ["old-1", "old-2", "new-1"]
@@ -270,7 +270,7 @@ class TestBeforeAgentTurn:
         channel.conversation = None
         plugin = ThinkingPlugin(_make_pm(reasoning_history="exchange"))
 
-        await plugin.before_agent_turn(channel=channel, correlation_id=None, meta={})
+        await plugin.before_agent_turn(channel=channel, trace_id=None, meta={})
 
 
 class TestTransformDisplayText:

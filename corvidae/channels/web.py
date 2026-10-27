@@ -42,7 +42,7 @@ from urllib.parse import urlsplit
 from aiohttp import WSMsgType, web
 
 from corvidae.channel import Channel, ChannelRegistry
-from corvidae.correlation import mint_correlation_id
+from corvidae.trace import mint_trace_id
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 from corvidae.thinking import strip_thinking
 
@@ -282,9 +282,9 @@ class _Unsent:
     """A user message shown in the pane whose row isn't persisted yet."""
 
     text: str
-    # Correlation id minted by _on_send and passed to on_message; the
+    # Trace id minted by _on_send and passed to on_message; the
     # admitted/rejected/persisted hooks match their entry by it.
-    cid: str
+    trace_id: str
     # Set by on_message_admitted: the agent accepted it, so a reply is owed.
     admitted: bool = False
     id: str = field(default_factory=lambda: secrets.token_hex(8))
@@ -811,13 +811,13 @@ class WebPlugin(CorvidaePlugin):
 
         # Track the message until it's persisted, rejected or dropped.
         channel = self._registry.get_or_create("web", name)
-        entry = _Unsent(text, mint_correlation_id())
+        entry = _Unsent(text, mint_trace_id())
         self._unsent.setdefault(channel.id, []).append(entry)
         try:
             self._broadcast(channel.id, {"type": "user", "conversation": name,
                                          "text": text, "id": entry.id})
             await self.pm.ahook.on_message(channel=channel, sender="web", text=text,
-                                           correlation_id=entry.cid)
+                                           trace_id=entry.trace_id)
         finally:
             # Admission fires before on_message returns, so an entry still
             # un-admitted here was dropped, rejected, raised or cancelled.
@@ -836,10 +836,10 @@ class WebPlugin(CorvidaePlugin):
         else:
             del self._unsent[channel_id]
 
-    def _entry_for(self, channel_id: str, cid: str) -> _Unsent | None:
-        """The tracked entry carrying this correlation id, if any."""
+    def _entry_for(self, channel_id: str, trace_id: str) -> _Unsent | None:
+        """The tracked entry carrying this trace id, if any."""
         for e in self._unsent.get(channel_id, []):
-            if e.cid == cid:
+            if e.trace_id == trace_id:
                 return e
         return None
 
@@ -1026,29 +1026,29 @@ class WebPlugin(CorvidaePlugin):
 
     @hookimpl
     async def on_message_admitted(
-        self, channel: Channel, correlation_id: str, sender: str, text: str
+        self, channel: Channel, trace_id: str, sender: str, text: str
     ) -> None:
         if not self._mine(channel):
             return
         # Only _on_send calls on_message on a web channel, and it registers
         # its entry under this id first, so an unmatched id has no real
         # source; ignore it rather than invent an entry.
-        entry = self._entry_for(channel.id, correlation_id)
+        entry = self._entry_for(channel.id, trace_id)
         if entry is None:
-            logger.debug("web: admission for unknown correlation id %s", correlation_id)
+            logger.debug("web: admission for unknown trace id %s", trace_id)
             return
         entry.admitted = True
         self._set_working(channel, True)
 
     @hookimpl
     async def on_message_rejected(
-        self, channel: Channel, correlation_id: str, sender: str, text: str
+        self, channel: Channel, trace_id: str, sender: str, text: str
     ) -> None:
         if not self._mine(channel):
             return
         # Match this send's own entry by id; an unknown id removes nothing
         # and is reported to clients with a null id.
-        entry = self._entry_for(channel.id, correlation_id)
+        entry = self._entry_for(channel.id, trace_id)
         if entry is not None:
             self._remove_entry(channel.id, entry)
         self._broadcast(channel.id, {"type": "rejected", "conversation": channel.scope,
@@ -1056,11 +1056,11 @@ class WebPlugin(CorvidaePlugin):
 
     @hookimpl
     async def on_message_persisted(
-        self, channel: Channel, correlation_id: str, rowid: int | None, text: str, meta: dict
+        self, channel: Channel, trace_id: str, rowid: int | None, text: str, meta: dict
     ) -> None:
         if not self._mine(channel):
             return
         # Ids we never saw (notification-originated turns) are a no-op.
-        entry = self._entry_for(channel.id, correlation_id)
+        entry = self._entry_for(channel.id, trace_id)
         if entry is not None:
             self._remove_entry(channel.id, entry)

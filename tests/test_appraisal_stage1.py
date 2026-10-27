@@ -5,7 +5,7 @@ Per plans/implementation/phase-2.md WP2.4:
 - FTS5 probe on a dedicated read-only connection, sanitized MATCH, hard
   latency budget, fail-open;
 - the direction-keyed pull API get_or_compute: idempotent, concurrency-safe
-  (single shared in-flight future per (exchange_key, direction)),
+  (single shared in-flight future per (trace_id, direction)),
   evict-on-failure, fire-and-forget stage-1 persist via upsert_exchange;
 - the thin should_process_message trigger: load-bearing try/except, always
   returns None (this plugin computes; the gate plugin decides).
@@ -314,9 +314,9 @@ class TestPullApi:
                 self._appraisal = appraisal
 
             @hookimpl
-            async def should_process_message(self, channel, sender, text, correlation_id):
-                observed[correlation_id] = await self._appraisal.get_or_compute(
-                    channel, correlation_id, text
+            async def should_process_message(self, channel, sender, text, trace_id):
+                observed[trace_id] = await self._appraisal.get_or_compute(
+                    channel, trace_id, text
                 )
                 return None
 
@@ -341,7 +341,7 @@ class TestPullApi:
             key = f"k-order-{consumer_first}"
             # Concurrent broadcast: both hookimpls fire in one gather.
             await pm.ahook.should_process_message(
-                channel=channel, sender="user", text="a seeded memory", correlation_id=key
+                channel=channel, sender="user", text="a seeded memory", trace_id=key
             )
             assert observed[key] == await plugin.get_appraisal(key)
             await plugin.on_stop()
@@ -365,7 +365,7 @@ class TestStage1Persist:
     async def _read_row(self, db_path, key):
         db = await aiosqlite.connect(db_path)
         async with db.execute(
-            "SELECT appraisal, outcomes, probe_score FROM exchange_log WHERE exchange_key = ?",
+            "SELECT appraisal, outcomes, probe_score FROM exchange_log WHERE trace_id = ?",
             (key,),
         ) as cursor:
             row = await cursor.fetchone()
@@ -390,7 +390,7 @@ class TestStage1Persist:
         vector = await plugin.get_or_compute(channel, key, "a rejected message")
         await self._drain_persists(plugin)
         await pm.ahook.on_message_rejected(
-            channel=channel, correlation_id=key, sender="user", text="a rejected message"
+            channel=channel, trace_id=key, sender="user", text="a rejected message"
         )
         row = await self._read_row(db_path, key)
         assert row is not None
@@ -406,7 +406,7 @@ class TestStage1Persist:
         )
         key = "k-rej-2"
         await pm.ahook.on_message_rejected(
-            channel=channel, correlation_id=key, sender="user", text="a rejected message"
+            channel=channel, trace_id=key, sender="user", text="a rejected message"
         )
         vector = await plugin.get_or_compute(channel, key, "a rejected message")
         await self._drain_persists(plugin)
@@ -439,7 +439,7 @@ class TestThinTrigger:
     async def test_gate_hook_computes_and_returns_none(self, tmp_path):
         plugin, channel, _, pm = await build_appraisal(tmp_path, summaries=["x"])
         result = await plugin.should_process_message(
-            channel=channel, sender="user", text="hello", correlation_id="k-thin"
+            channel=channel, sender="user", text="hello", trace_id="k-thin"
         )
         assert result is None
         assert await plugin.get_appraisal("k-thin") is not None
@@ -462,7 +462,7 @@ class TestThinTrigger:
         monkeypatch.setattr(plugin, "_compute", failing_compute)
 
         result = await plugin.should_process_message(
-            channel=channel, sender="user", text="hello", correlation_id="k-fail"
+            channel=channel, sender="user", text="hello", trace_id="k-fail"
         )
         assert result is None  # fail-open: never rejects, never raises
         assert await plugin.get_appraisal("k-fail") is None
@@ -617,7 +617,7 @@ class TestPersistSpyGaps:
 
         import json as _json
         async with db.execute(
-            "SELECT appraisal, probe_score FROM exchange_log WHERE exchange_key = ?",
+            "SELECT appraisal, probe_score FROM exchange_log WHERE trace_id = ?",
             ("k-noprobe",),
         ) as cursor:
             row = await cursor.fetchone()

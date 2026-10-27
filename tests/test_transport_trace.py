@@ -1,7 +1,7 @@
-"""Transports mint the correlation id (issue #95).
+"""Transports mint the trace id (issue #95).
 
 Pins the Agent-side contract (a caller-supplied id is used verbatim; a
-missing/falsy id fails loudly), the new ``corvidae.correlation`` leaf
+missing/falsy id fails loudly), the new ``corvidae.trace`` leaf
 module, and that cli / irc / discord each pass a minted id to
 ``pm.ahook.on_message``.  Outcome labels (O1..O6) are issue #95's
 requirements.
@@ -26,34 +26,34 @@ from llm_response_fixtures import _make_text_response
 
 
 class _Recorder:
-    """Records the correlation id each message-lifecycle hook receives."""
+    """Records the trace id each message-lifecycle hook receives."""
 
     def __init__(self, veto: bool = False) -> None:
         self.veto = veto
-        # (hook name, correlation id) in firing order.
+        # (hook name, trace id) in firing order.
         self.events: list[tuple[str, str]] = []
 
     def ids(self, hook: str) -> list[str]:
-        """Correlation ids seen by one hook, in order."""
-        return [cid for name, cid in self.events if name == hook]
+        """Trace ids seen by one hook, in order."""
+        return [tid for name, tid in self.events if name == hook]
 
     @hookimpl
-    async def should_process_message(self, channel, sender, text, correlation_id):
+    async def should_process_message(self, channel, sender, text, trace_id):
         # Record the gate call; veto when configured.
-        self.events.append(("gate", correlation_id))
+        self.events.append(("gate", trace_id))
         return False if self.veto else None
 
     @hookimpl
-    async def on_message_admitted(self, channel, correlation_id, sender, text):
-        self.events.append(("admitted", correlation_id))
+    async def on_message_admitted(self, channel, trace_id, sender, text):
+        self.events.append(("admitted", trace_id))
 
     @hookimpl
-    async def on_message_rejected(self, channel, correlation_id, sender, text):
-        self.events.append(("rejected", correlation_id))
+    async def on_message_rejected(self, channel, trace_id, sender, text):
+        self.events.append(("rejected", trace_id))
 
     @hookimpl
-    async def on_message_persisted(self, channel, correlation_id, rowid, text, meta):
-        self.events.append(("persisted", correlation_id))
+    async def on_message_persisted(self, channel, trace_id, rowid, text, meta):
+        self.events.append(("persisted", trace_id))
 
 
 @pytest.fixture
@@ -79,14 +79,14 @@ async def agent_env():
 
 class TestAgentUsesCallerId:
     async def test_admit_path_uses_supplied_id(self, agent_env):
-        """O1: a caller-supplied correlation_id reaches should_process_message,
+        """O1: a caller-supplied trace_id reaches should_process_message,
         on_message_admitted and on_message_persisted unchanged."""
         plugin, channel, rec = agent_env
 
         # Call through the plugin manager, as a transport does.
         await plugin.pm.ahook.on_message(
             channel=channel, sender="user", text="hello",
-            correlation_id="caller-id-1",
+            trace_id="caller-id-1",
         )
         await drain(plugin, channel)
 
@@ -103,7 +103,7 @@ class TestAgentUsesCallerId:
 
         await plugin.pm.ahook.on_message(
             channel=channel, sender="user", text="hello",
-            correlation_id="caller-id-2",
+            trace_id="caller-id-2",
         )
 
         # Same id on both, gate first, and no admission (O5).
@@ -116,14 +116,14 @@ class TestAgentUsesCallerId:
 
 
 class TestMissingIdFailsLoudly:
-    async def test_omitted_correlation_id_raises_hook_call_error(self, agent_env):
-        """O2: a caller that omits correlation_id gets HookCallError, not a
+    async def test_omitted_trace_id_raises_hook_call_error(self, agent_env):
+        """O2: a caller that omits trace_id gets HookCallError, not a
         silently-unlinked message."""
         plugin, channel, rec = agent_env
 
         # pluggy warns about the missing spec argument, then the Agent's
         # impl (which requires it) raises.
-        with pytest.warns(UserWarning, match="correlation_id"), \
+        with pytest.warns(UserWarning, match="trace_id"), \
                 pytest.raises(pluggy.HookCallError):
             await plugin.pm.ahook.on_message(
                 channel=channel, sender="user", text="hello",
@@ -132,15 +132,15 @@ class TestMissingIdFailsLoudly:
         assert rec.events == []
 
     @pytest.mark.parametrize("bad", [None, ""])
-    async def test_falsy_correlation_id_raises_value_error(self, agent_env, bad):
-        """O2: a None or empty correlation_id raises ValueError before any
+    async def test_falsy_trace_id_raises_value_error(self, agent_env, bad):
+        """O2: a None or empty trace_id raises ValueError before any
         gate hook fires (no silent fallback mint)."""
         plugin, channel, rec = agent_env
 
         with pytest.raises(ValueError):
             await plugin.pm.ahook.on_message(
                 channel=channel, sender="user", text="hello",
-                correlation_id=bad,
+                trace_id=bad,
             )
         assert rec.events == []
 
@@ -153,23 +153,23 @@ class TestMissingIdFailsLoudly:
 
         with pytest.raises(ValueError):
             await plugin.pm.ahook.on_message(
-                channel=channel, sender="user", text="hello", correlation_id=None,
+                channel=channel, sender="user", text="hello", trace_id=None,
             )
         assert rec.events == []
 
 
 # ---------------------------------------------------------------------------
-# D2: mint_correlation_id lives in a leaf module
+# D2: mint_trace_id lives in a leaf module
 # ---------------------------------------------------------------------------
 
 
-class TestMintCorrelationIdModule:
+class TestMintTraceIdModule:
     def test_importable_and_unique(self):
-        """O1: mint_correlation_id is importable from corvidae.correlation
+        """O1: mint_trace_id is importable from corvidae.trace
         and returns distinct non-empty strings."""
-        from corvidae.correlation import mint_correlation_id
+        from corvidae.trace import mint_trace_id
 
-        ids = {mint_correlation_id() for _ in range(50)}
+        ids = {mint_trace_id() for _ in range(50)}
         assert len(ids) == 50
         assert all(isinstance(i, str) and i for i in ids)
 
@@ -177,9 +177,9 @@ class TestMintCorrelationIdModule:
         """O1: corvidae.agent keeps exposing the very same function so
         existing imports keep working."""
         import corvidae.agent
-        import corvidae.correlation
+        import corvidae.trace
 
-        assert corvidae.agent.mint_correlation_id is corvidae.correlation.mint_correlation_id
+        assert corvidae.agent.mint_trace_id is corvidae.trace.mint_trace_id
 
 
 # ---------------------------------------------------------------------------
@@ -188,14 +188,14 @@ class TestMintCorrelationIdModule:
 
 
 def _assert_minted(kwargs: dict) -> None:
-    """The on_message call carried a non-empty string correlation_id."""
-    cid = kwargs.get("correlation_id")
-    assert isinstance(cid, str) and cid, kwargs
+    """The on_message call carried a non-empty string trace_id."""
+    tid = kwargs.get("trace_id")
+    assert isinstance(tid, str) and tid, kwargs
 
 
 class TestTransportCallSites:
-    async def test_cli_passes_correlation_id(self):
-        """O1: the CLI read loop passes a minted correlation_id."""
+    async def test_cli_passes_trace_id(self):
+        """O1: the CLI read loop passes a minted trace_id."""
         from corvidae.channels.cli import CLIPlugin
         from test_cli_plugin import _make_pm_with_registry
 
@@ -220,8 +220,8 @@ class TestTransportCallSites:
 
         _assert_minted(pm.ahook.on_message.await_args.kwargs)
 
-    async def test_irc_channel_message_passes_correlation_id(self):
-        """O1: an IRC channel message passes a minted correlation_id."""
+    async def test_irc_channel_message_passes_trace_id(self):
+        """O1: an IRC channel message passes a minted trace_id."""
         from corvidae.channels.irc import IRCPlugin
         from test_irc_plugin import _make_pm_with_registry
 
@@ -236,8 +236,8 @@ class TestTransportCallSites:
 
         _assert_minted(pm.ahook.on_message.await_args.kwargs)
 
-    async def test_irc_private_message_passes_correlation_id(self):
-        """O1: an IRC private message passes a minted correlation_id."""
+    async def test_irc_private_message_passes_trace_id(self):
+        """O1: an IRC private message passes a minted trace_id."""
         from corvidae.channels.irc import IRCPlugin
         from test_irc_plugin import _make_pm_with_registry
 
@@ -252,8 +252,8 @@ class TestTransportCallSites:
 
         _assert_minted(pm.ahook.on_message.await_args.kwargs)
 
-    async def test_discord_passes_distinct_correlation_ids(self):
-        """O1: Discord passes a minted correlation_id, distinct per message."""
+    async def test_discord_passes_distinct_trace_ids(self):
+        """O1: Discord passes a minted trace_id, distinct per message."""
         from test_discord_plugin import _deliver, _start_plugin, make_dm
 
         h = await _start_plugin()
@@ -262,7 +262,7 @@ class TestTransportCallSites:
             calls = [c.kwargs for c in h.on_message.await_args_list]
             for kw in calls:
                 _assert_minted(kw)
-            ids = [kw["correlation_id"] for kw in calls]
+            ids = [kw["trace_id"] for kw in calls]
             assert len(set(ids)) == len(ids), ids
         finally:
             await h.plugin.on_stop()

@@ -10,8 +10,8 @@ and metadata):
     stage: str — what kind of operation is running. Built-in values:
         "turn", "compaction", "subagent".
     channel_id: str — the Channel.id the operation is running on behalf of.
-    correlation_id: str — the correlation this call belongs to.
-    meta: dict — the correlation metadata dict.
+    trace_id: str — the trace this call belongs to.
+    meta: dict — the trace metadata dict.
 
 Propagation rule: contextvars snapshot at ``asyncio.create_task`` time.
 A task created before ``set_attribution`` was called never sees the

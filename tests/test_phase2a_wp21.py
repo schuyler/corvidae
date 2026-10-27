@@ -3,7 +3,7 @@
 Phase 2A design (plans/implementation/phase-2.md, "Phase 2A — Design",
 WP2.1 section, PASSED re-review #1 at HEAD bb03fa5). Covers:
 
-  1. mint_exchange_key() shape.
+  1. mint_trace_id() shape.
   2. USER message: the transport-supplied key reaches the gate hook,
      admitted -> exchange_log row origin='user', message_rowid populated
      after the turn.
@@ -17,9 +17,9 @@ WP2.1 section, PASSED re-review #1 at HEAD bb03fa5). Covers:
   6. Mid-exchange tool-result rows never fire on_message_persisted (count
      firings) — folded into test 4's assertion and a dedicated multi-tool
      count test.
-  7. before_agent_turn receives (channel, exchange_key, origin); retrieval
+  7. before_agent_turn receives (channel, trace_id, origin); retrieval
      profile lands in exchange_log under the key.
-  8. usage_log rows carry the exchange key (attribution wiring).
+  8. usage_log rows carry the trace id (attribution wiring).
   9. upsert_exchange write-order independence.
   10. Atomic JSON merge for outcomes/appraisal columns (json_patch).
 
@@ -33,7 +33,7 @@ from unittest.mock import ANY, AsyncMock, MagicMock
 
 import pytest
 
-from corvidae.correlation import mint_correlation_id
+from corvidae.trace import mint_trace_id
 from corvidae.hooks import CorvidaePlugin, create_plugin_manager, hookimpl
 
 from helpers import build_plugin_and_channel, drain, drain_task_queue
@@ -74,17 +74,17 @@ async def _setup_usage_log(pm):
     return plugin
 
 
-async def _fetch_exchange_row(db, exchange_key):
+async def _fetch_exchange_row(db, trace_id):
     async with db.execute(
         "SELECT channel_id, origin, message_rowid, outcomes, appraisal "
-        "FROM exchange_log WHERE exchange_key = ?",
-        (exchange_key,),
+        "FROM exchange_log WHERE trace_id = ?",
+        (trace_id,),
     ) as cursor:
         return await cursor.fetchone()
 
 
 class _KeyCapturePlugin:
-    """Gate plugin that records the correlation_id it was handed and, when
+    """Gate plugin that records the trace_id it was handed and, when
     configured, vetoes the message."""
 
     def __init__(self, reject: bool = False):
@@ -93,12 +93,12 @@ class _KeyCapturePlugin:
         self.seen_calls: list[dict] = []
 
     @hookimpl
-    async def should_process_message(self, channel, sender, text, correlation_id):
+    async def should_process_message(self, channel, sender, text, trace_id):
         self.seen_calls.append(
-            {"channel": channel, "sender": sender, "text": text, "correlation_id": correlation_id}
+            {"channel": channel, "sender": sender, "text": text, "trace_id": trace_id}
         )
-        if correlation_id is not None:
-            self.seen_keys.append(correlation_id)
+        if trace_id is not None:
+            self.seen_keys.append(trace_id)
         return False if self.reject else None
 
 
@@ -111,23 +111,23 @@ class _AdmissionRecorderPlugin:
         self.persisted: list[dict] = []
 
     @hookimpl
-    async def on_message_admitted(self, channel, correlation_id, sender, text):
+    async def on_message_admitted(self, channel, trace_id, sender, text):
         self.admitted.append(
-            {"channel": channel, "correlation_id": correlation_id, "sender": sender, "text": text}
+            {"channel": channel, "trace_id": trace_id, "sender": sender, "text": text}
         )
 
     @hookimpl
-    async def on_message_rejected(self, channel, correlation_id, sender, text):
+    async def on_message_rejected(self, channel, trace_id, sender, text):
         self.rejected.append(
-            {"channel": channel, "correlation_id": correlation_id, "sender": sender, "text": text}
+            {"channel": channel, "trace_id": trace_id, "sender": sender, "text": text}
         )
 
     @hookimpl
-    async def on_message_persisted(self, channel, correlation_id, rowid, text, meta):
+    async def on_message_persisted(self, channel, trace_id, rowid, text, meta):
         self.persisted.append(
             {
                 "channel": channel,
-                "correlation_id": correlation_id,
+                "trace_id": trace_id,
                 "rowid": rowid,
                 "text": text,
                 "meta": meta,
@@ -136,15 +136,15 @@ class _AdmissionRecorderPlugin:
 
 
 class _BeforeTurnRecorderPlugin:
-    """Records the (channel, correlation_id, meta) tuple before_agent_turn receives."""
+    """Records the (channel, trace_id, meta) tuple before_agent_turn receives."""
 
     def __init__(self):
         self.calls: list[dict] = []
 
     @hookimpl
-    async def before_agent_turn(self, channel, correlation_id, meta):
+    async def before_agent_turn(self, channel, trace_id, meta):
         self.calls.append(
-            {"channel": channel, "correlation_id": correlation_id, "meta": meta}
+            {"channel": channel, "trace_id": trace_id, "meta": meta}
         )
 
 
@@ -160,7 +160,7 @@ class _AgentResponseRecorderPlugin:
         channel,
         request_text,
         response_text,
-        correlation_id,
+        trace_id,
         meta,
         logprobs,
     ):
@@ -169,7 +169,7 @@ class _AgentResponseRecorderPlugin:
                 "channel": channel,
                 "request_text": request_text,
                 "response_text": response_text,
-                "correlation_id": correlation_id,
+                "trace_id": trace_id,
                 "meta": meta,
                 "logprobs": logprobs,
             }
@@ -177,32 +177,32 @@ class _AgentResponseRecorderPlugin:
 
 
 # ---------------------------------------------------------------------------
-# 1. mint_exchange_key shape
+# 1. mint_trace_id shape
 # ---------------------------------------------------------------------------
 
 
-class TestMintCorrelationId:
+class TestMintTraceId:
     def test_returns_hex_hex_shape(self):
-        from corvidae.agent import mint_correlation_id
+        from corvidae.agent import mint_trace_id
 
-        key = mint_correlation_id()
+        key = mint_trace_id()
         assert re.fullmatch(r"[0-9a-f]+-[0-9a-f]{12}", key), (
             f"expected '<hex-time>-<hex12>' shape, got {key!r}"
         )
 
     def test_time_prefix_is_monotone_nondecreasing(self):
-        from corvidae.agent import mint_correlation_id
+        from corvidae.agent import mint_trace_id
 
-        first = mint_correlation_id()
+        first = mint_trace_id()
         time_a = int(first.split("-")[0], 16)
-        second = mint_correlation_id()
+        second = mint_trace_id()
         time_b = int(second.split("-")[0], 16)
         assert time_b >= time_a
 
     def test_two_calls_produce_distinct_keys(self):
-        from corvidae.agent import mint_correlation_id
+        from corvidae.agent import mint_trace_id
 
-        assert mint_correlation_id() != mint_correlation_id()
+        assert mint_trace_id() != mint_trace_id()
 
 
 # ---------------------------------------------------------------------------
@@ -212,8 +212,8 @@ class TestMintCorrelationId:
 
 
 class TestUserMessageAdmission:
-    async def test_gate_hook_receives_correlation_id(self):
-        """should_process_message must be called with the correlation_id the
+    async def test_gate_hook_receives_trace_id(self):
+        """should_process_message must be called with the trace_id the
         transport minted and passed to on_message (the Agent no longer mints
         ids for USER messages)."""
         plugin, channel, db = await build_plugin_and_channel()
@@ -225,12 +225,12 @@ class TestUserMessageAdmission:
         gate = _KeyCapturePlugin()
         plugin.pm.register(gate, name="key_capture")
 
-        cid = mint_correlation_id()
-        await plugin.on_message(channel=channel, sender="user", text="hello", correlation_id=cid)
+        tid = mint_trace_id()
+        await plugin.on_message(channel=channel, sender="user", text="hello", trace_id=tid)
         await drain(plugin, channel)
 
         assert len(gate.seen_calls) == 1
-        assert gate.seen_calls[0]["correlation_id"] == cid
+        assert gate.seen_calls[0]["trace_id"] == tid
 
         await db.close()
 
@@ -245,7 +245,7 @@ class TestUserMessageAdmission:
         gate = _KeyCapturePlugin()
         plugin.pm.register(gate, name="key_capture")
 
-        await plugin.on_message(channel=channel, sender="user", text="hello", correlation_id=mint_correlation_id())
+        await plugin.on_message(channel=channel, sender="user", text="hello", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
         assert len(gate.seen_keys) == 1
@@ -269,7 +269,7 @@ class TestUserMessageAdmission:
         gate = _KeyCapturePlugin()
         plugin.pm.register(gate, name="key_capture")
 
-        await plugin.on_message(channel=channel, sender="user", text="hello", correlation_id=mint_correlation_id())
+        await plugin.on_message(channel=channel, sender="user", text="hello", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
         key = gate.seen_keys[0]
@@ -309,12 +309,12 @@ class TestGateRejection:
         recorder = _AdmissionRecorderPlugin()
         plugin.pm.register(recorder, name="admission_recorder")
 
-        cid = mint_correlation_id()
-        await plugin.on_message(channel=channel, sender="user", text="blocked", correlation_id=cid)
+        tid = mint_trace_id()
+        await plugin.on_message(channel=channel, sender="user", text="blocked", trace_id=tid)
         await drain(plugin, channel)
 
         assert len(recorder.rejected) == 1
-        assert recorder.rejected[0]["correlation_id"] == cid
+        assert recorder.rejected[0]["trace_id"] == tid
         assert len(recorder.admitted) == 0
         plugin.pm.ahook.send_message.assert_not_awaited()
 
@@ -331,7 +331,7 @@ class TestGateRejection:
         gate = _KeyCapturePlugin(reject=True)
         plugin.pm.register(gate, name="key_capture")
 
-        await plugin.on_message(channel=channel, sender="user", text="blocked", correlation_id=mint_correlation_id())
+        await plugin.on_message(channel=channel, sender="user", text="blocked", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
         assert len(gate.seen_keys) == 1
@@ -355,8 +355,8 @@ class TestGateRejection:
 
 
 class TestToolCyclePropagation:
-    async def test_task_stamped_with_correlation_id_and_meta(self):
-        """_dispatch_tool_calls must stamp Task.correlation_id/meta from the
+    async def test_task_stamped_with_trace_id_and_meta(self):
+        """_dispatch_tool_calls must stamp Task.trace_id/meta from the
         current item so the tool cycle carries the exchange forward."""
         plugin, channel, db = await build_plugin_and_channel()
 
@@ -402,7 +402,7 @@ class TestToolCyclePropagation:
         gate = _KeyCapturePlugin()
         plugin.pm.register(gate, name="key_capture")
 
-        await plugin.on_message(channel=channel, sender="user", text="use the tool", correlation_id=mint_correlation_id())
+        await plugin.on_message(channel=channel, sender="user", text="use the tool", trace_id=mint_trace_id())
         await drain(plugin, channel)
         task_plugin = plugin.pm.get_plugin("task")
         await task_plugin.task_queue.queue.join()
@@ -411,8 +411,8 @@ class TestToolCyclePropagation:
 
         assert len(captured_tasks) == 1
         task = captured_tasks[0]
-        assert task.correlation_id is not None
-        assert task.correlation_id == gate.seen_keys[0]
+        assert task.trace_id is not None
+        assert task.trace_id == gate.seen_keys[0]
         # Core stamps only the attribution meta forward; it carries no
         # 'user' origin string itself (R1 — origin is a plugin-side
         # convention over meta["origin"], never set by core for USER items).
@@ -448,7 +448,7 @@ class TestToolCyclePropagation:
         gate = _KeyCapturePlugin()
         plugin.pm.register(gate, name="key_capture")
 
-        await plugin.on_message(channel=channel, sender="user", text="use the tool", correlation_id=mint_correlation_id())
+        await plugin.on_message(channel=channel, sender="user", text="use the tool", trace_id=mint_trace_id())
         await drain(plugin, channel)
         task_plugin = plugin.pm.get_plugin("task")
         await task_plugin.task_queue.queue.join()
@@ -458,7 +458,7 @@ class TestToolCyclePropagation:
         key = gate.seen_keys[0]
 
         async with db.execute(
-            "SELECT COUNT(*) FROM exchange_log WHERE exchange_key = ?", (key,)
+            "SELECT COUNT(*) FROM exchange_log WHERE trace_id = ?", (key,)
         ) as cursor:
             (count,) = await cursor.fetchone()
         assert count == 1, "tool-result turn must not mint/insert a second exchange row"
@@ -498,7 +498,7 @@ class TestToolCyclePropagation:
         )
         plugin._client = mock_client
 
-        await plugin.on_message(channel=channel, sender="user", text="the original user text", correlation_id=mint_correlation_id())
+        await plugin.on_message(channel=channel, sender="user", text="the original user text", trace_id=mint_trace_id())
         await drain(plugin, channel)
         task_plugin = plugin.pm.get_plugin("task")
         await task_plugin.task_queue.queue.join()
@@ -510,7 +510,7 @@ class TestToolCyclePropagation:
         # never the exchange's true originating text -- this is exactly the
         # mis-pairing bug the plugin-side originating-text LRU exists to fix.
         assert recorder.calls[0]["request_text"] != "the original user text"
-        assert recorder.calls[0]["correlation_id"] is not None
+        assert recorder.calls[0]["trace_id"] is not None
 
         await task_plugin.on_stop()
         await db.close()
@@ -539,7 +539,7 @@ class TestStandaloneNotificationAndPersistedFiring:
         await drain(plugin, channel)
 
         assert len(recorder.persisted) == 1
-        assert recorder.persisted[0]["correlation_id"] is not None
+        assert recorder.persisted[0]["trace_id"] is not None
         # origin='task' must be recorded on the exchange_log row for this key.
 
         await db.close()
@@ -581,7 +581,7 @@ class TestStandaloneNotificationAndPersistedFiring:
         )
         await drain(plugin, channel)
 
-        key = recorder.persisted[0]["correlation_id"]
+        key = recorder.persisted[0]["trace_id"]
         row = await _fetch_exchange_row(db, key)
         assert row is not None
         assert row[1] == "task"
@@ -623,7 +623,7 @@ class TestStandaloneNotificationAndPersistedFiring:
         )
         plugin._client = mock_client
 
-        await plugin.on_message(channel=channel, sender="user", text="use two tools", correlation_id=mint_correlation_id())
+        await plugin.on_message(channel=channel, sender="user", text="use two tools", trace_id=mint_trace_id())
         await drain(plugin, channel)
         task_plugin = plugin.pm.get_plugin("task")
         await task_plugin.task_queue.queue.join()
@@ -644,7 +644,7 @@ class TestStandaloneNotificationAndPersistedFiring:
 
 
 class TestBeforeAgentTurnEnrichment:
-    async def test_before_agent_turn_receives_channel_correlation_id_meta(self):
+    async def test_before_agent_turn_receives_channel_trace_id_meta(self):
         plugin, channel, db = await build_plugin_and_channel()
 
         mock_client = MagicMock()
@@ -656,11 +656,11 @@ class TestBeforeAgentTurnEnrichment:
         recorder = _BeforeTurnRecorderPlugin()
         plugin.pm.register(recorder, name="before_turn_recorder")
 
-        await plugin.on_message(channel=channel, sender="user", text="hello", correlation_id=mint_correlation_id())
+        await plugin.on_message(channel=channel, sender="user", text="hello", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
         assert len(recorder.calls) == 1
-        assert recorder.calls[0]["correlation_id"] == gate.seen_keys[0]
+        assert recorder.calls[0]["trace_id"] == gate.seen_keys[0]
         # Core carries no 'user' origin string for a USER item -- origin is
         # a plugin-side convention over meta["origin"] (R1); core's meta
         # for a directly-admitted USER message stays empty.
@@ -671,7 +671,7 @@ class TestBeforeAgentTurnEnrichment:
     async def test_retrieval_profile_lands_in_exchange_log_under_the_key(self):
         """MemoryPlugin.before_agent_turn (updated for WP2.1 point 8) writes
         retrieval_top_score/retrieval_hit_count into exchange_log under the
-        exchange key via update_exchange."""
+        trace id via update_exchange."""
         plugin, channel, db = await build_plugin_and_channel()
         await _setup_outcome_log(plugin.pm, db)
 
@@ -688,11 +688,11 @@ class TestBeforeAgentTurnEnrichment:
 
         class _StandInRetrievalProfiler:
             @hookimpl
-            async def before_agent_turn(self, channel, correlation_id, meta):
-                if correlation_id is None:
+            async def before_agent_turn(self, channel, trace_id, meta):
+                if trace_id is None:
                     return
                 await outcome_log.update_exchange(
-                    correlation_id, retrieval_top_score=0.75, retrieval_hit_count=2,
+                    trace_id, retrieval_top_score=0.75, retrieval_hit_count=2,
                 )
 
         plugin.pm.register(_StandInRetrievalProfiler(), name="stand_in_profiler")
@@ -701,13 +701,13 @@ class TestBeforeAgentTurnEnrichment:
         mock_client.chat = AsyncMock(return_value=_make_text_response("hi"))
         plugin._client = mock_client
 
-        await plugin.on_message(channel=channel, sender="user", text="hello", correlation_id=mint_correlation_id())
+        await plugin.on_message(channel=channel, sender="user", text="hello", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
         key = gate.seen_keys[0]
         async with db.execute(
             "SELECT retrieval_top_score, retrieval_hit_count FROM exchange_log "
-            "WHERE exchange_key = ?",
+            "WHERE trace_id = ?",
             (key,),
         ) as cursor:
             row = await cursor.fetchone()
@@ -717,14 +717,14 @@ class TestBeforeAgentTurnEnrichment:
 
 
 # ---------------------------------------------------------------------------
-# 8. usage_log carries the correlation id (attribution wiring)
+# 8. usage_log carries the trace id (attribution wiring)
 # ---------------------------------------------------------------------------
 
 
 class TestUsageLogAttributionWiring:
-    async def test_usage_log_row_carries_correlation_id_via_attribution(self):
+    async def test_usage_log_row_carries_trace_id_via_attribution(self):
         """Every LLM call inside _process_queue_item_attributed must run
-        under an attribution contextvar carrying correlation_id, wired via
+        under an attribution contextvar carrying trace_id, wired via
         the widened set_attribution(...) call ahead of the attributed body
         (design fix for the ordering finding)."""
         from corvidae.attribution import get_attribution
@@ -745,15 +745,15 @@ class TestUsageLogAttributionWiring:
         mock_client.chat = AsyncMock(side_effect=fake_chat)
         plugin._client = mock_client
 
-        await plugin.on_message(channel=channel, sender="user", text="hello", correlation_id=mint_correlation_id())
+        await plugin.on_message(channel=channel, sender="user", text="hello", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
-        assert captured_attribution.get("correlation_id") == gate.seen_keys[0]
+        assert captured_attribution.get("trace_id") == gate.seen_keys[0]
 
-    async def test_usage_log_table_row_has_correlation_id_column_populated(self):
+    async def test_usage_log_table_row_has_trace_id_column_populated(self):
         """End-to-end: firing on_llm_response with the real attribution
-        snapshot writes a usage_log row whose correlation_id column is set
-        (renamed from exchange_key via the lazy ALTER TABLE migration)."""
+        snapshot writes a usage_log row whose trace_id column is set
+        (renamed from trace_id via the lazy ALTER TABLE migration)."""
         from corvidae.attribution import get_attribution, reset_attribution, set_attribution
 
         plugin, channel, db = await build_plugin_and_channel()
@@ -784,61 +784,19 @@ class TestUsageLogAttributionWiring:
         mock_client.chat = AsyncMock(side_effect=fake_chat)
         plugin._client = mock_client
 
-        await plugin.on_message(channel=channel, sender="user", text="hello", correlation_id=mint_correlation_id())
+        await plugin.on_message(channel=channel, sender="user", text="hello", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
-        assert captured_attribution.get("correlation_id") == gate.seen_keys[0]
+        assert captured_attribution.get("trace_id") == gate.seen_keys[0]
 
         async with db.execute(
-            "SELECT correlation_id FROM usage_log WHERE request_id = ?", ("req-1",)
+            "SELECT trace_id FROM usage_log WHERE request_id = ?", ("req-1",)
         ) as cursor:
             row = await cursor.fetchone()
         assert row is not None
         assert row[0] == gate.seen_keys[0]
 
         await db.close()
-
-
-class TestUsageLogColumnLazyMigration:
-    async def test_pre_existing_exchange_key_column_upgrades_to_correlation_id(self, db):
-        """A usage_log table created under the old exchange_key schema is
-        upgraded in place (ALTER TABLE ... RENAME COLUMN) on first use,
-        preserving existing rows -- the same lazy-upgrade pattern as
-        memory.py's embedding_meta ALTER."""
-        from corvidae.metrics import UsageLogPlugin
-
-        # Simulate a pre-existing old-schema table with one row.
-        await db.execute(
-            "CREATE TABLE usage_log ("
-            "id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL NOT NULL, "
-            "request_id TEXT NOT NULL, role TEXT NOT NULL, model TEXT NOT NULL, "
-            "stage TEXT, channel_id TEXT, exchange_key TEXT, "
-            "prompt_tokens INTEGER, completion_tokens INTEGER, "
-            "total_tokens INTEGER, latency_ms REAL, error TEXT)"
-        )
-        await db.execute(
-            "INSERT INTO usage_log (ts, request_id, role, model, exchange_key) "
-            "VALUES (1.0, 'req-old', 'main', 'test-model', 'ek-old')"
-        )
-        await db.commit()
-
-        plugin = UsageLogPlugin()
-        # _ensure_table resolves the db via the persistence dependency;
-        # bypass that indirection for this narrow migration test by
-        # returning the pre-seeded connection directly.
-        plugin._resolve_db = lambda: db
-        await plugin._ensure_table()
-
-        async with db.execute("PRAGMA table_info(usage_log)") as cursor:
-            columns = {row[1] for row in await cursor.fetchall()}
-        assert "correlation_id" in columns
-        assert "exchange_key" not in columns
-
-        async with db.execute(
-            "SELECT correlation_id FROM usage_log WHERE request_id = ?", ("req-old",)
-        ) as cursor:
-            row = await cursor.fetchone()
-        assert row == ("ek-old",)
 
 
 # ---------------------------------------------------------------------------
@@ -857,7 +815,7 @@ class TestUpsertExchangeWriteOrderIndependence:
 
         async with db.execute(
             "SELECT channel_id, origin, probe_score FROM exchange_log "
-            "WHERE exchange_key = ?",
+            "WHERE trace_id = ?",
             ("ex-upsert-1",),
         ) as cursor:
             row = await cursor.fetchone()
@@ -878,7 +836,7 @@ class TestUpsertExchangeWriteOrderIndependence:
 
         async with db.execute(
             "SELECT channel_id, origin, probe_score FROM exchange_log "
-            "WHERE exchange_key = ?",
+            "WHERE trace_id = ?",
             ("ex-upsert-2",),
         ) as cursor:
             row = await cursor.fetchone()
@@ -898,7 +856,7 @@ class TestUpsertExchangeWriteOrderIndependence:
         )
 
         async with db.execute(
-            "SELECT channel_id, probe_score FROM exchange_log WHERE exchange_key = ?",
+            "SELECT channel_id, probe_score FROM exchange_log WHERE trace_id = ?",
             ("ex-upsert-3",),
         ) as cursor:
             row = await cursor.fetchone()
@@ -931,7 +889,7 @@ class TestAtomicJsonMerge:
         import json as _json
 
         async with db.execute(
-            "SELECT outcomes FROM exchange_log WHERE exchange_key = ?",
+            "SELECT outcomes FROM exchange_log WHERE trace_id = ?",
             ("ex-merge-1",),
         ) as cursor:
             (outcomes_raw,) = await cursor.fetchone()
@@ -957,7 +915,7 @@ class TestAtomicJsonMerge:
         import json as _json
 
         async with db.execute(
-            "SELECT appraisal FROM exchange_log WHERE exchange_key = ?",
+            "SELECT appraisal FROM exchange_log WHERE trace_id = ?",
             ("ex-merge-2",),
         ) as cursor:
             (appraisal_raw,) = await cursor.fetchone()
@@ -1004,7 +962,7 @@ class TestAtomicJsonMerge:
         import json as _json
 
         async with db.execute(
-            "SELECT appraisal FROM exchange_log WHERE exchange_key = ?",
+            "SELECT appraisal FROM exchange_log WHERE trace_id = ?",
             ("ex-merge-5",),
         ) as cursor:
             (appraisal_raw,) = await cursor.fetchone()
@@ -1046,7 +1004,7 @@ class TestAtomicJsonMerge:
 
         A genuinely atomic single-statement implementation
         (`UPDATE exchange_log SET outcomes = json_patch(COALESCE(outcomes,
-        '{}'), ?) WHERE exchange_key = ?`) has no read-then-write gap for
+        '{}'), ?) WHERE trace_id = ?`) has no read-then-write gap for
         another coroutine to interleave into: the merge happens inside SQLite
         itself, in the single SQL statement dispatched to aiosqlite's
         executor thread. Regardless of what order the coroutines' `await
@@ -1077,7 +1035,7 @@ class TestAtomicJsonMerge:
         import json as _json
 
         async with db.execute(
-            "SELECT outcomes FROM exchange_log WHERE exchange_key = ?",
+            "SELECT outcomes FROM exchange_log WHERE trace_id = ?",
             ("ex-merge-gather",),
         ) as cursor:
             (outcomes_raw,) = await cursor.fetchone()
@@ -1116,7 +1074,7 @@ class TestAtomicJsonMerge:
         somehow, and the design explicitly forbids reading it into Python
         (WP2.1 point 7: "single atomic SQL statement... NOT read-merge-
         write"). A single-statement `UPDATE ... SET outcomes =
-        json_patch(COALESCE(outcomes, '{}'), ?) WHERE exchange_key = ?`
+        json_patch(COALESCE(outcomes, '{}'), ?) WHERE trace_id = ?`
         performs the read, merge, and write entirely inside SQLite as part of
         one `execute()` call from Python's perspective -- there is exactly
         one call to the connection's execute for the merge, and it is never
