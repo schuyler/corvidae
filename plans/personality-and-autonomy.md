@@ -169,19 +169,22 @@ the duck test fails in the named way).
 
 ### 5.1 Surfaced interoception (cheapest; likely highest yield)
 
-The system already computes every signal Anna reports monitoring — the
-retrieval profile, the appraisal vector, output-logprob entropy, window
-budget — and consumes them all *subcortically*: gates, thresholds,
-calibration logs. The model never sees them. The amygdala fires; the cortex
-is never informed. One compact funnel-admitted CONTEXT line per turn
-("retrieval: strong / window at 72% / high-entropy span over the factual
-claim") lets the agent perceive and narrate its own state instead of
+The system already computes nearly every signal Anna reports monitoring —
+the retrieval profile, the appraisal vector, output-logprob entropy — and
+consumes them *subcortically*: gates, thresholds, calibration logs. The
+model sees almost none of it: admitted memory lines carry their own
+relevance band, but not the aggregate (top score, hit count, or that
+nothing matched), and the appraisal vector, entropy, and window fill never
+reach it. The amygdala fires; the cortex is barely informed. One compact
+funnel-admitted CONTEXT line per turn ("retrieval: nothing matched / window
+at 72% / last reply: high entropy") lets the agent perceive and narrate its own state instead of
 confabulating it. This is not new machinery — it is *exposure of existing
 state*, and self-perception is the cheapest known amplifier of interface
 consistency (a duck that can see its own gait keeps it).
 
 **Eval:** do the agent's self-reports about its own state become accurate
-(checkable against the outcome log, which records the same signals), and
+(checkable against the outcome log, which records the retrieval profile,
+both appraisal stages, and entropy; window fill would need a column), and
 does behavioral consistency improve at fixed token budget? Cost: a few
 tokens per turn. Phase 6 toggle riding on Phase 2's signals; never
 load-bearing — absent signals degrade to an absent line.
@@ -221,7 +224,11 @@ promises but only half-delivers: memory writes the self-model; the prompt
 reads it. Note the current gap this fills: the persona layer today is a
 static one-line `SOUL.md`, and `set_settings` deliberately excludes the
 system prompt — character is frozen at config time with no legitimate path
-for drift to feed back.
+for drift to feed back. There is not yet a place to put it, either: the
+system prompt is resolved from config once per conversation and no plugin
+can contribute to it, so the compile needs a small kernel seam (shared
+with the skills index), refreshed at compaction, where the cache after the
+system prompt is rebuilt anyway.
 
 **Eval:** self-model diffs over months — coherent evolution vs. thrash vs.
 flattening toward the generic. Blocked on 5.2 having accumulated data;

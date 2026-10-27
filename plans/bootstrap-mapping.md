@@ -998,21 +998,29 @@ theatrics are persona. **Effort: S.**
 Two mechanisms from `personality-and-autonomy.md` (§5.1, §5.3), both closing
 the same loop from opposite ends: the system computes rich state about
 itself that nothing lets the agent perceive, and the agent accumulates a
-history that nothing lets feed back into its standing character.
+history that nothing lets feed back into its standing character. Both are
+plugins outside the kernel, like the rest of this cluster; the kernel's
+only addition is the system-prompt seam the compile needs (below).
 
 - **The interoception line** (Phase 6 toggle, riding on Phase 2's signals).
-  Every signal worth reporting is already computed and consumed
-  *subcortically* — the retrieval profile (§3.1), the appraisal vector
-  (§3.2), output-logprob entropy, window budget — by gates, thresholds, and
-  the outcome log; the model itself never sees them. One compact
-  funnel-admitted CONTEXT line per turn ("retrieval: strong / window at
-  72% / high-entropy span over the factual claim") lets the agent perceive
-  and narrate its own state instead of confabulating it. Exposure of
-  existing state, not new machinery; a few tokens per turn; never
-  load-bearing (absent signals degrade to an absent line, per the tier
-  discipline in §3.2). **Eval:** do self-reports about own state become
-  accurate — checkable against the outcome log, which records the same
-  signals — and does behavioral consistency improve at fixed token budget?
+  The signals worth reporting are already computed and consumed
+  *subcortically*, by gates, thresholds, and the outcome log, and the model
+  sees little of them. Admitted memory lines carry their own relevance
+  band, but the aggregate retrieval profile (§3.1) does not reach the
+  model — top score, hit count, or that nothing matched at all. Nor do the
+  appraisal vector (§3.2: stage 1 for the current exchange, stage 2 for the
+  previous one), the entropy summary of the previous reply (mean and max
+  per response, present only when `agent.request_logprobs` is on), or
+  window fill. One compact funnel-admitted CONTEXT line per turn
+  ("retrieval: nothing matched / window at 72% / last reply: high
+  entropy") lets the agent perceive and narrate its own state instead of
+  confabulating it. Exposure of existing state, not new machinery; a few
+  tokens per turn; never load-bearing (absent signals degrade to an absent
+  line, per the tier discipline in §3.2). **Eval:** do self-reports about
+  own state become accurate, and does behavioral consistency improve at
+  fixed token budget? Accuracy is checked against the outcome log, which
+  records the retrieval profile, both appraisal stages, and entropy, but
+  not window fill; the toggle adds that column to `exchange_log`.
   **Effort: S.**
 - **The self-model compile** (later-phase; blocked on §3.6 `self` facts
   accumulating). A compact block compiled from `self`-subject facts into the
@@ -1025,7 +1033,15 @@ history that nothing lets feed back into its standing character.
   — review after the fact, not approval before it; the operator is already
   reading those diffs for the §6 longitudinal tier. When the compile is
   built, `docs/threat-model.md` gains an entry for the path from untrusted
-  text through consolidation into the stable region. This supplies the feedback edge that "memory
+  text through consolidation into the stable region. The compile needs a
+  seam the kernel lacks: today the system prompt is resolved from config
+  once, when a channel's conversation is first created, and no plugin can
+  contribute to it. The seam is one `transform_` hook over the resolved
+  system prompt, shared with the §3.8 skills index (the second implementer
+  the hook-admission rule asks for), re-run only at a compaction boundary
+  or when a conversation starts. Compaction already rebuilds the KV cache
+  for everything after the system prompt, so a refresh there costs only
+  the system prompt's own tokens. This supplies the feedback edge that "memory
   is the personality" (§5 divergence 6) promises but the current design only
   half-delivers: memory writes the self-model; the prompt reads it. Today's
   persona layer is a static one-line `SOUL.md` and `set_settings` rightly
@@ -1034,7 +1050,8 @@ history that nothing lets feed back into its standing character.
   self-model's diffs over months read as coherent evolution, not thrash or
   flattening toward the generic (§6, longitudinal tier). **Effort: S**
   (compile, refresh policy, trust floor, diff notice; trust tags already
-  exist from §3.9).
+  exist from §3.9) plus the kernel seam, which the skills index needs
+  anyway.
 
 ---
 

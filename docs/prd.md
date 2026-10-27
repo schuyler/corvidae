@@ -691,12 +691,16 @@ agent only behind operator confirmation or a trust gate.
 
 **Interoception and the self-model.** The system computes rich state
 about itself (retrieval profile, appraisal vector, output entropy, window
-budget) and consumes all of it subcortically; the model never sees it. The
+fill) and consumes nearly all of it subcortically: admitted memory lines
+carry their own relevance band, but the aggregate retrieval profile, the
+appraisal vector, the entropy summary, and window fill never reach the
+model. The
 interoception line is one compact funnel-admitted CONTEXT line per turn
 exposing that state so the agent can perceive and narrate its own
 condition instead of confabulating it: a few tokens, never load-bearing,
 absent signals degrade to an absent line, and its eval is whether
-self-reports become accurate against the outcome log. The self-model is a
+self-reports become accurate against the outcome log, which gains a
+window-fill column for it. The self-model is a
 compact block compiled from `self` facts into the stable prompt region,
 refreshed rarely (a legitimate, infrequent cache break, the same argument
 as the skills index). Because the stable region is the one prompt position
@@ -705,7 +709,8 @@ facts whose inherited trust meets a configured floor, and each refresh
 notifies the operator with the diff of the block: a review after the
 fact, not an approval before it. When the compile is built,
 `docs/threat-model.md` gains an entry for the path from untrusted text
-through consolidation into the stable region. Its eval is the diff of the compiled block
+through consolidation into the stable region. Both mechanisms are plugins
+outside the kernel. Its eval is the diff of the compiled block
 over months, read as coherent drift, thrash, or flattening toward the
 generic. This is the feedback edge that "memory is the personality"
 otherwise only half-delivers.
