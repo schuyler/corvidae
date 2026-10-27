@@ -23,18 +23,10 @@ from corvidae.trace import mint_trace_id
 
 CORVIDAE_ROOT = Path(__file__).resolve().parent.parent / "corvidae"
 
-# R1: cognition plugins keep cognition vocabulary internally (plugin-side);
-# only core modules must be vocabulary-free (Design §1, "Vocabulary rule").
-COGNITION_MODULES = {
-    "appraisal.py",
-    "critique.py",
-    "funnel.py",
-    "memory.py",
-    "retention.py",
-    "outcome_log.py",
-    "thinking.py",
-    "tools/memory_tools.py",
-}
+# R1: cognition plugins keep cognition vocabulary internally (plugin-side,
+# in packages/corvidae-cognition/); every module under corvidae/ is kernel
+# and must be vocabulary-free (Design §1, "Vocabulary rule"). There is no
+# exemption list: if a kernel change trips this, rename the thing.
 
 VOCAB_PATTERN = re.compile(r"\b(appraisal|critique|funnel|salience|withheld|engagement)\b")
 ORIGIN_TAXONOMY_LITERAL = "'user'|'reminder'|'critique'|'heartbeat'|'task'"
@@ -45,8 +37,6 @@ def _core_python_files():
         if "__pycache__" in path.parts:
             continue
         rel = path.relative_to(CORVIDAE_ROOT).as_posix()
-        if rel in COGNITION_MODULES:
-            continue
         yield path, rel
 
 
