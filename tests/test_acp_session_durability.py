@@ -302,7 +302,10 @@ class TestListSessions:
     async def test_list_sessions_filters_by_cwd(self, acp_durable, tmp_path):
         """Optional cwd filter returns only matching indexed sessions."""
         _plugin, _registry, agent, _persistence, _db, cwd_a = acp_durable
-        cwd_b = str(tmp_path / "other")
+        # session/new now rejects a workspace that is not an existing directory.
+        other = tmp_path / "other"
+        other.mkdir()
+        cwd_b = str(other)
         a = await agent.new_session(cwd=cwd_a)
         b = await agent.new_session(cwd=cwd_b)
 

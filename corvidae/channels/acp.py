@@ -15,6 +15,7 @@ import logging
 import sys
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import click
@@ -123,7 +124,10 @@ class CorvidaeAcpAgent:
         if self._plugin is None or self._plugin._registry is None:
             raise RuntimeError("CorvidaeAcpAgent.new_session requires an AcpPlugin with registry")
 
+        # Reject a workspace we cannot use before creating any state.
+        _validate_cwd(cwd)
         session_id = uuid4().hex
+        _warn_ignored_session_input(session_id, mcp_servers, additional_directories)
         channel = self._plugin._registry.get_or_create("acp", session_id)
         channel.runtime_overrides["cwd"] = cwd
         await self._plugin.index_session(session_id, cwd)
@@ -136,7 +140,7 @@ class CorvidaeAcpAgent:
         **kwargs: Any,
     ) -> Any:
         """Enqueue user text via on_message and wait for the turn to finish."""
-        from acp import PromptResponse
+        from acp import PromptResponse, RequestError
 
         if self._plugin is None or self._plugin._registry is None:
             raise RuntimeError("CorvidaeAcpAgent.prompt requires an AcpPlugin with registry")
@@ -145,7 +149,22 @@ class CorvidaeAcpAgent:
         if channel is None:
             raise RuntimeError(f"unknown ACP session {session_id!r}")
 
-        text = _flatten_prompt_text(prompt)
+        # Only text blocks become user text; make any dropped block visible,
+        # and never enqueue an empty message.
+        text, dropped = _flatten_prompt_text(prompt)
+        if dropped:
+            logger.warning(
+                "dropped non-text ACP prompt blocks %s; only text blocks are supported",
+                dropped,
+                extra={"session_id": session_id, "block_types": dropped},
+            )
+        if not text.strip():
+            raise RequestError.invalid_params(
+                {
+                    "prompt": "no text content; corvidae supports text prompt blocks only",
+                    "block_types": dropped,
+                }
+            )
         future = self._plugin.begin_prompt(session_id)
         await self._plugin.pm.ahook.on_message(
             channel=channel,
@@ -173,7 +192,9 @@ class CorvidaeAcpAgent:
         from acp import update_agent_message_text, update_user_message_text
         from corvidae.context import MessageType
 
-        channel, history = await self._reattach_session(session_id, cwd)
+        channel, history = await self._reattach_session(
+            session_id, cwd, mcp_servers, additional_directories
+        )
 
         # Replay text turns to the client; leave channel.conversation None so
         # the agent loop lazy-loads the same DB rows on the next prompt.
@@ -206,7 +227,7 @@ class CorvidaeAcpAgent:
         """Reattach ``acp:<sessionId>`` without replaying history (A16)."""
         from acp.schema import ResumeSessionResponse
 
-        await self._reattach_session(session_id, cwd)
+        await self._reattach_session(session_id, cwd, mcp_servers, additional_directories)
         return ResumeSessionResponse()
 
     async def close_session(self, session_id: str, **kwargs: Any) -> Any:
@@ -227,7 +248,13 @@ class CorvidaeAcpAgent:
         registry.channels.pop(channel_id, None)
         return CloseSessionResponse()
 
-    async def _reattach_session(self, session_id: str, cwd: str) -> tuple[Any, list | None]:
+    async def _reattach_session(
+        self,
+        session_id: str,
+        cwd: str,
+        mcp_servers: list[Any] | None = None,
+        additional_directories: list[str] | None = None,
+    ) -> tuple[Any, list | None]:
         """get_or_create the ACP channel, set cwd, load history; raise if unknown.
 
         Returns ``(channel, history)``. ``history`` may be ``None`` for a
@@ -238,6 +265,9 @@ class CorvidaeAcpAgent:
         if self._plugin is None or self._plugin._registry is None:
             raise RuntimeError("CorvidaeAcpAgent requires an AcpPlugin with registry")
 
+        # Same workspace rules as session/new, before touching the registry.
+        _validate_cwd(cwd)
+        _warn_ignored_session_input(session_id, mcp_servers, additional_directories)
         registry = self._plugin._registry
         channel_id = f"acp:{session_id}"
         # Detect same-process live channels before get_or_create would mint one.
@@ -306,17 +336,65 @@ def _message_text(msg: dict) -> str:
     return ""
 
 
-def _flatten_prompt_text(prompt: list[Any]) -> str:
-    """Join text content blocks from an ACP prompt into one user message."""
+def _flatten_prompt_text(prompt: list[Any]) -> tuple[str, list[str]]:
+    """Join text blocks into one user message, and list the dropped block types."""
     parts: list[str] = []
+    dropped: list[str] = []
     for block in prompt:
         if isinstance(block, dict):
             text = block.get("text") or ""
+            block_type = block.get("type") or type(block).__name__
         else:
             text = getattr(block, "text", None) or ""
+            block_type = getattr(block, "type", type(block).__name__)
         if text:
             parts.append(str(text))
-    return "\n".join(parts)
+        else:
+            dropped.append(str(block_type))
+    return "\n".join(parts), dropped
+
+
+def _validate_cwd(cwd: str) -> None:
+    """Reject a workspace cwd that is not an existing directory (invalid params).
+
+    The cwd is recorded for ``session/list``; tools still run in the process
+    working directory, so a differing cwd is logged rather than left silent.
+    """
+    from acp import RequestError
+
+    path = Path(cwd)
+    if not path.is_dir():
+        raise RequestError.invalid_params(
+            {"cwd": cwd, "reason": "not an existing directory"}
+        )
+    if path.resolve() != Path.cwd().resolve():
+        logger.warning(
+            "ACP session cwd differs from the process working directory; "
+            "tools run in the process directory",
+            extra={"cwd": cwd, "process_cwd": str(Path.cwd())},
+        )
+
+
+def _warn_ignored_session_input(
+    session_id: str,
+    mcp_servers: list[Any] | None,
+    additional_directories: list[str] | None,
+) -> None:
+    """Log client fields this transport does not act on, so the gap is visible."""
+    if mcp_servers:
+        logger.warning(
+            "ACP client sent mcpServers; corvidae does not mount per-session "
+            "MCP servers — configure mcp: in agent.yaml instead",
+            extra={"session_id": session_id, "mcp_server_count": len(mcp_servers)},
+        )
+    if additional_directories:
+        logger.warning(
+            "ACP client sent additionalDirectories; corvidae ignores them",
+            extra={
+                "session_id": session_id,
+                "additional_directory_count": len(additional_directories),
+            },
+        )
 
 
 class AcpPlugin(CorvidaePlugin):

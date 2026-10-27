@@ -209,3 +209,109 @@ class TestAcpCancel:
         _plugin, _registry, agent = await _init_acp_plugin()
         await agent.new_session(cwd=str(tmp_path))
         await agent.cancel(session_id="does-not-exist")
+
+
+# ---------------------------------------------------------------------------
+# Misconfiguration and unsupported input must be visible, not silently
+# ignored: a bad cwd, mcpServers the transport cannot mount, and non-text
+# prompt blocks all need an error or a warning.
+# ---------------------------------------------------------------------------
+
+
+class TestAcpCwdValidation:
+    async def test_new_session_rejects_missing_cwd(self):
+        """A cwd that is not an existing directory is invalid params."""
+        from acp import RequestError
+
+        _plugin, _registry, agent = await _init_acp_plugin()
+
+        with pytest.raises(RequestError) as excinfo:
+            await agent.new_session(cwd="/definitely/not/a/directory")
+
+        assert excinfo.value.code == -32602  # invalid params
+
+    async def test_new_session_rejects_cwd_that_is_a_file(self, tmp_path):
+        """A cwd pointing at a regular file is invalid params."""
+        from acp import RequestError
+
+        _plugin, _registry, agent = await _init_acp_plugin()
+        a_file = tmp_path / "not-a-dir"
+        a_file.write_text("x")
+
+        with pytest.raises(RequestError) as excinfo:
+            await agent.new_session(cwd=str(a_file))
+
+        assert excinfo.value.code == -32602
+
+    async def test_new_session_warns_when_cwd_differs_from_process_cwd(
+        self, tmp_path, caplog
+    ):
+        """A valid but different cwd is recorded; say that tools use the process cwd."""
+        _plugin, _registry, agent = await _init_acp_plugin()
+
+        with caplog.at_level("WARNING"):
+            await agent.new_session(cwd=str(tmp_path))
+
+        assert any(
+            "working directory" in record.message.lower() for record in caplog.records
+        )
+
+
+class TestAcpIgnoredClientInput:
+    async def test_new_session_warns_about_mcp_servers(self, tmp_path, caplog):
+        """mcpServers are not mounted per session; the drop must be logged."""
+        _plugin, _registry, agent = await _init_acp_plugin()
+
+        with caplog.at_level("WARNING"):
+            await agent.new_session(
+                cwd=str(tmp_path), mcp_servers=[{"name": "fs", "command": "x"}]
+            )
+
+        assert any("mcpservers" in record.message.lower() for record in caplog.records)
+
+    async def test_prompt_with_only_non_text_blocks_is_invalid(self, tmp_path):
+        """An image-only prompt cannot become an empty user message."""
+        from acp import RequestError
+
+        _plugin, _registry, agent = await _init_acp_plugin()
+        created = await agent.new_session(cwd=str(tmp_path))
+
+        # wait_for so a regression that leaves the prompt future pending fails
+        # fast instead of hanging the suite.
+        with pytest.raises(RequestError) as excinfo:
+            await asyncio.wait_for(
+                agent.prompt(
+                    session_id=created.session_id,
+                    prompt=[{"type": "image", "data": "abc", "mimeType": "image/png"}],
+                ),
+                timeout=2,
+            )
+
+        assert excinfo.value.code == -32602
+
+    async def test_prompt_logs_dropped_non_text_blocks(self, tmp_path, caplog):
+        """Text plus an image keeps the text and logs the dropped block type."""
+        from acp import text_block
+
+        plugin, _registry, agent = await _init_acp_plugin()
+        created = await agent.new_session(cwd=str(tmp_path))
+
+        async def _fake_on_message(channel, sender: str, text: str) -> None:
+            await plugin.send_message(channel=channel, text=f"reply:{text}")
+
+        plugin.pm.ahook.on_message = _fake_on_message
+
+        with caplog.at_level("WARNING"):
+            response = await asyncio.wait_for(
+                agent.prompt(
+                    session_id=created.session_id,
+                    prompt=[
+                        text_block("hello"),
+                        {"type": "image", "data": "abc", "mimeType": "image/png"},
+                    ],
+                ),
+                timeout=2,
+            )
+
+        assert response.stop_reason == "end_turn"
+        assert any("image" in record.message.lower() for record in caplog.records)

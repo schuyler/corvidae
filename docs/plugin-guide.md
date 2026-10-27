@@ -600,6 +600,17 @@ Advertised capabilities: `loadSession`, plus `sessionCapabilities.list` /
 `resume` / `close`. `session/delete` is not advertised. Disable the
 plugin with `plugins.disabled: [acp]` if needed.
 
+**Client input this transport rejects or ignores.** `session/new`,
+`session/load`, and `session/resume` require `cwd` to be an existing
+directory; anything else returns JSON-RPC `invalidParams`. The `cwd` is
+recorded for `session/list`, but tools still run in the process working
+directory — a differing `cwd` is logged at WARNING rather than acting as a
+chdir. `mcpServers` and `additionalDirectories` are accepted and ignored
+with a WARNING; configure `mcp:` in `agent.yaml` for MCP servers. Prompts
+must carry at least one text block: image, audio, and resource blocks are
+logged and dropped, and a prompt with no text at all returns
+`invalidParams` instead of an empty turn.
+
 ## Registration order
 
 Plugins are loaded via `pm.load_setuptools_entrypoints("corvidae")`. The entry point loading order is non-deterministic — it is not guaranteed to match any specific sequence. The following plugins are registered:
