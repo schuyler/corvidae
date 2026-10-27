@@ -436,7 +436,11 @@ Per transport:
    exposed. Tool arguments are validated against the generated schema
    before the call.
 2. Tools are collected once at startup through `register_tools` and
-   filtered through `tools.disabled` at that single chokepoint. The
+   filtered through `tools.disabled` at that single chokepoint.
+   `channels.<id>.tools.disabled` narrows one channel further: its
+   schemas are resolved at conversation start and compaction (principle
+   2), forks share them, dispatch refuses the disabled tools, and
+   subagents inherit the narrowed set. The
    running Agent picks up registry changes (a reconnected MCP server) on
    its next turn without rebuilding schemas when nothing changed.
 3. Tools run unsandboxed as the daemon user. The dangerous ones (`shell`,
@@ -463,7 +467,7 @@ Per transport:
    tune its own gates by default, with the documented recommended
    blocklist for channels with untrusted participants.
 7. `subagent` launches a background agent on the shared `background`
-   client with the full tool set minus itself and a persona-neutral
+   client with the calling channel's tool set minus itself and a persona-neutral
    prompt; it returns a task id at once and its result arrives as a
    notification like any other tool.
 8. MCP servers connect at startup over stdio or SSE, each inside its own

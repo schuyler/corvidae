@@ -72,6 +72,7 @@ from corvidae.outbound import (
 from corvidae.queue import SerialQueue
 from corvidae.task import Task
 from corvidae.tool import dispatch_tool_call
+from corvidae.tool_policy import ToolView, build_tool_view, disabled_on, refusal_message
 
 logger = logging.getLogger("corvidae.agent")
 
@@ -655,6 +656,9 @@ class Agent(CorvidaePlugin):
             if base_dir is None:
                 base_dir = Path(".")
             conv.system_prompt = resolve_system_prompt(resolved_cfg["system_prompt"], base_dir)
+            # The tool set is fixed for the conversation, like the system
+            # prompt it sits beside at the head of the prompt (principle 2).
+            conv.tool_view = self._build_tool_view(channel)
             history = await self.pm.ahook.resolve_conversation(channel=channel)
             if history:
                 conv.messages = history
@@ -781,7 +785,9 @@ class Agent(CorvidaePlugin):
         if self._request_logprobs:
             llm_overrides["logprobs"] = True
 
-        result = await self._run_turn(channel, messages, self._tool_schemas, llm_overrides or None)
+        result = await self._run_turn(
+            channel, messages, self._tool_view(channel).schemas, llm_overrides or None
+        )
         if result is None:
             return
 
@@ -913,8 +919,9 @@ class Agent(CorvidaePlugin):
 
         token = set_attribution(channel_id=channel.id, mode="fork")
         try:
+            # The channel's own schemas: a fork must share the turn's prefix.
             response = await self._client.chat(
-                messages, tools=self._tool_schemas or None, extra_body=body
+                messages, tools=self._tool_view(channel).schemas or None, extra_body=body
             )
         finally:
             reset_attribution(token)
@@ -953,6 +960,62 @@ class Agent(CorvidaePlugin):
             "llm.background (%s); their cost moves to the main model",
             main_model, background_model,
         )
+
+    def _build_tool_view(self, channel: Channel) -> ToolView:
+        """The daemon's tools narrowed to ``channel``'s disabled list.
+
+        A per-channel name that matches no loaded tool is logged, since a
+        typo there silently disables nothing. An MCP tool whose server has
+        not connected yet reads the same way; the warning says so.
+        """
+        disabled = channel.config.disabled_tools
+        view = build_tool_view(self._tools, self._tool_schemas, disabled)
+        unknown = sorted(name for name in disabled if name not in self._tools)
+        if unknown:
+            logger.warning(
+                "channels.%s.tools.disabled names no loaded tool: %s; check the "
+                "spelling (loaded: %s), or ignore if an MCP server has not connected yet",
+                channel.id, ", ".join(unknown), ", ".join(sorted(self._tools)),
+                extra={"channel": channel.id},
+            )
+        return view
+
+    def _tool_view(self, channel: Channel) -> ToolView:
+        """The conversation's tool view, resolving it on first use for a
+        window built outside conversation init (a test, an import)."""
+        conv = channel.conversation
+        if conv is None:
+            return self._build_tool_view(channel)
+        if conv.tool_view is None:
+            conv.tool_view = self._build_tool_view(channel)
+        return conv.tool_view
+
+    @hookimpl
+    async def on_compaction(
+        self,
+        channel: Channel,
+        summary_msg: dict,
+        retain_count: int,
+        compacted_ids: list[int],
+    ) -> None:
+        """Re-resolve the channel's tool set at the compaction boundary.
+
+        Compaction already rebuilds the KV cache past the system prompt, so
+        this is where a reloaded channels.<id>.tools.disabled reaches the
+        schemas (issue #149); between boundaries they never move. A call
+        dispatched before the boundary runs to completion.
+        """
+        conv = channel.conversation
+        if conv is None:
+            return
+        view = self._build_tool_view(channel)
+        previous = conv.tool_view
+        if previous is not None and previous.disabled != view.disabled:
+            logger.info(
+                "tool set changed at compaction boundary",
+                extra={"channel": channel.id, "disabled": sorted(view.disabled)},
+            )
+        conv.tool_view = view
 
     async def _dispatch_tool_calls(
         self, tool_calls: list[dict], channel: Channel
@@ -1009,7 +1072,20 @@ class Agent(CorvidaePlugin):
             fn_name = call["function"]["name"]
 
             async def make_work(call=call):
-                """Execute a single tool call via dispatch_tool_call."""
+                """Execute a single tool call via dispatch_tool_call, unless
+                the tool is disabled on this channel (issue #149)."""
+                # Checked when the task runs, against the conversation's
+                # view and the live config: hiding a tool is not access
+                # control, since the model can name one it saw earlier or
+                # one injected text names.
+                name = call["function"]["name"]
+                if name in disabled_on(channel):
+                    logger.warning(
+                        "refused tool %s on %s: disabled by channels.%s.tools.disabled",
+                        name, channel.id, channel.id,
+                        extra={"channel": channel.id, "tool": name, "tool_call_id": call["id"]},
+                    )
+                    return refusal_message(name, channel)
                 result = await dispatch_tool_call(
                     call, self._tools,
                     channel=channel,

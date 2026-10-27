@@ -171,10 +171,14 @@ class SubagentPlugin(CorvidaePlugin):
             )
 
         # Get tools, excluding subagent itself to prevent recursion
+        from corvidae.tool_policy import disabled_on
         from corvidae.tool_collection import ToolCollectionPlugin
         from corvidae.llm_plugin import LLMPlugin
         tools_plugin = get_dependency(self.pm, "tools", ToolCollectionPlugin)
-        registry = tools_plugin.get_registry().exclude("subagent")
+        # A subagent never gets a tool its calling channel cannot use
+        # (channels.<id>.tools.disabled, issue #149); otherwise a channel
+        # without shell would get it back one hop away.
+        registry = tools_plugin.get_registry().exclude("subagent", *disabled_on(channel))
         max_result_chars = tools_plugin.max_result_chars
         tools_dict = registry.as_dict()
         tool_schemas = registry.schemas()

@@ -428,6 +428,40 @@ class ToolContext:
 
 Tools that don't declare `_ctx` work without modification.
 
+### Per-channel tool sets (`tool_policy.py`)
+
+`channels.<id>.tools.disabled` (#149) narrows one channel on top of the
+global `tools.disabled`. It is parsed into `ChannelConfig.disabled_tools`
+by `load_channel_config`. The global list is already gone from the
+registry, so the channel's effective set is the registry minus its own
+list. `expand_disabled` adds coupled tools: `shell` and `task_pipeline`
+go together (PRD §3.5.3), for the global list too.
+
+- **Schemas are fixed per conversation.** When `Agent` initializes a
+  channel's `ContextWindow` it resolves a `ToolView` (disabled set, tools
+  dict, schema list) beside the system prompt and stores it as
+  `conv.tool_view`. Every turn and every `Agent.fork` of the channel sends
+  that same list object, so the prompt head is byte-identical across turns
+  (principle 2) and forks keep prefix parity (PRD §3.8.2). `Agent` also
+  implements `on_compaction` and re-resolves the view there. Compaction
+  already rebuilds the KV cache, so this is the only point where a running
+  conversation's schemas can change.
+- **Dispatch enforces.** Each tool task checks the name against
+  `disabled_on(channel)` when it runs. That is the conversation view's set
+  plus the live `ChannelConfig` list. A disabled call returns
+  `refusal_message` as the tool result (naming the tool, channel and
+  config key) and is logged at WARNING. Hiding is not access control: the
+  model can call a tool it saw earlier or one named in injected text. This
+  is a config list, not the `should_execute_tool` hook (#148).
+- **Subagents inherit.** `SubagentPlugin` excludes `disabled_on(channel)`
+  as well as itself from the registry it hands the subagent.
+- **Hot reload.** `load_channel_config` validates every entry before it
+  applies any. For channels already registered it updates only
+  `disabled_tools`, in place, so a Signal ACI channel that shares its
+  alias's `ChannelConfig` follows. Because dispatch reads the union,
+  narrowing is enforced on the next call. The schemas, and any widening,
+  wait for the next compaction or conversation start.
+
 ## Conversation Management
 
 `context.py` provides in-memory context management. `persistence.py` handles all SQLite I/O.
@@ -1039,7 +1073,8 @@ fork_prompt = build_prompt(window[:cut]) + [{"role": "user", "content": instruct
 
 **Prefix parity.** `Agent.fork(channel, instruction, *, cut=None,
 extra_body=None)` builds with exactly what step 7 of the agent loop uses:
-the `llm.main` client (its `extra_body`, e.g. `id_slot`), `_tool_schemas`,
+the `llm.main` client (its `extra_body`, e.g. `id_slot`), the channel's
+conversation tool schemas (`conv.tool_view.schemas`, per-channel since #149),
 `build_prompt(pending_ids, mid_conversation_system_role)`, and the same
 runtime-override filter (`_llm_overrides`). `reasoning_effort` is left
 alone, because the chat template renders it into the system block.
@@ -1212,7 +1247,10 @@ setup.
   collect tools from all plugins, then builds a `ToolRegistry`. Tools whose
   name is in `tools.disabled` are dropped from the registry here — the
   single chokepoint every registered tool passes through, so there are no
-  per-plugin opt-outs.
+  per-plugin opt-outs. The list is validated in `on_init` (a non-list
+  raises naming `tools.disabled` and the value) and widened to coupled
+  tools, so `shell` and `task_pipeline` go together. Per-channel narrowing
+  happens downstream in `Agent`; see "Per-channel tool sets".
 
 ### Tool access
 
@@ -1228,6 +1266,7 @@ for inspection or filtering (e.g., `exclude("subagent")`).
 ```yaml
 tools:
   max_result_chars: 100000   # truncation limit for tool result strings (default 100_000)
+  disabled: [write_file]     # dropped for every channel; shell <-> task_pipeline coupled
 
 # Legacy (deprecated):
 agent:
@@ -1366,7 +1405,8 @@ tool, cron syntax, hook-kind jobs (see `plans/scheduler.md`).
 
 `tools/subagent.py` — `SubagentPlugin` registers the `subagent` tool, which
 launches a background agent using the shared LLM client from `LLMPlugin` and
-the full tool set minus `subagent` itself.
+the full tool set minus `subagent` itself and minus whatever the calling
+channel's `channels.<id>.tools.disabled` removes (#149).
 
 ### Tool signature
 

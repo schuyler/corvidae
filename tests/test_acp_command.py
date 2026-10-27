@@ -135,7 +135,10 @@ class TestAcpConfigErrors:
         result, combined = self._invoke(bad)
 
         assert result.exit_code != 0
-        assert "invalid config" in combined.lower()
+        # Runtime.start reports agent/channels validation itself, as the
+        # same "Config error: ... — check <path>" line serve prints.
+        assert "config error" in combined.lower()
+        assert str(bad) in combined
         assert "reasoning_history" in combined
         assert "Traceback" not in combined
 

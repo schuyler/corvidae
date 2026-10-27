@@ -750,12 +750,14 @@ def acp_command(config: str) -> None:
             "logging": {"file": "corvidae-acp.log"},
         },
     )
-    # Runtime.start reports an unreadable or malformed YAML file itself, as a
-    # one-line "Config error" with the path, and exits non-zero.
+    # Runtime.start reports an unreadable or malformed YAML file, and a
+    # rejected agent/channels value, itself, as a one-line "Config error"
+    # with the path, and exits non-zero.
     try:
         asyncio.run(runtime.run())
     except ValueError as exc:
-        # Config validation raises ValueError (removed keys, bad values).
+        # Plugin config validation in on_init raises ValueError (a malformed
+        # signal: or discord: block, say).
         click.echo(f"Error: invalid config {config}: {exc}", err=True)
         sys.exit(1)
 

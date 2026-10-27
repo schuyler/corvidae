@@ -141,11 +141,18 @@ class Runtime:
         # 6. Create ChannelRegistry and register with PM
         self.registry = ChannelRegistry()
         self.pm.register(self.registry, name="registry")
-        validate_agent_config(config.get("agent", {}))
-        self.registry.agent_defaults = config.get("agent", {})
 
-        # 7. Load channel config
-        load_channel_config(config, self.registry)
+        # 7. Validate the agent section and load channel config. A rejected
+        # value is an operator error: one line naming the key, the value
+        # and the file, like a malformed file above, not a traceback.
+        try:
+            validate_agent_config(config.get("agent", {}))
+            self.registry.agent_defaults = config.get("agent", {})
+            load_channel_config(config, self.registry)
+        except ValueError as exc:
+            sys.stderr.write(f"Config error: {exc} — check {self.config_path}\n")
+            sys.stderr.flush()
+            raise SystemExit(1) from exc
 
         # 7b. Block disabled plugins before loading entry points so they are
         #     never instantiated. Must precede load_setuptools_entrypoints.
