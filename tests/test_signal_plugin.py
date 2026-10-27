@@ -1549,6 +1549,6 @@ class TestTransportMintedIds:
         h = await _start_plugin(tmp_path)
         try:
             assert not hasattr(h.plugin, "_pending_timestamps")
-            assert not hasattr(h.plugin, "_admitted_trace_ids")
+            assert not hasattr(h.plugin, "_admitted_correlation_ids")
         finally:
             await _stop_plugin(h)
