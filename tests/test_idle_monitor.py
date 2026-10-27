@@ -87,7 +87,7 @@ class TestPushBasedIdle:
         )
 
     def test_agent_plugin_has_last_idle_fire_attribute(self):
-        """Agent must initialise _last_idle_fire to 0.0 in __init__."""
+        """Agent must initialise _last_idle_fire to None (never fired)."""
         from corvidae.agent import Agent
 
         pm = create_plugin_manager()
@@ -95,9 +95,26 @@ class TestPushBasedIdle:
         assert hasattr(agent, "_last_idle_fire"), (
             "Agent must have _last_idle_fire attribute"
         )
-        assert agent._last_idle_fire == 0.0, (
-            "_last_idle_fire must initialise to 0.0"
+        assert agent._last_idle_fire is None, (
+            "_last_idle_fire must initialise to None (never fired)"
         )
+
+    async def test_fires_within_cooldown_of_boot(self):
+        """A never-fired agent fires on_idle even when the monotonic clock
+        (seconds since boot) is still below the cooldown."""
+        from unittest.mock import patch
+
+        from corvidae.agent import Agent
+
+        pm = create_plugin_manager()
+        pm.ahook.on_idle = AsyncMock()
+        agent = Agent(pm)
+
+        # Pretend the machine booted five seconds ago, inside the 30 s cooldown.
+        with patch("corvidae.agent.time.monotonic", return_value=5.0):
+            await agent._maybe_fire_idle()
+
+        pm.ahook.on_idle.assert_awaited_once()
 
     # -----------------------------------------------------------------------
     # _maybe_fire_idle — firing conditions
@@ -113,7 +130,7 @@ class TestPushBasedIdle:
         agent = Agent(pm)
         # No queues at all — all (zero) queues are empty
         agent._idle_cooldown = 0.0
-        agent._last_idle_fire = 0.0
+        agent._last_idle_fire = None
 
         await agent._maybe_fire_idle()
 
@@ -128,7 +145,7 @@ class TestPushBasedIdle:
 
         agent = Agent(pm)
         agent._idle_cooldown = 0.0
-        agent._last_idle_fire = 0.0
+        agent._last_idle_fire = None
 
         # Add a non-empty queue
         q = SerialQueue()
@@ -163,7 +180,7 @@ class TestPushBasedIdle:
 
         agent = Agent(pm)
         agent._idle_cooldown = 0.0
-        agent._last_idle_fire = 0.0
+        agent._last_idle_fire = None
 
         # Register a mock task plugin whose task queue is not idle
         mock_tq = MagicMock()
@@ -185,7 +202,7 @@ class TestPushBasedIdle:
 
         agent = Agent(pm)
         agent._idle_cooldown = 0.0
-        agent._last_idle_fire = 0.0
+        agent._last_idle_fire = None
 
         before = time.monotonic()
         await agent._maybe_fire_idle()
@@ -257,7 +274,7 @@ class TestPushBasedIdle:
         pm.ahook.on_idle = AsyncMock(side_effect=slow_on_idle)
 
         agent._idle_cooldown = 0.0
-        agent._last_idle_fire = 0.0
+        agent._last_idle_fire = None
 
         t1 = asyncio.create_task(agent._maybe_fire_idle())
         await fired.wait()  # ensure first call is inside on_idle
@@ -277,7 +294,7 @@ class TestPushBasedIdle:
         agent = Agent(pm)
 
         agent._idle_cooldown = 0.0
-        agent._last_idle_fire = 0.0
+        agent._last_idle_fire = None
         original_ts = agent._last_idle_fire
 
         await agent._maybe_fire_idle()
