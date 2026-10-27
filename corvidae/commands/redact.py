@@ -481,9 +481,11 @@ def _memory_cmd(ctx, memory_id):
         conn = await aiosqlite.connect(db_path)
         await conn.execute("PRAGMA busy_timeout = 5000")
         try:
-            # Capture sample token from memory summary before tombstoning
+            # Capture sample token from memory summary before tombstoning.
+            # Probe first: on a database without the memory schema the query
+            # would fail with a raw SQLite error; redact_memory_id reports it.
             sample_token = None
-            if not dry_run:
+            if not dry_run and "memory" in await _probe_tables(conn):
                 async with conn.execute(
                     "SELECT summary FROM memory WHERE id = ?", (memory_id,)
                 ) as c:
@@ -491,7 +493,12 @@ def _memory_cmd(ctx, memory_id):
                 if mem_row:
                     sample_token = _extract_sample_token(mem_row[0])
 
-            result = await redact_memory_id(conn, memory_id, dry_run=dry_run)
+            try:
+                result = await redact_memory_id(conn, memory_id, dry_run=dry_run)
+            except ValueError as exc:
+                # e.g. "memory table not present in this database": an
+                # operator error, reported as one line rather than a traceback.
+                raise click.ClickException(str(exc)) from exc
             if dry_run:
                 click.echo(
                     f"[dry-run] would redact {result['affected_messages']} messages, "
@@ -538,7 +545,9 @@ def _range_cmd(ctx, start_id, end_id):
                     sample_token = _extract_sample_token(range_row[0])
 
             result = await redact_range(conn, start_id, end_id, dry_run=dry_run)
-            requested = result.get("requested_messages", len(ids))
+            # The ids that exist in the range; redact_range omits the key
+            # (and finds nothing) when the range is empty.
+            requested = result.get("requested_messages", 0)
             if dry_run:
                 click.echo(
                     f"[dry-run] would redact {result['affected_messages']} of "
