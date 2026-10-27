@@ -145,9 +145,10 @@ class CorvidaeAcpAgent:
         if self._plugin is None or self._plugin._registry is None:
             raise RuntimeError("CorvidaeAcpAgent.prompt requires an AcpPlugin with registry")
 
+        # Unknown session is a protocol-level not-found, matching load/resume/close.
         channel = self._plugin._registry.get(f"acp:{session_id}")
         if channel is None:
-            raise RuntimeError(f"unknown ACP session {session_id!r}")
+            raise RequestError.resource_not_found(uri=f"acp:{session_id}")
 
         # Only text blocks become user text; make any dropped block visible,
         # and never enqueue an empty message.

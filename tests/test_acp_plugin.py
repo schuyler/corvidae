@@ -315,3 +315,20 @@ class TestAcpIgnoredClientInput:
 
         assert response.stop_reason == "end_turn"
         assert any("image" in record.message.lower() for record in caplog.records)
+
+
+class TestAcpUnknownSession:
+    async def test_prompt_unknown_session_is_resource_not_found(self):
+        """prompt matches load/resume/close: not-found, not internal error."""
+        from acp import RequestError, text_block
+
+        _plugin, _registry, agent = await _init_acp_plugin()
+
+        with pytest.raises(RequestError) as excinfo:
+            await asyncio.wait_for(
+                agent.prompt(session_id="nosuchsession", prompt=[text_block("hi")]),
+                timeout=2,
+            )
+
+        assert excinfo.value.code == -32002
+        assert excinfo.value.data == {"uri": "acp:nosuchsession"}

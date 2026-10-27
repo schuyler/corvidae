@@ -609,7 +609,8 @@ chdir. `mcpServers` and `additionalDirectories` are accepted and ignored
 with a WARNING; configure `mcp:` in `agent.yaml` for MCP servers. Prompts
 must carry at least one text block: image, audio, and resource blocks are
 logged and dropped, and a prompt with no text at all returns
-`invalidParams` instead of an empty turn.
+`invalidParams` instead of an empty turn. An unknown session id is
+`resourceNotFound` for `prompt`, `load`, `resume`, and `close` alike.
 
 ## Registration order
 
