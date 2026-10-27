@@ -243,7 +243,7 @@ Any *dotted* key not on that list is operator-only: it is read once at init or r
 
 #### `appraisal.*` — stage-1 appraisal
 
-Requires the cognition extra (`uv sync --extra cognition`; see [cognition.md](cognition.md)). Without it these keys are ignored.
+Requires the cognition extra (`--extra cognition` on your `uv sync` line; see [cognition.md](cognition.md)). Without it these keys are ignored.
 
 `AppraisalPlugin` scores every inbound message at the gate: surface heuristics plus an FTS5 familiarity probe on a dedicated read-only connection, under a hard latency budget, failing open. All keys resolve per-decision.
 
@@ -269,7 +269,7 @@ Requires the cognition extra (`uv sync --extra cognition`; see [cognition.md](co
 
 ## `memory` — autobiographical memory
 
-Requires the cognition extra (`uv sync --extra cognition`; see [cognition.md](cognition.md)). Without it these keys are ignored.
+Requires the cognition extra (`--extra cognition` on your `uv sync` line; see [cognition.md](cognition.md)). Without it these keys are ignored.
 
 `MemoryPlugin` consolidates compacted dialog into first-person memory records and retrieves them into the prompt (see [design.md](design.md)). The former `dream.*` keys are gone with `DreamPlugin` (absorbed by this plugin).
 
@@ -348,7 +348,7 @@ A heartbeat costs a main-model turn per beat on the shared backend; keep the int
 
 ## `funnel` — context-admission funnel
 
-Requires the cognition extra (`uv sync --extra cognition`; see [cognition.md](cognition.md)). Without it these keys are ignored.
+Requires the cognition extra (`--extra cognition` on your `uv sync` line; see [cognition.md](cognition.md)). Without it these keys are ignored.
 
 `FunnelPlugin` is the single chokepoint for tail CONTEXT admission (dedupe, budgets, injection framing). It also owns deferred registration: non-tool-call notification payloads queue per `(channel, origin)` via `register_and_wake()`, one stub notification wakes the channel per pending pair, and the drain in `before_agent_turn` admits everything queued for the triggering exchange's origin. The deferred registry is in-memory by design (payloads pending at shutdown are dropped) and adds no config keys — drained payloads spend the same per-source budgets below.
 
@@ -431,7 +431,7 @@ Pass the ids explicitly rather than using the `range` form: `message_log` ids ar
 
 ## `discord` — Discord transport
 
-The transport needs the Discord SDK: `uv sync --extra discord`. A `discord:` block without it fails at startup with a message saying so; with no block, the SDK is never loaded.
+The transport needs the Discord SDK: add `--extra discord` to your `uv sync` line. A `discord:` block without it fails at startup with a message saying so; with no block, the SDK is never loaded.
 
 The `discord` section is optional. If absent, `DiscordPlugin` loads but stays inert: no client, no tasks, nothing logged above `DEBUG`. If present, it must be well-formed — no token (in the block or the environment), an `allow` that is not a list, or a `message_chunk_size` that is not an integer from 100 to 2000 raises at startup naming the offending field.
 
@@ -512,7 +512,7 @@ Whichever you pick, the origin you browse to has to be in the allowed set. Don't
 
 The `acp` section is optional and does not enable ACP by itself. ACP mode
 starts only via `corvidae acp`, which sets an internal `_acp_mode` flag.
-Install the SDK with `uv sync --extra acp`.
+Install the SDK by adding `--extra acp` to your `uv sync` line.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|

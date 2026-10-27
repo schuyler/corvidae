@@ -2070,7 +2070,7 @@ listener with aiohttp's client and raw sockets.
 
 `AcpPlugin` + `corvidae acp` — Agent Client Protocol **v1** over stdio for
 editors (bb `customAcpAgents`, Zed, …). Requires the optional
-`agent-client-protocol` extra (`uv sync --extra acp`).
+`agent-client-protocol` extra (`--extra acp` on the `uv sync` line).
 
 **Process model.** ACP is a dedicated subprocess (`corvidae acp`), not
 attached to long-lived `corvidae serve`. The command sets

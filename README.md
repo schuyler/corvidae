@@ -51,7 +51,8 @@ uv run corvidae
 `uv sync` alone installs the kernel: the agent loop, persistence, tools and
 the transports, without the cognition plugins or sqlite-vec. Add
 `--extra discord` for the Discord transport and `--extra acp` for
-`corvidae acp`.
+`corvidae acp`, on the same line: `uv sync` removes any extra you don't
+name.
 
 For development (pytest, every extra its tests import):
 

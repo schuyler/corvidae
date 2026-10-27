@@ -1,50 +1,34 @@
-"""Tests for WP1b.4 — redact CLI: the memory cascade.
+"""Tests for the redact CLI (WP1b.4): the memory cascade.
 
 These build the memory schema with MemoryPlugin, so they need the cognition
 extra. The kernel half (no memory tables) is tests/test_redact.py.
 
-Red phase: all tests in this file fail at collection with:
-    ModuleNotFoundError: No module named 'corvidae.commands.redact'
-because corvidae/commands/redact.py does not exist yet.
-
-Designed failure reason: missing corvidae.commands.redact module.
-
-The plan specifies 'direct function invocation against a temp DB', so
-tests call into the redact module's underlying functions, not through
-the Click CLI runner. The redact module exposes helper functions for
-each subcommand form (message, memory, range) alongside redact_command.
-
-Key behaviors tested (bootstrap-mapping §4.11–4.12, WP1b.4):
+Behaviours tested (bootstrap-mapping §4.11–4.12):
 - Tombstone preserves row count, ids, and role structure.
 - Both FTS surfaces (memory_fts, message_fts) return zero hits post-redact.
 - Vec rows gone; embedded=0 on redacted memory records.
 - Same-channel intersecting memories tombstoned; non-intersecting untouched.
 - Foreign-channel memory whose numeric range contains a redacted id: UNTOUCHED.
-- redact memory form: channel_id predicate prevents tombstoning foreign-channel rows.
+- redact memory form: channel_id predicate prevents tombstoning
+  foreign-channel rows.
 - dry-run writes nothing.
-- Non-WAL journal mode aborts with a clear error.
-- Pre-1b DB (no memory/message_fts tables): tombstones written, skip notices, exit 0.
-- Backfill-after-redact: WP1b.3 backfill indexes the tombstone text, not the original.
+- Backfill-after-redact: WP1b.3 backfill indexes the tombstone text, not
+  the original.
+- Verification after a real redact; affected counts on a full database.
 """
 
 import asyncio
 import json
 import time
-import os
-import tempfile
 
 import aiosqlite
-import pytest
 
-# PRIMARY IMPORT FAILURE — all tests below fail at collection time with
-# ModuleNotFoundError: No module named 'corvidae.commands.redact'
+# The redact module's functions, called directly.
 from corvidae.commands.redact import (
     redact_command,
     redact_messages,   # async: (db, message_ids, dry_run=False, notices: list | None = None) -> dict
     redact_memory_id,  # async: (db, memory_id, dry_run=False) -> dict
-    redact_range,      # async: (db, start_id, end_id, dry_run=False) -> dict
     _verify_fts_clean,
-    _extract_sample_token,
 )
 
 from corvidae_cognition.memory import MemoryPlugin

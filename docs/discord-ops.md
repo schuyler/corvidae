@@ -4,9 +4,10 @@ How to give corvidae a Discord bot: create an application in the Developer
 Portal, get its token, invite it to a server, and point corvidae's
 `discord:` config block at it.
 
-The SDK is an optional extra. Install it with `uv sync --extra discord` (plus
-`--extra cognition` for the full daemon); without it, a `discord:` block
-fails at startup and says which command to run.
+The SDK is an optional extra: add `--extra discord` to your `uv sync` line,
+for example `uv sync --extra discord --extra cognition` for the full daemon.
+`uv sync` removes any extra you don't name, so list all of them. Without the
+SDK, a `discord:` block fails at startup and says what to install.
 
 Unlike Signal, there is no daemon to run. corvidae logs in to Discord's
 gateway itself using discord.py, retries on the same backoff ladder IRC

@@ -18,9 +18,9 @@ install hint when a ``discord:`` block is configured without it.
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import os
-import functools
 import re
 from types import ModuleType
 from typing import Any, Optional
@@ -275,8 +275,9 @@ class DiscordPlugin(TransportPlugin):
         except ImportError as exc:
             raise RuntimeError(
                 "DiscordPlugin: agent.yaml has a discord: block, but the "
-                "Discord SDK (discord-py) is not installed. Install it with: "
-                "uv sync --extra discord"
+                "Discord SDK (discord-py) is not installed. Install it with "
+                "uv sync --extra discord, adding the other extras you use "
+                "(e.g. --extra cognition): uv sync removes extras you don't name."
             ) from exc
 
         # The token may live in the environment instead of agent.yaml.

@@ -53,7 +53,7 @@ from llm_response_fixtures import (
 async def _setup_outcome_log(pm, db):
     """Register a real OutcomeLogPlugin against the given db and pm.
 
-    Mirrors tests/test_outcome_log.py's _setup, duplicated locally per
+    Mirrors tests/cognition/test_outcome_log.py's _setup, duplicated locally per
     the red-author's file-isolation instructions.
     """
     from corvidae_cognition.outcome_log import OutcomeLogPlugin

@@ -9,6 +9,10 @@ kernel's agent loop. They live in a second distribution in this repository,
 uv sync --extra cognition
 ```
 
+`uv sync` installs exactly the extras you name and removes the rest, so add
+`--extra discord` or `--extra acp` to the same line if you use those
+transports.
+
 | Plugin | Entry point | What it does |
 |---|---|---|
 | `MemoryPlugin` | `memory` | Consolidates compacted conversation into durable memories and retrieves them into context; owns `sqlite-vec` |

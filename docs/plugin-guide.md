@@ -119,7 +119,7 @@ The existing `corvidae` entry point group (for plugins) and the `corvidae.comman
 
 The built-in subcommand `scaffold` is registered by corvidae itself under `corvidae.commands`. Do not register an entry point named `scaffold` in the `corvidae.commands` group — a collision will silently overwrite the built-in command, causing unpredictable behavior.
 
-Built-in `corvidae acp` (from `corvidae.channels.acp:acp_command`) starts an ACP v1 agent on stdio. It boots `Runtime` with `overrides={"_acp_mode": True}` so `AcpPlugin` owns the connection; without that flag the plugin stays inert. Install the optional extra first: `uv sync --extra acp`.
+Built-in `corvidae acp` (from `corvidae.channels.acp:acp_command`) starts an ACP v1 agent on stdio. It boots `Runtime` with `overrides={"_acp_mode": True}` so `AcpPlugin` owns the connection; without that flag the plugin stays inert. Install the optional extra first: add `--extra acp` to your `uv sync` line.
 
 ## Hook grammar
 
@@ -707,7 +707,7 @@ document intent):
 
 **bb smoke (`customAcpAgents`):**
 
-1. `uv sync --extra acp --extra dev`
+1. `uv sync --extra acp --extra dev --extra cognition` (add `--extra discord` if you use it)
 2. Point bb at Corvidae, e.g. command `uv` with args
    `run --directory /path/to/corvidae corvidae acp` (or a wrapper script).
 3. `bb thread spawn --provider acp-corvidae --prompt "…" ` (provider name

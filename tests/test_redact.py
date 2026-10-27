@@ -1,64 +1,41 @@
-"""Tests for WP1b.4 — redact CLI: the kernel half.
+"""Tests for the redact CLI (WP1b.4): the kernel half.
 
-These need no memory plugin (pre-1b databases, journal-mode checks, the
-verification helpers). The tests that build the memory schema and check
-the memory cascade are in tests/cognition/test_redact_cascade.py, since
-they need the cognition extra.
+These need no memory plugin. The tests that build the memory schema and
+check the memory cascade are in tests/cognition/test_redact_cascade.py,
+since they need the cognition extra.
 
-Red phase: all tests in this file fail at collection with:
-    ModuleNotFoundError: No module named 'corvidae.commands.redact'
-because corvidae/commands/redact.py does not exist yet.
-
-Designed failure reason: missing corvidae.commands.redact module.
-
-The plan specifies 'direct function invocation against a temp DB', so
-tests call into the redact module's underlying functions, not through
-the Click CLI runner. The redact module exposes helper functions for
-each subcommand form (message, memory, range) alongside redact_command.
-
-Key behaviors tested (bootstrap-mapping §4.11–4.12, WP1b.4):
-- Tombstone preserves row count, ids, and role structure.
-- Both FTS surfaces (memory_fts, message_fts) return zero hits post-redact.
-- Vec rows gone; embedded=0 on redacted memory records.
-- Same-channel intersecting memories tombstoned; non-intersecting untouched.
-- Foreign-channel memory whose numeric range contains a redacted id: UNTOUCHED.
-- redact memory form: channel_id predicate prevents tombstoning foreign-channel rows.
-- dry-run writes nothing.
+Behaviours tested (bootstrap-mapping §4.11–4.12):
 - Non-WAL journal mode aborts with a clear error.
-- Pre-1b DB (no memory/message_fts tables): tombstones written, skip notices, exit 0.
-- Backfill-after-redact: WP1b.3 backfill indexes the tombstone text, not the original.
+- Pre-1b DB (no memory/message_fts tables): tombstones written, skip
+  notices, exit 0.
+- The verification helpers: sample-token extraction, and the FTS check on
+  databases without the FTS tables.
+- CLI error context and honest affected counts on a missing database.
+
+Tests call the redact module's functions directly against a temp DB, not
+through the Click runner, except where the CLI's own output is the subject.
 """
 
-import asyncio
 import json
 import time
-import os
-import tempfile
 
 import aiosqlite
 import pytest
 
-# PRIMARY IMPORT FAILURE — all tests below fail at collection time with
-# ModuleNotFoundError: No module named 'corvidae.commands.redact'
+# The redact module's functions, called directly.
 from corvidae.commands.redact import (
     redact_command,
     redact_messages,   # async: (db, message_ids, dry_run=False, notices: list | None = None) -> dict
-    redact_memory_id,  # async: (db, memory_id, dry_run=False) -> dict
-    redact_range,      # async: (db, start_id, end_id, dry_run=False) -> dict
     _verify_fts_clean,
     _extract_sample_token,
 )
 
-from corvidae.persistence import PersistencePlugin, init_db
-from corvidae.hooks import create_plugin_manager
-from corvidae.llm_plugin import LLMPlugin
+from corvidae.persistence import init_db
 
 
 # ---------------------------------------------------------------------------
 # DB setup helpers
 # ---------------------------------------------------------------------------
-
-
 
 
 async def insert_message(
@@ -75,37 +52,6 @@ async def insert_message(
     return row_id
 
 
-async def insert_memory(
-    db,
-    channel_id: str,
-    summary: str,
-    msg_id_start: int,
-    msg_id_end: int,
-    importance: float = 0.5,
-    indexed: int = 1,
-) -> int:
-    cursor = await db.execute(
-        "INSERT INTO memory (channel_id, created_at, summary, importance, "
-        "msg_id_start, msg_id_end, embedded, indexed) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (channel_id, time.time(), summary, importance, msg_id_start, msg_id_end, 0, indexed),
-    )
-    row_id = cursor.lastrowid
-    await db.commit()
-    return row_id
-
-
-async def fts_hits(db, table: str, token: str) -> int:
-    """Count FTS hits for a token in the named FTS table."""
-    try:
-        match_expr = f'"{token}"'
-        async with db.execute(
-            f"SELECT COUNT(*) FROM {table} WHERE {table} MATCH ?", (match_expr,)
-        ) as c:
-            return (await c.fetchone())[0]
-    except Exception:
-        return -1  # table doesn't exist
-
-
 async def get_message(db, row_id: int) -> dict:
     async with db.execute(
         "SELECT id, channel_id, message FROM message_log WHERE id = ?", (row_id,)
@@ -114,56 +60,6 @@ async def get_message(db, row_id: int) -> dict:
     if row is None:
         raise ValueError(f"message_log row {row_id} not found")
     return {"id": row[0], "channel_id": row[1], "message": json.loads(row[2])}
-
-
-async def get_memory(db, memory_id: int) -> dict:
-    async with db.execute(
-        "SELECT id, summary, redacted, indexed, embedded, superseded_by "
-        "FROM memory WHERE id = ?", (memory_id,)
-    ) as c:
-        row = await c.fetchone()
-    if row is None:
-        raise ValueError(f"memory row {memory_id} not found")
-    keys = ["id", "summary", "redacted", "indexed", "embedded", "superseded_by"]
-    return dict(zip(keys, row))
-
-
-async def vec_exists(db, memory_id: int) -> bool:
-    try:
-        async with db.execute(
-            "SELECT 1 FROM memory_vec WHERE memory_id = ?", (memory_id,)
-        ) as c:
-            return (await c.fetchone()) is not None
-    except Exception:
-        return False
-
-
-# ---------------------------------------------------------------------------
-# WP1b.4 message tombstone basics
-# ---------------------------------------------------------------------------
-
-
-
-
-# ---------------------------------------------------------------------------
-# WP1b.4 memory cascade
-# ---------------------------------------------------------------------------
-
-
-
-
-# ---------------------------------------------------------------------------
-# WP1b.4 redact memory form — channel predicate prevents foreign-channel damage
-# ---------------------------------------------------------------------------
-
-
-
-
-# ---------------------------------------------------------------------------
-# WP1b.4 dry-run
-# ---------------------------------------------------------------------------
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -244,7 +140,6 @@ class TestPrePhase1bDb:
         await db.close()
 
 
-
 # ---------------------------------------------------------------------------
 # WP1b.4 verification pass (green fix #2 — 2026-07-07)
 # ---------------------------------------------------------------------------
@@ -282,7 +177,6 @@ class TestVerificationPass:
         """_extract_sample_token returns None for empty or short-word-only content."""
         assert _extract_sample_token("") is None
         assert _extract_sample_token("{}") is None
-
 
 
     async def test_verify_fts_clean_handles_absent_fts_tables(self):
@@ -330,11 +224,5 @@ def test_cli_missing_db_raises_clean_error_without_creating_file(tmp_path):
     assert result.exit_code != 0
     assert str(db_path) in result.output
     assert not db_path.exists(), "the CLI must not create an empty database"
-
-
-
-
-
-
 
 
