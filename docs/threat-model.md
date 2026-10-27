@@ -200,14 +200,19 @@ under `role: assistant`. The `user`-role experiment is still worth running.
 `shell` runs as the daemon user with no allowlist, no fixed cwd, and no
 confirmation (`tools/shell.py`). `task_pipeline` is `shell` with a
 120-second timeout, and it calls the shell implementation directly, so
-`tools.disabled: [shell]` does not remove it. `write_file` writes anywhere
+`tools.disabled` couples the two: naming either removes both, globally
+and per channel (#149). `write_file` writes anywhere
 the daemon user can, creating parent directories, including over
 `agent.yaml`, which `ConfigWatcherPlugin` reloads within two seconds. That
 lets the model change `llm.main.base_url` or clear `immutable_settings`
 immediately. It can also add an MCP server whose `command` is anything,
-disable plugins, or re-enable disabled tools; those keys are not
+disable plugins, or re-enable globally disabled tools; those keys are not
 hot-reloaded, so they wait for the next restart, which makes the attack
-persistent and quiet rather than immediate. It can also
+persistent and quiet rather than immediate. A channel's own
+`channels.<id>.tools.disabled` *is* hot-reloaded. Removing an entry from it
+widens that channel's tools at its next compaction, with no restart, so on
+a channel that still has `write_file` the per-channel list is only as
+strong as the protection on `agent.yaml`. It can also
 rewrite any file named in a list-form `agent.system_prompt`, which is a
 persistent persona change that never touches `agent.yaml` and takes effect
 on the next restart or new channel. `web_fetch` has
@@ -217,10 +222,14 @@ no scheme or host check, follows redirects, and will happily GET
 All of this is expected for a personal agent on your own box. The Buster
 harness config (`harness/buster.yaml.in`) shows the pattern for narrowing
 it: no subagent, no MCP, `shell` disabled. It is not a closed profile,
-though: it leaves `task_pipeline` on, which is the shell by another name,
-and `write_file`, which is the `agent.yaml` path. A genuinely narrowed
-profile needs `tools.disabled: [shell, task_pipeline, write_file]` at
-least. Cheap wins beyond that: make the dangerous tools opt-in rather than
+though: it leaves `write_file` on, which is the `agent.yaml` path
+(`task_pipeline`, the shell by another name, now goes with `shell`). A
+genuinely narrowed profile needs `tools.disabled: [shell, write_file]` at
+least. The same list under `channels.<id>.tools.disabled` narrows a single
+channel. The rest of the daemon keeps its tools, the channel's schemas
+never show the disabled ones, dispatch refuses them even when the model
+names one anyway, and a `subagent` launched from that channel inherits
+the restriction. Cheap wins beyond that: make the dangerous tools opt-in rather than
 opt-out, deny private address ranges and non-HTTP schemes in `web_fetch`,
 root the file tools in a directory, and have `agent.yaml` and the prompt
 files owned by another user and read-only to the daemon (if the daemon
@@ -248,6 +257,15 @@ Signal's allowlist bounds which channels can come into existence under
 sender adds nothing to the registry (#103). Discord and IRC still create
 the channel before their gate runs. At minimum, PMs should be off by default or
 gated by an `irc.allow` list, bringing it in line with Signal.
+
+Partial mitigation (#149): `channels.<id>.tools.disabled` takes the
+dangerous tools off an IRC channel the operator configures, for example
+`channels: {"irc:#lex": {tools: {disabled: [shell, write_file, read_file,
+subagent]}}}`, while the operator's own channels keep them. Dispatch
+enforces the list, not just the schemas. It doesn't cover PM channels:
+a stranger's PM channel is keyed on a nick nobody configured, so it gets
+the global set. Until PMs are gated, the global `tools.disabled` is the
+only control there.
 
 Discord is built like Signal, not like IRC. The transport's
 `should_process_message` is a default-deny allowlist of numeric user ids; an
@@ -441,8 +459,8 @@ The architecture already has the seam to split this. Tool calls dispatch
 through `TaskQueue` and `dispatch_tool_call`, so a separated design would
 run tool workers in another process (or container) with a narrowed
 filesystem and network, keeping transport credentials and `sessions.db` on
-the trusted side. Subagents inherit the full tool set minus themselves and
-would need the same treatment. The systemd hardening in
+the trusted side. Subagents inherit the calling channel's tool set minus
+themselves and would need the same treatment. The systemd hardening in
 [signal-ops.md](signal-ops.md)
 (`ProtectSystem=strict`, `NoNewPrivileges`, `ProtectHome`) is good and
 applies only to signal-cli; corvidae itself runs under `screen` with none
@@ -462,8 +480,10 @@ of it.
    next restart) undoes every other item on this list.
 4. Flip the defaults: `shell`, `read_file`, `write_file`, `task_pipeline`,
    `subagent` and IRC PMs opt-in. Root the file tools in a directory when
-   they are on. Meanwhile, add `task_pipeline` and `write_file` to
-   `tools.disabled` wherever `shell` already is, `buster.yaml.in` included.
+   they are on. Meanwhile, add `write_file` to `tools.disabled` wherever
+   `shell` already is, `buster.yaml.in` included (`task_pipeline` now goes
+   with `shell` automatically). Channels with untrusted participants can
+   drop them with `channels.<id>.tools.disabled` instead.
 5. Deny private ranges and non-HTTP schemes in `web_fetch`.
 6. Move CONTEXT out of the `system` role. Opt-in today via
    `agent.mid_conversation_system_role: user`; flipping the default is

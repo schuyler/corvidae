@@ -400,8 +400,10 @@ class TestOnMessagePersistenceAndLoop:
         messages_arg = call_args[0][1]
         assert messages_arg[0]["role"] == "system"
         assert any(m.get("content") == "query" for m in messages_arg)
-        # Third positional arg is tool_schemas
-        assert call_args[0][2] is plugin._tool_schemas
+        # Third positional arg is the conversation's own schema list (#149):
+        # the per-channel view, reused as-is every turn.
+        assert call_args[0][2] is channel.conversation.tool_view.schemas
+        assert call_args[0][2] == plugin._tool_schemas
 
         await db.close()
 

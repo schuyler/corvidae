@@ -110,8 +110,9 @@ agent:
 #   web_fetch_timeout: 15           # seconds before HTTP request is aborted
 #   web_max_response_bytes: 50000   # max bytes of HTTP response body
 #   max_file_read_bytes: 1048576    # max file size for read_file (1 MB)
-#   disabled: []                    # tool names to drop entirely, e.g. [shell, task_pipeline, write_file]
-#                                   # or [set_settings]; see docs/threat-model.md
+#   disabled: []                    # tool names to drop entirely, e.g. [shell, write_file]
+#                                   # or [set_settings]; shell and task_pipeline go
+#                                   # together; see docs/threat-model.md
 
 # IRC transport connection settings (optional — omit to disable IRC)
 # irc:
@@ -201,5 +202,10 @@ channels:
   # irc:#lex:
   #   system_prompt: "You are Sherman, an IRC bot in #lex."
   #   max_context_tokens: 8000
+  #   tools:
+  #     disabled: [shell, web_fetch]  # on top of tools.disabled; task_pipeline goes with
+  #                                   # shell; refused at dispatch, not just hidden.
+  #                                   # On reload: refused at once, schemas change at
+  #                                   # the next compaction or conversation start.
   # signal:8f2c1c9a-3e21-4b77-9c3f-1a2b3c4d5e6f:   # ACI-keyed form (signal:<aci>) is recommended
   #   system_prompt: "You are Sherman, a Signal DM bot."

@@ -21,6 +21,7 @@ from time import time
 from typing import TYPE_CHECKING
 
 from corvidae.fork import parse_forks_config
+from corvidae.tool_policy import parse_channel_tools
 # Transport/session metadata parked on Channel.runtime_overrides — never
 # merge into resolved ChannelConfig or forward to the LLM request body.
 RUNTIME_META_KEYS = frozenset({"cwd", "tool_backend"})
@@ -110,7 +111,11 @@ class ChannelConfig:
     max_context_tokens: int | None = None
     reasoning_history: str | None = None
     max_turns: int | None = None
-    # Future: tool allowlist/denylist, response length, etc.
+    # channels.<id>.tools.disabled, layered on the global tools.disabled
+    # (issue #149). Unlike the fields above it is not merged by resolve():
+    # the Agent snapshots it per conversation (corvidae/tool_policy.py),
+    # and a hot reload updates it on channels already registered.
+    disabled_tools: frozenset[str] = frozenset()
 
     def resolve(self, agent_defaults: dict, runtime_overrides: dict | None = None) -> dict:
         """Merge channel overrides with agent-level defaults.
@@ -265,12 +270,22 @@ def load_channel_config(config: dict, registry: ChannelRegistry) -> None:
     Reads the top-level "channels" dict from config. Each key must be
     in "transport:scope" format.
 
+    Also runs on hot reload. A channel already registered keeps its
+    ChannelConfig except for ``tools.disabled``, which is updated in place
+    (shared with any Signal ACI channel created from an E.164 alias); the
+    Agent applies it to schemas at the next conversation start or
+    compaction, and to dispatch at once (corvidae/tool_policy.py). Every
+    entry is validated before any is applied, so a malformed file changes
+    nothing.
+
     Raises:
         ValueError: If a channel key does not contain a colon separator, or
-            an entry uses the removed keep_thinking_in_history key or an
-            invalid reasoning_history value.
+            an entry uses the removed keep_thinking_in_history key, an
+            invalid reasoning_history value, or a malformed tools block.
     """
     channels_config = config.get("channels", {})
+    # Validate and build every entry first; apply only if all are good.
+    parsed: list[tuple[str, str, str, ChannelConfig]] = []
     for channel_id, overrides in channels_config.items():
         parts = channel_id.split(":", 1)
         if len(parts) != 2:
@@ -291,7 +306,25 @@ def load_channel_config(config: dict, registry: ChannelRegistry) -> None:
             max_context_tokens=overrides.get("max_context_tokens"),
             reasoning_history=overrides.get("reasoning_history"),
             max_turns=overrides.get("max_turns"),
+            disabled_tools=parse_channel_tools(
+                overrides.get("tools"), f"channels.{channel_id}"
+            ),
         )
+        parsed.append((channel_id, transport, scope, channel_config))
+
+    for channel_id, transport, scope, channel_config in parsed:
+        existing = registry.get(channel_id)
+        if existing is not None:
+            # Reload: only the tool list is live for a registered channel.
+            if existing.config.disabled_tools != channel_config.disabled_tools:
+                existing.config.disabled_tools = channel_config.disabled_tools
+                logger.info(
+                    "channel tools.disabled updated by reload; schemas follow at "
+                    "the next conversation start or compaction",
+                    extra={"channel_id": channel_id,
+                           "disabled": sorted(channel_config.disabled_tools)},
+                )
+            continue
         registry.get_or_create(transport, scope, config=channel_config)
 
         logger.info(

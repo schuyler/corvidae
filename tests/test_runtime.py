@@ -371,6 +371,30 @@ class TestRuntimeStart:
         assert "Config error:" in stderr
         assert str(config_path) in stderr
 
+    async def test_start_invalid_channel_config_reports_config_error_and_exits(
+        self, tmp_path, capsys
+    ):
+        """A rejected channels: entry (here a per-channel tools.disabled that
+        is a string, #149) is a one-line Config error naming the key, the
+        value and the file, not a traceback."""
+        from corvidae.runtime import Runtime
+
+        config_path = tmp_path / "agent.yaml"
+        config_path.write_text(
+            "llm:\n  main: {base_url: 'http://127.0.0.1:1', model: m}\n"
+            "channels:\n  'irc:#lex':\n    tools:\n      disabled: shell\n"
+        )
+        rt = Runtime(config_path=str(config_path))
+        with pytest.raises(SystemExit) as excinfo:
+            await rt.start()
+
+        assert excinfo.value.code != 0
+        stderr = capsys.readouterr().err
+        assert any(line.startswith("Config error:") for line in stderr.splitlines())
+        assert "channels.irc:#lex.tools.disabled" in stderr
+        assert "'shell'" in stderr and "list of tool names" in stderr
+        assert str(config_path) in stderr
+
     async def test_start_sets_base_dir_from_config_path(self):
         """start() sets config['_base_dir'] to the directory of config_path."""
         from corvidae.runtime import Runtime

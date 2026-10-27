@@ -15,6 +15,10 @@ Logging:
 import enum
 import json
 import logging
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from corvidae.tool_policy import ToolView
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +104,9 @@ class ContextWindow:
         self.channel_id = channel_id
         self.messages: list[dict] = []
         self.system_prompt: str = ""
+        # The conversation's tool set (corvidae/tool_policy.py), resolved
+        # with the system prompt and fixed until the next compaction.
+        self.tool_view: "ToolView | None" = None
         self.chars_per_token: float = chars_per_token
 
     def append(self, message: dict, message_type: MessageType = MessageType.MESSAGE) -> None:

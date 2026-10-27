@@ -8,6 +8,7 @@ Config:
     tools:
       max_result_chars: 100000  # optional, default 100_000
       disabled: [shell]         # optional; tool names dropped after collection
+                                # (shell and task_pipeline disable together)
 
     # Legacy (deprecated):
     agent:
@@ -16,6 +17,7 @@ Config:
 import logging
 from corvidae.hooks import CorvidaePlugin, hookimpl
 from corvidae.tool import Tool, ToolRegistry
+from corvidae.tool_policy import expand_disabled, parse_disabled_list
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +38,11 @@ class ToolCollectionPlugin(CorvidaePlugin):
     async def on_init(self, pm, config: dict) -> None:
         await super().on_init(pm, config)
         tools_config = config.get("tools", {})
-        self._disabled = list(tools_config.get("disabled", []))
+        # Validated (a bare string would otherwise split into characters)
+        # and widened to coupled tools: shell and task_pipeline go together.
+        self._disabled = sorted(expand_disabled(
+            parse_disabled_list(tools_config.get("disabled"), "tools.disabled")
+        ))
         fallback = config.get("agent", {}).get("max_tool_result_chars")
         if "max_result_chars" in tools_config:
             self.max_result_chars = tools_config["max_result_chars"]

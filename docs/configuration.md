@@ -371,8 +371,7 @@ Configured by `CoreToolsPlugin`. `tools.max_result_chars` is read by `ToolCollec
 | `tools.web_max_response_bytes` | integer | `50000` | Maximum bytes of HTTP response body returned by `web_fetch`. Content beyond this limit is truncated with `[truncated]`. This limit is independent of `tools.max_result_chars`. |
 | `tools.max_file_read_bytes` | integer | `1048576` | Maximum file size in bytes that `read_file` will return. Files larger than this limit return an error string. Default is 1 MB (1,048,576 bytes). |
 | `tools.web_search_max_results` | integer | `8` | Maximum number of DuckDuckGo results returned by the `web_search` tool. |
-| `tools.disabled` | list of strings | `[]` | Tool names dropped after collection, from any plugin (built-in or MCP). Read by `ToolCollectionPlugin`; this is the single chokepoint, so a disabled tool is absent from the schema the LLM sees and from subagents. Note `task_pipeline` is a separate tool that shells out on its own; disabling `shell` does not disable it. Not hot-reloaded. See [threat-model.md](threat-model.md). |
-| `tools.disabled` | list of strings | `[]` | Tool names dropped after collection, in `ToolCollectionPlugin.rebuild_registry`. The single chokepoint every registered tool passes through — no per-plugin opt-outs. |
+| `tools.disabled` | list of strings | `[]` | Tool names dropped after collection, from any plugin (built-in or MCP), in `ToolCollectionPlugin.rebuild_registry`. This is the single chokepoint every registered tool passes through, so a disabled tool is absent from every channel's schemas and from subagents. `shell` and `task_pipeline` disable together: `task_pipeline` shells out on its own, so naming either removes both (PRD §3.5.3). A value that is not a list of names (a bare string, say) is rejected at startup. Not hot-reloaded. To narrow one channel instead, use `channels.<id>.tools.disabled`. See [threat-model.md](threat-model.md). |
 
 ---
 
@@ -543,6 +542,7 @@ Keys are `transport:scope` identifiers (e.g., `irc:#general`, `cli:local`). Each
 | `max_context_tokens` | integer | `agent.max_context_tokens` | Token budget for this channel's conversation history. |
 | `max_turns` | integer | `agent.max_turns` | Maximum consecutive tool-calling turns for this channel. |
 | `reasoning_history` | `drop` \| `exchange` \| `keep` | `agent.reasoning_history` | Controls `reasoning_content` retention for this channel. |
+| `tools.disabled` | list of strings | `[]` | Tools this channel cannot use, on top of the global `tools.disabled`. The channel can only narrow; it can't re-enable a globally disabled tool, and `set_settings` can't change the list. `shell` and `task_pipeline` disable together. See [Per-channel tool sets](#per-channel-tool-sets). |
 
 Channels not listed here are created on-demand when a message arrives and use `agent` defaults for all fields.
 
@@ -557,6 +557,32 @@ channels:
       - prompts/cli-addendum.txt
     reasoning_history: keep
 ```
+
+### Per-channel tool sets
+
+`channels.<id>.tools.disabled` gives one channel a narrower tool set than the rest, for example an IRC channel with strangers in it that runs without `shell` while your own channels keep it:
+
+```yaml
+tools:
+  disabled: [write_file]          # everywhere
+channels:
+  irc:#lex:
+    tools:
+      disabled: [shell, web_fetch] # here too; task_pipeline goes with shell
+```
+
+The channel's set is the global list plus its own, resolved when its conversation starts, the same way its system prompt is. The tool schemas sit at the head of the prompt, so they stay fixed for the conversation; rewriting them every turn would rebuild the llama-server KV cache every turn. Forks of the channel send the same schemas.
+
+Hiding a tool isn't access control. A model can still call a tool it saw earlier in the conversation, or one named in text someone pasted in. So dispatch enforces the list too: a call to a disabled tool doesn't run. The model gets back `Error: tool 'shell' is disabled on channel irc:#lex (channels.irc:#lex.tools.disabled); it was not run. ...`, and the refusal is logged at WARNING with the tool and channel. A `subagent` launched from the channel gets the same narrowed set, so the tool isn't one hop away.
+
+`tools` accepts only `disabled`. Anything else is rejected at startup, and on reload, naming the key, the rejected value and the accepted keys. A name that matches no loaded tool is logged at WARNING when the conversation starts. That catches typos, though an MCP tool whose server hasn't connected yet reads the same way.
+
+**On hot reload** the list is live for channels that are already running. This is the one channel key that is; the others need a restart.
+
+- **Narrowing** (adding a tool to the list) is enforced at dispatch on the next call. The schemas keep listing the tool until the next compaction or conversation start, so the model may try it and be refused.
+- **Widening** (removing a tool from the list) takes effect at the next compaction or conversation start. Until then the tool stays hidden and refused, so the head of the prompt never changes mid-conversation.
+- A call that was already dispatched runs to completion.
+- Removing a channel's whole entry from `channels:` keeps its last list until restart. To re-enable everything on a running channel, set `disabled: []`.
 
 Discord channels are keyed on numeric ids: `discord:<channel_id>` for a server channel, `discord:<thread_id>` for a thread (a thread has its own id and its own history, so it does not inherit its parent channel's override), and `discord:dm:<user_id>` for a DM. Names are not accepted, because they change and the id is the persistence key.
 
@@ -626,6 +652,7 @@ No restart is required for the changes listed below. Changes that require restar
 | Dotted plugin tunables (`appraisal.*`, `critique.*`) | Resolved per-decision via `corvidae.tuning.resolve_tunable`; a reloaded value applies on the next appraisal/critique decision. Per-channel `set_settings` overrides still take precedence. |
 | `agent.immutable_settings` | `RuntimeSettingsPlugin` resets its blocklist and re-applies the new list. Constructor-supplied immutable keys are always retained. |
 | New channel entries in `channels:` | `load_channel_config` registers newly added channels. |
+| `channels.<id>.tools.disabled` on a registered channel | Updated in place. Dispatch refuses a newly disabled tool at once; the schemas follow at the next compaction or conversation start, never mid-conversation. See [Per-channel tool sets](#per-channel-tool-sets). A reload with a malformed entry changes no channel. |
 | `web.token` | A changed token logs out every browser (their sockets close and the page says the session expired). A token removed from config falls back to `CORVIDAE_WEB_TOKEN` as the daemon started with it, else a fresh generated one, which is logged. Changing `CORVIDAE_WEB_TOKEN` itself needs a restart. |
 | `agent` defaults | `ChannelRegistry.agent_defaults` is updated; new channels created after the reload use the new defaults. |
 
@@ -635,15 +662,18 @@ No restart is required for the changes listed below. Changes that require restar
 |---------|--------|
 | `irc.host`, `irc.port`, `irc.nick` | IRC transport is connected at startup; changing connection parameters requires reconnection. |
 | `web.host`, `web.port`, `web.allowed_origins`, adding or removing the `web` block | The listener is bound at startup. A reload logs `restart to apply` and keeps serving with the old values. |
-| Existing channel config in `channels:` | Channels already registered retain their original `ChannelConfig` until restart. |
+| Existing channel config in `channels:` | Channels already registered retain their original `ChannelConfig` until restart, except `tools.disabled` (above). |
 | `llm.background` | Not updated on reload. |
 | `memory.*` (including `memory.consolidation_prompt` and `memory.consolidation_fork_prompt`) | `MemoryPlugin` reads its section at init only. |
 | `tools.max_result_chars`, `tools.shell_timeout`, `tools.web_fetch_timeout` | Deferred; not currently implemented in hot-reload path. |
 
 ### Error handling
 
-At startup (not reload), a missing or malformed config file prints
-`Config error: <detail> — check <path>` to stderr and exits non-zero.
+At startup (not reload), a missing or malformed config file, or a rejected
+value in the `agent` or `channels` sections (e.g. a `channels.<id>.tools`
+block that is not `{disabled: [names]}`), prints
+`Config error: <detail> — check <path>` to stderr and exits non-zero. The
+detail names the key, the rejected value and what is accepted.
 
 - **Invalid YAML**: logged at `ERROR`; reload is skipped and the running config is unchanged.
 - **Missing `llm.main` after merge**: logged at `ERROR`; reload is skipped.
