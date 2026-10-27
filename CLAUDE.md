@@ -3,12 +3,13 @@
 ## Environment
 
 Dependencies are installed by `.claude/hooks/session-start.sh` in Claude Code on
-the web. If an import fails, run `uv sync --extra dev` — that installs both the
-`dev` extra (pytest, pytest-asyncio) and the `dev` dependency group
-(pytest-timeout), which the pytest config needs.
+the web. If an import fails, run `uv sync --extra dev --extra acp` — that
+installs the `dev` extra (pytest, pytest-asyncio), the `dev` dependency group
+(pytest-timeout), which the pytest config needs, and the `acp` extra, which the
+ACP transport tests import. CI syncs the same set.
 
 ```sh
-uv sync --extra dev              # install everything
+uv sync --extra dev --extra acp  # install everything
 uv run pytest                    # full suite
 uv run pytest tests/test_foo.py  # one file
 uv run pytest --run-eval         # include live-LLM eval tests (deselected by default)
