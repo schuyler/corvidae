@@ -28,7 +28,7 @@ async def _run(tmp_path, agent, lenses, window_rowids=(7, 8), rowid=7, config=No
     if snapshot:
         await env.outcome.update_exchange("k", provenance_snapshot=json.dumps([{"content": snapshot}]))
     await env.plugin.on_message_persisted(
-        channel=env.channel, correlation_id="k", rowid=rowid, text=QUESTION, meta={})
+        channel=env.channel, trace_id="k", rowid=rowid, text=QUESTION, meta={})
     await env.plugin._run_critique(env.channel, "k", QUESTION, RESPONSE, lenses, False)
     outcome = (await _read_outcomes(env.db, "k"))["critique"]
     await _teardown(env)
@@ -43,7 +43,7 @@ async def test_each_lens_forks(tmp_path):
         assert call["instruction"].startswith(DEFAULT_FORK_PROMPTS[lens])
         assert f"«{QUESTION}»" in call["instruction"] and f"«{RESPONSE}»" in call["instruction"]
         assert (call["cut"], call["extra_body"]) == (None, OBJECTION_EXTRA_BODY)
-        assert (call["attribution"]["stage"], call["attribution"]["correlation_id"]) == ("critique", "k")
+        assert (call["attribution"]["stage"], call["attribution"]["trace_id"]) == ("critique", "k")
     assert "memory: Monday" in agent.calls[1]["instruction"]
     assert outcome["objections"] == 2
 

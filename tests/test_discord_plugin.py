@@ -260,16 +260,16 @@ async def _wait_until(predicate, timeout: float = 5.0, interval: float = 0.01) -
     await asyncio.wait_for(_poll(), timeout=timeout)
 
 
-async def _drive_gate(pm, *, channel, sender: str, text: str, correlation_id: str = "cid") -> bool | None:
+async def _drive_gate(pm, *, channel, sender: str, text: str, trace_id: str = "tid") -> bool | None:
     """Run the message gate the way Agent.on_message does (reject-wins, then
     on_message_rejected on a veto)."""
     results = await pm.ahook.should_process_message(
-        channel=channel, sender=sender, text=text, correlation_id=correlation_id,
+        channel=channel, sender=sender, text=text, trace_id=trace_id,
     )
     decision = resolve_reject_wins(results)
     if decision is False:
         await pm.ahook.on_message_rejected(
-            channel=channel, correlation_id=correlation_id, sender=sender, text=text,
+            channel=channel, trace_id=trace_id, sender=sender, text=text,
         )
     return decision
 
@@ -761,6 +761,8 @@ class TestScope:
             assert kw["channel"].id == f"discord:{CHAN_ID}"
             assert kw["sender"] == str(AUTH_ID)
             assert h.registry.get(f"discord:{CHAN_ID}") is kw["channel"]
+            # The transport mints a real (non-empty string) trace id.
+            assert isinstance(kw["trace_id"], str) and kw["trace_id"]
         finally:
             await h.plugin.on_stop()
 
@@ -928,7 +930,7 @@ class TestTyping:
             await _wait_until(lambda: h.messageable.typing_count >= 2)
             ch = h.registry.get(f"discord:dm:{AUTH_ID}")
             await h.plugin.on_message_rejected(
-                channel=ch, correlation_id="cid", sender=str(OTHER_ID), text="hi",
+                channel=ch, trace_id="tid", sender=str(OTHER_ID), text="hi",
             )
             assert h.plugin._outstanding[ch.id] == 1
             before = h.messageable.typing_count
@@ -974,7 +976,7 @@ class TestTyping:
             await _wait_until(lambda: h.messageable.typing_count >= 2)
             ch = h.registry.get(f"discord:dm:{AUTH_ID}")
             await h.plugin.on_message_rejected(
-                channel=ch, correlation_id="cid", sender=str(AUTH_ID), text="work",
+                channel=ch, trace_id="tid", sender=str(AUTH_ID), text="work",
             )
             await asyncio.sleep(TYPING_REFRESH_FOR_TESTS * 3)
             settled = h.messageable.typing_count

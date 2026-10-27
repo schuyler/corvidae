@@ -68,7 +68,7 @@ async def _start_daemon_plugins(state_dir: Path):
 async def _turn(memory: MemoryPlugin, channel: Channel, text: str) -> None:
     """The turn-loop entry: append the user message, fire retrieval."""
     channel.conversation.append({"role": "user", "content": text})
-    await memory.before_agent_turn(channel=channel, correlation_id=None, meta={})
+    await memory.before_agent_turn(channel=channel, trace_id=None, meta={})
 
 
 class TestProbeSequence:

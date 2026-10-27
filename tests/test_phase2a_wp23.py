@@ -34,6 +34,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from corvidae.trace import mint_trace_id
 from corvidae.agent import Agent, FRAMEWORK_KEYS
 from corvidae.channel import Channel, ChannelConfig
 from corvidae.turn import AgentTurnResult
@@ -256,7 +257,7 @@ class TestStep7DottedKeyExclusion:
 
         with patch("corvidae.agent.run_agent_turn", new_callable=AsyncMock) as mock_turn:
             mock_turn.return_value = turn_result
-            await plugin.on_message(channel=channel, sender="user", text="hi")
+            await plugin.on_message(channel=channel, sender="user", text="hi", trace_id=mint_trace_id())
             await drain(plugin, channel)
 
         assert mock_turn.await_args is not None
@@ -287,7 +288,7 @@ class TestStep7DottedKeyExclusion:
 
         with patch("corvidae.agent.run_agent_turn", new_callable=AsyncMock) as mock_turn:
             mock_turn.return_value = turn_result
-            await plugin.on_message(channel=channel, sender="user", text="hi")
+            await plugin.on_message(channel=channel, sender="user", text="hi", trace_id=mint_trace_id())
             await drain(plugin, channel)
 
         extra_body = mock_turn.await_args.kwargs.get("extra_body")
@@ -312,7 +313,7 @@ class TestStep7DottedKeyExclusion:
 
         with patch("corvidae.agent.run_agent_turn", new_callable=AsyncMock) as mock_turn:
             mock_turn.return_value = turn_result
-            await plugin.on_message(channel=channel, sender="user", text="hi")
+            await plugin.on_message(channel=channel, sender="user", text="hi", trace_id=mint_trace_id())
             await drain(plugin, channel)
 
         extra_body = mock_turn.await_args.kwargs.get("extra_body")
@@ -391,7 +392,7 @@ class TestStep7LogprobsMerge:
 
         with patch("corvidae.agent.run_agent_turn", new_callable=AsyncMock) as mock_turn:
             mock_turn.return_value = turn_result
-            await plugin.on_message(channel=channel, sender="user", text="hi")
+            await plugin.on_message(channel=channel, sender="user", text="hi", trace_id=mint_trace_id())
             await drain(plugin, channel)
 
         extra_body = mock_turn.await_args.kwargs.get("extra_body")
@@ -414,7 +415,7 @@ class TestStep7LogprobsMerge:
 
         with patch("corvidae.agent.run_agent_turn", new_callable=AsyncMock) as mock_turn:
             mock_turn.return_value = turn_result
-            await plugin.on_message(channel=channel, sender="user", text="hi")
+            await plugin.on_message(channel=channel, sender="user", text="hi", trace_id=mint_trace_id())
             await drain(plugin, channel)
 
         extra_body = mock_turn.await_args.kwargs.get("extra_body")
@@ -440,7 +441,7 @@ class TestStep7LogprobsMerge:
 
         with patch("corvidae.agent.run_agent_turn", new_callable=AsyncMock) as mock_turn:
             mock_turn.return_value = turn_result
-            await plugin.on_message(channel=channel, sender="user", text="hi")
+            await plugin.on_message(channel=channel, sender="user", text="hi", trace_id=mint_trace_id())
             await drain(plugin, channel)
 
         extra_body = mock_turn.await_args.kwargs.get("extra_body")
@@ -460,7 +461,7 @@ class TestStep7LogprobsMerge:
         mock_client.chat = AsyncMock(return_value=_make_text_response("ok"))
         plugin._client = mock_client
 
-        await plugin.on_message(channel=channel, sender="user", text="hi")
+        await plugin.on_message(channel=channel, sender="user", text="hi", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
         assert mock_client.chat.await_args is not None

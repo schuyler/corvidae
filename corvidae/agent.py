@@ -27,7 +27,6 @@ Logging:
 import asyncio
 import logging
 import time
-import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field, fields as dc_fields
 from enum import Enum
@@ -42,6 +41,9 @@ from corvidae.channel import (
     resolve_system_prompt,
 )
 from corvidae.context import ContextWindow, MessageType, DEFAULT_CHARS_PER_TOKEN
+# Re-exported: mint_trace_id lives in a leaf module so transports can
+# import it without this module; existing imports from here keep working.
+from corvidae.trace import mint_trace_id  # noqa: F401
 from corvidae.fork import (
     ForkRefused,
     ForkResult,
@@ -73,16 +75,6 @@ DEFAULT_LLM_ERROR_MESSAGE = "Sorry, I encountered an error and could not process
 MAX_TURNS_FALLBACK_MESSAGE = "(max tool-calling rounds reached)"
 
 
-def mint_correlation_id() -> str:
-    """Mint a time-sortable, globally-unique correlation id.
-
-    Shape: ``<hex-time>-<hex12>``. The hex-time prefix is
-    monotone-nondecreasing across calls (wall-clock seconds); the uuid4
-    suffix guarantees distinctness within the same second.
-    """
-    return f"{int(time.time()):x}-{uuid.uuid4().hex[:12]}"
-
-
 class QueueItemRole(Enum):
     USER = "user"
     NOTIFICATION = "notification"
@@ -102,9 +94,9 @@ class QueueItem:
         tool_call_id: For deferred tool results (background task completions).
         meta: Extensible metadata, opaque to core. Plugins stamp their own
             keys (e.g. ``meta["origin"]``) and read them back downstream.
-        correlation_id: The correlation this item belongs to. None for
+        trace_id: The trace this item belongs to. None for
             notifications until dequeue-time resolution runs.
-        originating: True when this item mints/owns the correlation id
+        originating: True when this item mints/owns the trace id
             (USER items, and dequeue-minted notifications). False for
             tool-result notifications that inherited an id from a prior
             item. Tracked on the item, never re-derived, so
@@ -118,7 +110,7 @@ class QueueItem:
     source: str | None = None
     tool_call_id: str | None = None
     meta: dict = field(default_factory=dict)
-    correlation_id: str | None = None
+    trace_id: str | None = None
     originating: bool = False
 
 
@@ -248,7 +240,14 @@ class Agent(CorvidaePlugin):
         await self._start_plugin(config)
 
     @hookimpl
-    async def on_message(self, channel, sender: str, text: str) -> None:
+    async def on_message(self, channel, sender: str, text: str, trace_id: str) -> None:
+        # The transport mints the id. A missing one would silently break the
+        # transport's link between this message and its lifecycle hooks, so
+        # fail loudly -- before the readiness check, so a mis-wired transport
+        # is caught even while the agent is starting.
+        if not trace_id:
+            raise ValueError("on_message requires a non-empty trace_id from the transport")
+
         if not self._client:
             logger.error("on_message: LLM client not initialized")
             return
@@ -258,13 +257,9 @@ class Agent(CorvidaePlugin):
             extra={"channel": channel.id, "sender": sender},
         )
 
-        # Mint the correlation id BEFORE the gate fires, so gate plugins can
-        # correlate their decision with the message.
-        correlation_id = mint_correlation_id()
-
         # Hook: should_process_message (broadcast, reject-wins)
         results = await self.pm.ahook.should_process_message(
-            channel=channel, sender=sender, text=text, correlation_id=correlation_id,
+            channel=channel, sender=sender, text=text, trace_id=trace_id,
         )
         gate_result = resolve_reject_wins(results)
         if gate_result is False:
@@ -274,7 +269,7 @@ class Agent(CorvidaePlugin):
             )
             try:
                 await self.pm.ahook.on_message_rejected(
-                    channel=channel, correlation_id=correlation_id, sender=sender, text=text,
+                    channel=channel, trace_id=trace_id, sender=sender, text=text,
                 )
             except Exception:
                 logger.warning("on_message_rejected hook failed", exc_info=True, extra={"channel": channel.id})
@@ -282,7 +277,7 @@ class Agent(CorvidaePlugin):
 
         try:
             await self.pm.ahook.on_message_admitted(
-                channel=channel, correlation_id=correlation_id, sender=sender, text=text,
+                channel=channel, trace_id=trace_id, sender=sender, text=text,
             )
         except Exception:
             logger.warning("on_message_admitted hook failed", exc_info=True, extra={"channel": channel.id})
@@ -292,7 +287,7 @@ class Agent(CorvidaePlugin):
             content=text,
             channel=channel,
             sender=sender,
-            correlation_id=correlation_id,
+            trace_id=trace_id,
             originating=True,
         )
         queue = self._get_or_create_queue(channel)
@@ -445,9 +440,9 @@ class Agent(CorvidaePlugin):
         - No tool calls: increment counter, resolve display text, fire
           on_agent_response, send message.
 
-        ``item`` provides the current turn's correlation id/meta (for the
+        ``item`` provides the current turn's trace id/meta (for the
         enriched on_agent_response call) and, via _dispatch_tool_calls,
-        stamps the tool cycle's Tasks with the same correlation.
+        stamps the tool cycle's Tasks with the same trace.
         """
         if result.tool_calls and channel.turn_counter < max_turns_limit:
             channel.turn_counter += 1
@@ -485,14 +480,14 @@ class Agent(CorvidaePlugin):
             },
         )
 
-        correlation_id = item.correlation_id if item is not None else None
+        trace_id = item.trace_id if item is not None else None
         meta = item.meta if item is not None else {}
         try:
             await self.pm.ahook.on_agent_response(
                 channel=channel,
                 request_text=request_text,
                 response_text=display_response,
-                correlation_id=correlation_id,
+                trace_id=trace_id,
                 meta=meta,
                 logprobs=result.logprobs,
             )
@@ -545,20 +540,20 @@ class Agent(CorvidaePlugin):
         )
         channel = item.channel
 
-        # Correlation resolution MUST happen here, before the
+        # Trace resolution MUST happen here, before the
         # set_attribution call below, so the widened attribution carries
         # the id into every LLM call in the turn (including tool Tasks
         # created during dispatch, which snapshot the context at creation).
         # If resolution ran inside _process_queue_item_attributed instead
-        # (after attribution is set), usage_log.correlation_id would be null
+        # (after attribution is set), usage_log.trace_id would be null
         # for the whole turn.
-        if item.correlation_id is None:
-            inherited = item.meta.get("correlation_id") if item.meta else None
+        if item.trace_id is None:
+            inherited = item.meta.get("trace_id") if item.meta else None
             if inherited is not None:
-                item.correlation_id = inherited
+                item.trace_id = inherited
                 item.originating = False
             else:
-                item.correlation_id = mint_correlation_id()
+                item.trace_id = mint_trace_id()
                 item.originating = True
 
         # Attribute all LLM activity in this turn (including tool Tasks
@@ -567,7 +562,7 @@ class Agent(CorvidaePlugin):
         # around its own LLM call and restores this attribution after.
         attribution_token = set_attribution(
             stage="turn", channel_id=channel.id,
-            correlation_id=item.correlation_id, meta=item.meta,
+            trace_id=item.trace_id, meta=item.meta,
         )
         try:
             await self._process_queue_item_attributed(item, channel)
@@ -606,7 +601,7 @@ class Agent(CorvidaePlugin):
         conv = channel.conversation
         _phases["conv_init"] = _time.monotonic() - _t_conv_init_start
 
-        # 2. Reset turn_counter when this item originates a new correlation
+        # 2. Reset turn_counter when this item originates a new trace
         # (USER items, and notifications whose id was minted at dequeue in
         # _process_queue_item) — but only when it starts a cycle. An item
         # arriving while a tool cycle is in flight is charged against that
@@ -641,15 +636,15 @@ class Agent(CorvidaePlugin):
         _phases["persist"] = _time.monotonic() - _t_persist_start
 
         # 4c. Fire on_message_persisted only when this item originates its
-        # correlation (USER items, and notification items whose id was
+        # trace (USER items, and notification items whose id was
         # minted at dequeue). Mid-exchange tool-result rows, injected
         # CONTEXT, and assistant rows never fire it — per-row firing under
         # one id would overwrite the rowid with each successive row. Fires
         # regardless of persistence outcome (rowid may be None).
-        if item.originating and item.correlation_id is not None:
+        if item.originating and item.trace_id is not None:
             try:
                 await self.pm.ahook.on_message_persisted(
-                    channel=channel, correlation_id=item.correlation_id,
+                    channel=channel, trace_id=item.trace_id,
                     rowid=rowid, text=request_text, meta=item.meta,
                 )
             except Exception:
@@ -689,7 +684,7 @@ class Agent(CorvidaePlugin):
         msg_count_before = len(conv.messages)
         try:
             await self.pm.ahook.before_agent_turn(
-                channel=channel, correlation_id=item.correlation_id, meta=item.meta,
+                channel=channel, trace_id=item.trace_id, meta=item.meta,
             )
         except Exception:
             logger.warning(
@@ -909,10 +904,10 @@ class Agent(CorvidaePlugin):
         Logs an error and returns without enqueuing if the TaskQueue is
         unavailable (TaskPlugin not registered).
 
-        Stamps each Task with the current turn's correlation id/meta, read
+        Stamps each Task with the current turn's trace id/meta, read
         from the attribution contextvar set by _process_queue_item at
         dequeue (this coroutine runs under that attribution). Every turn of
-        a tool cycle inherits its correlation this way, however many hops.
+        a tool cycle inherits its trace this way, however many hops.
         """
         task_queue = getattr(self.pm.get_plugin("task"), "task_queue", None)
         if task_queue is None:
@@ -920,7 +915,7 @@ class Agent(CorvidaePlugin):
             return
 
         current_attribution = get_attribution()
-        correlation_id = current_attribution.get("correlation_id")
+        trace_id = current_attribution.get("trace_id")
         meta = current_attribution.get("meta") or {}
 
         # Union in this batch's call IDs — a second dispatch while an earlier
@@ -960,7 +955,7 @@ class Agent(CorvidaePlugin):
                 channel=channel,
                 tool_call_id=call_id,
                 description=f"tool:{fn_name}",
-                correlation_id=correlation_id,
+                trace_id=trace_id,
                 meta=meta,
             )
             await task_queue.enqueue(task)

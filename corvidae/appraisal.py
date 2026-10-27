@@ -13,7 +13,7 @@ The stage-1 vector is produced by a pull-based compute
 (:meth:`AppraisalPlugin.get_or_compute`), NOT by cross-hook ordering: apluggy
 dispatches broadcast async hooks concurrently via ``asyncio.gather``, so a
 push model would race the gate consumer against this plugin's write. Callers
-pull; the compute runs once per ``(exchange_key, direction)`` and caches.
+pull; the compute runs once per ``(trace_id, direction)`` and caches.
 
 Every parameter here is a commented best-guess constant, runtime-tunable
 through both surfaces via ``corvidae.tuning.resolve_tunable`` (operator
@@ -59,7 +59,7 @@ WEIGHT_IMPERATIVE_DEFAULT = 0.10      # appraisal.weights.imperative
 CACHE_MAXSIZE = 512
 
 # Bound on the originating-text LRU (AppraisalPlugin._originating_text).
-# Keyed by correlation_id, not per-channel — user messages interleave
+# Keyed by trace_id, not per-channel — user messages interleave
 # mid-cycle by design, so a single per-channel slot would be clobbered.
 ORIGINATING_TEXT_LRU_MAXSIZE = 512
 
@@ -415,7 +415,7 @@ class AppraisalPlugin(CorvidaePlugin):
         if pm is not None:
             self.pm = pm
         self.config: dict = {}
-        # Both maps keyed (exchange_key, direction); direction ∈ {"in","out"}.
+        # Both maps keyed (trace_id, direction); direction ∈ {"in","out"}.
         # get_or_compute_out (WP2.9) will share this discipline — the two
         # directions compute over different text and must never alias.
         self._cache: _LRUDict = _LRUDict(maxsize=CACHE_MAXSIZE)
@@ -428,7 +428,7 @@ class AppraisalPlugin(CorvidaePlugin):
         # advisory reader (get_last_stage2). Consumers never wait for the
         # CURRENT exchange's stage-2 (WP2.5 point 2).
         self._last_stage2: dict[str, dict] = {}
-        # Correlation-keyed LRU of originating text (the exchange's true
+        # Trace-keyed LRU of originating text (the exchange's true
         # originating USER/notification text), bounded so long-running
         # exchanges don't leak memory. Fed by on_message_persisted.
         self._originating_text: collections.OrderedDict[str, str] = collections.OrderedDict()
@@ -511,7 +511,7 @@ class AppraisalPlugin(CorvidaePlugin):
     # ------------------------------------------------------------------
 
     @hookimpl
-    async def should_process_message(self, channel, sender, text, correlation_id):
+    async def should_process_message(self, channel, sender, text, trace_id):
         """Thin trigger: compute the inbound stage-1 vector, return None.
 
         The try/except is load-bearing, not defensive dressing: this is a
@@ -521,55 +521,55 @@ class AppraisalPlugin(CorvidaePlugin):
         prevent reject-wins from resolving. An appraisal failure never
         rejects or crashes the inbound path (traps #1/#10).
         """
-        if correlation_id is None:
+        if trace_id is None:
             return None
         try:
-            await self.get_or_compute(channel, correlation_id, text)
+            await self.get_or_compute(channel, trace_id, text)
         except Exception:
             logger.warning(
                 "stage-1 appraisal failed at the gate (failing open)",
                 exc_info=True,
-                extra={"channel": channel.id, "correlation_id": correlation_id},
+                extra={"channel": channel.id, "trace_id": trace_id},
             )
         return None
 
     @hookimpl
-    async def on_message_persisted(self, channel, correlation_id, rowid, text, meta) -> None:
+    async def on_message_persisted(self, channel, trace_id, rowid, text, meta) -> None:
         """Record the exchange's true originating text in the bounded LRU.
 
         Fires once per originating item (user messages and
-        notification-born correlations alike), regardless of persistence
+        notification-born traces alike), regardless of persistence
         outcome (rowid may be None).
         """
-        self._originating_text[correlation_id] = text
-        self._originating_text.move_to_end(correlation_id)
+        self._originating_text[trace_id] = text
+        self._originating_text.move_to_end(trace_id)
         while len(self._originating_text) > ORIGINATING_TEXT_LRU_MAXSIZE:
             self._originating_text.popitem(last=False)
         # The rowid, when persistence produced one (the fork containment check).
         if rowid is not None:
-            self._originating_rowid[correlation_id] = rowid
-            self._originating_rowid.move_to_end(correlation_id)
+            self._originating_rowid[trace_id] = rowid
+            self._originating_rowid.move_to_end(trace_id)
             while len(self._originating_rowid) > ORIGINATING_TEXT_LRU_MAXSIZE:
                 self._originating_rowid.popitem(last=False)
 
-    def get_originating_text(self, correlation_id: str) -> str | None:
+    def get_originating_text(self, trace_id: str) -> str | None:
         """Pure reader for the exchange's true originating text, or None."""
-        return self._originating_text.get(correlation_id)
+        return self._originating_text.get(trace_id)
 
-    def get_originating_rowid(self, correlation_id: str) -> int | None:
+    def get_originating_rowid(self, trace_id: str) -> int | None:
         """Pure reader for the originating row's message_log rowid, or None."""
-        return self._originating_rowid.get(correlation_id)
+        return self._originating_rowid.get(trace_id)
 
     # ------------------------------------------------------------------
     # Pull API
     # ------------------------------------------------------------------
 
-    async def get_or_compute(self, channel, exchange_key: str, text: str) -> dict:
+    async def get_or_compute(self, channel, trace_id: str, text: str) -> dict:
         """Return the INBOUND stage-1 vector for this exchange, computing once.
 
         Idempotent and concurrency-safe: concurrent callers for the same key
         await a single shared in-flight future, so the probe runs exactly
-        once per (exchange_key, direction) regardless of how many hookimpls
+        once per (trace_id, direction) regardless of how many hookimpls
         request it or what order they fire in. On first compute,
         fire-and-forget persists probe_score + the vector under the
         appraisal envelope's "stage1" key.
@@ -588,19 +588,19 @@ class AppraisalPlugin(CorvidaePlugin):
         unreachable; it stops being so the moment a cross-task caller
         appears.
         """
-        return await self._get_or_compute(channel, exchange_key, text, "in")
+        return await self._get_or_compute(channel, trace_id, text, "in")
 
-    async def get_appraisal(self, exchange_key: str) -> dict | None:
+    async def get_appraisal(self, trace_id: str) -> dict | None:
         """Pure reader for the inbound stage-1 vector (no compute)."""
-        return await self._read_vector(exchange_key, "in", "stage1")
+        return await self._read_vector(trace_id, "in", "stage1")
 
-    async def get_appraisal_out(self, exchange_key: str) -> dict | None:
+    async def get_appraisal_out(self, trace_id: str) -> dict | None:
         """Pure reader for the outbound stage-1 vector (no compute)."""
-        return await self._read_vector(exchange_key, "out", "stage1_out")
+        return await self._read_vector(trace_id, "out", "stage1_out")
 
-    async def get_stage2(self, exchange_key: str) -> dict | None:
+    async def get_stage2(self, trace_id: str) -> dict | None:
         """Pure reader for the stage-2 vector (WP2.5 writes it)."""
-        return await self._read_vector(exchange_key, None, "stage2")
+        return await self._read_vector(trace_id, None, "stage2")
 
     def get_last_stage2(self, channel_id: str) -> dict | None:
         """Synchronous advisory reader for the LAST completed stage-2 vector.
@@ -618,7 +618,7 @@ class AppraisalPlugin(CorvidaePlugin):
 
     @hookimpl
     async def on_agent_response(
-        self, channel, request_text, response_text, correlation_id, meta, logprobs,
+        self, channel, request_text, response_text, trace_id, meta, logprobs,
     ) -> None:
         """Enqueue the silent stage-2 appraisal task (never on the response path).
 
@@ -629,17 +629,17 @@ class AppraisalPlugin(CorvidaePlugin):
         (trap #10).
         """
         origin = (meta or {}).get("origin")
-        if correlation_id is None or origin == "critique":
+        if trace_id is None or origin == "critique":
             return
         task_plugin = self.pm.get_plugin("task") if hasattr(self, "pm") else None
         queue = getattr(task_plugin, "task_queue", None)
         if queue is None:
             logger.debug("stage-2 appraisal skipped: task queue unavailable")
             return
-        text_in = self.get_originating_text(correlation_id) or request_text
+        text_in = self.get_originating_text(trace_id) or request_text
 
         async def _work() -> str:
-            await self._run_stage2(channel, correlation_id, text_in, response_text, logprobs)
+            await self._run_stage2(channel, trace_id, text_in, response_text, logprobs)
             return ""
 
         try:
@@ -647,7 +647,7 @@ class AppraisalPlugin(CorvidaePlugin):
                 work=_work,
                 channel=channel,
                 description="appraisal:stage2",
-                correlation_id=correlation_id,
+                trace_id=trace_id,
                 meta=meta,
                 deliver=False,
                 tool_call_id=None,
@@ -655,11 +655,11 @@ class AppraisalPlugin(CorvidaePlugin):
         except Exception:
             logger.warning(
                 "failed to enqueue stage-2 appraisal task", exc_info=True,
-                extra={"channel": channel.id, "correlation_id": correlation_id},
+                extra={"channel": channel.id, "trace_id": trace_id},
             )
 
     async def _run_stage2(
-        self, channel, exchange_key: str, originating_text: str | None,
+        self, channel, trace_id: str, originating_text: str | None,
         response_text: str | None, logprobs: dict | None,
     ) -> None:
         """The silent task body: one tier-3 call, merge-persist stage 2.
@@ -669,14 +669,14 @@ class AppraisalPlugin(CorvidaePlugin):
         the row keeps stage 1 only — no exception escapes (trap #10).
         """
         token = set_attribution(
-            stage="appraisal", channel_id=channel.id, correlation_id=exchange_key
+            stage="appraisal", channel_id=channel.id, trace_id=trace_id
         )
         try:
-            profile = await self._retrieval_profile_summary(exchange_key)
+            profile = await self._retrieval_profile_summary(trace_id)
             # A fork of the live window when one is available; else (and
             # on any fork miss) the standalone tier-3 call.
             stage2 = await self._fork_stage2(
-                channel, exchange_key, originating_text, response_text, profile
+                channel, trace_id, originating_text, response_text, profile
             )
             if stage2 is None:
                 client = self._appraisal_client()
@@ -704,7 +704,7 @@ class AppraisalPlugin(CorvidaePlugin):
                 except Exception:
                     logger.warning(
                         "stage-2 appraisal call/parse failed; row keeps stage 1",
-                        exc_info=True, extra={"exchange_key": exchange_key},
+                        exc_info=True, extra={"trace_id": trace_id},
                     )
                     return
                 finally:
@@ -721,11 +721,11 @@ class AppraisalPlugin(CorvidaePlugin):
             outcome_log = self.pm.get_plugin("outcome_log")
             if outcome_log is not None:
                 try:
-                    await outcome_log.update_exchange(exchange_key, appraisal=merge)
+                    await outcome_log.update_exchange(trace_id, appraisal=merge)
                 except Exception:
                     logger.warning(
                         "stage-2 appraisal persist failed", exc_info=True,
-                        extra={"exchange_key": exchange_key},
+                        extra={"trace_id": trace_id},
                     )
             # Advisory synchronous reader for the last completed stage-2.
             self._last_stage2[channel.id] = stage2
@@ -733,7 +733,7 @@ class AppraisalPlugin(CorvidaePlugin):
             reset_attribution(token)
 
     async def _fork_stage2(
-        self, channel, exchange_key: str, originating_text: str | None,
+        self, channel, trace_id: str, originating_text: str | None,
         response_text: str | None, profile: str,
     ) -> dict | None:
         """Stage 2 from a fork of the channel's live window, or None.
@@ -750,12 +750,12 @@ class AppraisalPlugin(CorvidaePlugin):
         agent = fork_agent(self.pm if hasattr(self, "pm") else None, "appraisal")
         if agent is None:
             return None
-        rowid = self.get_originating_rowid(exchange_key)
+        rowid = self.get_originating_rowid(trace_id)
         conv = getattr(channel, "conversation", None)
         if rowid is None or conv is None or rowid not in window_db_ids(conv.messages):
             logger.debug(
                 "stage-2 exchange not in the window; using the standalone call",
-                extra={"exchange_key": exchange_key},
+                extra={"trace_id": trace_id},
             )
             return None
         prompt = config_value(
@@ -773,7 +773,7 @@ class AppraisalPlugin(CorvidaePlugin):
         except Exception:
             logger.warning(
                 "stage-2 appraisal fork failed; using the standalone call",
-                exc_info=True, extra={"exchange_key": exchange_key},
+                exc_info=True, extra={"trace_id": trace_id},
             )
             return None
 
@@ -796,7 +796,7 @@ class AppraisalPlugin(CorvidaePlugin):
         except Exception:
             return None
 
-    async def _retrieval_profile_summary(self, exchange_key: str) -> str:
+    async def _retrieval_profile_summary(self, trace_id: str) -> str:
         """Render the exchange's retrieval profile as a short prompt line."""
         db = self._exchange_db()
         if db is None:
@@ -804,8 +804,8 @@ class AppraisalPlugin(CorvidaePlugin):
         try:
             async with db.execute(
                 "SELECT retrieval_top_score, retrieval_hit_count "
-                "FROM exchange_log WHERE exchange_key = ?",
-                (exchange_key,),
+                "FROM exchange_log WHERE trace_id = ?",
+                (trace_id,),
             ) as cursor:
                 row = await cursor.fetchone()
         except Exception:
@@ -912,8 +912,8 @@ class AppraisalPlugin(CorvidaePlugin):
     # Internals
     # ------------------------------------------------------------------
 
-    async def _get_or_compute(self, channel, exchange_key: str, text: str, direction: str) -> dict:
-        k = (exchange_key, direction)
+    async def _get_or_compute(self, channel, trace_id: str, text: str, direction: str) -> dict:
+        k = (trace_id, direction)
         if k in self._cache:                    # 1. hit — return before any await
             return self._cache[k]
         if (fut := self._inflight.get(k)):      # 2. compute in progress: share it.
@@ -950,7 +950,7 @@ class AppraisalPlugin(CorvidaePlugin):
         # 6. Fire-and-forget persist — the gate path never awaits it; the
         # strong ref prevents a GC-dropped write.
         t = asyncio.create_task(
-            self._persist_stage1(channel, exchange_key, direction, vector, probe_score)
+            self._persist_stage1(channel, trace_id, direction, vector, probe_score)
         )
         self._persist_tasks.add(t)
         t.add_done_callback(self._persist_tasks.discard)
@@ -1054,7 +1054,7 @@ class AppraisalPlugin(CorvidaePlugin):
         return clamp01((min(hits, 3) / 3) * min(1.0, -top_rank / rank_scale))
 
     async def _persist_stage1(
-        self, channel, exchange_key: str, direction: str, vector: dict,
+        self, channel, trace_id: str, direction: str, vector: dict,
         probe_score: float | None,
     ) -> None:
         """Fire-and-forget stage-1 persist via the atomic-merge upsert.
@@ -1080,22 +1080,22 @@ class AppraisalPlugin(CorvidaePlugin):
             # get_or_compute must thread the real origin through here or it
             # will silently relabel the exchange row (2B review A-4).
             await outcome_log.upsert_exchange(
-                exchange_key, channel.id, "user", **columns
+                trace_id, channel.id, "user", **columns
             )
         except Exception:
             logger.warning(
                 "stage-1 appraisal persist failed",
                 exc_info=True,
-                extra={"exchange_key": exchange_key, "direction": direction},
+                extra={"trace_id": trace_id, "direction": direction},
             )
 
     async def _read_vector(
-        self, exchange_key: str, direction: str | None, envelope_key: str
+        self, trace_id: str, direction: str | None, envelope_key: str
     ) -> dict | None:
         """Read a vector: in-memory store first, then the appraisal envelope
         in exchange_log. Returns None when neither has it."""
         if direction is not None:
-            cached = self._cache.get((exchange_key, direction))
+            cached = self._cache.get((trace_id, direction))
             if cached is not None:
                 return cached
         db = self._probe_db
@@ -1108,8 +1108,8 @@ class AppraisalPlugin(CorvidaePlugin):
                 return None
         try:
             async with db.execute(
-                "SELECT appraisal FROM exchange_log WHERE exchange_key = ?",
-                (exchange_key,),
+                "SELECT appraisal FROM exchange_log WHERE trace_id = ?",
+                (trace_id,),
             ) as cursor:
                 row = await cursor.fetchone()
         except Exception:
@@ -1121,6 +1121,6 @@ class AppraisalPlugin(CorvidaePlugin):
             return json.loads(row[0]).get(envelope_key)
         except (json.JSONDecodeError, AttributeError):
             logger.warning(
-                "malformed appraisal envelope for exchange %s", exchange_key
+                "malformed appraisal envelope for exchange %s", trace_id
             )
             return None

@@ -10,6 +10,7 @@ logger = logging.getLogger("corvidae.irc_plugin")
 
 from corvidae.channel import Channel, ChannelRegistry
 from corvidae.channels.split import split_message
+from corvidae.trace import mint_trace_id
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 
 
@@ -136,6 +137,8 @@ class IRCPlugin(CorvidaePlugin):
             channel=channel,
             sender=by,
             text=message,
+            # Transport-minted id; the Agent uses it verbatim (#95).
+            trace_id=mint_trace_id(),
         )
 
     async def on_private_message(self, target, by, message):
@@ -147,6 +150,8 @@ class IRCPlugin(CorvidaePlugin):
             channel=channel,
             sender=by,
             text=message,
+            # Transport-minted id; the Agent uses it verbatim (#95).
+            trace_id=mint_trace_id(),
         )
 
     @hookimpl

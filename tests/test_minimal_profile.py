@@ -24,6 +24,7 @@ from llm_response_fixtures import (
     _make_tool_call,
     _make_tool_call_response,
 )
+from corvidae.trace import mint_trace_id
 
 MINIMAL_DISABLED_PLUGINS = [
     "memory", "memory_tools", "funnel", "appraisal", "critique", "outcome_log",
@@ -180,7 +181,8 @@ class TestMinimalProfile:
 
             # (b) A user message produces a response.
             await rt.pm.ahook.on_message(
-                channel=main_channel, sender="user", text="hello there"
+                channel=main_channel, sender="user", text="hello there",
+                trace_id=mint_trace_id()
             )
             await _drain_all(agent)
             assert main_channel.conversation is not None
@@ -191,6 +193,7 @@ class TestMinimalProfile:
             await rt.pm.ahook.on_message(
                 channel=main_channel, sender="user",
                 text="please read the marker file and report its contents",
+                trace_id=mint_trace_id(),
             )
             await _drain_all(agent)
             last_msg = main_channel.conversation.messages[-1]
@@ -220,6 +223,7 @@ class TestMinimalProfile:
                 await rt.pm.ahook.on_message(
                     channel=compact_channel, sender="user",
                     text=f"filler message {i}: {filler}",
+                trace_id=mint_trace_id(),
                 )
                 await _drain_all(agent)
 
@@ -262,7 +266,8 @@ class TestMinimalProfile:
             main_channel2 = registry2.get_or_create("irc", "main")
 
             await rt2.pm.ahook.on_message(
-                channel=main_channel2, sender="user", text="are you still there?"
+                channel=main_channel2, sender="user", text="are you still there?",
+                trace_id=mint_trace_id()
             )
             await _drain_all(agent2)
 

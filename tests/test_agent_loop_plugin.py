@@ -8,6 +8,7 @@ from unittest.mock import ANY, AsyncMock, MagicMock, patch
 import aiosqlite
 import pytest
 
+from corvidae.trace import mint_trace_id
 from corvidae.channel import ChannelConfig, ChannelRegistry
 from corvidae.context import ContextWindow, MessageType as ContextMessageType
 from corvidae.persistence import init_db
@@ -314,7 +315,7 @@ class TestOnMessageConversationInit:
 
         assert channel.conversation is None
 
-        await plugin.on_message(channel=channel, sender="user", text="hi")
+        await plugin.on_message(channel=channel, sender="user", text="hi", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
         assert channel.conversation is not None
@@ -331,11 +332,11 @@ class TestOnMessageConversationInit:
         mock_client.chat = AsyncMock(return_value=_make_text_response("hello"))
         plugin._client = mock_client
 
-        await plugin.on_message(channel=channel, sender="user", text="first")
+        await plugin.on_message(channel=channel, sender="user", text="first", trace_id=mint_trace_id())
         await drain(plugin, channel)
         conv_first = channel.conversation
 
-        await plugin.on_message(channel=channel, sender="user", text="second")
+        await plugin.on_message(channel=channel, sender="user", text="second", trace_id=mint_trace_id())
         await drain(plugin, channel)
         conv_second = channel.conversation
 
@@ -359,7 +360,7 @@ class TestOnMessagePersistenceAndLoop:
         mock_client.chat = AsyncMock(return_value=_make_text_response("response"))
         plugin._client = mock_client
 
-        await plugin.on_message(channel=channel, sender="alice", text="test message")
+        await plugin.on_message(channel=channel, sender="alice", text="test message", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
         conv = channel.conversation
@@ -387,7 +388,7 @@ class TestOnMessagePersistenceAndLoop:
 
         with patch("corvidae.agent.run_agent_turn", new_callable=AsyncMock) as mock_turn:
             mock_turn.return_value = turn_result
-            await plugin.on_message(channel=channel, sender="user", text="query")
+            await plugin.on_message(channel=channel, sender="user", text="query", trace_id=mint_trace_id())
             await drain(plugin, channel)
 
         mock_turn.assert_awaited_once()
@@ -412,7 +413,7 @@ class TestOnMessagePersistenceAndLoop:
         mock_client.chat = AsyncMock(return_value=_make_text_response("agent reply"))
         plugin._client = mock_client
 
-        await plugin.on_message(channel=channel, sender="user", text="hello")
+        await plugin.on_message(channel=channel, sender="user", text="hello", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
         conv = channel.conversation
@@ -431,7 +432,7 @@ class TestOnMessagePersistenceAndLoop:
         mock_client.chat = AsyncMock(return_value=_make_text_response("my answer"))
         plugin._client = mock_client
 
-        await plugin.on_message(channel=channel, sender="user", text="question")
+        await plugin.on_message(channel=channel, sender="user", text="question", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
         plugin.pm.ahook.send_message.assert_awaited_once_with(
@@ -633,7 +634,7 @@ class TestOnMessageThinkingTokens:
         mock_client.chat = AsyncMock(return_value=_make_text_response(raw))
         plugin._client = mock_client
 
-        await plugin.on_message(channel=channel, sender="user", text="hi")
+        await plugin.on_message(channel=channel, sender="user", text="hi", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
         plugin.pm.ahook.send_message.assert_awaited_once_with(
@@ -672,7 +673,7 @@ class TestOnMessageThinkingTokens:
         )
         plugin._client = mock_client
 
-        await plugin.on_message(channel=channel, sender="user", text="query")
+        await plugin.on_message(channel=channel, sender="user", text="query", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
         # Prior message is stripped too, before the LLM call sees it
@@ -708,7 +709,7 @@ class TestOnMessageThinkingTokens:
         )
         plugin._client = mock_client
 
-        await plugin.on_message(channel=channel, sender="user", text="query")
+        await plugin.on_message(channel=channel, sender="user", text="query", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
         conv = channel.conversation
@@ -738,7 +739,7 @@ class TestOnMessageThinkingTokens:
         )
         plugin._client = mock_client
 
-        await plugin.on_message(channel=channel, sender="user", text="query")
+        await plugin.on_message(channel=channel, sender="user", text="query", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
         # Query the DB directly for this channel's assistant messages
@@ -777,7 +778,7 @@ class TestOnMessageCompactionAndConfig:
         mock_client.chat = AsyncMock(return_value=_make_text_response("answer"))
         plugin._client = mock_client
 
-        await plugin.on_message(channel=channel, sender="user", text="hi")
+        await plugin.on_message(channel=channel, sender="user", text="hi", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
         # Register a compact_conversation hook that records calls and returns None
@@ -807,7 +808,7 @@ class TestOnMessageCompactionAndConfig:
 
             mock_turn.side_effect = tracking_turn
 
-            await plugin.on_message(channel=channel, sender="user", text="second message")
+            await plugin.on_message(channel=channel, sender="user", text="second message", trace_id=mint_trace_id())
             await drain(plugin, channel)
 
         assert len(compact_calls) == 1
@@ -851,8 +852,8 @@ class TestOnMessageCompactionAndConfig:
         mock_client.chat = AsyncMock(return_value=_make_text_response("ok"))
         plugin._client = mock_client
 
-        await plugin.on_message(channel=channel_a, sender="user", text="hello")
-        await plugin.on_message(channel=channel_b, sender="user", text="hello")
+        await plugin.on_message(channel=channel_a, sender="user", text="hello", trace_id=mint_trace_id())
+        await plugin.on_message(channel=channel_b, sender="user", text="hello", trace_id=mint_trace_id())
         await drain(plugin, channel_a)
         await drain(plugin, channel_b)
 
@@ -961,7 +962,7 @@ class TestOnMessageToolCallRoundTrip:
 
         # Phase 3 async dispatch cycle:
         # 1. on_message enqueues user QueueItem
-        await plugin.on_message(channel=channel, sender="user", text="use the tool")
+        await plugin.on_message(channel=channel, sender="user", text="use the tool", trace_id=mint_trace_id())
         # 2. Drain: _process_queue_item runs, dispatches tool Task
         await drain(plugin, channel)
         # 3. Wait for TaskQueue to execute the tool task
@@ -1016,7 +1017,7 @@ class TestConversationInitPromptResolution:
         mock_client.chat = AsyncMock(return_value=_make_text_response("ok"))
         plugin._client = mock_client
 
-        await plugin.on_message(channel=channel, sender="user", text="hello")
+        await plugin.on_message(channel=channel, sender="user", text="hello", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
         assert channel.conversation is not None
@@ -1036,7 +1037,7 @@ class TestConversationInitPromptResolution:
         mock_client.chat = AsyncMock(return_value=_make_text_response("ok"))
         plugin._client = mock_client
 
-        await plugin.on_message(channel=channel, sender="user", text="hello")
+        await plugin.on_message(channel=channel, sender="user", text="hello", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
         assert channel.conversation is not None
@@ -1071,7 +1072,7 @@ class TestConversationInitPromptResolution:
         mock_client.chat = AsyncMock(return_value=_make_text_response("ok"))
         plugin._client = mock_client
 
-        await plugin.on_message(channel=channel, sender="user", text="hello")
+        await plugin.on_message(channel=channel, sender="user", text="hello", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
         assert channel.conversation is not None
@@ -1104,7 +1105,7 @@ class TestConversationInitPromptResolution:
         mock_client.chat = AsyncMock(return_value=_make_text_response("ok"))
         plugin._client = mock_client
 
-        await plugin.on_message(channel=channel, sender="user", text="hello")
+        await plugin.on_message(channel=channel, sender="user", text="hello", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
         assert channel.conversation is not None
@@ -1134,7 +1135,7 @@ class TestOnMessageErrorHandling:
         plugin._client = mock_client
 
         # Should not raise
-        await plugin.on_message(channel=channel, sender="user", text="trigger error")
+        await plugin.on_message(channel=channel, sender="user", text="trigger error", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
         # send_message should be called with the error text
@@ -1265,7 +1266,7 @@ class TestShouldProcessMessage:
 
         plugin.pm.register(RejectPlugin(), name="reject_plugin")
 
-        await plugin.on_message(channel=channel, sender="user", text="blocked message")
+        await plugin.on_message(channel=channel, sender="user", text="blocked message", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
         plugin.pm.ahook.send_message.assert_not_awaited()
@@ -1290,7 +1291,7 @@ class TestShouldProcessMessage:
 
         plugin.pm.register(AcceptPlugin(), name="accept_plugin")
 
-        await plugin.on_message(channel=channel, sender="user", text="accepted message")
+        await plugin.on_message(channel=channel, sender="user", text="accepted message", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
         plugin.pm.ahook.send_message.assert_awaited_once()
@@ -1315,7 +1316,7 @@ class TestShouldProcessMessage:
 
         plugin.pm.register(NeutralPlugin(), name="neutral_plugin")
 
-        await plugin.on_message(channel=channel, sender="user", text="hi")
+        await plugin.on_message(channel=channel, sender="user", text="hi", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
         plugin.pm.ahook.send_message.assert_awaited_once()
@@ -1331,7 +1332,7 @@ class TestShouldProcessMessage:
         mock_client.chat = AsyncMock(return_value=_make_text_response("no filter"))
         plugin._client = mock_client
 
-        await plugin.on_message(channel=channel, sender="user", text="hi")
+        await plugin.on_message(channel=channel, sender="user", text="hi", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
         plugin.pm.ahook.send_message.assert_awaited_once()
@@ -1356,7 +1357,7 @@ class TestShouldProcessMessage:
 
         plugin.pm.register(FalsyPlugin(), name="falsy_plugin")
 
-        await plugin.on_message(channel=channel, sender="user", text="hi")
+        await plugin.on_message(channel=channel, sender="user", text="hi", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
         # 0 is falsy but not `is False`, so message should proceed
@@ -1388,7 +1389,7 @@ class TestOnLlmError:
 
         plugin.pm.register(ErrorPlugin(), name="error_plugin")
 
-        await plugin.on_message(channel=channel, sender="user", text="trigger error")
+        await plugin.on_message(channel=channel, sender="user", text="trigger error", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
         plugin.pm.ahook.send_message.assert_awaited_once()
@@ -1414,7 +1415,7 @@ class TestOnLlmError:
 
         plugin.pm.register(NullErrorPlugin(), name="null_error_plugin")
 
-        await plugin.on_message(channel=channel, sender="user", text="trigger error")
+        await plugin.on_message(channel=channel, sender="user", text="trigger error", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
         plugin.pm.ahook.send_message.assert_awaited_once()
@@ -1432,7 +1433,7 @@ class TestOnLlmError:
         mock_client.chat = AsyncMock(side_effect=RuntimeError("LLM failed"))
         plugin._client = mock_client
 
-        await plugin.on_message(channel=channel, sender="user", text="trigger error")
+        await plugin.on_message(channel=channel, sender="user", text="trigger error", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
         plugin.pm.ahook.send_message.assert_awaited_once()
@@ -1463,7 +1464,7 @@ class TestOnLlmError:
 
         plugin.pm.register(InspectPlugin(), name="inspect_plugin")
 
-        await plugin.on_message(channel=channel, sender="user", text="trigger error")
+        await plugin.on_message(channel=channel, sender="user", text="trigger error", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
         assert "exc" in received_error
@@ -1491,7 +1492,7 @@ class TestCompactConversation:
         plugin._client = mock_client
 
         # Trigger conversation init
-        await plugin.on_message(channel=channel, sender="user", text="hi")
+        await plugin.on_message(channel=channel, sender="user", text="hi", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
         compact_called = []
@@ -1512,7 +1513,7 @@ class TestCompactConversation:
         )
         with patch("corvidae.agent.run_agent_turn", new_callable=AsyncMock,
                    return_value=turn_result):
-            await plugin.on_message(channel=channel, sender="user", text="second")
+            await plugin.on_message(channel=channel, sender="user", text="second", trace_id=mint_trace_id())
             await drain(plugin, channel)
 
         # Custom plugin was called and agent turn ran without error.
@@ -1549,7 +1550,7 @@ class TestCompactConversation:
         )
         with patch("corvidae.agent.run_agent_turn", new_callable=AsyncMock,
                    return_value=turn_result):
-            await plugin.on_message(channel=channel, sender="user", text="second")
+            await plugin.on_message(channel=channel, sender="user", text="second", trace_id=mint_trace_id())
             await drain(plugin, channel)
 
         # Agent turn ran without error; send_message was called.
@@ -1571,7 +1572,7 @@ class TestCompactConversation:
         plugin._client = mock_client
 
         # Trigger conversation init
-        await plugin.on_message(channel=channel, sender="user", text="hi")
+        await plugin.on_message(channel=channel, sender="user", text="hi", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
         class ExplodingPlugin:
@@ -1590,7 +1591,7 @@ class TestCompactConversation:
         with caplog.at_level(logging.WARNING, logger="corvidae.agent"):
             with patch("corvidae.agent.run_agent_turn", new_callable=AsyncMock,
                        return_value=turn_result):
-                await plugin.on_message(channel=channel, sender="user", text="second")
+                await plugin.on_message(channel=channel, sender="user", text="second", trace_id=mint_trace_id())
                 await drain(plugin, channel)
 
         # Exception must be caught and logged
@@ -1618,7 +1619,7 @@ class TestCompactConversation:
         plugin._client = mock_client
 
         # Trigger conversation init
-        await plugin.on_message(channel=channel, sender="user", text="hi")
+        await plugin.on_message(channel=channel, sender="user", text="hi", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
         captured = {}
@@ -1640,7 +1641,7 @@ class TestCompactConversation:
         )
         with patch("corvidae.agent.run_agent_turn", new_callable=AsyncMock,
                    return_value=turn_result):
-            await plugin.on_message(channel=channel, sender="user", text="second")
+            await plugin.on_message(channel=channel, sender="user", text="second", trace_id=mint_trace_id())
             await drain(plugin, channel)
 
         assert captured.get("max_tokens") == 8000  # from AGENT_DEFAULTS
@@ -1849,7 +1850,7 @@ class TestBeforeAgentTurn:
 
         plugin.pm.register(BeforeTurnPlugin(), name="before_turn_plugin")
 
-        await plugin.on_message(channel=channel, sender="user", text="hello")
+        await plugin.on_message(channel=channel, sender="user", text="hello", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
         assert len(hook_calls) == 1, (
@@ -1900,7 +1901,7 @@ class TestBeforeAgentTurn:
         mock_client.chat = AsyncMock(side_effect=capture_chat)
         plugin._client = mock_client
 
-        await plugin.on_message(channel=channel, sender="user", text="hello")
+        await plugin.on_message(channel=channel, sender="user", text="hello", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
         assert any(
