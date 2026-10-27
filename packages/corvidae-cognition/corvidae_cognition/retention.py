@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 from corvidae.attribution import reset_attribution, set_attribution
 
 if TYPE_CHECKING:
-    from corvidae.memory import MemoryPlugin
+    from corvidae_cognition.memory import MemoryPlugin
 
 logger = logging.getLogger("corvidae.retention")
 

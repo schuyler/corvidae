@@ -8,7 +8,7 @@ from corvidae.hooks import create_plugin_manager
 
 
 async def _setup(db):
-    from corvidae.outcome_log import OutcomeLogPlugin
+    from corvidae_cognition.outcome_log import OutcomeLogPlugin
     from corvidae.persistence import PersistencePlugin
 
     pm = create_plugin_manager()
@@ -170,7 +170,7 @@ class TestRetrievalTopSimilarity:
     async def test_concurrent_upgrade_does_not_fail(self, db):
         """Two first writers racing the upgrade both succeed: the loser of
         the ALTER race sees 'duplicate column name', which means done."""
-        from corvidae.outcome_log import OutcomeLogPlugin
+        from corvidae_cognition.outcome_log import OutcomeLogPlugin
         from corvidae.persistence import PersistencePlugin
 
         await db.execute(
@@ -226,7 +226,7 @@ class TestRfc7386NoneDeletes:
 
 async def test_missing_persistence_db_names_path_and_start_status():
     """The exchange_log DB guard names the configured path and start status."""
-    from corvidae.outcome_log import OutcomeLogPlugin
+    from corvidae_cognition.outcome_log import OutcomeLogPlugin
     from corvidae.persistence import PersistencePlugin
 
     pm = create_plugin_manager()

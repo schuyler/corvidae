@@ -30,7 +30,7 @@ from corvidae.attribution import get_attribution
 from corvidae.channel import Channel, ChannelConfig
 from corvidae.hooks import create_plugin_manager
 from corvidae.llm_plugin import LLMPlugin
-from corvidae.outcome_log import OutcomeLogPlugin
+from corvidae_cognition.outcome_log import OutcomeLogPlugin
 from corvidae.persistence import PersistencePlugin, init_db
 from corvidae.task import TaskPlugin
 
@@ -64,7 +64,7 @@ class StubClient:
 async def build_env(tmp_path, chat_text=VALID_STAGE2_JSON, start_worker=False):
     """Wire persistence + outcome_log + llm(stub) + task + appraisal against a
     file-backed session DB. Returns a SimpleNamespace of the pieces."""
-    from corvidae.appraisal import AppraisalPlugin
+    from corvidae_cognition.appraisal import AppraisalPlugin
 
     db_path = str(tmp_path / "sessions.db")
     db = await aiosqlite.connect(db_path)
@@ -174,7 +174,7 @@ class TestOriginatingTextLRU:
         await _teardown(env)
 
     async def test_lru_bounded_at_512_evicts_oldest(self, tmp_path):
-        from corvidae.appraisal import ORIGINATING_TEXT_LRU_MAXSIZE
+        from corvidae_cognition.appraisal import ORIGINATING_TEXT_LRU_MAXSIZE
         assert ORIGINATING_TEXT_LRU_MAXSIZE == 512
 
         env = await build_env(tmp_path)
@@ -393,13 +393,13 @@ class TestStage2Persist:
 
 class TestEntropySummary:
     def test_absent_logprobs_returns_none(self):
-        from corvidae.appraisal import entropy_summary
+        from corvidae_cognition.appraisal import entropy_summary
         assert entropy_summary(None) is None
         assert entropy_summary({}) is None
         assert entropy_summary({"content": []}) is None
 
     def test_topn_with_residual(self):
-        from corvidae.appraisal import entropy_summary
+        from corvidae_cognition.appraisal import entropy_summary
         env = entropy_summary({"content": [
             {"token": "x", "logprob": -0.05,
              "top_logprobs": [{"token": "x", "logprob": -0.05}]},
@@ -409,7 +409,7 @@ class TestEntropySummary:
         assert env["mean"] > 0.0  # residual bucket contributes entropy
 
     def test_nll_fallback_when_no_top_logprobs(self):
-        from corvidae.appraisal import entropy_summary
+        from corvidae_cognition.appraisal import entropy_summary
         env = entropy_summary({"content": [
             {"token": "x", "logprob": -1.0},
             {"token": "y", "logprob": -2.0},
@@ -461,7 +461,7 @@ class TestAppraisalPrior:
         await _teardown(env)
 
     async def test_prior_falls_back_when_uncovered(self, tmp_path):
-        from corvidae.appraisal import AppraisalPrior
+        from corvidae_cognition.appraisal import AppraisalPrior
         env = await build_env(tmp_path)
         fallback = MagicMock()
         fallback.score = AsyncMock(return_value=0.33)
@@ -473,7 +473,7 @@ class TestAppraisalPrior:
         await _teardown(env)
 
     async def test_prior_uses_appraisal_when_covered(self, tmp_path):
-        from corvidae.appraisal import AppraisalPrior
+        from corvidae_cognition.appraisal import AppraisalPrior
         env = await build_env(tmp_path)
         await self._seed(env, "e4", 30, stage1={"salience": 0.55})
         fallback = MagicMock()
@@ -499,10 +499,10 @@ class TestAppraisalPrior:
     async def test_consolidation_writes_mean_valence(self, tmp_path):
         """End-to-end: consolidation writes mean stage-2 valence into the
         memory record and uses the appraisal-driven importance prior."""
-        from corvidae.appraisal import AppraisalPlugin
+        from corvidae_cognition.appraisal import AppraisalPlugin
         from corvidae.channel import Channel, ChannelConfig
         from corvidae.context import MessageType
-        from corvidae.memory import MemoryPlugin
+        from corvidae_cognition.memory import MemoryPlugin
 
         consolidation_json = json.dumps({
             "summary": "I discussed the plan with the user.",
@@ -584,7 +584,7 @@ class TestAppraisalPrior:
 
     async def test_prior_installed_on_memory_at_start(self, tmp_path):
         """AppraisalPlugin.on_start wraps MemoryPlugin.importance_prior."""
-        from corvidae.appraisal import AppraisalPlugin, AppraisalPrior
+        from corvidae_cognition.appraisal import AppraisalPlugin, AppraisalPrior
 
         db_path = str(tmp_path / "sessions.db")
         db = await aiosqlite.connect(db_path)
@@ -618,7 +618,7 @@ class TestAppraisalPrior:
 
 def test_parse_json_block_error_names_appraisal_phase_and_long_text():
     """The appraisal JSON parse error names its phase and keeps >200 chars."""
-    from corvidae.appraisal import _parse_json_block
+    from corvidae_cognition.appraisal import _parse_json_block
 
     text = "x" * 300 + " PROVIDER_ERROR_MARKER"
     with pytest.raises(ValueError) as excinfo:

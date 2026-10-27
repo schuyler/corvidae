@@ -24,7 +24,7 @@ import pytest
 
 from corvidae.channel import Channel
 from corvidae.context import ContextWindow, MessageType
-from corvidae.funnel import FunnelPlugin
+from corvidae_cognition.funnel import FunnelPlugin
 from corvidae.hooks import create_plugin_manager
 from corvidae.persistence import PersistencePlugin, init_db
 

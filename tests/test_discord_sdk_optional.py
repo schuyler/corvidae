@@ -50,7 +50,7 @@ async def test_configured_block_without_sdk_names_the_extra(
     monkeypatch.setitem(sys.modules, "discord", None)
     plugin = DiscordPlugin()
     # The error says what failed, where, and the next step (#115's style).
-    with pytest.raises(RuntimeError, match=r"discord") as excinfo:
+    with pytest.raises(RuntimeError, match="DiscordPlugin") as excinfo:
         await plugin.on_init(pm=None, config={"discord": {"token": "t"}})
     assert "uv sync --extra discord" in str(excinfo.value)
 

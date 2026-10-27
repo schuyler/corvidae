@@ -17,7 +17,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  pytest:
+  # The kernel alone: no cognition extra, no Discord SDK. This job is the
+  # acceptance test for "corvidae installs and works without the extras"
+  # (plans/kernel-split.md, R1 and R10).
+  kernel:
     runs-on: ubuntu-latest
     # Backstop above pytest's own per-test timeout (15s, pyproject.toml).
     timeout-minutes: 15
@@ -33,24 +36,57 @@ jobs:
       # (pytest-timeout), which the pytest config needs; see CLAUDE.md. The acp
       # extra is needed because the ACP transport tests import the SDK.
       # --locked fails the run if uv.lock is out of date with pyproject.toml.
-      - name: Install dependencies
+      - name: Install dependencies (kernel)
         run: uv sync --locked --extra dev --extra acp
 
-      # About 26 test sites skip when sqlite-vec can't load, which would turn
-      # the vector-retrieval tests into silent skips on a green run. Fail
-      # here instead.
-      - name: Check sqlite-vec loads
+      # Prove the optional packages really are absent, so a dependency that
+      # pulls one back in fails here rather than passing unnoticed.
+      - name: Check the extras are not installed
         run: |
-          uv run python - <<'PY'
+          uv run --no-sync python - <<'PY'
+          import importlib.util
+          present = [m for m in ("sqlite_vec", "discord", "corvidae_cognition")
+                     if importlib.util.find_spec(m) is not None]
+          assert not present, f"kernel install has optional packages: {present}"
+          import corvidae.channels.discord  # must import without its SDK
+          print("kernel install: no sqlite_vec, discord or corvidae_cognition")
+          PY
+
+      - name: Run kernel tests
+        run: uv run --no-sync pytest -q --ignore=tests/cognition
+
+  # Everything: the kernel plus the cognition and discord extras.
+  full:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.13"
+          enable-cache: true
+
+      - name: Install dependencies (all extras)
+        run: uv sync --locked --extra dev --extra acp --extra discord --extra cognition
+
+      # About 26 test sites skip when sqlite-vec can't load, and the Discord
+      # tests skip without the SDK, which would turn them into silent skips
+      # on a green run. Fail here instead.
+      - name: Check sqlite-vec and discord load
+        run: |
+          uv run --no-sync python - <<'PY'
           import sqlite3
           import sqlite_vec
+          import discord
 
           conn = sqlite3.connect(":memory:")
           conn.enable_load_extension(True)
           sqlite_vec.load(conn)
           print("sqlite", sqlite3.sqlite_version,
-                "/ sqlite-vec", conn.execute("SELECT vec_version()").fetchone()[0])
+                "/ sqlite-vec", conn.execute("SELECT vec_version()").fetchone()[0],
+                "/ discord.py", discord.__version__)
           PY
 
       - name: Run tests
-        run: uv run pytest -q
+        run: uv run --no-sync pytest -q

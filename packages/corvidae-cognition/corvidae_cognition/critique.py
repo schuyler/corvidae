@@ -46,7 +46,9 @@ from corvidae.hooks import CorvidaePlugin, hookimpl
 from corvidae.task import Task
 from corvidae.tuning import config_value, resolve_tunable
 
-logger = logging.getLogger(__name__)
+# Named explicitly: corvidae/logging.py configures the "corvidae" logger,
+# and __name__ would be corvidae_cognition.critique.
+logger = logging.getLogger("corvidae.critique")
 
 # --------------------------------------------------------------------------
 # Best-guess defaults (§6-tunable; resolved through resolve_tunable at

@@ -110,7 +110,9 @@ curl -sf "$LLAMA_URL/v1/models" > "$RUN_DIR/server_models.json" \
 # takes ~21s observed — do it here, synchronously, so that cost lands
 # before the daemon-startup/driver-join windows instead of eating into
 # them from inside the screen session.
-uv sync --project "$REPO_DIR"
+# The harness exercises the full daemon, cognition plugins included; it
+# drives IRC, so the discord extra is not needed.
+uv sync --project "$REPO_DIR" --extra cognition
 
 screen -dmS buster-daemon bash -c "
     cd '$REPO_DIR' &&

@@ -21,7 +21,7 @@ import pytest
 
 # PRIMARY IMPORT FAILURE — all tests below fail at collection time with
 # ModuleNotFoundError: No module named 'corvidae.retention'
-from corvidae.retention import (
+from corvidae_cognition.retention import (
     retention_score,
     run_retention_job,
     RETRIEVAL_BOOST,
@@ -29,16 +29,16 @@ from corvidae.retention import (
 
 from corvidae.channel import Channel
 from corvidae.context import ContextWindow, MessageType
-from corvidae.funnel import FunnelPlugin
+from corvidae_cognition.funnel import FunnelPlugin
 from corvidae.hooks import create_plugin_manager
 from corvidae.llm_plugin import LLMPlugin
-from corvidae.memory import MemoryPlugin
+from corvidae_cognition.memory import MemoryPlugin
 from corvidae.persistence import PersistencePlugin, init_db
 # Cross-WP dependency: MemoryToolsPlugin lives in WP1b.3. Tests in this file
 # (WP1b.1) will not collect until WP1b.3's module exists — the collection error
 # shifts from corvidae.retention to corvidae.tools.memory_tools if only WP1b.1
 # is implemented. Implement WP1b.1 and WP1b.3 together to unlock these tests.
-from corvidae.tools.memory_tools import MemoryToolsPlugin
+from corvidae_cognition.memory_tools import MemoryToolsPlugin
 
 
 # ---------------------------------------------------------------------------

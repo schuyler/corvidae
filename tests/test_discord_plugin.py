@@ -42,8 +42,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-import discord
 import pytest
+
+# The SDK is the optional ``discord`` extra; without it this file skips
+# (tests/test_discord_sdk_optional.py covers the SDK-absent behaviour).
+discord = pytest.importorskip("discord")
 
 from corvidae.channel import ChannelRegistry, load_channel_config
 from corvidae.hooks import (

@@ -926,7 +926,7 @@ class MemoryPlugin(CorvidaePlugin):
                 )
             await db.commit()
 
-            from corvidae.retention import run_retention_job
+            from corvidae_cognition.retention import run_retention_job
             await run_retention_job(self, now=now)
         except Exception:
             logger.warning("retention startup trigger failed", exc_info=True)

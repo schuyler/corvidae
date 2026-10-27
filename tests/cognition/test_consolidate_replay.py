@@ -19,7 +19,7 @@ import sqlite3
 import aiosqlite
 import pytest
 
-from corvidae.memory import _dialog_transcript
+from corvidae_cognition.memory import _dialog_transcript
 
 
 # ---------------------------------------------------------------------------
@@ -139,7 +139,7 @@ class _FakeClient:
 
 
 def test_dialog_from_rows_keeps_only_real_user_and_assistant_dialog():
-    from corvidae.memory import dialog_from_rows
+    from corvidae_cognition.memory import dialog_from_rows
 
     dialog = dialog_from_rows(MIXED_ROWS)
 
@@ -152,14 +152,14 @@ def test_dialog_from_rows_keeps_only_real_user_and_assistant_dialog():
 
 def test_dialog_from_rows_drops_summary_rows():
     """8 such rows sit inside the real 76-163 fixture; none may reach the LLM."""
-    from corvidae.memory import dialog_from_rows
+    from corvidae_cognition.memory import dialog_from_rows
 
     only_summaries = [_row(1, "assistant", "recap", message_type="summary")]
     assert dialog_from_rows(only_summaries) == []
 
 
 def test_dialog_from_rows_preserves_input_order():
-    from corvidae.memory import dialog_from_rows
+    from corvidae_cognition.memory import dialog_from_rows
 
     rows = [
         _row(3, "user", "third"),
@@ -179,7 +179,7 @@ def test_dialog_from_rows_preserves_input_order():
 
 
 async def test_fetch_range_rows_is_half_open_and_id_ordered(tmp_path):
-    from corvidae.memory import fetch_range_rows
+    from corvidae_cognition.memory import fetch_range_rows
 
     rows = [_row(i, "user", f"m{i}") for i in range(1, 6)]
     db = await _seed_db(tmp_path / "t.db", rows)
@@ -192,7 +192,7 @@ async def test_fetch_range_rows_is_half_open_and_id_ordered(tmp_path):
 
 
 async def test_fetch_range_rows_excludes_other_channels(tmp_path):
-    from corvidae.memory import fetch_range_rows
+    from corvidae_cognition.memory import fetch_range_rows
 
     db = await _seed_db(tmp_path / "t.db", [_row(1, "user", "mine")])
     await db.execute(
@@ -214,7 +214,7 @@ async def test_fetch_range_rows_returns_non_dialog_rows_too(tmp_path):
     memory.msg_id_start/msg_id_end and passes to the importance prior and
     mean_valence. A summary row at the edge of a range still sets that
     endpoint, so the fetch must not pre-filter."""
-    from corvidae.memory import fetch_range_rows
+    from corvidae_cognition.memory import fetch_range_rows
 
     rows = [
         _row(20, "assistant", "recap", message_type="summary"),
@@ -255,7 +255,7 @@ async def test_build_messages_matches_what_the_plugin_actually_sends():
 
     If _summarize_range grows a third message or reorders roles, this fails —
     which a hand-written expected-payload literal would not."""
-    from corvidae.memory import MemoryPlugin
+    from corvidae_cognition.memory import MemoryPlugin
     from harness.consolidate_replay import build_messages
 
     dialog = [
@@ -280,7 +280,7 @@ async def test_replay_uses_the_same_llm_role_as_the_daemon():
     _summarize_range ever asked for a different role, the replay tool would
     keep asking for `background` and silently exercise a different path than
     production."""
-    from corvidae.memory import MemoryPlugin
+    from corvidae_cognition.memory import MemoryPlugin
 
     client = _FakeClient()
     llm = _FakeLLMPlugin(client)

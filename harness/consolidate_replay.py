@@ -37,7 +37,7 @@ import aiosqlite
 import yaml
 
 from corvidae.llm import LLMClient
-from corvidae.memory import (
+from corvidae_cognition.memory import (
     DEFAULT_CONSOLIDATION_PROMPT,
     _dialog_transcript,
     _parse_json_block,

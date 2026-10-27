@@ -7,11 +7,11 @@ import json
 
 import pytest
 
-from corvidae.critique import DEFAULT_FORK_PROMPTS, OBJECTION_EXTRA_BODY
+from corvidae_cognition.critique import DEFAULT_FORK_PROMPTS, OBJECTION_EXTRA_BODY
 from corvidae.fork import ForkRefused
 
 from helpers import FakeForkAgent, window_of
-from test_critique import EMPTY_VERDICT, _read_outcomes, _teardown, build_critique
+from .test_critique import EMPTY_VERDICT, _read_outcomes, _teardown, build_critique
 
 FORK_VERDICT = json.dumps({"objections": [{"claim": "it was Tuesday", "objection": "you said Monday"}]})
 QUESTION, RESPONSE = "when is the meeting?", "It was Tuesday, as you said."

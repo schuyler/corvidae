@@ -20,7 +20,9 @@ import aiosqlite
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 from corvidae.persistence import add_column_if_missing
 
-logger = logging.getLogger(__name__)
+# Named explicitly: corvidae/logging.py configures the "corvidae" logger,
+# and __name__ would be corvidae_cognition.outcome_log.
+logger = logging.getLogger("corvidae.outcome_log")
 
 # Columns whose values are JSON envelopes merged via SQLite's json_patch()
 # rather than overwritten. Concurrent fire-and-forget writers touch these

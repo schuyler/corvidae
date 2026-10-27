@@ -53,7 +53,7 @@ async def build_appraisal(tmp_path, summaries=(), config=None, with_outcome_log=
     real OutcomeLogPlugin + PersistencePlugin pair is registered against the
     SAME file DB so upsert_exchange writes land somewhere observable.
     """
-    from corvidae.appraisal import AppraisalPlugin
+    from corvidae_cognition.appraisal import AppraisalPlugin
 
     db_path = str(tmp_path / "sessions.db")
     await _seed_probe_db(db_path, summaries)
@@ -61,7 +61,7 @@ async def build_appraisal(tmp_path, summaries=(), config=None, with_outcome_log=
     pm = create_plugin_manager()
 
     if with_outcome_log:
-        from corvidae.outcome_log import OutcomeLogPlugin
+        from corvidae_cognition.outcome_log import OutcomeLogPlugin
 
         db = await aiosqlite.connect(db_path)
         await init_db(db)
@@ -99,7 +99,7 @@ async def _teardown(plugin, pm):
 
 class TestSurfaceSignals:
     def test_empty_text_scores_all_zero(self):
-        from corvidae.appraisal import surface_signals
+        from corvidae_cognition.appraisal import surface_signals
 
         signals = surface_signals("")
         assert set(signals) == {
@@ -108,19 +108,19 @@ class TestSurfaceSignals:
         assert all(v == 0.0 for v in signals.values())
 
     def test_all_questions_scores_question_one(self):
-        from corvidae.appraisal import surface_signals
+        from corvidae_cognition.appraisal import surface_signals
 
         signals = surface_signals("Where were you? What happened? Who said that?")
         assert signals["question"] == 1.0
 
     def test_plain_statement_scores_question_zero(self):
-        from corvidae.appraisal import surface_signals
+        from corvidae_cognition.appraisal import surface_signals
 
         signals = surface_signals("The sky was clear this morning.")
         assert signals["question"] == 0.0
 
     def test_dense_negation_scores_high(self):
-        from corvidae.appraisal import surface_signals
+        from corvidae_cognition.appraisal import surface_signals
 
         dense = "No, that is not right. I never said that. Nothing about this is true."
         sparse = "The meeting went well and everyone agreed on the plan."
@@ -128,7 +128,7 @@ class TestSurfaceSignals:
         assert surface_signals(sparse)["negation"] == 0.0
 
     def test_scores_are_clamped_to_unit_interval(self):
-        from corvidae.appraisal import surface_signals
+        from corvidae_cognition.appraisal import surface_signals
 
         pathological = "no not never none nothing neither nor " * 20 + "?"
         signals = surface_signals(pathological)
@@ -195,7 +195,7 @@ class TestProbe:
     async def test_missing_db_degrades_to_no_probe(self, tmp_path):
         """No session DB on disk → plugin starts, warns once, vectors use
         the no-probe novelty default (fail-open, trap #1)."""
-        from corvidae.appraisal import AppraisalPlugin
+        from corvidae_cognition.appraisal import AppraisalPlugin
 
         pm = create_plugin_manager()
         plugin = AppraisalPlugin()
@@ -221,7 +221,7 @@ class TestProbe:
         no-probe -- proven here by a familiar/unseen novelty comparison
         that only holds when the probe actually reads the seeded content.
         """
-        from corvidae.appraisal import AppraisalPlugin
+        from corvidae_cognition.appraisal import AppraisalPlugin
 
         config_dir = tmp_path / "config_dir"
         config_dir.mkdir()
@@ -302,7 +302,7 @@ class TestPullApi:
         """A consumer's should_process_message pulling get_or_compute
         observes the SAME vector whether registered before or after
         AppraisalPlugin, including under one concurrent gather broadcast."""
-        from corvidae.appraisal import AppraisalPlugin
+        from corvidae_cognition.appraisal import AppraisalPlugin
         from corvidae.hooks import CorvidaePlugin, hookimpl
 
         observed = {}
@@ -582,8 +582,8 @@ class TestPersistSpyGaps:
         """No probe (missing DB) → the stage-1 upsert carries NO probe_score
         column: the row's probe_score stays NULL rather than being written,
         and the appraisal envelope still lands."""
-        from corvidae.appraisal import AppraisalPlugin
-        from corvidae.outcome_log import OutcomeLogPlugin
+        from corvidae_cognition.appraisal import AppraisalPlugin
+        from corvidae_cognition.outcome_log import OutcomeLogPlugin
 
         # Session DB exists (for outcome_log/persistence) but has NO
         # memory_fts — the probe degrades at on_start.

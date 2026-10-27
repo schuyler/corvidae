@@ -23,10 +23,10 @@ import pytest
 
 from corvidae.channel import Channel
 from corvidae.context import ContextWindow, MessageType
-from corvidae.funnel import FunnelPlugin
+from corvidae_cognition.funnel import FunnelPlugin
 from corvidae.hooks import create_plugin_manager
 from corvidae.llm_plugin import LLMPlugin
-from corvidae.memory import MemoryPlugin
+from corvidae_cognition.memory import MemoryPlugin
 from corvidae.persistence import PersistencePlugin, init_db
 
 from evals.metrics import recall_at_k
@@ -334,7 +334,7 @@ class TestChannelScopeResolver:
     async def test_empty_scope_sql_matches_nothing(self):
         # A directly constructed empty scope must still be valid SQL.
         import aiosqlite
-        from corvidae.memory import ChannelScope
+        from corvidae_cognition.memory import ChannelScope
         fragment, params = ChannelScope(frozenset()).sql("c")
         assert params == []
         async with aiosqlite.connect(":memory:") as db:
@@ -527,7 +527,7 @@ class TestRecallBenchmark:
     async def test_recall_at_k_beats_floor_on_seed_fixture(self):
         """The Phase 0 harness doing real work over the real retrieval path."""
         fixture_path = (
-            Path(__file__).parent / "fixtures" / "memory_retrieval_basic.json"
+            Path(__file__).parent.parent / "fixtures" / "memory_retrieval_basic.json"
         )
         fixture = json.loads(fixture_path.read_text())
         # One group spanning both fixture channels so every query sees the

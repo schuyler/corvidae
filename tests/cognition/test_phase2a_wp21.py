@@ -56,7 +56,7 @@ async def _setup_outcome_log(pm, db):
     Mirrors tests/test_outcome_log.py's _setup, duplicated locally per
     the red-author's file-isolation instructions.
     """
-    from corvidae.outcome_log import OutcomeLogPlugin
+    from corvidae_cognition.outcome_log import OutcomeLogPlugin
 
     plugin = OutcomeLogPlugin()
     pm.register(plugin, name="outcome_log")

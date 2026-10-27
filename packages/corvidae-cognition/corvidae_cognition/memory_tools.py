@@ -20,7 +20,7 @@ import time
 from datetime import datetime, timezone
 
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
-from corvidae.memory import ChannelScope, _format_age, _fts_match_query
+from corvidae_cognition.memory import ChannelScope, _format_age, _fts_match_query
 from corvidae.tool import Tool, tool_to_schema
 
 logger = logging.getLogger("corvidae.tools.memory_tools")
@@ -51,7 +51,7 @@ class MemoryToolsPlugin(CorvidaePlugin):
         await super().on_init(pm, config)
 
     def _memory(self):
-        from corvidae.memory import MemoryPlugin
+        from corvidae_cognition.memory import MemoryPlugin
         return get_dependency(self.pm, "memory", MemoryPlugin)
 
     async def _wait_for_schema(self, memory):

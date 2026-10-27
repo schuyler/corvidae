@@ -20,10 +20,10 @@ import pytest
 
 from corvidae.channel import Channel
 from corvidae.context import ContextWindow
-from corvidae.funnel import FunnelPlugin
+from corvidae_cognition.funnel import FunnelPlugin
 from corvidae.hooks import create_plugin_manager
 from corvidae.llm_plugin import LLMPlugin
-from corvidae.memory import MemoryPlugin
+from corvidae_cognition.memory import MemoryPlugin
 from corvidae.persistence import PersistencePlugin, init_db
 
 from evals.metrics import mrr, recall_at_k

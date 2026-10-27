@@ -79,10 +79,10 @@ async def run_live_evaluation(args) -> None:
 
     import aiosqlite
 
-    from corvidae.funnel import FunnelPlugin
+    from corvidae_cognition.funnel import FunnelPlugin
     from corvidae.hooks import create_plugin_manager
     from corvidae.llm_plugin import LLMPlugin
-    from corvidae.memory import MemoryPlugin
+    from corvidae_cognition.memory import MemoryPlugin
     from corvidae.metrics import UsageLogPlugin
     from corvidae.persistence import PersistencePlugin, init_db
 
@@ -188,7 +188,7 @@ async def run_live_evaluation(args) -> None:
             )
         await db.commit()
         # Backfill embeds the seeded records through the real embed path.
-        from corvidae.retention import run_retention_job
+        from corvidae_cognition.retention import run_retention_job
         await run_retention_job(memory_plugin)
 
     # Run the queries through the real retrieval path.

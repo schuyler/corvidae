@@ -33,7 +33,7 @@ from corvidae.attribution import get_attribution
 from corvidae.channel import Channel, ChannelConfig
 from corvidae.context import ContextWindow, MessageType
 from corvidae.hooks import CorvidaePlugin, create_plugin_manager, hookimpl
-from corvidae.outcome_log import OutcomeLogPlugin
+from corvidae_cognition.outcome_log import OutcomeLogPlugin
 from corvidae.persistence import PersistencePlugin, init_db
 from corvidae.task import TaskPlugin, TaskQueue
 
@@ -112,7 +112,7 @@ async def build_critique(
     tmp_path, appraisal=None, chat_text=OBJECTION_VERDICT, fts_contents=(),
     with_funnel=False, config=None,
 ):
-    from corvidae.critique import CritiquePlugin
+    from corvidae_cognition.critique import CritiquePlugin
 
     db_path = str(tmp_path / "sessions.db")
     await _seed_fts(db_path, fts_contents)  # creates message_fts
@@ -143,7 +143,7 @@ async def build_critique(
 
     funnel = None
     if with_funnel:
-        from corvidae.funnel import FunnelPlugin
+        from corvidae_cognition.funnel import FunnelPlugin
         funnel = FunnelPlugin()
         pm.register(funnel, name="funnel")
         await funnel.on_init(pm=pm, config={})
@@ -229,7 +229,7 @@ class TestSessionDbBaseDirResolution:
         straight to aiosqlite.connect(), so the message_fts probe pointed
         at a nonexistent file and silently degraded to no-probe.
         """
-        from corvidae.critique import CritiquePlugin
+        from corvidae_cognition.critique import CritiquePlugin
 
         config_dir = tmp_path / "config_dir"
         config_dir.mkdir()
@@ -264,18 +264,18 @@ class TestSessionDbBaseDirResolution:
 
 class TestPastClaimDetector:
     def test_fires_on_recall_patterns(self):
-        from corvidae.critique import is_past_claim
+        from corvidae_cognition.critique import is_past_claim
         assert is_past_claim("You told me the deadline was Friday.")
         assert is_past_claim("I remember we discussed the budget.")
         assert is_past_claim("As I mentioned earlier, the plan changed.")
 
     def test_no_fire_on_plain_statement(self):
-        from corvidae.critique import is_past_claim
+        from corvidae_cognition.critique import is_past_claim
         assert not is_past_claim("The weather is nice today.")
         assert not is_past_claim("")
 
     def test_extract_terms_caps_and_dedupes(self):
-        from corvidae.critique import _extract_terms
+        from corvidae_cognition.critique import _extract_terms
         terms = _extract_terms("alpha beta alpha gamma delta epsilon zeta eta theta", 3)
         assert terms == ["alpha", "beta", "gamma"]
 
@@ -621,7 +621,7 @@ class TestExecution:
 
 def test_parse_json_block_error_names_critique_phase_and_long_text():
     """The critique JSON parse error names its phase and keeps >200 chars."""
-    from corvidae.critique import _parse_json_block
+    from corvidae_cognition.critique import _parse_json_block
 
     text = "x" * 300 + " PROVIDER_ERROR_MARKER"
     with pytest.raises(ValueError) as excinfo:

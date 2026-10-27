@@ -11,10 +11,10 @@ import json
 import pytest
 
 from corvidae.fork import ForkRefused
-from corvidae.memory import DEFAULT_CONSOLIDATION_FORK_PROMPT
+from corvidae_cognition.memory import DEFAULT_CONSOLIDATION_FORK_PROMPT
 
 from helpers import FakeForkAgent, window_of
-from test_memory_consolidation import build_consolidation_env, fetch_memories, seed_dialog
+from .test_memory_consolidation import build_consolidation_env, fetch_memories, seed_dialog
 
 FORK_JSON = json.dumps({"summary": "I told kestrel it was the brownout detector.",
                         "topic_tags": ["wifi"], "participants": ["kestrel"]})

@@ -42,14 +42,19 @@ For a chat page in your browser, add a `web:` block (an empty one will do) and o
 Clone the repo — corvidae isn't published on PyPI.
 
 ```sh
-uv sync
+uv sync --extra cognition    # the daemon with memory, appraisal and critique
 uv run corvidae
 ```
 
-For development (includes pytest, and the ACP SDK its tests import):
+`uv sync` alone installs the kernel: the agent loop, persistence, tools and
+the transports, without the cognition plugins or sqlite-vec. Add
+`--extra discord` for the Discord transport and `--extra acp` for
+`corvidae acp`.
+
+For development (pytest, every extra its tests import):
 
 ```sh
-uv sync --extra dev --extra acp
+uv sync --extra dev --extra acp --extra discord --extra cognition
 uv run pytest
 ```
 

@@ -14,10 +14,10 @@ import yaml
 
 from corvidae.channel import Channel
 from corvidae.context import ContextWindow
-from corvidae.funnel import FunnelPlugin
+from corvidae_cognition.funnel import FunnelPlugin
 from corvidae.hooks import create_plugin_manager
 from corvidae.llm_plugin import LLMPlugin
-from corvidae.memory import MemoryPlugin
+from corvidae_cognition.memory import MemoryPlugin
 from corvidae.persistence import PersistencePlugin
 
 from harness.driver import (
@@ -31,7 +31,7 @@ from harness.driver import (
     seed_memory_row,
 )
 
-REPO = Path(__file__).resolve().parent.parent
+REPO = Path(__file__).resolve().parents[2]
 
 
 def _render(name: str) -> dict:

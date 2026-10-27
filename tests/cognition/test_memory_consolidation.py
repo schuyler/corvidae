@@ -21,7 +21,7 @@ from corvidae.channel import Channel
 from corvidae.context import MessageType
 from corvidae.hooks import create_plugin_manager
 from corvidae.llm_plugin import LLMPlugin
-from corvidae.memory import MemoryPlugin, RubricPrior
+from corvidae_cognition.memory import MemoryPlugin, RubricPrior
 from corvidae.persistence import PersistencePlugin, init_db
 
 
@@ -520,7 +520,7 @@ class TestConsolidationTriggerLogging:
 
 def test_parse_json_block_error_names_consolidation_phase_and_long_text():
     """The consolidation parse error names its phase and keeps >200 chars."""
-    from corvidae.memory import _parse_json_block
+    from corvidae_cognition.memory import _parse_json_block
 
     text = "x" * 300 + " PROVIDER_ERROR_MARKER"
     with pytest.raises(ValueError) as excinfo:

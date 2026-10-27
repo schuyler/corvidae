@@ -15,10 +15,10 @@ import time
 
 import pytest
 
-from corvidae.memory import FTS_SIMILARITY_PROXY
+from corvidae_cognition.memory import FTS_SIMILARITY_PROXY
 
-from test_memory_consolidation import build_consolidation_env, seed_dialog
-from test_memory_retrieval import EMBED_CONFIG, build_retrieval_env, seed_memory
+from .test_memory_consolidation import build_consolidation_env, seed_dialog
+from .test_memory_retrieval import EMBED_CONFIG, build_retrieval_env, seed_memory
 
 DAY = 86400.0
 SUMMARY = "kestrel's ESP32 weather station dropped off wifi"
@@ -233,8 +233,8 @@ class TestSourceDatedRecords:
         """A backdated record that supersedes a live one carries the later
         date: the merged memory spans both conversations, and the latest of
         them is when it was last true."""
-        from test_memory_dedup import _NEAR_IDENTICAL_SUMMARY, build_dedup_env
-        from test_memory_dedup import seed_dialog as seed_dedup_dialog
+        from .test_memory_dedup import _NEAR_IDENTICAL_SUMMARY, build_dedup_env
+        from .test_memory_dedup import seed_dialog as seed_dedup_dialog
 
         memory, persistence, stub, channel, db = await build_dedup_env()
         try:

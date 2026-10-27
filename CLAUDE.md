@@ -3,14 +3,21 @@
 ## Environment
 
 Dependencies are installed by `.claude/hooks/session-start.sh` in Claude Code on
-the web. If an import fails, run `uv sync --extra dev --extra acp` — that
+the web. If an import fails, run
+`uv sync --extra dev --extra acp --extra discord --extra cognition` — that
 installs the `dev` extra (pytest, pytest-asyncio), the `dev` dependency group
-(pytest-timeout), which the pytest config needs, and the `acp` extra, which the
-ACP transport tests import. CI syncs the same set.
+(pytest-timeout), which the pytest config needs, the `acp` and `discord`
+extras, whose transport tests import the SDKs, and the `cognition` extra
+(`packages/corvidae-cognition`: memory, appraisal, critique, funnel,
+outcome_log), which `tests/cognition/` imports. That is CI's `full` job. The
+kernel alone is `--extra dev --extra acp`; CI's `kernel` job runs everything
+outside `tests/cognition/` that way, so a kernel module must never import
+`corvidae_cognition` (`tests/test_kernel_boundary.py`).
 
 ```sh
-uv sync --extra dev --extra acp  # install everything
+uv sync --extra dev --extra acp --extra discord --extra cognition  # everything
 uv run pytest                    # full suite
+uv run pytest --ignore=tests/cognition  # the kernel suite
 uv run pytest tests/test_foo.py  # one file
 uv run pytest --run-eval         # include live-LLM eval tests (deselected by default)
 uv run corvidae                  # run the daemon; reads ./agent.yaml
