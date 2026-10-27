@@ -383,8 +383,8 @@ class TestSendMessage:
 
 # ---------------------------------------------------------------------------
 # Section 3b — send_progress (R2: progress text must not be silently
-# dropped — IRCPlugin implements no send_progress hook today, so a turn's
-# intermediate text vanishes when the plugin manager calls it.)
+# dropped — the progress event must reach the client, not vanish as the base-class
+# no-op would make it.)
 # ---------------------------------------------------------------------------
 
 
@@ -477,11 +477,8 @@ class TestOnStop:
 
 
 class TestSendMessageLatencyMs:
-    async def test_send_message_accepts_latency_ms_kwarg(self):
-        """send_message must accept latency_ms as an optional keyword argument.
-
-        RED phase: fails until IRCPlugin.send_message signature includes latency_ms.
-        """
+    async def test_send_accepts_latency_ms_on_event(self):
+        """OutboundMessage carries latency_ms and IRC delivery must accept it."""
         pm, registry = _make_pm_with_registry()
         plugin = IRCPlugin(pm)
         pm.register(plugin, name="irc")

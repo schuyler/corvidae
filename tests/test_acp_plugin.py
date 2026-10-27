@@ -351,7 +351,7 @@ class TestPromptAlwaysCompletes:
 
         async def _fake_on_message(channel, sender: str, text: str, trace_id: str) -> None:
             # Mimic the agent loop: delivery happens on its own task, and the
-            # Agent logs (does not re-raise) a failed send_message hook.
+            # Agent logs (does not re-raise) a failed send hook.
             async def _deliver() -> None:
                 try:
                     await plugin.send(channel=channel, event=OutboundMessage(text="reply"))

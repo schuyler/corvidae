@@ -22,11 +22,17 @@ from corvidae.trace import mint_trace_id
 from corvidae.agent import Agent
 from corvidae.channel import Channel, ChannelConfig, ChannelRegistry
 from corvidae.compaction import CompactionPlugin
-from corvidae.hooks import create_plugin_manager, hookimpl, validate_dependencies
+from corvidae.hooks import (
+    TransportPlugin,
+    create_plugin_manager,
+    hookimpl,
+    validate_dependencies,
+)
 from corvidae.idle import IdleMonitorPlugin
 from corvidae.llm import LLMClient
 from corvidae.llm_plugin import LLMPlugin
 from corvidae.mcp_client import McpClientPlugin
+from corvidae.outbound import OutboundMessage
 from corvidae.persistence import PersistencePlugin
 from corvidae.task import TaskPlugin
 from corvidae.thinking import ThinkingPlugin
@@ -47,10 +53,14 @@ pytestmark = pytest.mark.timeout(30)
 # ---------------------------------------------------------------------------
 
 
-class FakeTransportPlugin:
-    """Replaces CLIPlugin and IRCPlugin. Captures send_message calls."""
+class FakeTransportPlugin(TransportPlugin):
+    """Replaces CLIPlugin and IRCPlugin. Captures OutboundMessage events.
 
-    depends_on = {"registry"}
+    Owns the "test" transport, which every channel in this file uses, so the
+    base class's broadcast filter passes exactly the harness's channels.
+    """
+
+    transport = "test"
 
     def __init__(self, pm):
         self.pm = pm
@@ -62,9 +72,9 @@ class FakeTransportPlugin:
         from corvidae.hooks import get_dependency
         self._registry = get_dependency(self.pm, "registry", ChannelRegistry)
 
-    @hookimpl
-    async def send_message(self, channel, text, latency_ms=None):
-        self.sent.append((channel, text, latency_ms))
+    async def send_message(self, channel: Channel, event: OutboundMessage) -> None:
+        """Record the reply the agent asked this transport to deliver."""
+        self.sent.append((channel, event.text, event.latency_ms))
 
     @hookimpl
     async def on_stop(self):
