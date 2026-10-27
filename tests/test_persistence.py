@@ -194,11 +194,11 @@ class TestOnStop:
 
 
 # ---------------------------------------------------------------------------
-# TestLoadConversation (NEW — RED phase)
+# TestResolveConversation (NEW — RED phase)
 # ---------------------------------------------------------------------------
 
 
-class TestLoadConversation:
+class TestResolveConversation:
     """Tests for PersistencePlugin.resolve_conversation hookimpl.
 
     RED phase: these fail because resolve_conversation does not exist yet on
@@ -331,11 +331,11 @@ class TestLoadConversation:
 
 
 # ---------------------------------------------------------------------------
-# TestOnConversationEvent (NEW — RED phase)
+# TestPersistMessage (NEW — RED phase)
 # ---------------------------------------------------------------------------
 
 
-class TestOnConversationEvent:
+class TestPersistMessage:
     """Tests for PersistencePlugin.persist_message hookimpl.
 
     RED phase: these fail because persist_message does not exist yet.

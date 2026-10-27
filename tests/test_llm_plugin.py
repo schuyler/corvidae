@@ -316,7 +316,7 @@ def _http_error(status: int, body: str = "") -> "object":
     return LLMHTTPError(cause, body=body, model="test-model")
 
 
-class TestOnLlmErrorExplainsFailures:
+class TestResolveLlmErrorExplainsFailures:
     async def test_401_names_the_api_key(self):
         """A 401 must point at llm.main.api_key, not just say 'an error'."""
         from corvidae.llm_plugin import LLMPlugin

@@ -118,6 +118,52 @@ The built-in subcommand `scaffold` is registered by corvidae itself under `corvi
 
 Built-in `corvidae acp` (from `corvidae.channels.acp:acp_command`) starts an ACP v1 agent on stdio. It boots `Runtime` with `overrides={"_acp_mode": True}` so `AcpPlugin` owns the connection; without that flag the plugin stays inert. Install the optional extra first: `uv sync --extra acp`.
 
+## Hook grammar
+
+A hook's name tells you how its results are resolved. Every hookspec name
+starts with a prefix that fixes its pluggy options, or is a bare imperative
+verb on a short allowlist. `tests/test_hook_grammar.py` checks names against
+pluggy options.
+
+| Prefix | pluggy spec | Resolution | Core uses result | Implementations |
+|---|---|---|---|---|
+| `on_`, `before_`, `after_` | broadcast | none | no | any number; side effects allowed, including on objects passed in |
+| `should_` | broadcast | `resolve_reject_wins` | yes, `bool` | any number; `False` from any one rejects; `None` abstains |
+| `resolve_` | `firstresult=True` | first non-`None` | yes | any number; first to answer wins, so order matters and the docstring says who answers |
+| `transform_` | `firstresult=True` wrapper chain with a seed in `_SeedHooksPlugin` | chain | yes | any number, LIFO |
+| bare imperative | broadcast | caller-defined over the result list | sometimes | any number; the docstring states what the caller does with results |
+
+The observe class has three prefixes because `before_agent_turn`,
+`before_compaction` and `after_persist_assistant` are observations placed
+relative to a stage. All three mean the same thing to pluggy.
+
+An observe hook may mutate an object it was handed (`after_persist_assistant`
+strips `reasoning_content` in place; `before_agent_turn` appends to
+`channel.conversation`), but its return value is never read. A transform
+returns the replacement and the core uses it.
+
+`resolve_channel` shows the other safe shape for `resolve_`: each
+implementer answers only for ids under its own `transport:` prefix and
+returns `None` for the rest, so the order pluggy calls them in cannot change
+the answer.
+
+The bare imperative allowlist is `register_tools` (implementers append to
+the list passed in), `persist_message` (every implementation runs; the
+caller resolves the list with `resolve_single_result`), and the four
+`send_*` hooks, which are being folded into a single `send` hook.
+
+### Adding a hook
+
+A hookspec earns a name when it is a decision point (veto, resolve,
+transform), when it is an observation with at least two plausible
+implementers, or when it is an observability hook that pairs with an
+existing one (`on_llm_request` with `on_llm_response`). A single-consumer
+observation does not get a hookspec; it gets an entry in `meta`, a return
+value on an existing hook, or waits for its second consumer. Pick the name
+from the table above. The test checks the prefix against the pluggy
+options; whether the core reads a hook's return value is not something
+pluggy exposes, so that half is checked in review.
+
 ## Available hooks
 
 ### Lifecycle
@@ -309,7 +355,8 @@ These hooks return a value. Hooks marked `firstresult=True` (sequential) stop at
 | `resolve_compaction(channel, conversation, max_tokens)` | `firstresult=True` | `bool \| None` | First non-None return stops the chain. `CompactionPlugin` uses `trylast` (returns True). Third-party plugins run at default priority. |
 | `transform_tool_result(tool_name, result, channel)` | `firstresult=True` wrapper chain | `str \| None` | Wrappers compose transforms in LIFO order. The seed returns the input unchanged. Non-wrapper hookimpls short-circuit the seed via firstresult. |
 | `transform_display_text(channel, text, result_message)` | `firstresult=True` wrapper chain | `str \| None` | Wrappers compose transforms in LIFO order. The seed returns the input text unchanged. Non-wrapper hookimpls short-circuit the seed via firstresult. |
-| `resolve_conversation(channel)` | `firstresult=True` | `list[dict] \| None` | First non-None result wins. `PersistencePlugin` uses `trylast` as fallback. Called once when a channel's conversation is first initialized. |
+| `resolve_conversation(channel)` | `firstresult=True` | `list[dict] \| None` | First non-None result wins. `PersistencePlugin` uses `trylast` as fallback. Called once when a channel's conversation is first initialized, and by `AcpPlugin` for `session/load`. |
+| `persist_message(channel, message, message_type)` | `resolve_single_result` (broadcast) | `int \| None` | Every implementation runs. `PersistencePlugin` returns the `message_log` rowid; others return None. More than one non-None is a configuration error: logged, and the first is used. |
 
 `resolve_compaction` — sequential hook (`firstresult=True`). The first handler returning a non-None value stops the chain. `CompactionPlugin` runs last (`trylast=True`) as the default strategy and returns True. A third-party plugin at default priority runs before it — if it returns non-None, `CompactionPlugin` is never called.
 
@@ -723,7 +770,7 @@ For `firstresult=True` hooks (`resolve_compaction`, `resolve_conversation`, `res
 
 - `resolve_compaction` — wrapped in try/except; failure is logged at WARNING and the turn continues without compaction.
 - `resolve_conversation` — not wrapped; an exception propagates to `_process_queue_item`, which will fail the queue item.
-- `resolve_llm_error` — called inside the existing try/except in `_run_turn`; an exception from the hook itself is not separately caught (it propagates up from `_run_turn`).
+- `resolve_llm_error` — wrapped in its own try/except inside `_run_turn`'s error handler; failure is logged at WARNING and the default error message is sent instead.
 
 For `should_process_message` (broadcast, resolved with `resolve_reject_wins`), exceptions propagate to the call site.
 

@@ -31,7 +31,7 @@ def _http_error(body: str, model: str = "swift-1.5", status: int = 400) -> LLMHT
     return LLMHTTPError(cause, body=body, model=model)
 
 
-class TestLLMPluginOnLlmError:
+class TestLLMPluginResolveLlmError:
     async def test_names_unloaded_model(self):
         reply = await LLMPlugin().resolve_llm_error(channel=MagicMock(), error=_http_error(NOT_LOADED_BODY))
         assert reply is not None

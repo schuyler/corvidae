@@ -109,7 +109,16 @@ resolver function is involved. `transform_tool_result` and
 implementations compose transforms over an identity seed.
 
 Pure broadcast hooks (e.g. `on_start`, `on_idle`) resolve neither way;
-their return values are ignored.
+their return values are ignored. `persist_message` is the one broadcast
+hook resolved with `resolve_single_result`: every implementation runs and
+at most one (persistence) returns a value.
+
+Hook names follow a grammar: the prefix tells you the resolution
+(`on_`/`before_`/`after_` observe, `should_` vetoes, `resolve_` takes the
+first non-None result, `transform_` runs a wrapper chain), and a short
+allowlist of bare imperatives covers the rest. The table and the rule for
+adding a hook are in [plugin-guide.md](plugin-guide.md#hook-grammar);
+`tests/test_hook_grammar.py` enforces the name/option half.
 
 ### Hook reference
 
@@ -131,7 +140,7 @@ their return values are ignored.
 | `on_message_rejected` | broadcast | `on_message`, after a USER message is vetoed; fires exactly once per rejected message |
 | `on_message_persisted` | broadcast | dequeue, after the trace-originating row is persisted; fires once per originating item regardless of outcome (`rowid` may be None) |
 | `resolve_llm_error` | firstresult=True | `_run_turn`, after LLM exception; return error string or None for default |
-| `resolve_compaction` | broadcast | `_process_queue_item`, step 5; all implementations run for side effects |
+| `resolve_compaction` | firstresult=True | `_process_queue_item`, step 5; the first non-None return stops the chain (`CompactionPlugin` is `trylast`, so a default-priority replacement runs first); the caller ignores the value |
 | `transform_tool_result` | firstresult=True wrapper chain | `dispatch_tool_call` (both subagent and main agent paths), after tool execution; return replacement string or None for default |
 | `before_agent_turn` | broadcast | `_process_queue_item`, before LLM call; plugins inject context into conversation log |
 | `after_persist_assistant` | broadcast | `_process_queue_item`, after assistant message is persisted; plugins may mutate the in-memory dict |
@@ -139,7 +148,7 @@ their return values are ignored.
 | `on_idle` | broadcast | `IdleMonitor`, when all queues empty and cooldown elapsed |
 | `resolve_conversation` | firstresult=True | `_process_queue_item`, when `channel.conversation is None`; return list of tagged message dicts or None to defer |
 | `resolve_channel` | firstresult=True | `SchedulerPlugin`, for a persisted channel id the registry does not hold (e.g. a reminder due after a restart); a transport returns the live Channel for ids it owns, created with transport-specific config, or None to defer. `SignalPlugin` and `DiscordPlugin` implement it; callers fall back to `registry.get_or_create` from the split id |
-| `persist_message` | broadcast | `_process_queue_item`, after every `conv.append()`; side effects only (persistence, JSONL logging) |
+| `persist_message` | broadcast (imperative) | `_process_queue_item`, after every `conv.append()`; every implementation runs (persistence, JSONL logging). `PersistencePlugin` returns the `message_log` rowid and the caller resolves the list with `resolve_single_result` into `_db_id` |
 | `before_compaction` | broadcast, awaited | `CompactionPlugin`, after the summary succeeded and before `replace_with_summary()`; the window still holds `messages[:cut]`, so a plugin can fork over the dropped prefix (see [Forks](#forks)); failures logged, never block compaction |
 | `on_compaction` | broadcast | `CompactionPlugin`, after `replace_with_summary()`; side effects only (persistence) |
 | `on_llm_request` | broadcast | `LLMClient.chat()` via LLMPlugin's injected observer, before the retry loop; side effects only (observability) |
@@ -611,8 +620,9 @@ per-channel `SerialQueue`. The queue's consumer calls
     removal, returns immediately (more results still pending). The LLM call
     is deferred until the last result clears the set. User messages can
     interleave during this window — they don't clear the pending set.
-6. Broadcasts `resolve_compaction`; all implementations run for side
-   effects; return values are not used
+6. Calls `resolve_compaction` (`firstresult=True`): the first non-None
+   return stops the chain, so a default-priority replacement runs before
+   the `trylast` `CompactionPlugin`; the return value is not used
 7. Calls `before_agent_turn` hook (broadcast); fires `persist_message`
    for any messages injected by the hook
 8. **`_run_turn`** — calls `run_agent_turn` (single LLM invocation).
@@ -837,8 +847,9 @@ per-turn token stats now live in the `usage_log` table.
 
 ### resolve_compaction
 
-Implements the `resolve_compaction` broadcast hook. The hook is called
-for side effects; its return value is not used by the caller.
+Implements the `resolve_compaction` hook (`firstresult=True`) at
+`trylast`, so it runs only if no default-priority replacement returned
+non-None first. The caller does not use the return value.
 
 **Algorithm:**
 

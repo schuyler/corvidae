@@ -100,11 +100,11 @@ class TestJsonlPluginCreatesDirectory:
 
 
 # ---------------------------------------------------------------------------
-# TestOnConversationEvent
+# TestPersistMessage
 # ---------------------------------------------------------------------------
 
 
-class TestOnConversationEvent:
+class TestPersistMessage:
     """Tests for JsonlLogPlugin.persist_message hookimpl.
 
     RED phase: fails because persist_message does not exist yet.

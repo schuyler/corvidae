@@ -619,8 +619,8 @@ class AgentSpec:
         first non-None return value wins; subsequent handlers are not called.
 
         Who answers: LLMPlugin, which names the failure and the next step for
-        LLM client errors. Other plugins return None unless they own the
-        error; if one ever answers, registration order decides who wins.
+        LLM client errors, registered ``trylast`` so that a default-priority
+        plugin that owns the error answers first.
         """
 
     @hookspec(firstresult=True)

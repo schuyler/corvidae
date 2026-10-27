@@ -1371,7 +1371,7 @@ class TestShouldProcessMessage:
 # ---------------------------------------------------------------------------
 
 
-class TestOnLlmError:
+class TestResolveLlmError:
     async def test_hook_returns_string_sent_as_error_message(self):
         """When resolve_llm_error returns a string, that string is sent via send_message."""
         from corvidae.hooks import hookimpl
@@ -1478,7 +1478,7 @@ class TestOnLlmError:
 # ---------------------------------------------------------------------------
 
 
-class TestCompactConversation:
+class TestResolveCompaction:
     async def test_custom_plugin_returning_true_short_circuits(self):
         """A custom resolve_compaction plugin that returns True is invoked
         and the agent turn still runs. The hook call completes normally."""
@@ -1655,7 +1655,7 @@ class TestCompactConversation:
 # ---------------------------------------------------------------------------
 
 
-class TestProcessToolResult:
+class TestTransformToolResult:
     async def test_hook_returns_string_replaces_tool_result(self):
         """When transform_tool_result returns a string, that string replaces the
         original tool result in the conversation."""
