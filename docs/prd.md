@@ -388,7 +388,10 @@ Per transport:
    the last user turn.
 8. The system prompt is a string or a list of file paths concatenated
    with blank lines, resolved against the config directory once per
-   conversation. Nothing mutates it per turn.
+   conversation. Nothing mutates it per turn. Plugin-contributed sections
+   (the skills index, the self-model) are re-resolved only at a
+   compaction boundary or when a conversation starts, because compaction
+   already rebuilds the KV cache for everything after the system prompt.
 9. `<think>` blocks are stripped from display, never from the DB.
 10. Double-buffer compaction (build the compacted prompt in a second KV
     slot and swap) is not built and needs its own decision before it is.
