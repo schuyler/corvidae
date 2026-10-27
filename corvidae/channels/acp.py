@@ -167,6 +167,14 @@ class CorvidaeAcpAgent:
                     "block_types": dropped,
                 }
             )
+        # A second prompt would overwrite the live future and orphan the first.
+        if self._plugin.prompt_in_flight(session_id):
+            raise RequestError.invalid_request(
+                {
+                    "sessionId": session_id,
+                    "reason": "a prompt is already in progress",
+                }
+            )
         future = self._plugin.begin_prompt(session_id)
         started = False
         try:
@@ -492,6 +500,11 @@ class AcpPlugin(CorvidaePlugin):
             rows.append((channel.scope, channel_cwd, channel.last_active))
         rows.sort(key=lambda r: r[2], reverse=True)
         return rows
+
+    def prompt_in_flight(self, session_id: str) -> bool:
+        """Whether this session already has an unresolved prompt future."""
+        future = self._active_prompts.get(session_id)
+        return future is not None and not future.done()
 
     def begin_prompt(self, session_id: str) -> asyncio.Future:
         """Register a Future that send_message resolves when the turn is idle."""

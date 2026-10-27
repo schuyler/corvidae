@@ -618,7 +618,9 @@ logged and dropped, and a prompt with no text at all returns
 A prompt always ends. If the client connection dies while the final
 message is being delivered, the turn is still completed rather than left
 pending; if the turn never starts (the enqueue fails), its future is
-cleared so a later prompt cannot inherit it.
+cleared so a later prompt cannot inherit it. A second `session/prompt`
+on a session that already has one in flight is `invalidRequest`; the
+first prompt is left untouched (see the concurrent-prompt policy issue).
 
 ## Registration order
 

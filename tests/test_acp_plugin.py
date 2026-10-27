@@ -389,3 +389,37 @@ class TestPromptAlwaysCompletes:
             )
 
         assert plugin._active_prompts.get(created.session_id) is None
+
+
+class TestConcurrentPrompt:
+    async def test_second_prompt_while_one_is_active_is_invalid_request(self, tmp_path):
+        """Overwriting a live prompt future would orphan the first request."""
+        from acp import RequestError, text_block
+
+        plugin, _registry, agent = await _init_acp_plugin()
+        created = await agent.new_session(cwd=str(tmp_path))
+        enqueued = asyncio.Event()
+
+        async def _enqueue(channel, sender: str, text: str) -> None:
+            # A tool is in flight, so the turn's future stays pending.
+            channel.pending_tool_call_ids.add("call_1")
+            enqueued.set()
+
+        plugin.pm.ahook.on_message = _enqueue
+
+        first = asyncio.create_task(
+            agent.prompt(session_id=created.session_id, prompt=[text_block("first")])
+        )
+        await asyncio.wait_for(enqueued.wait(), timeout=2)
+
+        with pytest.raises(RequestError) as excinfo:
+            await asyncio.wait_for(
+                agent.prompt(session_id=created.session_id, prompt=[text_block("second")]),
+                timeout=2,
+            )
+
+        assert excinfo.value.code == -32600  # invalid request
+        # The first prompt is untouched and still cancellable.
+        await agent.cancel(session_id=created.session_id)
+        response = await asyncio.wait_for(first, timeout=2)
+        assert response.stop_reason == "cancelled"
