@@ -21,6 +21,7 @@ import discord
 
 from corvidae.channel import Channel, ChannelRegistry
 from corvidae.channels.split import split_message
+from corvidae.correlation import mint_correlation_id
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 
 logger = logging.getLogger("corvidae.discord_plugin")
@@ -435,7 +436,11 @@ class DiscordPlugin(CorvidaePlugin):
         if sender in self._allow:
             await self._begin_typing(channel)
 
-        await self.pm.ahook.on_message(channel=channel, sender=sender, text=text)
+        # Mint the correlation id here; the Agent uses it verbatim (#95).
+        await self.pm.ahook.on_message(
+            channel=channel, sender=sender, text=text,
+            correlation_id=mint_correlation_id(),
+        )
 
     # -----------------------------------------------------------------
     # Channel resolution

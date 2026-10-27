@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 import aiosqlite
 import pytest
 
+from corvidae.correlation import mint_correlation_id
 from corvidae.turn import AgentTurnResult
 from corvidae.channel import ChannelConfig, ChannelRegistry
 from corvidae.persistence import PersistencePlugin, init_db
@@ -44,7 +45,7 @@ class TestSendThinkingHook:
         plugin._tool_schemas = []
         plugin._max_tool_result_chars = 10000
 
-        await plugin.pm.ahook.on_message(channel=channel, sender="user", text="hello")
+        await plugin.pm.ahook.on_message(channel=channel, sender="user", text="hello", correlation_id=mint_correlation_id())
         await drain(plugin, channel)
 
         plugin.pm.ahook.send_thinking.assert_awaited_once_with(
@@ -68,7 +69,7 @@ class TestSendThinkingHook:
         plugin._tool_schemas = []
         plugin._max_tool_result_chars = 10000
 
-        await plugin.pm.ahook.on_message(channel=channel, sender="user", text="hello")
+        await plugin.pm.ahook.on_message(channel=channel, sender="user", text="hello", correlation_id=mint_correlation_id())
         await drain(plugin, channel)
 
         plugin.pm.ahook.send_thinking.assert_not_awaited()
@@ -89,7 +90,7 @@ class TestSendThinkingHook:
         plugin._tool_schemas = []
         plugin._max_tool_result_chars = 10000
 
-        await plugin.pm.ahook.on_message(channel=channel, sender="user", text="hello")
+        await plugin.pm.ahook.on_message(channel=channel, sender="user", text="hello", correlation_id=mint_correlation_id())
         await drain(plugin, channel)
 
         # Response should still be delivered via send_message
@@ -138,7 +139,7 @@ class TestSendToolStatusHook:
         ]
         plugin._max_tool_result_chars = 10000
 
-        await plugin.pm.ahook.on_message(channel=channel, sender="user", text="run echo")
+        await plugin.pm.ahook.on_message(channel=channel, sender="user", text="run echo", correlation_id=mint_correlation_id())
         await drain(plugin, channel)
         await drain_task_queue(plugin)
 
@@ -184,7 +185,7 @@ class TestSendToolStatusHook:
         ]
         plugin._max_tool_result_chars = 10000
 
-        await plugin.pm.ahook.on_message(channel=channel, sender="user", text="run echo")
+        await plugin.pm.ahook.on_message(channel=channel, sender="user", text="run echo", correlation_id=mint_correlation_id())
         await drain(plugin, channel)
         await drain_task_queue(plugin)
 
@@ -228,7 +229,7 @@ class TestSendToolStatusHook:
         ]
         plugin._max_tool_result_chars = 10000
 
-        await plugin.pm.ahook.on_message(channel=channel, sender="user", text="run echo")
+        await plugin.pm.ahook.on_message(channel=channel, sender="user", text="run echo", correlation_id=mint_correlation_id())
         await drain(plugin, channel)
         await drain_task_queue(plugin)
         await drain(plugin, channel)  # drain again for the tool-result turn

@@ -20,6 +20,7 @@ from llm_response_fixtures import (
     _make_tool_call_response,
     _make_tool_call,
 )
+from corvidae.correlation import mint_correlation_id
 
 
 class TestBatchedToolResults:
@@ -62,7 +63,7 @@ class TestBatchedToolResults:
         mock_client.chat = AsyncMock(side_effect=counting_chat)
         plugin._client = mock_client
 
-        await plugin.on_message(channel=channel, sender="user", text="use tools")
+        await plugin.on_message(channel=channel, sender="user", text="use tools", correlation_id=mint_correlation_id())
         await drain(plugin, channel)
         assert llm_call_count == 1
 
@@ -120,7 +121,7 @@ class TestBatchedToolResults:
         mock_client.chat = AsyncMock(side_effect=counting_chat)
         plugin._client = mock_client
 
-        await plugin.on_message(channel=channel, sender="user", text="go")
+        await plugin.on_message(channel=channel, sender="user", text="go", correlation_id=mint_correlation_id())
         await drain(plugin, channel)
         assert llm_call_count == 1
 
@@ -147,7 +148,7 @@ class TestBatchedToolResults:
         mock_client.chat = AsyncMock(return_value=_make_text_response("got it"))
         plugin._client = mock_client
 
-        await plugin.on_message(channel=channel, sender="user", text="quick question")
+        await plugin.on_message(channel=channel, sender="user", text="quick question", correlation_id=mint_correlation_id())
         await drain(plugin, channel)
 
         assert channel.pending_tool_call_ids == {"call_a", "call_b"}, (
@@ -178,7 +179,7 @@ class TestBatchedToolResults:
         )
         plugin._client = mock_client
 
-        await plugin.on_message(channel=channel, sender="user", text="go")
+        await plugin.on_message(channel=channel, sender="user", text="go", correlation_id=mint_correlation_id())
         await drain(plugin, channel)
 
         task_plugin = plugin.pm.get_plugin("task")
@@ -222,7 +223,7 @@ class TestBatchedToolResults:
         mock_client.chat = AsyncMock(side_effect=capture_chat)
         plugin._client = mock_client
 
-        await plugin.on_message(channel=channel, sender="user", text="go")
+        await plugin.on_message(channel=channel, sender="user", text="go", correlation_id=mint_correlation_id())
         await drain(plugin, channel)
 
         task_plugin = plugin.pm.get_plugin("task")
@@ -265,7 +266,7 @@ class TestBatchedToolResults:
         )
         plugin._client = mock_client
 
-        await plugin.on_message(channel=channel, sender="user", text="go")
+        await plugin.on_message(channel=channel, sender="user", text="go", correlation_id=mint_correlation_id())
         await drain(plugin, channel)
 
         task_plugin = plugin.pm.get_plugin("task")
@@ -322,13 +323,13 @@ class TestBatchedToolResults:
         plugin._client = mock_client
 
         # Batch A dispatched, both calls gated open.
-        await plugin.on_message(channel=channel, sender="user", text="go")
+        await plugin.on_message(channel=channel, sender="user", text="go", correlation_id=mint_correlation_id())
         await drain(plugin, channel)
         assert channel.pending_tool_call_ids == {"a1", "a2"}
 
         # An interleaved message arrives while A is still outstanding and
         # dispatches batch B.
-        await plugin.on_message(channel=channel, sender="user", text="also do this")
+        await plugin.on_message(channel=channel, sender="user", text="also do this", correlation_id=mint_correlation_id())
         await drain(plugin, channel)
         assert channel.pending_tool_call_ids == {"a1", "a2", "b1"}, (
             "batch B's dispatch must union into the pending set, not "
@@ -394,12 +395,12 @@ class TestBatchedToolResults:
         plugin._client = mock_client
 
         # First message: simple response
-        await plugin.on_message(channel=channel, sender="user", text="hi")
+        await plugin.on_message(channel=channel, sender="user", text="hi", correlation_id=mint_correlation_id())
         await drain(plugin, channel)
         assert llm_call_count == 1
 
         # Second message triggers tool dispatch
-        await plugin.on_message(channel=channel, sender="user", text="use tool")
+        await plugin.on_message(channel=channel, sender="user", text="use tool", correlation_id=mint_correlation_id())
         await drain(plugin, channel)
         assert llm_call_count == 2
 

@@ -17,6 +17,7 @@ import logging
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from corvidae.correlation import mint_correlation_id
 from corvidae.agent import (
     Agent,
     MAX_TURNS_FALLBACK_MESSAGE,
@@ -616,7 +617,7 @@ class TestQueueItemTimingPromptTokens:
         plugin._client = mock_client
 
         with caplog.at_level(logging.INFO, logger="corvidae.agent"):
-            await plugin.on_message(channel=channel, sender="user", text="hi")
+            await plugin.on_message(channel=channel, sender="user", text="hi", correlation_id=mint_correlation_id())
             await drain(plugin, channel)
 
         timing_records = [

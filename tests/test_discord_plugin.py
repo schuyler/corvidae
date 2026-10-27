@@ -761,6 +761,8 @@ class TestScope:
             assert kw["channel"].id == f"discord:{CHAN_ID}"
             assert kw["sender"] == str(AUTH_ID)
             assert h.registry.get(f"discord:{CHAN_ID}") is kw["channel"]
+            # The transport mints a real (non-empty string) correlation id.
+            assert isinstance(kw["correlation_id"], str) and kw["correlation_id"]
         finally:
             await h.plugin.on_stop()
 

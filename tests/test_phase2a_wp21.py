@@ -4,7 +4,7 @@ Phase 2A design (plans/implementation/phase-2.md, "Phase 2A — Design",
 WP2.1 section, PASSED re-review #1 at HEAD bb03fa5). Covers:
 
   1. mint_exchange_key() shape.
-  2. USER message: key minted before the gate, gate hook receives it,
+  2. USER message: the transport-supplied key reaches the gate hook,
      admitted -> exchange_log row origin='user', message_rowid populated
      after the turn.
   3. Gate plugin returns False -> on_message_rejected fires, exchange_log
@@ -33,6 +33,7 @@ from unittest.mock import ANY, AsyncMock, MagicMock
 
 import pytest
 
+from corvidae.correlation import mint_correlation_id
 from corvidae.hooks import CorvidaePlugin, create_plugin_manager, hookimpl
 
 from helpers import build_plugin_and_channel, drain, drain_task_queue
@@ -212,8 +213,9 @@ class TestMintCorrelationId:
 
 class TestUserMessageAdmission:
     async def test_gate_hook_receives_correlation_id(self):
-        """should_process_message must be called with a non-None correlation_id
-        for a USER message, minted before the gate fires."""
+        """should_process_message must be called with the correlation_id the
+        transport minted and passed to on_message (the Agent no longer mints
+        ids for USER messages)."""
         plugin, channel, db = await build_plugin_and_channel()
 
         mock_client = MagicMock()
@@ -223,12 +225,12 @@ class TestUserMessageAdmission:
         gate = _KeyCapturePlugin()
         plugin.pm.register(gate, name="key_capture")
 
-        await plugin.on_message(channel=channel, sender="user", text="hello")
+        cid = mint_correlation_id()
+        await plugin.on_message(channel=channel, sender="user", text="hello", correlation_id=cid)
         await drain(plugin, channel)
 
         assert len(gate.seen_calls) == 1
-        assert gate.seen_calls[0]["correlation_id"] is not None
-        assert isinstance(gate.seen_calls[0]["correlation_id"], str)
+        assert gate.seen_calls[0]["correlation_id"] == cid
 
         await db.close()
 
@@ -243,7 +245,7 @@ class TestUserMessageAdmission:
         gate = _KeyCapturePlugin()
         plugin.pm.register(gate, name="key_capture")
 
-        await plugin.on_message(channel=channel, sender="user", text="hello")
+        await plugin.on_message(channel=channel, sender="user", text="hello", correlation_id=mint_correlation_id())
         await drain(plugin, channel)
 
         assert len(gate.seen_keys) == 1
@@ -267,7 +269,7 @@ class TestUserMessageAdmission:
         gate = _KeyCapturePlugin()
         plugin.pm.register(gate, name="key_capture")
 
-        await plugin.on_message(channel=channel, sender="user", text="hello")
+        await plugin.on_message(channel=channel, sender="user", text="hello", correlation_id=mint_correlation_id())
         await drain(plugin, channel)
 
         key = gate.seen_keys[0]
@@ -307,11 +309,12 @@ class TestGateRejection:
         recorder = _AdmissionRecorderPlugin()
         plugin.pm.register(recorder, name="admission_recorder")
 
-        await plugin.on_message(channel=channel, sender="user", text="blocked")
+        cid = mint_correlation_id()
+        await plugin.on_message(channel=channel, sender="user", text="blocked", correlation_id=cid)
         await drain(plugin, channel)
 
         assert len(recorder.rejected) == 1
-        assert recorder.rejected[0]["correlation_id"] is not None
+        assert recorder.rejected[0]["correlation_id"] == cid
         assert len(recorder.admitted) == 0
         plugin.pm.ahook.send_message.assert_not_awaited()
 
@@ -328,7 +331,7 @@ class TestGateRejection:
         gate = _KeyCapturePlugin(reject=True)
         plugin.pm.register(gate, name="key_capture")
 
-        await plugin.on_message(channel=channel, sender="user", text="blocked")
+        await plugin.on_message(channel=channel, sender="user", text="blocked", correlation_id=mint_correlation_id())
         await drain(plugin, channel)
 
         assert len(gate.seen_keys) == 1
@@ -399,7 +402,7 @@ class TestToolCyclePropagation:
         gate = _KeyCapturePlugin()
         plugin.pm.register(gate, name="key_capture")
 
-        await plugin.on_message(channel=channel, sender="user", text="use the tool")
+        await plugin.on_message(channel=channel, sender="user", text="use the tool", correlation_id=mint_correlation_id())
         await drain(plugin, channel)
         task_plugin = plugin.pm.get_plugin("task")
         await task_plugin.task_queue.queue.join()
@@ -445,7 +448,7 @@ class TestToolCyclePropagation:
         gate = _KeyCapturePlugin()
         plugin.pm.register(gate, name="key_capture")
 
-        await plugin.on_message(channel=channel, sender="user", text="use the tool")
+        await plugin.on_message(channel=channel, sender="user", text="use the tool", correlation_id=mint_correlation_id())
         await drain(plugin, channel)
         task_plugin = plugin.pm.get_plugin("task")
         await task_plugin.task_queue.queue.join()
@@ -495,7 +498,7 @@ class TestToolCyclePropagation:
         )
         plugin._client = mock_client
 
-        await plugin.on_message(channel=channel, sender="user", text="the original user text")
+        await plugin.on_message(channel=channel, sender="user", text="the original user text", correlation_id=mint_correlation_id())
         await drain(plugin, channel)
         task_plugin = plugin.pm.get_plugin("task")
         await task_plugin.task_queue.queue.join()
@@ -620,7 +623,7 @@ class TestStandaloneNotificationAndPersistedFiring:
         )
         plugin._client = mock_client
 
-        await plugin.on_message(channel=channel, sender="user", text="use two tools")
+        await plugin.on_message(channel=channel, sender="user", text="use two tools", correlation_id=mint_correlation_id())
         await drain(plugin, channel)
         task_plugin = plugin.pm.get_plugin("task")
         await task_plugin.task_queue.queue.join()
@@ -653,7 +656,7 @@ class TestBeforeAgentTurnEnrichment:
         recorder = _BeforeTurnRecorderPlugin()
         plugin.pm.register(recorder, name="before_turn_recorder")
 
-        await plugin.on_message(channel=channel, sender="user", text="hello")
+        await plugin.on_message(channel=channel, sender="user", text="hello", correlation_id=mint_correlation_id())
         await drain(plugin, channel)
 
         assert len(recorder.calls) == 1
@@ -698,7 +701,7 @@ class TestBeforeAgentTurnEnrichment:
         mock_client.chat = AsyncMock(return_value=_make_text_response("hi"))
         plugin._client = mock_client
 
-        await plugin.on_message(channel=channel, sender="user", text="hello")
+        await plugin.on_message(channel=channel, sender="user", text="hello", correlation_id=mint_correlation_id())
         await drain(plugin, channel)
 
         key = gate.seen_keys[0]
@@ -742,7 +745,7 @@ class TestUsageLogAttributionWiring:
         mock_client.chat = AsyncMock(side_effect=fake_chat)
         plugin._client = mock_client
 
-        await plugin.on_message(channel=channel, sender="user", text="hello")
+        await plugin.on_message(channel=channel, sender="user", text="hello", correlation_id=mint_correlation_id())
         await drain(plugin, channel)
 
         assert captured_attribution.get("correlation_id") == gate.seen_keys[0]
@@ -781,7 +784,7 @@ class TestUsageLogAttributionWiring:
         mock_client.chat = AsyncMock(side_effect=fake_chat)
         plugin._client = mock_client
 
-        await plugin.on_message(channel=channel, sender="user", text="hello")
+        await plugin.on_message(channel=channel, sender="user", text="hello", correlation_id=mint_correlation_id())
         await drain(plugin, channel)
 
         assert captured_attribution.get("correlation_id") == gate.seen_keys[0]

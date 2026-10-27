@@ -65,7 +65,7 @@ not shown here).
 class AgentSpec:
     async def on_start(self, config: dict) -> None
     async def on_stop(self) -> None
-    async def on_message(self, channel: Channel, sender: str, text: str) -> None
+    async def on_message(self, channel: Channel, sender: str, text: str, correlation_id: str) -> None
     async def send_message(self, channel: Channel, text: str, latency_ms: float | None = None) -> None
     def register_tools(self, tool_registry: list) -> None  # sync; plugins append Tool instances or bare callables
     async def on_agent_response(self, channel: Channel, request_text: str, response_text: str, correlation_id: str | None, meta: dict, logprobs: dict | None) -> None
@@ -118,7 +118,7 @@ their return values are ignored.
 | `on_init` | broadcast | `Runtime.start()`, after all plugins are registered, before `on_start`; store `pm`/`config`, resolve other plugins — no runtime resources |
 | `on_start` | broadcast | daemon startup, after config load |
 | `on_stop` | broadcast | SIGINT/SIGTERM |
-| `on_message` | broadcast | inbound message from any transport |
+| `on_message` | broadcast | inbound message from any transport; the transport mints and passes `correlation_id` (required, no default) |
 | `send_message` | broadcast | outbound message delivery |
 | `send_thinking` | broadcast | `Agent`, when the LLM response carries `reasoning_content` |
 | `send_tool_status` | broadcast | `Agent`/`TaskPlugin`, tool call dispatched and completed |
@@ -126,7 +126,7 @@ their return values are ignored.
 | `register_tools` | broadcast (sync) | startup tool collection |
 | `on_agent_response` | broadcast | after agent loop produces a text response; no default implementation |
 | `on_notify` | broadcast | inject a notification into a channel queue |
-| `should_process_message` | broadcast / resolve_reject_wins | `on_message`, before enqueue; no default implementation; None from empty broadcast allows all messages |
+| `should_process_message` | broadcast / resolve_reject_wins | `on_message`, before enqueue, carrying the transport-minted `correlation_id`; no default implementation; None from empty broadcast allows all messages |
 | `on_message_admitted` | broadcast | `on_message`, after a USER message is admitted; fires exactly once per admitted message |
 | `on_message_rejected` | broadcast | `on_message`, after a USER message is vetoed; fires exactly once per rejected message |
 | `on_message_persisted` | broadcast | dequeue, after the correlation-originating row is persisted; fires once per originating item regardless of outcome (`rowid` may be None) |
@@ -562,6 +562,17 @@ Queues added after startup are visible to other plugins that hold a reference
 to this dict because the reference is live.
 
 ### Message processing
+
+A transport mints the correlation id for each inbound user message
+(`corvidae.correlation.mint_correlation_id()`, a stdlib-only leaf module;
+`corvidae.agent` re-exports it) and passes it to `on_message`. `Agent.on_message`
+uses it verbatim for the gate, the admitted/rejected hooks and the
+`QueueItem`, so `on_message_persisted` carries the same id. It never mints
+for a USER item: a falsy id raises `ValueError`, checked before the
+readiness check so a mis-wired transport fails even while the agent starts.
+Omitting the argument entirely fails at the hook call (`HookCallError`).
+Notification-born items with no inherited `meta["correlation_id"]` are the
+exception: the Agent mints their id at dequeue.
 
 `on_message` broadcasts `should_process_message` and passes the result
 list to `resolve_reject_wins`. If the resolved result is `False` (identity
@@ -1778,24 +1789,28 @@ monitored.
   sends `sendTyping` immediately, covering queueing delay, and starts a
   refresh loop that re-sends every 10s while the channel's outstanding
   count stays positive (Signal clients expire an indicator after roughly
-  15s). `send_message` and `on_message_rejected` each give one outstanding
-  slot back; a second gate plugin vetoing a message this transport already
-  counted is why the rejection path decrements too. It gives one back
-  only for an allowlisted sender, the only kind that ever took one. Today
-  that is belt and braces: channels are one per sender (groups are
-  dropped), so a stranger's rejection could only reach their own zero
-  count. It matters if group messages are ever handled, where a refused
-  stranger could otherwise stop typing owed to an allowed user. A refresh loop still asleep from an earlier
+  15s). `send_message` gives one outstanding slot back. So does the
+  inbound handler for any message `on_message` returns without admitting:
+  the transport mints the message's correlation id, records its envelope
+  timestamp under that id and takes the slot before calling `on_message`,
+  and a `finally` releases both unless `on_message_admitted` fired for the
+  id. Admission and rejection fire before `on_message` returns, so a gate
+  veto, an agent that is not ready yet, or a raise or cancellation all land
+  there. Only a message that took a slot (an allowlisted sender with an
+  envelope timestamp) has an entry to release, so a stranger's refusal
+  gives nothing back and no `on_message_rejected` implementation is needed.
+  A refresh loop still asleep from an earlier
   turn is reused rather than doubled, so a channel has at most one, and
   `on_stop` cancels it. No explicit stop is ever sent — once the loop
   exits, the indicator expires on its own.
 - *Read receipt.* Sent from `on_message_persisted` — processing start —
   not on arrival. A message can sit queued behind contended local
   inference, and a "read" marker followed by a long silence is worse than
-  no marker. Envelope timestamps are held FIFO per channel and popped when
-  the matching turn starts; only correlation ids this transport itself
-  admitted are eligible, since `on_message_persisted` also fires for
-  notification-originated turns that never pushed a timestamp. That
+  no marker. Envelope timestamps are held per channel keyed by correlation
+  id and popped by that id when the matching turn starts, so a vetoed or
+  dropped message cannot shift a later receipt onto the wrong timestamp.
+  `on_message_persisted` also fires for notification-originated turns,
+  whose ids were never recorded, so those are a no-op. That
   `sendReceipt`'s `targetTimestamp` takes the inbound envelope's
   `timestamp` is convention, not documented by signal-cli — it matches
   `sendReaction`, `remoteDelete`, and `quoteTimestamp`, but it has not been
@@ -1894,7 +1909,9 @@ silence. The bot has no way to tell them it is configured to ignore them.
 outstanding message for a channel the transport sends the typing indicator
 immediately and starts a refresh loop that re-sends every 8s (Discord's
 indicator lasts about 10s) while the channel's outstanding count stays
-positive. `send_message` gives one slot back. `on_message_rejected` gives
+positive. The transport mints the message's correlation id and passes it to
+`on_message`; the id keys nothing here, since the outstanding count needs no
+identity. `send_message` gives one slot back. `on_message_rejected` gives
 one back only for an allowlisted sender — the only kind that ever took one —
 so a refused stranger @-mentioning the bot cannot stop typing owed to an
 allowed user in the same channel. A refresh loop still asleep from an
@@ -2008,18 +2025,17 @@ traceback and answered the same way. Empty text is ignored.
 
 **Unsent messages.** A user message is shown from the moment it's sent,
 but its row reaches `message_log` only at dequeue. Between the two it's an
-`_Unsent` entry with a server-minted id. The send handler sets a
-`ContextVar` to its entry around `await on_message(...)`; apluggy runs
-hook impls in `gather` tasks, which copy the context, so the admitted and
-rejected impls fired inside that call see exactly that entry. Admission
-binds the entry to its correlation id, rejection removes it (and the
-`rejected` frame carries its id, so the right item is marked even when two
-tabs send the same text), `on_message_persisted` removes the bound entry,
-and the send handler's `finally` removes an entry that was neither
-admitted nor rejected. Entries are matched by identity, never by text.
-Tasks created inside that `await` (Agent's queue consumer, on a channel's
-first message) inherit the variable for life, so the hooks only trust it
-while its entry is still tracked.
+`_Unsent` entry with a server-minted display id. The entry also carries
+the message's correlation id, minted by the send handler when it creates
+the entry and passed to `on_message`, plus an `admitted` flag. The admitted
+and rejected hooks find their entry by that id, with no ambient state:
+admission sets `admitted`, rejection removes the entry (and the `rejected`
+frame carries its display id, so the right item is marked even when two
+tabs send the same text), and `on_message_persisted` removes the entry.
+A hook carrying an id no entry holds changes nothing (a rejection reports a
+null id). Admission and rejection fire before `on_message` returns, so the
+send handler's `finally` removes any entry still un-admitted: dropped,
+raised or cancelled. Removal is idempotent.
 
 **Working indicator.** On at admission. After each `send_message`, off
 unless a reply is still owed: an admitted-but-unpersisted entry, a

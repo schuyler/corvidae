@@ -247,11 +247,6 @@ Signal's allowlist bounds which channels can come into existence under
 `signal:*`. At minimum, PMs should be off by default or
 gated by an `irc.allow` list, bringing it in line with Signal.
 
-The Signal plugin also carries a documented latent bug (`on_message_rejected`
-docstring): a second gate plugin vetoing an already-admitted message would
-leak a stale timestamp into every later read receipt. Not exploitable
-today; a trap for the next plugin author.
-
 Discord is built like Signal, not like IRC. The transport's
 `should_process_message` is a default-deny allowlist of numeric user ids; an
 empty list refuses everyone, and a refusal is one INFO log line with no

@@ -9,6 +9,7 @@ Design requirements covered:
 import asyncio
 import pytest
 
+from corvidae.correlation import mint_correlation_id
 from corvidae.channel import Channel, ChannelConfig
 from corvidae.queue import SerialQueue, QueueItem
 
@@ -286,7 +287,7 @@ class TestQueueItemRole:
         q.start(fake_process)
         plugin.queues[ch.id] = q
 
-        await plugin.on_message(channel=ch, sender="alice", text="hello")
+        await plugin.on_message(channel=ch, sender="alice", text="hello", correlation_id=mint_correlation_id())
         await q.drain()
 
         assert len(captured_items) == 1

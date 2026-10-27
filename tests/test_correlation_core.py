@@ -19,6 +19,7 @@ import pytest
 
 from helpers import build_plugin_and_channel, drain
 from llm_response_fixtures import _make_text_response
+from corvidae.correlation import mint_correlation_id
 
 CORVIDAE_ROOT = Path(__file__).resolve().parent.parent / "corvidae"
 
@@ -328,11 +329,13 @@ class TestOnMessagePersistedFiringDiscipline:
         mock_client.chat = AsyncMock(return_value=_make_text_response("hi"))
         plugin._client = mock_client
 
-        await plugin.on_message(channel=channel, sender="user", text="hello")
+        # The transport-minted id passed to on_message must reach the hook.
+        cid = mint_correlation_id()
+        await plugin.on_message(channel=channel, sender="user", text="hello", correlation_id=cid)
         await drain(plugin, channel)
 
         persisted.assert_awaited_once()
         call_kwargs = persisted.call_args.kwargs
         assert call_kwargs["rowid"] is None
         assert call_kwargs["text"] == "hello"
-        assert call_kwargs["correlation_id"] is not None
+        assert call_kwargs["correlation_id"] == cid

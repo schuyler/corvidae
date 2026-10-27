@@ -27,7 +27,6 @@ Logging:
 import asyncio
 import logging
 import time
-import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field, fields as dc_fields
 from enum import Enum
@@ -36,6 +35,9 @@ from corvidae.turn import AgentTurnResult, run_agent_turn
 from corvidae.attribution import get_attribution, reset_attribution, set_attribution
 from corvidae.channel import Channel, ChannelConfig, ChannelRegistry, resolve_system_prompt
 from corvidae.context import ContextWindow, MessageType, DEFAULT_CHARS_PER_TOKEN
+# Re-exported: mint_correlation_id lives in a leaf module so transports can
+# import it without this module; existing imports from here keep working.
+from corvidae.correlation import mint_correlation_id  # noqa: F401
 from corvidae.fork import (
     ForkRefused,
     ForkResult,
@@ -65,16 +67,6 @@ FRAMEWORK_KEYS = {f.name for f in dc_fields(ChannelConfig)}
 DEFAULT_LLM_ERROR_MESSAGE = "Sorry, I encountered an error and could not process your message."
 # Note: same text as MAX_ROUNDS_REACHED_MESSAGE in tools/subagent.py — kept in sync.
 MAX_TURNS_FALLBACK_MESSAGE = "(max tool-calling rounds reached)"
-
-
-def mint_correlation_id() -> str:
-    """Mint a time-sortable, globally-unique correlation id.
-
-    Shape: ``<hex-time>-<hex12>``. The hex-time prefix is
-    monotone-nondecreasing across calls (wall-clock seconds); the uuid4
-    suffix guarantees distinctness within the same second.
-    """
-    return f"{int(time.time()):x}-{uuid.uuid4().hex[:12]}"
 
 
 class QueueItemRole(Enum):
@@ -242,7 +234,14 @@ class Agent(CorvidaePlugin):
         await self._start_plugin(config)
 
     @hookimpl
-    async def on_message(self, channel, sender: str, text: str) -> None:
+    async def on_message(self, channel, sender: str, text: str, correlation_id: str) -> None:
+        # The transport mints the id. A missing one would silently break the
+        # transport's link between this message and its lifecycle hooks, so
+        # fail loudly -- before the readiness check, so a mis-wired transport
+        # is caught even while the agent is starting.
+        if not correlation_id:
+            raise ValueError("on_message requires a non-empty correlation_id from the transport")
+
         if not self._client:
             logger.error("on_message: LLM client not initialized")
             return
@@ -251,10 +250,6 @@ class Agent(CorvidaePlugin):
             "on_message received",
             extra={"channel": channel.id, "sender": sender},
         )
-
-        # Mint the correlation id BEFORE the gate fires, so gate plugins can
-        # correlate their decision with the message.
-        correlation_id = mint_correlation_id()
 
         # Hook: should_process_message (broadcast, reject-wins)
         results = await self.pm.ahook.should_process_message(

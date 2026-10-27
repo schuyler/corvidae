@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import aiosqlite
 import pytest
 
+from corvidae.correlation import mint_correlation_id
 from corvidae.channel import Channel, ChannelConfig, ChannelRegistry
 from corvidae.persistence import init_db
 from corvidae.hooks import create_plugin_manager
@@ -668,7 +669,7 @@ class TestGracefulDegradation:
         channel = registry.get_or_create("test", "scope1", config=ChannelConfig())
 
         # With no PersistencePlugin, Agent should still create a ContextWindow
-        await plugin.on_message(channel=channel, sender="user", text="hello")
+        await plugin.on_message(channel=channel, sender="user", text="hello", correlation_id=mint_correlation_id())
         if channel.id in plugin.queues:
             await plugin.queues[channel.id].drain()
 
