@@ -1041,7 +1041,9 @@ only addition is the system-prompt seam the compile needs (below).
   the hook-admission rule asks for), re-run only at a compaction boundary
   or when a conversation starts. Compaction already rebuilds the KV cache
   for everything after the system prompt, so a refresh there costs only
-  the system prompt's own tokens. This supplies the feedback edge that "memory
+  the system prompt's own tokens. A refresh that can't wait is appended to
+  the current window as a CONTEXT entry instead, and moved into the system
+  prompt at the next boundary (PRD §3.3.8). This supplies the feedback edge that "memory
   is the personality" (§5 divergence 6) promises but the current design only
   half-delivers: memory writes the self-model; the prompt reads it. Today's
   persona layer is a static one-line `SOUL.md` and `set_settings` rightly

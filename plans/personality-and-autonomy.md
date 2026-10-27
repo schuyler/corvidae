@@ -228,7 +228,8 @@ for drift to feed back. There is not yet a place to put it, either: the
 system prompt is resolved from config once per conversation and no plugin
 can contribute to it, so the compile needs a small kernel seam (shared
 with the skills index), refreshed at compaction, where the cache after the
-system prompt is rebuilt anyway.
+system prompt is rebuilt anyway, or appended to the window in the meantime
+and moved into the system prompt at the next boundary.
 
 **Eval:** self-model diffs over months — coherent evolution vs. thrash vs.
 flattening toward the generic. Blocked on 5.2 having accumulated data;

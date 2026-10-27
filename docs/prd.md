@@ -391,7 +391,9 @@ Per transport:
    conversation. Nothing mutates it per turn. Plugin-contributed sections
    (the skills index, the self-model) are re-resolved only at a
    compaction boundary or when a conversation starts, because compaction
-   already rebuilds the KV cache for everything after the system prompt.
+   already rebuilds the KV cache for everything after the system prompt;
+   or appended to the current window, and moved to the system prompt at
+   the next conversation boundary.
 9. `<think>` blocks are stripped from display, never from the DB.
 10. Double-buffer compaction (build the compacted prompt in a second KV
     slot and swap) is not built and needs its own decision before it is.
