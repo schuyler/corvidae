@@ -235,6 +235,9 @@ class CorvidaeAcpAgent:
                     continue
                 role = msg.get("role")
                 msg_type = msg.get("_message_type")
+                if msg_type == MessageType.UNSENT:
+                    # A send gate vetoed it; the client never saw it live.
+                    continue
                 if role == "user":
                     update = update_user_message_text(text)
                 elif role == "assistant" or msg_type == MessageType.SUMMARY:

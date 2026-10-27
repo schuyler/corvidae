@@ -54,11 +54,16 @@ class MessageType(str, enum.Enum):
     CONTEXT: plugin-injected contextual information (memory, notes, retrieved
              documents, etc.) that should appear in the prompt but is not part
              of the conversational turn history.
+    UNSENT: an assistant message a should_send_response gate vetoed. It
+            stays in the window (and reloads into it) but no transport ever
+            sees it, including history replay. Compaction and consolidation
+            read MESSAGE rows only, so it is never summarized as said.
     """
 
     MESSAGE = "message"
     SUMMARY = "summary"
     CONTEXT = "context"
+    UNSENT = "unsent"
 
 
 #: Default characters-per-token estimate for rough token counting.

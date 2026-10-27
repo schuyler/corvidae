@@ -90,6 +90,31 @@ _LLM_ERROR_TEMPLATE = (
 # Note: same text as MAX_ROUNDS_REACHED_MESSAGE in tools/subagent.py — kept in sync.
 MAX_TURNS_FALLBACK_MESSAGE = "(max tool-calling rounds reached)"
 
+# The not-sent marker appended after a should_send_response veto. It quotes
+# the start of the unsent text because build_prompt moves a tool-calls block
+# to its last result, so the marker's position alone can't say which
+# emission it means.
+UNSENT_MARKER_LABEL = "not sent"
+_UNSENT_MARKER_EXCERPT_CHARS = 80
+_UNSENT_MARKER_SUBJECT = {
+    "final": "response",
+    "progress": "progress text",
+    "thinking": "reasoning",
+}
+
+
+def _unsent_marker_text(emission: str, text: str) -> str:
+    """The marker content for a vetoed emission of ``text``."""
+    excerpt = " ".join(text.split())
+    if len(excerpt) > _UNSENT_MARKER_EXCERPT_CHARS:
+        excerpt = excerpt[:_UNSENT_MARKER_EXCERPT_CHARS].rstrip() + "…"
+    subject = _UNSENT_MARKER_SUBJECT.get(emission, emission)
+    return (
+        f"[{UNSENT_MARKER_LABEL}]\n\n"
+        f"The channel did not see your {subject} beginning «{excerpt}». "
+        "Don't refer to it as something you said."
+    )
+
 
 def _describe_llm_failure(exc: Exception) -> str:
     """Map an LLM failure to a calm, human-readable cause for the user.
@@ -417,11 +442,14 @@ class Agent(CorvidaePlugin):
         messages: list[dict],
         tool_schemas: list[dict],
         llm_overrides: dict | None,
+        item: QueueItem | None = None,
     ) -> AgentTurnResult | None:
         """Call run_agent_turn and handle LLM errors.
 
         Returns the AgentTurnResult on success, or None on error (error message
-        already sent to the channel via the send hook).
+        already sent to the channel via the send hook, unless a
+        should_send_response gate vetoed the "error" emission). ``item``
+        supplies the trace id and meta for that gate.
         """
         try:
             return await run_agent_turn(self._client, messages, tool_schemas, extra_body=llm_overrides)
@@ -441,6 +469,14 @@ class Agent(CorvidaePlugin):
             if error_msg is None:
                 # Build a complete message with the human-readable failure class.
                 error_msg = _llm_error_message(exc)
+            # Per-emission gate: a veto suppresses this unpersisted send and
+            # nothing else — no assistant message exists on this path.
+            if not await self._gate_send(channel, error_msg, "error", item):
+                logger.info(
+                    "error fallback not sent: vetoed by should_send_response",
+                    extra={"channel": channel.id},
+                )
+                return None
             try:
                 await self.pm.ahook.send(
                     channel=channel,
@@ -453,6 +489,66 @@ class Agent(CorvidaePlugin):
                     extra={"channel": channel.id},
                 )
             return None
+
+    async def _gate_send(
+        self,
+        channel: Channel,
+        text: str,
+        emission: str,
+        item: QueueItem | None,
+    ) -> bool:
+        """Fire should_send_response; return True when ``text`` may be sent.
+
+        Reject-wins over every implementation. A raising hook fails open:
+        an outbound gate that breaks must never silence the agent, so the
+        failure is logged and the emission goes out.
+        """
+        trace_id = item.trace_id if item is not None else None
+        meta = item.meta if item is not None else {}
+        try:
+            results = await self.pm.ahook.should_send_response(
+                channel=channel, text=text, emission=emission,
+                trace_id=trace_id, meta=meta,
+            )
+            verdict = resolve_reject_wins(results)
+        except Exception:
+            logger.warning(
+                "should_send_response hook failed for the %s emission on %s; "
+                "sending it anyway",
+                emission, channel.id,
+                exc_info=True,
+                extra={"channel": channel.id, "emission": emission, "trace_id": trace_id},
+            )
+            return True
+        return verdict is not False
+
+    async def _append_unsent_marker(
+        self, channel: Channel, emission: str, text: str
+    ) -> None:
+        """Append and persist the not-sent marker for a vetoed emission.
+
+        A CONTEXT system row, persisted like any other, so it reloads with
+        the window and the model never cites the unsent text as said. Core
+        appends it directly rather than through a plugin, so every gate's
+        veto gets one.
+        """
+        conv = channel.conversation
+        if conv is None:
+            return
+        marker = {"role": "system", "content": _unsent_marker_text(emission, text)}
+        conv.append(marker, MessageType.CONTEXT)
+        try:
+            results = await self.pm.ahook.persist_message(
+                channel=channel, message=marker, message_type=MessageType.CONTEXT,
+            )
+            rowid = resolve_single_result(results, "persist_message")
+            if rowid is not None:
+                conv.messages[-1]["_db_id"] = rowid
+        except Exception:
+            logger.warning(
+                "persist_message hook failed for the not-sent marker on %s",
+                channel.id, exc_info=True, extra={"channel": channel.id},
+            )
 
     async def _resolve_display_text(
         self,
@@ -491,30 +587,43 @@ class Agent(CorvidaePlugin):
         max_turns_limit: int,
         request_text: str,
         item: QueueItem | None = None,
+        *,
+        display_text: str | None = None,
+        unsent: bool = False,
     ) -> None:
         """Dispatch tool calls or send text response.
 
         Implements the decision point at step 10 of _process_queue_item:
-        - Tool calls under limit: increment counter, dispatch, return.
+        - Tool calls under limit: increment counter, gate and send progress
+          text, dispatch, return.
         - Tool calls at limit: NO counter increment, resolve display text
           with MAX_TURNS_FALLBACK_MESSAGE, fire on_agent_response, send message.
         - No tool calls: increment counter, resolve display text, fire
           on_agent_response, send message.
 
         ``item`` provides the current turn's trace id/meta (for the
-        enriched on_agent_response call) and, via _dispatch_tool_calls,
-        stamps the tool cycle's Tasks with the same trace.
+        enriched on_agent_response call and the send gate) and, via
+        _dispatch_tool_calls, stamps the tool cycle's Tasks with the same
+        trace. ``display_text`` is the text the step-7 final gate already
+        resolved and checked (None resolves it here); ``unsent`` is that
+        gate's veto, which skips the transport send but still fires
+        on_agent_response.
         """
         if result.tool_calls and channel.turn_counter < max_turns_limit:
             channel.turn_counter += 1
-            # Show intermediate text (e.g. "Let me look that up...") before dispatching tools
+            # Show intermediate text (e.g. "Let me look that up...") before
+            # dispatching tools, unless the progress gate vetoes it; a veto
+            # leaves the row alone and marks the window instead.
             if result.text:
-                try:
-                    await self.pm.ahook.send(
-                        channel=channel, event=OutboundProgress(text=result.text)
-                    )
-                except Exception:
-                    logger.warning("send hook failed for progress", exc_info=True, extra={"channel": channel.id})
+                if await self._gate_send(channel, result.text, "progress", item):
+                    try:
+                        await self.pm.ahook.send(
+                            channel=channel, event=OutboundProgress(text=result.text)
+                        )
+                    except Exception:
+                        logger.warning("send hook failed for progress", exc_info=True, extra={"channel": channel.id})
+                else:
+                    await self._append_unsent_marker(channel, "progress", result.text)
             await self._dispatch_tool_calls(result.tool_calls, channel)
             # Do NOT send text response; return and wait for tool results
             return
@@ -524,16 +633,21 @@ class Agent(CorvidaePlugin):
                 "max_turns reached, suppressing tool calls",
                 extra={"channel": channel.id, "turn_counter": channel.turn_counter},
             )
-            display_response = await self._resolve_display_text(
-                channel, result, fallback=MAX_TURNS_FALLBACK_MESSAGE
+            display_response = display_text if display_text is not None else (
+                await self._resolve_display_text(
+                    channel, result, fallback=MAX_TURNS_FALLBACK_MESSAGE
+                )
             )
         else:
             # No tool calls — normal text response
             channel.turn_counter += 1
-            display_response = await self._resolve_display_text(channel, result, fallback=None)
+            display_response = display_text if display_text is not None else (
+                await self._resolve_display_text(channel, result, fallback=None)
+            )
 
         logger.info(
-            "agent response sent",
+            "agent response not sent: vetoed by should_send_response"
+            if unsent else "agent response sent",
             extra={
                 "channel": channel.id,
                 "latency_ms": result.latency_ms,
@@ -560,6 +674,10 @@ class Agent(CorvidaePlugin):
                 exc_info=True,
                 extra={"channel": channel.id},
             )
+        # A vetoed final never reaches a transport; the row is UNSENT and the
+        # window already carries its marker.
+        if unsent:
+            return
         try:
             await self.pm.ahook.send(
                 channel=channel,
@@ -786,49 +904,97 @@ class Agent(CorvidaePlugin):
             llm_overrides["logprobs"] = True
 
         result = await self._run_turn(
-            channel, messages, self._tool_view(channel).schemas, llm_overrides or None
+            channel, messages, self._tool_view(channel).schemas, llm_overrides or None,
+            item,
         )
         if result is None:
             return
 
+        # 7b. The persistence-controlling send gate (trap #6). It fires only
+        # when this result's tool calls will NOT dispatch — a text result,
+        # or the max-turns branch — because hiding an assistant message
+        # whose calls dispatch would orphan its tool rows on reload. The
+        # dispatch condition is computed once here and _handle_response
+        # takes the same branch (turn_counter does not move in between).
+        # The gate checks exactly what would be sent: the display text, or
+        # the max-turns fallback on that branch.
+        will_dispatch = bool(result.tool_calls) and channel.turn_counter < max_turns_limit
+        assistant_message = result.message
+        display_text: str | None = None
+        unsent = False
+        if not will_dispatch:
+            if result.tool_calls:
+                # Max-turns: these calls never dispatch, so a row that kept
+                # them would dangle on reload. Strip them from the row AND
+                # the window copy (one dict feeds both), whatever the verdict.
+                assistant_message = {
+                    k: v for k, v in result.message.items() if k != "tool_calls"
+                }
+                if assistant_message.get("content") is None:
+                    assistant_message["content"] = ""
+            display_text = await self._resolve_display_text(
+                channel, result,
+                fallback=MAX_TURNS_FALLBACK_MESSAGE if result.tool_calls else None,
+            )
+            unsent = not await self._gate_send(channel, display_text, "final", item)
+
         # 8. Append assistant message and fire persistence event, attaching
-        # the resolved rowid to the window copy (same rule as step 4).
-        conv.append(result.message)
+        # the resolved rowid to the window copy (same rule as step 4). A
+        # vetoed final persists as UNSENT: in the window, never sent.
+        message_type = MessageType.UNSENT if unsent else MessageType.MESSAGE
+        conv.append(assistant_message, message_type)
+        assistant_in_window = conv.messages[-1]
         try:
             results = await self.pm.ahook.persist_message(
                 channel=channel,
-                message=result.message,
-                message_type=MessageType.MESSAGE,
+                message=assistant_message,
+                message_type=message_type,
             )
             rowid = resolve_single_result(results, "persist_message")
             if rowid is not None:
-                conv.messages[-1]["_db_id"] = rowid
+                assistant_in_window["_db_id"] = rowid
         except Exception:
             logger.warning("persist_message hook failed", exc_info=True)
 
-        # 8b. Send an OutboundThinking event if the LLM produced reasoning_content
+        # 8b. Send an OutboundThinking event if the LLM produced
+        # reasoning_content, unless the thinking gate vetoes it. The marker
+        # waits until after step 9, which works on the assistant message.
+        unsent_markers: list[tuple[str, str]] = []
+        if unsent:
+            unsent_markers.append(("final", display_text or ""))
         reasoning_text = result.message.get("reasoning_content")
         if reasoning_text:
-            try:
-                await self.pm.ahook.send(
-                    channel=channel, event=OutboundThinking(text=reasoning_text)
-                )
-            except Exception:
-                logger.warning("send hook failed for thinking", exc_info=True, extra={"channel": channel.id})
+            if await self._gate_send(channel, reasoning_text, "thinking", item):
+                try:
+                    await self.pm.ahook.send(
+                        channel=channel, event=OutboundThinking(text=reasoning_text)
+                    )
+                except Exception:
+                    logger.warning("send hook failed for thinking", exc_info=True, extra={"channel": channel.id})
+            else:
+                unsent_markers.append(("thinking", reasoning_text))
 
         # 9. Let plugins post-process the in-memory assistant message (e.g., strip reasoning_content)
         try:
-            await self.pm.ahook.after_persist_assistant(channel=channel, message=conv.messages[-1])
+            await self.pm.ahook.after_persist_assistant(channel=channel, message=assistant_in_window)
         except Exception:
             logger.warning(
                 "after_persist_assistant hook failed",
                 exc_info=True,
                 extra={"channel": channel.id},
             )
+
+        # 9b. Mark each vetoed emission in the window (persisted, so the
+        # marker reloads beside the row it describes).
+        for emission, text in unsent_markers:
+            await self._append_unsent_marker(channel, emission, text)
         _phases["llm"] = _time.monotonic() - _t_llm_start
 
         # 10. Dispatch tool calls or send text response
-        await self._handle_response(result, channel, max_turns_limit, request_text, item)
+        await self._handle_response(
+            result, channel, max_turns_limit, request_text, item,
+            display_text=display_text, unsent=unsent,
+        )
 
         # 11. Push-based idle detection: check if the system became idle
         await self._maybe_fire_idle()

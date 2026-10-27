@@ -891,11 +891,12 @@ class WebPlugin(TransportPlugin):
             if not isinstance(msg, dict):
                 continue
 
-            # Summaries become dividers; injected context is never shown.
+            # Summaries become dividers; injected context is never shown,
+            # and neither is a message a send gate vetoed (it was never sent).
             if message_type == "summary":
                 frames.append({"type": "divider", "text": _text(msg.get("content"))})
                 continue
-            if message_type == "context":
+            if message_type in ("context", "unsent"):
                 continue
 
             role = msg.get("role")
