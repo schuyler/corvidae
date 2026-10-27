@@ -2143,6 +2143,17 @@ not LLM config). Tool calls on ACP channels go through a swappable
 `ToolBackend` (`LocalToolBackend` by default; see
 `corvidae/tools/backends.py`).
 
+**Session durability (Phase 2).** `initialize` advertises
+`loadSession: true` plus `sessionCapabilities` for `list`, `resume`, and
+`close` (`delete` is not advertised). `session/load` and `session/resume`
+reattach the **same** `acp:<sessionId>` from `sessions.db` (no forked
+history). `session/load` replays user/assistant text (and compaction
+summaries) as `session/update` chunks before responding;
+`session/resume` does not. `session/close` cancels in-flight work and
+drops the in-memory channel while leaving `message_log` intact.
+`session/list` reads an `acp_session_index` sidecar table in the same DB
+(cwd + `updated_at`).
+
 **Hooks.** Every `send_*` broadcast-filters with
 `channel.matches_transport("acp")`. `session/prompt` completes with
 `end_turn` after tool drain; `session/cancel` yields `cancelled`.

@@ -1,14 +1,17 @@
-"""Gate B ACP conformance: initialize → session/new → prompt → cancel (WP-A1.4)."""
+"""Gate B ACP conformance: Phase 1 MVP + Phase 2 session durability."""
 
 from __future__ import annotations
 
 import asyncio
+import json
 from unittest.mock import AsyncMock, MagicMock
 
+import aiosqlite
 import pytest
 
 from corvidae.channel import ChannelRegistry
 from corvidae.hooks import create_plugin_manager
+from corvidae.persistence import PersistencePlugin, init_db
 
 
 AGENT_DEFAULTS = {
@@ -88,3 +91,90 @@ async def test_gate_b_initialize_session_prompt_cancel(tmp_path) -> None:
     cancelled = await pending
     assert cancelled.stop_reason == "cancelled"
     assert "call_gate_b" not in channel.pending_tool_call_ids
+
+
+@pytest.mark.asyncio
+async def test_gate_b_session_load_resume_close(tmp_path) -> None:
+    """Gate B durability (A16): loadSession + load/resume/close/list.
+
+    Seeds message_log, loads with replay, resumes without replay, closes,
+    then loads again from the same ``acp:<sessionId>`` key.
+    """
+    from acp import PROTOCOL_VERSION
+
+    pm = create_plugin_manager()
+    registry = ChannelRegistry(AGENT_DEFAULTS)
+    pm.register(registry, name="registry")
+
+    persistence = PersistencePlugin(pm)
+    db = await aiosqlite.connect(":memory:")
+    await init_db(db)
+    persistence.db = db
+    pm.register(persistence, name="persistence")
+
+    from corvidae.channels.acp import AcpPlugin, CorvidaeAcpAgent
+
+    plugin = AcpPlugin()
+    pm.register(plugin, name="acp")
+    await plugin.on_init(pm=pm, config={"_acp_mode": True})
+
+    agent = CorvidaeAcpAgent(
+        agent_info={"name": "corvidae", "title": "Corvidae", "version": "0.0.1"},
+        plugin=plugin,
+    )
+    conn = MagicMock()
+    conn.session_update = AsyncMock()
+    plugin._conn = conn
+    agent.on_connect(conn)
+
+    try:
+        init = await agent.initialize(protocol_version=PROTOCOL_VERSION)
+        caps = init.agent_capabilities
+        assert caps is not None
+        assert caps.load_session is True
+        assert caps.session_capabilities is not None
+        assert caps.session_capabilities.list is not None
+        assert caps.session_capabilities.resume is not None
+        assert caps.session_capabilities.close is not None
+        assert caps.session_capabilities.delete is None
+
+        cwd = str(tmp_path)
+        session_id = "gatebload01"
+        channel_id = f"acp:{session_id}"
+        for role, text, ts in (
+            ("user", "gate-b-user", 1.0),
+            ("assistant", "gate-b-assistant", 2.0),
+        ):
+            await db.execute(
+                "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
+                "VALUES (?, ?, ?, ?)",
+                (channel_id, json.dumps({"role": role, "content": text}), ts, "message"),
+            )
+        await db.commit()
+
+        # load → replay
+        await agent.load_session(cwd=cwd, session_id=session_id)
+        assert registry.get(channel_id) is not None
+        load_updates = list(conn.session_update.await_args_list)
+        assert len(load_updates) == 2
+        assert load_updates[0].kwargs["update"].content.text == "gate-b-user"
+        assert load_updates[1].kwargs["update"].content.text == "gate-b-assistant"
+
+        # list sees indexed session
+        listed = await agent.list_sessions(cwd=cwd)
+        assert any(s.session_id == session_id for s in listed.sessions)
+
+        # resume → no replay
+        conn.session_update.reset_mock()
+        await agent.resume_session(session_id=session_id, cwd=cwd)
+        conn.session_update.assert_not_called()
+
+        # close → drop registry; load again restores same id
+        await agent.close_session(session_id=session_id)
+        assert registry.get(channel_id) is None
+        conn.session_update.reset_mock()
+        await agent.load_session(cwd=cwd, session_id=session_id)
+        assert registry.get(channel_id) is not None
+        assert len(conn.session_update.await_args_list) == 2
+    finally:
+        await db.close()

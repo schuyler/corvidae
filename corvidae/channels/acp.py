@@ -13,6 +13,8 @@ import asyncio
 import importlib.metadata
 import logging
 import sys
+import time
+from datetime import datetime, timezone
 from typing import Any
 
 import click
@@ -21,6 +23,15 @@ from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 from corvidae.runtime import Runtime
 
 logger = logging.getLogger(__name__)
+
+# Sidecar index for session/list (cwd + activity); lives in sessions.db.
+_ACP_SESSION_INDEX_DDL = """
+CREATE TABLE IF NOT EXISTS acp_session_index (
+    session_id TEXT PRIMARY KEY,
+    cwd TEXT NOT NULL,
+    updated_at REAL NOT NULL
+)
+"""
 
 
 def _package_version() -> str:
@@ -61,7 +72,14 @@ class CorvidaeAcpAgent:
         """Negotiate ACP v1 and advertise empty authMethods (D4)."""
         # Lazy import so loading this module without the extra still works.
         from acp import PROTOCOL_VERSION, InitializeResponse
-        from acp.schema import AgentCapabilities, Implementation
+        from acp.schema import (
+            AgentCapabilities,
+            Implementation,
+            SessionCapabilities,
+            SessionCloseCapabilities,
+            SessionListCapabilities,
+            SessionResumeCapabilities,
+        )
 
         info = self._agent_info
         agent_info = Implementation(
@@ -75,9 +93,17 @@ class CorvidaeAcpAgent:
             if protocol_version <= PROTOCOL_VERSION
             else PROTOCOL_VERSION
         )
+        # Phase 2 session durability capabilities (A16); delete stays off.
         return InitializeResponse(
             protocol_version=negotiated,
-            agent_capabilities=AgentCapabilities(),
+            agent_capabilities=AgentCapabilities(
+                load_session=True,
+                session_capabilities=SessionCapabilities(
+                    list=SessionListCapabilities(),
+                    resume=SessionResumeCapabilities(),
+                    close=SessionCloseCapabilities(),
+                ),
+            ),
             agent_info=agent_info,
             auth_methods=[],
         )
@@ -100,6 +126,7 @@ class CorvidaeAcpAgent:
         session_id = uuid4().hex
         channel = self._plugin._registry.get_or_create("acp", session_id)
         channel.runtime_overrides["cwd"] = cwd
+        await self._plugin.index_session(session_id, cwd)
         return NewSessionResponse(session_id=session_id)
 
     async def prompt(
@@ -133,6 +160,151 @@ class CorvidaeAcpAgent:
             return
         self._plugin.cancel_prompt(session_id)
 
+    async def load_session(
+        self,
+        cwd: str,
+        session_id: str,
+        mcp_servers: list[Any] | None = None,
+        additional_directories: list[str] | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Restore ``acp:<sessionId>`` from sessions.db and replay history (A16)."""
+        from acp import LoadSessionResponse
+        from acp import update_agent_message_text, update_user_message_text
+        from corvidae.context import MessageType
+
+        channel, history = await self._reattach_session(session_id, cwd)
+
+        # Replay text turns to the client; leave channel.conversation None so
+        # the agent loop lazy-loads the same DB rows on the next prompt.
+        if history and self._conn is not None:
+            for msg in history:
+                text = _message_text(msg)
+                if not text:
+                    continue
+                role = msg.get("role")
+                msg_type = msg.get("_message_type")
+                if role == "user":
+                    update = update_user_message_text(text)
+                elif role == "assistant" or msg_type == MessageType.SUMMARY:
+                    update = update_agent_message_text(text)
+                else:
+                    # Skip tool/system rows — client sees text turns only.
+                    continue
+                await self._conn.session_update(session_id=session_id, update=update)
+
+        return LoadSessionResponse()
+
+    async def resume_session(
+        self,
+        session_id: str,
+        cwd: str,
+        additional_directories: list[str] | None = None,
+        mcp_servers: list[Any] | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Reattach ``acp:<sessionId>`` without replaying history (A16)."""
+        from acp.schema import ResumeSessionResponse
+
+        await self._reattach_session(session_id, cwd)
+        return ResumeSessionResponse()
+
+    async def close_session(self, session_id: str, **kwargs: Any) -> Any:
+        """Cancel in-flight work and drop the in-memory channel (keep DB)."""
+        from acp import RequestError
+        from acp.schema import CloseSessionResponse
+
+        if self._plugin is None or self._plugin._registry is None:
+            raise RuntimeError("CorvidaeAcpAgent.close_session requires an AcpPlugin with registry")
+
+        channel_id = f"acp:{session_id}"
+        registry = self._plugin._registry
+        if registry.get(channel_id) is None:
+            raise RequestError.resource_not_found(uri=channel_id)
+
+        # Same cancel semantics as session/cancel, then free registry resources.
+        self._plugin.cancel_prompt(session_id)
+        registry.channels.pop(channel_id, None)
+        return CloseSessionResponse()
+
+    async def _reattach_session(self, session_id: str, cwd: str) -> tuple[Any, list | None]:
+        """get_or_create the ACP channel, set cwd, load history; raise if unknown.
+
+        Returns ``(channel, history)``. ``history`` may be ``None`` for a
+        same-process empty session (e.g. just created via session/new).
+        """
+        from acp import RequestError
+
+        if self._plugin is None or self._plugin._registry is None:
+            raise RuntimeError("CorvidaeAcpAgent requires an AcpPlugin with registry")
+
+        registry = self._plugin._registry
+        channel_id = f"acp:{session_id}"
+        # Detect same-process live channels before get_or_create would mint one.
+        existed = registry.get(channel_id) is not None
+        channel = registry.get_or_create("acp", session_id)
+        channel.runtime_overrides["cwd"] = cwd
+
+        history = await self._plugin.pm.ahook.load_conversation(channel=channel)
+        if history is None and not existed:
+            # Brand-new id with no DB rows is not a loadable session — drop the
+            # empty registry entry so a later call does not treat it as live.
+            registry.channels.pop(channel_id, None)
+            raise RequestError.resource_not_found(uri=channel_id)
+        await self._plugin.index_session(session_id, cwd)
+        return channel, history
+
+    async def list_sessions(
+        self,
+        cwd: str | None = None,
+        cursor: str | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Discover indexed ACP sessions (full page; no pagination yet)."""
+        from acp.schema import ListSessionsResponse, SessionInfo
+
+        if self._plugin is None:
+            raise RuntimeError("CorvidaeAcpAgent.list_sessions requires an AcpPlugin")
+
+        # Phase 2: ignore cursor and return the full set (next_cursor=None).
+        rows = await self._plugin.list_indexed_sessions(cwd=cwd)
+        sessions = [
+            SessionInfo(
+                session_id=session_id,
+                cwd=session_cwd,
+                updated_at=_iso8601_utc(updated_at),
+            )
+            for session_id, session_cwd, updated_at in rows
+        ]
+        return ListSessionsResponse(sessions=sessions, next_cursor=None)
+
+
+def _iso8601_utc(ts: float) -> str:
+    """Format a unix timestamp as an ISO-8601 UTC string ending in Z."""
+    return (
+        datetime.fromtimestamp(ts, tz=timezone.utc)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+
+def _message_text(msg: dict) -> str:
+    """Extract plain text from a persisted conversation message dict."""
+    content = msg.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, dict):
+                text = block.get("text") or ""
+            else:
+                text = getattr(block, "text", None) or ""
+            if text:
+                parts.append(str(text))
+        return "\n".join(parts)
+    return ""
+
 
 def _flatten_prompt_text(prompt: list[Any]) -> str:
     """Join text content blocks from an ACP prompt into one user message."""
@@ -160,6 +332,78 @@ class AcpPlugin(CorvidaePlugin):
         self._active_prompts: dict[str, asyncio.Future] = {}
         # (channel.id, tool_name) -> synthetic toolCallId for ACP updates.
         self._tool_call_ids: dict[tuple[str, str], str] = {}
+
+    def _persistence_db(self):
+        """Return PersistencePlugin.db when available, else None."""
+        if self.pm is None:
+            return None
+        plugin = self.pm.get_plugin("persistence")
+        if plugin is None:
+            return None
+        return getattr(plugin, "db", None)
+
+    async def index_session(self, session_id: str, cwd: str) -> None:
+        """Upsert cwd into acp_session_index (fail-soft if no DB)."""
+        db = self._persistence_db()
+        if db is None:
+            return
+        try:
+            await db.execute(_ACP_SESSION_INDEX_DDL)
+            await db.execute(
+                "INSERT INTO acp_session_index (session_id, cwd, updated_at) "
+                "VALUES (?, ?, ?) "
+                "ON CONFLICT(session_id) DO UPDATE SET "
+                "cwd = excluded.cwd, updated_at = excluded.updated_at",
+                (session_id, cwd, time.time()),
+            )
+            await db.commit()
+        except Exception:
+            logger.warning(
+                "failed to upsert acp_session_index",
+                exc_info=True,
+                extra={"session_id": session_id},
+            )
+
+    async def list_indexed_sessions(
+        self, cwd: str | None = None
+    ) -> list[tuple[str, str, float]]:
+        """Return (session_id, cwd, updated_at) rows for session/list.
+
+        Prefers the durable index. When persistence is absent, falls back to
+        in-registry ACP channels so unit tests without a DB still work.
+        """
+        db = self._persistence_db()
+        if db is not None:
+            try:
+                await db.execute(_ACP_SESSION_INDEX_DDL)
+                if cwd is None:
+                    sql = (
+                        "SELECT session_id, cwd, updated_at FROM acp_session_index "
+                        "ORDER BY updated_at DESC"
+                    )
+                    params: tuple = ()
+                else:
+                    sql = (
+                        "SELECT session_id, cwd, updated_at FROM acp_session_index "
+                        "WHERE cwd = ? ORDER BY updated_at DESC"
+                    )
+                    params = (cwd,)
+                async with db.execute(sql, params) as cursor:
+                    return list(await cursor.fetchall())
+            except Exception:
+                logger.warning("failed to read acp_session_index", exc_info=True)
+
+        # No persistence: list live registry ACP channels only.
+        if self._registry is None:
+            return []
+        rows: list[tuple[str, str, float]] = []
+        for channel in self._registry.by_transport("acp"):
+            channel_cwd = channel.runtime_overrides.get("cwd") or ""
+            if cwd is not None and channel_cwd != cwd:
+                continue
+            rows.append((channel.scope, channel_cwd, channel.last_active))
+        rows.sort(key=lambda r: r[2], reverse=True)
+        return rows
 
     def begin_prompt(self, session_id: str) -> asyncio.Future:
         """Register a Future that send_message resolves when the turn is idle."""

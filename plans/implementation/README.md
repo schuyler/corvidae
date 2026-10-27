@@ -25,7 +25,7 @@ same conventions but sit outside the phase ordering and can land beside it.
 | Document | Scope | Effort | Status |
 |---|---|---|---|
 | `signal-transport.md` | Signal DM transport: signal-cli JSON-RPC, ACI-keyed channels, authorization gate, liveness, and a privacy flag for disappearing-message content | M | PLANNED |
-| `acp-transport.md` | ACP v1 stdio transport: `AcpPlugin` + `corvidae acp`; bb milestone; Gate B harness; swappable tool seam for M-CLIENT-TOOLS | L | PHASE 1 DONE — Gate B green; pause for review / bb smoke before Phase 2 |
+| `acp-transport.md` | ACP v1 stdio transport: `AcpPlugin` + `corvidae acp`; bb milestone; Gate B harness; swappable tool seam for M-CLIENT-TOOLS; Phase 2 session durability (A16) | L | PHASE 2 DONE — WP-A2.1–A2.4 green (load/resume/close/list; delete deferred) |
 
 ## Design and research (not executable)
 

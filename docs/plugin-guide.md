@@ -594,8 +594,11 @@ document intent):
    per your bb config).
 4. Confirm a reply and any tool rows in the timeline.
 
-Channel ids are `acp:<sessionId>`. Disable the plugin with
-`plugins.disabled: [acp]` if needed.
+Channel ids are `acp:<sessionId>` and stay stable across `session/load`
+and `session/resume` (history is keyed on that id in `sessions.db`).
+Advertised capabilities: `loadSession`, plus `sessionCapabilities.list` /
+`resume` / `close`. `session/delete` is not advertised. Disable the
+plugin with `plugins.disabled: [acp]` if needed.
 
 ## Registration order
 

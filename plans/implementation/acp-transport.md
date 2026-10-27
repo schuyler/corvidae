@@ -13,10 +13,10 @@ for TDD and exception discipline.
 plugin so editors (bb via `customAcpAgents`, Zed, …) can drive it; full v1
 conformance is the destination, bb usability is the first product milestone.
 
-**Status:** PHASE 1 DONE — Phases 0–1 work packages green (Gate B in
-`tests/test_acp_conformance.py`). Pause for review / bb smoke before
-Phase 2. Deferred milestones M-CLIENT-TOOLS / M-REMOTE / M-REGISTRY /
-M-V2 stay in the design until their trigger fires.
+**Status:** PHASE 2 DONE — WP-A2.1–A2.4 green (`loadSession` +
+`session/load` / `resume` / `close` / `list`; `session/delete` deferred).
+Deferred milestones M-CLIENT-TOOLS / M-REMOTE / M-REGISTRY / M-V2 stay in
+the design until their trigger fires.
 
 If this document and `acp-transport-design.md` disagree, **the design wins** —
 update this file after.
@@ -297,12 +297,176 @@ explicit `@pytest.mark.timeout(30)` only if needed.
 3. `bb thread spawn --provider acp-corvidae --prompt "…"`
 4. Confirm reply + tool rows in timeline
 
-### Phase 2 — Session durability (after MVP green)
+### Phase 2 — Session durability (A16)
 
-#### WP-A2.x — load / resume / close / list / delete as advertised (A16)
+Advertise **only** what these WPs implement. Keep D1–D5, `ToolBackend`,
+`_acp_mode`, and broadcast-filters untouched.
 
-Split into concrete WPs when Phase 1 is green; advertise only what we
-implement.
+**Ruling — defer `session/delete`:** python-sdk 0.12 `Agent` Protocol has no
+`delete_session` (router does not dispatch `session/delete`). Deleting
+`message_log` rows would also fight the append-only / KV-cache invariant
+(trap 10). Do **not** set `sessionCapabilities.delete`. Revisit under a
+later WP with an explicit tombstone / list-filter design.
+
+**Session identity (non-negotiable):** `session/new` mints `sessionId`;
+channel key is always `acp:<sessionId>`. `session/load` and `session/resume`
+**reuse** that id via `registry.get_or_create("acp", session_id)` — never mint
+a second id for the same conversation (A16: no forked history).
+
+**cwd:** Protocol requires clients to send `cwd` on load/resume. Store it on
+`channel.runtime_overrides["cwd"]` (already RUNTIME_META). For `session/list`
+after process restart, WP-A2.3 persists an `acp_session_index` sidecar table
+in the same `sessions.db` (cwd + updated_at). Do not invent mid-window
+`message_log` mutation.
+
+**History source:** `pm.ahook.load_conversation(channel=…)`
+(`PersistencePlugin`). Leave `channel.conversation is None` after load/resume
+so the agent loop’s lazy init reloads from DB on the next prompt (same rows,
+no fork).
+
+**Replay mapping (session/load only):**
+
+| Stored message | ACP `session/update` |
+|----------------|----------------------|
+| `role=user` | `user_message_chunk` (`update_user_message_text`) |
+| `role=assistant` | `agent_message_chunk` (`update_agent_message_text`) |
+| `message_type=summary` | `agent_message_chunk` (summary `content` text) |
+| `role=tool` / `role=system` | skip (client sees text turns; tools re-run live) |
+
+Extract text from `content` when it is a string; if it is a list of parts,
+concatenate `.get("text")` / `.text` fragments. Skip empty text.
+
+**Unknown session:** no in-registry channel **and** `load_conversation`
+returns `None` → raise `acp.RequestError.resource_not_found(uri=f"acp:{session_id}")`.
+
+#### WP-A2.1 — `loadSession` + `session/load` replay (A16 core)
+
+**Files:** `corvidae/channels/acp.py`; `tests/test_acp_session_durability.py`
+(new).
+
+**Ship:**
+
+- `initialize` → `AgentCapabilities(load_session=True)` (keep `auth_methods=[]`).
+  Do **not** yet set `session_capabilities` (resume/close/list land in
+  WP-A2.2 / A2.3).
+- `CorvidaeAcpAgent.load_session(cwd, session_id, …) -> LoadSessionResponse`:
+  1. `get_or_create("acp", session_id)`; set `runtime_overrides["cwd"] = cwd`.
+  2. `history = await plugin.pm.ahook.load_conversation(channel=channel)`.
+  3. If `history is None` and this channel was not already in the registry
+     before `get_or_create` (detect via `registry.get` **before** create, or
+     equivalently: history None and no prior `message_log` / not a
+     same-process live channel) → `RequestError.resource_not_found`.
+     Practical rule for tests: call `registry.get(f"acp:{session_id}")`
+     first; if missing, `get_or_create`, load history, and if history is
+     still `None` → not found (empty brand-new id is not loadable). If the
+     channel already existed in-registry (e.g. just created via
+     `session/new`), empty history is OK (replay zero updates).
+  4. For each replayable message, `await conn.session_update(session_id=…,
+     update=…)`.
+  5. Return `LoadSessionResponse()` (modes/config_options stay `None`).
+- Do not resolve or create an active prompt; do not call `on_message`.
+
+**Red tests (`tests/test_acp_session_durability.py`):**
+
+- `test_initialize_advertises_load_session`
+- `test_load_session_replays_user_and_assistant_from_db` — seed
+  `message_log` for `acp:<id>` via PersistencePlugin (in-memory DB); call
+  `load_session`; assert `session_update` order is user then assistant;
+  assert channel id is exactly `acp:<id>` (same scope, no new uuid).
+- `test_load_session_unknown_id_raises_resource_not_found`
+- `test_load_session_same_process_empty_new_session_ok` — `new_session` then
+  `load_session` with no rows → success, zero replay updates.
+- `test_load_session_does_not_fork_channel_id` — after load, a follow-up
+  `prompt` / registry lookup still uses the loaded id (not a freshly minted
+  one).
+
+#### WP-A2.2 — `session/resume` + `session/close`
+
+**Files:** `corvidae/channels/acp.py`; extend
+`tests/test_acp_session_durability.py`.
+
+**Ship:**
+
+- `initialize` also advertises
+  `session_capabilities=SessionCapabilities(resume=SessionResumeCapabilities(),
+  close=SessionCloseCapabilities())` (keep `load_session=True`).
+- `resume_session(session_id, cwd, …) -> ResumeSessionResponse`: same
+  reattach / cwd / unknown-session rules as load; **must not** call
+  `session_update` for history.
+- `close_session(session_id) -> CloseSessionResponse`:
+  - `cancel_prompt(session_id)` (same as cancel).
+  - Drop in-memory channel from `registry.channels` if present (free
+    `conversation` / pending tools). **Do not** delete `message_log` rows.
+  - Unknown id → `RequestError.resource_not_found` (not currently active).
+- After close, `load_session` / `resume_session` of the same id must still
+  restore from DB when rows exist.
+
+**Red tests:**
+
+- `test_initialize_advertises_resume_and_close`
+- `test_resume_session_reattaches_without_replay`
+- `test_resume_unknown_raises_resource_not_found`
+- `test_close_session_cancels_prompt_and_drops_registry_entry`
+- `test_load_after_close_restores_from_db`
+
+#### WP-A2.3 — `session/list` + durable session index
+
+**Files:** `corvidae/channels/acp.py` (or small helper module beside it if
+`acp.py` exceeds ~400 lines); extend durability tests.
+
+**Ship:**
+
+- Advertise `session_capabilities.list=SessionListCapabilities()` (still no
+  `delete` / `fork` / `additional_directories`).
+- On `new_session`, `load_session`, and `resume_session`, upsert into table
+  `acp_session_index` on PersistencePlugin’s DB (create-if-missing):
+
+```sql
+CREATE TABLE IF NOT EXISTS acp_session_index (
+    session_id TEXT PRIMARY KEY,
+    cwd TEXT NOT NULL,
+    updated_at REAL NOT NULL
+)
+```
+
+  Resolve DB via `get_dependency(self.pm, "persistence", PersistencePlugin)`
+  when available; if persistence is absent, list returns only in-registry
+  ACP channels (tests without PersistencePlugin stay meaningful).
+- `list_sessions(cwd=None, cursor=None) -> ListSessionsResponse`:
+  - Ignore/reject unknown cursors simply: Phase 2 returns the full list and
+    `next_cursor=None` (no pagination required until volume demands it).
+  - Optional `cwd` filter: exact string match on stored cwd.
+  - Each `SessionInfo(session_id=…, cwd=…)`; `updated_at` as ISO-8601 UTC
+    when known; `title` may be omitted.
+- Index upsert failures: log + continue (fail-soft); do not break
+  new/load/resume.
+
+**Red tests:**
+
+- `test_initialize_advertises_list`
+- `test_list_sessions_includes_indexed_cwd`
+- `test_list_sessions_filters_by_cwd`
+- `test_list_sessions_survives_registry_clear` — upsert via new_session,
+  drop registry entry, list still returns the session from the index.
+
+#### WP-A2.4 — Gate B durability + docs (A14 extend, A16, A17)
+
+**Files:** `tests/test_acp_conformance.py`; `docs/design.md`,
+`docs/plugin-guide.md`, `docs/configuration.md` as needed;
+`plans/implementation/README.md` status.
+
+**Ship:**
+
+- Extend Gate B (or sibling test) :
+  `initialize` (assert `load_session`) → `session/new` → prompt/end_turn →
+  simulate persistence → `session/load` → assert replay updates →
+  `session/resume` / `session/close` smoke as implemented.
+- Docs: document advertised session capabilities, `acp:<sessionId>` stability
+  across load/resume, and that delete is not advertised.
+
+**Red / update tests:**
+
+- `test_gate_b_session_load_resume_close` (or extend existing Gate B)
 
 ### Phase 3+ / deferred milestones
 
@@ -312,8 +476,11 @@ implement.
 | M-REMOTE | Separate plan / WP-A9.x — HTTP/WS on `serve` |
 | M-REGISTRY | WP-A8.x — Terminal Auth + registry entry |
 | M-V2 | Separate plan after v1 Gate B green |
+| (Phase 2 follow-up) | `session/delete` + tombstone — only when SDK routes it and append-only policy is settled |
 
-## Docs checklist (before declaring Phase 1 done)
+## Docs checklist
+
+### Phase 1 (done)
 
 - [x] `docs/design.md` — ACP transport, channel id form, process model
 - [x] `docs/plugin-guide.md` — `AcpPlugin`, command registration, inert rules
@@ -321,15 +488,22 @@ implement.
       `customAcpAgents` pointer
 - [x] `plans/implementation/README.md` — status → in progress / done
 
+### Phase 2 (WP-A2.4)
+
+- [x] `docs/design.md` — load/resume/close/list; stable `acp:<sessionId>`; no delete
+- [x] `docs/plugin-guide.md` / `docs/configuration.md` — capability notes
+- [x] `plans/implementation/README.md` — Phase 2 status
+
 ## Execution order
 
-1. **WP-A0.1 → WP-A0.2** (Phase 0 skeleton)
-2. **WP-A1.1 → WP-A1.2 → WP-A1.3 → WP-A1.4** (MVP + Gate B + docs)
-3. Stop for review / bb smoke before Phase 2
+1. **WP-A0.1 → WP-A0.2** (Phase 0 skeleton) — done
+2. **WP-A1.1 → WP-A1.2 → WP-A1.3 → WP-A1.4** (MVP + Gate B + docs) — done
+3. Review / bb smoke (A15) — done
+4. **WP-A2.1 → WP-A2.2 → WP-A2.3 → WP-A2.4** (session durability) — done
 
-**Next action for an executor:** start **WP-A0.1** — write the three red tests
-in `tests/test_acp_command.py`, run them (expect fail), then implement the
-extra + `acp_command` until green.
+**Next action for an executor:** Phase 3 / M-CLIENT-TOOLS when the design
+trigger fires (client `fs`/`terminal` + permissions). Until then, extend
+Gate B only for newly advertised capabilities.
 
 ## Conventions note
 

@@ -510,9 +510,14 @@ Install the SDK with `uv sync --extra acp`.
 |-----|------|---------|-------------|
 | *(reserved)* | — | — | Future agent capability / logging hints. Omit the block until needed. |
 
-Channel ids use `acp:<sessionId>`. Per-session `cwd` from `session/new` is
-stored on the channel as transport metadata (not merged into LLM request
-bodies).
+Channel ids use `acp:<sessionId>` and are persistence keys: load/resume
+reuse the same id so history is not forked. Per-session `cwd` from
+`session/new` (and load/resume) is stored on the channel as transport
+metadata (not merged into LLM request bodies) and indexed for
+`session/list` in `acp_session_index` inside `daemon.session_db`.
+
+Advertised ACP session capabilities: `loadSession`, `list`, `resume`,
+`close`. `session/delete` is not advertised.
 
 **bb:** register Corvidae under `customAcpAgents` with command
 `uv run corvidae acp` (from a checkout with the `acp` extra). See

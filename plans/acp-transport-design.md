@@ -1,6 +1,8 @@
 # ACP transport for Corvidae
 
-**Status:** decisions settled — ready for work-package planning; do not implement until WPs exist and a session is kicked off to execute them.  
+**Status:** Phase 0–2 implemented on `feature/acp-transport` (MVP + session
+durability). Decisions D1–D5 still govern; deferred milestones below stay
+parked until their triggers fire.  
 **Goal:** full **ACP v1** conformance as the destination; **bb** (and other clients) as interoperability milestones on the way.  
 **Companion research:** [acp-conformance-research.md](./acp-conformance-research.md).
 
