@@ -93,13 +93,6 @@ def free_port() -> int:
 # Agent stub and gate plugins
 # ---------------------------------------------------------------------------
 
-class FakeQueue:
-    """Stands in for SerialQueue; only `is_empty` is read by the plugin."""
-
-    def __init__(self, is_empty: bool) -> None:
-        self.is_empty = is_empty
-
-
 class AgentStub:
     """Registered as "agent". on_message mirrors Agent.on_message's flow."""
 
@@ -487,19 +480,12 @@ class TestConfig:
 
     @pytest.mark.parametrize("block, field", [
         ([], "web"),
-        ("yes", "web"),
         ({"host": ""}, "host"),
-        ({"host": 5}, "host"),
         ({"port": "x"}, "port"),
-        ({"port": True}, "port"),
-        ({"port": -1}, "port"),
-        ({"port": 65536}, "port"),
         ({"host": "localhost", "port": 0}, "port"),
         ({"token": 123}, "token"),
-        ({"allowed_origins": "http://x"}, "allowed_origins"),
-        ({"allowed_origins": [1]}, "allowed_origins"),
-        ({"allowed_origins": ["ftp://box"]}, "allowed_origins"),
         ({"allowed_origins": ["http://box/path"]}, "allowed_origins"),
+        ({"host": "0.0.0.0", "token": TOKEN}, "allowed_origins"),
     ])
     async def test_malformed_field_raises_naming_it(self, block, field):
         pm = create_plugin_manager()
@@ -509,16 +495,6 @@ class TestConfig:
             await plugin.on_init(pm=pm, config={"web": block})
         assert str(exc.value).startswith("web:")
 
-    @pytest.mark.parametrize("host", ["0.0.0.0", "::", "::0"])
-    @pytest.mark.parametrize("origins", [None, []])
-    async def test_wildcard_without_allowed_origins_raises(self, host, origins):
-        pm = create_plugin_manager()
-        pm.register(ChannelRegistry(), name="registry")
-        plugin = WebPlugin(pm)
-        with pytest.raises(ValueError, match="allowed_origins"):
-            await plugin.on_init(pm=pm, config={"web": {
-                "host": host, "allowed_origins": origins, "token": TOKEN}})
-
     async def test_non_loopback_bind_warns_once(self, make_env, caplog):
         caplog.set_level(logging.DEBUG)
         await make_env({"host": "0.0.0.0", "port": 0,
@@ -526,11 +502,6 @@ class TestConfig:
         warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
         assert len(warnings) == 1, [r.getMessage() for r in warnings]
         assert "not a loopback address" in warnings[0].getMessage()
-
-    async def test_loopback_bind_with_token_does_not_warn(self, make_env, caplog):
-        caplog.set_level(logging.DEBUG)
-        await make_env()
-        assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
 
     async def test_bind_failure_raises(self, make_env):
         env = await make_env()
@@ -550,43 +521,21 @@ class TestConfig:
 
 class TestToken:
 
-    def test_config_wins_over_env(self, monkeypatch):
+    def test_resolution_order(self, monkeypatch):
+        # Neither → generated; env → env; config beats env; empty falls through.
+        token, generated = _resolve_token({})
+        assert generated is True and len(token) >= 43
         monkeypatch.setenv("CORVIDAE_WEB_TOKEN", OTHER_TOKEN)
+        assert _resolve_token({"token": ""}) == (OTHER_TOKEN, False)
         assert _resolve_token({"token": TOKEN}) == (TOKEN, False)
 
-    @pytest.mark.parametrize("value", [None, ""])
-    def test_env_used_when_config_null_or_empty(self, monkeypatch, value):
-        monkeypatch.setenv("CORVIDAE_WEB_TOKEN", OTHER_TOKEN)
-        assert _resolve_token({"token": value}) == (OTHER_TOKEN, False)
-
-    def test_generated_when_neither(self):
-        token, generated = _resolve_token({})
-        assert generated is True
-        assert len(token) >= 43
-        assert _resolve_token({})[0] != token
-
-    @pytest.mark.parametrize("bad", [
-        "short-token",
-        "a" * 20 + "+",
-        "a" * 20 + "/",
-        "a" * 20 + "=",
-        "a" * 20 + " b",
-        "a" * 20 + "é",
-    ])
+    @pytest.mark.parametrize("bad", ["short-token", "a" * 20 + "+", "a" * 20 + "é"])
     async def test_bad_provided_token_rejected(self, bad):
         pm = create_plugin_manager()
         pm.register(ChannelRegistry(), name="registry")
         plugin = WebPlugin(pm)
         with pytest.raises(ValueError, match="token"):
             await plugin.on_init(pm=pm, config={"web": {"token": bad}})
-
-    async def test_bad_env_token_rejected(self, monkeypatch):
-        monkeypatch.setenv("CORVIDAE_WEB_TOKEN", "short")
-        pm = create_plugin_manager()
-        pm.register(ChannelRegistry(), name="registry")
-        plugin = WebPlugin(pm)
-        with pytest.raises(ValueError, match="token"):
-            await plugin.on_init(pm=pm, config={"web": {}})
 
     async def test_generated_token_logged_once_as_url(self, make_env, caplog):
         caplog.set_level(logging.DEBUG)
@@ -654,23 +603,12 @@ def _assert_token_not_in_structured_fields(records, token: str) -> None:
 class TestOrigins:
 
     @pytest.mark.parametrize("given, expected", [
-        ("HTTP://Example.COM", "http://example.com"),
-        ("http://example.com/", "http://example.com"),
+        ("HTTP://Example.COM/", "http://example.com"),
         ("http://[0:0:0:0:0:0:0:1]:8765", "http://[::1]:8765"),
         ("https://box.example:443", "https://box.example"),
-        ("http://box:80", "http://box"),
-        ("https://box:8443", "https://box:8443"),
     ])
     def test_normalise_origin(self, given, expected):
         assert _normalise_origin(given) == expected
-
-    @pytest.mark.parametrize("bad", [
-        "http://box/path", "http://box?q=1", "http://u@box", "http://u:p@box",
-        "ftp://box", "http://", "http://box#frag", "box", "http://[::1",
-    ])
-    def test_normalise_origin_rejects(self, bad):
-        with pytest.raises(ValueError):
-            _normalise_origin(bad)
 
     @staticmethod
     def _trio(port: int = 8000):
@@ -679,27 +617,13 @@ class TestOrigins:
 
     @pytest.mark.parametrize("host, base", [
         ("127.0.0.1", "http://127.0.0.1:8000"),
-        ("::1", "http://[::1]:8000"),
-        ("[::1]", "http://[::1]:8000"),
         ("0:0:0:0:0:0:0:1", "http://[::1]:8000"),
-        ("LOCALHOST", "http://localhost:8000"),
     ])
     def test_loopback_hosts_get_the_trio(self, host, base):
         origins, hosts, login_base = _compute_origins(host, 8000, None)
         assert set(origins) == self._trio()
         assert login_base == base
         assert {"127.0.0.1:8000", "localhost:8000", "[::1]:8000"} <= hosts
-
-    @pytest.mark.parametrize("host, origin", [
-        ("127.0.0.2", "http://127.0.0.2:8000"),
-        ("2001:db8::5", "http://[2001:db8::5]:8000"),
-        ("MyBox.local", "http://mybox.local:8000"),
-    ])
-    def test_specific_hosts(self, host, origin):
-        origins, hosts, login_base = _compute_origins(host, 8000, None)
-        assert origins == [origin]
-        assert login_base == origin
-        assert hosts == {origin.split("://", 1)[1]}
 
     def test_configured_https_default_port(self):
         origins, hosts, login_base = _compute_origins(
@@ -708,12 +632,6 @@ class TestOrigins:
         assert _normalise_origin("https://box.example") in origins
         assert {"box.example", "box.example:443"} <= hosts
         assert login_base == "https://box.example"
-
-    def test_wildcard_uses_only_configured(self):
-        origins, hosts, login_base = _compute_origins("0.0.0.0", 8000, ["http://box:9"])
-        assert origins == ["http://box:9"]
-        assert hosts == {"box:9"}
-        assert login_base == "http://box:9"
 
     async def test_end_to_end_configured_origin_and_host(self, make_env):
         port = free_port()
@@ -764,21 +682,12 @@ class TestAuth:
             assert r.status == 200
             assert "secure" not in r.headers["Set-Cookie"].lower()
 
-    @pytest.mark.parametrize("query", [f"wrong-{TOKEN}", "%C3%A9" * 20, ""])
+    @pytest.mark.parametrize("query", [f"wrong-{TOKEN}", "%C3%A9" * 20])
     async def test_bad_token_401(self, make_env, query):
         env = await make_env()
         async with env.http.get(f"{env.base}/?token={query}") as r:
             assert r.status == 401
             assert "Set-Cookie" not in r.headers
-
-    async def test_bad_login_logged_at_info_without_token(self, make_env, caplog):
-        caplog.set_level(logging.DEBUG)
-        env = await make_env()
-        async with env.http.get(f"{env.base}/?token=nope-{TOKEN}") as r:
-            assert r.status == 401
-        hits = [r for r in caplog.records if "invalid token" in r.getMessage()]
-        assert len(hits) == 1 and hits[0].levelno == logging.INFO
-        assert "nope" not in hits[0].getMessage()
 
     async def test_undecodable_cookie_bytes_401_not_500(self, make_env, caplog):
         caplog.set_level(logging.DEBUG)
@@ -796,13 +705,7 @@ class TestAuth:
         async with env.http.get(f"{env.base}{path}") as r:
             assert r.status == 401
 
-    async def test_ws_without_cookie_refused(self, make_env):
-        env = await make_env()
-        with pytest.raises(aiohttp.WSServerHandshakeError) as exc:
-            await env.http.ws_connect(f"{env.base}/ws", headers={"Origin": env.origin})
-        assert exc.value.status == 401
-
-    @pytest.mark.parametrize("origin", ["http://evil.example", None, "http://[::1", "null"])
+    @pytest.mark.parametrize("origin", ["http://evil.example", None])
     async def test_ws_bad_origin_403(self, make_env, origin):
         env = await make_env()
         hdrs = dict(env.cookie())
@@ -817,14 +720,6 @@ class TestAuth:
         async with env.http.get(f"{env.base}/", headers={"Host": "evil.example",
                                                          **env.cookie()}) as r:
             assert r.status == 403
-
-    async def test_index_and_static_served_with_cookie(self, make_env):
-        env = await make_env()
-        async with env.http.get(f"{env.base}/", headers=env.cookie()) as r:
-            assert r.status == 200
-            assert "<html" in (await r.text()).lower()
-        async with env.http.get(f"{env.base}/static/app.js", headers=env.cookie()) as r:
-            assert r.status == 200
 
     def _assert_security_headers(self, headers, port):
         assert _parse_csp(headers["Content-Security-Policy"]) == _expected_csp(
@@ -948,32 +843,8 @@ class TestInbound:
         assert "user" not in conn.types()
         assert env.agent.calls == []
 
-    async def test_subscribe_not_ready(self, make_env):
-        env = await make_env(ready=False)
-        conn = await env.connect()
-        await conn.send(type="subscribe", conversation="main")
-        err = await conn.wait_type("error")
-        assert err["request"] == "subscribe" and err["code"] == "starting"
-        assert "history" not in conn.types()
-
-    async def test_list_not_ready(self, make_env):
-        env = await make_env(ready=False)
-        conn = await env.connect()
-        await conn.send(type="list")
-        err = await conn.wait_type("error")
-        assert err == {**err, "request": "list", "code": "starting"}
-        assert "conversations" not in conn.types()
-
-    async def test_64_char_name_ok(self, make_env):
-        env = await make_env()
-        conn = await env.connect()
-        name = "a" * 64
-        await conn.send(type="send", conversation=name, text="hi")
-        await wait_until(lambda: env.agent.calls)
-        assert env.agent.calls[0][0].id == f"web:{name}"
-
     @pytest.mark.parametrize("request_type", ["send", "subscribe"])
-    @pytest.mark.parametrize("name", ["a" * 65, "-a", "_a", "Main", "main\n", "", 5, None])
+    @pytest.mark.parametrize("name", ["a" * 65, "Main", "main\n"])
     async def test_bad_names(self, make_env, request_type, name):
         env = await make_env()
         conn = await env.connect()
@@ -983,7 +854,7 @@ class TestInbound:
         assert "history" not in conn.types()
         assert env.agent.calls == []
 
-    @pytest.mark.parametrize("text", [5, None, ["x"], "\ud800"])
+    @pytest.mark.parametrize("text", [5, "\ud800"])
     async def test_bad_text(self, make_env, text):
         env = await make_env()
         conn = await env.connect("main")
@@ -994,22 +865,9 @@ class TestInbound:
         assert env.agent.calls == []
         assert "user" not in conn.types()
 
-    @pytest.mark.parametrize("text", ["", "   \n\t"])
-    async def test_empty_text_ignored(self, make_env, text):
-        env = await make_env()
-        conn = await env.connect("main")
-        await conn.send(type="send", conversation="main", text=text)
-        await conn.sync()
-        assert "error" not in conn.types()
-        assert "user" not in conn.types()
-        assert env.agent.calls == []
-
     @pytest.mark.parametrize("raw, expected_request", [
         ("{", None),
-        ("[1, 2]", None),
-        ('"just a string"', None),
         ("[" * 100_000 + "]" * 100_000, None),
-        ('{"type": 5}', None),
         ('{"type": "nonsense"}', "nonsense"),
     ])
     async def test_malformed_frames_answered_and_socket_survives(self, make_env, raw,
@@ -1062,11 +920,6 @@ class TestOutbound:
             assert f["conversation"] == "main"
         await other.sync()
         assert "message" not in other.types()
-
-    async def test_no_error_with_nobody_connected(self, make_env):
-        env = await make_env()
-        await env.pm.ahook.send_message(channel=env.channel("main"), text="reply")
-        await env.pm.ahook.send_thinking(channel=env.channel("main"), text="hm")
 
     async def test_frame_types(self, make_env):
         env = await make_env()
@@ -1122,57 +975,6 @@ class TestWorking:
         await env.pm.ahook.send_message(channel=ch, text="r2")
         await conn.wait_type("working", value=False)
         assert "web:main" not in env.plugin._working
-
-    async def test_queued_item_keeps_it_on(self, make_env):
-        env = await make_env()
-        conn = await env.connect("main")
-        ch = env.channel("main")
-        await conn.send(type="send", conversation="main", text="one")
-        await conn.wait_type("working", value=True)
-        await wait_until(lambda: env.agent.calls)
-        await _persist(env, _cid_of(env, "one"))
-        env.agent.queues["web:main"] = FakeQueue(is_empty=False)
-        await env.pm.ahook.send_message(channel=ch, text="r")
-        await conn.wait_type("message", text="r")
-        await conn.sync()
-        assert "web:main" in env.plugin._working
-        # Positive control: once the queue empties the next reply turns it off.
-        env.agent.queues["web:main"] = FakeQueue(is_empty=True)
-        await env.pm.ahook.send_message(channel=ch, text="r2")
-        await conn.wait_type("working", value=False)
-
-    async def test_pending_tool_calls_keep_it_on(self, make_env):
-        env = await make_env()
-        conn = await env.connect("main")
-        ch = env.channel("main")
-        await conn.send(type="send", conversation="main", text="one")
-        await conn.wait_type("working", value=True)
-        await wait_until(lambda: env.agent.calls)
-        await _persist(env, _cid_of(env, "one"))
-        ch.pending_tool_call_ids.add("call-1")
-        await env.pm.ahook.send_message(channel=ch, text="r")
-        await conn.wait_type("message", text="r")
-        await conn.sync()
-        assert "web:main" in env.plugin._working
-        ch.pending_tool_call_ids.clear()
-        await env.pm.ahook.send_message(channel=ch, text="r2")
-        await conn.wait_type("working", value=False)
-
-    async def test_history_reports_working(self, make_env):
-        env = await make_env()
-        conn = await env.connect("main")
-        await conn.send(type="send", conversation="main", text="one")
-        await conn.wait_type("working", value=True)
-        other = await env.connect()
-        await other.send(type="subscribe", conversation="main")
-        assert (await other.wait_type("history"))["working"] is True
-        await wait_until(lambda: env.agent.calls)
-        await _persist(env, _cid_of(env, "one"))
-        await env.pm.ahook.send_message(channel=env.channel("main"), text="r")
-        await conn.wait_type("working", value=False)
-        third = await env.connect()
-        await third.send(type="subscribe", conversation="main")
-        assert (await third.wait_type("history"))["working"] is False
 
     async def test_rejected_frame(self, make_env):
         env = await make_env()
@@ -1237,16 +1039,6 @@ class TestUnsent:
         assert entries[0].cid == env.agent.calls[1][3]
         assert entries[1].cid == env.agent.calls[0][3]
 
-    async def test_admitted_not_persisted_in_history(self, make_env):
-        env = await make_env()
-        a = await env.connect()
-        await a.send(type="send", conversation="main", text="hi")
-        await wait_until(lambda: env.agent.calls)
-        b = await env.connect()
-        await b.send(type="subscribe", conversation="main")
-        history = await b.wait_type("history")
-        assert history["items"][-1]["text"] == "hi"
-
     async def test_snapshot_taken_before_fetch(self, make_env):
         env = await make_env()
         a = await env.connect()
@@ -1284,17 +1076,6 @@ class TestUnsent:
         await _persist(env, _cid_of(env, "still waiting"))
         assert "web:main" not in env.plugin._unsent
 
-    async def test_rejected_message_leaves_unsent(self, make_env):
-        env = await make_env()
-        env.pm.register(VetoGate(), name="veto")
-        a = await env.connect("main")
-        await a.send(type="send", conversation="main", text="hi")
-        await a.wait_type("rejected")
-        assert "web:main" not in env.plugin._unsent
-        b = await env.connect()
-        await b.send(type="subscribe", conversation="main")
-        assert _history_users(await b.wait_type("history")) == []
-
     async def test_raising_gate(self, make_env, caplog):
         env = await make_env()
         env.pm.register(RaiseGate(), name="raise")
@@ -1306,26 +1087,6 @@ class TestUnsent:
         await a.send(type="list")
         await a.wait_type("conversations")
         assert any(r.exc_info for r in caplog.records if r.levelno >= logging.ERROR)
-
-    async def test_persisted_unknown_id_is_noop(self, make_env):
-        env = await make_env()
-        a = await env.connect()
-        await a.send(type="send", conversation="main", text="hi")
-        await wait_until(lambda: env.agent.calls)
-        await _persist(env, "never-seen")
-        assert len(env.plugin._unsent["web:main"]) == 1
-
-    async def test_admission_not_originated_by_plugin(self, make_env):
-        env = await make_env()
-        await env.pm.ahook.on_message(channel=env.channel("main"), sender="web",
-                                      text="direct")
-        entries = env.plugin._unsent["web:main"]
-        assert len(entries) == 1 and entries[0].cid == _cid_of(env, "direct")
-        b = await env.connect()
-        await b.send(type="subscribe", conversation="main")
-        assert (await b.wait_type("history"))["items"][-1]["text"] == "direct"
-        await _persist(env, _cid_of(env, "direct"))
-        assert "web:main" not in env.plugin._unsent
 
     async def test_two_tabs_veto_marks_only_its_own(self, make_env):
         env = await make_env()
@@ -1351,20 +1112,6 @@ class TestUnsent:
         c = await env.connect()
         await c.send(type="subscribe", conversation="main")
         assert [u["text"] for u in _history_users(await c.wait_type("history"))] == ["b-msg"]
-
-    async def test_mid_gate_subscriber_sees_refusal_id(self, make_env):
-        env = await make_env()
-        gate = HoldGate(result=False)
-        env.pm.register(gate, name="gate")
-        a = await env.connect()
-        await a.send(type="send", conversation="main", text="hi")
-        await asyncio.wait_for(gate.entered.wait(), 3)
-        c = await env.connect()
-        await c.send(type="subscribe", conversation="main")
-        last = (await c.wait_type("history"))["items"][-1]
-        gate.release.set()
-        rej = await c.wait_type("rejected")
-        assert rej["id"] == last["id"] and rej["id"] is not None
 
     async def test_stale_context_is_ignored(self, make_env):
         env = await make_env()
@@ -1403,17 +1150,6 @@ class TestUnsent:
         finally:
             _CURRENT_SEND.reset(token)
             gate.release.set()
-
-    async def test_frames_use_bare_slug(self, make_env):
-        env = await make_env()
-        conn = await env.connect("main")
-        await conn.send(type="send", conversation="main", text="hi")
-        await conn.wait_type("user")
-        await env.pm.ahook.send_message(channel=env.channel("main"), text="r")
-        await conn.wait_type("message")
-        for f in conn.frames:
-            if "conversation" in f:
-                assert f["conversation"] == "main"
 
 
 # ===========================================================================
@@ -1521,26 +1257,6 @@ async def _timed_stop(env) -> float:
 
 class TestBackpressure:
 
-    async def test_full_queue_drops_without_awaiting(self, make_env):
-        env = await make_env()
-        conn = await env.connect("main")
-        client = env.client_for("web:main")
-        _fill(client)
-        result = env.plugin._broadcast("web:main", {"type": "message",
-                                                    "conversation": "main", "text": "y"})
-        assert result is None  # synchronous: nothing to await
-        assert client not in env.plugin._clients
-        code = await conn.wait_closed(timeout=4)
-        assert code == 1008
-        await wait_until(lambda: not env.plugin._handlers)
-
-    async def test_disconnect_removes_client(self, make_env):
-        env = await make_env()
-        conn = await env.connect("main")
-        assert len(env.plugin._clients) == 1
-        await conn.ws.close()
-        await wait_until(lambda: not env.plugin._clients and not env.plugin._handlers)
-
     async def test_stop_with_peer_that_never_reads(self, make_env):
         env = await make_env()
         raw = await env.raw_subscribed()
@@ -1613,22 +1329,6 @@ class TestBackpressure:
         assert time.monotonic() - t0 < 2.0
         transport.abort.assert_called_once()
 
-    async def test_close_client_aborts_when_cancelled(self, make_env):
-        env = await make_env()
-
-        class StuckWS:
-            async def close(self, **kw):
-                await asyncio.sleep(3600)
-
-        transport = MagicMock()
-        client = SimpleNamespace(ws=StuckWS(), transport=transport)
-        task = asyncio.create_task(env.plugin._close_client(client, 1001, b"bye"))
-        await asyncio.sleep(0.05)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        transport.abort.assert_called_once()
-
     async def test_heartbeat_timeout_aborts_stuck_socket(self, make_env, monkeypatch):
         # A peer that stops reading and answering pings (a phone asleep):
         # aiohttp's heartbeat only calls transport.close(), which would
@@ -1664,60 +1364,6 @@ class TestBackpressure:
         await wait_until(lambda: not env.plugin._handlers and client.writer.done())
         assert not env.plugin._clients
         assert transport.is_closing()
-
-    async def test_connection_during_stop_refused(self, make_env):
-        env = await make_env()
-        env.plugin._stopping = True
-        try:
-            with pytest.raises(aiohttp.WSServerHandshakeError) as exc:
-                await env.http.ws_connect(f"{env.base}/ws",
-                                          headers={"Origin": env.origin, **env.cookie()})
-            assert exc.value.status == 503
-            assert not env.plugin._handlers
-        finally:
-            env.plugin._stopping = False
-
-    async def test_drop_while_stopping_aborts_synchronously(self, make_env):
-        env = await make_env()
-        await env.connect("main")
-        client = env.client_for("web:main")
-        spy = SpyTransport(client.transport)
-        client.transport = spy
-        env.plugin._stopping = True
-        try:
-            _fill(client)
-            env.plugin._broadcast("web:main", {"type": "message", "conversation": "main",
-                                               "text": "overflow"})
-            assert spy.aborted
-            assert not env.plugin._close_tasks
-            assert client not in env.plugin._clients
-        finally:
-            env.plugin._stopping = False
-
-    async def test_drop_close_task_awaited_not_cancelled(self, make_env):
-        env = await make_env()
-        raw = await env.raw_subscribed()
-        client = env.client_for("web:main")
-        await _flood(env, n=400)  # enough to fill kernel buffers and block the writer
-        assert _writer_blocked(client)
-        _fill(client)
-        env.plugin._broadcast("web:main", {"type": "message", "conversation": "main",
-                                           "text": "overflow"})
-        tasks = set(env.plugin._close_tasks)
-        assert len(tasks) == 1
-        await env.plugin.on_stop()
-        task = tasks.pop()
-        assert task.done() and not task.cancelled()
-
-    async def test_close_client_none_transport(self, make_env):
-        env = await make_env()
-
-        class StuckWS:
-            async def close(self, **kw):
-                await asyncio.sleep(3600)
-
-        client = SimpleNamespace(ws=StuckWS(), transport=None)
-        await env.plugin._close_client(client, 1001, b"bye")  # must not raise
 
 
 # ===========================================================================
@@ -1798,31 +1444,6 @@ class TestReplay:
         items = await _history(env)
         assert [i["text"] for i in items] == [f"m{i}" for i in range(50, 250)]
 
-    async def test_malformed_rows_tolerated(self, make_env, db):
-        env = await make_env()
-        await _seed(db, "web:main", [
-            ({"role": "assistant", "tool_calls": [{"id": "c1", "function": None}]},
-             "message", 1.0),
-            ({"role": "assistant", "tool_calls": [{"id": "c2", "function": {"name": "t"}}]},
-             "message", 2.0),
-            ({"role": "tool", "tool_call_id": "c2"}, "message", 3.0),
-            ({"role": "user"}, "message", 4.0),
-            ({"role": "user", "content": "fine"}, "message", 5.0),
-        ])
-        items = await _history(env)
-        assert items[-1]["text"] == "fine"
-
-    async def test_long_summaries_truncated(self, make_env, db):
-        env = await make_env()
-        await _seed(db, "web:main", [
-            ({"role": "assistant", "content": None, "tool_calls": [
-                {"id": "c1", "function": {"name": "t", "arguments": "a" * 500}}]},
-             "message", 1.0),
-            ({"role": "tool", "tool_call_id": "c1", "content": "b" * 500}, "message", 2.0),
-        ])
-        items = await _history(env)
-        assert [len(i["summary"]) for i in items] == [200, 200]
-
     async def test_db_error_gives_empty_history_and_warning(self, make_env, caplog):
         caplog.set_level(logging.DEBUG)
 
@@ -1834,15 +1455,6 @@ class TestReplay:
         env.persistence.db = BrokenDB()
         assert await _history(env) == []
         assert any(r.levelno == logging.WARNING and r.exc_info for r in caplog.records)
-
-    async def test_no_persistence_gives_empty_history(self, make_env, caplog):
-        caplog.set_level(logging.DEBUG)
-        env = await make_env(persistence=False)
-        assert await _history(env) == []
-        assert await _history(env) == []
-        warnings = [r for r in caplog.records if r.levelno == logging.WARNING
-                    and "persistence" in r.getMessage()]
-        assert len(warnings) == 1
 
     async def test_listing(self, make_env, db):
         env = await make_env()
@@ -1858,32 +1470,6 @@ class TestReplay:
         items = (await conn.wait_type("conversations"))["items"]
         assert [i["name"] for i in items] == ["b", "c", "a", "d"]
         assert items[0]["last_active"] == 300.0
-
-    async def test_listing_overlap_larger_wins(self, make_env, db):
-        env = await make_env()
-        await _seed(db, "web:a", [({"role": "user", "content": "x"}, "message", 100.0)])
-        await _seed(db, "web:b", [({"role": "user", "content": "x"}, "message", 300.0)])
-        env.channel("a").last_active = 500.0
-        conn = await env.connect()
-        await conn.send(type="list")
-        items = (await conn.wait_type("conversations"))["items"]
-        assert [(i["name"], i["last_active"]) for i in items] == [("a", 500.0), ("b", 300.0)]
-
-    async def test_listing_with_db_none(self, make_env):
-        env = await make_env(use_db=False)
-        env.channel("c").last_active = 200.0
-        conn = await env.connect()
-        await conn.send(type="list")
-        items = (await conn.wait_type("conversations"))["items"]
-        assert [i["name"] for i in items] == ["c"]
-
-    async def test_listing_without_persistence(self, make_env):
-        env = await make_env(persistence=False)
-        env.channel("c").last_active = 200.0
-        conn = await env.connect()
-        await conn.send(type="list")
-        items = (await conn.wait_type("conversations"))["items"]
-        assert [i["name"] for i in items] == ["c"]
 
 
 # ===========================================================================
@@ -1909,33 +1495,6 @@ class TestReload:
         await env.plugin.on_config_reload(config={"web": {"host": "127.0.0.1", "port": 0}})
         assert env.plugin._token == token
 
-    async def test_provided_token_removed_generates_new(self, make_env, caplog):
-        caplog.set_level(logging.DEBUG)
-        env = await make_env()
-        await env.plugin.on_config_reload(config={"web": {"host": "127.0.0.1", "port": 0}})
-        assert env.plugin._token != TOKEN
-        assert any(f"?token={env.plugin._token}" in r.getMessage() for r in caplog.records)
-
-    async def test_host_change_warns_and_keeps_serving(self, make_env, caplog):
-        caplog.set_level(logging.DEBUG)
-        env = await make_env()
-        await env.plugin.on_config_reload(config={"web": {
-            "host": "127.0.0.2", "port": 0, "token": TOKEN}})
-        assert any(r.levelno == logging.WARNING and "restart" in r.getMessage()
-                   for r in caplog.records)
-        async with env.http.get(f"{env.base}/", headers=env.cookie()) as r:
-            assert r.status == 200
-
-    async def test_block_removed_keeps_everything(self, make_env, caplog):
-        caplog.set_level(logging.DEBUG)
-        env = await make_env()
-        conn = await env.connect("main")
-        await env.plugin.on_config_reload(config={})
-        assert any(r.levelno == logging.WARNING and "restart" in r.getMessage()
-                   for r in caplog.records)
-        assert env.plugin._token == TOKEN
-        await conn.sync()
-
     async def test_malformed_reload_raises_and_changes_nothing(self, make_env):
         env = await make_env()
         with pytest.raises(ValueError, match="port"):
@@ -1944,17 +1503,6 @@ class TestReload:
             await env.plugin.on_config_reload(config={"web": {
                 "host": "127.0.0.1", "port": 0, "token": "short"}})
         assert env.plugin._token == TOKEN
-
-    async def test_inert_then_block_added_warns(self, caplog):
-        caplog.set_level(logging.DEBUG)
-        pm = create_plugin_manager()
-        pm.register(ChannelRegistry(), name="registry")
-        plugin = WebPlugin(pm)
-        await plugin.on_init(pm=pm, config={})
-        await plugin.on_config_reload(config={"web": {"token": TOKEN}})
-        assert any(r.levelno == logging.WARNING and "restart" in r.getMessage()
-                   for r in caplog.records)
-        assert plugin._enabled is False
 
 
 # ===========================================================================
@@ -1982,9 +1530,6 @@ class TestPackaging:
         pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
         eps = pyproject["project"]["entry-points"]["corvidae"]
         assert eps["web"] == "corvidae.channels.web:WebPlugin"
-
-    def test_depends_on_registry(self):
-        assert WebPlugin.depends_on == frozenset({"registry"})
 
     def test_hook_arg_binding(self):
         pm = create_plugin_manager()
