@@ -797,7 +797,7 @@ wake the daemon at 9am Friday. This plugin adds real scheduling:
   an open goal's next step. Per `agent-directions.md`, this is a heartbeat
   *template* plus result-caching, not new architecture — the base model does
   the simulating; the beat asks and caches. Two further slot inputs are
-  hypothesis-tier (Phase 6, built only on the named duck-test failures in
+  hypothesis-tier (Phase 6+, built only on the named duck-test failure in
   `personality-and-autonomy.md` §5.5): **curiosity** — unresolved
   high-surprise episodes from the outcome log surface as candidate goals,
   giving the §3.2 surprise signal a third consumer — and **care** — dormant
@@ -1303,7 +1303,8 @@ them). Corvidae's TDD culture (AGENTS.md: red/green) forces the fix:
   primary failure mode, **genericness** (regression to what any deployment
   on the same weights would present), is invisible to fixtures since every
   fixture run starts from the same weights. The tier is: operator-as-judge
-  over weeks — consistency of voice, distinctiveness, legible drift — plus
+  over weeks — consistency of voice, distinctiveness, legible drift,
+  generalization under novel probes — plus
   one cheap instrument, a periodic diff of the self-describing store
   (`self` facts §3.6; the compiled self-model §3.11 once built) with three
   readable outcomes: coherent drift, thrash, or flattening. The diff does
@@ -1330,7 +1331,7 @@ AGENTS.md):
 | 4 | PeoplePlugin with subject-typed semantic facts (person extraction only) + operator fact authoring + directory curation commands; participant-match retrieval upgrade (§3.6) | knows who it's talking to; agent-to-agent with budgets (with phase-2 gates) | M |
 | 5 | Trust/quarantine (incl. distilled-fact trust inheritance), sensitivity, pattern guardrails, skills; appraisal tier-2 readout head (§3.8, §3.9) | safe to leave running | M (aggregate) |
 | 6 | A/B toggles behind the §6 harness: surprise term in the importance prior; semantic-tier extraction/promotion beyond persons (incl. `self`, §3.6); salience-arbitration policy in the funnel; encode/retrieve gate; interoception line (§3.11) | — (refinements; each ships only if it beats its baseline) | S per toggle |
-| 6+ | Longitudinal-trigger items, built only on named duck-test failures (§6 third tier): self-model compile (§3.11, blocked on `self`-fact data); commitment records; endogenous goal candidates in the heartbeat slot (§3.4) — triggers specified in `personality-and-autonomy.md` §5.3–5.5 | — (the personality bar is watched, not scheduled) | S–M per item |
+| 6+ | Self-model compile (§3.11), once `self` facts have accumulated — gated on data, not on a failure. Hypothesis-tier items, built only on named duck-test failures (§6 third tier): commitment records; endogenous goal candidates in the heartbeat slot (§3.4) — triggers specified in `personality-and-autonomy.md` §5.4–5.5 | — (the personality bar is watched, not scheduled) | S–M per item |
 
 Phase 6 has no fixed contents: it is where the toggles the earlier seams
 enable are measured against their simpler baselines — with the expectation,

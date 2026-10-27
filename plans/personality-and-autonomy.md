@@ -121,11 +121,14 @@ future instance receives it with the authority of an internal voice,
 unable to interrogate the writer. Generalized: **the most intimate
 write-side poisoner of an agent's memory is the agent's own prior
 instance.** §3.9's threat model previously named only third-party poisoning.
-Folded in: consolidation summaries and any agent-authored write to a
-self-describing surface (self-facts, the self-model compile — §3.11) are
-persistence-of-influence channels of the same shape as skill-directory
-writes, and join the same gated surface. Two already-planned mechanisms are
-hereby re-described as anti-self-manipulation machinery, not merely style:
+Folded in: consolidation summaries are the channel, and any agent-authored
+write to a self-describing surface (self-facts, the self-model compile —
+§3.11) is a persistence-of-influence channel of the same shape as
+skill-directory writes, and joins the same gated surface. Ordinary
+consolidation summaries do not pass that gate — gating every memory record
+on operator confirmation would make memory unusable — and are answered
+instead by two already-planned mechanisms, hereby re-described as
+anti-self-manipulation machinery, not merely style:
 epistemic framing preserved at consolidation ("I speculated that…") forces
 every note to confess what kind of note it is; and the append-only
 `message_log` + `recall_raw` **keeps the negatives** — however far a
@@ -159,8 +162,9 @@ conditions, what restores them) is the evidential part.
 
 Per `agent-directions.md` discipline: cheapest and most native first, each
 with the evaluation that would retire it. Items 1–2 are ground (cheap enough
-to provide and watch); items 3–5 are machinery (built only when the duck
-test fails in the named way).
+to provide and watch); item 3 is later-phase, blocked on item 2 having
+accumulated data; items 4–5 are hypothesis-tier machinery (built only when
+the duck test fails in the named way).
 
 ### 5.1 Surfaced interoception (cheapest; likely highest yield)
 
