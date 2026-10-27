@@ -968,7 +968,7 @@ class TestInbound:
         assert "user" not in conn.types()
         assert env.agent.calls == []
 
-    @pytest.mark.parametrize("raw, request", [
+    @pytest.mark.parametrize("raw, expected_request", [
         ("{", None),
         ("[1, 2]", None),
         ('"just a string"', None),
@@ -976,13 +976,14 @@ class TestInbound:
         ('{"type": 5}', None),
         ('{"type": "nonsense"}', "nonsense"),
     ])
-    async def test_malformed_frames_answered_and_socket_survives(self, make_env, raw, request):
+    async def test_malformed_frames_answered_and_socket_survives(self, make_env, raw,
+                                                                    expected_request):
         env = await make_env()
         conn = await env.connect()
         await conn.ws.send_str(raw)
         err = await conn.wait_type("error")
         assert err["code"] == "bad_request"
-        assert err["request"] == request
+        assert err["request"] == expected_request
         # The socket still works afterwards.
         await conn.send(type="list")
         await conn.wait_type("conversations")
@@ -1325,6 +1326,10 @@ class TestUnsent:
         await wait_until(lambda: env.agent.calls)
         stale = env.plugin._unsent["web:main"][0]
         await _persist(env, _cid_of(env, "hi"))
+        # Another message still unsent, so the channel's list isn't empty.
+        await conn.send(type="send", conversation="main", text="keep")
+        await wait_until(lambda: len(env.agent.calls) == 2)
+        keep = env.plugin._unsent["web:main"][0]
         # Simulate a task (e.g. the queue consumer) that inherited the var.
         token = _CURRENT_SEND.set(stale)
         try:
@@ -1333,11 +1338,13 @@ class TestUnsent:
                                                    sender="web", text="t")
             rej = await conn.wait_type("rejected", text="t")
             assert rej["id"] is None
+            assert env.plugin._unsent["web:main"] == [keep]
             await env.pm.ahook.on_message_admitted(channel=ch, correlation_id="c2",
                                                    sender="web", text="t2")
             entries = env.plugin._unsent["web:main"]
-            assert len(entries) == 1
-            assert entries[0] is not stale and entries[0].cid == "c2"
+            assert len(entries) == 2 and entries[0] is keep
+            assert entries[1] is not stale and entries[1].cid == "c2"
+            assert stale.cid != "c2"
         finally:
             _CURRENT_SEND.reset(token)
 
@@ -1577,9 +1584,9 @@ class TestBackpressure:
         client = env.client_for("web:main")
         transport = client.transport
         await conn.ws.close()
-        await wait_until(lambda: not env.plugin._handlers)
+        # The writer is cancelled synchronously but finishes on a later tick.
+        await wait_until(lambda: not env.plugin._handlers and client.writer.done())
         assert not env.plugin._clients
-        assert client.writer.done()
         assert transport.is_closing()
 
     async def test_connection_during_stop_refused(self, make_env):
