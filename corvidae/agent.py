@@ -205,7 +205,10 @@ class Agent(CorvidaePlugin):
         self._request_logprobs: bool = False
         self._mid_conversation_system_role: str = "system"
         self._forks: ForksConfig = ForksConfig()
-        self._last_idle_fire: float = 0.0
+        # monotonic() time of the last on_idle, or None if it never fired.
+        # (0.0 would read as "fired at boot" and suppress on_idle for the
+        # first cooldown after boot, since monotonic() counts from boot.)
+        self._last_idle_fire: float | None = None
         self._idle_firing: bool = False
         # True between a completed on_start and on_stop; see `started`.
         self._started: bool = False
@@ -251,7 +254,10 @@ class Agent(CorvidaePlugin):
             tq = getattr(task_plugin, "task_queue", None)
             if tq is not None and not tq.is_idle:
                 return
-        if time.monotonic() - self._last_idle_fire < self._idle_cooldown:
+        if (
+            self._last_idle_fire is not None
+            and time.monotonic() - self._last_idle_fire < self._idle_cooldown
+        ):
             return
         self._idle_firing = True
         try:

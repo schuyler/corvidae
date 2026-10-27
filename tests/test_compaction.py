@@ -589,3 +589,35 @@ class TestCompactionPromptHonored:
         content = await self._system_content(None, prior)
         assert content.startswith(CompactionPlugin.DEFAULT_SUMMARY_PROMPT)
         assert content.endswith("[Summary] earlier facts")
+
+
+class TestCooldownWithoutPriorFailure:
+    """A channel that never failed compaction is never in cooldown.
+
+    The cooldown used to default "never failed" to timestamp 0. Since
+    time.monotonic() counts from boot, compaction was skipped for the first
+    30 seconds of a machine's uptime: a daemon started at boot, or a CI
+    runner that had just booted.
+    """
+
+    async def test_compacts_within_30s_of_boot(self):
+        """With the monotonic clock at 5 s, an over-threshold window compacts."""
+        from corvidae.compaction import CompactionPlugin
+
+        # Ten short messages against a 50-token budget: over the threshold.
+        conv = ContextWindow("chan1")
+        conv.system_prompt = ""
+        conv.messages = [
+            {"role": "user", "content": "a" * 35, "_message_type": MessageType.MESSAGE}
+            for _ in range(10)
+        ]
+        plugin = CompactionPlugin(pm=None)
+
+        # Pretend the machine booted five seconds ago.
+        with patch("corvidae.compaction.time.monotonic", return_value=5.0), \
+                patch.object(plugin, "_summarize", AsyncMock(return_value="summary")):
+            result = await plugin.resolve_compaction(
+                channel=_make_channel(), conversation=conv, max_tokens=50
+            )
+
+        assert result is True

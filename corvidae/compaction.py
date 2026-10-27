@@ -182,8 +182,11 @@ class CompactionPlugin(CorvidaePlugin):
             return None
 
         # Cooldown after a failed compaction: don't retry immediately.
-        last_fail = self._last_failed_compaction.get(channel_id, 0)
-        if time.monotonic() - last_fail < self._failed_compaction_cooldown:
+        # A channel with no recorded failure is never in cooldown. (Defaulting
+        # to timestamp 0 put every channel in cooldown for the first 30 s
+        # after boot, since time.monotonic() counts from boot.)
+        last_fail = self._last_failed_compaction.get(channel_id)
+        if last_fail is not None and time.monotonic() - last_fail < self._failed_compaction_cooldown:
             logger.debug(
                 "compaction skipped (cooldown after recent failure)",
                 extra={"channel_id": channel_id},
