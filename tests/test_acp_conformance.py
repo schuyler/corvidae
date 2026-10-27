@@ -11,6 +11,7 @@ import pytest
 
 from corvidae.channel import ChannelRegistry
 from corvidae.hooks import create_plugin_manager
+from corvidae.outbound import OutboundMessage
 from corvidae.persistence import PersistencePlugin, init_db
 
 
@@ -66,7 +67,7 @@ async def test_gate_b_initialize_session_prompt_cancel(tmp_path) -> None:
 
     # 3. prompt → agent_message_chunk → end_turn
     async def _reply_on_message(*, channel, sender: str, text: str, trace_id: str) -> None:
-        await plugin.send_message(channel=channel, text=f"echo:{text}")
+        await plugin.send(channel=channel, event=OutboundMessage(text=f"echo:{text}"))
 
     plugin.pm.ahook.on_message = _reply_on_message
     prompt_resp = await agent.prompt(

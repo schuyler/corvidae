@@ -16,7 +16,8 @@ from corvidae.hooks import hookimpl
 from corvidae.llm import LLMHTTPError
 from corvidae.llm_plugin import LLMPlugin
 
-from helpers import build_plugin_and_channel, drain
+from corvidae.outbound import OutboundMessage
+from helpers import build_plugin_and_channel, drain, sent_texts
 
 NOT_LOADED_BODY = json.dumps({
     "error": {"code": 400, "message": "model is not loaded", "type": "invalid_request_error"}
@@ -72,8 +73,8 @@ class TestEndToEnd:
         await plugin.on_message(channel=channel, sender="user", text="hi", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
-        sent = plugin.pm.ahook.send_message.call_args.kwargs["text"]
-        assert "swift-1.5" in sent and "isn't loaded" in sent
+        reply = sent_texts(plugin.pm, OutboundMessage)[-1]
+        assert "swift-1.5" in reply and "isn't loaded" in reply
         await db.close()
 
     async def test_other_plugin_overrides(self):
@@ -93,7 +94,7 @@ class TestEndToEnd:
         await plugin.on_message(channel=channel, sender="user", text="hi", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
-        assert plugin.pm.ahook.send_message.call_args.kwargs["text"] == "custom"
+        assert sent_texts(plugin.pm, OutboundMessage)[-1] == "custom"
         await db.close()
 
 

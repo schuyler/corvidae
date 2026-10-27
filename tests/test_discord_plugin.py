@@ -48,9 +48,11 @@ import pytest
 from corvidae.channel import ChannelRegistry, load_channel_config
 from corvidae.hooks import (
     _check_hook_arg_binding,
+    TransportPlugin,
     create_plugin_manager,
     resolve_reject_wins,
 )
+from corvidae.outbound import OutboundMessage, OutboundProgress, OutboundThinking, OutboundToolStatus
 
 # Expected to fail at import until corvidae/channels/discord.py exists.
 import corvidae.channels.discord as dmod
@@ -454,8 +456,9 @@ class TestConfig:
 
     def test_no_send_thinking_or_tool_status(self):
         """R15: like IRC/Signal, thinking and tool status are not rendered."""
-        assert not hasattr(DiscordPlugin, "send_thinking")
-        assert not hasattr(DiscordPlugin, "send_tool_status")
+        # Not overridden: the TransportPlugin base-class no-ops stand.
+        assert DiscordPlugin.send_thinking is TransportPlugin.send_thinking
+        assert DiscordPlugin.send_tool_status is TransportPlugin.send_tool_status
 
 
 # ---------------------------------------------------------------------------
@@ -553,7 +556,7 @@ class TestConnectionLifecycle:
                 try:
                     await _deliver(h2, make_dm("hi"))
                     ch = h2.registry.get_or_create("discord", f"dm:{AUTH_ID}")
-                    await h2.plugin.send_message(channel=ch, text="reply")
+                    await h2.plugin.send(channel=ch, event=OutboundMessage(text="reply"))
                     await _drive_gate(h2.pm, channel=ch, sender=str(OTHER_ID), text="no")
                 finally:
                     await h2.plugin.on_stop()
@@ -912,7 +915,7 @@ class TestTyping:
             h.plugin._enqueue(make_dm("work"), BOT_ID)
             await _wait_until(lambda: h.messageable.typing_count >= 2)
             ch = h.registry.get(f"discord:dm:{AUTH_ID}")
-            await h.plugin.send_message(channel=ch, text="done")
+            await h.plugin.send(channel=ch, event=OutboundMessage(text="done"))
             await asyncio.sleep(TYPING_REFRESH_FOR_TESTS * 3)  # let in-flight refresh settle
             settled = h.messageable.typing_count
             await asyncio.sleep(TYPING_REFRESH_FOR_TESTS * 6)
@@ -992,7 +995,7 @@ class TestTyping:
             h.plugin._enqueue(make_dm("work"), BOT_ID)
             await _wait_until(lambda: h.messageable.typing_count >= 1)
             ch = h.registry.get(f"discord:dm:{AUTH_ID}")
-            await h.plugin.send_progress(channel=ch, text="thinking out loud")
+            await h.plugin.send(channel=ch, event=OutboundProgress(text="thinking out loud"))
             before = h.messageable.typing_count
             await _wait_until(lambda: h.messageable.typing_count >= before + 2)
         finally:
@@ -1081,7 +1084,7 @@ class TestOutbound:
         """R11: every send passes AllowedMentions.none() explicitly."""
         h = await _start_plugin()
         try:
-            await h.plugin.send_message(channel=await self._channel(h), text="hello @everyone <@123>")
+            await h.plugin.send(channel=await self._channel(h), event=OutboundMessage(text="hello @everyone <@123>"))
             assert h.messageable.contents == ["hello @everyone <@123>"]
             for _, kwargs in h.messageable.sends:
                 assert _is_no_mentions(kwargs.get("allowed_mentions"))
@@ -1092,7 +1095,7 @@ class TestOutbound:
         """R11 holds for every chunk, not just the first."""
         h = await _start_plugin()
         try:
-            await h.plugin.send_message(channel=await self._channel(h), text="word " * 1500)
+            await h.plugin.send(channel=await self._channel(h), event=OutboundMessage(text="word " * 1500))
             assert len(h.messageable.sends) >= 3
             for _, kwargs in h.messageable.sends:
                 assert _is_no_mentions(kwargs.get("allowed_mentions"))
@@ -1102,7 +1105,7 @@ class TestOutbound:
     async def test_send_progress_has_no_mentions(self):
         h = await _start_plugin()
         try:
-            await h.plugin.send_progress(channel=await self._channel(h), text="@everyone")
+            await h.plugin.send(channel=await self._channel(h), event=OutboundProgress(text="@everyone"))
             assert len(h.messageable.sends) == 1
             assert _is_no_mentions(h.messageable.sends[0][1].get("allowed_mentions"))
         finally:
@@ -1113,7 +1116,7 @@ class TestOutbound:
         h = await _start_plugin()
         text = ("A sentence of moderate length. " * 40 + "\n\n") * 4
         try:
-            await h.plugin.send_message(channel=await self._channel(h), text=text)
+            await h.plugin.send(channel=await self._channel(h), event=OutboundMessage(text=text))
             sent = h.messageable.contents
             assert len(sent) >= 3
             assert all(len(c) <= 2000 for c in sent)
@@ -1125,7 +1128,7 @@ class TestOutbound:
         h = await _start_plugin(discord_overrides={"message_chunk_size": 100})
         text = "word " * 100
         try:
-            await h.plugin.send_message(channel=await self._channel(h), text=text)
+            await h.plugin.send(channel=await self._channel(h), event=OutboundMessage(text=text))
             sent = h.messageable.contents
             assert len(sent) >= 5
             assert all(len(c.encode("utf-8")) <= 100 for c in sent)
@@ -1139,7 +1142,7 @@ class TestOutbound:
         code = "".join(f"value_{i:04d} = compute({i})\n" for i in range(120))
         text = "```python\n" + code + "```\n"
         try:
-            await h.plugin.send_message(channel=await self._channel(h), text=text)
+            await h.plugin.send(channel=await self._channel(h), event=OutboundMessage(text=text))
             sent = h.messageable.contents
             assert len(sent) >= 2
             assert sent[0].endswith("```")
@@ -1151,25 +1154,31 @@ class TestOutbound:
         """Discord rejects empty messages: whitespace-only chunks are skipped."""
         h = await _start_plugin(discord_overrides={"message_chunk_size": 100})
         try:
-            await h.plugin.send_message(
-                channel=await self._channel(h), text="a" * 100 + "\n" * 150 + "b" * 100,
+            await h.plugin.send(
+                channel=await self._channel(h),
+                event=OutboundMessage(text="a" * 100 + "\n" * 150 + "b" * 100),
             )
             assert h.messageable.sends, "real content must still be sent"
             assert all(c is not None and c.strip() for c in h.messageable.contents)
 
             h.messageable.sends.clear()
-            await h.plugin.send_message(channel=await self._channel(h), text="  \n\n  ")
+            await h.plugin.send(channel=await self._channel(h), event=OutboundMessage(text="  \n\n  "))
             assert h.messageable.sends == []
         finally:
             await h.plugin.on_stop()
 
-    @pytest.mark.parametrize("hook", ["send_message", "send_progress"])
-    async def test_broadcast_filter_ignores_other_transports(self, hook):
-        """Every send_* opens with a matches_transport('discord') filter."""
+    @pytest.mark.parametrize("event", [
+        OutboundMessage(text="not yours"),
+        OutboundProgress(text="not yours"),
+        OutboundThinking(text="not yours"),
+        OutboundToolStatus(tool_name="t", status="dispatched"),
+    ])
+    async def test_broadcast_filter_ignores_other_transports(self, event):
+        """send() filters on owns() (matches_transport('discord')) for every event type."""
         h = await _start_plugin()
         try:
             irc = h.registry.get_or_create("irc", "#chan")
-            await getattr(h.plugin, hook)(channel=irc, text="not yours")
+            await h.plugin.send(channel=irc, event=event)
             assert h.messageable.sends == []
             assert h.messageable_requests == []
         finally:
@@ -1179,7 +1188,7 @@ class TestOutbound:
         h = await _start_plugin()
         try:
             irc = h.registry.get_or_create("irc", "#chan")
-            await h.pm.ahook.send_message(channel=irc, text="hi", latency_ms=None)
+            await h.pm.ahook.send(channel=irc, event=OutboundMessage(text="hi", latency_ms=None))
             assert h.messageable.sends == []
         finally:
             await h.plugin.on_stop()
@@ -1193,7 +1202,7 @@ class TestOutbound:
             h.plugin._enqueue(make_dm("go"), BOT_ID)
             await _wait_until(lambda: h.on_message.await_count >= 1)
             ch = h.registry.get(f"discord:dm:{AUTH_ID}")
-            await h.plugin.send_progress(channel=ch, text="step 1")
+            await h.plugin.send(channel=ch, event=OutboundProgress(text="step 1"))
             assert h.messageable.contents == ["step 1"]
             mark = h.messageable.typing_count
             await _wait_until(lambda: h.messageable.typing_count > mark + 1)
@@ -1206,7 +1215,7 @@ class TestOutbound:
         h.messageable.fail_with = discord.Forbidden(SimpleNamespace(status=403, reason="Forbidden"), "Missing Permissions")
         try:
             with caplog.at_level(logging.DEBUG):
-                await h.plugin.send_message(channel=await self._channel(h), text="hi")
+                await h.plugin.send(channel=await self._channel(h), event=OutboundMessage(text="hi"))
             assert any(r.levelno >= logging.WARNING for r in caplog.records)
         finally:
             await h.plugin.on_stop()
@@ -1221,7 +1230,7 @@ class TestOutbound:
         h.plugin._messageable = nowhere
         try:
             with caplog.at_level(logging.DEBUG):
-                await h.plugin.send_message(channel=await self._channel(h), text="hi")
+                await h.plugin.send(channel=await self._channel(h), event=OutboundMessage(text="hi"))
             assert any(r.levelno >= logging.WARNING for r in caplog.records)
         finally:
             await h.plugin.on_stop()

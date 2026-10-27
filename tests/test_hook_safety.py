@@ -96,7 +96,7 @@ class TestAfterPersistAssistantHookSafety:
     async def test_after_persist_assistant_raise_continues_processing(
         self, caplog
     ):
-        plugin, channel, db = await build_plugin_and_channel(mock_send_message=False, mock_on_agent_response=False)
+        plugin, channel, db = await build_plugin_and_channel(mock_send=False, mock_on_agent_response=False)
         try:
             pm = plugin.pm
 
@@ -171,7 +171,7 @@ class TestOnAgentResponseHookSafety:
     async def test_on_agent_response_raise_does_not_skip_send_message(
         self, caplog
     ):
-        plugin, channel, db = await build_plugin_and_channel(mock_send_message=False, mock_on_agent_response=False)
+        plugin, channel, db = await build_plugin_and_channel(mock_send=False, mock_on_agent_response=False)
         try:
             pm = plugin.pm
 
@@ -244,7 +244,7 @@ class TestSendMessageNormalPathHookSafety:
     """
 
     async def test_send_message_raise_is_caught_with_error_log(self, caplog):
-        plugin, channel, db = await build_plugin_and_channel(mock_send_message=False, mock_on_agent_response=False)
+        plugin, channel, db = await build_plugin_and_channel(mock_send=False, mock_on_agent_response=False)
         try:
             pm = plugin.pm
 
@@ -315,7 +315,7 @@ class TestSendMessageErrorPathHookSafety:
     """
 
     async def test_send_message_on_error_path_raise_is_caught(self, caplog):
-        plugin, channel, db = await build_plugin_and_channel(mock_send_message=False, mock_on_agent_response=False)
+        plugin, channel, db = await build_plugin_and_channel(mock_send=False, mock_on_agent_response=False)
         try:
             pm = plugin.pm
 
@@ -387,7 +387,7 @@ class TestOnNotifyInTaskCompleteSafety:
     """
 
     async def test_on_notify_raise_does_not_crash_task_worker(self, caplog):
-        plugin, channel, db = await build_plugin_and_channel(mock_send_message=False, mock_on_agent_response=False)
+        plugin, channel, db = await build_plugin_and_channel(mock_send=False, mock_on_agent_response=False)
         try:
             pm = plugin.pm
 

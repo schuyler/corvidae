@@ -47,6 +47,7 @@ from corvidae.hooks import (
     resolve_reject_wins,
     _check_hook_arg_binding,
 )
+from corvidae.outbound import OutboundMessage
 
 # The transport under test does not exist yet -- this import is expected to
 # fail until the green phase creates corvidae/channels/signal.py. That
@@ -964,7 +965,7 @@ class TestOutboundSend:
         h = await _start_plugin(tmp_path)
         try:
             cli_channel = h.registry.get_or_create("cli", "local")
-            await h.plugin.send_message(channel=cli_channel, text="ignored")
+            await h.plugin.send(channel=cli_channel, event=OutboundMessage(text="ignored"))
             await asyncio.sleep(0.1)
             assert h.server.received == []
         finally:
@@ -976,7 +977,7 @@ class TestOutboundSend:
             h.server.fail_next_matching("send", "delivery boom")
             channel = h.registry.get_or_create("signal", AUTH_ACI)
             with caplog.at_level(logging.WARNING):
-                await h.plugin.send_message(channel=channel, text="hello")  # must not raise
+                await h.plugin.send(channel=channel, event=OutboundMessage(text="hello"))  # must not raise
                 await _wait_until(
                     lambda: any("delivery boom" in _record_text(r) for r in caplog.records), timeout=5
                 )
@@ -991,7 +992,7 @@ class TestOutboundSend:
             long_text = "\n\n".join(paragraphs)
             assert len(long_text) > 200
 
-            await h.plugin.send_message(channel=channel, text=long_text)
+            await h.plugin.send(channel=channel, event=OutboundMessage(text=long_text))
 
             sends = []
             while True:
@@ -1119,7 +1120,7 @@ class TestLiveness:
 
                 block.set()
                 channel = h.pm.ahook.on_message.await_args.kwargs["channel"]
-                await h.plugin.send_message(channel=channel, text="final reply")
+                await h.plugin.send(channel=channel, event=OutboundMessage(text="final reply"))
 
                 send_request = await h.server.next_request(timeout=5)
                 assert send_request.get("method") == "send"
@@ -1155,7 +1156,7 @@ class TestLiveness:
                 # on_message returned without admitting it.
                 await _wait_until(lambda: h.plugin._outstanding.get(channel.id) == 2, timeout=5)
 
-                await h.plugin.send_message(channel=channel, text="reply to one")
+                await h.plugin.send(channel=channel, event=OutboundMessage(text="reply to one"))
                 # One reply is still owed, so typing must keep refreshing. This
                 # is what makes the assertion below discriminating: a transport
                 # that simply stopped typing on any send would pass that one.
@@ -1166,7 +1167,7 @@ class TestLiveness:
                     "typing must keep refreshing while a reply is still owed"
                 )
 
-                await h.plugin.send_message(channel=channel, text="reply to two")
+                await h.plugin.send(channel=channel, event=OutboundMessage(text="reply to two"))
                 await asyncio.sleep(0.5)
                 settled = len(h.server.requests_matching("typing"))
                 await asyncio.sleep(TYPING_SILENCE_WINDOW)
@@ -1203,7 +1204,7 @@ class TestLiveness:
                 channel = h.pm.ahook.on_message.await_args.kwargs["channel"]
 
                 # Reply, then a new message before the loop's sleep ends.
-                await h.plugin.send_message(channel=channel, text="reply to one")
+                await h.plugin.send(channel=channel, event=OutboundMessage(text="reply to one"))
                 await h.server.push_notification(
                     "receive", make_data_envelope(source_uuid=AUTH_ACI, source_number=None, text="two"),
                 )

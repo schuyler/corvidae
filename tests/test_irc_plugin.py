@@ -8,6 +8,7 @@ import pytest
 
 from corvidae.channel import Channel, ChannelConfig, ChannelRegistry
 from corvidae.hooks import create_plugin_manager
+from corvidae.outbound import OutboundMessage, OutboundProgress
 
 # Mock pydle before importing irc_plugin since it may not be installed
 # Create a more sophisticated mock that allows real IRCClient instantiation
@@ -76,7 +77,7 @@ def _make_pm_with_registry():
     registry = ChannelRegistry(AGENT_DEFAULTS)
     pm.register(registry, name="registry")
     pm.ahook.on_message = AsyncMock()
-    pm.ahook.send_message = AsyncMock()
+    pm.ahook.send = AsyncMock()
     return pm, registry
 
 
@@ -247,7 +248,7 @@ class TestSendMessage:
             plugin.client.message = AsyncMock()
 
             channel = registry.get_or_create("irc", "#test")
-            await plugin.send_message(channel=channel, text="hello")
+            await plugin.send(channel=channel, event=OutboundMessage(text="hello"))
 
             plugin.client.message.assert_awaited_once_with("#test", "hello")
 
@@ -264,7 +265,7 @@ class TestSendMessage:
             plugin.client.message = AsyncMock()
 
             cli_channel = registry.get_or_create("cli", "local")
-            await plugin.send_message(channel=cli_channel, text="hello")
+            await plugin.send(channel=cli_channel, event=OutboundMessage(text="hello"))
 
             plugin.client.message.assert_not_awaited()
 
@@ -283,7 +284,7 @@ class TestSendMessage:
             channel = registry.get_or_create("irc", "#test")
             # Create text longer than default max_len (400)
             long_text = "a" * 500
-            await plugin.send_message(channel=channel, text=long_text)
+            await plugin.send(channel=channel, event=OutboundMessage(text=long_text))
 
             # Should be called twice due to splitting
             assert plugin.client.message.await_count == 2
@@ -302,15 +303,15 @@ class TestSendMessage:
 
             channel = registry.get_or_create("irc", "#test")
             # Text that splits into chunks including whitespace-only ones
-            await plugin.send_message(channel=channel, text="\n")
+            await plugin.send(channel=channel, event=OutboundMessage(text="\n"))
             plugin.client.message.assert_not_awaited()
 
             # Also test bare whitespace
-            await plugin.send_message(channel=channel, text="   ")
+            await plugin.send(channel=channel, event=OutboundMessage(text="   "))
             plugin.client.message.assert_not_awaited()
 
             # But real content still sends
-            await plugin.send_message(channel=channel, text="hello")
+            await plugin.send(channel=channel, event=OutboundMessage(text="hello"))
             plugin.client.message.assert_awaited_once_with("#test", "hello")
 
         # Whitespace-only chunk in a multi-chunk list (defensive filter)
@@ -319,7 +320,7 @@ class TestSendMessage:
         channel = registry.get_or_create("irc", "#test")
         with patch.object(_irc_module, 'split_message',
                           return_value=["para1", "\n\n", "para2"]):
-            await plugin.send_message(channel=channel, text="ignored")
+            await plugin.send(channel=channel, event=OutboundMessage(text="ignored"))
         calls = [c.args[1] for c in plugin.client.message.await_args_list]
         assert calls == ["para1", "para2"]
 
@@ -327,7 +328,7 @@ class TestSendMessage:
         plugin.client.message = AsyncMock()
         with patch.object(_irc_module, 'split_message',
                           return_value=["line1\n\nline2\n\n"]):
-            await plugin.send_message(channel=channel, text="ignored")
+            await plugin.send(channel=channel, event=OutboundMessage(text="ignored"))
         calls = [c.args[1] for c in plugin.client.message.await_args_list]
         assert calls == ["line1", "line2"]
 
@@ -335,7 +336,7 @@ class TestSendMessage:
         plugin.client.message = AsyncMock()
         with patch.object(_irc_module, 'split_message',
                           return_value=["line1\r\nline2\r\n"]):
-            await plugin.send_message(channel=channel, text="ignored")
+            await plugin.send(channel=channel, event=OutboundMessage(text="ignored"))
         calls = [c.args[1] for c in plugin.client.message.await_args_list]
         assert calls == ["line1", "line2"]
 
@@ -351,7 +352,7 @@ class TestSendMessage:
 
         channel = registry.get_or_create("irc", "#test")
         with caplog.at_level(logging.WARNING, logger="corvidae.irc_plugin"):
-            await plugin.send_message(channel=channel, text="hello world")
+            await plugin.send(channel=channel, event=OutboundMessage(text="hello world"))
 
         plugin.client.message.assert_not_awaited()
         warnings = [
@@ -373,7 +374,7 @@ class TestSendMessage:
         # Text long enough that split_message preserves \n\n in chunks
         para = "x" * 300
         text = para + "\n\n" + para
-        await plugin.send_message(channel=channel, text=text)
+        await plugin.send(channel=channel, event=OutboundMessage(text=text))
 
         sent = [c.args[1] for c in plugin.client.message.await_args_list]
         assert len(sent) >= 2
@@ -402,7 +403,7 @@ class TestSendProgress:
             plugin.client.message = AsyncMock()
 
             channel = registry.get_or_create("irc", "#test")
-            await plugin.send_progress(channel=channel, text="let me look that up")
+            await plugin.send(channel=channel, event=OutboundProgress(text="let me look that up"))
 
             plugin.client.message.assert_awaited_once_with("#test", "let me look that up")
 
@@ -420,7 +421,7 @@ class TestSendProgress:
             plugin.client.message = AsyncMock()
 
             cli_channel = registry.get_or_create("cli", "local")
-            await plugin.send_progress(channel=cli_channel, text="ignored")
+            await plugin.send(channel=cli_channel, event=OutboundProgress(text="ignored"))
 
             plugin.client.message.assert_not_awaited()
 
@@ -493,7 +494,7 @@ class TestSendMessageLatencyMs:
 
             channel = registry.get_or_create("irc", "#test")
             # Must not raise TypeError for unexpected keyword argument
-            await plugin.send_message(channel=channel, text="hello", latency_ms=42.5)
+            await plugin.send(channel=channel, event=OutboundMessage(text="hello", latency_ms=42.5))
 
             # The message should still be sent normally
             plugin.client.message.assert_awaited_once_with("#test", "hello")
