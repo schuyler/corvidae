@@ -116,6 +116,8 @@ The existing `corvidae` entry point group (for plugins) and the `corvidae.comman
 
 The built-in subcommand `scaffold` is registered by corvidae itself under `corvidae.commands`. Do not register an entry point named `scaffold` in the `corvidae.commands` group — a collision will silently overwrite the built-in command, causing unpredictable behavior.
 
+Built-in `corvidae acp` (from `corvidae.channels.acp:acp_command`) starts an ACP v1 agent on stdio. It boots `Runtime` with `overrides={"_acp_mode": True}` so `AcpPlugin` owns the connection; without that flag the plugin stays inert. Install the optional extra first: `uv sync --extra acp`.
+
 ## Available hooks
 
 ### Lifecycle
@@ -303,7 +305,7 @@ These hooks return a value. Hooks marked `firstresult=True` (sequential) stop at
 | Hook | Strategy | Returns | Behavior |
 |------|----------|---------|----------|
 | `should_process_message(channel, sender, text, trace_id)` | reject-wins (broadcast) | `bool \| None` | Any `False` vetoes the message; any `True` (with no `False`) accepts; `None` if all defer |
-| `on_llm_error(channel, error)` | `firstresult=True` | `str \| None` | First non-None string wins; chain stops. If all return None, the default message names the failure class (timeout, unreachable server, or an HTTP status) and asks the user to try again. `LLMPlugin` registers a `trylast` handler for an unloaded router model; to inspect HTTP failures yourself, check `isinstance(error, corvidae.llm.LLMHTTPError)` and read `error.status`, `error.body`, and `error.model`. |
+| `on_llm_error(channel, error)` | `firstresult=True` | `str \| None` | First non-None string wins; chain stops. If all return None, the default message names the failure class (timeout, unreachable server, or an HTTP status) and asks the user to try again. `LLMPlugin` registers a `trylast` handler that explains an unloaded router model, any non-2xx `LLMHTTPError` (naming the status, an actionable hint, and a short provider body), and connection/timeout failures that point at `llm.main.base_url`; it defers (`None`) for anything else. To inspect HTTP failures yourself, check `isinstance(error, corvidae.llm.LLMHTTPError)` and read `error.status`, `error.body`, and `error.model`. |
 | `compact_conversation(channel, conversation, max_tokens)` | `firstresult=True` | `bool \| None` | First non-None return stops the chain. `CompactionPlugin` uses `trylast` (returns True). Third-party plugins run at default priority. |
 | `process_tool_result(tool_name, result, channel)` | `firstresult=True` wrapper chain | `str \| None` | Wrappers compose transforms in LIFO order. The seed returns the input unchanged. Non-wrapper hookimpls short-circuit the seed via firstresult. |
 | `transform_display_text(channel, text, result_message)` | `firstresult=True` wrapper chain | `str \| None` | Wrappers compose transforms in LIFO order. The seed returns the input text unchanged. Non-wrapper hookimpls short-circuit the seed via firstresult. |
@@ -591,6 +593,64 @@ async def resolve_channel(self, channel_id: str) -> Channel | None:
 ```
 
 `SignalPlugin` implements it so an ACI it has not seen since startup still gets its E.164 alias's `ChannelConfig`. IRC and CLI don't need it; the registry fallback is already correct for them. Channels no transport owns (`internal:heartbeat`) also take the fallback, and since every `send_*` hook filters on `matches_transport`, replies there go only to the log and `sessions.db`.
+### ACP transport
+
+`AcpPlugin` (`corvidae` entry point `acp`) speaks Agent Client Protocol v1
+over stdio when launched via `corvidae acp`. It does **not** connect under
+`serve` / `cli` unless `config["_acp_mode"]` is set (only the `acp`
+command does that). Startup misconfiguration — a missing config file, an
+invalid YAML document, or an invalid config value — exits non-zero with a
+single line naming the config path (`Config error:` from Runtime for an
+unreadable or malformed YAML file, `Error:` otherwise), so an editor shows
+the diagnosis instead of a traceback.
+
+Optional YAML block (all keys optional today; presence is enough to
+document intent):
+
+```yaml
+# acp:
+#   # Reserved for future agentCapabilities / logging hints.
+#   # Mode is not enabled by YAML alone — use `corvidae acp`.
+```
+
+**bb smoke (`customAcpAgents`):**
+
+1. `uv sync --extra acp --extra dev`
+2. Point bb at Corvidae, e.g. command `uv` with args
+   `run --directory /path/to/corvidae corvidae acp` (or a wrapper script).
+3. `bb thread spawn --provider acp-corvidae --prompt "…" ` (provider name
+   per your bb config).
+4. Confirm a reply and any tool rows in the timeline.
+
+Channel ids are `acp:<sessionId>` and stay stable across `session/load`
+and `session/resume` (history is keyed on that id in `sessions.db`).
+Advertised capabilities: `loadSession`, plus `sessionCapabilities.list` /
+`resume` / `close`. `session/delete` is not advertised. Disable the
+plugin with `plugins.disabled: [acp]` if needed.
+
+**Client input this transport rejects or ignores.** `session/new`,
+`session/load`, and `session/resume` require `cwd` to be an existing
+directory; anything else returns JSON-RPC `invalidParams`. The `cwd` is
+recorded for `session/list`, but tools still run in the process working
+directory — a differing `cwd` is logged at WARNING rather than acting as a
+chdir. `mcpServers` and `additionalDirectories` are accepted and ignored
+with a WARNING; configure `mcp:` in `agent.yaml` for MCP servers. Prompts
+must carry at least one text block: image, audio, and resource blocks are
+logged and dropped, and a prompt with no text at all returns
+`invalidParams` instead of an empty turn. An unknown session id is
+`resourceNotFound` for `prompt`, `load`, `resume`, and `close` alike.
+
+A prompt always ends. If the client connection dies while the final
+message is being delivered, the turn is still completed rather than left
+pending; if the turn never starts (the enqueue fails), its future is
+cleared so a later prompt cannot inherit it. A second `session/prompt`
+on a session that already has one in flight is `invalidRequest`; the
+first prompt is left untouched (see the concurrent-prompt policy issue).
+
+The ACP loop owns stdin/stdout, so the process stops when the loop ends:
+a client disconnect initiates a normal shutdown, and a loop crash is
+logged and then exits non-zero, so a client sees a failed provider
+instead of a live process with a dead transport.
 
 ## Registration order
 
@@ -604,6 +664,7 @@ core_tools        (CoreToolsPlugin)     — entry point
 cli               (CLIPlugin)           — entry point
 irc               (IRCPlugin)           — entry point
 signal            (SignalPlugin)        — entry point
+acp               (AcpPlugin)           — entry point (inert unless `_acp_mode`)
 task              (TaskPlugin)          — entry point
 subagent          (SubagentPlugin)      — entry point
 mcp               (McpClientPlugin)     — entry point

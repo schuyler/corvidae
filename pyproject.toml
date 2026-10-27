@@ -23,6 +23,9 @@ dev = [
     "pytest>=8",
     "pytest-asyncio>=0.23",
 ]
+acp = [
+    "agent-client-protocol>=0.12.1,<0.13",
+]
 
 [project.scripts]
 corvidae = "corvidae.main:corvidae"
@@ -32,6 +35,7 @@ cli = "corvidae.channels.cli:cli_command"
 serve = "corvidae.commands.serve:serve_command"
 scaffold = "corvidae.scaffold:scaffold_command"
 redact = "corvidae.commands.redact:redact_command"
+acp = "corvidae.channels.acp:acp_command"
 
 [project.entry-points.corvidae]
 persistence = "corvidae.persistence:PersistencePlugin"
@@ -42,6 +46,7 @@ irc = "corvidae.channels.irc:IRCPlugin"
 signal = "corvidae.channels.signal:SignalPlugin"
 discord = "corvidae.channels.discord:DiscordPlugin"
 web = "corvidae.channels.web:WebPlugin"
+acp = "corvidae.channels.acp:AcpPlugin"
 task = "corvidae.task:TaskPlugin"
 subagent = "corvidae.tools.subagent:SubagentPlugin"
 mcp = "corvidae.mcp_client:McpClientPlugin"

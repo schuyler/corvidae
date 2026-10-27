@@ -41,6 +41,10 @@ class CLIPlugin(CorvidaePlugin):
     @hookimpl
     async def on_start(self, config: dict) -> None:
         """Start the stdin read loop if any cli channels are configured."""
+        # ACP owns stdin/stdout exclusively - never compete with the JSON-RPC agent.
+        if config.get("_acp_mode"):
+            logger.debug("CLIPlugin: _acp_mode set, skipping CLI stdin loop")
+            return
         self._registry = get_dependency(self.pm, "registry", ChannelRegistry)
         self._exit_on_eof = bool(config.get("_cli_exit_on_eof", False))
         if not self._registry.by_transport("cli"):

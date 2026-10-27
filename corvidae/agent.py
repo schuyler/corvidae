@@ -36,7 +36,13 @@ from enum import Enum
 from corvidae.llm import LLMHTTPError
 from corvidae.turn import AgentTurnResult, run_agent_turn
 from corvidae.attribution import get_attribution, reset_attribution, set_attribution
-from corvidae.channel import Channel, ChannelConfig, ChannelRegistry, resolve_system_prompt
+from corvidae.channel import (
+    Channel,
+    ChannelConfig,
+    ChannelRegistry,
+    RUNTIME_META_KEYS,
+    resolve_system_prompt,
+)
 from corvidae.context import ContextWindow, MessageType, DEFAULT_CHARS_PER_TOKEN
 # Re-exported: mint_trace_id lives in a leaf module so transports can
 # import it without this module; existing imports from here keep working.
@@ -825,15 +831,17 @@ class Agent(CorvidaePlugin):
     def _llm_overrides(channel: Channel) -> dict:
         """The channel's runtime overrides that go into the request body.
 
-        Framework keys are channel config, and dotted keys are plugin
-        tunables (see corvidae.tuning), never LLM inference params — neither
-        may leak into the request body. Shared by the main turn and forks,
-        which must send the same body to keep the cached prefix.
+        Framework keys are channel config, dotted keys are plugin tunables
+        (see corvidae.tuning), and RUNTIME_META_KEYS are transport metadata —
+        none may leak into the request body. Shared by the main turn and
+        forks, which must send the same body to keep the cached prefix.
         """
         return {
             k: v
             for k, v in channel.runtime_overrides.items()
-            if k not in FRAMEWORK_KEYS and "." not in k
+            if k not in FRAMEWORK_KEYS
+            and k not in RUNTIME_META_KEYS
+            and "." not in k
         }
 
     def fork_enabled(self, stage: str) -> bool:

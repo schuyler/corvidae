@@ -38,9 +38,13 @@ class TestLLMPluginOnLlmError:
         assert "swift-1.5" in reply
         assert "isn't loaded" in reply
 
-    async def test_defers_on_other_http_errors(self):
+    async def test_explains_other_http_errors(self):
+        """Non-model-not-loaded HTTP failures get their own message."""
         error = _http_error('{"error": {"message": "context too long"}}')
-        assert await LLMPlugin().on_llm_error(channel=MagicMock(), error=error) is None
+        reply = await LLMPlugin().on_llm_error(channel=MagicMock(), error=error)
+        assert reply is not None
+        assert "400" in reply
+        assert "context too long" in reply
 
     async def test_defers_on_non_http_errors(self):
         error = RuntimeError("model is not loaded")

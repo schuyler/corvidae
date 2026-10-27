@@ -19,7 +19,7 @@ Three layers:
    dispatch: one LLM call per queue item, tool calls dispatched as
    background tasks, results arrive as notifications.
 
-3. **Transport plugins** — IRC, CLI. Each transport converts
+3. **Transport plugins** — IRC, CLI, ACP (stdio). Each transport converts
    platform-specific messages to/from a common Channel abstraction.
 
 ```
@@ -619,8 +619,11 @@ per-channel `SerialQueue`. The queue's consumer calls
    On exception, broadcasts `on_llm_error` (`firstresult=True`), sends
    the error message to the channel, and returns `None` to abort
    processing. `LLMPlugin` implements it `trylast`: for an unloaded
-   backend model it returns a message naming the model, and it defers
-   (`None`) on every other error, so the generic message still applies.
+   backend model it returns a message naming the model; for any non-2xx
+   `LLMHTTPError` it names the status, an actionable hint (API key,
+   quota, endpoint/model) and a short provider body; for connection and
+   timeout failures it points at `llm.main.base_url`. It defers (`None`)
+   on every other error, so the generic message still applies.
 9. Appends the assistant message to conversation; fires `on_conversation_event`
 10. Calls `after_persist_assistant` hook (broadcast); `ThinkingPlugin`
     uses this to strip `reasoning_content` from the in-memory copy
@@ -2153,6 +2156,46 @@ inspector pane, and views of other transports' channels.
 
 Behavior is pinned by `tests/test_web_plugin.py`, which drives a real
 listener with aiohttp's client and raw sockets.
+### ACP (`channels/acp.py`)
+
+`AcpPlugin` + `corvidae acp` — Agent Client Protocol **v1** over stdio for
+editors (bb `customAcpAgents`, Zed, …). Requires the optional
+`agent-client-protocol` extra (`uv sync --extra acp`).
+
+**Process model.** ACP is a dedicated subprocess (`corvidae acp`), not
+attached to long-lived `corvidae serve`. The command sets
+`config["_acp_mode"]`; without that flag the plugin is inert (no stdin/
+stdout ownership under `serve` / `cli`). Stdout is ACP JSON-RPC only;
+logs go to stderr or a log file.
+
+**Channels.** Sessions are `acp:<sessionId>`. `session/new` stores the
+client `cwd` on `channel.runtime_overrides["cwd"]` (transport metadata,
+not LLM config). Tool calls on ACP channels go through a swappable
+`ToolBackend` (`LocalToolBackend` by default; see
+`corvidae/tools/backends.py`).
+
+**Session durability (Phase 2).** `initialize` advertises
+`loadSession: true` plus `sessionCapabilities` for `list`, `resume`, and
+`close` (`delete` is not advertised). `session/load` and `session/resume`
+reattach the **same** `acp:<sessionId>` from `sessions.db` (no forked
+history). `session/load` replays user/assistant text (and compaction
+summaries) as `session/update` chunks before responding;
+`session/resume` does not. `session/close` cancels in-flight work and
+drops the in-memory channel while leaving `message_log` intact.
+`session/list` reads an `acp_session_index` sidecar table in the same DB
+(cwd + `updated_at`).
+
+**Hooks.** Every `send_*` broadcast-filters with
+`channel.matches_transport("acp")`. `session/prompt` mints the message's
+trace id and passes it to `on_message`, and completes with `end_turn`
+after tool drain; `session/cancel` yields `cancelled`. The stdio loop
+starts reading only once `Agent.started` is true: Runtime starts Agent
+after the `on_start` broadcast, and a prompt read before then would be
+dropped with its response never sent.
+
+Design of record: `plans/acp-transport-design.md`. Gate B harness:
+`tests/test_acp_conformance.py`. Subprocess stdio smoke (mocked LLM, no
+live API): `tests/test_acp_stdio_smoke.py`.
 
 ## Configuration
 
@@ -2325,6 +2368,7 @@ Agent               → "registry", "task", "llm", "tools"
 CLIPlugin           → "registry"    (ChannelRegistry)
 IRCPlugin           → "registry"    (ChannelRegistry)
 WebPlugin           → "registry"    (ChannelRegistry); looks up "agent" and "persistence" lazily
+AcpPlugin           → "registry"    (ChannelRegistry)
 SubagentPlugin      → "llm", "tools"
 CompactionPlugin    → "llm"         (LLMPlugin); soft-uses "agent" for forks
 ThinkingPlugin      → "registry"    (ChannelRegistry)
@@ -2386,6 +2430,7 @@ corvidae/
 │   ├── discord.py        # DiscordPlugin (discord.py gateway transport)
 │   ├── web.py            # WebPlugin (browser chat UI over aiohttp)
 │   ├── web_static/       # its page, script, styles, vendored marked + DOMPurify
+│   ├── acp.py            # AcpPlugin + corvidae acp command
 │   └── split.py          # split_message() — shared outbound chunking
 ├── commands/
 │   └── redact.py         # corvidae redact CLI (operator-only)

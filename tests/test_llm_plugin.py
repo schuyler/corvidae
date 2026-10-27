@@ -8,6 +8,7 @@ implemented.
 See plans/agent-decomposition-parts-3-4.md for the full specification.
 """
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -290,3 +291,98 @@ async def test_llm_plugin_on_stop_safe_when_clients_are_none():
     plugin = LLMPlugin(pm=None)
     # Both clients are None — on_stop must complete without error
     await plugin.on_stop()
+
+
+# ---------------------------------------------------------------------------
+# on_llm_error — explain transport and provider failures, not just unloaded
+# models. Without this every 401/429/connection failure reaches the user as
+# the generic "Sorry, I encountered an error" message.
+# ---------------------------------------------------------------------------
+
+
+def _http_error(status: int, body: str = "") -> "object":
+    """Build an LLMHTTPError with a synthetic ClientResponseError cause."""
+    import aiohttp
+
+    from corvidae.llm import LLMHTTPError
+
+    cause = aiohttp.ClientResponseError(
+        request_info=MagicMock(),
+        history=(),
+        status=status,
+        message="error",
+        headers={},
+    )
+    return LLMHTTPError(cause, body=body, model="test-model")
+
+
+class TestOnLlmErrorExplainsFailures:
+    async def test_401_names_the_api_key(self):
+        """A 401 must point at llm.main.api_key, not just say 'an error'."""
+        from corvidae.llm_plugin import LLMPlugin
+
+        plugin = LLMPlugin(pm=None)
+        message = await plugin.on_llm_error(
+            channel=None, error=_http_error(401, '{"error":"bad key"}')
+        )
+
+        assert message is not None
+        assert "401" in message
+        assert "api_key" in message.lower()
+
+    async def test_429_mentions_rate_limit_or_quota(self):
+        """A 429 must name rate limiting/quota and include the provider body."""
+        from corvidae.llm_plugin import LLMPlugin
+
+        plugin = LLMPlugin(pm=None)
+        body = '{"error":{"message":"Insufficient balance"}}'
+        message = await plugin.on_llm_error(channel=None, error=_http_error(429, body))
+
+        assert message is not None
+        assert "429" in message
+        assert "Insufficient balance" in message
+
+    async def test_unmapped_status_still_names_the_status(self):
+        """Any other HTTP failure must at least name the status code."""
+        from corvidae.llm_plugin import LLMPlugin
+
+        plugin = LLMPlugin(pm=None)
+        message = await plugin.on_llm_error(channel=None, error=_http_error(502, "bad gateway"))
+
+        assert message is not None
+        assert "502" in message
+
+    async def test_connection_error_points_at_base_url(self):
+        """A refused connection must point at llm.main.base_url."""
+        import aiohttp
+
+        from corvidae.llm_plugin import LLMPlugin
+
+        plugin = LLMPlugin(pm=None)
+        message = await plugin.on_llm_error(
+            channel=None, error=aiohttp.ClientConnectionError("Connection refused")
+        )
+
+        assert message is not None
+        assert "base_url" in message.lower()
+
+    async def test_timeout_is_explained(self):
+        """An asyncio timeout must be explained as a timeout."""
+        from corvidae.llm_plugin import LLMPlugin
+
+        plugin = LLMPlugin(pm=None)
+        message = await plugin.on_llm_error(channel=None, error=asyncio.TimeoutError())
+
+        assert message is not None
+        assert "timed out" in message.lower() or "timeout" in message.lower()
+
+    async def test_unrelated_error_defers_to_the_generic_message(self):
+        """Non-LLM errors must still return None so the generic text applies."""
+        from corvidae.llm_plugin import LLMPlugin
+
+        plugin = LLMPlugin(pm=None)
+        message = await plugin.on_llm_error(
+            channel=None, error=RuntimeError("something else")
+        )
+
+        assert message is None
