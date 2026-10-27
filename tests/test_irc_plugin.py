@@ -171,8 +171,8 @@ class TestIRCClientEvents:
                 trace_id=ANY,
             )
             # The transport mints a real (non-empty string) trace id.
-            cid = pm.ahook.on_message.await_args.kwargs["trace_id"]
-            assert isinstance(cid, str) and cid
+            tid = pm.ahook.on_message.await_args.kwargs["trace_id"]
+            assert isinstance(tid, str) and tid
 
     async def test_on_channel_message_ignores_self(self):
         """Messages from own nick are filtered out."""
@@ -223,8 +223,8 @@ class TestIRCClientEvents:
                 text="private message",
                 trace_id=ANY,
             )
-            cid = pm.ahook.on_message.await_args.kwargs["trace_id"]
-            assert isinstance(cid, str) and cid
+            tid = pm.ahook.on_message.await_args.kwargs["trace_id"]
+            assert isinstance(tid, str) and tid
 
 
 # ---------------------------------------------------------------------------

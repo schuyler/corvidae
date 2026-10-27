@@ -511,14 +511,14 @@ END
 """
 
 # The per-retrieval raw profile stream (§3.7 wants this accumulating from
-# day one). Phase 2 keys it by exchange and copies it into exchange_log;
-# until then trace_id stays NULL.
+# day one). Each row is keyed by the turn's trace id, and the profile is
+# copied into exchange_log under the same id.
 RETRIEVAL_LOG_DDL = """
 CREATE TABLE IF NOT EXISTS retrieval_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts REAL NOT NULL,
     channel_id TEXT NOT NULL,
-    trace_id TEXT,              -- NULL until Phase 2 wires the key
+    trace_id TEXT,                  -- NULL when the retrieval ran outside any trace
     top_score REAL,                 -- recency-decayed score of the top-ranked candidate
     top_similarity REAL,            -- raw similarity of that same candidate
     hit_count INTEGER NOT NULL,

@@ -134,8 +134,8 @@ class TestReadLoop:
             trace_id=ANY,
         )
         # The transport mints a real (non-empty string) trace id.
-        cid = pm.ahook.on_message.await_args.kwargs["trace_id"]
-        assert isinstance(cid, str) and cid
+        tid = pm.ahook.on_message.await_args.kwargs["trace_id"]
+        assert isinstance(tid, str) and tid
         # EOF triggers SIGINT to self for graceful shutdown
         mock_kill.assert_called_once()
 

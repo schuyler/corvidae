@@ -106,26 +106,26 @@ class AgentStub:
     async def on_message(self, channel, sender: str, text: str,
                          trace_id: str) -> None:
         # Use the transport-minted id for every hook, as Agent does.
-        cid = trace_id
+        tid = trace_id
         results = await self.pm.ahook.should_process_message(
-            channel=channel, sender=sender, text=text, trace_id=cid,
+            channel=channel, sender=sender, text=text, trace_id=tid,
         )
         # Reject-wins resolution, then exactly one of rejected/admitted.
         if resolve_reject_wins(results) is False:
             try:
                 await self.pm.ahook.on_message_rejected(
-                    channel=channel, trace_id=cid, sender=sender, text=text,
+                    channel=channel, trace_id=tid, sender=sender, text=text,
                 )
             except Exception:
                 logging.getLogger(__name__).warning("rejected failed", exc_info=True)
             return
         try:
             await self.pm.ahook.on_message_admitted(
-                channel=channel, trace_id=cid, sender=sender, text=text,
+                channel=channel, trace_id=tid, sender=sender, text=text,
             )
         except Exception:
             logging.getLogger(__name__).warning("admitted failed", exc_info=True)
-        self.calls.append((channel, sender, text, cid))
+        self.calls.append((channel, sender, text, tid))
 
 
 class HoldGate:
@@ -948,9 +948,9 @@ def _cid_of(env, text: str) -> str:
     return next(c[3] for c in env.agent.calls if c[2] == text)
 
 
-async def _persist(env, cid: str, name: str = "main") -> None:
+async def _persist(env, tid: str, name: str = "main") -> None:
     await env.pm.ahook.on_message_persisted(
-        channel=env.channel(name), trace_id=cid, rowid=1, text="", meta={})
+        channel=env.channel(name), trace_id=tid, rowid=1, text="", meta={})
 
 
 class TestWorking:
@@ -1034,8 +1034,8 @@ class TestUnsent:
         entries = env.plugin._unsent["web:main"]
         assert len(entries) == 2
         # A's entry (appended first) is bound to A's id (admitted second).
-        assert entries[0].cid == env.agent.calls[1][3]
-        assert entries[1].cid == env.agent.calls[0][3]
+        assert entries[0].trace_id == env.agent.calls[1][3]
+        assert entries[1].trace_id == env.agent.calls[0][3]
 
     async def test_snapshot_taken_before_fetch(self, make_env):
         env = await make_env()

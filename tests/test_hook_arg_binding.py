@@ -254,13 +254,13 @@ class TestEnrichedOnAgentResponseParams:
             channel=None,
             request_text="req",
             response_text="resp",
-            trace_id="cid-1",
+            trace_id="tid-1",
             meta={"origin": "user"},
             logprobs={"content": [{"token": "resp", "logprob": -0.1}]},
         )
 
         assert received["logprobs"] == {"content": [{"token": "resp", "logprob": -0.1}]}
-        assert received["trace_id"] == "cid-1"
+        assert received["trace_id"] == "tid-1"
         assert received["meta"] == {"origin": "user"}
 
 

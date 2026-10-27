@@ -241,7 +241,7 @@ class _FakeAgent:
 
     def cid_for(self, text: str) -> str:
         """The trace id the transport passed for the message `text`."""
-        return next(cid for t, cid, _ in self.calls if t == text)
+        return next(tid for t, tid, _ in self.calls if t == text)
 
     async def __call__(self, channel, sender, text, trace_id):
         # Record first so tests can find the id even on early return.

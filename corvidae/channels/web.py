@@ -284,7 +284,7 @@ class _Unsent:
     text: str
     # Trace id minted by _on_send and passed to on_message; the
     # admitted/rejected/persisted hooks match their entry by it.
-    cid: str
+    trace_id: str
     # Set by on_message_admitted: the agent accepted it, so a reply is owed.
     admitted: bool = False
     id: str = field(default_factory=lambda: secrets.token_hex(8))
@@ -817,7 +817,7 @@ class WebPlugin(CorvidaePlugin):
             self._broadcast(channel.id, {"type": "user", "conversation": name,
                                          "text": text, "id": entry.id})
             await self.pm.ahook.on_message(channel=channel, sender="web", text=text,
-                                           trace_id=entry.cid)
+                                           trace_id=entry.trace_id)
         finally:
             # Admission fires before on_message returns, so an entry still
             # un-admitted here was dropped, rejected, raised or cancelled.
@@ -836,10 +836,10 @@ class WebPlugin(CorvidaePlugin):
         else:
             del self._unsent[channel_id]
 
-    def _entry_for(self, channel_id: str, cid: str) -> _Unsent | None:
+    def _entry_for(self, channel_id: str, trace_id: str) -> _Unsent | None:
         """The tracked entry carrying this trace id, if any."""
         for e in self._unsent.get(channel_id, []):
-            if e.cid == cid:
+            if e.trace_id == trace_id:
                 return e
         return None
 

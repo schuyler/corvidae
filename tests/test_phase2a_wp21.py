@@ -225,12 +225,12 @@ class TestUserMessageAdmission:
         gate = _KeyCapturePlugin()
         plugin.pm.register(gate, name="key_capture")
 
-        cid = mint_trace_id()
-        await plugin.on_message(channel=channel, sender="user", text="hello", trace_id=cid)
+        tid = mint_trace_id()
+        await plugin.on_message(channel=channel, sender="user", text="hello", trace_id=tid)
         await drain(plugin, channel)
 
         assert len(gate.seen_calls) == 1
-        assert gate.seen_calls[0]["trace_id"] == cid
+        assert gate.seen_calls[0]["trace_id"] == tid
 
         await db.close()
 
@@ -309,12 +309,12 @@ class TestGateRejection:
         recorder = _AdmissionRecorderPlugin()
         plugin.pm.register(recorder, name="admission_recorder")
 
-        cid = mint_trace_id()
-        await plugin.on_message(channel=channel, sender="user", text="blocked", trace_id=cid)
+        tid = mint_trace_id()
+        await plugin.on_message(channel=channel, sender="user", text="blocked", trace_id=tid)
         await drain(plugin, channel)
 
         assert len(recorder.rejected) == 1
-        assert recorder.rejected[0]["trace_id"] == cid
+        assert recorder.rejected[0]["trace_id"] == tid
         assert len(recorder.admitted) == 0
         plugin.pm.ahook.send_message.assert_not_awaited()
 

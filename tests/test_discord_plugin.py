@@ -260,7 +260,7 @@ async def _wait_until(predicate, timeout: float = 5.0, interval: float = 0.01) -
     await asyncio.wait_for(_poll(), timeout=timeout)
 
 
-async def _drive_gate(pm, *, channel, sender: str, text: str, trace_id: str = "cid") -> bool | None:
+async def _drive_gate(pm, *, channel, sender: str, text: str, trace_id: str = "tid") -> bool | None:
     """Run the message gate the way Agent.on_message does (reject-wins, then
     on_message_rejected on a veto)."""
     results = await pm.ahook.should_process_message(
@@ -930,7 +930,7 @@ class TestTyping:
             await _wait_until(lambda: h.messageable.typing_count >= 2)
             ch = h.registry.get(f"discord:dm:{AUTH_ID}")
             await h.plugin.on_message_rejected(
-                channel=ch, trace_id="cid", sender=str(OTHER_ID), text="hi",
+                channel=ch, trace_id="tid", sender=str(OTHER_ID), text="hi",
             )
             assert h.plugin._outstanding[ch.id] == 1
             before = h.messageable.typing_count
@@ -976,7 +976,7 @@ class TestTyping:
             await _wait_until(lambda: h.messageable.typing_count >= 2)
             ch = h.registry.get(f"discord:dm:{AUTH_ID}")
             await h.plugin.on_message_rejected(
-                channel=ch, trace_id="cid", sender=str(AUTH_ID), text="work",
+                channel=ch, trace_id="tid", sender=str(AUTH_ID), text="work",
             )
             await asyncio.sleep(TYPING_REFRESH_FOR_TESTS * 3)
             settled = h.messageable.typing_count

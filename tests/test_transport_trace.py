@@ -35,7 +35,7 @@ class _Recorder:
 
     def ids(self, hook: str) -> list[str]:
         """Trace ids seen by one hook, in order."""
-        return [cid for name, cid in self.events if name == hook]
+        return [tid for name, tid in self.events if name == hook]
 
     @hookimpl
     async def should_process_message(self, channel, sender, text, trace_id):
@@ -189,8 +189,8 @@ class TestMintTraceIdModule:
 
 def _assert_minted(kwargs: dict) -> None:
     """The on_message call carried a non-empty string trace_id."""
-    cid = kwargs.get("trace_id")
-    assert isinstance(cid, str) and cid, kwargs
+    tid = kwargs.get("trace_id")
+    assert isinstance(tid, str) and tid, kwargs
 
 
 class TestTransportCallSites:

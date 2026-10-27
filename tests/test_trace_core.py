@@ -300,7 +300,7 @@ class TestTaskPluginMetaRoundTrip:
             return "result"
 
         task = Task(
-            work=work, channel=channel, trace_id="cid-1",
+            work=work, channel=channel, trace_id="tid-1",
             meta={"origin": "critique"}, tool_call_id=None,
         )
         await plugin._on_task_complete(task, "the result")
@@ -308,7 +308,7 @@ class TestTaskPluginMetaRoundTrip:
         call_kwargs = pm.ahook.on_notify.call_args.kwargs
         assert call_kwargs["meta"] == {
             "task_id": task.task_id,
-            "trace_id": "cid-1",
+            "trace_id": "tid-1",
             "origin": "critique",
         }
 
@@ -333,12 +333,12 @@ class TestOnMessagePersistedFiringDiscipline:
         plugin._client = mock_client
 
         # The transport-minted id passed to on_message must reach the hook.
-        cid = mint_trace_id()
-        await plugin.on_message(channel=channel, sender="user", text="hello", trace_id=cid)
+        tid = mint_trace_id()
+        await plugin.on_message(channel=channel, sender="user", text="hello", trace_id=tid)
         await drain(plugin, channel)
 
         persisted.assert_awaited_once()
         call_kwargs = persisted.call_args.kwargs
         assert call_kwargs["rowid"] is None
         assert call_kwargs["text"] == "hello"
-        assert call_kwargs["trace_id"] == cid
+        assert call_kwargs["trace_id"] == tid
