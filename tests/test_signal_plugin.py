@@ -239,7 +239,7 @@ class _FakeAgent:
         # side_effect it recognizes as a coroutine function.
         self.pm.ahook.on_message = AsyncMock(side_effect=self.__call__)
 
-    def cid_for(self, text: str) -> str:
+    def tid_for(self, text: str) -> str:
         """The trace id the transport passed for the message `text`."""
         return next(tid for t, tid, _ in self.calls if t == text)
 
@@ -1417,7 +1417,7 @@ class TestTransportMintedIds:
             # Persist the second message, as the agent's queue consumer would.
             channel = agent.calls[1][2]
             await h.plugin.on_message_persisted(
-                channel=channel, trace_id=agent.cid_for("kept"),
+                channel=channel, trace_id=agent.tid_for("kept"),
                 rowid=1, text="kept", meta={},
             )
 
@@ -1533,7 +1533,7 @@ class TestTransportMintedIds:
 
             # The owed message's own persist sends its receipt.
             await h.plugin.on_message_persisted(
-                channel=channel, trace_id=agent.cid_for("owed"),
+                channel=channel, trace_id=agent.tid_for("owed"),
                 rowid=10, text="owed", meta={},
             )
             await _wait_until(lambda: h.server.requests_matching("receipt"), timeout=3)

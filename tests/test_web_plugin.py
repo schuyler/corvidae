@@ -944,7 +944,7 @@ class TestOutbound:
 # 7. Working indicator and unsent messages
 # ===========================================================================
 
-def _cid_of(env, text: str) -> str:
+def _tid_of(env, text: str) -> str:
     return next(c[3] for c in env.agent.calls if c[2] == text)
 
 
@@ -969,7 +969,7 @@ class TestWorking:
         assert "web:main" in env.plugin._working
         assert not any(f["type"] == "working" and f["value"] is False for f in conn.frames)
         # Persisted, queue empty, nothing pending → off.
-        await _persist(env, _cid_of(env, "one"))
+        await _persist(env, _tid_of(env, "one"))
         await env.pm.ahook.send_message(channel=ch, text="r2")
         await conn.wait_type("working", value=False)
         assert "web:main" not in env.plugin._working
@@ -1053,7 +1053,7 @@ class TestUnsent:
         b = await env.connect()
         await b.send(type="subscribe", conversation="main")
         await asyncio.wait_for(entered.wait(), 3)
-        await _persist(env, _cid_of(env, "hi"))
+        await _persist(env, _tid_of(env, "hi"))
         release.set()
         history = await b.wait_type("history")
         assert history["items"][-1]["text"] == "hi"
@@ -1064,14 +1064,14 @@ class TestUnsent:
         await a.send(type="send", conversation="main", text="hi")
         await a.send(type="send", conversation="main", text="still waiting")
         await wait_until(lambda: len(env.agent.calls) == 2)
-        await _persist(env, _cid_of(env, "hi"))
+        await _persist(env, _tid_of(env, "hi"))
         # Only the persisted message leaves; the other stays visible.
         assert [e.text for e in env.plugin._unsent["web:main"]] == ["still waiting"]
         b = await env.connect()
         await b.send(type="subscribe", conversation="main")
         history = await b.wait_type("history")
         assert [u["text"] for u in _history_users(history)] == ["still waiting"]
-        await _persist(env, _cid_of(env, "still waiting"))
+        await _persist(env, _tid_of(env, "still waiting"))
         assert "web:main" not in env.plugin._unsent
 
     async def test_raising_gate(self, make_env, caplog):
