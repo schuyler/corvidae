@@ -2102,10 +2102,6 @@ forbidden; links get `target="_blank" rel="noopener noreferrer"`.
 Everything else uses `textContent`. Thinking and dividers render in closed
 `<details>`. The page reconnects with backoff (1 s → 30 s) and, after
 three failed connects, checks `/` for a 401 to detect an expired session.
-The server answers every `send`, in order, with its `user` echo or an
-`error`; the page keeps sends it hasn't seen answered, and if the socket
-dies first (a half-open connection after sleep) it puts them back in the
-composer and says so in the banner, rather than lose them.
 
 Known limitations:
 - a turn that ends in an exception without a `send_message` leaves the
@@ -2118,7 +2114,11 @@ Known limitations:
 - a gate that's slow to decide holds up the socket's later frames, since
   frames are handled in order;
 - messages in a gate, admitted or queued at shutdown are lost, as with
-  every transport, and in the pane they simply disappear on reload.
+  every transport, and in the pane they simply disappear on reload;
+- a message sent into a socket that looks open but is dead (a phone waking
+  from sleep on a half-open connection) is lost: the composer clears and
+  the server never sees it, so it's missing after the reconnect. Fixing
+  that needs a per-send acknowledgement in the protocol.
 
 Out of scope for v1: paging back past 200 rows, token streaming, an
 inspector pane, and views of other transports' channels.
