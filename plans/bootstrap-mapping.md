@@ -78,7 +78,7 @@ Two headline conclusions:
 | Engagement decision, inbound (§4 step 6) | `should_process_message` (REJECT_WINS) | 🟡 inbound only, unassisted |
 | Runtime self-configuration (§4.6 self-inspection) | `RuntimeSettingsPlugin` (`set_settings`) | 🟡 write side only |
 | Graceful degradation (§2) | Explicit per-plugin degradation contracts throughout `docs/design.md` | ✅ shared philosophy |
-| Usage metering / tracing (App. C, D) | `plans/new-hooks.md`: `on_llm_request` / `on_llm_response` / `on_metrics` | 📄 designed, not built |
+| Usage metering / tracing (App. C, D) | `on_llm_request` / `on_llm_response` / `on_metrics`, fired from `LLMClient.chat` (Phase 0) | ✅ built |
 | Vector memory retrieval (§4 step 2) | `docs/design.md` "Unimplemented: Memory retrieval" (sqlite-vec sketch) | ❌ not built |
 | Counter-perspective critique (§4.2) | — (built appraisal-gated here, not unconditional; §3.3) | ❌ not built |
 | Scheduler / reminders / heartbeat (§4.7) | — (only `on_idle`, which requires traffic-then-quiet, not clock time) | ❌ not built |
@@ -135,10 +135,12 @@ prefix. Therefore:
   retired the way stale everything is retired: they age past the compaction
   boundary. (The DB-side mechanics for this already exist — old CONTEXT rows
   fall below the summary timestamp boundary.)
-- The `transform_system_prompt` hook proposed in `plans/new-hooks.md` (e.g.
-  for date/time injection) should be reconsidered in this light: a per-turn
+- The per-turn `transform_system_prompt` hook once proposed in
+  `plans/new-hooks.md` (retired; #31) failed this test: a per-turn
   system-prompt mutation invalidates the KV cache at position ~0 every turn.
-  Date/time grounding belongs in a tail-appended CONTEXT line.
+  Date/time grounding belongs in a tail-appended CONTEXT line. The hook that
+  replaces it (#136) re-resolves plugin-contributed sections only at a
+  compaction or conversation boundary (PRD §3.3.8).
 
 Consequence for retrieval semantics: because appended memories persist in the
 window until compacted (rather than being swapped per query as Persyn
@@ -884,8 +886,8 @@ capped by the assurance that transport can actually provide. **Effort: M.**
 
 ### 3.7 Observability — usage records, metrics, tracing (Persyn App. C–D)
 
-`plans/new-hooks.md` already designed the hooks; BOOTSTRAP.md settles its open
-question #1 decisively: **capture at the model gateway, the single chokepoint
+The former `plans/new-hooks.md` (retired; #31) designed the hooks; BOOTSTRAP.md
+settled its open question #1 decisively: **capture at the model gateway, the single chokepoint
 every call passes through** — i.e. `on_llm_request`/`on_llm_response` fire from
 `LLMClient`, not `run_agent_turn`, so compaction, critique, appraisal,
 consolidation, and subagent calls are all metered. (Supporting evidence that
@@ -1078,7 +1080,8 @@ all of it:
    error-fallback sites, whose veto suppresses that emission only (with a
    window marker for suppressed progress/thinking text; §3.3).
 2. **`on_llm_request` / `on_llm_response` / `on_metrics` hooks** — already
-   specified in `plans/new-hooks.md`; site resolved to `LLMClient` per §3.7.
+   specified in the former `plans/new-hooks.md`; site resolved to `LLMClient`
+   per §3.7. Built in Phase 0.
 3. **`llm.<role>` generalization** in `LLMPlugin` (`critic`, `embedding`,
    `appraisal`, …, falling back to `main`) — **plus an embeddings client
    surface**: `LLMClient` implements only `chat()` today, so the embedding

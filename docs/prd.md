@@ -954,3 +954,4 @@ record that holds the reasoning.
 | No runtime plugin loading; changing the plugin set is a restart | #28 |
 | No container image until a second deployment needs one | #37 |
 | Retrieval scoped by channel; topic structure is the `topic` subject's job, not a retrieval dimension | `shakedown-findings.md` |
+| `plans/new-hooks.md` retired. Its observability hooks landed; per-turn tool filtering and system-prompt transforms are rejected (the tool schemas and system prompt are the head of the prompt, principle 2); inbound-text rewriting is rejected (the log keeps what arrived); config-change notifications are unneeded (tunables resolve at decision time); the remaining gates wait for a named consumer under §3.1.11 | #31 |

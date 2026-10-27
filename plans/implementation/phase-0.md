@@ -5,6 +5,8 @@ later phases and unblocks their measurement).
 **Normative references:** `bootstrap-mapping.md` §3.7, §6, §7 row 0;
 `plans/new-hooks.md` (the `on_llm_request`/`on_llm_response`/`on_metrics`
 designs — this phase resolves its open question #1 in favor of `LLMClient`).
+That plan has since been retired (#31); read it from git history at this
+phase's commit.
 
 **Goal:** every LLM call in the system is metered at the single chokepoint
 all calls pass through, with attribution (stage, channel) that survives
