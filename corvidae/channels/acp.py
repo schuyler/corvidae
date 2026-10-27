@@ -25,6 +25,7 @@ import yaml
 
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 from corvidae.runtime import Runtime
+from corvidae.trace import mint_trace_id
 
 logger = logging.getLogger(__name__)
 
@@ -184,6 +185,7 @@ class CorvidaeAcpAgent:
                 channel=channel,
                 sender="user",
                 text=text,
+                trace_id=mint_trace_id(),
             )
             started = True
         finally:

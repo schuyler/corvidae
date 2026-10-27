@@ -161,7 +161,7 @@ class TestLoadSessionReplay:
         assert channel is not None
 
         # Prompt against the loaded id must not mint a second channel.
-        async def _reply(*, channel, sender: str, text: str) -> None:
+        async def _reply(*, channel, sender: str, text: str, trace_id: str) -> None:
             await plugin.send_message(channel=channel, text="ok")
 
         plugin.pm.ahook.on_message = _reply
@@ -229,7 +229,7 @@ class TestResumeAndClose:
         channel = registry.get(f"acp:{session_id}")
         assert channel is not None
 
-        async def _block(*, channel, sender: str, text: str) -> None:
+        async def _block(*, channel, sender: str, text: str, trace_id: str) -> None:
             channel.pending_tool_call_ids.add("call_close")
 
         plugin.pm.ahook.on_message = _block

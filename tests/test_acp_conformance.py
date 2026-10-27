@@ -65,7 +65,7 @@ async def test_gate_b_initialize_session_prompt_cancel(tmp_path) -> None:
     assert channel.runtime_overrides.get("cwd") == cwd
 
     # 3. prompt → agent_message_chunk → end_turn
-    async def _reply_on_message(*, channel, sender: str, text: str) -> None:
+    async def _reply_on_message(*, channel, sender: str, text: str, trace_id: str) -> None:
         await plugin.send_message(channel=channel, text=f"echo:{text}")
 
     plugin.pm.ahook.on_message = _reply_on_message
@@ -77,7 +77,7 @@ async def test_gate_b_initialize_session_prompt_cancel(tmp_path) -> None:
     assert conn.session_update.await_count >= 1
 
     # 4. cancel during a second prompt with tools still pending
-    async def _block_on_message(*, channel, sender: str, text: str) -> None:
+    async def _block_on_message(*, channel, sender: str, text: str, trace_id: str) -> None:
         channel.pending_tool_call_ids.add("call_gate_b")
 
     plugin.pm.ahook.on_message = _block_on_message
