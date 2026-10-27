@@ -332,3 +332,60 @@ class TestAcpUnknownSession:
 
         assert excinfo.value.code == -32002
         assert excinfo.value.data == {"uri": "acp:nosuchsession"}
+
+
+# ---------------------------------------------------------------------------
+# A prompt must always end: either the turn completes, or the failure that
+# stopped it resolves/clears the future. A pending future would hang the ACP
+# request forever.
+# ---------------------------------------------------------------------------
+
+
+class TestPromptAlwaysCompletes:
+    async def test_delivery_failure_still_completes_prompt(self, tmp_path):
+        """A failing session_update must not leave the prompt future pending."""
+        from acp import text_block
+
+        plugin, _registry, agent = await _init_acp_plugin()
+        created = await agent.new_session(cwd=str(tmp_path))
+        plugin._conn.session_update = AsyncMock(side_effect=RuntimeError("client gone"))
+
+        async def _fake_on_message(channel, sender: str, text: str) -> None:
+            # Mimic the agent loop: delivery happens on its own task, and the
+            # Agent logs (does not re-raise) a failed send_message hook.
+            async def _deliver() -> None:
+                try:
+                    await plugin.send_message(channel=channel, text="reply")
+                except Exception:
+                    pass
+
+            asyncio.create_task(_deliver())
+
+        plugin.pm.ahook.on_message = _fake_on_message
+
+        response = await asyncio.wait_for(
+            agent.prompt(session_id=created.session_id, prompt=[text_block("hi")]),
+            timeout=2,
+        )
+
+        assert response.stop_reason == "end_turn"
+
+    async def test_enqueue_failure_drops_the_future(self, tmp_path):
+        """If the turn never starts, the future is cleared, not inherited."""
+        from acp import text_block
+
+        plugin, _registry, agent = await _init_acp_plugin()
+        created = await agent.new_session(cwd=str(tmp_path))
+
+        async def _boom(channel, sender: str, text: str) -> None:
+            raise RuntimeError("queue full")
+
+        plugin.pm.ahook.on_message = _boom
+
+        with pytest.raises(RuntimeError):
+            await asyncio.wait_for(
+                agent.prompt(session_id=created.session_id, prompt=[text_block("hi")]),
+                timeout=2,
+            )
+
+        assert plugin._active_prompts.get(created.session_id) is None

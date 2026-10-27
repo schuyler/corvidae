@@ -168,11 +168,19 @@ class CorvidaeAcpAgent:
                 }
             )
         future = self._plugin.begin_prompt(session_id)
-        await self._plugin.pm.ahook.on_message(
-            channel=channel,
-            sender="user",
-            text=text,
-        )
+        started = False
+        try:
+            await self._plugin.pm.ahook.on_message(
+                channel=channel,
+                sender="user",
+                text=text,
+            )
+            started = True
+        finally:
+            # The turn never started: drop the future so a later prompt cannot
+            # inherit it. The original exception reaches the client unchanged.
+            if not started:
+                self._plugin.abandon_prompt(session_id)
         return await future
 
     async def cancel(self, session_id: str, **kwargs: Any) -> None:
@@ -492,6 +500,12 @@ class AcpPlugin(CorvidaePlugin):
         self._active_prompts[session_id] = future
         return future
 
+    def abandon_prompt(self, session_id: str) -> None:
+        """Drop an unstarted prompt future so a later prompt cannot inherit it."""
+        future = self._active_prompts.pop(session_id, None)
+        if future is not None and not future.done():
+            future.cancel()
+
     def cancel_prompt(self, session_id: str) -> None:
         """Resolve an in-flight prompt as cancelled; no-op if none is active."""
         from acp import PromptResponse
@@ -589,8 +603,12 @@ class AcpPlugin(CorvidaePlugin):
             return
         from acp import text_block, update_agent_message
 
-        await self._session_update(channel, update_agent_message(text_block(text)))
-        self._complete_prompt_if_idle(channel)
+        try:
+            await self._session_update(channel, update_agent_message(text_block(text)))
+        finally:
+            # The turn is over even if the client connection died mid-update;
+            # leaving the future pending would hang the ACP prompt forever.
+            self._complete_prompt_if_idle(channel)
 
     @hookimpl
     async def send_thinking(self, channel, text: str) -> None:

@@ -615,6 +615,11 @@ logged and dropped, and a prompt with no text at all returns
 `invalidParams` instead of an empty turn. An unknown session id is
 `resourceNotFound` for `prompt`, `load`, `resume`, and `close` alike.
 
+A prompt always ends. If the client connection dies while the final
+message is being delivered, the turn is still completed rather than left
+pending; if the turn never starts (the enqueue fails), its future is
+cleared so a later prompt cannot inherit it.
+
 ## Registration order
 
 Plugins are loaded via `pm.load_setuptools_entrypoints("corvidae")`. The entry point loading order is non-deterministic — it is not guaranteed to match any specific sequence. The following plugins are registered:
