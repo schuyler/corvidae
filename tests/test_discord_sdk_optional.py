@@ -39,19 +39,23 @@ def test_module_imports_without_the_sdk() -> None:
     assert result.stdout.strip() == "ok"
 
 
-async def test_configured_block_without_sdk_names_the_extra(monkeypatch) -> None:
+async def test_configured_block_without_sdk_names_the_extra(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A ``discord:`` block with no SDK installed fails at on_init with a
-    message naming ``uv sync --extra discord``."""
+    message naming the plugin and ``uv sync --extra discord``."""
     from corvidae.channels.discord import DiscordPlugin
 
     # Block the SDK for this test only; monkeypatch restores sys.modules.
     monkeypatch.setitem(sys.modules, "discord", None)
     plugin = DiscordPlugin()
-    with pytest.raises(RuntimeError, match=r"uv sync --extra discord"):
+    # The error says what failed, where, and the next step (#115's style).
+    with pytest.raises(RuntimeError, match=r"discord") as excinfo:
         await plugin.on_init(pm=None, config={"discord": {"token": "t"}})
+    assert "uv sync --extra discord" in str(excinfo.value)
 
 
-async def test_absent_block_does_not_need_the_sdk(monkeypatch) -> None:
+async def test_absent_block_does_not_need_the_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
     """With no ``discord:`` block the plugin stays inert and never needs
     the SDK."""
     from corvidae.channels.discord import DiscordPlugin

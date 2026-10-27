@@ -1423,15 +1423,20 @@ def test_cognition_entry_points_come_from_the_cognition_package() -> None:
     import importlib.metadata
     import importlib.util
 
-    # Entry points registered under the "corvidae" group, by name.
-    eps = {ep.name: ep for ep in importlib.metadata.entry_points(group="corvidae")}
-    cognition = {name: eps[name] for name in _COGNITION_ENTRY_POINTS if name in eps}
+    # Every cognition-named entry point from every installed distribution.
+    # Not deduplicated by name: two distributions may both register
+    # "memory", and a stale duplicate is exactly what this test must see.
+    cognition = [
+        ep for ep in importlib.metadata.entry_points(group="corvidae")
+        if ep.name in _COGNITION_ENTRY_POINTS
+    ]
 
     if importlib.util.find_spec("corvidae_cognition") is None:
         # Kernel-only install: the extra's plugins are simply absent.
-        assert cognition == {}
+        assert cognition == []
     else:
-        assert set(cognition) == _COGNITION_ENTRY_POINTS
-        stale = {n: ep.value for n, ep in cognition.items()
-                 if not ep.value.startswith("corvidae_cognition.")}
-        assert stale == {}, f"entry points outside corvidae_cognition: {stale}"
+        # Each name registered exactly once, by the cognition package.
+        assert sorted(ep.name for ep in cognition) == sorted(_COGNITION_ENTRY_POINTS)
+        stale = [f"{ep.name} = {ep.value}" for ep in cognition
+                 if not ep.value.startswith("corvidae_cognition.")]
+        assert stale == [], f"entry points outside corvidae_cognition: {stale}"

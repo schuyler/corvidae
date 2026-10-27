@@ -37,6 +37,8 @@ def _imported_modules(path: Path) -> list[tuple[int, str]]:
     imports included, since a lazy import is still a dependency."""
     tree = ast.parse(path.read_text(), filename=str(path))
     found: list[tuple[int, str]] = []
+    # Walk every node, not just the module body, to reach local imports.
+    # Relative imports (level > 0) stay within one package and are skipped.
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             found.extend((node.lineno, alias.name) for alias in node.names)

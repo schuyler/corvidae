@@ -23,6 +23,7 @@ MODULES = sorted(
 @pytest.mark.parametrize("name", MODULES)
 def test_module_logger_is_in_the_corvidae_namespace(name: str) -> None:
     """Each module has a module-level ``logger`` named ``corvidae.<...>``."""
+    # Import the module and read its module-level logger, if any.
     module = importlib.import_module(name)
     logger = getattr(module, "logger", None)
     assert logger is not None, f"{name} has no module-level logger"
