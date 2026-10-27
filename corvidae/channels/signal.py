@@ -35,6 +35,12 @@ TYPING_REFRESH_SECONDS = 10
 # the message actually is rather than reading it as current.
 STALE_MESSAGE_THRESHOLD_SECONDS = 5 * 60
 
+# How long resolve_channel waits for an in-flight E.164 alias resolution
+# before deferring (returning None so the caller retries). Bounded so a
+# signal-cli that accepts the request but never answers cannot stall the
+# scheduler's timer pass.
+ALIAS_RESOLUTION_WAIT_SECONDS = 5.0
+
 # Connection retry backoff ladder -- the same one IRCClient uses.
 _INITIAL_BACKOFF = 10
 _BACKOFF_MULTIPLIER = 2
@@ -94,6 +100,11 @@ class SignalPlugin(TransportPlugin):
         # one that failed to resolve is retried after the next connect.
         self._resolved_aliases: dict[str, str] = {}
         self._allow_resolution_task: Optional[asyncio.Task] = None
+        # Set once any resolution attempt has finished, successfully or
+        # not. Until then an alias's ACI is simply unknown, and
+        # resolve_channel defers rather than cache a channel without the
+        # alias's config (issue #76).
+        self._alias_resolution_attempted = False
 
         # Liveness bookkeeping, per channel id (transport:scope).
         self._outstanding: dict[str, int] = {}
@@ -395,7 +406,15 @@ class SignalPlugin(TransportPlugin):
             return
 
         timestamp = envelope.get("timestamp", data_message.get("timestamp"))
-        channel = await self._resolve_channel(source_uuid, source_number)
+        # The allowlist is checked before the channel is resolved, so a
+        # refused sender never adds an entry to the registry (PRD §3.2.6,
+        # issue #103): anyone who knows the number could otherwise grow it
+        # by one channel per distinct ACI.
+        allowed = await self._is_allowed(source_uuid)
+        if allowed:
+            channel = await self._resolve_channel(source_uuid, source_number)
+        else:
+            channel = self._transient_channel(source_uuid)
         text = self._maybe_prefix_stale(text, timestamp)
 
         # Typing and the read receipt only ever apply to an authorized
@@ -406,7 +425,7 @@ class SignalPlugin(TransportPlugin):
         # the lifecycle hooks can be matched back to it without inference.
         trace_id = mint_trace_id()
         try:
-            if await self._is_allowed(source_uuid) and timestamp is not None:
+            if allowed and timestamp is not None:
                 # Remember the timestamp (for the read receipt) and take a
                 # typing slot; both are released below if never admitted.
                 self._pending_receipts.setdefault(channel.id, {})[trace_id] = timestamp
@@ -468,6 +487,19 @@ class SignalPlugin(TransportPlugin):
         alias_config = await self._resolve_alias_config(source_uuid, source_number)
         return self._registry.get_or_create("signal", source_uuid, config=alias_config)
 
+    def _transient_channel(self, source_uuid: str) -> Channel:
+        """The channel a refused sender's message is gated on.
+
+        A live registry entry is reused (a sender dropped from allow:
+        keeps the channel it already had); otherwise the Channel is built
+        without registering it, so the gate still sees the
+        ``signal:<aci>`` id it logs, and nothing outlives the refusal.
+        """
+        existing = self._registry.get(f"signal:{source_uuid}")
+        if existing is not None:
+            return existing
+        return Channel(transport="signal", scope=source_uuid)
+
     @hookimpl
     async def resolve_channel(self, channel_id: str) -> Channel | None:
         """Resolve a persisted ``signal:<ACI>`` id to its live channel.
@@ -476,9 +508,12 @@ class SignalPlugin(TransportPlugin):
         source_number, so a channel first created here (e.g. a reminder
         due after a restart, before the sender has messaged again) gets
         the E.164 alias's ChannelConfig via forward resolution, the same
-        as an inbound message under phone-number privacy would. Defers
-        (None) for ids this transport does not own, and before on_start
-        has resolved the registry.
+        as an inbound message under phone-number privacy would. Returns
+        None for ids this transport does not own, and also for its own ids
+        while that config cannot be applied yet: before on_start has
+        resolved the registry, and before the first alias resolution has
+        finished (PRD §3.2.7, issue #76). The caller retries; a channel
+        created now would keep the default config for the process lifetime.
         """
         # Only ids of the form "signal:<non-empty scope>" belong here.
         transport, sep, scope = channel_id.partition(":")
@@ -486,7 +521,61 @@ class SignalPlugin(TransportPlugin):
             return None
         if self._registry is None:
             return None
+        existing = self._registry.get(channel_id)
+        if existing is not None:
+            return existing
+        if not await self._alias_config_ready(channel_id):
+            logger.debug(
+                "signal: deferring %s until E.164 alias resolution has run", channel_id
+            )
+            return None
         return await self._resolve_channel(scope, None)
+
+    async def _alias_config_ready(self, channel_id: str) -> bool:
+        """Whether every E.164 alias that could configure a channel has
+        had its chance to resolve to an ACI.
+
+        Only aliases that key a channels: override AND appear in allow:
+        matter -- an alias missing from allow: is never resolved and is
+        inert. Waits a bounded time for an in-flight resolution. Once any
+        attempt has finished, a failed alias stops blocking: a batch
+        failure is retried only on the next connect, and deferring until
+        then could hold a reminder for the life of the connection. That
+        fallback is logged, since the channel then runs without its
+        alias's config.
+        """
+        alias_channels = {
+            c.scope for c in self._registry.by_transport("signal") if c.scope.startswith("+")
+        }
+        needed = alias_channels & set(self._configured_allow_aliases())
+
+        # Nothing to resolve, or everything already resolved.
+        def unresolved() -> list[str]:
+            return sorted(a for a in needed if a not in self._resolved_aliases)
+
+        if not unresolved():
+            return True
+
+        # A resolution is in flight (we are connected): give it a bounded
+        # wait. asyncio.wait never cancels the task it watches.
+        task = self._allow_resolution_task
+        if not self._alias_resolution_attempted and task is not None and not task.done():
+            await asyncio.wait({task}, timeout=ALIAS_RESOLUTION_WAIT_SECONDS)
+
+        pending = unresolved()
+        if not pending:
+            return True
+        if not self._alias_resolution_attempted:
+            return False
+        # shortcut: a failed alias is treated as unmatched once an attempt
+        # has run, upgrade to deferring if reminders on an aliased channel
+        # firing with the default config turn out to matter.
+        logger.warning(
+            "signal: creating %s without E.164 alias config: alias(es) %s did not "
+            "resolve; check signal-cli and the allow: entries, then restart to apply",
+            channel_id, ", ".join(pending),
+        )
+        return True
 
     async def _resolve_alias_config(
         self, source_uuid: str, source_number: str | None
@@ -562,24 +651,29 @@ class SignalPlugin(TransportPlugin):
         unauthorized-sender refusal.
         """
         try:
-            result = await self._send_rpc("getUserStatus", {"recipient": aliases})
-        except Exception as exc:
-            logger.error(
-                "signal: failed to resolve configured allowlist alias(es) %s: %s",
-                ", ".join(aliases), exc,
-            )
-            return
-        entries = result if isinstance(result, list) else [result]
-        aci_by_alias = {
-            entry.get("recipient") or entry.get("number"): entry.get("uuid")
-            for entry in entries if isinstance(entry, dict)
-        }
-        for alias in aliases:
-            aci = aci_by_alias.get(alias)
-            if not aci:
-                logger.error("signal: configured allowlist alias %s did not resolve to an account", alias)
-                continue
-            self._resolved_aliases[alias] = aci
+            try:
+                result = await self._send_rpc("getUserStatus", {"recipient": aliases})
+            except Exception as exc:
+                logger.error(
+                    "signal: failed to resolve configured allowlist alias(es) %s: %s",
+                    ", ".join(aliases), exc,
+                )
+                return
+            entries = result if isinstance(result, list) else [result]
+            aci_by_alias = {
+                entry.get("recipient") or entry.get("number"): entry.get("uuid")
+                for entry in entries if isinstance(entry, dict)
+            }
+            for alias in aliases:
+                aci = aci_by_alias.get(alias)
+                if not aci:
+                    logger.error("signal: configured allowlist alias %s did not resolve to an account", alias)
+                    continue
+                self._resolved_aliases[alias] = aci
+        finally:
+            # Success or failure, an attempt has now run; see
+            # _alias_config_ready for why that matters.
+            self._alias_resolution_attempted = True
 
     async def _await_allow_resolution(self) -> None:
         """Block until any in-flight allowlist alias resolution has
@@ -699,6 +793,7 @@ class SignalPlugin(TransportPlugin):
         which never had a pending entry, so those are a no-op."""
         if not channel.matches_transport("signal"):
             return
+        self._sweep_orphans_before(channel, trace_id)
         timestamp_ms = self._pop_pending(channel, trace_id)
         if timestamp_ms is None:
             return
@@ -708,6 +803,39 @@ class SignalPlugin(TransportPlugin):
             )
         except Exception as exc:
             logger.warning("signal: failed to send read receipt: %s", exc, exc_info=True)
+
+    def _sweep_orphans_before(self, channel: Channel, trace_id: str) -> None:
+        """Release pending entries admitted before ``trace_id`` that were
+        never persisted (issue #104).
+
+        Entries are inserted in the order their messages were enqueued
+        (the notification processor is serial), and the channel's agent
+        queue processes items one at a time in that order. So when
+        ``trace_id`` is persisted, every message admitted before it has
+        finished; one whose entry is still here died before persistence
+        (conversation init raised, the item was dropped) and will never
+        get a receipt or a reply. Its timestamp is dropped without a
+        receipt and its typing slot given back, so the indicator does not
+        refresh forever. An id this transport never recorded (a
+        notification-born turn) sweeps nothing: its place in the order is
+        unknown.
+        """
+        pending = self._pending_receipts.get(channel.id)
+        if not pending or trace_id not in pending:
+            return
+        orphans: list[str] = []
+        for pending_id in pending:
+            if pending_id == trace_id:
+                break
+            orphans.append(pending_id)
+        for orphan in orphans:
+            del pending[orphan]
+            self._decrement_outstanding(channel)
+            logger.warning(
+                "signal: message %s on %s was admitted but never persisted; "
+                "dropping its read receipt and typing slot",
+                orphan, channel.id,
+            )
 
     # -----------------------------------------------------------------
     # Outbound send

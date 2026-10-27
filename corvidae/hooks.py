@@ -845,11 +845,20 @@ class AgentSpec:
         prefix and every implementation returns None for ids it does not
         own, so registration order cannot change the answer.
 
+        A transport may also return None for an id it does own when it
+        cannot apply that channel's config yet (PRD §3.2.7), e.g. Signal
+        before its first E.164 alias resolution. Callers must then retry
+        rather than fall back to ``registry.get_or_create``, which would
+        cache a default-configured channel; SchedulerPlugin does, for any
+        id whose prefix names a plugin (by its ``transport`` attribute)
+        that implements this hook.
+
         Args:
             channel_id: The ``transport:scope`` persistence key.
 
         Returns:
-            The Channel, or None when this transport does not own the id.
+            The Channel, or None when this transport does not own the id
+            or cannot build it yet.
         """
 
     @hookspec

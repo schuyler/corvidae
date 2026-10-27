@@ -19,6 +19,7 @@ from corvidae.channel import Channel, ChannelConfig, ChannelRegistry
 from corvidae.hooks import create_plugin_manager, hookimpl
 from corvidae.persistence import PersistencePlugin, init_db
 from corvidae.scheduler import (
+    CHANNEL_RETRY_SECONDS,
     MAX_SLEEP_SECONDS,
     READY_POLL_SECONDS,
     SchedulerPlugin,
@@ -484,6 +485,46 @@ class TestChannelResolution:
         await e.init()
         ch = await e.sched._channel_for("signal:aci-1")
         assert ch.config is alias
+
+    async def test_owning_transport_that_declines_defers_the_firing(self, memdb, caplog):
+        """PRD §3.2.7 / #76: when the transport that owns the id returns
+        None (its config cannot be applied yet), the row stays due, no
+        default-configured channel is cached, and the next pass fires it
+        once the transport answers."""
+        e = Env(memdb, sched_config())
+        alias = ChannelConfig(system_prompt="alias prompt")
+
+        class DeferringTransport:
+            transport = "signal"
+            ready = False
+
+            @hookimpl
+            async def resolve_channel(self, channel_id):
+                if not channel_id.startswith("signal:") or not self.ready:
+                    return None
+                return e.registry.get_or_create("signal", channel_id[7:], config=alias)
+
+        transport = DeferringTransport()
+        e.pm.register(transport, name="fake_signal")
+        await e.init()
+        await e.sched.add_reminder("signal:aci-1", "call mom", T0 + 60)
+        e.clock.advance(60)
+
+        with caplog.at_level("WARNING", logger="corvidae.scheduler"):
+            delay = await e.sched._tick()
+        assert e.recorder.calls == []
+        assert e.registry.get("signal:aci-1") is None
+        (row,) = await e.rows()
+        assert row.enabled and row.last_fired_at is None
+        assert delay == CHANNEL_RETRY_SECONDS
+        assert any("signal:aci-1" in r.getMessage() for r in caplog.records)
+
+        transport.ready = True
+        await e.sched._tick()
+        (call,) = e.recorder.calls
+        assert call["channel"].config is alias
+        (row,) = await e.rows()
+        assert not row.enabled and row.disabled_reason == "fired"
 
     async def test_registry_hit_and_bare_fallback(self, env):
         existing = env.registry.get_or_create("irc", "#lex")

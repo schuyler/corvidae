@@ -72,6 +72,9 @@ MAX_SLEEP_SECONDS = 3600.0
 READY_POLL_SECONDS = 1.0
 #: Back-off after an unexpected error in a timer pass.
 ERROR_RETRY_SECONDS = 30.0
+#: Re-check interval while a due row's owning transport cannot resolve its
+#: channel yet (Signal before its first alias resolution, #76).
+CHANNEL_RETRY_SECONDS = 5.0
 #: Upper bound on reminder text a tool call may store; together with
 #: max_reminders_per_channel this bounds what a hostile speaker can park
 #: in the table.
@@ -106,6 +109,15 @@ _ROW_COLUMNS = (
     "id, name, channel_id, origin, text, next_fire_at, interval_seconds, "
     "created_at, created_by, last_fired_at, enabled, disabled_reason, schedule_spec"
 )
+
+
+class ChannelNotReady(Exception):
+    """A due row's owning transport cannot build its channel yet; the row
+    stays due and the timer retries after CHANNEL_RETRY_SECONDS."""
+
+    def __init__(self, channel_id: str) -> None:
+        super().__init__(f"channel {channel_id} cannot be resolved yet")
+        self.channel_id = channel_id
 
 
 @dataclass
@@ -458,6 +470,8 @@ class SchedulerPlugin(CorvidaePlugin):
             ordering does not guarantee.
         _stale_overdue: row id -> seconds overdue, for rows the startup
             catch-up policy decided to fire late; consumed on firing.
+        _deferred_rows: row ids whose channel the owning transport could
+            not resolve yet; each is warned about once, not every retry.
     """
 
     depends_on = frozenset({"registry", "persistence"})
@@ -491,6 +505,7 @@ class SchedulerPlugin(CorvidaePlugin):
         self._wake = asyncio.Event()
         self._task: asyncio.Task | None = None
         self._stale_overdue: dict[int, float] = {}
+        self._deferred_rows: set[int | None] = set()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -790,9 +805,12 @@ class SchedulerPlugin(CorvidaePlugin):
         now = self._clock()
         due = await self._fetch(db, "enabled = 1 AND next_fire_at <= ? ORDER BY next_fire_at", (now,))
         failed = False
+        deferred = False
         for row in due:
             try:
                 await self._fire(db, row, now)
+            except ChannelNotReady:
+                deferred = True
             except Exception:
                 failed = True
                 logger.exception("scheduler: firing failed", extra={"schedule_id": row.id})
@@ -801,6 +819,9 @@ class SchedulerPlugin(CorvidaePlugin):
         # due; re-arming at zero would spin, so back off instead.
         if failed:
             return ERROR_RETRY_SECONDS
+        # A deferred row is still due; check back soon for its channel.
+        if deferred:
+            return CHANNEL_RETRY_SECONDS
 
         # Re-arm on the earliest remaining enabled row.
         async with db.execute(
@@ -818,6 +839,11 @@ class SchedulerPlugin(CorvidaePlugin):
         before the notification is sent: at-most-once, so a crash between
         the two can lose a firing but never repeats one on restart.
         """
+        # Resolve the target channel before anything is recorded, so a row
+        # whose transport cannot build the channel yet stays due (raises
+        # ChannelNotReady) rather than being consumed; an unresolvable id
+        # is logged and dropped below, after the row is recorded.
+        channel = await self._channel_for(row.channel_id, schedule_id=row.id)
         overdue = self._stale_overdue.pop(row.id, None)
 
         # Record the firing first. The update is conditional on the row
@@ -843,8 +869,7 @@ class SchedulerPlugin(CorvidaePlugin):
                         extra={"schedule_id": row.id})
             return
 
-        # Resolve the target channel; an unresolvable id is logged and dropped.
-        channel = await self._channel_for(row.channel_id)
+        # An unresolvable id is logged and dropped.
         if channel is None:
             logger.warning("scheduler: cannot resolve channel; firing dropped",
                            extra={"schedule_id": row.id, "channel": row.channel_id})
@@ -866,12 +891,19 @@ class SchedulerPlugin(CorvidaePlugin):
             meta={"origin": row.origin, "schedule_id": row.id},
         )
 
-    async def _channel_for(self, channel_id: str) -> Channel | None:
+    async def _channel_for(self, channel_id: str, schedule_id: int | None = None) -> Channel | None:
         """Resolve a persisted channel id: live registry entry, then the
         transport's resolve_channel (Signal applies alias config), then a
-        bare registry channel from the split id (IRC, CLI, internal:*)."""
+        bare registry channel from the split id (IRC, CLI, internal:*).
+
+        Raises ChannelNotReady when the transport that owns the id
+        implements resolve_channel but declined: it cannot apply the
+        channel's config yet (PRD §3.2.7), and a bare channel would cache
+        the defaults for the process lifetime (#76).
+        """
         channel = self._registry.get(channel_id)
         if channel is not None:
+            self._deferred_rows.discard(schedule_id)
             return channel
         try:
             channel = await self.pm.ahook.resolve_channel(channel_id=channel_id)
@@ -880,11 +912,32 @@ class SchedulerPlugin(CorvidaePlugin):
                            extra={"channel": channel_id})
             channel = None
         if channel is not None:
+            self._deferred_rows.discard(schedule_id)
             return channel
         transport, sep, scope = channel_id.partition(":")
         if not sep or not transport or not scope:
             return None
+        if self._transport_resolves(transport):
+            # Warn once per row, not once per retry pass.
+            if schedule_id not in self._deferred_rows:
+                self._deferred_rows.add(schedule_id)
+                logger.warning(
+                    "scheduler: %s transport cannot resolve %s yet; holding schedule "
+                    "row %s and retrying every %ss",
+                    transport, channel_id, schedule_id, CHANNEL_RETRY_SECONDS,
+                    extra={"schedule_id": schedule_id, "channel": channel_id},
+                )
+            raise ChannelNotReady(channel_id)
         return self._registry.get_or_create(transport, scope)
+
+    def _transport_resolves(self, transport: str) -> bool:
+        """Whether a loaded plugin for ``transport`` implements
+        resolve_channel, so its None means "not yet" rather than "not
+        mine". Transports set a ``transport`` attribute (TransportPlugin)."""
+        return any(
+            getattr(impl.plugin, "transport", None) == transport
+            for impl in self.pm.hook.resolve_channel.get_hookimpls()
+        )
 
     # ------------------------------------------------------------------
     # Reminder operations (the tools' backing)
