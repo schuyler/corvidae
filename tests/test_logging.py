@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import yaml
 
+from corvidae.trace import mint_trace_id
 from corvidae.channel import ChannelConfig, ChannelRegistry, load_channel_config
 from corvidae.context import ContextWindow
 from corvidae.persistence import init_db
@@ -905,7 +906,7 @@ class TestAgentLogging:
         plugin, channel = await self._make_on_message_plugin(db)
 
         with caplog.at_level(logging.INFO, logger="corvidae.agent"):
-            await plugin.on_message(channel=channel, sender="alice", text="hello")
+            await plugin.on_message(channel=channel, sender="alice", text="hello", trace_id=mint_trace_id())
 
         records = [r for r in caplog.records if r.name == "corvidae.agent"]
         info_records = [r for r in records if r.levelno == logging.INFO]
@@ -918,7 +919,7 @@ class TestAgentLogging:
         plugin, channel = await self._make_on_message_plugin(db)
 
         with caplog.at_level(logging.INFO, logger="corvidae.agent"):
-            await plugin.on_message(channel=channel, sender="alice", text="hello")
+            await plugin.on_message(channel=channel, sender="alice", text="hello", trace_id=mint_trace_id())
             # Drain the channel queue so the consumer (which emits latency log)
             # runs before we check caplog records.
             if channel.id in plugin.queues:

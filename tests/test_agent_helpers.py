@@ -17,6 +17,7 @@ import logging
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from corvidae.trace import mint_trace_id
 from corvidae.agent import (
     Agent,
     DEFAULT_LLM_ERROR_MESSAGE,
@@ -643,7 +644,7 @@ class TestQueueItemTimingPromptTokens:
         plugin._client = mock_client
 
         with caplog.at_level(logging.INFO, logger="corvidae.agent"):
-            await plugin.on_message(channel=channel, sender="user", text="hi")
+            await plugin.on_message(channel=channel, sender="user", text="hi", trace_id=mint_trace_id())
             await drain(plugin, channel)
 
         timing_records = [

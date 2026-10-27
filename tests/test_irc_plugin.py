@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -169,7 +169,11 @@ class TestIRCClientEvents:
                 channel=expected_channel,
                 sender="user",
                 text="hello bot",
+                trace_id=ANY,
             )
+            # The transport mints a real (non-empty string) trace id.
+            tid = pm.ahook.on_message.await_args.kwargs["trace_id"]
+            assert isinstance(tid, str) and tid
 
     async def test_on_channel_message_ignores_self(self):
         """Messages from own nick are filtered out."""
@@ -218,7 +222,10 @@ class TestIRCClientEvents:
                 channel=expected_channel,
                 sender="user",
                 text="private message",
+                trace_id=ANY,
             )
+            tid = pm.ahook.on_message.await_args.kwargs["trace_id"]
+            assert isinstance(tid, str) and tid
 
 
 # ---------------------------------------------------------------------------

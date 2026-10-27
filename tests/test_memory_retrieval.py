@@ -138,7 +138,7 @@ async def seed_memory(
 async def ask(memory, channel, conv, text: str) -> None:
     """Simulate the turn-loop entry: append the user message, fire retrieval."""
     conv.append({"role": "user", "content": text})
-    await memory.before_agent_turn(channel=channel, correlation_id=None, meta={})
+    await memory.before_agent_turn(channel=channel, trace_id=None, meta={})
 
 
 def context_messages(conv) -> list[dict]:
@@ -184,7 +184,7 @@ class TestRetrievalBasics:
         memory, embedder, channel, conv, db = await build_retrieval_env()
         await seed_memory(db, channel.id, "some memory about wifi networks")
         conv.append({"role": "system", "content": "[task]\n\nwifi wifi wifi"})
-        await memory.before_agent_turn(channel=channel, correlation_id=None, meta={})
+        await memory.before_agent_turn(channel=channel, trace_id=None, meta={})
         assert context_messages(conv) == []
         assert embedder.calls == []
         await db.close()
@@ -570,8 +570,8 @@ class _ExchangeRecorder:
     def __init__(self):
         self.updates: list[tuple[str, dict]] = []
 
-    async def update_exchange(self, exchange_key, **fields):
-        self.updates.append((exchange_key, fields))
+    async def update_exchange(self, trace_id, **fields):
+        self.updates.append((trace_id, fields))
 
 
 class TestRetrievalLogSimilarity:
@@ -612,7 +612,7 @@ class TestRetrievalLogSimilarity:
                           "kestrel moved the rain gauge to the north fence")
         conv.append({"role": "user", "content": "where is the rain gauge?"})
         await memory.before_agent_turn(
-            channel=channel, correlation_id="ex-sim", meta={}
+            channel=channel, trace_id="ex-sim", meta={}
         )
 
         async with db.execute(
@@ -633,7 +633,7 @@ class TestRetrievalLogSimilarity:
         async with aiosqlite.connect(path) as legacy:
             await legacy.execute(
                 "CREATE TABLE retrieval_log (id INTEGER PRIMARY KEY AUTOINCREMENT, "
-                "ts REAL NOT NULL, channel_id TEXT NOT NULL, exchange_key TEXT, "
+                "ts REAL NOT NULL, channel_id TEXT NOT NULL, trace_id TEXT, "
                 "top_score REAL, hit_count INTEGER NOT NULL, "
                 "admitted_count INTEGER NOT NULL, "
                 "degraded_to_fts INTEGER NOT NULL DEFAULT 0)"
@@ -660,7 +660,7 @@ class TestRetrievalLogSimilarity:
         async with aiosqlite.connect(path) as legacy:
             await legacy.execute(
                 "CREATE TABLE retrieval_log (id INTEGER PRIMARY KEY AUTOINCREMENT, "
-                "ts REAL NOT NULL, channel_id TEXT NOT NULL, exchange_key TEXT, "
+                "ts REAL NOT NULL, channel_id TEXT NOT NULL, trace_id TEXT, "
                 "top_score REAL, hit_count INTEGER NOT NULL, "
                 "admitted_count INTEGER NOT NULL, "
                 "degraded_to_fts INTEGER NOT NULL DEFAULT 0)"

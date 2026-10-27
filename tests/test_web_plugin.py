@@ -10,7 +10,7 @@ the real hook interleavings.
 
 Interface the tests pin (private names the design names):
   module corvidae.channels.web:
-    WebPlugin, _Client, _Unsent, _CURRENT_SEND,
+    WebPlugin, _Client, _Unsent,
     _ascii_equal, _canonical_host, _normalise_origin, _compute_origins,
     _resolve_token
   WebPlugin attributes: _enabled, _host, _port (configured), port (bound),
@@ -57,7 +57,6 @@ from corvidae.persistence import PersistencePlugin
 from corvidae.channels import web as web_mod
 from corvidae.channels.web import (
     WebPlugin,
-    _CURRENT_SEND,
     _compute_origins,
     _normalise_origin,
     _resolve_token,
@@ -100,34 +99,33 @@ class AgentStub:
         self.pm = pm
         self.started = True
         self.queues: dict = {}
-        # (channel, sender, text, correlation_id) per admitted message.
+        # (channel, sender, text, trace_id) per admitted message.
         self.calls: list[tuple] = []
-        self._n = 0
 
     @hookimpl
-    async def on_message(self, channel, sender: str, text: str) -> None:
-        # Mint a correlation id before the gate, as Agent does.
-        self._n += 1
-        cid = f"cid-{self._n}"
+    async def on_message(self, channel, sender: str, text: str,
+                         trace_id: str) -> None:
+        # Use the transport-minted id for every hook, as Agent does.
+        tid = trace_id
         results = await self.pm.ahook.should_process_message(
-            channel=channel, sender=sender, text=text, correlation_id=cid,
+            channel=channel, sender=sender, text=text, trace_id=tid,
         )
         # Reject-wins resolution, then exactly one of rejected/admitted.
         if resolve_reject_wins(results) is False:
             try:
                 await self.pm.ahook.on_message_rejected(
-                    channel=channel, correlation_id=cid, sender=sender, text=text,
+                    channel=channel, trace_id=tid, sender=sender, text=text,
                 )
             except Exception:
                 logging.getLogger(__name__).warning("rejected failed", exc_info=True)
             return
         try:
             await self.pm.ahook.on_message_admitted(
-                channel=channel, correlation_id=cid, sender=sender, text=text,
+                channel=channel, trace_id=tid, sender=sender, text=text,
             )
         except Exception:
             logging.getLogger(__name__).warning("admitted failed", exc_info=True)
-        self.calls.append((channel, sender, text, cid))
+        self.calls.append((channel, sender, text, tid))
 
 
 class HoldGate:
@@ -139,7 +137,7 @@ class HoldGate:
         self.release = asyncio.Event()
 
     @hookimpl
-    async def should_process_message(self, channel, sender, text, correlation_id):
+    async def should_process_message(self, channel, sender, text, trace_id):
         self.entered.set()
         await self.release.wait()
         return self.result
@@ -155,7 +153,7 @@ class OrderedGate:
         self.count = 0
 
     @hookimpl
-    async def should_process_message(self, channel, sender, text, correlation_id):
+    async def should_process_message(self, channel, sender, text, trace_id):
         i = self.count
         self.count += 1
         if self.events[i] is not None:
@@ -167,7 +165,7 @@ class VetoGate:
     """Vetoes every message."""
 
     @hookimpl
-    async def should_process_message(self, channel, sender, text, correlation_id):
+    async def should_process_message(self, channel, sender, text, trace_id):
         return False
 
 
@@ -175,7 +173,7 @@ class RaiseGate:
     """Raises out of the gate, as a broken third-party gate would."""
 
     @hookimpl
-    async def should_process_message(self, channel, sender, text, correlation_id):
+    async def should_process_message(self, channel, sender, text, trace_id):
         raise RuntimeError("gate exploded")
 
 
@@ -462,7 +460,7 @@ class TestConfig:
         # Hooks on a web channel are no-ops when inert.
         ch = registry.get_or_create("web", "main")
         await plugin.send_message(channel=ch, text="x")
-        await plugin.on_message_admitted(channel=ch, correlation_id="c", sender="web", text="x")
+        await plugin.on_message_admitted(channel=ch, trace_id="c", sender="web", text="x")
         await plugin.on_config_reload(config={})
         await plugin.on_stop()
         loud = [r for r in caplog.records if r.levelno > logging.DEBUG
@@ -899,11 +897,11 @@ class TestOutbound:
         await env.plugin.send_progress(channel=irc, text="x")
         await env.plugin.send_tool_status(channel=irc, tool_name="t", status="dispatched",
                                           args_summary="a", result_summary=None)
-        await env.plugin.on_message_admitted(channel=irc, correlation_id="c",
+        await env.plugin.on_message_admitted(channel=irc, trace_id="c",
                                              sender="x", text="x")
-        await env.plugin.on_message_rejected(channel=irc, correlation_id="c",
+        await env.plugin.on_message_rejected(channel=irc, trace_id="c",
                                              sender="x", text="x")
-        await env.plugin.on_message_persisted(channel=irc, correlation_id="c",
+        await env.plugin.on_message_persisted(channel=irc, trace_id="c",
                                               rowid=1, text="x", meta={})
         assert calls == []
         assert env.plugin._unsent == {}
@@ -946,13 +944,13 @@ class TestOutbound:
 # 7. Working indicator and unsent messages
 # ===========================================================================
 
-def _cid_of(env, text: str) -> str:
+def _tid_of(env, text: str) -> str:
     return next(c[3] for c in env.agent.calls if c[2] == text)
 
 
-async def _persist(env, cid: str, name: str = "main") -> None:
+async def _persist(env, tid: str, name: str = "main") -> None:
     await env.pm.ahook.on_message_persisted(
-        channel=env.channel(name), correlation_id=cid, rowid=1, text="", meta={})
+        channel=env.channel(name), trace_id=tid, rowid=1, text="", meta={})
 
 
 class TestWorking:
@@ -971,7 +969,7 @@ class TestWorking:
         assert "web:main" in env.plugin._working
         assert not any(f["type"] == "working" and f["value"] is False for f in conn.frames)
         # Persisted, queue empty, nothing pending → off.
-        await _persist(env, _cid_of(env, "one"))
+        await _persist(env, _tid_of(env, "one"))
         await env.pm.ahook.send_message(channel=ch, text="r2")
         await conn.wait_type("working", value=False)
         assert "web:main" not in env.plugin._working
@@ -1036,8 +1034,8 @@ class TestUnsent:
         entries = env.plugin._unsent["web:main"]
         assert len(entries) == 2
         # A's entry (appended first) is bound to A's id (admitted second).
-        assert entries[0].cid == env.agent.calls[1][3]
-        assert entries[1].cid == env.agent.calls[0][3]
+        assert entries[0].trace_id == env.agent.calls[1][3]
+        assert entries[1].trace_id == env.agent.calls[0][3]
 
     async def test_snapshot_taken_before_fetch(self, make_env):
         env = await make_env()
@@ -1055,7 +1053,7 @@ class TestUnsent:
         b = await env.connect()
         await b.send(type="subscribe", conversation="main")
         await asyncio.wait_for(entered.wait(), 3)
-        await _persist(env, _cid_of(env, "hi"))
+        await _persist(env, _tid_of(env, "hi"))
         release.set()
         history = await b.wait_type("history")
         assert history["items"][-1]["text"] == "hi"
@@ -1066,14 +1064,14 @@ class TestUnsent:
         await a.send(type="send", conversation="main", text="hi")
         await a.send(type="send", conversation="main", text="still waiting")
         await wait_until(lambda: len(env.agent.calls) == 2)
-        await _persist(env, _cid_of(env, "hi"))
+        await _persist(env, _tid_of(env, "hi"))
         # Only the persisted message leaves; the other stays visible.
         assert [e.text for e in env.plugin._unsent["web:main"]] == ["still waiting"]
         b = await env.connect()
         await b.send(type="subscribe", conversation="main")
         history = await b.wait_type("history")
         assert [u["text"] for u in _history_users(history)] == ["still waiting"]
-        await _persist(env, _cid_of(env, "still waiting"))
+        await _persist(env, _tid_of(env, "still waiting"))
         assert "web:main" not in env.plugin._unsent
 
     async def test_raising_gate(self, make_env, caplog):
@@ -1112,44 +1110,6 @@ class TestUnsent:
         c = await env.connect()
         await c.send(type="subscribe", conversation="main")
         assert [u["text"] for u in _history_users(await c.wait_type("history"))] == ["b-msg"]
-
-    async def test_stale_context_is_ignored(self, make_env):
-        env = await make_env()
-        conn = await env.connect("main")
-        await conn.send(type="send", conversation="main", text="hi")
-        await wait_until(lambda: env.agent.calls)
-        stale = env.plugin._unsent["web:main"][0]
-        await _persist(env, _cid_of(env, "hi"))
-        # Another message still unsent, so the channel's list isn't empty.
-        await conn.send(type="send", conversation="main", text="keep")
-        await wait_until(lambda: len(env.agent.calls) == 2)
-        keep = env.plugin._unsent["web:main"][0]
-        # And an unbound entry held in a gate, with the text the stale
-        # rejection will carry — a text-matching implementation removes it.
-        gate = HoldGate()
-        env.pm.register(gate, name="gate")
-        await conn.send(type="send", conversation="main", text="t")
-        await asyncio.wait_for(gate.entered.wait(), 3)
-        held = env.plugin._unsent["web:main"][1]
-        assert held.text == "t" and held.cid is None
-        # Simulate a task (e.g. the queue consumer) that inherited the var.
-        token = _CURRENT_SEND.set(stale)
-        try:
-            ch = env.channel("main")
-            await env.pm.ahook.on_message_rejected(channel=ch, correlation_id="x",
-                                                   sender="web", text="t")
-            rej = await conn.wait_type("rejected", text="t")
-            assert rej["id"] is None
-            assert env.plugin._unsent["web:main"] == [keep, held]
-            await env.pm.ahook.on_message_admitted(channel=ch, correlation_id="c2",
-                                                   sender="web", text="t2")
-            entries = env.plugin._unsent["web:main"]
-            assert len(entries) == 3 and entries[:2] == [keep, held]
-            assert entries[2] is not stale and entries[2].cid == "c2"
-            assert stale.cid != "c2" and held.cid is None
-        finally:
-            _CURRENT_SEND.reset(token)
-            gate.release.set()
 
 
 # ===========================================================================
@@ -1536,3 +1496,73 @@ class TestPackaging:
         pm.register(ChannelRegistry(), name="registry")
         pm.register(WebPlugin(pm), name="web")
         _check_hook_arg_binding(pm)
+
+
+# ===========================================================================
+# Issue #95: the transport mints the trace id
+# ===========================================================================
+
+class TestTransportMintedIds:
+
+    def test_no_context_inheritance_machinery(self):
+        """O3: the web transport no longer uses a ContextVar to link an
+        entry to its admission/rejection."""
+        import inspect
+        import re
+
+        assert not hasattr(web_mod, "_CURRENT_SEND")
+        source = inspect.getsource(web_mod)
+        assert not re.search(r"^\s*(import contextvars|from contextvars)", source, re.M)
+        assert not hasattr(web_mod, "contextvars")
+
+    async def test_unknown_id_leaves_entries_untouched(self, make_env):
+        """O1/O3: an admission or rejection carrying an id no entry owns is
+        a no-op: held entries are neither removed nor marked admitted, and
+        the rejected frame carries id None."""
+        env = await make_env()
+        conn = await env.connect("main")
+        # Hold one send inside the gate so its entry is unsent and unadmitted.
+        gate = HoldGate()
+        env.pm.register(gate, name="gate")
+        await conn.send(type="send", conversation="main", text="t")
+        await asyncio.wait_for(gate.entered.wait(), 3)
+        before = list(env.plugin._unsent["web:main"])
+        held = before[0]
+        assert held.admitted is False
+        try:
+            ch = env.channel("main")
+            # A rejection for an unknown id: broadcast with no entry id.
+            await env.pm.ahook.on_message_rejected(
+                channel=ch, trace_id="unknown-id", sender="web", text="t")
+            rej = await conn.wait_type("rejected")
+            assert rej["id"] is None
+            assert env.plugin._unsent["web:main"] == before
+
+            # An admission for an unknown id: no new entry, nothing marked.
+            await env.pm.ahook.on_message_admitted(
+                channel=ch, trace_id="unknown-id", sender="web", text="t2")
+            assert env.plugin._unsent["web:main"] == before
+            assert held.admitted is False
+        finally:
+            gate.release.set()
+
+    async def test_later_send_vetoed_marks_only_itself(self, make_env):
+        """O1: the LATER send is vetoed
+        while the earlier is admitted and not yet persisted -- only the later
+        is marked rejected and the earlier entry survives."""
+        env = await make_env()
+        # First call admitted; second call vetoed.
+        gate = OrderedGate([None, None], [None, False])
+        env.pm.register(gate, name="gate")
+        a = await env.connect("main")
+        await a.send(type="send", conversation="main", text="first")
+        await wait_until(lambda: len(env.agent.calls) == 1)
+        await a.send(type="send", conversation="main", text="second")
+        id_first = (await a.wait_type("user", text="first"))["id"]
+        id_second = (await a.wait_type("user", text="second"))["id"]
+        assert id_first != id_second
+
+        rej = await a.wait_type("rejected")
+        assert rej["id"] == id_second
+        # The earlier, admitted-and-unpersisted entry is still there.
+        assert [e.text for e in env.plugin._unsent["web:main"]] == ["first"]

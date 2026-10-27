@@ -9,6 +9,7 @@ import sys
 import click
 
 from corvidae.channel import ChannelRegistry
+from corvidae.trace import mint_trace_id
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 from corvidae.runtime import Runtime
 
@@ -102,6 +103,8 @@ class CLIPlugin(CorvidaePlugin):
                 channel=channel,
                 sender="user",
                 text=text,
+                # Transport-minted id; the Agent uses it verbatim (#95).
+                trace_id=mint_trace_id(),
             )
 
     @hookimpl

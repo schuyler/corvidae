@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock
 import aiosqlite
 import pytest
 
+from corvidae.trace import mint_trace_id
 from corvidae.agent import Agent
 from corvidae.turn import AgentTurnResult, run_agent_turn  # noqa: F401 (used in comments/type checking)
 from corvidae.channel import ChannelConfig, ChannelRegistry
@@ -102,7 +103,7 @@ class TestToolCallDispatchesTask:
 
         task_plugin.task_queue.enqueue = spy_enqueue
 
-        await plugin.on_message(channel=channel, sender="user", text="hello")
+        await plugin.on_message(channel=channel, sender="user", text="hello", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
         # Phase 3: Agent._dispatch_tool_calls enqueues exactly one Task
@@ -144,7 +145,7 @@ class TestToolCallResultTriggersContinuation:
         )
         plugin._client = mock_client
 
-        await plugin.on_message(channel=channel, sender="user", text="do the thing")
+        await plugin.on_message(channel=channel, sender="user", text="do the thing", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
         # Wait for TaskQueue to execute the tool task
@@ -206,7 +207,7 @@ class TestMultipleToolCallsDispatched:
 
         task_plugin.task_queue.enqueue = spy_enqueue
 
-        await plugin.on_message(channel=channel, sender="user", text="do three things")
+        await plugin.on_message(channel=channel, sender="user", text="do three things", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
         assert len(enqueued_tasks) == 3
@@ -233,7 +234,7 @@ class TestMaxTurnsResetsOnUserMessage:
         mock_client.chat = AsyncMock(return_value=_make_text_response("hello"))
         plugin._client = mock_client
 
-        await plugin.on_message(channel=channel, sender="user", text="reset me")
+        await plugin.on_message(channel=channel, sender="user", text="reset me", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
         # After a user message with a text response, turn_counter was reset to 0
@@ -260,7 +261,7 @@ class TestMaxTurnsNotResetWhileToolsPending:
 
         channel.pending_tool_call_ids = {"x"}
         channel.turn_counter = 3
-        await plugin.on_message(channel=channel, sender="user", text="mid-cycle question")
+        await plugin.on_message(channel=channel, sender="user", text="mid-cycle question", trace_id=mint_trace_id())
         await drain(plugin, channel)
         assert channel.turn_counter == 4, (
             "a mid-cycle user message must charge, not reset, the turn budget"
@@ -268,7 +269,7 @@ class TestMaxTurnsNotResetWhileToolsPending:
 
         channel.pending_tool_call_ids = set()
         channel.turn_counter = 3
-        await plugin.on_message(channel=channel, sender="user", text="fresh question")
+        await plugin.on_message(channel=channel, sender="user", text="fresh question", trace_id=mint_trace_id())
         await drain(plugin, channel)
         assert channel.turn_counter == 1, (
             "a message starting a fresh cycle (no pending tools) still resets"
@@ -276,16 +277,16 @@ class TestMaxTurnsNotResetWhileToolsPending:
 
 
 # ---------------------------------------------------------------------------
-# Test 4c: the reset rule is "originates a new correlation and no tool cycle
+# Test 4c: the reset rule is "originates a new trace and no tool cycle
 # is in flight" (#59) — not "is a USER item". A clock-driven notification
 # (scheduler reminder, heartbeat) starts its own exchange and gets a fresh
-# max_turns budget; a notification inheriting a correlation does not.
+# max_turns budget; a notification inheriting a trace does not.
 # ---------------------------------------------------------------------------
 
 
 class TestMaxTurnsResetsOnOriginatingNotification:
     async def test_originating_notification_resets_counter(self, plugin_and_channel):
-        """A notification with no inherited correlation id mints its own at
+        """A notification with no inherited trace id mints its own at
         dequeue (item.originating=True); with no pending tools it resets the
         counter, so a notification-only channel never exhausts max_turns."""
         plugin, channel, db = plugin_and_channel
@@ -320,8 +321,8 @@ class TestMaxTurnsResetsOnOriginatingNotification:
         await drain(plugin, channel)
         assert channel.turn_counter == 4
 
-    async def test_inherited_correlation_notification_does_not_reset(self, plugin_and_channel):
-        """A notification carrying meta['correlation_id'] belongs to an
+    async def test_inherited_trace_notification_does_not_reset(self, plugin_and_channel):
+        """A notification carrying meta['trace_id'] belongs to an
         existing exchange (originating=False) and must not reset."""
         plugin, channel, db = plugin_and_channel
         mock_client = MagicMock()
@@ -331,7 +332,7 @@ class TestMaxTurnsResetsOnOriginatingNotification:
         channel.turn_counter = 3
         await plugin.on_notify(
             channel=channel, source="task", text="background done",
-            tool_call_id=None, meta={"correlation_id": "abc-123"},
+            tool_call_id=None, meta={"trace_id": "abc-123"},
         )
         await drain(plugin, channel)
         assert channel.turn_counter == 4
@@ -366,7 +367,7 @@ class TestMaxTurnsIncrementsOnNotification:
         )
         plugin._client = mock_client
 
-        await plugin.on_message(channel=channel, sender="user", text="go")
+        await plugin.on_message(channel=channel, sender="user", text="go", trace_id=mint_trace_id())
         await drain(plugin, channel)
         assert channel.turn_counter == 1
 
@@ -425,7 +426,7 @@ class TestMaxTurnsExceededSuppressesToolCalls:
 
         try:
             # First turn: user message -> first tool call dispatched
-            await plugin.on_message(channel=channel, sender="user", text="go")
+            await plugin.on_message(channel=channel, sender="user", text="go", trace_id=mint_trace_id())
             await drain(plugin, channel)
             assert len(enqueued_tasks) == 1
 
@@ -479,7 +480,7 @@ class TestMaxTurnsExceededSendsFallbackText:
         plugin._client = mock_client
 
         try:
-            await plugin.on_message(channel=channel, sender="user", text="go")
+            await plugin.on_message(channel=channel, sender="user", text="go", trace_id=mint_trace_id())
             await drain(plugin, channel)
             await drain_task_queue(plugin)
             await drain(plugin, channel)
@@ -525,7 +526,7 @@ class TestToolDispatchWithToolContext:
         )
         plugin._client = mock_client
 
-        await plugin.on_message(channel=channel, sender="user", text="use ctx tool")
+        await plugin.on_message(channel=channel, sender="user", text="use ctx tool", trace_id=mint_trace_id())
         await drain(plugin, channel)
         await drain_task_queue(plugin)
         await drain(plugin, channel)
@@ -561,7 +562,7 @@ class TestToolDispatchUnknownTool:
         )
         plugin._client = mock_client
 
-        await plugin.on_message(channel=channel, sender="user", text="use missing tool")
+        await plugin.on_message(channel=channel, sender="user", text="use missing tool", trace_id=mint_trace_id())
         await drain(plugin, channel)
         await drain_task_queue(plugin)
         await drain(plugin, channel)
@@ -603,7 +604,7 @@ class TestToolDispatchToolRaises:
         plugin._client = mock_client
 
         # Should not raise
-        await plugin.on_message(channel=channel, sender="user", text="use failing tool")
+        await plugin.on_message(channel=channel, sender="user", text="use failing tool", trace_id=mint_trace_id())
         await drain(plugin, channel)
         await drain_task_queue(plugin)
         await drain(plugin, channel)
@@ -663,7 +664,7 @@ class TestNoTaskQueueLogsError:
 
         # Should not raise even though no TaskPlugin is registered
         with caplog.at_level(logging.ERROR, logger="corvidae.agent"):
-            await plugin.on_message(channel=channel, sender="user", text="hi")
+            await plugin.on_message(channel=channel, sender="user", text="hi", trace_id=mint_trace_id())
             await drain(plugin, channel)
 
         # Must log an error about the missing TaskQueue
@@ -715,7 +716,7 @@ class TestNoTaskQueueEmitsToolResult:
 
         channel = registry.get_or_create("test", "scope_notq")
 
-        await plugin.on_message(channel=channel, sender="user", text="hi")
+        await plugin.on_message(channel=channel, sender="user", text="hi", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
         # The model saw an error tool result for the call it asked for...
@@ -759,7 +760,7 @@ class TestAssistantMessageWithToolCallsPersisted:
         )
         plugin._client = mock_client
 
-        await plugin.on_message(channel=channel, sender="user", text="persist test")
+        await plugin.on_message(channel=channel, sender="user", text="persist test", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
         conv = channel.conversation
@@ -812,7 +813,7 @@ class TestNoSendMessageWhenToolCallsDispatched:
         )
         plugin._client = mock_client
 
-        await plugin.on_message(channel=channel, sender="user", text="use tool")
+        await plugin.on_message(channel=channel, sender="user", text="use tool", trace_id=mint_trace_id())
         await drain(plugin, channel)
 
         # Under Phase 3 single-turn dispatch: after the first drain,
@@ -861,7 +862,7 @@ class TestCompactionFailureResilience:
         plugin.pm.register(CrashingCompactionPlugin(), name="crashing_compaction")
 
         with caplog.at_level(logging.WARNING, logger="corvidae.agent"):
-            await plugin.on_message(channel=channel, sender="user", text="hello")
+            await plugin.on_message(channel=channel, sender="user", text="hello", trace_id=mint_trace_id())
             await drain(plugin, channel)
 
         # Despite compaction failure, run_agent_turn must have been called

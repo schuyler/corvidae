@@ -2,7 +2,7 @@
 
 import asyncio
 import sys
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -131,7 +131,11 @@ class TestReadLoop:
             channel=expected_channel,
             sender="user",
             text="hello world",
+            trace_id=ANY,
         )
+        # The transport mints a real (non-empty string) trace id.
+        tid = pm.ahook.on_message.await_args.kwargs["trace_id"]
+        assert isinstance(tid, str) and tid
         # EOF triggers SIGINT to self for graceful shutdown
         mock_kill.assert_called_once()
 
@@ -246,6 +250,7 @@ class TestNonInteractiveStdin:
             channel=registry.get_or_create("cli", "local"),
             sender="user",
             text="hi",
+            trace_id=ANY,
         )
         mock_kill.assert_not_called()
 

@@ -147,7 +147,7 @@ class FunnelPlugin(CorvidaePlugin):
             )
 
     @hookimpl
-    async def before_agent_turn(self, channel, correlation_id, meta) -> None:
+    async def before_agent_turn(self, channel, trace_id, meta) -> None:
         """Drain deferred payloads matching the triggering turn's origin.
 
         The origin comes from ``meta["origin"]``, never parsed from stub
