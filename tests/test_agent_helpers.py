@@ -287,6 +287,34 @@ class TestRunTurn:
         assert call_kwargs["channel"] is channel
         assert call_kwargs["error"] is exc
 
+    async def test_llm_error_hook_raising_still_sends_default_message(
+        self, plugin_and_channel
+    ):
+        """A raising on_llm_error hook must not silence the error reply."""
+        plugin, channel, db = plugin_and_channel
+        plugin._client = MagicMock()
+        plugin.pm.ahook.on_llm_error = AsyncMock(
+            side_effect=RuntimeError("error hook blew up")
+        )
+
+        with patch(
+            "corvidae.agent.run_agent_turn",
+            new=AsyncMock(side_effect=RuntimeError("LLM exploded")),
+        ):
+            result = await plugin._run_turn(
+                channel=channel,
+                messages=[{"role": "user", "content": "hi"}],
+                tool_schemas=[],
+                llm_overrides=None,
+            )
+
+        assert result is None
+        plugin.pm.ahook.send_message.assert_called_once()
+        sent = plugin.pm.ahook.send_message.call_args.kwargs["text"]
+        # Delivery, not wording: the user still gets a complete, formatted reply.
+        assert isinstance(sent, str) and sent.strip()
+        assert "{" not in sent
+
     async def test_passes_llm_overrides_to_run_agent_turn(self, plugin_and_channel):
         """llm_overrides dict -> forwarded to run_agent_turn as extra_body."""
         plugin, channel, db = plugin_and_channel
@@ -626,3 +654,74 @@ class TestQueueItemTimingPromptTokens:
         ]
         assert timing_records, "expected a 'queue item timing' log record"
         assert timing_records[0].prompt_tokens == 896
+
+
+# ===========================================================================
+# Default LLM error message: names the failure class and tells the user what
+# to do next. The message must stay calm and must not leak Python type names.
+# ===========================================================================
+
+
+class TestDefaultLlmErrorMessage:
+    def test_error_message_api_requires_a_failure(self):
+        """There is no bare default message: a failure cause is mandatory."""
+        import corvidae.agent as agent_mod
+
+        assert not hasattr(agent_mod, "DEFAULT_LLM_ERROR_MESSAGE"), (
+            "a bare default message lets callers omit the failure cause; "
+            "use _llm_error_message(exc)"
+        )
+        with pytest.raises(TypeError):
+            agent_mod._llm_error_message()
+
+        message = agent_mod._llm_error_message(TimeoutError())
+        assert "timed out" in message.lower()
+        assert "try again" in message.lower()
+
+    async def test_timeout_names_the_failure_class_and_retry_hint(
+        self, plugin_and_channel
+    ):
+        """A timeout produces a human 'timed out' cause plus a retry hint."""
+        plugin, channel, db = plugin_and_channel
+        plugin._client = MagicMock()
+        plugin.pm.ahook.on_llm_error = AsyncMock(return_value=None)
+
+        with patch(
+            "corvidae.agent.run_agent_turn",
+            new=AsyncMock(side_effect=TimeoutError()),
+        ):
+            await plugin._run_turn(
+                channel=channel,
+                messages=[{"role": "user", "content": "hi"}],
+                tool_schemas=[],
+                llm_overrides=None,
+            )
+
+        sent_text = plugin.pm.ahook.send_message.call_args.kwargs["text"]
+        assert "timed out" in sent_text.lower()
+        assert "try again" in sent_text.lower()
+        assert "TimeoutError" not in sent_text
+
+    async def test_generic_failure_names_the_failure_class_and_retry_hint(
+        self, plugin_and_channel
+    ):
+        """An unclassified failure still names a cause and gives a retry hint."""
+        plugin, channel, db = plugin_and_channel
+        plugin._client = MagicMock()
+        plugin.pm.ahook.on_llm_error = AsyncMock(return_value=None)
+
+        with patch(
+            "corvidae.agent.run_agent_turn",
+            new=AsyncMock(side_effect=RuntimeError("boom")),
+        ):
+            await plugin._run_turn(
+                channel=channel,
+                messages=[{"role": "user", "content": "hi"}],
+                tool_schemas=[],
+                llm_overrides=None,
+            )
+
+        sent_text = plugin.pm.ahook.send_message.call_args.kwargs["text"]
+        assert "model request failed" in sent_text.lower()
+        assert "try again" in sent_text.lower()
+        assert "RuntimeError" not in sent_text

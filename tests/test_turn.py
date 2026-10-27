@@ -325,3 +325,45 @@ async def test_run_agent_turn_exception_leaves_messages_unchanged():
     # messages must be exactly as passed — no assistant message appended
     assert len(messages) == 1
     assert messages[0] is original_message
+
+
+# ---------------------------------------------------------------------------
+# Malformed provider responses name the provider, the missing key, and the
+# top-level keys actually received (instead of a bare KeyError/IndexError).
+# ---------------------------------------------------------------------------
+
+
+async def test_run_agent_turn_error_envelope_names_provider_missing_key_and_keys():
+    """An error envelope raises a diagnosable error, not a bare KeyError."""
+    client = MagicMock()
+    client.model = "local-chat"
+    client.base_url = "http://localhost:8080"
+    client.chat = AsyncMock(
+        return_value={"error": {"message": "rate limited"}, "status": 429}
+    )
+    messages = [{"role": "user", "content": "hi"}]
+
+    with pytest.raises(ValueError) as excinfo:
+        await run_agent_turn(client, messages, tool_schemas=[])
+
+    message = str(excinfo.value)
+    assert "local-chat" in message
+    assert "choices" in message
+    assert "error" in message and "status" in message
+    assert messages == [{"role": "user", "content": "hi"}]
+
+
+async def test_run_agent_turn_missing_message_names_the_missing_key():
+    """A choice without 'message' names that key and the provider."""
+    client = MagicMock()
+    client.model = "local-chat"
+    client.base_url = "http://localhost:8080"
+    client.chat = AsyncMock(return_value={"choices": [{"text": "hi"}]})
+
+    with pytest.raises(ValueError) as excinfo:
+        await run_agent_turn(client, [{"role": "user", "content": "hi"}], tool_schemas=[])
+
+    message = str(excinfo.value)
+    assert "local-chat" in message
+    assert "message" in message
+    assert "choices" in message

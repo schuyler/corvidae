@@ -991,3 +991,132 @@ class TestNonTextContentBlocks:
         result = await _call_mcp_tool(mock_session, "tool", {}, 30.0, "myserver")
 
         assert result == "first\nsecond"
+
+
+async def test_generic_exception_names_the_server():
+    """A generic tool-call failure names the MCP server, like the timeout branch."""
+    mock_session = AsyncMock()
+    mock_session.call_tool = AsyncMock(side_effect=RuntimeError("protocol error"))
+
+    result = await _call_mcp_tool(mock_session, "read_file", {}, 30.0, "myserver")
+
+    assert "myserver" in result
+
+# ---------------------------------------------------------------------------
+# Lazy reconnect for a server that failed at startup
+# ---------------------------------------------------------------------------
+
+
+def _working_session(tool_names: list[str]):
+    """Return (session, session context manager) exposing the named tools."""
+    session = AsyncMock()
+    session.initialize = AsyncMock()
+    result = MagicMock()
+    result.tools = [_make_mcp_tool(name) for name in tool_names]
+    session.list_tools = AsyncMock(return_value=result)
+    session.call_tool = AsyncMock(
+        return_value=_make_tool_result([_make_text_block("ok")])
+    )
+    cm = AsyncMock()
+    cm.__aenter__ = AsyncMock(return_value=session)
+    cm.__aexit__ = AsyncMock(return_value=False)
+    return session, cm
+
+
+def _working_stdio_cm():
+    cm = AsyncMock()
+    cm.__aenter__ = AsyncMock(return_value=(MagicMock(), MagicMock()))
+    cm.__aexit__ = AsyncMock(return_value=False)
+    return cm
+
+
+def _failing_cm(error: Exception):
+    cm = AsyncMock()
+    cm.__aenter__ = AsyncMock(side_effect=error)
+    cm.__aexit__ = AsyncMock(return_value=False)
+    return cm
+
+
+_MCP_CONFIG = {
+    "mcp": {
+        "servers": {
+            "broken": {"transport": "stdio", "command": "broken", "args": []},
+            "good": {"transport": "stdio", "command": "good", "args": []},
+        }
+    }
+}
+
+
+class TestLazyReconnect:
+    async def test_failed_server_reconnects_on_next_tool_call(self):
+        """A server skipped at startup is retried when an MCP tool is called."""
+        plugin = McpClientPlugin(None)
+        await plugin.on_init(pm=MagicMock(), config=_MCP_CONFIG)
+
+        good_session, good_session_cm = _working_session(["ok"])
+        with (
+            patch(
+                "mcp.client.stdio.stdio_client",
+                side_effect=[
+                    _failing_cm(ConnectionRefusedError("no server")),
+                    _working_stdio_cm(),
+                ],
+            ),
+            patch("mcp.client.stdio.StdioServerParameters"),
+            patch("mcp.ClientSession", return_value=good_session_cm),
+        ):
+            await plugin.on_start(config=_MCP_CONFIG)
+
+        assert [s.name for s in plugin._servers] == ["good"]
+        assert [t.name for t in plugin._cached_tools] == ["good__ok"]
+
+        # The broken server is healthy by the time the first MCP tool runs.
+        recovered_session, recovered_session_cm = _working_session(["recovered"])
+        with (
+            patch(
+                "mcp.client.stdio.stdio_client",
+                return_value=_working_stdio_cm(),
+            ),
+            patch("mcp.client.stdio.StdioServerParameters"),
+            patch("mcp.ClientSession", return_value=recovered_session_cm),
+        ):
+            (good_tool,) = plugin._cached_tools
+            result = await good_tool.fn()
+
+        assert result == "ok"
+        assert [s.name for s in plugin._servers] == ["good", "broken"]
+        assert "broken__recovered" in [t.name for t in plugin._cached_tools]
+
+    async def test_failed_reconnect_does_not_break_the_tool_call(self, caplog):
+        """A still-broken server logs and leaves the current call working."""
+        plugin = McpClientPlugin(None)
+        await plugin.on_init(pm=MagicMock(), config=_MCP_CONFIG)
+
+        good_session, good_session_cm = _working_session(["ok"])
+        with (
+            patch(
+                "mcp.client.stdio.stdio_client",
+                side_effect=[
+                    _failing_cm(ConnectionRefusedError("no server")),
+                    _working_stdio_cm(),
+                ],
+            ),
+            patch("mcp.client.stdio.StdioServerParameters"),
+            patch("mcp.ClientSession", return_value=good_session_cm),
+        ):
+            await plugin.on_start(config=_MCP_CONFIG)
+
+        with caplog.at_level(logging.WARNING, logger="corvidae.mcp_client"), \
+                patch(
+                    "mcp.client.stdio.stdio_client",
+                    return_value=_failing_cm(ConnectionRefusedError("still down")),
+                ), \
+                patch("mcp.client.stdio.StdioServerParameters"):
+            (good_tool,) = plugin._cached_tools
+            result = await good_tool.fn()
+
+        assert result == "ok"
+        assert any(
+            "lazy reconnect failed" in r.getMessage()
+            for r in caplog.records if r.levelno >= logging.WARNING
+        ), [r.getMessage() for r in caplog.records]

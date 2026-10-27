@@ -617,3 +617,16 @@ class TestExecution:
         )
         assert "no record says Friday" in context_text
         await _teardown(env)
+
+
+def test_parse_json_block_error_names_critique_phase_and_long_text():
+    """The critique JSON parse error names its phase and keeps >200 chars."""
+    from corvidae.critique import _parse_json_block
+
+    text = "x" * 300 + " PROVIDER_ERROR_MARKER"
+    with pytest.raises(ValueError) as excinfo:
+        _parse_json_block(text)
+
+    message = str(excinfo.value)
+    assert "critique" in message.lower()
+    assert "PROVIDER_ERROR_MARKER" in message

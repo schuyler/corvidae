@@ -2,6 +2,7 @@
 
 import json
 import logging
+import sqlite3
 import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -759,3 +760,97 @@ class TestWALMode:
             and "wal" in r.getMessage().lower()
         ]
         assert info_records
+
+
+async def test_on_start_invalid_journal_mode_lists_allowed_values(tmp_path):
+    """An invalid sqlite_journal_mode names the accepted values."""
+    from corvidae.persistence import PersistencePlugin
+
+    pm = create_plugin_manager()
+    registry = _make_registry()
+    pm.register(registry, name="registry")
+
+    plugin = PersistencePlugin(pm)
+    config = {
+        "daemon": {
+            "session_db": str(tmp_path / "invalid_mode.db"),
+            "sqlite_journal_mode": "bogus",
+        }
+    }
+
+    with pytest.raises(ValueError) as excinfo:
+        await plugin.on_start(config=config)
+
+    message = str(excinfo.value)
+    assert "bogus" in message
+    for mode in ("delete", "truncate", "persist", "memory", "wal", "off"):
+        assert mode in message
+
+    await plugin.db.close()
+
+# ---------------------------------------------------------------------------
+# Degradation: corrupt rows and failed writes must not abort the turn
+# ---------------------------------------------------------------------------
+
+
+class TestPersistenceDegradation:
+    async def test_load_conversation_skips_corrupt_row(self, db, caplog):
+        """One unparseable row is skipped; the rest of the history loads."""
+        from corvidae.context import MessageType  # noqa: F401  (row types)
+        from corvidae.persistence import PersistencePlugin
+
+        plugin, registry, _ = await _make_plugin_with_db(db)
+        channel = _make_channel(registry)
+
+        valid_one = json.dumps({"role": "user", "content": "one"})
+        corrupt = "{not valid json"
+        valid_three = json.dumps({"role": "assistant", "content": "three"})
+
+        async def insert(ts: float, payload: str) -> int:
+            cursor = await db.execute(
+                "INSERT INTO message_log "
+                "(channel_id, message, timestamp, message_type) VALUES (?, ?, ?, ?)",
+                (channel.id, payload, ts, "message"),
+            )
+            return cursor.lastrowid
+
+        await insert(1.0, valid_one)
+        corrupt_id = await insert(2.0, corrupt)
+        await insert(3.0, valid_three)
+        await db.commit()
+
+        with caplog.at_level(logging.WARNING, logger="corvidae.persistence"):
+            result = await plugin.load_conversation(channel=channel)
+
+        assert [m["content"] for m in result] == ["one", "three"]
+        warnings = [
+            r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
+        ]
+        assert any(str(corrupt_id) in message for message in warnings), warnings
+
+    async def test_on_conversation_event_db_error_returns_none(
+        self, db, monkeypatch, caplog
+    ):
+        """A locked DB is logged and swallowed so the turn keeps running."""
+        from corvidae.context import MessageType
+
+        plugin, registry, _ = await _make_plugin_with_db(db)
+        channel = _make_channel(registry)
+
+        async def locked(*args, **kwargs):
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(db, "execute", locked)
+
+        with caplog.at_level(logging.WARNING, logger="corvidae.persistence"):
+            result = await plugin.on_conversation_event(
+                channel=channel,
+                message={"role": "user", "content": "hi"},
+                message_type=MessageType.MESSAGE,
+            )
+
+        assert result is None
+        warnings = [
+            r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
+        ]
+        assert any(channel.id in message for message in warnings), warnings

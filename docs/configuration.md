@@ -589,8 +589,9 @@ open, `initialize`, `list_tools`); it must be positive. A server that does not
 finish in time is logged as unavailable (`MCP server connect timed out`), its
 subprocess is terminated at once, and the daemon starts with the remaining
 servers. MCP servers connect one after another during startup, so the worst
-case adds the sum of the configured bounds to startup time. Connections are
-made at startup only; the `mcp` section is not hot-reloaded.
+case adds the sum of the configured bounds to startup time. A server that
+failed at startup is retried lazily on the next MCP tool call. The `mcp`
+section itself is not hot-reloaded.
 
 ---
 
@@ -632,6 +633,9 @@ No restart is required for the changes listed below. Changes that require restar
 | `tools.max_result_chars`, `tools.shell_timeout`, `tools.web_fetch_timeout` | Deferred; not currently implemented in hot-reload path. |
 
 ### Error handling
+
+At startup (not reload), a missing or malformed config file prints
+`Config error: <detail> — check <path>` to stderr and exits non-zero.
 
 - **Invalid YAML**: logged at `ERROR`; reload is skipped and the running config is unchanged.
 - **Missing `llm.main` after merge**: logged at `ERROR`; reload is skipped.

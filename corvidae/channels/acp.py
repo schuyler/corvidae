@@ -21,7 +21,6 @@ from pathlib import Path
 from typing import Any
 
 import click
-import yaml
 
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 from corvidae.runtime import Runtime
@@ -763,11 +762,10 @@ def acp_command(config: str) -> None:
             "logging": {"file": "corvidae-acp.log"},
         },
     )
+    # Runtime.start reports an unreadable or malformed YAML file itself, as a
+    # one-line "Config error" with the path, and exits non-zero.
     try:
         asyncio.run(runtime.run())
-    except yaml.YAMLError as exc:
-        click.echo(f"Error: invalid YAML in {config}: {exc}", err=True)
-        sys.exit(1)
     except ValueError as exc:
         # Config validation raises ValueError (removed keys, bad values).
         click.echo(f"Error: invalid config {config}: {exc}", err=True)

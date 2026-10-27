@@ -151,7 +151,7 @@ def _parse_json_block(text: str) -> dict:
     start = text.find("{")
     end = text.rfind("}")
     if start == -1 or end == -1 or end <= start:
-        raise ValueError(f"no JSON object in LLM output: {text[:200]!r}")
+        raise ValueError(f"consolidation: no JSON object in LLM output: {text[:500]!r}")
     return json.loads(text[start:end + 1])
 
 
@@ -1235,16 +1235,31 @@ class MemoryPlugin(CorvidaePlugin):
     async def _summarize_range(self, dialog: list[dict]) -> dict:
         """One llm.background call producing the first-person record.
 
-        Returns {"summary": str, "topic_tags": list, "participants": list};
-        raises on unusable output (the task logs and leaves the watermark).
+        Returns {"summary": str, "topic_tags": list, "participants": list}.
+        A malformed reply is retried once; if both attempts are unusable it
+        degrades to the raw transcript rather than losing the range.
         """
         client = self._llm().get_client("background")
-        response = await client.chat([
+        messages = [
             {"role": "system", "content": self._consolidation_prompt},
             {"role": "user", "content": _dialog_transcript(dialog)},
-        ])
-        text = response["choices"][0]["message"]["content"]
-        return _record_from_text(text)
+        ]
+        for attempt in range(2):
+            response = await client.chat(messages)
+            text = response["choices"][0]["message"]["content"]
+            try:
+                return _record_from_text(text)
+            except ValueError as exc:
+                logger.warning(
+                    "consolidation reply unusable (attempt %d/2): %s",
+                    attempt + 1, exc,
+                )
+        # The call is already paid for; keep the range as its raw transcript.
+        return {
+            "summary": _dialog_transcript(dialog),
+            "topic_tags": [],
+            "participants": [],
+        }
 
     # ------------------------------------------------------------------
     # Retrieval read path (§3.1)

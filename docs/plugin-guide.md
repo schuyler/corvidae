@@ -305,7 +305,7 @@ These hooks return a value. Hooks marked `firstresult=True` (sequential) stop at
 | Hook | Strategy | Returns | Behavior |
 |------|----------|---------|----------|
 | `should_process_message(channel, sender, text, trace_id)` | reject-wins (broadcast) | `bool \| None` | Any `False` vetoes the message; any `True` (with no `False`) accepts; `None` if all defer |
-| `on_llm_error(channel, error)` | `firstresult=True` | `str \| None` | First non-None string wins; chain stops. If all return None, default error message is used. `LLMPlugin` registers a `trylast` handler that explains an unloaded router model, any non-2xx `LLMHTTPError` (naming the status, an actionable hint, and a short provider body), and connection/timeout failures that point at `llm.main.base_url`; it defers (`None`) for anything else. To inspect HTTP failures yourself, check `isinstance(error, corvidae.llm.LLMHTTPError)` and read `error.status`, `error.body`, and `error.model`. |
+| `on_llm_error(channel, error)` | `firstresult=True` | `str \| None` | First non-None string wins; chain stops. If all return None, the default message names the failure class (timeout, unreachable server, or an HTTP status) and asks the user to try again. `LLMPlugin` registers a `trylast` handler that explains an unloaded router model, any non-2xx `LLMHTTPError` (naming the status, an actionable hint, and a short provider body), and connection/timeout failures that point at `llm.main.base_url`; it defers (`None`) for anything else. To inspect HTTP failures yourself, check `isinstance(error, corvidae.llm.LLMHTTPError)` and read `error.status`, `error.body`, and `error.model`. |
 | `compact_conversation(channel, conversation, max_tokens)` | `firstresult=True` | `bool \| None` | First non-None return stops the chain. `CompactionPlugin` uses `trylast` (returns True). Third-party plugins run at default priority. |
 | `process_tool_result(tool_name, result, channel)` | `firstresult=True` wrapper chain | `str \| None` | Wrappers compose transforms in LIFO order. The seed returns the input unchanged. Non-wrapper hookimpls short-circuit the seed via firstresult. |
 | `transform_display_text(channel, text, result_message)` | `firstresult=True` wrapper chain | `str \| None` | Wrappers compose transforms in LIFO order. The seed returns the input text unchanged. Non-wrapper hookimpls short-circuit the seed via firstresult. |
@@ -600,8 +600,9 @@ over stdio when launched via `corvidae acp`. It does **not** connect under
 `serve` / `cli` unless `config["_acp_mode"]` is set (only the `acp`
 command does that). Startup misconfiguration — a missing config file, an
 invalid YAML document, or an invalid config value — exits non-zero with a
-single `Error:` line naming the config path, so an editor shows the
-diagnosis instead of a traceback.
+single line naming the config path (`Config error:` from Runtime for an
+unreadable or malformed YAML file, `Error:` otherwise), so an editor shows
+the diagnosis instead of a traceback.
 
 Optional YAML block (all keys optional today; presence is enough to
 document intent):
@@ -786,9 +787,9 @@ Registered by `CoreToolsPlugin` (entry point name: `core_tools`).
 | `shell` | `command: str` | Runs a shell command and returns combined stdout/stderr. Times out after `tools.shell_timeout` seconds (default 30). Returns `"(no output)"` if the command produces none. Non-zero exit codes are appended to the output. |
 | `read_file` | `path: str` | Reads a file and returns its text content. Returns an error string for missing files, directories, unreadable files, or files larger than `tools.max_file_read_bytes` bytes (default 1 MB). |
 | `write_file` | `path: str`, `content: str` | Writes `content` to `path`, creating parent directories as needed. Returns a confirmation with the byte count, or an error string on failure. |
-| `web_fetch` | `url: str` | Fetches a URL via HTTP GET and returns the response body as text. Times out after `tools.web_fetch_timeout` seconds (default 15). Truncates responses at `tools.web_max_response_bytes` characters (default 50,000, independent of `MAX_TOOL_RESULT_CHARS`). |
+| `web_fetch` | `url: str` | Fetches a URL via HTTP GET and returns the response body as text. Times out after `tools.web_fetch_timeout` seconds (default 15). Truncates responses at `tools.web_max_response_bytes` characters (default 50,000, independent of `MAX_TOOL_RESULT_CHARS`). A network failure names the URL and the failure class. |
 | `web_search` | `query: str`, `max_results: int` (optional) | Searches the web via DuckDuckGo and returns formatted results with titles, URLs, and snippets. Defaults to 8 results per page. |
-| `task_pipeline` | `definition: str` | Executes a task graph defined in YAML or JSON. The definition must contain a `tasks` key with a list of objects, each having `name`, `command`, and optionally `depends_on`. Tasks run in topological order; failed tasks block their dependents. Returns a status summary. |
+| `task_pipeline` | `definition: str` | Executes a task graph defined in YAML or JSON. The definition must contain a `tasks` key with a list of objects, each having `name`, `command`, and optionally `depends_on`. Tasks run in topological order; failed tasks block their dependents. Returns a status summary; a task failure names the task and the command. |
 
 **CoreToolsPlugin config:**
 
@@ -872,7 +873,11 @@ produces tools like `filesystem__read_file`. Set `tool_prefix: ""` to
 disable prefixing. If two servers produce the same tool name, the first
 wins and the duplicate is skipped with a WARNING. A server that does not
 complete its handshake within `connect_timeout_seconds` is skipped with a
-WARNING and its subprocess terminated; startup continues without it.
+WARNING and its subprocess terminated; startup continues without it. A
+server that fails to connect at startup is kept and retried lazily on the
+next MCP tool call; a successful retry adds its tools to the cached list and
+the shared registry, while a failed retry logs a WARNING and leaves the
+current tool call untouched.
 
 **Without this plugin:** MCP servers cannot be used. No tools are affected
 if the `mcp:` config key is absent — the plugin no-ops.
@@ -1190,6 +1195,10 @@ when appraisal is enabled. Configuration is documented in
 **Without this plugin:** no memory records form and no retrieval happens;
 compaction remains plain lossy summarization.
 
+A malformed consolidation reply is retried once; if the retry is also
+unusable, the range is stored with its raw transcript as the summary rather
+than being dropped (the LLM call has already been paid for).
+
 ### MemoryToolsPlugin (`corvidae/tools/memory_tools.py`)
 
 Registers the `search_memory` and `recall_raw` agent tools — the active
@@ -1218,6 +1227,10 @@ back to unscoped access. The tools are broader than passive retrieval in
 *status* (they reach demoted, superseded, and redacted-tombstone records)
 but never broader in *compartment* — channel B cannot enumerate or raw-recall
 channel A's memories.
+
+Both tools retry briefly when the memory schema is still being created by
+another task. If `search_memory`'s FTS5 query fails, it falls back to a
+`LIKE` scan over record summaries instead of returning an internal error.
 
 **Tools:**
 

@@ -119,7 +119,7 @@ class TestAcpConfigErrors:
         result, combined = self._invoke(bad)
 
         assert result.exit_code != 0
-        assert "invalid yaml" in combined.lower()
+        assert "config error" in combined.lower()
         assert str(bad) in combined
         assert "Traceback" not in combined
 
