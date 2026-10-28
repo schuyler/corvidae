@@ -564,3 +564,95 @@ class TestRegistration:
         from corvidae_cognition.gates import GatePlugin
 
         assert GatePlugin.depends_on == frozenset()
+
+
+class TestReviewFindings:
+    """WP2.9 review gate: bad tunable types, origin across tool cycles and
+    LRU eviction, and records that survive json_patch's null-deletes."""
+
+    async def test_unparseable_threshold_falls_back_and_admits(self, make_env, caplog):
+        env = await make_env(responses=[_make_text_response("sure")])
+        env.channel.runtime_overrides["gate.engagement.threshold"] = "high"
+        env.channel.runtime_overrides["gate.engagement.enforce"] = "false"
+
+        trace_id = await _say(env, "ok")
+
+        assert sent_texts(env.pm, OutboundMessage) == ["sure"]
+        engagement = (await env.row(trace_id))["outcomes"]["engagement"]
+        assert engagement["threshold"] == 0.2  # the default
+        assert engagement["enforced"] is False
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("gate.engagement.threshold" in m and "'high'" in m and "number" in m for m in messages)
+
+    async def test_string_false_does_not_enforce(self, make_env):
+        env = await make_env(responses=[_make_text_response("sure")])
+        env.channel.runtime_overrides["gate.engagement.enforce"] = "false"
+        env.channel.runtime_overrides["gate.engagement.threshold"] = "1.0"
+
+        trace_id = await _say(env, "ok")
+
+        assert sent_texts(env.pm, OutboundMessage) == ["sure"]
+        engagement = (await env.row(trace_id))["outcomes"]["engagement"]
+        assert engagement["threshold"] == 1.0
+        assert engagement["would_reject"] is True
+        assert engagement["enforced"] is False
+
+    async def test_bad_send_tunables_never_raise(self, make_env):
+        env = await make_env(responses=[_make_text_response("nothing to add.")])
+        env.channel.runtime_overrides["gate.send.min_salience"] = ["nope"]
+        env.channel.runtime_overrides["gate.send.enforce"] = {"x": 1}
+
+        trace_id = await _notify(env, "background check finished")
+
+        # Defaults apply (0.15, enforce true); this text scores above 0.15.
+        assert sent_texts(env.pm, OutboundMessage) == ["nothing to add."]
+        send = (await env.row(trace_id))["outcomes"]["send"]
+        assert send["min_salience"] == 0.15
+        assert send["enforced"] is True
+
+    async def test_user_exchange_through_tool_cycle_is_never_withheld(self, make_env):
+        env = await make_env(
+            config={"gate": {"send": {"min_salience": 1.0}}},
+            responses=[
+                _make_mixed_response("", [_make_tool_call("call-1", "my_tool", {"x": "a"})]),
+                _make_text_response("ok."),
+            ],
+        )
+
+        async def my_tool(x: str) -> str:
+            """A test tool."""
+            return f"result:{x}"
+
+        env.plugin._tools = {"my_tool": my_tool}
+        trace_id = await _say(env, "look it up")
+        await drain_task_queue(env.plugin)
+        await drain(env.plugin, env.channel)
+
+        assert sent_texts(env.pm, OutboundMessage) == ["ok."]
+        row = await env.row(trace_id)
+        assert row["outcomes"]["send"]["origin"] == "user"
+        assert row["origin"] == "user"
+
+    async def test_evicted_user_trace_reads_origin_from_exchange_log(self, make_env):
+        env = await make_env(config={"gate": {"send": {"min_salience": 1.0}}})
+        trace_id = mint_trace_id()
+        outcome = env.pm.get_plugin("outcome_log")
+        await outcome.record_exchange(trace_id, env.channel.id, origin="user")
+        assert trace_id not in env.gates._admitted  # as if evicted
+
+        results = await env.pm.ahook.should_send_response(
+            channel=env.channel, text="ok.", emission="final",
+            trace_id=trace_id, meta={},
+        )
+
+        assert resolve_reject_wins(results) is None
+        row = await env.row(trace_id)
+        assert row["outcomes"]["send"]["origin"] == "user"
+        assert row["origin"] == "user"  # not relabelled
+
+    async def test_no_vector_record_omits_salience(self, make_env):
+        env = await make_env(order=("gates",), responses=[_make_text_response("nothing to add.")])
+        trace_id = await _notify(env, "background check finished")
+        send = (await env.row(trace_id))["outcomes"]["send"]
+        assert send["reason"] == "no_vector"
+        assert "salience" not in send

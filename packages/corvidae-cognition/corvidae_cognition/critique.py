@@ -889,8 +889,8 @@ class CritiquePlugin(CorvidaePlugin):
             # that the claim was made.
             async with self._probe_db.execute(
                 "SELECT rowid FROM message_fts WHERE message_fts MATCH ? "
-                "AND rowid NOT IN "
-                "(SELECT id FROM message_log WHERE message_type = 'unsent') LIMIT 1",
+                "AND NOT EXISTS (SELECT 1 FROM message_log m "
+                "WHERE m.id = message_fts.rowid AND m.message_type = 'unsent') LIMIT 1",
                 (match_expr,),
             ) as cursor:
                 row = await cursor.fetchone()

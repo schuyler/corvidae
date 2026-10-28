@@ -64,6 +64,45 @@ _EMISSION_SWITCHES = {
 }
 
 
+_TRUE_STRINGS = frozenset({"true", "yes", "on", "1"})
+_FALSE_STRINGS = frozenset({"false", "no", "off", "0"})
+
+
+def _bool_tunable(channel, config: dict, key: str, default: bool) -> bool:
+    """Resolve ``key`` as a bool. A value that isn't a bool or a boolean
+    word falls back to ``default``, logged: ``bool("false")`` is True, and a
+    set_settings call can store any JSON value."""
+    value = resolve_tunable(channel, config, key, default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.strip().lower() in _TRUE_STRINGS | _FALSE_STRINGS:
+        return value.strip().lower() in _TRUE_STRINGS
+    logger.warning(
+        "gate tunable %s=%r is not a boolean (accepted: true/false); using the default %r",
+        key, value, default, extra={"key": key, "channel": getattr(channel, "id", None)},
+    )
+    return default
+
+
+def _float_tunable(channel, config: dict, key: str, default: float) -> float:
+    """Resolve ``key`` as a number. A non-numeric value (a list, a word, a
+    bool) falls back to ``default``, logged, so a bad override can never
+    raise inside the gate."""
+    value = resolve_tunable(channel, config, key, default)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            pass
+    logger.warning(
+        "gate tunable %s=%r is not a number (accepted: a number such as %r); using the default",
+        key, value, default, extra={"key": key, "channel": getattr(channel, "id", None)},
+    )
+    return default
+
+
 class GatePlugin(CorvidaePlugin):
     """The engagement (inbound) and decide (outbound) gates."""
 
@@ -121,7 +160,21 @@ class GatePlugin(CorvidaePlugin):
         Returns False only when enforcement is on and salience is below
         the threshold; otherwise None. No AppraisalPlugin, or a failed
         compute, returns None with nothing recorded (unchanged behavior).
+        Any unexpected error fails open: this broadcast runs on the
+        transport read path, and a raise would drop the message.
         """
+        try:
+            return await self._engagement(channel, text, trace_id)
+        except Exception:
+            logger.warning(
+                "engagement gate failed for %s on %s; admitting the message",
+                trace_id, channel.id, exc_info=True,
+                extra={"channel": channel.id, "trace_id": trace_id},
+            )
+            return None
+
+    async def _engagement(self, channel, text, trace_id) -> bool | None:
+        """The engagement decision; returns False to reject."""
         if trace_id is None:
             return None
         appraisal = self.pm.get_plugin("appraisal")
@@ -134,16 +187,16 @@ class GatePlugin(CorvidaePlugin):
         if salience is None:
             return None
 
-        threshold = resolve_tunable(
+        threshold = _float_tunable(
             channel, self.config, "gate.engagement.threshold", ENGAGEMENT_THRESHOLD_DEFAULT
         )
-        enforce = bool(resolve_tunable(
+        enforce = _bool_tunable(
             channel, self.config, "gate.engagement.enforce", ENGAGEMENT_ENFORCE_DEFAULT
-        ))
+        )
         would_reject = salience < threshold
         # The row may not exist yet (the admission insert comes after this
         # hook), hence the upsert; origin is "user" by construction here.
-        self._record(trace_id, channel, "user", {"engagement": {
+        self._record(trace_id, channel, origin="user", outcomes={"engagement": {
             "salience": salience,
             "threshold": threshold,
             "would_reject": would_reject,
@@ -168,30 +221,39 @@ class GatePlugin(CorvidaePlugin):
 
         "final": origin-conditional salience policy over the outbound
         vector. "progress"/"thinking": the allow switches. Anything else
-        (including "error") is no opinion.
+        (including "error") is no opinion. Any unexpected error fails open:
+        a broken gate never silences the agent.
         """
-        origin = self._origin(trace_id, meta)
-        if emission in _EMISSION_SWITCHES:
-            key, default = _EMISSION_SWITCHES[emission]
-            if resolve_tunable(channel, self.config, key, default):
+        try:
+            if emission in _EMISSION_SWITCHES:
+                key, default = _EMISSION_SWITCHES[emission]
+                if _bool_tunable(channel, self.config, key, default):
+                    return None
+                # The vetoing plugin records the suppression; core only
+                # marks the window.
+                if trace_id is not None:
+                    self._record(trace_id, channel, {"suppressed": {emission: True}})
+                return False
+            if emission != "final":
                 return None
-            # The vetoing plugin records the suppression; core only marks
-            # the window.
-            if trace_id is not None:
-                self._record(trace_id, channel, origin, {"suppressed": {emission: True}})
-            return False
-        if emission != "final":
+            origin = await self._origin(trace_id, meta)
+            return await self._decide_final(channel, text, trace_id, origin)
+        except Exception:
+            logger.warning(
+                "decide gate failed for the %s emission of %s on %s; sending it",
+                emission, trace_id, channel.id, exc_info=True,
+                extra={"channel": channel.id, "trace_id": trace_id, "emission": emission},
+            )
             return None
-        return await self._decide_final(channel, text, trace_id, origin)
 
     async def _decide_final(self, channel, text, trace_id, origin) -> bool | None:
         """The final-emission policy; returns False to withhold."""
-        min_salience = resolve_tunable(
+        min_salience = _float_tunable(
             channel, self.config, "gate.send.min_salience", SEND_MIN_SALIENCE_DEFAULT
         )
-        enforce = bool(resolve_tunable(
+        enforce = _bool_tunable(
             channel, self.config, "gate.send.enforce", SEND_ENFORCE_DEFAULT
-        ))
+        )
         record: dict = {
             "emission": "final",
             "origin": origin,
@@ -208,13 +270,17 @@ class GatePlugin(CorvidaePlugin):
             vector = await self._pull(
                 appraisal.get_or_compute_out, channel, trace_id, text, direction="out",
             )
-            record["advisory"] = await self._advisory(appraisal, channel, trace_id)
+            if origin != "user":
+                # Calibration context for decisions that can bite; a user
+                # final is never withheld, so it skips the extra reads.
+                record["advisory"] = await self._advisory(appraisal, channel, trace_id)
         salience = (vector or {}).get("salience")
 
         if salience is None:
             # Fail open: never withhold on a missing signal, but record the
-            # miss so calibration can see how often the gate ran blind.
-            record.update(salience=None, vetoed=False, would_veto=False, reason="no_vector")
+            # miss so calibration can see how often the gate ran blind. No
+            # salience key: a null in a json_patch fragment deletes the key.
+            record.update(vetoed=False, would_veto=False, reason="no_vector")
             verdict = None
         elif origin == "user":
             # A direct reply to a human is never swallowed by a guessed
@@ -231,7 +297,7 @@ class GatePlugin(CorvidaePlugin):
             verdict = False if vetoed else None
 
         if trace_id is not None:
-            self._record(trace_id, channel, origin, {"send": record})
+            self._record(trace_id, channel, {"send": record})
         if verdict is False:
             logger.info(
                 "decide gate withheld a %s-origin final on %s (salience %.3f < %.3f)",
@@ -244,12 +310,15 @@ class GatePlugin(CorvidaePlugin):
         """Input-side stage 1 and the previous stage 2, best effort."""
         advisory: dict = {}
         try:
+            # Absent values are left out, not nulled: a null in a
+            # json_patch fragment deletes the key.
             stage1 = await appraisal.get_appraisal(trace_id)
-            if stage1 is not None:
-                advisory["input_salience"] = stage1.get("salience")
+            if stage1 is not None and stage1.get("salience") is not None:
+                advisory["input_salience"] = stage1["salience"]
             get_last = getattr(appraisal, "get_last_stage2", None)
-            if callable(get_last):
-                advisory["previous_stage2"] = get_last(channel.id)
+            previous = get_last(channel.id) if callable(get_last) else None
+            if previous is not None:
+                advisory["previous_stage2"] = previous
         except Exception:
             logger.warning(
                 "decide gate: advisory appraisal read failed for %s",
@@ -261,15 +330,43 @@ class GatePlugin(CorvidaePlugin):
     # Helpers
     # ------------------------------------------------------------------
 
-    def _origin(self, trace_id, meta) -> str:
+    async def _origin(self, trace_id, meta) -> str:
         """The exchange's origin, read from propagated state, never inferred
-        from text or source strings (trap #3)."""
+        from text or source strings (trap #3).
+
+        ``meta["origin"]`` first, then the admitted-trace LRU. A trace the
+        LRU has evicted (a long tool cycle under heavy traffic) falls back
+        to the exchange_log row's origin, so an old user exchange is never
+        mistaken for background traffic and withheld.
+        """
         origin = (meta or {}).get("origin")
         if origin:
             return origin
-        if trace_id is not None and trace_id in self._admitted:
+        if trace_id is None:
+            return "task"
+        if trace_id in self._admitted:
             return "user"
-        return "task"
+        recorded = await self._recorded_origin(trace_id)
+        return recorded or "task"
+
+    async def _recorded_origin(self, trace_id: str) -> str | None:
+        """The origin exchange_log holds for ``trace_id``, or None."""
+        persistence = self.pm.get_plugin("persistence")
+        db = getattr(persistence, "db", None)
+        if db is None or self.pm.get_plugin("outcome_log") is None:
+            return None
+        try:
+            async with db.execute(
+                "SELECT origin FROM exchange_log WHERE trace_id = ?", (trace_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+        except Exception:
+            logger.warning(
+                "gate: could not read the recorded origin for %s; treating it as task",
+                trace_id, exc_info=True, extra={"trace_id": trace_id},
+            )
+            return None
+        return row[0] if row else None
 
     async def _pull(self, compute, channel, trace_id, text, *, direction: str) -> dict | None:
         """Pull a vector through the appraisal compute API; None on failure.
@@ -297,8 +394,13 @@ class GatePlugin(CorvidaePlugin):
             )
         return None
 
-    def _record(self, trace_id, channel, origin, outcomes: dict) -> None:
-        """Fire-and-forget merge of ``outcomes`` into the exchange row."""
+    def _record(self, trace_id, channel, outcomes: dict, origin: str | None = None) -> None:
+        """Fire-and-forget merge of ``outcomes`` into the exchange row.
+
+        ``origin`` is passed only where it is certain (the inbound gate:
+        "user"). upsert_exchange patches origin onto an existing row, so a
+        derived origin passed here could relabel it (2B review A-4).
+        """
         outcome_log = self.pm.get_plugin("outcome_log")
         if outcome_log is None:
             return

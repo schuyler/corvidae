@@ -220,7 +220,7 @@ class CorvidaeAcpAgent:
         """Restore ``acp:<sessionId>`` from sessions.db and replay history (A16)."""
         from acp import LoadSessionResponse
         from acp import update_agent_message_text, update_user_message_text
-        from corvidae.context import MessageType, unsent_marker_emission
+        from corvidae.context import MessageType
 
         channel, history = await self._reattach_session(
             session_id, cwd, mcp_servers, additional_directories
@@ -238,14 +238,9 @@ class CorvidaeAcpAgent:
                 if msg_type == MessageType.UNSENT:
                     # A send gate vetoed it; the client never saw it live.
                     continue
-                following = history[i + 1] if i + 1 < len(history) else {}
-                if (
-                    role == "assistant"
-                    and following.get("_message_type") == MessageType.CONTEXT
-                    and unsent_marker_emission(following.get("content")) == "progress"
-                ):
-                    # Its progress text was suppressed live; the marker
-                    # right after the row says so.
+                if role == "assistant" and "progress" in _markers_after(history, i):
+                    # Its progress text was suppressed live; a marker in
+                    # the CONTEXT run right after the row says so.
                     continue
                 if role == "user":
                     update = update_user_message_text(text)
@@ -358,6 +353,23 @@ def _iso8601_utc(ts: float) -> str:
         .isoformat()
         .replace("+00:00", "Z")
     )
+
+
+def _markers_after(history: list[dict], index: int) -> set[str]:
+    """Emissions named by the not-sent markers in the run of CONTEXT rows
+    right after ``history[index]``. The Agent writes a thinking marker and
+    then a progress marker after one assistant row, so one row can carry
+    both."""
+    from corvidae.context import MessageType, unsent_marker_emission
+
+    found: set[str] = set()
+    for msg in history[index + 1:]:
+        if msg.get("_message_type") != MessageType.CONTEXT:
+            break
+        emission = unsent_marker_emission(msg.get("content"))
+        if emission is not None:
+            found.add(emission)
+    return found
 
 
 def _message_text(msg: dict) -> str:

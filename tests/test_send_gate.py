@@ -623,6 +623,19 @@ class TestReplay:
         assert "progress" not in types
         assert [f.get("text") for f in frames if f["type"] in ("user", "message")] == ["hi", "Found it"]
 
+    def test_acp_markers_after_reads_the_whole_context_run(self):
+        from corvidae.channels.acp import _markers_after
+        from corvidae.context import unsent_marker_text
+
+        history = [
+            {"role": "assistant", "content": "Let me look", "_message_type": MessageType.MESSAGE},
+            {"role": "system", "content": unsent_marker_text("thinking", "x"), "_message_type": MessageType.CONTEXT},
+            {"role": "system", "content": unsent_marker_text("progress", "Let me look"), "_message_type": MessageType.CONTEXT},
+            {"role": "tool", "content": "r", "_message_type": MessageType.MESSAGE},
+            {"role": "system", "content": unsent_marker_text("final", "y"), "_message_type": MessageType.CONTEXT},
+        ]
+        assert _markers_after(history, 0) == {"thinking", "progress"}
+
     async def test_acp_load_session_skips_unsent_rows(self, tmp_path):
         from acp import PROTOCOL_VERSION
 
