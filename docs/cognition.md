@@ -404,7 +404,11 @@ model makes both language judgments; the code only fetches evidence:
    earlier messages (excerpts capped at 500 characters) and the CONTEXT
    snapshot recorded for the exchange. It's told the search shows near
    matches, not proof of absence, and objects only to claims nothing
-   supports, judged by meaning rather than wording. It runs as a fork of
+   supports, judged by meaning rather than wording. The agent's own earlier
+   messages show only that something was said: they support a claim that
+   it was said, not a claim about a fact, which needs a user message, a
+   summary or the snapshot behind it. In the fork, the response under
+   audit is in the window but is not a record of itself. It runs as a fork of
    the window when `agent.forks` covers `critique` and the exchange is still
    in the window; otherwise it's a standalone call. The outcome is recorded
    as `outcomes.provenance = {claims, candidates, objections}`, and

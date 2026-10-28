@@ -1016,3 +1016,21 @@ class TestProvenanceRealPath:
             assert env.critic.calls == []
         finally:
             await _real_path_teardown(env)
+
+
+class TestProvenancePrompts:
+    """The critic must not take the agent's word for a fact: its own
+    earlier statement shows only that it said so (PR #156 follow-up)."""
+
+    @pytest.mark.parametrize("prompts", ["DEFAULT_PROMPTS", "DEFAULT_FORK_PROMPTS"])
+    def test_own_earlier_statement_is_not_a_record_of_a_fact(self, prompts):
+        import corvidae_cognition.critique as critique
+
+        prompt = getattr(critique, prompts)["provenance"]
+        assert "shows only that it was said" in prompt
+        assert "a user message, a summary or the snapshot" in prompt
+
+    def test_fork_prompt_excludes_the_audited_response(self):
+        from corvidae_cognition.critique import DEFAULT_FORK_PROMPTS
+
+        assert "not a record of itself" in DEFAULT_FORK_PROMPTS["provenance"]
