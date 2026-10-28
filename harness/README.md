@@ -44,6 +44,7 @@ HARNESS_PROFILE=buster-memrole harness/run-remote.sh [rev]
 |---|---|---|---|
 | `buster-memrole` | `memory_role` | `#p-memrole` | With `agent.mid_conversation_system_role: user`, the memory block is the last "user" message the model sees; the model still answers the person |
 | `buster-heartbeat` | `heartbeat_smoke` | `#p-heartbeat` | A `scheduler.jobs` heartbeat on `internal:heartbeat` runs a full exchange and sends nothing to IRC |
+| `buster-gate` | `withheld_restart` | `#p-withheld` | A withheld heartbeat final is stored `unsent` with its marker, never reaches IRC, and reloads into the window after a restart (#131) |
 
 `memory_role` sends a warm-up turn (MemoryPlugin creates its schema on first
 use when its `on_start` ran before the database opened), seeds one memory row
@@ -74,6 +75,20 @@ every 30 seconds on `internal:heartbeat`, a channel no transport owns, and
 turns `outcome_log` on. The probe passes when `exchange_log` has a
 `heartbeat`-origin row and `message_log` has an assistant reply on that
 channel, while the bot has said nothing in `#p-heartbeat`.
+
+`withheld_restart` sends nothing until the restart. The profile turns on
+`appraisal`, `outcome_log` and `gates`, sets `gate.send.min_salience: 1.0`
+so the decide gate withholds every non-user final, and runs a `heartbeat`
+job every 30 seconds on `irc:#p-withheld` whose prompt asks for the planted
+code `PELICAN-7731`. Before the restart the probe needs an `unsent` row on
+that channel, a `[not sent: final]` CONTEXT row right after it, an
+`exchange_log` row with a heartbeat origin and `outcomes.send.vetoed`, and
+silence on IRC. It then restarts the daemon, checks that the same row is
+still `unsent`, and asks for the code. The reply is user-origin, which the
+gate never withholds, and it can carry the code only if the withheld row
+reloaded into the window. Like `restart_recovery`, that last step relies on
+the model recalling a planted token; the other five checks are read
+straight out of `sessions.db`.
 
 A run under any profile but `buster` moves its rendered config into the run
 directory when it finishes, so the next `chat.sh` renders the default profile

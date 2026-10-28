@@ -75,6 +75,8 @@ def _bool_tunable(channel, config: dict, key: str, default: bool) -> bool:
     value = resolve_tunable(channel, config, key, default)
     if isinstance(value, bool):
         return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
     if isinstance(value, str) and value.strip().lower() in _TRUE_STRINGS | _FALSE_STRINGS:
         return value.strip().lower() in _TRUE_STRINGS
     logger.warning(

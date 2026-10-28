@@ -226,6 +226,41 @@ class TestFinalVeto:
         assert [m["content"] for m in unsent] == ["the secret answer"]
         assert len(_markers(reloaded)) == 1
 
+    async def test_fresh_agent_after_restart_prompts_with_unsent_row(self, env):
+        """A restart in miniature: a new Agent and a new registry over the
+        same sessions DB. The next LLM call's prompt carries the withheld
+        text as the assistant turn, followed by its marker."""
+        from corvidae.agent import Agent
+        from corvidae.channel import ChannelConfig, ChannelRegistry
+
+        plugin, channel, db = env
+        plugin.pm.register(SpyGate(veto={"final"}), name="spy_gate")
+        plugin._client = _client(_make_text_response("the secret answer"))
+        await _say(plugin, channel)
+
+        pm = plugin.pm
+        pm.unregister(plugin)
+        # The spy vetoes every final; the restarted daemon runs without it.
+        pm.unregister(name="spy_gate")
+        registry = ChannelRegistry()
+        registry.agent_defaults = plugin._registry.agent_defaults
+        fresh = Agent()
+        pm.register(fresh, name="agent")
+        fresh.pm = pm
+        fresh._registry = registry
+        client = _client(_make_text_response("I kept it to myself."))
+        fresh._client = client
+        reborn = registry.get_or_create(channel.transport, channel.scope, config=ChannelConfig())
+        assert reborn is not channel and reborn.conversation is None
+
+        await fresh.on_message(channel=reborn, sender="user", text="what did you say?", trace_id=mint_trace_id())
+        await drain(fresh, reborn)
+
+        prompt = client.chat.await_args.args[0]
+        idx = prompt.index({"role": "assistant", "content": "the secret answer"})
+        assert unsent_marker_emission(prompt[idx + 1]["content"]) == "final"
+        assert sent_texts(pm, OutboundMessage)[-1] == "I kept it to myself."
+
     async def test_build_prompt_includes_unsent_row(self, env):
         plugin, channel, db = env
         plugin.pm.register(SpyGate(veto={"final"}), name="spy_gate")
