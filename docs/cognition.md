@@ -356,6 +356,74 @@ no gate registered. It catches and logs every exception: one raising
 implementation in that broadcast would discard every sibling's verdict.
 `get_appraisal_out(trace_id)` reads the vector back.
 
+**Stage 2** (`on_agent_response`) is a silent model call over the
+finished exchange: valence, stakes, ambiguity, commitment density, novelty,
+correction, and `past_claims`. `past_claims` is a list of `{claim,
+queries}`: each statement in the reply that presents something as
+established before the exchange, with up to 3 short search phrases. A
+missing or malformed field reads as no claims; malformed entries are
+dropped with a warning; it's capped at 5 claims. The vector is merged into
+the `appraisal` envelope's `stage2` key. Then every listener registered with
+`add_stage2_listener` is awaited with `channel, trace_id, response_text,
+meta, stage2`, outside the appraisal attribution. A failing listener is
+logged and doesn't stop the others; a failed stage 2 notifies no one. It's
+a push rather than a wait because a consumer that awaited stage 2 from a
+queued task would hold a TaskQueue worker the stage-2 task may need.
+
+### CritiquePlugin: the provenance check (`packages/corvidae-cognition/corvidae_cognition/critique.py`)
+
+The provenance check looks for confabulation: a reply that presents
+something as already said, agreed or done when no record of it exists. A
+model makes both language judgments; the code only fetches evidence:
+
+1. **Detection.** Stage-2 appraisal lists the reply's claims about the past
+   in `past_claims`, with a few search phrases for each (see
+   [AppraisalPlugin](#appraisalplugin-the-outbound-vector-packagescorvidae-cognitioncorvidae_cognitionappraisalpy)).
+   That works in any language and any phrasing, and it costs no extra model
+   call because stage 2 already runs on every exchange.
+2. **Evidence.** When stage 2 lands, AppraisalPlugin notifies its listeners.
+   CritiquePlugin registers one in `on_start`. For an eligible exchange
+   (same rule as the stylistic lenses: `user` or `reminder`) with at least
+   one claim, it enqueues a silent task. That task searches `message_fts`
+   with each claim's phrases (or the claim's own words when it has none):
+   every whitespace-separated chunk quoted, then OR-joined. FTS5
+   tokenizes the quotes with the index's own tokenizer, so no
+   word-splitting or stopword list of ours decides what matches, and query
+   syntax in the model's phrases is never parsed. Results are ranked
+   by bm25, and up to 5 per claim are kept. Only these rows count:
+   - rows from before the exchange's originating row. The exchange's own
+     rows, the reply included, are already indexed when the check runs.
+   - `message` and `summary` rows. CONTEXT (injected data, including
+     earlier critique) and `unsent` rows are never a record of something
+     said.
+   - rows from channels in the calling channel's memory scope
+     (`memory.channel_groups`), or the channel alone without MemoryPlugin.
+     The excerpts reach the critic, and its objections re-enter the window,
+     so an unscoped search would carry text across channels.
+3. **Judgment.** The provenance critic gets each claim with its closest
+   earlier messages (excerpts capped at 500 characters) and the CONTEXT
+   snapshot recorded for the exchange. It's told the search shows near
+   matches, not proof of absence, and objects only to claims nothing
+   supports, judged by meaning rather than wording. The agent's own earlier
+   messages show only that something was said: they support a claim that
+   it was said, not a claim about a fact, which needs a user message, a
+   tool result, a summary or the snapshot behind it. Summary rows are
+   shown to the critic as `summary`, whatever role compaction stored them
+   under. In the fork, the response under audit is in the window but is not
+   a record of itself. It runs as a fork of the window when `agent.forks` covers `critique` and the exchange is still
+   in the window; otherwise it's a standalone call. The outcome is recorded
+   as `outcomes.provenance = {claims, candidates, objections}`, and
+   objections reach the funnel tagged `[provenance]`.
+
+The check doesn't run, and logs a warning naming what's missing, when there
+is no AppraisalPlugin, no read-only probe on `message_fts`, no originating
+row for the exchange, or a search fails. An absence it couldn't look for
+must never reach the critic as "nothing matched". A failed stage 2 (malformed model
+output) leaves that exchange unchecked; appraisal logs the failure. The
+candidate count and excerpt length are constants, not tunables: a lever
+that hid evidence would make the critic object to everything.
+`critique.provenance.enabled` is the one switch.
+
 ### GatePlugin (`packages/corvidae-cognition/corvidae_cognition/gates.py`)
 
 The agent's right to silence (PRD §3.7). Entry point name: `"gates"`;

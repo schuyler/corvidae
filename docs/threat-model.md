@@ -40,7 +40,16 @@ them:
 
 The provenance critic and the CONTEXT framing are soft mitigations. They
 depend on the model behaving, which is the one thing you cannot assume
-under prompt injection or with a poisoned model. Leaving sandboxing out
+under prompt injection or with a poisoned model. The provenance check is
+model-driven at both ends (#155). Stage-2 appraisal, reading the exchange,
+decides which claims to check, so injected text can talk it out of listing
+a claim. The provenance critic is shown excerpts of earlier raw-log
+messages. Those excerpts are limited to the channel's memory scope, so no
+text crosses a channel boundary that memory wouldn't already cross. But
+they are quoted, untrusted text in the critic's prompt, framed as data, and
+the critic's objections re-enter the window as CONTEXT. The number of
+claims (5) and excerpts (5 per claim, 500 characters each) is capped, so
+one reply can't fan out into an unbounded critic prompt. Leaving sandboxing out
 of the MVP was a reasonable call, but it matters here: the attacker is not
 another tenant, it is whoever can post in a channel the bot sits in.
 

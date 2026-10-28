@@ -387,6 +387,148 @@ class TestStage2Persist:
 
 
 # ---------------------------------------------------------------------------
+# 2b. past_claims (#155): the model lists the reply's claims about the past
+# and search phrases for each; listeners hear the finished stage 2.
+# ---------------------------------------------------------------------------
+
+
+CLAIMS_STAGE2 = {
+    **json.loads(VALID_STAGE2_JSON),
+    "past_claims": [{"claim": "the deadline is Thursday", "queries": ["deadline Thursday"]}],
+}
+
+
+class TestPastClaims:
+    def test_parsed_from_the_reply(self):
+        from corvidae_cognition.appraisal import _stage2_from_text
+        stage2 = _stage2_from_text(json.dumps(CLAIMS_STAGE2))
+        assert stage2["past_claims"] == CLAIMS_STAGE2["past_claims"]
+
+    def test_missing_field_is_no_claims(self):
+        from corvidae_cognition.appraisal import _stage2_from_text
+        assert _stage2_from_text(VALID_STAGE2_JSON)["past_claims"] == []
+
+    def test_malformed_entries_dropped_and_logged(self, caplog):
+        from corvidae_cognition.appraisal import _stage2_from_text
+        reply = {**json.loads(VALID_STAGE2_JSON), "past_claims": [
+            "a bare string", {"queries": ["no claim"]}, {"claim": "  "},
+            {"claim": "kept", "queries": ["q", 7, "  ", "r"]},
+        ]}
+        with caplog.at_level("WARNING", logger="corvidae.appraisal"):
+            stage2 = _stage2_from_text(json.dumps(reply))
+        assert stage2["past_claims"] == [{"claim": "kept", "queries": ["q", "r"]}]
+        assert "past_claims" in caplog.text
+
+    def test_not_a_list_is_no_claims(self):
+        from corvidae_cognition.appraisal import _stage2_from_text
+        reply = {**json.loads(VALID_STAGE2_JSON), "past_claims": "none"}
+        assert _stage2_from_text(json.dumps(reply))["past_claims"] == []
+
+    def test_capped(self):
+        from corvidae_cognition.appraisal import (
+            MAX_PAST_CLAIMS, MAX_QUERIES_PER_CLAIM, MAX_QUERY_CHARS, _stage2_from_text,
+        )
+        reply = {**json.loads(VALID_STAGE2_JSON), "past_claims": [
+            {"claim": f"c{i}", "queries": [f"q{j}" + "x" * MAX_QUERY_CHARS for j in range(9)]}
+            for i in range(MAX_PAST_CLAIMS + 4)
+        ]}
+        claims = _stage2_from_text(json.dumps(reply))["past_claims"]
+        assert len(claims) == MAX_PAST_CLAIMS
+        assert len(claims[0]["queries"]) == MAX_QUERIES_PER_CLAIM
+        assert len(claims[0]["queries"][0]) == MAX_QUERY_CHARS
+
+    def test_schema_and_prompts_ask_for_it(self):
+        from corvidae_cognition.appraisal import (
+            DEFAULT_STAGE2_FORK_PROMPT, DEFAULT_STAGE2_PROMPT, STAGE2_SCHEMA,
+        )
+        assert "past_claims" in STAGE2_SCHEMA["required"]
+        assert STAGE2_SCHEMA["properties"]["past_claims"]["type"] == "array"
+        assert "past_claims" in DEFAULT_STAGE2_PROMPT
+        assert "past_claims" in DEFAULT_STAGE2_FORK_PROMPT
+
+
+class TestStage2Listeners:
+    async def _run(self, env, trace_id, meta=None):
+        await env.outcome.record_exchange(trace_id, env.channel.id, origin="user")
+        await env.appraisal.on_agent_response(
+            channel=env.channel, request_text="req", response_text="the reply",
+            trace_id=trace_id, meta=meta if meta is not None else {"origin": "reminder"},
+            logprobs=None,
+        )
+        await _run_next_task(env.task)
+
+    async def test_listener_hears_the_persisted_stage2(self, tmp_path):
+        env = await build_env(tmp_path, chat_text=json.dumps(CLAIMS_STAGE2))
+        heard = []
+
+        async def listener(**kwargs):
+            # Stage 2 is persisted before listeners run.
+            kwargs["persisted"] = (await _read_appraisal(env.db, kwargs["trace_id"]))["stage2"]
+            heard.append(kwargs)
+
+        env.appraisal.add_stage2_listener(listener)
+        try:
+            await self._run(env, "kl")
+            [call] = heard
+            assert call["channel"] is env.channel
+            assert call["trace_id"] == "kl"
+            assert call["response_text"] == "the reply"
+            assert call["meta"] == {"origin": "reminder"}
+            assert call["stage2"]["past_claims"] == CLAIMS_STAGE2["past_claims"]
+            assert call["persisted"]["past_claims"] == CLAIMS_STAGE2["past_claims"]
+        finally:
+            await _teardown(env)
+
+    async def test_listener_runs_outside_the_appraisal_attribution(self, tmp_path):
+        env = await build_env(tmp_path, chat_text=json.dumps(CLAIMS_STAGE2))
+        seen = []
+
+        async def listener(**kwargs):
+            seen.append(dict(get_attribution()))
+
+        env.appraisal.add_stage2_listener(listener)
+        try:
+            await self._run(env, "ka")
+            assert seen[0].get("stage") != "appraisal"
+        finally:
+            await _teardown(env)
+
+    async def test_failing_listener_is_logged_and_others_still_run(self, tmp_path, caplog):
+        env = await build_env(tmp_path, chat_text=json.dumps(CLAIMS_STAGE2))
+        heard = []
+
+        async def broken(**kwargs):
+            raise RuntimeError("listener exploded")
+
+        async def fine(**kwargs):
+            heard.append(kwargs["trace_id"])
+
+        env.appraisal.add_stage2_listener(broken)
+        env.appraisal.add_stage2_listener(fine)
+        try:
+            with caplog.at_level("WARNING", logger="corvidae.appraisal"):
+                await self._run(env, "kf")
+            assert heard == ["kf"]
+            assert "stage-2 listener" in caplog.text and "kf" in caplog.text
+        finally:
+            await _teardown(env)
+
+    async def test_failed_stage2_notifies_no_one(self, tmp_path):
+        env = await build_env(tmp_path, chat_text="not json at all")
+        heard = []
+
+        async def listener(**kwargs):
+            heard.append(kwargs)
+
+        env.appraisal.add_stage2_listener(listener)
+        try:
+            await self._run(env, "kb")
+            assert heard == []
+        finally:
+            await _teardown(env)
+
+
+# ---------------------------------------------------------------------------
 # 3. entropy_summary unit tests
 # ---------------------------------------------------------------------------
 

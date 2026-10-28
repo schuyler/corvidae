@@ -28,6 +28,7 @@ import json
 import logging
 import math
 import re
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 import aiosqlite
@@ -92,7 +93,15 @@ DEFAULT_STAGE2_PROMPT = (
     "- novelty: how new this exchange's content is relative to what the "
     "retrieval summary shows the agent already knows. Familiar ground = low.\n"
     "- correction: true if the user was correcting the agent — telling it "
-    "that something it said, remembered, or did was wrong.\n\n"
+    "that something it said, remembered, or did was wrong.\n"
+    "- past_claims: every statement in the agent's final response that "
+    "presents something as established BEFORE this exchange — something "
+    "said, agreed, promised, decided or done earlier — in any language or "
+    "phrasing. Leave out what the originating message itself says, general "
+    "knowledge, and claims the response frames as uncertain. For each, give "
+    "the claim in a few words and up to 3 short search queries: the "
+    "distinctive words (names, numbers, dates, topics) the original "
+    "statement would have used. An empty list when there are none.\n\n"
     "Respond with a single JSON object, nothing else:\n"
     "{\n"
     '  "valence": 0.5,\n'
@@ -100,7 +109,8 @@ DEFAULT_STAGE2_PROMPT = (
     '  "ambiguity": 0.0,\n'
     '  "commitment_density": 0.0,\n'
     '  "novelty": 0.5,\n'
-    '  "correction": false\n'
+    '  "correction": false,\n'
+    '  "past_claims": [{"claim": "...", "queries": ["..."]}]\n'
     "}"
 )
 
@@ -129,7 +139,15 @@ DEFAULT_STAGE2_FORK_PROMPT = (
     "already knew, going by the memory retrieval note below. Familiar "
     "ground = low.\n"
     "- correction: true if the user was correcting you, telling you that "
-    "something you said, remembered, or did was wrong.\n\n"
+    "something you said, remembered, or did was wrong.\n"
+    "- past_claims: every statement in your final response that presents "
+    "something as established BEFORE this exchange — something said, "
+    "agreed, promised, decided or done earlier — in any language or "
+    "phrasing. Leave out what the opening message itself says, general "
+    "knowledge, and claims you framed as uncertain. For each, give the claim "
+    "in a few words and up to 3 short search queries: the distinctive words "
+    "(names, numbers, dates, topics) the original statement would have "
+    "used. An empty list when there are none.\n\n"
     "Do not call tools. Respond with a single JSON object, nothing else:\n"
     "{\n"
     '  "valence": 0.5,\n'
@@ -137,7 +155,8 @@ DEFAULT_STAGE2_FORK_PROMPT = (
     '  "ambiguity": 0.0,\n'
     '  "commitment_density": 0.0,\n'
     '  "novelty": 0.5,\n'
-    '  "correction": false\n'
+    '  "correction": false,\n'
+    '  "past_claims": [{"claim": "...", "queries": ["..."]}]\n'
     "}"
 )
 
@@ -153,12 +172,29 @@ STAGE2_SCHEMA = {
         "commitment_density": {"type": "number"},
         "novelty": {"type": "number"},
         "correction": {"type": "boolean"},
+        "past_claims": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "claim": {"type": "string"},
+                    "queries": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["claim", "queries"],
+            },
+        },
     },
     "required": [
         "valence", "stakes", "ambiguity", "commitment_density",
-        "novelty", "correction",
+        "novelty", "correction", "past_claims",
     ],
 }
+
+# Bounds on the stage-2 past_claims list (#155), so one verbose reply
+# can't fan out into an unbounded evidence search and critic prompt.
+MAX_PAST_CLAIMS = 5
+MAX_QUERIES_PER_CLAIM = 3
+MAX_QUERY_CHARS = 200
 STAGE2_EXTRA_BODY = {
     "response_format": {
         "type": "json_schema",
@@ -225,7 +261,46 @@ def _stage2_from_text(text: str) -> dict:
         "commitment_density": clamp01(float(parsed["commitment_density"])),
         "novelty": clamp01(float(parsed["novelty"])),
         "correction": bool(parsed.get("correction", False)),
+        "past_claims": _past_claims(parsed.get("past_claims")),
     }
+
+
+def _past_claims(raw) -> list[dict]:
+    """Normalize stage 2's past_claims: a list of {claim, queries}.
+
+    Tolerant by design: a missing field is no claims, and a malformed entry
+    is dropped with a warning rather than failing the whole stage-2 vector.
+    Each claim keeps its non-empty string queries; everything is capped.
+    """
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        logger.warning(
+            "stage-2 past_claims is a %s, not a list; treating it as no claims",
+            type(raw).__name__,
+        )
+        return []
+    claims: list[dict] = []
+    dropped = 0
+    for entry in raw:
+        # An entry needs a non-blank claim; queries are optional.
+        claim = entry.get("claim") if isinstance(entry, dict) else None
+        if not isinstance(claim, str) or not claim.strip():
+            dropped += 1
+            continue
+        queries = entry.get("queries")
+        queries = [
+            q.strip()[:MAX_QUERY_CHARS]
+            for q in (queries if isinstance(queries, list) else [])
+            if isinstance(q, str) and q.strip()
+        ][:MAX_QUERIES_PER_CLAIM]
+        claims.append({"claim": claim.strip(), "queries": queries})
+    if dropped:
+        logger.warning(
+            "stage-2 past_claims: dropped %d malformed entr%s (need a "
+            "non-empty \"claim\" string)", dropped, "y" if dropped == 1 else "ies",
+        )
+    return claims[:MAX_PAST_CLAIMS]
 
 
 def _sentences(text: str) -> list[str]:
@@ -431,6 +506,9 @@ class AppraisalPlugin(CorvidaePlugin):
         # advisory reader (get_last_stage2). Consumers never wait for the
         # CURRENT exchange's stage-2 (WP2.5 point 2).
         self._last_stage2: dict[str, dict] = {}
+        # Callbacks awaited after each stage 2 lands (add_stage2_listener):
+        # how CritiquePlugin hears past_claims without waiting on a task.
+        self._stage2_listeners: list[Callable[..., Awaitable[None]]] = []
         # Trace-keyed LRU of originating text (the exchange's true
         # originating USER/notification text), bounded so long-running
         # exchanges don't leak memory. Fed by on_message_persisted.
@@ -651,6 +729,32 @@ class AppraisalPlugin(CorvidaePlugin):
         """
         return self._last_stage2.get(channel_id)
 
+    def add_stage2_listener(self, callback: Callable[..., Awaitable[None]]) -> None:
+        """Register a coroutine function to hear each completed stage 2.
+
+        After a stage-2 vector is persisted, every listener is awaited with
+        keyword arguments ``channel, trace_id, response_text, meta, stage2``,
+        outside the appraisal attribution. A failed stage 2 notifies no one.
+        A listener's exception is logged and never reaches the others. This
+        is a push, not a wait: a consumer that awaited stage 2 from a queued
+        task would hold a TaskQueue worker the stage-2 task may need.
+        """
+        self._stage2_listeners.append(callback)
+
+    async def _notify_stage2(self, channel, trace_id, response_text, meta, stage2) -> None:
+        """Await every stage-2 listener; one failure doesn't stop the rest."""
+        for listener in list(self._stage2_listeners):
+            try:
+                await listener(
+                    channel=channel, trace_id=trace_id, response_text=response_text,
+                    meta=meta, stage2=stage2,
+                )
+            except Exception:
+                logger.warning(
+                    "stage-2 listener %r failed for trace %s", listener, trace_id,
+                    exc_info=True, extra={"channel": channel.id, "trace_id": trace_id},
+                )
+
     # ------------------------------------------------------------------
     # Stage 2 — LLM appraisal off the response path (WP2.5)
     # ------------------------------------------------------------------
@@ -678,7 +782,11 @@ class AppraisalPlugin(CorvidaePlugin):
         text_in = self.get_originating_text(trace_id) or request_text
 
         async def _work() -> str:
-            await self._run_stage2(channel, trace_id, text_in, response_text, logprobs)
+            stage2 = await self._run_stage2(channel, trace_id, text_in, response_text, logprobs)
+            # Listeners run after _run_stage2 has reset its attribution, so
+            # their own work isn't billed to appraisal.
+            if stage2 is not None:
+                await self._notify_stage2(channel, trace_id, response_text, meta, stage2)
             return ""
 
         try:
@@ -700,8 +808,10 @@ class AppraisalPlugin(CorvidaePlugin):
     async def _run_stage2(
         self, channel, trace_id: str, originating_text: str | None,
         response_text: str | None, logprobs: dict | None,
-    ) -> None:
+    ) -> dict | None:
         """The silent task body: one tier-3 call, merge-persist stage 2.
+
+        Returns the stage-2 vector, or None when no vector was produced.
 
         Sets attribution inside the body (usage rows join to the exchange for
         WP2.10's per-band cost report). Malformed model output is logged and
@@ -721,7 +831,7 @@ class AppraisalPlugin(CorvidaePlugin):
                 client = self._appraisal_client()
                 if client is None:
                     logger.debug("stage-2 appraisal skipped: no LLM client available")
-                    return
+                    return None
                 prompt = resolve_tunable(
                     channel, self.config, "appraisal.stage2_prompt", DEFAULT_STAGE2_PROMPT
                 )
@@ -745,7 +855,7 @@ class AppraisalPlugin(CorvidaePlugin):
                         "stage-2 appraisal call/parse failed; row keeps stage 1",
                         exc_info=True, extra={"trace_id": trace_id},
                     )
-                    return
+                    return None
                 finally:
                     reset_attribution(standalone_token)
 
@@ -768,6 +878,7 @@ class AppraisalPlugin(CorvidaePlugin):
                     )
             # Advisory synchronous reader for the last completed stage-2.
             self._last_stage2[channel.id] = stage2
+            return stage2
         finally:
             reset_attribution(token)
 

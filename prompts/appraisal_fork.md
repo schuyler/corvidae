@@ -42,6 +42,14 @@ performance) on each dimension, 0.0–1.0.
   ground = low.
 - **correction**: true if the user was correcting you, telling you that
   something you said, remembered, or did was wrong.
+- **past_claims**: every statement in your final response that presents
+  something as established BEFORE this exchange — something said, agreed,
+  promised, decided or done earlier — in any language or phrasing. Leave
+  out what the opening message itself says, general knowledge, and claims
+  you framed as uncertain. For each, give the claim in a few words and up to
+  3 short search queries: the distinctive words (names, numbers, dates,
+  topics) the original statement would have used. An empty list when there
+  are none.
 
 Do not call tools. Respond with a single JSON object, nothing else:
 
@@ -52,6 +60,7 @@ Do not call tools. Respond with a single JSON object, nothing else:
   "ambiguity": 0.0,
   "commitment_density": 0.0,
   "novelty": 0.5,
-  "correction": false
+  "correction": false,
+  "past_claims": [{"claim": "...", "queries": ["..."]}]
 }
 ```

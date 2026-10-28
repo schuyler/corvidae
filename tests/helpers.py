@@ -31,8 +31,9 @@ async def build_plugin_and_channel(
     *,
     mock_send: bool = True,
     mock_on_agent_response: bool = True,
+    db_path: str = ":memory:",
 ):
-    """Assemble plugin graph with in-memory DB.
+    """Assemble plugin graph with an in-memory (or ``db_path`` file) DB.
 
     Returns (plugin, channel, db). Callers are responsible for teardown:
     task_plugin.on_stop() and db.close().
@@ -43,6 +44,8 @@ async def build_plugin_and_channel(
         mock_send: If True, replace the outbound ``send`` hook with an
             AsyncMock; read what was sent with ``sent()``.
         mock_on_agent_response: If True, replace on_agent_response hook with AsyncMock.
+        db_path: The session DB; a file path lets a second connection (e.g.
+            a read-only probe) see what the turn persisted.
     """
     from unittest.mock import AsyncMock
 
@@ -62,7 +65,7 @@ async def build_plugin_and_channel(
     if agent_defaults is None:
         agent_defaults = _AGENT_DEFAULTS
 
-    db = await aiosqlite.connect(":memory:")
+    db = await aiosqlite.connect(db_path)
     await init_db(db)
 
     pm = create_plugin_manager()
