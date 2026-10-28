@@ -407,10 +407,10 @@ model makes both language judgments; the code only fetches evidence:
    supports, judged by meaning rather than wording. The agent's own earlier
    messages show only that something was said: they support a claim that
    it was said, not a claim about a fact, which needs a user message, a
-   tool result, a summary or the snapshot behind it. Summary rows are shown
-   to the critic as `summary`, whatever role compaction stored them under. In the fork, the response under
-   audit is in the window but is not a record of itself. It runs as a fork of
-   the window when `agent.forks` covers `critique` and the exchange is still
+   tool result, a summary or the snapshot behind it. Summary rows are
+   shown to the critic as `summary`, whatever role compaction stored them
+   under. In the fork, the response under audit is in the window but is not
+   a record of itself. It runs as a fork of the window when `agent.forks` covers `critique` and the exchange is still
    in the window; otherwise it's a standalone call. The outcome is recorded
    as `outcomes.provenance = {claims, candidates, objections}`, and
    objections reach the funnel tagged `[provenance]`.
