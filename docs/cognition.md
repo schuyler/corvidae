@@ -372,7 +372,8 @@ must hold:
 
 The probe's terms come from the claim itself: each sentence a pattern
 matched, with the recall phrase removed. The claim can sit on either side
-of that phrase, so the probe takes the whole sentence. Stopwords, recall
+of that phrase, so the probe takes the whole sentence. Words split the way
+FTS5's tokenizer splits them (`API_KEY` is two words). Stopwords, recall
 framing (`earlier`, `mentioned`, `previously`, …) and tokens under three
 characters are dropped. A token containing a digit (`3`, `4b`) is kept. If
 the claim sentences leave no content words ("As I said." with the claim in

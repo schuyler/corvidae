@@ -316,14 +316,19 @@ _PROBE_STOPWORDS = frozenset("""
     sure okay ok yeah thing things something anything everything
     remember recall recalled mentioned said told noted asked promised agreed
     decided discussed talked established covered committed earlier
-    previously already last time before ago back
+    previously already last time ago back
 """.split())
 
-# Sentences, for locating the claim span. shortcut: a period inside a
-# number or abbreviation ("3.5", "e.g.") splits the sentence, which can
-# drop terms from the claim span; upgrade to a real sentence splitter if
-# that starts suppressing the gate.
-_SENTENCE_RE = re.compile(r"[^.!?\n]+[.!?]*")
+# Sentences, for locating the claim span: a break is end punctuation
+# followed by whitespace, or a newline, so "3.50" stays whole. shortcut: an
+# abbreviation followed by a space ("e.g. the") still splits; upgrade to a
+# real sentence splitter if that starts suppressing the gate.
+_SENTENCE_BREAK_RE = re.compile(r"(?<=[.!?])\s+|\n+")
+
+# Word tokens as FTS5's unicode61 tokenizer sees them: "_" is a separator,
+# so "API_KEY" is two tokens and "___" is none. A token unicode61 can't see
+# would be an empty phrase that no row matches, emptying every AND probe.
+_TOKEN_RE = re.compile(r"[^\W_]+")
 
 
 def _content_terms(text: str, max_terms: int) -> list[str]:
@@ -332,7 +337,7 @@ def _content_terms(text: str, max_terms: int) -> list[str]:
     capped at max_terms. Every term is FTS5-safe (word characters only)."""
     seen: set[str] = set()
     terms: list[str] = []
-    for tok in re.findall(r"\w+", text):
+    for tok in _TOKEN_RE.findall(text):
         if len(terms) >= max_terms:
             break
         low = tok.lower()
@@ -351,7 +356,7 @@ def _claim_spans(text: str) -> list[str]:
     ("The deadline is Thursday, as I mentioned."), so the whole sentence is
     kept."""
     spans: list[str] = []
-    for sentence in _SENTENCE_RE.findall(text):
+    for sentence in _SENTENCE_BREAK_RE.split(text):
         stripped = sentence
         matched = False
         for rx in _PAST_CLAIM_RE:
@@ -982,6 +987,9 @@ class CritiquePlugin(CorvidaePlugin):
             ) as cursor:
                 row = await cursor.fetchone()
         except Exception:
-            logger.debug("message_fts probe failed; treating as inconclusive")
+            logger.warning(
+                "message_fts probe failed for %r; treating as inconclusive "
+                "(the provenance gate won't fire)", match_expr, exc_info=True,
+            )
             return False
         return row is None

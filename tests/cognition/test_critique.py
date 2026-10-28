@@ -313,6 +313,20 @@ class TestPastClaimDetector:
         from corvidae_cognition.critique import _extract_terms
         assert _extract_terms("As I said. The budget is 5k.", 8) == ["budget", "5k"]
 
+    def test_extract_terms_splits_on_underscores_like_fts5(self):
+        # unicode61 treats "_" as a separator: "___" would be an empty
+        # phrase that matches nothing and empties every AND probe.
+        from corvidae_cognition.critique import _extract_terms
+        assert _extract_terms("You told me the API_KEY field is ___ here.", 8) == [
+            "API", "KEY", "field",
+        ]
+
+    def test_extract_terms_keeps_decimals_in_the_claim_sentence(self):
+        from corvidae_cognition.critique import _extract_terms
+        assert _extract_terms("You told me the price was 3.50 per unit.", 8) == [
+            "price", "3", "50", "per", "unit",
+        ]
+
     def test_extract_terms_zero_cap_yields_nothing(self):
         # max_terms 0 turns tier 2 off (docs/configuration.md).
         from corvidae_cognition.critique import _extract_terms
@@ -512,7 +526,6 @@ async def _low_appraisal_env(tmp_path, fts_contents=(), chat_text=OBJECTION_VERD
         config={"critique": {"sample_below_rate": 0.0}},
     )
     return env
-
 
 
 async def _persist_origin(env, trace_id, rowid=ORIGIN_ROWID):
@@ -758,7 +771,18 @@ class TestProvenanceProbeCutoff:
         finally:
             await db.close()
 
-    async def test_no_originating_rowid_does_not_fire(self, tmp_path):
+    async def test_underscore_run_does_not_hide_a_record(self, tmp_path):
+        plugin, db = await self._probe(
+            tmp_path, [(1, "the API_KEY field is ___ here")],
+        )
+        try:
+            assert await plugin._message_fts_empty(
+                "You told me the API_KEY field is ___ here.", 8, before_rowid=10,
+            ) is False
+        finally:
+            await db.close()
+
+    async def test_no_originating_rowid_does_not_fire(self, tmp_path, caplog):
         # Without the cutoff the probe can't tell the exchange's own rows
         # from a record, so it stays inconclusive (conservative).
         env = await _low_appraisal_env(tmp_path)
@@ -767,9 +791,11 @@ class TestProvenanceProbeCutoff:
             channel=env.channel, trace_id="knorow", sender="user", text="q?",
         )
         try:
-            assert await env.plugin._provenance_should_fire(
-                env.channel, "knorow", "You told me the launch date was March.",
-            ) is False
+            with caplog.at_level("WARNING", logger="corvidae.critique"):
+                assert await env.plugin._provenance_should_fire(
+                    env.channel, "knorow", "You told me the launch date was March.",
+                ) is False
+            assert "provenance probe skipped for trace knorow" in caplog.text
         finally:
             await _teardown(env)
 
