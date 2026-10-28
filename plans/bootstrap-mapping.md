@@ -651,8 +651,8 @@ Deferred-deliberation mode (§2.1), appraisal-gated (§2.4). Flow:
    the last tool-result notification, not the user message — the critic
    would judge the response against a tool result; and the hook carries no
    trigger source, so a verdict-triggered turn is itself critique-eligible
-   (verdict → turn → response → critique → verdict…), a loop the mechanical
-   provenance gate would never break on its own. The rule is by **exchange
+   (verdict → turn → response → critique → verdict…), a loop the provenance
+   check would never break on its own. The rule is by **exchange
    origin**, and origin is an explicitly **stamped and propagated
    property**, never inferred. Two earlier drafts failed in opposite
    directions: "no critique of critique/heartbeat/task turns" exempted every
