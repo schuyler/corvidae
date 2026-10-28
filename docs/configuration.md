@@ -261,7 +261,7 @@ Requires the cognition extra (`--extra cognition` on your `uv sync` line; see [c
 | `appraisal.weights.commitment` | `0.20` | Salience weight for numbers/commitment density. |
 | `appraisal.weights.imperative` | `0.10` | Salience weight for imperative markers (feeds salience only, not the vector). |
 
-`critique.provenance.enabled` (default `true`) switches the provenance check; it has no other tunables. Stage-2 appraisal detects the past claims and the provenance critic judges them, so the check needs the `appraisal` plugin. See [cognition.md](cognition.md#critiqueplugin-the-provenance-check-packagescorvidae-cognitioncorvidae_cognitioncritiquepy).
+`critique.provenance.enabled` (default `true`) switches the provenance check. Besides the critic's prompt (`critique.prompt.provenance`, above), it has no other tunables. Stage-2 appraisal detects the past claims and the provenance critic judges them, so the check needs the `appraisal` plugin. See [cognition.md](cognition.md#critiqueplugin-the-provenance-check-packagescorvidae-cognitioncorvidae_cognitioncritiquepy).
 
 *(The `critique.*` tunable keys are not individually tabulated here; the complete list is under "Runtime-tunable gate parameters" above.)*
 

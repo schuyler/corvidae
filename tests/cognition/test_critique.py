@@ -826,6 +826,27 @@ class TestProvenanceCritic:
         finally:
             await _teardown(env)
 
+    async def test_failed_search_never_reaches_the_critic_as_no_match(self, tmp_path, caplog):
+        # A search that raised looked at nothing: telling the critic "no
+        # earlier message matched" would turn a supported claim into an
+        # objection. A lone surrogate (a truncated emoji escape in the
+        # model's JSON) is one real input that makes sqlite's bind raise.
+        env = await _provenance_env(tmp_path)
+        try:
+            await _log(env, "Heads up: the quarterly audit deadline is Thursday.")
+            origin = await _log(env, "when is it due?")
+            await _begin_exchange(env, "kfail", origin_rowid=origin)
+            claims = [CLAIM, {"claim": "we agreed on Tuesday", "queries": ["\ud83d Tuesday"]}]
+            with caplog.at_level("WARNING", logger="corvidae.critique"):
+                assert await env.plugin._gather_evidence(env.channel, "kfail", claims) is None
+                await _stage2(env, "kfail", claims)
+                await _run_next_task(env.task)
+            assert env.stub.chat_calls == []
+            assert "evidence search failed for trace kfail" in caplog.text
+            assert "skipping the provenance check" in caplog.text
+        finally:
+            await _teardown(env)
+
     async def test_no_evidence_available_skips_the_critic(self, tmp_path):
         # An unconfirmed absence must not reach the critic as "no record".
         env = await _provenance_env(tmp_path)

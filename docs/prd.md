@@ -95,9 +95,9 @@ one is a bug even if its tests pass.
 
 7. **Cheap, always-on perception gates expensive cognition.** One
    appraisal signal has three consumers: engagement, deliberation depth,
-   consolidation strength. Epistemic gates stay mechanical regardless of
-   appraisal: the provenance check fires on claims-about-the-past plus weak
-   retrieval, never on generator confidence. Thresholds ship as commented
+   consolidation strength. Epistemic checks stay independent of the
+   appraisal scores: the provenance check fires on any claim about the past
+   and is judged against retrieved records, never on generator confidence. Thresholds ship as commented
    best guesses, are tuned from the outcome log, and are never auto-fitted
    in a closed loop.
 

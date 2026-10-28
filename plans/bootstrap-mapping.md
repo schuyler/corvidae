@@ -523,9 +523,9 @@ Computed from three signal tiers, in ascending cost, with each tier optional
    escalation for the highest-stakes appraisal band. *Signal validity*:
    entropy is per-token and syntax-confounded, and confident confabulation
    is *low*-entropy — it detects "the generator was torn," not "the
-   generator was wrong." An independent reason the provenance gate keys off
-   retrieval evidence mechanically, never off generator-side confidence
-   (§2.4). (c) Surface heuristics: negation density, question marks,
+   generator was wrong." An independent reason the provenance check judges
+   claims against retrieved evidence, never against generator-side
+   confidence (§2.4). (c) Surface heuristics: negation density, question marks,
    imperatives, disagreement markers, numbers/commitments — all local and
    provider-independent.
 2. **A small readout head over the embedding.** A tiny classifier (logistic
@@ -640,9 +640,11 @@ Deferred-deliberation mode (§2.1), appraisal-gated (§2.4). Flow:
 1. `on_agent_response` fires after the agent's text response. The plugin
    reads the exchange's appraisal vector and decides: no critique, one
    stylistic lens (appraisal-selected), or lens + severity escalation.
-   Independently and mechanically, the **provenance gate** fires when the
-   response asserts past events/commitments *and* the turn's retrieval
-   profile was weak or empty — regardless of appraisal (§2.4). No appraisal
+   Independently of the appraisal scores, the **provenance check** runs when
+   the response asserts past events/commitments (§2.4). *Revised in #155:*
+   the claims now come from stage-2 appraisal's `past_claims` rather than a
+   regex detector, and the weak-retrieval condition is gone; the critic is
+   shown the evidence and judges it. No appraisal
    plugin registered → critique everything (spec behavior). Two verified
    defects in the hook as built, both §4 items: `request_text` derives from
    the *current* queue item, so for a tool-using exchange the "request" is
@@ -689,7 +691,10 @@ Deferred-deliberation mode (§2.1), appraisal-gated (§2.4). Flow:
    never addresses that a sycophantic generator may be a lenient critic of
    itself; where the deployment has two models, bind `llm.critic` to the one
    that didn't generate. With one model, the structured objection schema and
-   mechanical provenance check carry most of the weight.
+   the retrieved evidence the provenance critic is shown carry most of the
+   weight. Since #155 the provenance judgment is a model call too, so on a
+   one-model deployment the generator does judge its own claims, against
+   records it is shown.
 3. Empty objections → done; log the (appraisal, no-objection) outcome for
    calibration and let nothing re-enter the window (this requires the silent
    Task mode of §2.3 — without it, even an empty verdict wakes the main
@@ -1208,8 +1213,9 @@ harness checks the prediction per deployed model. Specific divergences:
 
 1. **Unconditional critique → appraisal-gated critique** (§3.2–3.3). The
    spec's per-response critique+provenance+refine is a 2–3× cost multiplier
-   with no trigger condition. We gate the stylistic lenses on salience, keep
-   the provenance gate mechanical, and self-calibrate the thresholds. The
+   with no trigger condition. We gate the stylistic lenses on salience, run
+   the provenance check on detected past claims regardless of salience, and
+   self-calibrate the thresholds. The
    spec's random template draw becomes appraisal-directed lens selection.
 2. **Emotion classifier → appraisal valence** (§3.2). The spec's §4.9
    post-hoc classifier and fixed taxonomy are deleted. Affect is the

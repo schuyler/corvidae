@@ -677,9 +677,9 @@ class CritiquePlugin(CorvidaePlugin):
           * channels in the calling channel's memory scope, so no text
             crosses a channel boundary into the critic's input.
 
-        None, with a warning, when there is no probe connection or no
-        originating rowid: an absence that wasn't checked must never reach
-        the critic as "nothing matched".
+        None, with a warning, when there is no probe connection, no
+        originating rowid, or a search fails: an absence that wasn't
+        checked must never reach the critic as "nothing matched".
         """
         if self._probe_db is None:
             logger.warning(
@@ -706,28 +706,34 @@ class CritiquePlugin(CorvidaePlugin):
             f"AND {scope_sql} ORDER BY bm25(message_fts) LIMIT ?"
         )
         evidence: list[dict] = []
-        for claim in claims:
-            match_expr = _match_expression(claim.get("queries") or [claim.get("claim", "")])
-            candidates: list[dict] = []
-            if match_expr:
-                try:
+        try:
+            for claim in claims:
+                # A claim with no queries is searched by its own words.
+                match_expr = _match_expression(
+                    claim.get("queries") or [claim.get("claim", "")])
+                rows = []
+                if match_expr:
                     async with self._probe_db.execute(
                         sql,
                         (match_expr, before_rowid, *RECORD_MESSAGE_TYPES,
                          *scope_params, PROVENANCE_CANDIDATES),
                     ) as cursor:
                         rows = await cursor.fetchall()
-                    candidates = [_candidate(row) for row in rows]
-                except Exception:
-                    # One failed search leaves that claim with no candidates
-                    # shown, not the whole check unrun; logged so the gap
-                    # is visible.
-                    logger.warning(
-                        "provenance evidence search failed for trace %s, query %r",
-                        trace_id, match_expr, exc_info=True,
-                        extra={"channel": channel.id, "trace_id": trace_id},
-                    )
-            evidence.append({"claim": claim.get("claim", ""), "candidates": candidates})
+                evidence.append({
+                    "claim": claim.get("claim", ""),
+                    "candidates": [_candidate(row) for row in rows],
+                })
+        except Exception:
+            # A search that raised looked at nothing, so its claim must not
+            # reach the critic as "no earlier message matched": the whole
+            # check is abandoned rather than run on partial evidence.
+            logger.warning(
+                "provenance evidence search failed for trace %s, claim %r; "
+                "skipping the provenance check for this exchange",
+                trace_id, claim.get("claim", ""), exc_info=True,
+                extra={"channel": channel.id, "trace_id": trace_id},
+            )
+            return None
         return evidence
 
     def _scope(self, channel) -> ChannelScope:

@@ -385,8 +385,8 @@ model makes both language judgments; the code only fetches evidence:
    CritiquePlugin registers one in `on_start`. For an eligible exchange
    (same rule as the stylistic lenses: `user` or `reminder`) with at least
    one claim, it enqueues a silent task. That task searches `message_fts`
-   with each claim's phrases: every whitespace-separated chunk quoted, then
-   OR-joined. FTS5 tokenizes the quotes with the index's own tokenizer, so
+   with each claim's phrases (or the claim's own words when it has none):
+   every whitespace-separated chunk quoted, then OR-joined. FTS5 tokenizes the quotes with the index's own tokenizer, so
    no word-splitting or stopword list of ours decides what matches, and
    query syntax in the model's phrases is never parsed. Results are ranked
    by bm25, and up to 5 per claim are kept. Only these rows count:
@@ -410,8 +410,8 @@ model makes both language judgments; the code only fetches evidence:
    objections reach the funnel tagged `[provenance]`.
 
 The check doesn't run, and logs a warning naming what's missing, when there
-is no AppraisalPlugin, no read-only probe on `message_fts`, or no
-originating row for the exchange. An absence it couldn't look for must never
+is no AppraisalPlugin, no read-only probe on `message_fts`, no originating
+row for the exchange, or a search fails. An absence it couldn't look for must never
 reach the critic as "nothing matched". A failed stage 2 (malformed model
 output) leaves that exchange unchecked; appraisal logs the failure. The
 candidate count and excerpt length are constants, not tunables: a lever
