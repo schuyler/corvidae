@@ -36,6 +36,7 @@ import json
 import logging
 import random
 import re
+import unicodedata
 from pathlib import Path
 
 import aiosqlite
@@ -320,15 +321,34 @@ _PROBE_STOPWORDS = frozenset("""
 """.split())
 
 # Sentences, for locating the claim span: a break is end punctuation
-# followed by whitespace, or a newline, so "3.50" stays whole. shortcut: an
-# abbreviation followed by a space ("e.g. the") still splits; upgrade to a
-# real sentence splitter if that starts suppressing the gate.
-_SENTENCE_BREAK_RE = re.compile(r"(?<=[.!?])\s+|\n+")
+# (optionally followed by closing quotes or brackets) and then whitespace,
+# or a newline, so "3.50" stays whole. shortcut: an abbreviation followed by
+# a space ("e.g. the") still splits; upgrade to a real sentence splitter if
+# that starts suppressing the gate.
+_SENTENCE_BREAK_RE = re.compile(r"(?<=[.!?])[\"'\u201d\u2019)\]]*\s+|\n+")
 
-# Word tokens as FTS5's unicode61 tokenizer sees them: "_" is a separator,
-# so "API_KEY" is two tokens and "___" is none. A token unicode61 can't see
-# would be an empty phrase that no row matches, emptying every AND probe.
-_TOKEN_RE = re.compile(r"[^\W_]+")
+
+def _tokens(text: str) -> list[str]:
+    """Word tokens as FTS5's unicode61 tokenizer sees them.
+
+    A token is a run of letters, numbers, combining marks and private-use
+    characters (Unicode categories L*, N*, M*, Co); everything else, "_"
+    included, separates. A token unicode61 can't see would be a phrase no
+    row matches, emptying every AND probe, so the two must agree. NFC first,
+    so a decomposed "naïve" is one token whichever way the client sent it.
+    """
+    tokens: list[str] = []
+    current: list[str] = []
+    for ch in unicodedata.normalize("NFC", text):
+        cat = unicodedata.category(ch)
+        if cat[0] in "LNM" or cat == "Co":
+            current.append(ch)
+        elif current:
+            tokens.append("".join(current))
+            current = []
+    if current:
+        tokens.append("".join(current))
+    return tokens
 
 
 def _content_terms(text: str, max_terms: int) -> list[str]:
@@ -337,7 +357,7 @@ def _content_terms(text: str, max_terms: int) -> list[str]:
     capped at max_terms. Every term is FTS5-safe (word characters only)."""
     seen: set[str] = set()
     terms: list[str] = []
-    for tok in _TOKEN_RE.findall(text):
+    for tok in _tokens(text):
         if len(terms) >= max_terms:
             break
         low = tok.lower()

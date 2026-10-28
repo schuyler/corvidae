@@ -321,6 +321,12 @@ class TestPastClaimDetector:
             "API", "KEY", "field",
         ]
 
+    def test_extract_terms_breaks_after_a_closing_quote(self):
+        from corvidae_cognition.critique import _extract_terms
+        assert _extract_terms('She said "maybe." You told me the venue is Oslo.', 8) == [
+            "venue", "Oslo",
+        ]
+
     def test_extract_terms_keeps_decimals_in_the_claim_sentence(self):
         from corvidae_cognition.critique import _extract_terms
         assert _extract_terms("You told me the price was 3.50 per unit.", 8) == [
@@ -778,6 +784,18 @@ class TestProvenanceProbeCutoff:
         try:
             assert await plugin._message_fts_empty(
                 "You told me the API_KEY field is ___ here.", 8, before_rowid=10,
+            ) is False
+        finally:
+            await db.close()
+
+    async def test_decomposed_unicode_does_not_hide_a_record(self, tmp_path):
+        # NFD "naïve" (i + combining diaeresis), as some clients send it:
+        # a mark is part of a unicode61 token, so the term must be too.
+        nfd = "deadline nai\u0308ve Thursday"
+        plugin, db = await self._probe(tmp_path, [(1, nfd)])
+        try:
+            assert await plugin._message_fts_empty(
+                f"You told me {nfd}.", 8, before_rowid=10,
             ) is False
         finally:
             await db.close()
