@@ -356,6 +356,51 @@ no gate registered. It catches and logs every exception: one raising
 implementation in that broadcast would discard every sibling's verdict.
 `get_appraisal_out(trace_id)` reads the vector back.
 
+### CritiquePlugin: the provenance gate (`packages/corvidae-cognition/corvidae_cognition/critique.py`)
+
+The provenance lens checks a reply that claims something about the past
+("as I mentioned", "you told me", "we agreed") against the record. It is
+mechanical and fires regardless of the appraisal scores. All three of these
+must hold:
+
+1. **A past claim.** `is_past_claim` matches one of `PAST_CLAIM_PATTERNS`.
+2. **Weak retrieval.** The exchange's `exchange_log` retrieval profile has
+   no hits, or a top score below `critique.provenance.weak_score`
+   (default 0.4).
+3. **No record in the raw dialog log.** A read-only probe on `message_fts`
+   finds no supporting row.
+
+The probe's terms come from the claim itself: each sentence a pattern
+matched, with the recall phrase removed. The claim can sit on either side
+of that phrase, so the probe takes the whole sentence. Stopwords, recall
+framing (`earlier`, `mentioned`, `previously`, …) and tokens under three
+characters are dropped. A token containing a digit (`3`, `4b`) is kept. If
+the claim sentences leave no content words ("As I said." with the claim in
+the next sentence), the probe uses the whole reply. Terms are deduped and
+capped at `critique.provenance.max_terms` (default 8).
+
+A record is **one** row holding **every** term (FTS5 AND). Three kinds of row
+never count:
+
+- Rows from the exchange itself: its originating message and everything
+  after it, including the reply, which the insert trigger has already
+  indexed when the gate runs. The cutoff is the originating rowid from
+  `on_message_persisted`. Without one (the originating row wasn't
+  persisted), the probe can't tell the exchange's own rows from a record,
+  so the gate logs a warning and doesn't fire.
+- Withheld (`unsent`) rows: they were never said.
+- Rows sharing only some of the terms. A user's question shares the topic
+  of the answer, and an earlier turn can mention the same subject, but
+  topical overlap isn't a record of the statement.
+
+AND fails toward firing. A paraphrased record ("audit due Thursday" against
+"the quarterly audit deadline is Thursday") reads as absent, and the cost
+is one silent critique task whose critic sees the CONTEXT snapshot and can
+come back with no objections. A missing probe (no `message_fts`, or the DB
+can't be opened read-only) is inconclusive, and the gate doesn't fire. The
+probe isn't scoped to the channel: a matching row from any channel counts
+as a record.
+
 ### GatePlugin (`packages/corvidae-cognition/corvidae_cognition/gates.py`)
 
 The agent's right to silence (PRD §3.7). Entry point name: `"gates"`;

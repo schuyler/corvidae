@@ -279,6 +279,45 @@ class TestPastClaimDetector:
         terms = _extract_terms("alpha beta alpha gamma delta epsilon zeta eta theta", 3)
         assert terms == ["alpha", "beta", "gamma"]
 
+    def test_extract_terms_drops_stopwords_and_short_tokens(self):
+        # #155 cause 2: "I" and "the" match nearly every row, so they are
+        # no evidence of a record.
+        from corvidae_cognition.critique import _extract_terms
+        assert _extract_terms("I like the weather today", 8) == ["weather", "today"]
+
+    def test_extract_terms_keeps_short_tokens_with_digits(self):
+        from corvidae_cognition.critique import _extract_terms
+        assert _extract_terms("The meeting is at 3 in room 4b", 8) == [
+            "meeting", "3", "room", "4b",
+        ]
+
+    def test_extract_terms_prefers_the_claim_sentence(self):
+        # Terms come from the sentence is_past_claim matched, minus the
+        # recall phrase and its framing words, not from the whole reply.
+        from corvidae_cognition.critique import _extract_terms
+        text = (
+            "Sure thing. As I mentioned earlier, the quarterly audit deadline "
+            "is Thursday. Let me know if anything changes."
+        )
+        assert _extract_terms(text, 8) == ["quarterly", "audit", "deadline", "Thursday"]
+
+    def test_extract_terms_claim_before_the_recall_phrase(self):
+        from corvidae_cognition.critique import _extract_terms
+        assert _extract_terms("The deadline is Thursday, as I mentioned.", 8) == [
+            "deadline", "Thursday",
+        ]
+
+    def test_extract_terms_falls_back_to_whole_text(self):
+        # A claim sentence with no content words ("As I said.") leaves the
+        # claim in a neighbouring sentence, so the whole reply is used.
+        from corvidae_cognition.critique import _extract_terms
+        assert _extract_terms("As I said. The budget is 5k.", 8) == ["budget", "5k"]
+
+    def test_extract_terms_zero_cap_yields_nothing(self):
+        # max_terms 0 turns tier 2 off (docs/configuration.md).
+        from corvidae_cognition.critique import _extract_terms
+        assert _extract_terms("the deadline is Friday", 0) == []
+
 
 # ---------------------------------------------------------------------------
 # 1. Provenance snapshot (before_agent_turn)
@@ -458,6 +497,10 @@ class TestLensSelection:
 # ---------------------------------------------------------------------------
 
 
+# Above every row _seed_fts writes: the seeded rows predate the exchange.
+ORIGIN_ROWID = 10_000
+
+
 async def _low_appraisal_env(tmp_path, fts_contents=(), chat_text=OBJECTION_VERDICT):
     appraisal = FakeAppraisal(
         stage1={"commitment_density": 0.0, "disagreement": 0.0},
@@ -471,6 +514,16 @@ async def _low_appraisal_env(tmp_path, fts_contents=(), chat_text=OBJECTION_VERD
     return env
 
 
+
+async def _persist_origin(env, trace_id, rowid=ORIGIN_ROWID):
+    """Record the exchange's originating message_log rowid, as the Agent's
+    on_message_persisted does. The probe only counts rows before it (#155)."""
+    await env.plugin.on_message_persisted(
+        channel=env.channel, trace_id=trace_id, rowid=rowid,
+        text="orig", meta={},
+    )
+
+
 class TestProvenanceGate:
     async def test_past_claim_weak_retrieval_empty_fts_fires(self, tmp_path):
         env = await _low_appraisal_env(tmp_path, chat_text=EMPTY_VERDICT)
@@ -482,6 +535,7 @@ class TestProvenanceGate:
             channel=env.channel, trace_id="kpg",
             sender="user", text="when is launch?",
         )
+        await _persist_origin(env, "kpg")
         await env.plugin.on_agent_response(
             channel=env.channel, request_text="req",
             response_text="You told me the launch date was March.",
@@ -503,6 +557,7 @@ class TestProvenanceGate:
             channel=env.channel, trace_id="kstrong",
             sender="user", text="when is launch?",
         )
+        await _persist_origin(env, "kstrong")
         await env.plugin.on_agent_response(
             channel=env.channel, request_text="req",
             response_text="You told me the launch date was March.",
@@ -525,6 +580,7 @@ class TestProvenanceGate:
             channel=env.channel, trace_id="kfts",
             sender="user", text="when is launch?",
         )
+        await _persist_origin(env, "kfts")
         await env.plugin.on_agent_response(
             channel=env.channel, request_text="req",
             response_text="You told me the launch date was March.",
@@ -543,6 +599,7 @@ class TestProvenanceGate:
             channel=env.channel, trace_id="knp",
             sender="user", text="thoughts?",
         )
+        await _persist_origin(env, "knp")
         await env.plugin.on_agent_response(
             channel=env.channel, request_text="req",
             response_text="The launch will be great.",
@@ -562,6 +619,7 @@ class TestProvenanceGate:
             channel=env.channel, trace_id="kdis",
             sender="user", text="q?",
         )
+        await _persist_origin(env, "kdis")
         await env.plugin.on_agent_response(
             channel=env.channel, request_text="req",
             response_text="You told me the answer was 42.",
@@ -656,9 +714,166 @@ class TestProvenanceProbeIgnoresUnsent:
         plugin = CritiquePlugin()
         plugin._probe_db = db
         try:
-            assert await plugin._message_fts_empty("deadline Friday", 8) is True
+            assert await plugin._message_fts_empty("deadline Friday", 8, before_rowid=ORIGIN_ROWID) is True
             await db.execute("UPDATE message_log SET message_type = 'message'")
             await db.commit()
-            assert await plugin._message_fts_empty("deadline Friday", 8) is False
+            assert await plugin._message_fts_empty("deadline Friday", 8, before_rowid=ORIGIN_ROWID) is False
         finally:
             await db.close()
+
+
+class TestProvenanceProbeCutoff:
+    """#155 cause 1: the exchange's own rows (at or after its originating
+    row) are never a record of its own claim."""
+
+    async def _probe(self, tmp_path, rows):
+        from corvidae_cognition.critique import CritiquePlugin
+
+        db = await aiosqlite.connect(str(tmp_path / "sessions.db"))
+        await init_db(db)
+        await db.execute("CREATE VIRTUAL TABLE message_fts USING fts5(content_text)")
+        for rowid, content in rows:
+            await db.execute(
+                "INSERT INTO message_fts(rowid, content_text) VALUES (?, ?)",
+                (rowid, content),
+            )
+        await db.commit()
+        plugin = CritiquePlugin()
+        plugin._probe_db = db
+        return plugin, db
+
+    async def test_rows_at_or_after_the_cutoff_are_not_a_record(self, tmp_path):
+        plugin, db = await self._probe(tmp_path, [(5, "the deadline is Friday")])
+        try:
+            assert await plugin._message_fts_empty("deadline Friday", 8, before_rowid=5) is True
+            assert await plugin._message_fts_empty("deadline Friday", 8, before_rowid=6) is False
+        finally:
+            await db.close()
+
+    async def test_all_claim_terms_must_appear_in_one_row(self, tmp_path):
+        # AND, not OR: a row sharing one content word is no record.
+        plugin, db = await self._probe(tmp_path, [(1, "the deadline moved"), (2, "Friday lunch")])
+        try:
+            assert await plugin._message_fts_empty("deadline Friday", 8, before_rowid=10) is True
+        finally:
+            await db.close()
+
+    async def test_no_originating_rowid_does_not_fire(self, tmp_path):
+        # Without the cutoff the probe can't tell the exchange's own rows
+        # from a record, so it stays inconclusive (conservative).
+        env = await _low_appraisal_env(tmp_path)
+        await env.outcome.record_exchange("knorow", env.channel.id, origin="user")
+        await env.plugin.on_message_admitted(
+            channel=env.channel, trace_id="knorow", sender="user", text="q?",
+        )
+        try:
+            assert await env.plugin._provenance_should_fire(
+                env.channel, "knorow", "You told me the launch date was March.",
+            ) is False
+        finally:
+            await _teardown(env)
+
+
+# ---------------------------------------------------------------------------
+# #155: the provenance gate on the production path — a real Agent turn on a
+# file DB with MemoryPlugin's message_fts DDL and insert trigger, and the
+# critique probe opened read-only on the same file.
+# ---------------------------------------------------------------------------
+
+
+CLAIM_REPLY = "As I mentioned earlier, the quarterly audit deadline is Thursday."
+
+
+async def _real_path_env(tmp_path, replies):
+    """Agent + persistence on a file DB with the real message_fts trigger,
+    and a CritiquePlugin whose gate decisions are recorded per trace id."""
+    from unittest.mock import MagicMock
+
+    from corvidae_cognition.critique import CritiquePlugin
+    from corvidae_cognition.memory import MESSAGE_FTS_DDL, MESSAGE_FTS_INSERT_TRIGGER
+    from helpers import build_plugin_and_channel
+    from llm_response_fixtures import _make_text_response
+
+    db_path = str(tmp_path / "sessions.db")
+    agent, channel, db = await build_plugin_and_channel(
+        mock_on_agent_response=False, db_path=db_path,
+    )
+    await db.execute(MESSAGE_FTS_DDL)
+    await db.execute(MESSAGE_FTS_INSERT_TRIGGER)
+    await db.commit()
+
+    pm = agent.pm
+    critique = CritiquePlugin()
+    pm.register(critique, name="critique")
+    cfg = {"daemon": {"session_db": db_path}}
+    await critique.on_init(pm=pm, config=cfg)
+    await critique.on_start(config=cfg)
+    assert critique._probe_db is not None
+    # The critic itself is out of scope here: only the gate decision is.
+    critique._run_critique = AsyncMock()
+
+    decisions: dict[str, bool] = {}
+    real_gate = critique._provenance_should_fire
+
+    async def spy(channel, trace_id, response_text):
+        decisions[trace_id] = await real_gate(channel, trace_id, response_text)
+        return decisions[trace_id]
+
+    critique._provenance_should_fire = spy
+
+    client = MagicMock()
+    client.chat = AsyncMock(side_effect=[_make_text_response(r) for r in replies])
+    agent._client = client
+    return SimpleNamespace(
+        agent=agent, channel=channel, db=db, critique=critique,
+        decisions=decisions,
+    )
+
+
+async def _real_path_teardown(env):
+    from helpers import drain_task_queue
+
+    await drain_task_queue(env.agent)
+    await env.critique.on_stop()
+    await env.agent.pm.get_plugin("task").on_stop()
+    await env.db.close()
+
+
+async def _say(env, text):
+    from corvidae.trace import mint_trace_id
+    from helpers import drain
+
+    trace_id = mint_trace_id()
+    await env.agent.on_message(channel=env.channel, sender="user", text=text, trace_id=trace_id)
+    await drain(env.agent, env.channel)
+    return trace_id
+
+
+class TestProvenanceGateRealPath:
+    async def test_unsupported_claim_fires(self, tmp_path):
+        # The reply's own row is in message_fts by the time the gate runs;
+        # it must not count as a record of itself.
+        env = await _real_path_env(tmp_path, [CLAIM_REPLY])
+        try:
+            trace_id = await _say(env, "when is it due?")
+            assert env.decisions[trace_id] is True
+        finally:
+            await _real_path_teardown(env)
+
+    async def test_supported_claim_does_not_fire(self, tmp_path):
+        env = await _real_path_env(tmp_path, ["Noted.", CLAIM_REPLY])
+        try:
+            await _say(env, "Heads up: the quarterly audit deadline is Thursday.")
+            trace_id = await _say(env, "when is it due?")
+            assert env.decisions[trace_id] is False
+        finally:
+            await _real_path_teardown(env)
+
+    async def test_earlier_row_sharing_only_common_words_still_fires(self, tmp_path):
+        env = await _real_path_env(tmp_path, ["Me too.", CLAIM_REPLY])
+        try:
+            await _say(env, "I like the weather today")
+            trace_id = await _say(env, "when is it due?")
+            assert env.decisions[trace_id] is True
+        finally:
+            await _real_path_teardown(env)

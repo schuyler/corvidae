@@ -296,18 +296,86 @@ def is_past_claim(text: str) -> bool:
     return any(rx.search(text) for rx in _PAST_CLAIM_RE)
 
 
-def _extract_terms(text: str, max_terms: int) -> list[str]:
-    """FTS5-safe key terms: word tokens, capped, deduped preserving order."""
+# Words that are no evidence of a record (#155): nearly every row contains
+# them, so a probe that counts them always finds one. Function words and
+# fillers, plus the recall framing around a past claim ("as I mentioned
+# earlier"), which the original statement would not contain.
+_PROBE_STOPWORDS = frozenset("""
+    a about above after again against all also am an and any are aren as at
+    be because been before being below between both but by can cannot could
+    couldn did didn do does doesn doing don down during each else even ever
+    every few for from further get got had hadn has hasn have haven having he
+    her here hers herself him himself his how i if in into is isn it its
+    itself just let like ll me might more most much must mustn my myself no
+    nor not now of off on once only or other ought our ours ourselves out over
+    own really re same shall shan she should shouldn so some such than that
+    the their theirs them themselves then there these they this those through
+    to too under until up upon us ve very was wasn way we well were weren
+    what when where which while who whom why will with won would wouldn yes
+    yet you your yours yourself yourselves
+    sure okay ok yeah thing things something anything everything
+    remember recall recalled mentioned said told noted asked promised agreed
+    decided discussed talked established covered committed earlier
+    previously already last time before ago back
+""".split())
+
+# Sentences, for locating the claim span. shortcut: a period inside a
+# number or abbreviation ("3.5", "e.g.") splits the sentence, which can
+# drop terms from the claim span; upgrade to a real sentence splitter if
+# that starts suppressing the gate.
+_SENTENCE_RE = re.compile(r"[^.!?\n]+[.!?]*")
+
+
+def _content_terms(text: str, max_terms: int) -> list[str]:
+    """Distinctive word tokens: stopwords and sub-3-character tokens dropped
+    (a token with a digit is kept: "3", "4b"), deduped preserving order,
+    capped at max_terms. Every term is FTS5-safe (word characters only)."""
     seen: set[str] = set()
     terms: list[str] = []
     for tok in re.findall(r"\w+", text):
+        if len(terms) >= max_terms:
+            break
         low = tok.lower()
-        if low in seen:
+        if low in seen or low in _PROBE_STOPWORDS:
+            continue
+        if len(tok) < 3 and not any(c.isdigit() for c in tok):
             continue
         seen.add(low)
         terms.append(tok)
-        if len(terms) >= max_terms:
-            break
+    return terms
+
+
+def _claim_spans(text: str) -> list[str]:
+    """The sentences an is_past_claim pattern matched, with the matched
+    recall phrase removed. The claim can sit on either side of the phrase
+    ("The deadline is Thursday, as I mentioned."), so the whole sentence is
+    kept."""
+    spans: list[str] = []
+    for sentence in _SENTENCE_RE.findall(text):
+        stripped = sentence
+        matched = False
+        for rx in _PAST_CLAIM_RE:
+            stripped, count = rx.subn(" ", stripped)
+            matched = matched or count > 0
+        if matched:
+            spans.append(stripped)
+    return spans
+
+
+def _extract_terms(text: str, max_terms: int) -> list[str]:
+    """The probe's key terms: the claim span's distinctive words.
+
+    Falls back to the whole text when the claim sentences carry no content
+    words ("As I said." with the claim in the next sentence) or no pattern
+    matched. max_terms <= 0 yields no terms, which leaves the probe
+    inconclusive.
+    """
+    if max_terms <= 0:
+        return []
+    spans = _claim_spans(text)
+    terms = _content_terms(" ".join(spans), max_terms) if spans else []
+    if not terms:
+        terms = _content_terms(text, max_terms)
     return terms
 
 
@@ -611,12 +679,24 @@ class CritiquePlugin(CorvidaePlugin):
         if not weak:
             return False
         # Tier 2: the raw dialog log via message_fts. Only fire if we
-        # CONFIRMED the raw log has no matching record.
-        max_terms = resolve_tunable(
+        # CONFIRMED the raw log has no matching record. The exchange's own
+        # rows (its originating message onward, the reply included) are
+        # already indexed by now and are no record of the claim (#155), so
+        # the probe needs the originating rowid as its cutoff.
+        before_rowid = self._originating_rowid.get(trace_id)
+        if before_rowid is None:
+            logger.warning(
+                "provenance probe skipped for trace %s: no originating "
+                "message_log row, so the exchange's own rows can't be told "
+                "from a record; not firing",
+                trace_id, extra={"channel": channel.id, "trace_id": trace_id},
+            )
+            return False
+        max_terms = int(resolve_tunable(
             channel, self.config, "critique.provenance.max_terms",
             PROVENANCE_MAX_TERMS_DEFAULT,
-        )
-        return await self._message_fts_empty(response_text, max_terms)
+        ))
+        return await self._message_fts_empty(response_text, max_terms, before_rowid)
 
     # ------------------------------------------------------------------
     # The silent task body
@@ -876,22 +956,29 @@ class CritiquePlugin(CorvidaePlugin):
             return ""
         return "\n".join(s.get("content", "") for s in snapshot if isinstance(s, dict))
 
-    async def _message_fts_empty(self, text, max_terms) -> bool:
-        """True only when the raw-log FTS probe CONFIRMED no matching record."""
+    async def _message_fts_empty(self, text, max_terms, before_rowid) -> bool:
+        """True only when the raw-log FTS probe CONFIRMED no matching record.
+
+        A record is one row, older than ``before_rowid``, that contains
+        every key term (AND): a row sharing one word with the claim is
+        topical overlap, not a record of the statement.
+        """
         if self._probe_db is None:
             return False  # cannot confirm empty → do not fire (conservative)
         terms = _extract_terms(text, max_terms)
         if not terms:
             return False
-        match_expr = " OR ".join(f'"{t}"' for t in terms)
+        match_expr = " AND ".join(f'"{t}"' for t in terms)
         try:
-            # A withheld (UNSENT) row was never said, so it is no record
+            # Rows at or after before_rowid belong to this exchange. A
+            # withheld (UNSENT) row was never said, so it is no record
             # that the claim was made.
             async with self._probe_db.execute(
                 "SELECT rowid FROM message_fts WHERE message_fts MATCH ? "
+                "AND message_fts.rowid < ? "
                 "AND NOT EXISTS (SELECT 1 FROM message_log m "
                 "WHERE m.id = message_fts.rowid AND m.message_type = 'unsent') LIMIT 1",
-                (match_expr,),
+                (match_expr, before_rowid),
             ) as cursor:
                 row = await cursor.fetchone()
         except Exception:
