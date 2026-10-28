@@ -85,6 +85,10 @@ agent:
   #   # - critique.prompt.constrained
   #   # - critique.prompt.predictive
   #   # - appraisal.stage2_prompt
+  #   # - gate.engagement.enforce        # can silence or un-silence the agent
+  #   # - gate.engagement.threshold
+  #   # - gate.send.enforce
+  #   # - gate.send.min_salience
 
 # Autobiographical memory (optional; see docs/configuration.md)
 # memory:
@@ -103,6 +107,18 @@ agent:
 # critique:
 #   fork_prompt:
 #     provenance: "..."               # prompts/critique_<lens>_fork.md
+
+# Engagement and decide gates (optional; cognition extra, see
+# docs/configuration.md "gate.*"). Runtime-tunable per channel via set_settings.
+# gate:
+#   engagement:
+#     enforce: false                  # shadow mode: record would_reject, admit everything
+#     threshold: 0.2                  # inbound salience below this would reject
+#   send:
+#     enforce: true                   # withhold non-user finals below min_salience
+#     min_salience: 0.15              # a reply to a user is never withheld
+#     allow_progress: true            # false suppresses text sent alongside tool calls
+#     allow_thinking: true            # false suppresses reasoning
 
 # Built-in tool settings (optional)
 # tools:

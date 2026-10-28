@@ -21,6 +21,7 @@ transports.
 | `AppraisalPlugin` | `appraisal` | Scores every inbound message at the gate (novelty, commitment density, disagreement, question, salience), then appraises the exchange once the agent has answered |
 | `CritiquePlugin` | `critique` | Reviews the agent's replies after the fact through several lenses (provenance, predictive, constrained, adversarial) |
 | `OutcomeLogPlugin` | `outcome_log` | Records each exchange and its outcome in `exchange_log` |
+| `GatePlugin` | `gates` | The engagement gate (may the agent ignore a message?) and the decide gate (may it stay silent instead of answering?), both over the appraisal vector |
 
 Entry-point names are the same as when these plugins lived in the kernel, so
 `plugins.disabled` lists in existing `agent.yaml` files keep working. Without
@@ -335,3 +336,97 @@ Writer API (used by other plugins, not hooks):
   those hooks' `INSERT OR IGNORE` would no-op against a row that doesn't
   exist yet, silently dropping the gate-path columns. Idempotent and
   write-order independent.
+
+### AppraisalPlugin: the outbound vector (`packages/corvidae-cognition/corvidae_cognition/appraisal.py`)
+
+Alongside the inbound stage-1 vector it computes at the gate,
+`AppraisalPlugin` computes an outbound vector over the final response text:
+`get_or_compute_out(channel, trace_id, text)` is the twin of
+`get_or_compute`, with the same surface heuristics and FTS5 probe blend and
+the same fail-open probe budget, and no model call. It has its own cache
+slot and in-flight future, keyed `(trace_id, "out")`. A user exchange
+computes both directions under one trace id, and a shared slot would hand
+the outbound caller the inbound vector. The first compute persists the
+vector under the `appraisal` envelope's `stage1_out` key, with no origin, so
+the upsert can't relabel the exchange's row.
+
+A thin `should_send_response` implementation calls it for every `final`
+emission and always returns None, so the outbound vector exists even with
+no gate registered. It catches and logs every exception: one raising
+implementation in that broadcast would discard every sibling's verdict.
+`get_appraisal_out(trace_id)` reads the vector back.
+
+### GatePlugin (`packages/corvidae-cognition/corvidae_cognition/gates.py`)
+
+The agent's right to silence (PRD §3.7). Entry point name: `"gates"`;
+`depends_on` is empty, and it reads `appraisal` and `outcome_log`
+fail-soft. Both gates *pull* their vector through AppraisalPlugin's compute
+API rather than relying on hook order: apluggy runs a broadcast's
+implementations concurrently, and the pull API's per-key dedup makes the
+compute run once whoever asks first.
+
+**Origin.** Read from propagated state, never inferred: `meta["origin"]`
+when a producer stamped one (the scheduler stamps `reminder` or
+`heartbeat`, the funnel stamps `critique`), else `user` for a trace the
+plugin saw in `on_message_admitted` (a bounded LRU of 1024), else the origin
+`exchange_log` already holds for the trace (so a user exchange whose trace
+fell out of the LRU during a long tool cycle is still `user`), else `task`.
+Tool cycles carry the item's meta forward, so an exchange keeps its origin
+through its tool calls. The decide gate never passes its derived origin to
+`upsert_exchange`, so it can't relabel a row; only the engagement gate,
+which fires only for user messages, writes `origin="user"`.
+
+**The engagement gate** (`should_process_message`) pulls the inbound
+stage-1 vector and compares its salience with `gate.engagement.threshold`
+(default 0.2). It ships in shadow mode: until `gate.engagement.enforce` is
+set it rejects nothing, and records `outcomes.engagement = {salience,
+threshold, would_reject, enforced}` so the offline calibration corpus
+accumulates from day one. It never samples below threshold live: a
+rejected message is something a user notices, so the threshold is fitted
+from the recorded verdicts instead. The record is written with
+`upsert_exchange` from a fire-and-forget task, because the gate fires before
+the admission row exists and must not wait on the shared write connection.
+No AppraisalPlugin, or a compute that fails, returns None and records
+nothing.
+
+**The decide gate** (`should_send_response`):
+
+- `final`: pulls the outbound vector. A user-origin final is never
+  withheld: a direct reply to a person is not swallowed by a guessed
+  threshold. A final of any other origin is withheld when its salience is
+  below `gate.send.min_salience` (default 0.15) and `gate.send.enforce`
+  (default true) is set: self-initiated traffic that adds nothing stays
+  silent. A missing vector (no AppraisalPlugin, or the compute failed) fails
+  open. Every decision is recorded as `outcomes.send = {emission, origin,
+  salience, min_salience, enforced, vetoed, would_veto, reason, advisory}`.
+  `reason` is one of `user_origin`, `below_threshold`,
+  `at_or_above_threshold` or `no_vector`; on `no_vector` the `salience` key
+  is absent (a null in a `json_patch` fragment deletes the key). `advisory`
+  carries the input-side salience and the previous exchange's stage-2 vector
+  (the current one is unfinished when the gate fires), as context for
+  calibration; neither affects the decision, and user-origin finals skip it.
+  The record is per trace: if a later item under the same trace reaches a
+  final again, its decision overwrites the earlier one key by key.
+- `progress` / `thinking`: vetoed when `gate.send.allow_progress` /
+  `gate.send.allow_thinking` (both default true) are off, recorded as
+  `outcomes.suppressed = {"progress": true}` or `{"thinking": true}`. Core
+  never writes the outcome log; the vetoing plugin does.
+- `error` and anything else: no opinion.
+
+A withheld final is stored as `MessageType.UNSENT`: the window keeps it,
+across restarts, with a not-sent marker, and no transport sees it
+([design.md](design.md#the-output-gate)). `on_agent_response` still fires,
+so a withheld `user` or `reminder` final stays eligible for critique, and
+the critique provenance probe doesn't count a withheld row as a record of
+anything said. `recall_raw` labels withheld rows `(withheld, not sent)`.
+
+Every tunable resolves through `resolve_tunable` at decision time, so a
+`set_settings` override or a hot config reload applies on the next
+exchange. Values are type-checked on read: numbers and numeric strings for
+thresholds, booleans and the words true/false/yes/no/on/off/1/0 for switches.
+Anything else logs a warning naming the key and value and uses the default.
+Both gates catch any other error, log it and fail open, because an exception
+in either broadcast would drop the message or the reply. The keys are in
+[configuration.md](configuration.md#gate--engagement-and-decide-gates), including the ones an
+operator should consider adding to `agent.immutable_settings` on channels
+with untrusted participants.

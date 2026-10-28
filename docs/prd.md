@@ -621,13 +621,14 @@ deciding only what to newly append and in what order.
 
 **Output gate and the right to silence.**
 
-1. `should_send_response(channel, text, emission, trace_id)` resolves
+1. `should_send_response(channel, text, emission, trace_id, meta)` resolves
    reject-wins, with `emission` in `final | progress | thinking | error`.
 2. The persistence-controlling firing happens between generation and
    persistence, only for results whose tool calls will not dispatch (a
    final-text result, or the max-turns branch). A veto stores the row as
-   `WITHHELD`: transports never see it, the window always does, including
-   across restarts, with a funnel-appended marker so the model does not
+   withheld (`MessageType.UNSENT`): transports never see it, history
+   replay included; the window always does, including across restarts,
+   with a core-appended marker so the model does not
    cite unsent statements as said. The max-turns branch strips
    `tool_calls` from both the row and the window copy regardless.
 3. Per-emission firings at the progress, thinking, and error-fallback

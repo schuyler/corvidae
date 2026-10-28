@@ -135,6 +135,17 @@ recommended keys (`gate.engagement.enforce`, `gate.send.enforce`) did not
 exist anywhere in the code, and the prompt keys were not mentioned; the
 doc now lists the real set.
 
+The output gate (`GatePlugin`, #131) added four more keys of the same kind.
+`gate.engagement.enforce` with a high `gate.engagement.threshold` makes the
+agent ignore every message on the channel; `gate.send.enforce: false` or
+`gate.send.min_salience: 0` turns off the decide gate; `gate.send.allow_progress`
+and `allow_thinking` hide intermediate output. All are writable through
+`set_settings` by default. A prompt-injected "just stop answering" now has a
+mechanism, so on channels with untrusted participants put the `enforce` and
+threshold keys in `agent.immutable_settings` with the others. The defaults
+can't silence a reply to a person: the decide gate never withholds a
+user-origin final, and the engagement gate ships in shadow mode.
+
 For a poisoned-model scenario this is the finding that matters most after
 the first one: the only runtime check on confabulation can be switched off
 by the thing being checked.
@@ -150,7 +161,7 @@ tunables. Keep them in `immutable_settings` with forks on too.
 
 ### 3. Untrusted text is promoted to the `system` role
 
-Three places:
+Four places:
 
 - Funnel-admitted CONTEXT (memories distilled from channel participants,
   critique objections) is appended as `role: system` (`funnel.py`).
@@ -159,6 +170,12 @@ Three places:
   a reminder's text is whatever the model wrote into `remind_me`, possibly
   at an untrusted speaker's request, and it comes back later as a system
   row. See finding 7.
+- The not-sent marker the Agent appends after a `should_send_response`
+  veto (#131) is a `role: system` CONTEXT row. It is core-written, not
+  framed by the funnel, and quotes at most 40 characters of the agent's own
+  progress text (the final and thinking markers quote nothing). If that
+  text echoed an injection, those 40 characters are promoted to the system
+  role. `mid_conversation_system_role: user` covers it like the others.
 - A tool result whose call compaction dropped (#79) is rendered by
   `ContextWindow.build_prompt` as a framed `role: system` message, since a
   `tool` message with no call breaks strict chat templates. The result can
@@ -176,7 +193,7 @@ Fix shape: deliver CONTEXT as a `user` turn (or a tool result) with the
 same framing, and reserve `system` for text the operator wrote.
 
 Available as an opt-in: `agent.mid_conversation_system_role: user` sends
-every system message after the operator's system prompt (all three
+every system message after the operator's system prompt (all four
 places above) as `user`, with the framing unchanged. It is applied at prompt
 build, so the stored rows keep `role: system`. The default is still
 `system`, because the evals were tuned against it. One behavioural
@@ -441,6 +458,11 @@ What it doesn't protect against, so you know:
   account name. Not a secret, but it is a real identifier in a public
   repository.
 - No secrets in `prompts/` or `docs/`.
+- A withheld (`unsent`) row is not sent to any transport, including web
+  and ACP history replay, but it is not secret: it sits in `sessions.db`,
+  the JSONL log and the window like any other row, and a fork or
+  compaction summary sees it. "Withheld" means not said to the channel,
+  not redacted.
 - The memory surfaces (`memory`, `memory_vec`, `memory_fts`,
   `message_fts`) exist only when the cognition extra has been installed.
   `corvidae redact` probes for each and silently skips one that is absent;
