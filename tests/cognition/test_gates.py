@@ -123,11 +123,14 @@ class Env:
 async def make_env(tmp_path):
     envs = []
 
-    async def _make(order=("appraisal", "gates"), config=None, responses=()):
+    async def _make(order=("appraisal", "gates"), config=None, responses=(), probe=False):
         from corvidae_cognition.outcome_log import OutcomeLogPlugin
 
+        # Without probe=True the session_db file doesn't exist, so the
+        # appraisal probe is disabled and vectors use the no-probe novelty.
         probe_path = str(tmp_path / f"probe{len(envs)}.db")
-        await _seed_probe_db(probe_path)
+        if probe:
+            await _seed_probe_db(probe_path)
         cfg = config if config is not None else {}
         cfg.setdefault("daemon", {})["session_db"] = probe_path
 
@@ -250,17 +253,6 @@ class TestEngagementEnforced:
         assert "stage1" in row["appraisal"]
         assert row["message_rowid"] is None
 
-    async def test_enforced_admits_above_threshold(self, make_env):
-        env = await make_env(
-            config={"gate": {"engagement": {"enforce": True, "threshold": 0.0}}},
-            responses=[_make_text_response("sure")],
-        )
-        trace_id = await _say(env, "ok")
-        assert sent_texts(env.pm, OutboundMessage) == ["sure"]
-        row = await env.row(trace_id)
-        assert row["outcomes"]["engagement"]["would_reject"] is False
-
-
 # ---------------------------------------------------------------------------
 # Decide gate (outbound)
 # ---------------------------------------------------------------------------
@@ -327,7 +319,7 @@ class TestDecideGate:
 
 class TestDirectionDistinctness:
     async def test_user_exchange_has_distinct_stage1_and_stage1_out(self, make_env):
-        env = await make_env(responses=[_make_text_response("Done. I will water the tomatoes on Friday.")])
+        env = await make_env(probe=True, responses=[_make_text_response("Done. I will water the tomatoes on Friday.")])
         probes = []
         original = env.appraisal._probe_query
 
@@ -373,27 +365,6 @@ class TestComputeFailureFailsOpen:
         send = (await env.row(trace_id))["outcomes"]["send"]
         assert send["vetoed"] is False
         assert send["reason"] == "no_vector"
-
-
-class TestNoAppraisal:
-    async def test_inbound_unchanged_and_outbound_fails_open(self, make_env):
-        env = await make_env(
-            order=("gates",),
-            config={"gate": {
-                "engagement": {"enforce": True, "threshold": 1.0},
-                "send": {"min_salience": 1.0},
-            }},
-            responses=[_make_text_response("sure"), _make_text_response("nothing to add.")],
-        )
-        trace_id = await _say(env, "ok")
-        assert sent_texts(env.pm, OutboundMessage) == ["sure"]
-
-        task_trace = await _notify(env, "background check finished")
-        assert sent_texts(env.pm, OutboundMessage) == ["sure", "nothing to add."]
-        send = (await env.row(task_trace))["outcomes"]["send"]
-        assert send["reason"] == "no_vector"
-        assert send["vetoed"] is False
-        assert "engagement" not in (await env.row(trace_id))["outcomes"]
 
 
 class TestOrderingIndependence:
@@ -452,18 +423,6 @@ class TestEmissionSuppression:
         assert sent_texts(env.pm, OutboundMessage) == ["Found it"]
         row = await env.row(trace_id)
         assert row["outcomes"]["suppressed"] == {"progress": True}
-
-    async def test_thinking_suppressed_and_recorded(self, make_env):
-        env = await make_env(
-            config={"gate": {"send": {"allow_thinking": False}}},
-            responses=[_make_text_response("answer", reasoning="pondering")],
-        )
-        trace_id = await _say(env, "think about it")
-
-        row = await env.row(trace_id)
-        assert row["outcomes"]["suppressed"] == {"thinking": True}
-        assert sent_texts(env.pm, OutboundMessage) == ["answer"]
-
 
 class TestTunableFlips:
     async def test_runtime_override_flips_next_exchange(self, make_env):
@@ -654,6 +613,30 @@ class TestDecisionTable:
         assert await gate.should_send_response(**args) is False
         await asyncio.gather(*set(gate._record_tasks))
         assert log.writes == [{"trace_id": "t1", "origin": None, "outcomes": {"suppressed": {emission: True}}}]
+
+
+class TestEngagementDecisions:
+    @pytest.mark.parametrize(
+        "salience, config, verdict, would_reject",
+        [
+            (0.1, {}, None, True),  # shadow mode: records, admits
+            (0.1, {"gate": {"engagement": {"enforce": True}}}, False, True),
+            (0.5, {"gate": {"engagement": {"enforce": True}}}, None, False),
+        ],
+    )
+    async def test_engagement(self, salience, config, verdict, would_reject):
+        gate, log, channel = await _gate(config, appraisal=_StubAppraisal(salience))
+        result = await gate.should_process_message(channel=channel, sender="u", text="ok", trace_id="t1")
+        await asyncio.gather(*set(gate._record_tasks))
+        assert result is verdict
+        engagement = log.writes[-1]["outcomes"]["engagement"]
+        assert engagement["would_reject"] is would_reject
+        assert log.writes[-1]["origin"] == "user"
+
+    async def test_no_appraisal_admits_and_records_nothing(self):
+        gate, log, channel = await _gate({"gate": {"engagement": {"enforce": True, "threshold": 1.0}}})
+        assert await gate.should_process_message(channel=channel, sender="u", text="ok", trace_id="t1") is None
+        assert log.writes == []
 
 
 class TestTunableTypes:
