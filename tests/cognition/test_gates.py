@@ -18,7 +18,13 @@ Interface pinned here:
     should_send_response impl that always returns None.
 
 Origin is a plugin-side convention (#131): meta["origin"] when present,
-else "user" for a trace admitted through on_message_admitted, else "task".
+else "user" for a trace admitted through on_message_admitted, else the
+origin exchange_log holds, else "task".
+
+Integration tests (a real Agent, outcome log and appraisal) cover the
+seams: upsert-before-admission, the withheld path into WP2.8, direction
+distinctness, dispatch order, origin through tool cycles. The decision
+table, tunable typing and origin derivation are unit tests against stubs.
 """
 
 import asyncio
@@ -28,6 +34,7 @@ from unittest.mock import AsyncMock, MagicMock
 import aiosqlite
 import pytest
 
+from corvidae.channel import Channel, ChannelConfig
 from corvidae.hooks import hookimpl, resolve_reject_wins
 from corvidae.outbound import OutboundMessage, OutboundProgress
 from corvidae.trace import mint_trace_id
@@ -294,48 +301,28 @@ class TestDecideGate:
         # The upsert kept the row's origin (no relabel to "user").
         assert row["origin"] == "task"
 
-    async def test_task_origin_above_threshold_is_sent_and_recorded(self, make_env):
-        env = await make_env(
-            config={"gate": {"send": {"min_salience": 0.0}}},
-            responses=[_make_text_response("Heads up: the build broke.")],
-        )
-        trace_id = await _notify(env, "background check finished")
-
-        assert sent_texts(env.pm, OutboundMessage) == ["Heads up: the build broke."]
-        send = (await env.row(trace_id))["outcomes"]["send"]
-        assert send["vetoed"] is False
-
-    async def test_shadow_send_records_would_veto_but_sends(self, make_env):
-        env = await make_env(
-            config={"gate": {"send": {"enforce": False, "min_salience": 1.0}}},
-            responses=[_make_text_response("nothing to add.")],
-        )
-        trace_id = await _notify(env, "background check finished")
-
-        assert sent_texts(env.pm, OutboundMessage) == ["nothing to add."]
-        send = (await env.row(trace_id))["outcomes"]["send"]
-        assert send["vetoed"] is False
-        assert send["would_veto"] is True
-        assert send["enforced"] is False
-
-    async def test_meta_origin_is_used(self, make_env):
+    async def test_user_exchange_through_tool_cycle_is_never_withheld(self, make_env):
         env = await make_env(
             config={"gate": {"send": {"min_salience": 1.0}}},
-            responses=[_make_text_response("stretch time.")],
+            responses=[
+                _make_mixed_response("", [_make_tool_call("call-1", "my_tool", {"x": "a"})]),
+                _make_text_response("ok."),
+            ],
         )
-        trace_id = await _notify(env, "time to stretch", meta={"origin": "reminder"})
 
-        send = (await env.row(trace_id))["outcomes"]["send"]
-        assert send["origin"] == "reminder"
-        assert send["vetoed"] is True
+        async def my_tool(x: str) -> str:
+            """A test tool."""
+            return f"result:{x}"
 
-    async def test_error_emission_is_never_vetoed(self, make_env):
-        env = await make_env(config={"gate": {"send": {"min_salience": 1.0}}})
-        results = await env.pm.ahook.should_send_response(
-            channel=env.channel, text="Sorry — it broke", emission="error",
-            trace_id=mint_trace_id(), meta={"origin": "heartbeat"},
-        )
-        assert resolve_reject_wins(results) is None
+        env.plugin._tools = {"my_tool": my_tool}
+        trace_id = await _say(env, "look it up")
+        await drain_task_queue(env.plugin)
+        await drain(env.plugin, env.channel)
+
+        assert sent_texts(env.pm, OutboundMessage) == ["ok."]
+        row = await env.row(trace_id)
+        assert row["outcomes"]["send"]["origin"] == "user"
+        assert row["origin"] == "user"
 
 
 class TestDirectionDistinctness:
@@ -505,28 +492,6 @@ class TestTunableFlips:
         assert len(sent_texts(env.pm, OutboundMessage)) == 1
 
 
-class TestBlocklist:
-    async def test_immutable_gate_key_refused_by_set_settings(self, make_env):
-        from corvidae.tool import Tool, ToolContext
-        from corvidae.tools.settings import RuntimeSettingsPlugin
-
-        env = await make_env()
-        settings = RuntimeSettingsPlugin()
-        await settings.on_init(pm=env.pm, config={"agent": {"immutable_settings": ["gate.send.enforce"]}})
-        registry = []
-        settings.register_tools(tool_registry=registry)
-        tool = next(t for t in registry if (t.name if isinstance(t, Tool) else t.__name__) == "set_settings")
-        fn = tool.fn if isinstance(tool, Tool) else tool
-
-        reply = await fn({"gate.send.enforce": False}, ToolContext(
-            channel=env.channel, tool_call_id="call_test", task_queue=None,
-        ))
-
-        assert "gate.send.enforce" in reply
-        assert "immutable" in reply
-        assert "gate.send.enforce" not in env.channel.runtime_overrides
-
-
 class TestWithheldStillCritiqued:
     async def test_withheld_reminder_final_is_critiqued(self, make_env):
         """WP2.7's deferred assertion: a withheld response stays eligible."""
@@ -551,108 +516,224 @@ class TestWithheldStillCritiqued:
         assert "stretch time." in args
 
 
-class TestRegistration:
-    def test_entry_point_registered(self):
-        import tomllib
-        from pathlib import Path
-
-        pyproject = Path(__file__).resolve().parents[2] / "packages/corvidae-cognition/pyproject.toml"
-        eps = tomllib.loads(pyproject.read_text())["project"]["entry-points"]["corvidae"]
-        assert eps["gates"] == "corvidae_cognition.gates:GatePlugin"
-
-    def test_depends_on_is_empty(self):
-        from corvidae_cognition.gates import GatePlugin
-
-        assert GatePlugin.depends_on == frozenset()
 
 
-class TestReviewFindings:
-    """WP2.9 review gate: bad tunable types, origin across tool cycles and
-    LRU eviction, and records that survive json_patch's null-deletes."""
+# ---------------------------------------------------------------------------
+# Unit tests: GatePlugin against stub appraisal and outcome-log plugins
+# ---------------------------------------------------------------------------
 
-    async def test_unparseable_threshold_falls_back_and_admits(self, make_env, caplog):
-        env = await make_env(responses=[_make_text_response("sure")])
-        env.channel.runtime_overrides["gate.engagement.threshold"] = "high"
-        env.channel.runtime_overrides["gate.engagement.enforce"] = "false"
 
-        trace_id = await _say(env, "ok")
+class _FakePM:
+    def __init__(self, **plugins):
+        self.plugins = plugins
 
-        assert sent_texts(env.pm, OutboundMessage) == ["sure"]
-        engagement = (await env.row(trace_id))["outcomes"]["engagement"]
-        assert engagement["threshold"] == 0.2  # the default
-        assert engagement["enforced"] is False
-        messages = [r.getMessage() for r in caplog.records]
-        assert any("gate.engagement.threshold" in m and "'high'" in m and "number" in m for m in messages)
+    def get_plugin(self, name):
+        return self.plugins.get(name)
 
-    async def test_string_false_does_not_enforce(self, make_env):
-        env = await make_env(responses=[_make_text_response("sure")])
-        env.channel.runtime_overrides["gate.engagement.enforce"] = "false"
-        env.channel.runtime_overrides["gate.engagement.threshold"] = "1.0"
 
-        trace_id = await _say(env, "ok")
+class _StubAppraisal:
+    """Returns fixed vectors; ``salience=None`` makes the compute raise."""
 
-        assert sent_texts(env.pm, OutboundMessage) == ["sure"]
-        engagement = (await env.row(trace_id))["outcomes"]["engagement"]
-        assert engagement["threshold"] == 1.0
-        assert engagement["would_reject"] is True
-        assert engagement["enforced"] is False
+    def __init__(self, salience=0.1, input_salience=0.5):
+        self.salience = salience
+        self.input_salience = input_salience
 
-    async def test_bad_send_tunables_never_raise(self, make_env):
-        env = await make_env(responses=[_make_text_response("nothing to add.")])
-        env.channel.runtime_overrides["gate.send.min_salience"] = ["nope"]
-        env.channel.runtime_overrides["gate.send.enforce"] = {"x": 1}
+    async def _vector(self, channel, trace_id, text):
+        if self.salience is None:
+            raise RuntimeError("compute failed")
+        return {"salience": self.salience}
 
-        trace_id = await _notify(env, "background check finished")
+    get_or_compute = _vector
+    get_or_compute_out = _vector
 
-        # Defaults apply (0.15, enforce true); this text scores above 0.15.
-        assert sent_texts(env.pm, OutboundMessage) == ["nothing to add."]
-        send = (await env.row(trace_id))["outcomes"]["send"]
-        assert send["min_salience"] == 0.15
-        assert send["enforced"] is True
+    async def get_appraisal(self, trace_id):
+        return {"salience": self.input_salience}
 
-    async def test_user_exchange_through_tool_cycle_is_never_withheld(self, make_env):
-        env = await make_env(
-            config={"gate": {"send": {"min_salience": 1.0}}},
-            responses=[
-                _make_mixed_response("", [_make_tool_call("call-1", "my_tool", {"x": "a"})]),
-                _make_text_response("ok."),
-            ],
+    def get_last_stage2(self, channel_id):
+        return None
+
+
+class _StubOutcomeLog:
+    def __init__(self):
+        self.writes: list[dict] = []
+
+    async def upsert_exchange(self, trace_id, channel_id, origin=None, **columns):
+        self.writes.append({"trace_id": trace_id, "origin": origin, **columns})
+
+
+async def _gate(config=None, *, appraisal=None, persistence=None):
+    """A GatePlugin wired to stubs; returns (gate, outcome_log, channel)."""
+    from corvidae_cognition.gates import GatePlugin
+
+    outcome_log = _StubOutcomeLog()
+    plugins = {"outcome_log": outcome_log}
+    if appraisal is not None:
+        plugins["appraisal"] = appraisal
+    if persistence is not None:
+        plugins["persistence"] = persistence
+    gate = GatePlugin(pm=_FakePM(**plugins))
+    gate.config = config or {}
+    channel = Channel(transport="test", scope="gates", config=ChannelConfig())
+    return gate, outcome_log, channel
+
+
+async def _final(gate, channel, meta=None, trace_id="t1"):
+    verdict = await gate.should_send_response(
+        channel=channel, text="nothing to add.", emission="final",
+        trace_id=trace_id, meta=meta or {},
+    )
+    await asyncio.gather(*set(gate._record_tasks))
+    return verdict
+
+
+class TestDecisionTable:
+    @pytest.mark.parametrize(
+        "meta, salience, config, verdict, record",
+        [
+            # Non-user, below threshold, enforced: withheld.
+            ({"origin": "heartbeat"}, 0.1, {}, False,
+             {"vetoed": True, "would_veto": True, "reason": "below_threshold"}),
+            # At or above threshold: sent.
+            ({"origin": "heartbeat"}, 0.5, {}, None,
+             {"vetoed": False, "would_veto": False, "reason": "at_or_above_threshold"}),
+            # Shadow mode: would veto, sends.
+            ({"origin": "heartbeat"}, 0.1, {"gate": {"send": {"enforce": False}}}, None,
+             {"vetoed": False, "would_veto": True, "enforced": False}),
+            # meta["origin"] is used as-is.
+            ({"origin": "reminder"}, 0.1, {}, False, {"origin": "reminder", "vetoed": True}),
+            # User origin is never withheld, at any threshold.
+            ({"origin": "user"}, 0.0, {"gate": {"send": {"min_salience": 1.0}}}, None,
+             {"vetoed": False, "reason": "user_origin"}),
+        ],
+    )
+    async def test_final_decisions(self, meta, salience, config, verdict, record):
+        gate, log, channel = await _gate(config, appraisal=_StubAppraisal(salience))
+        assert await _final(gate, channel, meta) is verdict
+        send = log.writes[-1]["outcomes"]["send"]
+        assert {k: send[k] for k in record} == record
+
+    async def test_user_final_skips_advisory_reads(self):
+        gate, log, channel = await _gate(appraisal=_StubAppraisal(0.0))
+        await _final(gate, channel, {"origin": "user"})
+        assert "advisory" not in log.writes[-1]["outcomes"]["send"]
+
+    async def test_non_user_final_records_advisory_without_nulls(self):
+        gate, log, channel = await _gate(appraisal=_StubAppraisal(0.1, input_salience=0.4))
+        await _final(gate, channel, {"origin": "heartbeat"})
+        # previous_stage2 is None, so it is left out rather than nulled
+        # (a null in a json_patch fragment deletes the key).
+        assert log.writes[-1]["outcomes"]["send"]["advisory"] == {"input_salience": 0.4}
+
+    @pytest.mark.parametrize("appraisal", [None, _StubAppraisal(salience=None)], ids=["absent", "raising"])
+    async def test_missing_vector_fails_open_and_omits_salience(self, appraisal):
+        gate, log, channel = await _gate(
+            {"gate": {"send": {"min_salience": 1.0}}}, appraisal=appraisal,
         )
-
-        async def my_tool(x: str) -> str:
-            """A test tool."""
-            return f"result:{x}"
-
-        env.plugin._tools = {"my_tool": my_tool}
-        trace_id = await _say(env, "look it up")
-        await drain_task_queue(env.plugin)
-        await drain(env.plugin, env.channel)
-
-        assert sent_texts(env.pm, OutboundMessage) == ["ok."]
-        row = await env.row(trace_id)
-        assert row["outcomes"]["send"]["origin"] == "user"
-        assert row["origin"] == "user"
-
-    async def test_evicted_user_trace_reads_origin_from_exchange_log(self, make_env):
-        env = await make_env(config={"gate": {"send": {"min_salience": 1.0}}})
-        trace_id = mint_trace_id()
-        outcome = env.pm.get_plugin("outcome_log")
-        await outcome.record_exchange(trace_id, env.channel.id, origin="user")
-        assert trace_id not in env.gates._admitted  # as if evicted
-
-        results = await env.pm.ahook.should_send_response(
-            channel=env.channel, text="ok.", emission="final",
-            trace_id=trace_id, meta={},
-        )
-
-        assert resolve_reject_wins(results) is None
-        row = await env.row(trace_id)
-        assert row["outcomes"]["send"]["origin"] == "user"
-        assert row["origin"] == "user"  # not relabelled
-
-    async def test_no_vector_record_omits_salience(self, make_env):
-        env = await make_env(order=("gates",), responses=[_make_text_response("nothing to add.")])
-        trace_id = await _notify(env, "background check finished")
-        send = (await env.row(trace_id))["outcomes"]["send"]
+        assert await _final(gate, channel, {"origin": "heartbeat"}) is None
+        send = log.writes[-1]["outcomes"]["send"]
         assert send["reason"] == "no_vector"
         assert "salience" not in send
+
+    @pytest.mark.parametrize("emission", ["error", "something-new"])
+    async def test_other_emissions_have_no_opinion(self, emission):
+        gate, log, channel = await _gate(
+            {"gate": {"send": {"min_salience": 1.0}}}, appraisal=_StubAppraisal(0.0),
+        )
+        verdict = await gate.should_send_response(
+            channel=channel, text="x", emission=emission, trace_id="t1", meta={"origin": "heartbeat"},
+        )
+        assert verdict is None
+        assert log.writes == []
+
+    @pytest.mark.parametrize("emission", ["progress", "thinking"])
+    async def test_emission_switches(self, emission):
+        gate, log, channel = await _gate()
+        args = dict(channel=channel, text="x", emission=emission, trace_id="t1", meta={})
+        assert await gate.should_send_response(**args) is None
+        channel.runtime_overrides[f"gate.send.allow_{emission}"] = False
+        assert await gate.should_send_response(**args) is False
+        await asyncio.gather(*set(gate._record_tasks))
+        assert log.writes == [{"trace_id": "t1", "origin": None, "outcomes": {"suppressed": {emission: True}}}]
+
+
+class TestTunableTypes:
+    @pytest.mark.parametrize(
+        "value, expected",
+        [(0.3, 0.3), ("0.3", 0.3), (1, 1.0), ("high", 0.2), (["x"], 0.2), (True, 0.2)],
+    )
+    def test_float_tunable(self, value, expected):
+        from corvidae_cognition.gates import _float_tunable
+
+        channel = Channel(transport="test", scope="t", config=ChannelConfig())
+        channel.runtime_overrides["gate.engagement.threshold"] = value
+        assert _float_tunable(channel, {}, "gate.engagement.threshold", 0.2) == expected
+
+    @pytest.mark.parametrize(
+        "value, expected",
+        [(True, True), (False, False), ("false", False), ("TRUE", True), ("off", False),
+         (1, True), (0, False), ("maybe", True), ({"x": 1}, True)],
+    )
+    def test_bool_tunable(self, value, expected):
+        from corvidae_cognition.gates import _bool_tunable
+
+        channel = Channel(transport="test", scope="t", config=ChannelConfig())
+        channel.runtime_overrides["gate.send.enforce"] = value
+        assert _bool_tunable(channel, {}, "gate.send.enforce", True) is expected
+
+    def test_bad_value_warning_names_key_and_value(self, caplog):
+        from corvidae_cognition.gates import _float_tunable
+
+        channel = Channel(transport="test", scope="t", config=ChannelConfig())
+        channel.runtime_overrides["gate.engagement.threshold"] = "high"
+        _float_tunable(channel, {}, "gate.engagement.threshold", 0.2)
+        assert any(
+            "gate.engagement.threshold" in r.getMessage() and "'high'" in r.getMessage()
+            and "number" in r.getMessage()
+            for r in caplog.records
+        )
+
+    async def test_string_false_does_not_enforce_engagement(self):
+        gate, log, channel = await _gate(appraisal=_StubAppraisal(0.0))
+        channel.runtime_overrides["gate.engagement.enforce"] = "false"
+        verdict = await gate.should_process_message(channel=channel, sender="u", text="ok", trace_id="t1")
+        await asyncio.gather(*set(gate._record_tasks))
+        assert verdict is None
+        assert log.writes[-1]["outcomes"]["engagement"]["enforced"] is False
+
+
+class TestFailOpen:
+    """Anything unexpected inside either gate admits and sends; a raise in
+    these broadcasts would drop the message or the reply."""
+
+    async def test_engagement_error_admits(self):
+        gate, _log, channel = await _gate(appraisal=_StubAppraisal(salience="not a number"))
+        assert await gate.should_process_message(channel=channel, sender="u", text="ok", trace_id="t1") is None
+
+    async def test_decide_error_sends(self):
+        gate, _log, channel = await _gate(appraisal=_StubAppraisal(salience="not a number"))
+        assert await _final(gate, channel, {"origin": "heartbeat"}) is None
+
+
+class TestOrigin:
+    async def test_meta_then_admitted_then_task(self):
+        gate, _log, _channel = await _gate()
+        assert await gate._origin("t1", {"origin": "reminder"}) == "reminder"
+        await gate.on_message_admitted(channel=None, trace_id="t1", sender="u", text="x")
+        assert await gate._origin("t1", {}) == "user"
+        assert await gate._origin("t2", {}) == "task"
+        assert await gate._origin(None, {}) == "task"
+
+    async def test_evicted_user_trace_reads_exchange_log(self):
+        from types import SimpleNamespace
+
+        async with aiosqlite.connect(":memory:") as db:
+            await db.execute("CREATE TABLE exchange_log (trace_id TEXT, origin TEXT)")
+            await db.execute("INSERT INTO exchange_log VALUES ('old', 'user')")
+            gate, log, channel = await _gate(
+                {"gate": {"send": {"min_salience": 1.0}}},
+                appraisal=_StubAppraisal(0.0), persistence=SimpleNamespace(db=db),
+            )
+            assert await gate._origin("old", {}) == "user"
+            # So its final is never withheld, and the record doesn't relabel the row.
+            assert await _final(gate, channel, trace_id="old") is None
+            assert log.writes[-1]["origin"] is None

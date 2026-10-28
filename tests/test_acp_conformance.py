@@ -6,13 +6,12 @@ import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock
 
-import aiosqlite
 import pytest
 
 from corvidae.channel import ChannelRegistry
 from corvidae.hooks import create_plugin_manager
 from corvidae.outbound import OutboundMessage
-from corvidae.persistence import PersistencePlugin, init_db
+from helpers import acp_agent_env
 
 
 AGENT_DEFAULTS = {
@@ -103,32 +102,8 @@ async def test_gate_b_session_load_resume_close(tmp_path) -> None:
     """
     from acp import PROTOCOL_VERSION
 
-    pm = create_plugin_manager()
-    registry = ChannelRegistry(AGENT_DEFAULTS)
-    pm.register(registry, name="registry")
-
-    persistence = PersistencePlugin(pm)
-    db = await aiosqlite.connect(":memory:")
-    await init_db(db)
-    persistence.db = db
-    pm.register(persistence, name="persistence")
-
-    from corvidae.channels.acp import AcpPlugin, CorvidaeAcpAgent
-
-    plugin = AcpPlugin()
-    pm.register(plugin, name="acp")
-    await plugin.on_init(pm=pm, config={"_acp_mode": True})
-
-    agent = CorvidaeAcpAgent(
-        agent_info={"name": "corvidae", "title": "Corvidae", "version": "0.0.1"},
-        plugin=plugin,
-    )
-    conn = MagicMock()
-    conn.session_update = AsyncMock()
-    plugin._conn = conn
-    agent.on_connect(conn)
-
-    try:
+    async with acp_agent_env(AGENT_DEFAULTS) as env:
+        registry, db, agent, conn = env.registry, env.db, env.agent, env.conn
         init = await agent.initialize(protocol_version=PROTOCOL_VERSION)
         caps = init.agent_capabilities
         assert caps is not None
@@ -177,5 +152,4 @@ async def test_gate_b_session_load_resume_close(tmp_path) -> None:
         await agent.load_session(cwd=cwd, session_id=session_id)
         assert registry.get(channel_id) is not None
         assert len(conn.session_update.await_args_list) == 2
-    finally:
-        await db.close()
+

@@ -18,17 +18,16 @@ Interface pinned here:
 import json
 from unittest.mock import AsyncMock, MagicMock
 
-import aiosqlite
 import pluggy
 import pytest
 
 from corvidae.agent import MAX_TURNS_FALLBACK_MESSAGE
 from corvidae.channel import ChannelConfig
-from corvidae.context import MessageType, unsent_marker_emission
+from corvidae.context import MessageType, unsent_marker_emission, unsent_marker_text
 from corvidae.hooks import _check_hook_arg_binding, create_plugin_manager, hookimpl
 from corvidae.outbound import OutboundMessage, OutboundProgress, OutboundThinking
 from corvidae.trace import mint_trace_id
-from helpers import build_plugin_and_channel, drain, drain_task_queue, sent_texts
+from helpers import acp_agent_env, build_plugin_and_channel, drain, drain_task_queue, sent_texts
 from llm_response_fixtures import (
     _make_mixed_response,
     _make_text_response,
@@ -135,9 +134,6 @@ class TestHookspec:
         params = [p for p in inspect.signature(AgentSpec.should_send_response).parameters if p != "self"]
         assert params == ["channel", "text", "emission", "trace_id", "meta"]
 
-    def test_unsent_message_type(self):
-        assert MessageType.UNSENT.value == "unsent"
-
     def test_impl_defaulting_meta_is_flagged(self):
         pm = create_plugin_manager()
 
@@ -163,35 +159,31 @@ class TestFinalVeto:
         plugin, channel, db = env
         gate = SpyGate(veto={"final"})
         plugin.pm.register(gate, name="spy_gate")
-        plugin._client = _client(_make_text_response("the secret answer"))
+        plugin._client = _client(_make_text_response("the secret answer", reasoning="the answer is 42"))
 
         await _say(plugin, channel)
 
-        # Transports never see it.
+        # Transports never see it, nor its reasoning: the thinking gate is
+        # not even consulted for a withheld response.
         assert sent_texts(plugin.pm, OutboundMessage) == []
+        assert sent_texts(plugin.pm, OutboundThinking) == []
+        assert gate.emissions() == ["final"]
+        # The gate saw exactly what would have been sent.
+        assert gate.calls[-1]["text"] == "the secret answer"
         # The row is stored, tagged UNSENT.
         rows = await _rows(db, channel.id)
-        assistant = [(m, t) for m, t in rows if m.get("role") == "assistant"]
-        assert assistant == [({"role": "assistant", "content": "the secret answer"}, "unsent")]
-        # The window holds the text, tagged, followed by a marker quoting it.
+        assistant = [(m.get("content"), t) for m, t in rows if m.get("role") == "assistant"]
+        assert assistant == [("the secret answer", "unsent")]
+        # The window holds the text, tagged, followed by a marker that does
+        # not repeat it; the marker row is persisted too.
         conv = channel.conversation
-        tagged = [m for m in conv.messages if m.get("role") == "assistant"]
-        assert tagged[0]["content"] == "the secret answer"
-        assert tagged[0]["_message_type"] == MessageType.UNSENT
+        assert conv.messages[-2]["content"] == "the secret answer"
+        assert conv.messages[-2]["_message_type"] == MessageType.UNSENT
         markers = _markers(conv.messages)
-        assert len(markers) == 1
+        assert markers == [conv.messages[-1]]
         assert unsent_marker_emission(markers[0]["content"]) == "final"
         assert "the secret answer" not in markers[0]["content"]
-        assert conv.messages[-1] is markers[0]
-        assert conv.messages[-2] is tagged[0]
-        # The marker row is persisted too (it must survive restart).
-        assert any(
-            t == "context" and unsent_marker_emission(m["content"]) == "final"
-            for m, t in rows
-        )
-        # The gate saw exactly what would have been sent.
-        assert gate.calls[-1]["emission"] == "final"
-        assert gate.calls[-1]["text"] == "the secret answer"
+        assert any(t == "context" and unsent_marker_emission(m["content"]) == "final" for m, t in rows)
 
     async def test_vetoed_final_still_fires_on_agent_response(self, env):
         """Critique stays eligible for withheld responses: on_agent_response
@@ -205,33 +197,82 @@ class TestFinalVeto:
         plugin.pm.ahook.on_agent_response.assert_awaited_once()
         assert plugin.pm.ahook.on_agent_response.await_args.kwargs["response_text"] == "kept to myself"
 
+    async def test_reject_wins_across_gates(self, env):
+        plugin, channel, db = env
+        plugin.pm.register(SpyGate(), name="no_opinion_gate")
+        plugin.pm.register(SpyGate(veto={"final"}), name="vetoing_gate")
+
+        class Accepting:
+            @hookimpl
+            async def should_send_response(self, channel, text, emission, trace_id, meta):
+                return True
+
+        plugin.pm.register(Accepting(), name="accepting_gate")
+        plugin._client = _client(_make_text_response("the secret answer"))
+
+        await _say(plugin, channel)
+
+        assert sent_texts(plugin.pm, OutboundMessage) == []
+
+    async def test_gate_receives_trace_id_and_meta(self, env):
+        """Origin is not a kernel param; the gate reads it from meta."""
+        plugin, channel, db = env
+        gate = SpyGate()
+        plugin.pm.register(gate, name="spy_gate")
+        plugin._client = _client(_make_text_response("reminder done"))
+
+        await plugin.on_notify(
+            channel=channel, source="scheduler", text="time to stretch",
+            tool_call_id=None, meta={"origin": "reminder"},
+        )
+        await drain(plugin, channel)
+
+        call = gate.calls[-1]
+        assert call["emission"] == "final"
+        assert call["trace_id"]
+        assert call["meta"]["origin"] == "reminder"
+        assert call["channel"] is channel
+
+    async def test_dispatching_turn_never_faces_the_final_gate(self, env):
+        plugin, channel, db = env
+        gate = SpyGate()
+        plugin.pm.register(gate, name="spy_gate")
+        tool_calls: list[str] = []
+        _install_tool(plugin, tool_calls)
+        plugin._client = _client(
+            _make_mixed_response("Let me look that up", [_make_tool_call("call-1", "my_tool", {"x": "a"})]),
+            _make_text_response("Found it"),
+        )
+
+        await _say(plugin, channel)
+        await drain_task_queue(plugin)
+        await drain(plugin, channel)
+
+        # The first turn (its tool calls dispatch) fired progress only; the
+        # final firing belongs to the second turn.
+        assert gate.emissions() == ["progress", "final"]
+        assert tool_calls == ["a"]
+
+
+class TestRestart:
     async def test_unsent_row_and_marker_reload_into_window(self, env):
-        """Restart: the reloaded window holds the UNSENT row, tagged, and the
-        marker — window identity across restarts."""
+        """Window identity across restarts: the reloaded window equals the
+        live one, UNSENT tag and marker included."""
         plugin, channel, db = env
         plugin.pm.register(SpyGate(veto={"final"}), name="spy_gate")
         plugin._client = _client(_make_text_response("the secret answer"))
         await _say(plugin, channel)
 
-        live = [
-            {k: v for k, v in m.items() if k != "_db_id"}
-            for m in channel.conversation.messages
-        ]
-
-        persistence = plugin.pm.get_plugin("persistence")
-        reloaded = await persistence.resolve_conversation(channel=channel)
-        reloaded_clean = [{k: v for k, v in m.items() if k != "_db_id"} for m in reloaded]
-        assert reloaded_clean == live
-        unsent = [m for m in reloaded if m["_message_type"] == MessageType.UNSENT]
-        assert [m["content"] for m in unsent] == ["the secret answer"]
-        assert len(_markers(reloaded)) == 1
+        live = [{k: v for k, v in m.items() if k != "_db_id"} for m in channel.conversation.messages]
+        reloaded = await plugin.pm.get_plugin("persistence").resolve_conversation(channel=channel)
+        assert [{k: v for k, v in m.items() if k != "_db_id"} for m in reloaded] == live
 
     async def test_fresh_agent_after_restart_prompts_with_unsent_row(self, env):
         """A restart in miniature: a new Agent and a new registry over the
         same sessions DB. The next LLM call's prompt carries the withheld
         text as the assistant turn, followed by its marker."""
         from corvidae.agent import Agent
-        from corvidae.channel import ChannelConfig, ChannelRegistry
+        from corvidae.channel import ChannelRegistry
 
         plugin, channel, db = env
         plugin.pm.register(SpyGate(veto={"final"}), name="spy_gate")
@@ -261,97 +302,19 @@ class TestFinalVeto:
         assert unsent_marker_emission(prompt[idx + 1]["content"]) == "final"
         assert sent_texts(pm, OutboundMessage)[-1] == "I kept it to myself."
 
-    async def test_build_prompt_includes_unsent_row(self, env):
-        plugin, channel, db = env
-        plugin.pm.register(SpyGate(veto={"final"}), name="spy_gate")
-        plugin._client = _client(_make_text_response("the secret answer"))
-        await _say(plugin, channel)
-
-        prompt = channel.conversation.build_prompt(frozenset())
-        assert {"role": "assistant", "content": "the secret answer"} in prompt
-        # The prompt never ends on the assistant message (PRD §3.1.6).
-        assert prompt[-1]["role"] != "assistant"
-
-    async def test_passed_final_is_sent_and_stored_as_message(self, env):
-        plugin, channel, db = env
-        gate = SpyGate()
-        plugin.pm.register(gate, name="spy_gate")
-        plugin._client = _client(_make_text_response("hi there"))
-
-        await _say(plugin, channel)
-
-        assert sent_texts(plugin.pm, OutboundMessage) == ["hi there"]
-        rows = await _rows(db, channel.id)
-        assert [t for m, t in rows] == ["message", "message"]
-        assert _markers(channel.conversation.messages) == []
-        assert gate.emissions() == ["final"]
-
-    async def test_gate_receives_trace_id_and_meta(self, env):
-        """Origin is not a kernel param; the gate reads it from meta."""
-        plugin, channel, db = env
-        gate = SpyGate()
-        plugin.pm.register(gate, name="spy_gate")
-        plugin._client = _client(_make_text_response("reminder done"))
-
-        await plugin.on_notify(
-            channel=channel, source="scheduler", text="time to stretch",
-            tool_call_id=None, meta={"origin": "reminder"},
-        )
-        await drain(plugin, channel)
-
-        call = gate.calls[-1]
-        assert call["emission"] == "final"
-        assert call["trace_id"]
-        assert call["meta"]["origin"] == "reminder"
-        assert call["channel"] is channel
-
-    async def test_raising_gate_fails_open(self, env, caplog):
-        plugin, channel, db = env
-        plugin.pm.register(SpyGate(raises=True), name="spy_gate")
-        plugin._client = _client(_make_text_response("still delivered"))
-
-        await _say(plugin, channel)
-
-        assert sent_texts(plugin.pm, OutboundMessage) == ["still delivered"]
-        rows = await _rows(db, channel.id)
-        assert "unsent" not in [t for m, t in rows]
-        assert any(
-            "should_send_response" in r.getMessage() and r.exc_info
-            for r in caplog.records
-        )
-
-
-class TestToolCallsResultNeverFacesFinalGate:
-    async def test_dispatching_turn_fires_only_progress(self, env):
-        plugin, channel, db = env
-        gate = SpyGate()
-        plugin.pm.register(gate, name="spy_gate")
-        tool_calls: list[str] = []
-        _install_tool(plugin, tool_calls)
-        plugin._client = _client(
-            _make_mixed_response("Let me look that up", [_make_tool_call("call-1", "my_tool", {"x": "a"})]),
-            _make_text_response("Found it"),
-        )
-
-        await _say(plugin, channel)
-        await drain_task_queue(plugin)
-        await drain(plugin, channel)
-
-        # First turn (tool calls dispatch) fired progress only; the final
-        # firing belongs to the second turn.
-        assert gate.emissions() == ["progress", "final"]
-        assert tool_calls == ["a"]
-
 
 # ---------------------------------------------------------------------------
 # Max-turns branch
 # ---------------------------------------------------------------------------
 
 
+_MAX_TURNS_ZERO = pytest.mark.parametrize(
+    "env", [{"channel_config": ChannelConfig(max_turns=0)}], indirect=True,
+)
+
+
 class TestMaxTurns:
-    @pytest.mark.parametrize(
-        "env", [{"channel_config": ChannelConfig(max_turns=0)}], indirect=True,
-    )
+    @_MAX_TURNS_ZERO
     async def test_tool_calls_stripped_from_row_and_window(self, env):
         plugin, channel, db = env
         gate = SpyGate()
@@ -377,9 +340,7 @@ class TestMaxTurns:
         assert gate.calls[-1]["emission"] == "final"
         assert gate.calls[-1]["text"] == MAX_TURNS_FALLBACK_MESSAGE
 
-    @pytest.mark.parametrize(
-        "env", [{"channel_config": ChannelConfig(max_turns=0)}], indirect=True,
-    )
+    @_MAX_TURNS_ZERO
     async def test_strip_happens_with_no_gate_registered(self, env):
         plugin, channel, db = env
         plugin._client = _client(
@@ -396,9 +357,7 @@ class TestMaxTurns:
         assistant = [m for m in prompt if m["role"] == "assistant"]
         assert isinstance(assistant[0]["content"], str)
 
-    @pytest.mark.parametrize(
-        "env", [{"channel_config": ChannelConfig(max_turns=0)}], indirect=True,
-    )
+    @_MAX_TURNS_ZERO
     async def test_vetoed_max_turns_fallback_is_unsent(self, env):
         plugin, channel, db = env
         plugin.pm.register(SpyGate(veto={"final"}), name="spy_gate")
@@ -421,20 +380,29 @@ class TestMaxTurns:
 # ---------------------------------------------------------------------------
 
 
-class TestProgressVeto:
+def _tool_turn_client():
+    """A progress-text turn with one tool call, then a final with reasoning."""
+    return _client(
+        _make_mixed_response("Let me look that up", [_make_tool_call("call-1", "my_tool", {"x": "a"})]),
+        _make_text_response("Found it", reasoning="hmm"),
+    )
+
+
+async def _run_tool_turn(plugin, channel):
+    await _say(plugin, channel)
+    await drain_task_queue(plugin)
+    await drain(plugin, channel)
+
+
+class TestProgressAndThinkingVetoes:
     async def test_progress_suppressed_tools_dispatch_row_intact(self, env):
         plugin, channel, db = env
         plugin.pm.register(SpyGate(veto={"progress"}), name="spy_gate")
         tool_calls: list[str] = []
         _install_tool(plugin, tool_calls)
-        plugin._client = _client(
-            _make_mixed_response("Let me look that up", [_make_tool_call("call-1", "my_tool", {"x": "a"})]),
-            _make_text_response("Found it"),
-        )
+        plugin._client = _tool_turn_client()
 
-        await _say(plugin, channel)
-        await drain_task_queue(plugin)
-        await drain(plugin, channel)
+        await _run_tool_turn(plugin, channel)
 
         assert sent_texts(plugin.pm, OutboundProgress) == []
         assert tool_calls == ["a"]
@@ -453,12 +421,9 @@ class TestProgressVeto:
         assert prompt[idx + 1]["role"] == "tool"
         assert prompt[idx + 1]["tool_call_id"] == "call-1"
 
-
-class TestThinkingVeto:
     async def test_thinking_suppressed_message_sent(self, env):
         plugin, channel, db = env
-        gate = SpyGate(veto={"thinking"})
-        plugin.pm.register(gate, name="spy_gate")
+        plugin.pm.register(SpyGate(veto={"thinking"}), name="spy_gate")
         plugin._client = _client(_make_text_response("answer", reasoning="pondering deeply"))
 
         await _say(plugin, channel)
@@ -466,14 +431,28 @@ class TestThinkingVeto:
         assert sent_texts(plugin.pm, OutboundThinking) == []
         assert sent_texts(plugin.pm, OutboundMessage) == ["answer"]
         rows = await _rows(db, channel.id)
-        assistant = [(m, t) for m, t in rows if m.get("role") == "assistant"]
-        assert [t for _m, t in assistant] == ["message"]
+        assert [t for m, t in rows if m.get("role") == "assistant"] == ["message"]
         markers = _markers(channel.conversation.messages)
-        assert len(markers) == 1
-        assert unsent_marker_emission(markers[0]["content"]) == "thinking"
+        assert [unsent_marker_emission(m["content"]) for m in markers] == ["thinking"]
         # Reasoning must not outlive reasoning_history: drop in a marker.
         assert "pondering deeply" not in markers[0]["content"]
-        assert "thinking" in gate.emissions()
+
+    async def test_both_vetoes_reload_identically(self, env):
+        plugin, channel, db = env
+        plugin.pm.register(SpyGate(veto={"progress", "thinking"}), name="spy_gate")
+        _install_tool(plugin, [])
+        plugin._client = _tool_turn_client()
+        await _run_tool_turn(plugin, channel)
+
+        live = [{k: v for k, v in m.items() if k != "_db_id"} for m in channel.conversation.messages]
+        reloaded = await plugin.pm.get_plugin("persistence").resolve_conversation(channel=channel)
+        # reasoning_history: drop strips reasoning from the live window only.
+        reloaded_clean = [
+            {k: v for k, v in m.items() if k not in ("_db_id", "reasoning_content")}
+            for m in reloaded
+        ]
+        assert reloaded_clean == live
+        assert [unsent_marker_emission(m["content"]) for m in _markers(reloaded)] == ["progress", "thinking"]
 
 
 class TestErrorVeto:
@@ -489,44 +468,64 @@ class TestErrorVeto:
 
         assert sent_texts(plugin.pm, OutboundMessage) == []
         assert gate.emissions() == ["error"]
+        assert gate.calls[0]["trace_id"]
         rows = await _rows(db, channel.id)
         assert [m.get("role") for m, t in rows] == ["user"]
         assert _markers(channel.conversation.messages) == []
 
-    async def test_error_fallback_passes_through_gate(self, env):
-        plugin, channel, db = env
-        gate = SpyGate()
-        plugin.pm.register(gate, name="spy_gate")
-        client = MagicMock()
-        client.chat = AsyncMock(side_effect=RuntimeError("llm down"))
-        plugin._client = client
-
-        await _say(plugin, channel)
-
-        texts = sent_texts(plugin.pm, OutboundMessage)
-        assert len(texts) == 1
-        assert gate.calls[0]["text"] == texts[0]
-        assert gate.calls[0]["trace_id"]
-
 
 # ---------------------------------------------------------------------------
-# No gate registered: today's behavior
+# Failure modes and the no-opinion baseline
 # ---------------------------------------------------------------------------
 
 
-class TestNoGate:
-    async def test_final_progress_thinking_all_sent(self, env):
+class TestFailOpen:
+    @pytest.mark.parametrize("emission", ["final", "progress", "thinking", "error"])
+    async def test_raising_gate_sends_every_emission(self, env, emission, caplog):
         plugin, channel, db = env
-        tool_calls: list[str] = []
-        _install_tool(plugin, tool_calls)
-        plugin._client = _client(
-            _make_mixed_response("Let me look that up", [_make_tool_call("call-1", "my_tool", {"x": "a"})]),
-            _make_text_response("Found it", reasoning="hmm"),
+        plugin.pm.register(SpyGate(raises=True), name="spy_gate")
+        _install_tool(plugin, [])
+        if emission == "error":
+            client = MagicMock()
+            client.chat = AsyncMock(side_effect=RuntimeError("llm down"))
+            plugin._client = client
+        else:
+            plugin._client = _tool_turn_client()
+
+        await _run_tool_turn(plugin, channel)
+
+        sent = {
+            "final": (OutboundMessage, ["Found it"]),
+            "progress": (OutboundProgress, ["Let me look that up"]),
+            "thinking": (OutboundThinking, ["hmm"]),
+        }
+        if emission == "error":
+            assert len(sent_texts(plugin.pm, OutboundMessage)) == 1
+        else:
+            kind, texts = sent[emission]
+            assert sent_texts(plugin.pm, kind) == texts
+        assert _markers(channel.conversation.messages) == []
+        assert "unsent" not in [t for m, t in await _rows(db, channel.id)]
+        assert any(
+            "should_send_response" in r.getMessage() and emission in r.getMessage() and r.exc_info
+            for r in caplog.records
         )
 
-        await _say(plugin, channel)
-        await drain_task_queue(plugin)
-        await drain(plugin, channel)
+
+class TestNoOpinion:
+    """No gate registered, or one with no opinion: everything is sent and
+    stored as today."""
+
+    @pytest.mark.parametrize("with_gate", [False, True], ids=["no-gate", "no-opinion-gate"])
+    async def test_final_progress_thinking_all_sent(self, env, with_gate):
+        plugin, channel, db = env
+        gate = SpyGate()
+        if with_gate:
+            plugin.pm.register(gate, name="spy_gate")
+        _install_tool(plugin, [])
+        plugin._client = _tool_turn_client()
+
+        await _run_tool_turn(plugin, channel)
 
         assert sent_texts(plugin.pm, OutboundProgress) == ["Let me look that up"]
         assert sent_texts(plugin.pm, OutboundThinking) == ["hmm"]
@@ -534,89 +533,8 @@ class TestNoGate:
         rows = await _rows(db, channel.id)
         assert {t for m, t in rows} == {"message"}
         assert _markers(channel.conversation.messages) == []
-
-
-class TestReviewGaps:
-    async def test_vetoed_final_withholds_its_reasoning(self, env):
-        plugin, channel, db = env
-        gate = SpyGate(veto={"final"})
-        plugin.pm.register(gate, name="spy_gate")
-        plugin._client = _client(_make_text_response("the answer", reasoning="the answer is 42"))
-
-        await _say(plugin, channel)
-
-        assert sent_texts(plugin.pm, OutboundThinking) == []
-        assert sent_texts(plugin.pm, OutboundMessage) == []
-        # The thinking gate is not consulted for a withheld response.
-        assert gate.emissions() == ["final"]
-        assert [unsent_marker_emission(m["content"]) for m in _markers(channel.conversation.messages)] == ["final"]
-
-    async def test_progress_veto_reloads_identically(self, env):
-        plugin, channel, db = env
-        plugin.pm.register(SpyGate(veto={"progress", "thinking"}), name="spy_gate")
-        tool_calls: list[str] = []
-        _install_tool(plugin, tool_calls)
-        plugin._client = _client(
-            _make_mixed_response("Let me look that up", [_make_tool_call("call-1", "my_tool", {"x": "a"})]),
-            _make_text_response("Found it", reasoning="hmm"),
-        )
-        await _say(plugin, channel)
-        await drain_task_queue(plugin)
-        await drain(plugin, channel)
-
-        live = [{k: v for k, v in m.items() if k != "_db_id"} for m in channel.conversation.messages]
-        reloaded = await plugin.pm.get_plugin("persistence").resolve_conversation(channel=channel)
-        # reasoning_history: drop strips reasoning from the live window only.
-        reloaded_clean = [
-            {k: v for k, v in m.items() if k not in ("_db_id", "reasoning_content")}
-            for m in reloaded
-        ]
-        assert reloaded_clean == live
-        assert [unsent_marker_emission(m["content"]) for m in _markers(reloaded)] == ["progress", "thinking"]
-
-    @pytest.mark.parametrize("emission", ["progress", "thinking", "error"])
-    async def test_raising_gate_fails_open_for_every_emission(self, env, emission):
-        plugin, channel, db = env
-        plugin.pm.register(SpyGate(raises=True), name="spy_gate")
-        tool_calls: list[str] = []
-        _install_tool(plugin, tool_calls)
-        if emission == "error":
-            client = MagicMock()
-            client.chat = AsyncMock(side_effect=RuntimeError("llm down"))
-            plugin._client = client
-        else:
-            plugin._client = _client(
-                _make_mixed_response("Let me look that up", [_make_tool_call("call-1", "my_tool", {"x": "a"})]),
-                _make_text_response("Found it", reasoning="hmm"),
-            )
-        await _say(plugin, channel)
-        await drain_task_queue(plugin)
-        await drain(plugin, channel)
-
-        if emission == "progress":
-            assert sent_texts(plugin.pm, OutboundProgress) == ["Let me look that up"]
-        elif emission == "thinking":
-            assert sent_texts(plugin.pm, OutboundThinking) == ["hmm"]
-        else:
-            assert len(sent_texts(plugin.pm, OutboundMessage)) == 1
-        assert _markers(channel.conversation.messages) == []
-
-    async def test_reject_wins_across_gates(self, env):
-        plugin, channel, db = env
-        plugin.pm.register(SpyGate(), name="no_opinion_gate")
-        plugin.pm.register(SpyGate(veto={"final"}), name="vetoing_gate")
-
-        class Accepting:
-            @hookimpl
-            async def should_send_response(self, channel, text, emission, trace_id, meta):
-                return True
-
-        plugin.pm.register(Accepting(), name="accepting_gate")
-        plugin._client = _client(_make_text_response("the secret answer"))
-
-        await _say(plugin, channel)
-
-        assert sent_texts(plugin.pm, OutboundMessage) == []
+        if with_gate:
+            assert gate.emissions() == ["progress", "final", "thinking"]
 
 
 # ---------------------------------------------------------------------------
@@ -638,7 +556,6 @@ class TestReplay:
 
     def test_web_history_holds_back_suppressed_progress_and_thinking(self):
         from corvidae.channels.web import WebPlugin
-        from corvidae.context import unsent_marker_text
 
         call = {"id": "call-1", "function": {"name": "my_tool", "arguments": "{}"}}
         rows = [
@@ -660,7 +577,6 @@ class TestReplay:
 
     def test_acp_markers_after_reads_the_whole_context_run(self):
         from corvidae.channels.acp import _markers_after
-        from corvidae.context import unsent_marker_text
 
         history = [
             {"role": "assistant", "content": "Let me look", "_message_type": MessageType.MESSAGE},
@@ -674,34 +590,9 @@ class TestReplay:
     async def test_acp_load_session_skips_unsent_rows(self, tmp_path):
         from acp import PROTOCOL_VERSION
 
-        from corvidae.channel import ChannelRegistry
-        from corvidae.channels.acp import AcpPlugin, CorvidaeAcpAgent
-        from corvidae.persistence import PersistencePlugin, init_db
-
-        pm = create_plugin_manager()
-        registry = ChannelRegistry({"system_prompt": "x", "max_context_tokens": 8000})
-        pm.register(registry, name="registry")
-        persistence = PersistencePlugin(pm)
-        db = await aiosqlite.connect(":memory:")
-        await init_db(db)
-        persistence.db = db
-        pm.register(persistence, name="persistence")
-        plugin = AcpPlugin()
-        pm.register(plugin, name="acp")
-        await plugin.on_init(pm=pm, config={"_acp_mode": True})
-        agent = CorvidaeAcpAgent(
-            agent_info={"name": "corvidae", "title": "Corvidae", "version": "0.0.1"},
-            plugin=plugin,
-        )
-        conn = MagicMock()
-        conn.session_update = AsyncMock()
-        plugin._conn = conn
-        agent.on_connect(conn)
-        try:
-            await agent.initialize(protocol_version=PROTOCOL_VERSION)
+        async with acp_agent_env({"system_prompt": "x", "max_context_tokens": 8000}) as acp:
+            await acp.agent.initialize(protocol_version=PROTOCOL_VERSION)
             session_id = "unsentreplay1"
-            from corvidae.context import unsent_marker_text
-
             for role, text, ts, mtype in (
                 ("user", "visible-user", 1.0, "message"),
                 ("assistant", "never-sent", 2.0, "unsent"),
@@ -710,16 +601,14 @@ class TestReplay:
                 ("system", unsent_marker_text("progress", "suppressed-progress"), 3.5, "context"),
                 ("assistant", "visible-answer", 4.0, "message"),
             ):
-                await db.execute(
+                await acp.db.execute(
                     "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
                     "VALUES (?, ?, ?, ?)",
                     (f"acp:{session_id}", json.dumps({"role": role, "content": text}), ts, mtype),
                 )
-            await db.commit()
+            await acp.db.commit()
 
-            await agent.load_session(cwd=str(tmp_path), session_id=session_id)
+            await acp.agent.load_session(cwd=str(tmp_path), session_id=session_id)
 
-            texts = [c.kwargs["update"].content.text for c in conn.session_update.await_args_list]
+            texts = [c.kwargs["update"].content.text for c in acp.conn.session_update.await_args_list]
             assert texts == ["visible-user", "visible-answer"]
-        finally:
-            await db.close()

@@ -1432,6 +1432,7 @@ class TestStartupPluginSetLogging:
 # The plugins the cognition extra provides, by entry-point name.
 _COGNITION_ENTRY_POINTS = {
     "memory", "memory_tools", "funnel", "outcome_log", "appraisal", "critique",
+    "gates",
 }
 
 

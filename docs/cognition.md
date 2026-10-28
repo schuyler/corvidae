@@ -413,12 +413,11 @@ nothing.
   never writes the outcome log; the vetoing plugin does.
 - `error` and anything else: no opinion.
 
-A withheld final is stored as `MessageType.UNSENT`: the window keeps it,
-across restarts, with a not-sent marker, and no transport sees it
-([design.md](design.md#the-output-gate)). `on_agent_response` still fires,
-so a withheld `user` or `reminder` final stays eligible for critique, and
-the critique provenance probe doesn't count a withheld row as a record of
-anything said. `recall_raw` labels withheld rows `(withheld, not sent)`.
+What the kernel does with a withheld final is in
+[design.md](design.md#the-output-gate). On the cognition side, critique still
+judges a withheld `user` or `reminder` final, its provenance probe doesn't
+count a withheld row as a record of anything said, and `recall_raw` labels
+withheld rows `(withheld, not sent)`.
 
 Every tunable resolves through `resolve_tunable` at decision time, so a
 `set_settings` override or a hot config reload applies on the next

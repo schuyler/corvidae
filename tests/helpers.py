@@ -1,6 +1,7 @@
 """Shared async helper functions for integration tests."""
 
 import asyncio
+import contextlib
 
 import aiosqlite
 
@@ -164,3 +165,44 @@ def window_of(channel_id, rowids, summary=False, contents=None):
             "_db_id": rid, "_message_type": MessageType.MESSAGE,
         })
     return conv
+
+
+@contextlib.asynccontextmanager
+async def acp_agent_env(agent_defaults: dict):
+    """An AcpPlugin and CorvidaeAcpAgent over an in-memory sessions DB, with
+    a mocked client connection (``conn.session_update`` is an AsyncMock).
+
+    Yields a SimpleNamespace with pm, registry, db, plugin, agent and conn;
+    closes the DB on exit. Callers still call ``agent.initialize``.
+    """
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+
+    from corvidae.channel import ChannelRegistry
+    from corvidae.channels.acp import AcpPlugin, CorvidaeAcpAgent
+    from corvidae.hooks import create_plugin_manager
+    from corvidae.persistence import PersistencePlugin, init_db
+
+    pm = create_plugin_manager()
+    registry = ChannelRegistry(agent_defaults)
+    pm.register(registry, name="registry")
+    persistence = PersistencePlugin(pm)
+    db = await aiosqlite.connect(":memory:")
+    await init_db(db)
+    persistence.db = db
+    pm.register(persistence, name="persistence")
+    plugin = AcpPlugin()
+    pm.register(plugin, name="acp")
+    await plugin.on_init(pm=pm, config={"_acp_mode": True})
+    agent = CorvidaeAcpAgent(
+        agent_info={"name": "corvidae", "title": "Corvidae", "version": "0.0.1"},
+        plugin=plugin,
+    )
+    conn = MagicMock()
+    conn.session_update = AsyncMock()
+    plugin._conn = conn
+    agent.on_connect(conn)
+    try:
+        yield SimpleNamespace(pm=pm, registry=registry, db=db, plugin=plugin, agent=agent, conn=conn)
+    finally:
+        await db.close()

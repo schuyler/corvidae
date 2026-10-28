@@ -830,16 +830,9 @@ For `transform_display_text` and `transform_tool_result` (wrapper chain hooks), 
 
 ## Output gating
 
-`should_send_response` is the outbound mirror of `should_process_message`. It fires before each emission, and `emission` says which:
+`should_send_response(channel, text, emission, trace_id, meta)` is the outbound mirror of `should_process_message`: return `False` to withhold, `None` for no opinion. `emission` is `final` (the reply), `progress` (text alongside dispatching tool calls), `thinking` (reasoning) or `error` (the LLM-error fallback); treat anything else as no opinion. `text` is exactly what would be sent. Where each fires and what a veto does to the stored row and the window is in [design.md](design.md#the-output-gate); in short, a vetoed final is kept in the window as `MessageType.UNSENT` and never sent, and any other veto suppresses only that send.
 
-| `emission` | Fires | A veto (any `False`) |
-|---|---|---|
-| `final` | between generation and persistence, only when the result's tool calls won't dispatch (a text reply, or the max-turns fallback) | stores the assistant row as `MessageType.UNSENT`, skips the send, still fires `on_agent_response`, appends a not-sent marker |
-| `progress` | before the text sent alongside dispatching tool calls | suppresses that send; the row and tool dispatch are unchanged; appends a marker |
-| `thinking` | before `OutboundThinking` (skipped entirely when the final was vetoed) | suppresses that send; appends a marker |
-| `error` | before the LLM-error fallback reply | suppresses that send; nothing is persisted |
-
-`text` is exactly what would be sent. Treat an unknown `emission` as no opinion. `meta` is the trace's metadata dict: origin is not a kernel parameter, so read `meta["origin"]` if your policy depends on it, and record a trace you saw in `on_message_admitted` if you need to recognise user exchanges.
+Origin is not a kernel parameter: read `meta["origin"]` if your policy depends on it, and record the traces you see in `on_message_admitted` if you need to recognise user exchanges.
 
 ```python
 class QuietHoursPlugin(CorvidaePlugin):
@@ -851,7 +844,7 @@ class QuietHoursPlugin(CorvidaePlugin):
         return None
 ```
 
-An `UNSENT` row stays in the window and reloads into it after a restart, followed by its marker, so the model knows the channel didn't see it. No transport sees it, including web and ACP history replay. If you write a transport with history replay, skip `message_type == "unsent"` rows, and use `corvidae.context.unsent_marker_emission(content)` to hold back progress or thinking a marker says was suppressed. Cognition's `GatePlugin` is the reference implementation ([cognition.md](cognition.md#gateplugin)).
+If you write a transport with history replay, skip `message_type == "unsent"` rows, and use `corvidae.context.unsent_marker_emission(content)` to hold back progress or thinking that a marker says was suppressed. Cognition's `GatePlugin` is the reference implementation ([cognition.md](cognition.md#gateplugin)).
 
 ## Async considerations
 
