@@ -606,10 +606,13 @@ deciding only what to newly append and in what order.
    threshold at `critique.sample_below_rate` as the false-negative bound,
    and runs each lens as a fork or a standalone schema-constrained call on
    the critic client.
-2. The provenance gate is mechanical: a claim about the past, weak
-   retrieval, and an empty `message_fts` probe over the raw dialog, both
-   tiers checked before objecting that no record exists; generator
-   confidence is never evidence.
+2. The provenance check runs on any claim about the past, independent of
+   the appraisal scores. Stage-2 appraisal (a model) lists the claims; the
+   code fetches the evidence (the memory snapshot and the closest earlier
+   raw-dialog messages within the channel's memory scope, the exchange's
+   own rows excluded); the provenance critic (a model) judges whether any
+   record supports each claim. Generator confidence is never evidence
+   (revised in #155 from a mechanical regex-and-keyword gate).
 3. Eligibility is by propagated origin: `user` and `reminder` exchanges
    are judged, against the stored originating message; `critique`,
    `heartbeat`, and `task` exchanges are exempt, unbypassable by tool use.

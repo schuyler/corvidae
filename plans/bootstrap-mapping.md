@@ -243,12 +243,20 @@ deliberation** — the organizing principle named in `agent-directions.md`.)
 
 Two corollaries discipline the design:
 
-- **Epistemic gates stay mechanical.** Affect-based triggering cannot catch a
-  calm, pleasant confabulation. The provenance check (does this response
-  assert past events that match no retrieved record?) triggers on a
-  mechanical condition — claims-about-the-past ∧ weak-or-absent retrieval —
-  regardless of appraisal scores. The appraisal gates the *stylistic* lenses,
-  never the *correctness* gate.
+- **Epistemic gates stay independent of affect.** Affect-based triggering
+  cannot catch a calm, pleasant confabulation. The provenance check (does
+  this response assert past events that match no record?) triggers on the
+  presence of claims about the past, regardless of the appraisal scores.
+  The appraisal scores gate the *stylistic* lenses, never the *correctness*
+  check.
+  *Revised in #155:* this once read "Epistemic gates stay mechanical", and
+  the detector was a regex list with a keyword probe. That couldn't judge
+  language: it found the reply's own row, counted "the" as evidence, and
+  missed rewording and other languages. A model now makes both language
+  judgments. Stage-2 appraisal lists the claims; the provenance critic
+  judges support against records it is shown. Only evidence retrieval is
+  mechanical. The concern behind the old wording stands: the generator's
+  confidence never substitutes for a record.
 - **Thresholds are learned from outcomes, not set by vibes.** Every gated
   firing produces a label (did the critic actually object?), so the gate
   self-calibrates: scores that repeatedly trigger empty critiques raise the

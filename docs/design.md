@@ -1216,7 +1216,8 @@ starts ("the whole conversation above", "what follows the summary at its
 top", or a quote of the first new message when rows below the watermark
 are still in view). Appraisal appends the exchange quotes and the
 retrieval profile. Critique appends the exchange quotes, and the
-provenance lens still passes the CONTEXT snapshot inline.
+provenance lens still passes the CONTEXT snapshot inline, along with each
+past claim and its closest earlier messages.
 
 **Configuration** (`agent.forks`, validated at startup and on reload by
 `validate_agent_config`):

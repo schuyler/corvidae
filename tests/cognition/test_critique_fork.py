@@ -1,7 +1,7 @@
 """Critique lenses as forks of the window (GitHub issue #51, phase 5):
 each lens forks while the exchange is in the window (checked per lens),
-the provenance lens keeps its snapshot inline, and a lens whose fork
-misses falls back alone to its standalone call."""
+the provenance lens keeps its snapshot and evidence inline, and a lens whose
+fork misses falls back alone to its standalone call."""
 
 import json
 
@@ -17,8 +17,15 @@ FORK_VERDICT = json.dumps({"objections": [{"claim": "it was Tuesday", "objection
 QUESTION, RESPONSE = "when is the meeting?", "It was Tuesday, as you said."
 
 
+EVIDENCE = [{"claim": "the meeting was Tuesday", "candidates": [{
+    "rowid": 3, "channel_id": "test:critique", "role": "user",
+    "content": "let's meet Monday", "timestamp": "2026-10-01 09:00 UTC",
+    "message_type": "message",
+}]}]
+
+
 async def _run(tmp_path, agent, lenses, window_rowids=(7, 8), rowid=7, config=None,
-               overrides=None, snapshot=None):
+               overrides=None, snapshot=None, evidence=None):
     """Run one critique task for exchange "k"; returns (env, recorded outcome)."""
     env = await build_critique(tmp_path, chat_text=EMPTY_VERDICT, config=config)
     env.pm.register(agent, name="agent")
@@ -29,23 +36,35 @@ async def _run(tmp_path, agent, lenses, window_rowids=(7, 8), rowid=7, config=No
         await env.outcome.update_exchange("k", provenance_snapshot=json.dumps([{"content": snapshot}]))
     await env.plugin.on_message_persisted(
         channel=env.channel, trace_id="k", rowid=rowid, text=QUESTION, meta={})
-    await env.plugin._run_critique(env.channel, "k", QUESTION, RESPONSE, lenses, False)
-    outcome = (await _read_outcomes(env.db, "k"))["critique"]
+    await env.plugin._run_critique(env.channel, "k", QUESTION, RESPONSE, lenses, False,
+                                   evidence=evidence)
+    outcome = (await _read_outcomes(env.db, "k"))["provenance" if evidence else "critique"]
     await _teardown(env)
     return env, outcome
 
 
 async def test_each_lens_forks(tmp_path):
     agent = FakeForkAgent({"critique"}, text=FORK_VERDICT)
-    env, outcome = await _run(tmp_path, agent, ["predictive", "provenance"], snapshot="memory: Monday")
+    env, outcome = await _run(tmp_path, agent, ["predictive", "constrained"])
     assert env.stub.chat_calls == []
-    for call, lens in zip(agent.calls, ["predictive", "provenance"]):
+    for call, lens in zip(agent.calls, ["predictive", "constrained"]):
         assert call["instruction"].startswith(DEFAULT_FORK_PROMPTS[lens])
         assert f"«{QUESTION}»" in call["instruction"] and f"«{RESPONSE}»" in call["instruction"]
         assert (call["cut"], call["extra_body"]) == (None, OBJECTION_EXTRA_BODY)
         assert (call["attribution"]["stage"], call["attribution"]["trace_id"]) == ("critique", "k")
-    assert "memory: Monday" in agent.calls[1]["instruction"]
     assert outcome["objections"] == 2
+
+
+async def test_provenance_fork_carries_snapshot_and_evidence(tmp_path):
+    agent = FakeForkAgent({"critique"}, text=FORK_VERDICT)
+    env, outcome = await _run(tmp_path, agent, ["provenance"], snapshot="memory: Monday",
+                              evidence=EVIDENCE)
+    [call] = agent.calls
+    assert call["instruction"].startswith(DEFAULT_FORK_PROMPTS["provenance"])
+    assert "memory: Monday" in call["instruction"]
+    assert "the meeting was Tuesday" in call["instruction"]
+    assert "let's meet Monday" in call["instruction"]
+    assert outcome == {"claims": 1, "candidates": 1, "objections": 1}
 
 
 @pytest.mark.parametrize("agent,window_rowids,rowid", [

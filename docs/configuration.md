@@ -227,8 +227,7 @@ The persona is allowed to tune its own gates by default — a deliberate operato
 | `critique.provenance.enabled` | The correctness gate — a prompt-injected "stop second-guessing yourself" must not be able to disable the confabulation check. |
 | `critique.sample_below_rate` | The standing experiment's integrity — an agent tuning its own sampling to zero blinds the critique false-negative bound. |
 | `critique.prompt.provenance`, `critique.prompt.adversarial`, `critique.prompt.constrained`, `critique.prompt.predictive` | These are the critic's *system prompts*. An agent that can rewrite its own critic's instructions has no critic. |
-| `appraisal.stage2_prompt` | Same shape: the stage-2 appraisal system prompt. |
-| `critique.provenance.weak_score`, `critique.provenance.max_terms` | The probe needs every claim term in one earlier row, so fewer terms make a record easier to find. `max_terms` of 1 lets any earlier row sharing one content word suppress the gate, and 0 turns the raw-log tier off outright. A `weak_score` of 0 stops the gate firing whenever memory retrieved anything. Each one guts the gate without touching `enabled`. |
+| `appraisal.stage2_prompt` | Same shape: the stage-2 appraisal system prompt. It is also where past claims are detected for the provenance check, so a prompt that never lists any switches the confabulation check off without touching `critique.provenance.enabled`. |
 | `gate.engagement.enforce`, `gate.send.enforce` | An injected message should not be able to silence the agent wholesale (enforce engagement with a threshold of 1.0) or un-silence it (turn the decide gate off). |
 | `gate.engagement.threshold`, `gate.send.min_salience` | The same lever by other means: a threshold above 1.0 rejects or withholds everything the gate covers once enforcement is on; 0 turns the gate off. |
 
@@ -237,7 +236,7 @@ These are recommendations, not hardcoded blocks: `set_settings` writes are chann
 The complete set of runtime-tunable keys (anything passed to `resolve_tunable`) as of this writing:
 
 - `appraisal.novelty.no_probe_default`, `appraisal.prior.w_novelty`, `appraisal.prior.w_stakes`, `appraisal.prior.w_valence`, `appraisal.probe.budget_ms`, `appraisal.probe.max_tokens`, `appraisal.probe.rank_scale`, `appraisal.stage2_prompt`, `appraisal.weights.commitment`, `appraisal.weights.disagreement`, `appraisal.weights.imperative`, `appraisal.weights.novelty`, `appraisal.weights.question`
-- `critique.lens.ambiguity`, `critique.lens.commitment`, `critique.lens.disagreement`, `critique.lens.neg_valence`, `critique.prompt.<lens>`, `critique.provenance.enabled`, `critique.provenance.max_terms`, `critique.provenance.weak_score`, `critique.sample_below_rate`
+- `critique.lens.ambiguity`, `critique.lens.commitment`, `critique.lens.disagreement`, `critique.lens.neg_valence`, `critique.prompt.<lens>`, `critique.provenance.enabled`, `critique.sample_below_rate`
 - `gate.engagement.enforce`, `gate.engagement.threshold`, `gate.send.allow_progress`, `gate.send.allow_thinking`, `gate.send.enforce`, `gate.send.min_salience`
 
 The fork instruction keys (`appraisal.stage2_fork_prompt`, `critique.fork_prompt.<lens>`) are deliberately not on that list: they are read from config only, so they need no `immutable_settings` entry.
@@ -262,15 +261,9 @@ Requires the cognition extra (`--extra cognition` on your `uv sync` line; see [c
 | `appraisal.weights.commitment` | `0.20` | Salience weight for numbers/commitment density. |
 | `appraisal.weights.imperative` | `0.10` | Salience weight for imperative markers (feeds salience only, not the vector). |
 
-The provenance gate's keys ([cognition.md](cognition.md#critiqueplugin-the-provenance-gate-packagescorvidae-cognitioncorvidae_cognitioncritiquepy) has what the gate does):
+`critique.provenance.enabled` (default `true`) switches the provenance check; it has no other tunables. Stage-2 appraisal detects the past claims and the provenance critic judges them, so the check needs the `appraisal` plugin. See [cognition.md](cognition.md#critiqueplugin-the-provenance-check-packagescorvidae-cognitioncorvidae_cognitioncritiquepy).
 
-| Key | Default | Description |
-|-----|---------|-------------|
-| `critique.provenance.enabled` | `true` | Run the provenance gate at all. |
-| `critique.provenance.weak_score` | `0.4` | Retrieval counts as weak, and the raw-log probe runs, when memory had no hits or its top score is below this. |
-| `critique.provenance.max_terms` | `8` | Cap on the claim terms the `message_fts` probe matches. A record is one earlier row holding *every* term, so lowering it makes a record easier to find and the gate fire less. `0` turns the probe off, and the gate never fires. |
-
-*(The other `critique.*` tunable keys are not individually tabulated here; the complete list is under "Runtime-tunable gate parameters" above.)*
+*(The `critique.*` tunable keys are not individually tabulated here; the complete list is under "Runtime-tunable gate parameters" above.)*
 
 #### `gate.*` — engagement and decide gates
 

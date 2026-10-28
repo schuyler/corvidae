@@ -77,8 +77,6 @@ agent:
   #   # Recommended additions for multi-speaker channels with untrusted
   #   # participants (see docs/configuration.md "Runtime-tunable gate parameters"):
   #   # - critique.provenance.enabled
-  #   # - critique.provenance.weak_score
-  #   # - critique.provenance.max_terms
   #   # - critique.sample_below_rate
   #   # - critique.prompt.provenance     # the critic's own system prompts
   #   # - critique.prompt.adversarial

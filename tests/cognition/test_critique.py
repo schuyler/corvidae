@@ -1,24 +1,21 @@
-"""RED tests for WP2.7 — CritiquePlugin.
+"""Tests for CritiquePlugin (WP2.7; the provenance check redesigned in #155).
 
-Per plans/implementation/phase-2.md WP2.7:
 - provenance snapshot of CONTEXT messages under the trace id
   (before_agent_turn);
 - eligibility by PROPAGATED origin (trap #3): user/reminder eligible;
-  critique/heartbeat/task exempt (the recursion brake); a verdict-triggered
-  tool-using turn ends exempt; a user exchange ending on a tool-result turn is
-  critiqued against the original user text;
-- lens selection from the appraisal vector (predictive/constrained/adversarial)
-  with below-threshold sampling via an injectable RNG, marked in the outcome;
-- the mechanical two-tier provenance gate (past-claim detector ∧ weak retrieval
-  ∧ empty message_fts) firing independently of appraisal scores;
-- silent execution: empty verdict → no on_notify, outcome recorded; non-empty →
-  funnel registration + one stub, verdict as framed CONTEXT on the next turn;
+  critique/heartbeat/task exempt (the recursion brake); a user exchange
+  ending on a tool-result turn is critiqued against the original user text;
+- stylistic lens selection from the appraisal vector
+  (predictive/constrained/adversarial) with below-threshold sampling via an
+  injectable RNG, marked in the outcome;
+- the provenance check (#155): stage-2 appraisal (a model) lists the
+  reply's claims about the past; critique fetches the closest earlier
+  messages for each, within the channel's memory scope and before the
+  exchange; the provenance critic (a model) judges support. No regex or
+  word list judges language anywhere on that path;
+- silent execution: empty verdict -> no on_notify, outcome recorded;
+  non-empty -> funnel registration + one stub;
 - runtime-tunable thresholds via channel.runtime_overrides (directive 2).
-
-Detector pattern spec (WP2.7 point 4): the past-claim detector fires on the
-first-person-recall / past-assertion patterns in corvidae.critique.
-PAST_CLAIM_PATTERNS; the message_fts key-term extraction caps at
-critique.provenance.max_terms word tokens.
 """
 
 import asyncio
@@ -70,6 +67,7 @@ class FakeAppraisal(CorvidaePlugin):
         # AppraisalPlugin owns (§1.4); CritiquePlugin reads it via
         # get_originating_text with a request_text fallback.
         self._originating_text: dict[str, str] = {}
+        self.stage2_listeners: list = []
 
     async def get_appraisal(self, trace_id):
         return self._stage1
@@ -79,6 +77,10 @@ class FakeAppraisal(CorvidaePlugin):
 
     def get_originating_text(self, trace_id):
         return self._originating_text.get(trace_id)
+
+    def add_stage2_listener(self, callback):
+        # CritiquePlugin registers here to hear the stage-2 past_claims.
+        self.stage2_listeners.append(callback)
 
 
 class FixedRng:
@@ -258,88 +260,6 @@ class TestSessionDbBaseDirResolution:
 
 
 # ---------------------------------------------------------------------------
-# 0. Pure detector units (part of the red-test spec)
-# ---------------------------------------------------------------------------
-
-
-class TestPastClaimDetector:
-    def test_fires_on_recall_patterns(self):
-        from corvidae_cognition.critique import is_past_claim
-        assert is_past_claim("You told me the deadline was Friday.")
-        assert is_past_claim("I remember we discussed the budget.")
-        assert is_past_claim("As I mentioned earlier, the plan changed.")
-
-    def test_no_fire_on_plain_statement(self):
-        from corvidae_cognition.critique import is_past_claim
-        assert not is_past_claim("The weather is nice today.")
-        assert not is_past_claim("")
-
-    def test_extract_terms_caps_and_dedupes(self):
-        from corvidae_cognition.critique import _extract_terms
-        terms = _extract_terms("alpha beta alpha gamma delta epsilon zeta eta theta", 3)
-        assert terms == ["alpha", "beta", "gamma"]
-
-    def test_extract_terms_drops_stopwords_and_short_tokens(self):
-        # #155 cause 2: "I" and "the" match nearly every row, so they are
-        # no evidence of a record.
-        from corvidae_cognition.critique import _extract_terms
-        assert _extract_terms("I like the weather today", 8) == ["weather", "today"]
-
-    def test_extract_terms_keeps_short_tokens_with_digits(self):
-        from corvidae_cognition.critique import _extract_terms
-        assert _extract_terms("The meeting is at 3 in room 4b", 8) == [
-            "meeting", "3", "room", "4b",
-        ]
-
-    def test_extract_terms_prefers_the_claim_sentence(self):
-        # Terms come from the sentence is_past_claim matched, minus the
-        # recall phrase and its framing words, not from the whole reply.
-        from corvidae_cognition.critique import _extract_terms
-        text = (
-            "Sure thing. As I mentioned earlier, the quarterly audit deadline "
-            "is Thursday. Let me know if anything changes."
-        )
-        assert _extract_terms(text, 8) == ["quarterly", "audit", "deadline", "Thursday"]
-
-    def test_extract_terms_claim_before_the_recall_phrase(self):
-        from corvidae_cognition.critique import _extract_terms
-        assert _extract_terms("The deadline is Thursday, as I mentioned.", 8) == [
-            "deadline", "Thursday",
-        ]
-
-    def test_extract_terms_falls_back_to_whole_text(self):
-        # A claim sentence with no content words ("As I said.") leaves the
-        # claim in a neighbouring sentence, so the whole reply is used.
-        from corvidae_cognition.critique import _extract_terms
-        assert _extract_terms("As I said. The budget is 5k.", 8) == ["budget", "5k"]
-
-    def test_extract_terms_splits_on_underscores_like_fts5(self):
-        # unicode61 treats "_" as a separator: "___" would be an empty
-        # phrase that matches nothing and empties every AND probe.
-        from corvidae_cognition.critique import _extract_terms
-        assert _extract_terms("You told me the API_KEY field is ___ here.", 8) == [
-            "API", "KEY", "field",
-        ]
-
-    def test_extract_terms_breaks_after_a_closing_quote(self):
-        from corvidae_cognition.critique import _extract_terms
-        assert _extract_terms('She said "maybe." You told me the venue is Oslo.', 8) == [
-            "venue", "Oslo",
-        ]
-
-    def test_extract_terms_keeps_decimals_in_the_claim_sentence(self):
-        from corvidae_cognition.critique import _extract_terms
-        assert _extract_terms("You told me the price was 3.50 per unit.", 8) == [
-            "price", "3", "50", "per", "unit",
-        ]
-
-    def test_extract_terms_zero_cap_yields_nothing(self):
-        # max_terms 0 turns tier 2 off (docs/configuration.md).
-        from corvidae_cognition.critique import _extract_terms
-        assert _extract_terms("the deadline is Friday", 0) == []
-
-
-# ---------------------------------------------------------------------------
 # 1. Provenance snapshot (before_agent_turn)
 # ---------------------------------------------------------------------------
 
@@ -513,142 +433,6 @@ class TestLensSelection:
 
 
 # ---------------------------------------------------------------------------
-# 4. Provenance gate (mechanical, two-tier)
-# ---------------------------------------------------------------------------
-
-
-# Above every row _seed_fts writes: the seeded rows predate the exchange.
-ORIGIN_ROWID = 10_000
-
-
-async def _low_appraisal_env(tmp_path, fts_contents=(), chat_text=OBJECTION_VERDICT):
-    appraisal = FakeAppraisal(
-        stage1={"commitment_density": 0.0, "disagreement": 0.0},
-        stage2={"ambiguity": 0.0, "valence": 0.5},
-    )
-    env = await build_critique(
-        tmp_path, appraisal=appraisal, chat_text=chat_text,
-        fts_contents=fts_contents,
-        config={"critique": {"sample_below_rate": 0.0}},
-    )
-    return env
-
-
-async def _persist_origin(env, trace_id, rowid=ORIGIN_ROWID):
-    """Record the exchange's originating message_log rowid, as the Agent's
-    on_message_persisted does. The probe only counts rows before it (#155)."""
-    await env.plugin.on_message_persisted(
-        channel=env.channel, trace_id=trace_id, rowid=rowid,
-        text="orig", meta={},
-    )
-
-
-class TestProvenanceGate:
-    async def test_past_claim_weak_retrieval_empty_fts_fires(self, tmp_path):
-        env = await _low_appraisal_env(tmp_path, chat_text=EMPTY_VERDICT)
-        await env.outcome.record_exchange("kpg", env.channel.id, origin="user")
-        await env.outcome.update_exchange(
-            "kpg", retrieval_top_score=0.1, retrieval_hit_count=1,
-        )
-        await env.plugin.on_message_admitted(
-            channel=env.channel, trace_id="kpg",
-            sender="user", text="when is launch?",
-        )
-        await _persist_origin(env, "kpg")
-        await env.plugin.on_agent_response(
-            channel=env.channel, request_text="req",
-            response_text="You told me the launch date was March.",
-            trace_id="kpg", meta={}, logprobs=None,
-        )
-        assert env.task.task_queue.queue.qsize() == 1
-        await _run_next_task(env.task)
-        outcomes = await _read_outcomes(env.db, "kpg")
-        assert "provenance" in outcomes["critique"]["lenses"]
-        await _teardown(env)
-
-    async def test_strong_retrieval_does_not_fire(self, tmp_path):
-        env = await _low_appraisal_env(tmp_path)
-        await env.outcome.record_exchange("kstrong", env.channel.id, origin="user")
-        await env.outcome.update_exchange(
-            "kstrong", retrieval_top_score=0.9, retrieval_hit_count=5,
-        )
-        await env.plugin.on_message_admitted(
-            channel=env.channel, trace_id="kstrong",
-            sender="user", text="when is launch?",
-        )
-        await _persist_origin(env, "kstrong")
-        await env.plugin.on_agent_response(
-            channel=env.channel, request_text="req",
-            response_text="You told me the launch date was March.",
-            trace_id="kstrong", meta={}, logprobs=None,
-        )
-        assert env.task.task_queue.queue.qsize() == 0
-        await _teardown(env)
-
-    async def test_fts_hit_does_not_fire(self, tmp_path):
-        # message_fts contains the response's key terms → tier 2 not empty.
-        env = await _low_appraisal_env(
-            tmp_path,
-            fts_contents=["You told me the launch date was March next year"],
-        )
-        await env.outcome.record_exchange("kfts", env.channel.id, origin="user")
-        await env.outcome.update_exchange(
-            "kfts", retrieval_top_score=0.1, retrieval_hit_count=0,
-        )
-        await env.plugin.on_message_admitted(
-            channel=env.channel, trace_id="kfts",
-            sender="user", text="when is launch?",
-        )
-        await _persist_origin(env, "kfts")
-        await env.plugin.on_agent_response(
-            channel=env.channel, request_text="req",
-            response_text="You told me the launch date was March.",
-            trace_id="kfts", meta={}, logprobs=None,
-        )
-        assert env.task.task_queue.queue.qsize() == 0
-        await _teardown(env)
-
-    async def test_no_past_claim_does_not_fire(self, tmp_path):
-        env = await _low_appraisal_env(tmp_path)
-        await env.outcome.record_exchange("knp", env.channel.id, origin="user")
-        await env.outcome.update_exchange(
-            "knp", retrieval_top_score=0.1, retrieval_hit_count=0,
-        )
-        await env.plugin.on_message_admitted(
-            channel=env.channel, trace_id="knp",
-            sender="user", text="thoughts?",
-        )
-        await _persist_origin(env, "knp")
-        await env.plugin.on_agent_response(
-            channel=env.channel, request_text="req",
-            response_text="The launch will be great.",
-            trace_id="knp", meta={}, logprobs=None,
-        )
-        assert env.task.task_queue.queue.qsize() == 0
-        await _teardown(env)
-
-    async def test_provenance_disabled_does_not_fire(self, tmp_path):
-        env = await _low_appraisal_env(tmp_path)
-        env.channel.runtime_overrides["critique.provenance.enabled"] = False
-        await env.outcome.record_exchange("kdis", env.channel.id, origin="user")
-        await env.outcome.update_exchange(
-            "kdis", retrieval_top_score=0.1, retrieval_hit_count=0,
-        )
-        await env.plugin.on_message_admitted(
-            channel=env.channel, trace_id="kdis",
-            sender="user", text="q?",
-        )
-        await _persist_origin(env, "kdis")
-        await env.plugin.on_agent_response(
-            channel=env.channel, request_text="req",
-            response_text="You told me the answer was 42.",
-            trace_id="kdis", meta={}, logprobs=None,
-        )
-        assert env.task.task_queue.queue.qsize() == 0
-        await _teardown(env)
-
-
-# ---------------------------------------------------------------------------
 # 5. Silent execution: empty vs non-empty verdict
 # ---------------------------------------------------------------------------
 
@@ -709,130 +493,386 @@ def test_parse_json_block_error_names_critique_phase_and_long_text():
     assert "PROVIDER_ERROR_MARKER" in message
 
 
-class TestProvenanceProbeIgnoresUnsent:
-    """WP2.8 follow-through: a withheld (UNSENT) row is no record that a
-    claim was made, so the raw-log probe must not count it."""
-
-    async def test_unsent_row_does_not_count_as_a_record(self, tmp_path):
-        from corvidae_cognition.critique import CritiquePlugin
-
-        db_path = str(tmp_path / "sessions.db")
-        db = await aiosqlite.connect(db_path)
-        await init_db(db)
-        await db.execute("CREATE VIRTUAL TABLE message_fts USING fts5(content_text)")
-        cursor = await db.execute(
-            "INSERT INTO message_log (channel_id, message, timestamp, message_type) VALUES (?, ?, ?, ?)",
-            ("test:x", json.dumps({"role": "assistant", "content": "the deadline is Friday"}), 1.0, "unsent"),
-        )
-        await db.execute(
-            "INSERT INTO message_fts(rowid, content_text) VALUES (?, ?)",
-            (cursor.lastrowid, "the deadline is Friday"),
-        )
-        await db.commit()
-
-        plugin = CritiquePlugin()
-        plugin._probe_db = db
-        try:
-            assert await plugin._message_fts_empty("deadline Friday", 8, before_rowid=ORIGIN_ROWID) is True
-            await db.execute("UPDATE message_log SET message_type = 'message'")
-            await db.commit()
-            assert await plugin._message_fts_empty("deadline Friday", 8, before_rowid=ORIGIN_ROWID) is False
-        finally:
-            await db.close()
+# ---------------------------------------------------------------------------
+# 6. The provenance check (#155): model-detected claims, mechanically
+# fetched evidence, a model judging support.
+# ---------------------------------------------------------------------------
 
 
-class TestProvenanceProbeCutoff:
-    """#155 cause 1: the exchange's own rows (at or after its originating
-    row) are never a record of its own claim."""
+CLAIM = {"claim": "the quarterly audit deadline is Thursday",
+         "queries": ["quarterly audit deadline", "audit Thursday"]}
+CLAIM_REPLY = "As I mentioned earlier, the quarterly audit deadline is Thursday."
+# No recall phrase at all: only stage 2's past_claims can say this reply
+# makes a claim about the past, so no wording filter can be what triggers.
+CUE_FREE_REPLY = "The quarterly audit deadline is Thursday."
 
-    async def _probe(self, tmp_path, rows):
-        from corvidae_cognition.critique import CritiquePlugin
 
-        db = await aiosqlite.connect(str(tmp_path / "sessions.db"))
-        await init_db(db)
-        await db.execute("CREATE VIRTUAL TABLE message_fts USING fts5(content_text)")
-        for rowid, content in rows:
-            await db.execute(
-                "INSERT INTO message_fts(rowid, content_text) VALUES (?, ?)",
-                (rowid, content),
-            )
-        await db.commit()
-        plugin = CritiquePlugin()
-        plugin._probe_db = db
-        return plugin, db
+async def _log(env, content, channel_id=None, message_type="message", role="user", ts=1.0):
+    """Insert a message_log row and index it in message_fts under the same
+    rowid, as MemoryPlugin's message_log_ai trigger would."""
+    cursor = await env.db.execute(
+        "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
+        "VALUES (?, ?, ?, ?)",
+        (channel_id or env.channel.id, json.dumps({"role": role, "content": content}),
+         ts, message_type),
+    )
+    await env.db.execute(
+        "INSERT INTO message_fts(rowid, content_text) VALUES (?, ?)",
+        (cursor.lastrowid, content),
+    )
+    await env.db.commit()
+    return cursor.lastrowid
 
-    async def test_rows_at_or_after_the_cutoff_are_not_a_record(self, tmp_path):
-        plugin, db = await self._probe(tmp_path, [(5, "the deadline is Friday")])
-        try:
-            assert await plugin._message_fts_empty("deadline Friday", 8, before_rowid=5) is True
-            assert await plugin._message_fts_empty("deadline Friday", 8, before_rowid=6) is False
-        finally:
-            await db.close()
 
-    async def test_all_claim_terms_must_appear_in_one_row(self, tmp_path):
-        # AND, not OR: a row sharing one content word is no record.
-        plugin, db = await self._probe(tmp_path, [(1, "the deadline moved"), (2, "Friday lunch")])
-        try:
-            assert await plugin._message_fts_empty("deadline Friday", 8, before_rowid=10) is True
-        finally:
-            await db.close()
+async def _provenance_env(tmp_path, chat_text=OBJECTION_VERDICT, with_funnel=False):
+    appraisal = FakeAppraisal()
+    return await build_critique(
+        tmp_path, appraisal=appraisal, chat_text=chat_text, with_funnel=with_funnel,
+        config={"critique": {"sample_below_rate": 0.0}},
+    )
 
-    async def test_underscore_run_does_not_hide_a_record(self, tmp_path):
-        plugin, db = await self._probe(
-            tmp_path, [(1, "the API_KEY field is ___ here")],
-        )
-        try:
-            assert await plugin._message_fts_empty(
-                "You told me the API_KEY field is ___ here.", 8, before_rowid=10,
-            ) is False
-        finally:
-            await db.close()
 
-    async def test_decomposed_unicode_does_not_hide_a_record(self, tmp_path):
-        # NFD "naïve" (i + combining diaeresis), as some clients send it:
-        # a mark is part of a unicode61 token, so the term must be too.
-        nfd = "deadline nai\u0308ve Thursday"
-        plugin, db = await self._probe(tmp_path, [(1, nfd)])
-        try:
-            assert await plugin._message_fts_empty(
-                f"You told me {nfd}.", 8, before_rowid=10,
-            ) is False
-        finally:
-            await db.close()
-
-    async def test_no_originating_rowid_does_not_fire(self, tmp_path, caplog):
-        # Without the cutoff the probe can't tell the exchange's own rows
-        # from a record, so it stays inconclusive (conservative).
-        env = await _low_appraisal_env(tmp_path)
-        await env.outcome.record_exchange("knorow", env.channel.id, origin="user")
+async def _begin_exchange(env, trace_id, origin_rowid, origin="user"):
+    """Admit (for user origin) and persist the exchange's originating row."""
+    await env.outcome.record_exchange(trace_id, env.channel.id, origin=origin)
+    if origin == "user":
         await env.plugin.on_message_admitted(
-            channel=env.channel, trace_id="knorow", sender="user", text="q?",
+            channel=env.channel, trace_id=trace_id, sender="user", text="when is it due?",
         )
+    await env.plugin.on_message_persisted(
+        channel=env.channel, trace_id=trace_id, rowid=origin_rowid,
+        text="when is it due?", meta={},
+    )
+
+
+async def _stage2(env, trace_id, claims, meta=None, response_text=CUE_FREE_REPLY):
+    """Deliver a stage-2 result the way AppraisalPlugin's listener call does."""
+    [listener] = env.appraisal.stage2_listeners
+    await listener(
+        channel=env.channel, trace_id=trace_id, response_text=response_text,
+        meta=meta or {}, stage2={"valence": 0.5, "past_claims": claims},
+    )
+
+
+def _candidate_rowids(evidence):
+    return [[c["rowid"] for c in e["candidates"]] for e in evidence]
+
+
+class TestProvenanceTrigger:
+    async def test_registers_a_stage2_listener(self, tmp_path):
+        env = await _provenance_env(tmp_path)
         try:
+            assert len(env.appraisal.stage2_listeners) == 1
+        finally:
+            await _teardown(env)
+
+    async def test_no_appraisal_warns_that_provenance_is_off(self, tmp_path, caplog):
+        with caplog.at_level("WARNING", logger="corvidae.critique"):
+            env = await build_critique(tmp_path)
+        try:
+            assert "provenance check disabled" in caplog.text
+            assert "appraisal" in caplog.text
+        finally:
+            await _teardown(env)
+
+    async def test_on_agent_response_never_selects_provenance(self, tmp_path):
+        # Provenance waits for stage-2's claims; the reply's wording alone
+        # triggers nothing.
+        appraisal = FakeAppraisal(stage2={"ambiguity": 0.9})
+        env = await build_critique(tmp_path, appraisal=appraisal, chat_text=EMPTY_VERDICT)
+        try:
+            # With an originating rowid and an empty message_fts, the old
+            # wording-triggered gate would have added "provenance" here.
+            await env.plugin.on_message_persisted(
+                channel=env.channel, trace_id="kst", rowid=50, text="q?", meta={},
+            )
+            await _fire(env, "kst", response_text=CLAIM_REPLY)
+            await _run_next_task(env.task)
+            outcomes = await _read_outcomes(env.db, "kst")
+            assert outcomes["critique"]["lenses"] == ["predictive"]
+        finally:
+            await _teardown(env)
+
+    async def test_claims_enqueue_one_silent_task(self, tmp_path):
+        env = await _provenance_env(tmp_path)
+        try:
+            await _begin_exchange(env, "kp", origin_rowid=50)
+            await _stage2(env, "kp", [CLAIM])
+            assert env.task.task_queue.queue.qsize() == 1
+            task = env.task.task_queue.queue.get_nowait()
+            assert task.deliver is False
+        finally:
+            await _teardown(env)
+
+    async def test_no_claims_no_task(self, tmp_path):
+        env = await _provenance_env(tmp_path)
+        try:
+            await _begin_exchange(env, "kn", origin_rowid=50)
+            await _stage2(env, "kn", [])
+            assert env.task.task_queue.queue.qsize() == 0
+        finally:
+            await _teardown(env)
+
+    @pytest.mark.parametrize("origin", ["critique", "heartbeat", "task"])
+    async def test_exempt_origins_no_task(self, tmp_path, origin):
+        env = await _provenance_env(tmp_path)
+        try:
+            await _begin_exchange(env, "kx", origin_rowid=50, origin=origin)
+            meta = {} if origin == "task" else {"origin": origin}
+            await _stage2(env, "kx", [CLAIM], meta=meta)
+            assert env.task.task_queue.queue.qsize() == 0
+        finally:
+            await _teardown(env)
+
+    async def test_reminder_origin_eligible(self, tmp_path):
+        env = await _provenance_env(tmp_path)
+        try:
+            await _begin_exchange(env, "kr", origin_rowid=50, origin="reminder")
+            await _stage2(env, "kr", [CLAIM], meta={"origin": "reminder"})
+            assert env.task.task_queue.queue.qsize() == 1
+        finally:
+            await _teardown(env)
+
+    async def test_disabled_no_task(self, tmp_path):
+        env = await _provenance_env(tmp_path)
+        env.channel.runtime_overrides["critique.provenance.enabled"] = False
+        try:
+            await _begin_exchange(env, "kd", origin_rowid=50)
+            await _stage2(env, "kd", [CLAIM])
+            assert env.task.task_queue.queue.qsize() == 0
+        finally:
+            await _teardown(env)
+
+
+class TestProvenanceEvidence:
+    async def test_rows_before_the_exchange_are_candidates(self, tmp_path):
+        env = await _provenance_env(tmp_path)
+        try:
+            earlier = await _log(env, "Heads up: the quarterly audit deadline is Thursday.")
+            origin = await _log(env, "when is it due?")
+            reply = await _log(env, CLAIM_REPLY, role="assistant")
+            await _begin_exchange(env, "ke", origin_rowid=origin)
+            evidence = await env.plugin._gather_evidence(env.channel, "ke", [CLAIM])
+            assert _candidate_rowids(evidence) == [[earlier]]
+            assert reply not in _candidate_rowids(evidence)[0]
+            assert evidence[0]["claim"] == CLAIM["claim"]
+            assert "quarterly audit deadline" in evidence[0]["candidates"][0]["content"]
+            assert evidence[0]["candidates"][0]["role"] == "user"
+        finally:
+            await _teardown(env)
+
+    async def test_unsent_and_context_rows_are_not_candidates(self, tmp_path):
+        env = await _provenance_env(tmp_path)
+        try:
+            await _log(env, "the quarterly audit deadline is Thursday", message_type="unsent",
+                       role="assistant")
+            await _log(env, "[critique] the quarterly audit deadline is Thursday",
+                       message_type="context", role="system")
+            summary = await _log(env, "Summary: audit deadline set for Thursday",
+                                 message_type="summary", role="system")
+            origin = await _log(env, "when is it due?")
+            await _begin_exchange(env, "ku", origin_rowid=origin)
+            evidence = await env.plugin._gather_evidence(env.channel, "ku", [CLAIM])
+            assert _candidate_rowids(evidence) == [[summary]]
+        finally:
+            await _teardown(env)
+
+    async def test_only_channels_in_memory_scope(self, tmp_path):
+        from corvidae_cognition.memory import ChannelScope
+
+        env = await _provenance_env(tmp_path)
+
+        class ScopeOnlyMemory(CorvidaePlugin):
+            def _channel_scope(self, channel_id):
+                return ChannelScope(frozenset({channel_id}), ("signal:*",))
+
+        env.pm.register(ScopeOnlyMemory(), name="memory")
+        try:
+            other = await _log(env, "the quarterly audit deadline is Thursday",
+                               channel_id="irc:#elsewhere")
+            grouped = await _log(env, "the quarterly audit deadline is Thursday",
+                                 channel_id="signal:alice")
+            origin = await _log(env, "when is it due?")
+            await _begin_exchange(env, "ks", origin_rowid=origin)
+            evidence = await env.plugin._gather_evidence(env.channel, "ks", [CLAIM])
+            assert _candidate_rowids(evidence) == [[grouped]]
+            assert other not in _candidate_rowids(evidence)[0]
+        finally:
+            await _teardown(env)
+
+    async def test_without_memory_only_the_channel_itself(self, tmp_path):
+        env = await _provenance_env(tmp_path)
+        try:
+            await _log(env, "the quarterly audit deadline is Thursday", channel_id="irc:#elsewhere")
+            own = await _log(env, "the quarterly audit deadline is Thursday")
+            origin = await _log(env, "when is it due?")
+            await _begin_exchange(env, "kw", origin_rowid=origin)
+            evidence = await env.plugin._gather_evidence(env.channel, "kw", [CLAIM])
+            assert _candidate_rowids(evidence) == [[own]]
+        finally:
+            await _teardown(env)
+
+    async def test_closest_first_and_capped(self, tmp_path):
+        from corvidae_cognition.critique import PROVENANCE_CANDIDATES
+
+        env = await _provenance_env(tmp_path)
+        try:
+            for i in range(PROVENANCE_CANDIDATES + 3):
+                await _log(env, f"the audit is on the calendar, note {i}")
+            best = await _log(env, "quarterly audit deadline: Thursday")
+            origin = await _log(env, "when is it due?")
+            await _begin_exchange(env, "kc", origin_rowid=origin)
+            [ev] = await env.plugin._gather_evidence(env.channel, "kc", [CLAIM])
+            assert len(ev["candidates"]) == PROVENANCE_CANDIDATES
+            assert ev["candidates"][0]["rowid"] == best
+        finally:
+            await _teardown(env)
+
+    @pytest.mark.parametrize("query", [
+        'NOT audit', 'say "hi"', "audit*", "content_text: audit", "^audit",
+        "audit AND OR", "___", "(audit", "naïve café", "Thursday🤞",
+    ])
+    async def test_query_syntax_is_inert(self, tmp_path, query):
+        # Model-written queries are data: FTS5 syntax in them is quoted,
+        # never parsed, and never raises.
+        env = await _provenance_env(tmp_path)
+        try:
+            await _log(env, "the audit is Thursday")
+            origin = await _log(env, "when is it due?")
+            await _begin_exchange(env, "kq", origin_rowid=origin)
+            evidence = await env.plugin._gather_evidence(
+                env.channel, "kq", [{"claim": "c", "queries": [query]}],
+            )
+            assert len(evidence) == 1
+        finally:
+            await _teardown(env)
+
+    async def test_no_originating_rowid_gathers_nothing(self, tmp_path, caplog):
+        # Without the cutoff the exchange's own rows can't be told apart.
+        env = await _provenance_env(tmp_path)
+        try:
+            await env.plugin.on_message_admitted(
+                channel=env.channel, trace_id="knr", sender="user", text="q?",
+            )
             with caplog.at_level("WARNING", logger="corvidae.critique"):
-                assert await env.plugin._provenance_should_fire(
-                    env.channel, "knorow", "You told me the launch date was March.",
-                ) is False
-            assert "provenance probe skipped for trace knorow" in caplog.text
+                evidence = await env.plugin._gather_evidence(env.channel, "knr", [CLAIM])
+            assert evidence is None
+            assert "knr" in caplog.text
+        finally:
+            await _teardown(env)
+
+    async def test_no_probe_gathers_nothing(self, tmp_path, caplog):
+        env = await _provenance_env(tmp_path)
+        try:
+            await _begin_exchange(env, "kpr", origin_rowid=50)
+            await env.plugin._probe_db.close()
+            env.plugin._probe_db = None
+            with caplog.at_level("WARNING", logger="corvidae.critique"):
+                evidence = await env.plugin._gather_evidence(env.channel, "kpr", [CLAIM])
+            assert evidence is None
+            assert "kpr" in caplog.text
+        finally:
+            await _teardown(env)
+
+
+class TestProvenanceCritic:
+    async def test_critic_sees_claims_evidence_and_snapshot(self, tmp_path):
+        env = await _provenance_env(tmp_path)
+        try:
+            await _log(env, "Heads up: the quarterly audit deadline is Thursday.")
+            origin = await _log(env, "when is it due?")
+            await _begin_exchange(env, "kv", origin_rowid=origin)
+            await env.outcome.update_exchange(
+                "kv", provenance_snapshot=json.dumps([{"content": "memory: audits are quarterly"}]),
+            )
+            await _stage2(env, "kv", [CLAIM])
+            await _run_next_task(env.task)
+            [call] = env.stub.chat_calls
+            system, user = (m["content"] for m in call["messages"])
+            assert "confabulated memory" in system
+            assert CLAIM["claim"] in user
+            assert "Heads up: the quarterly audit deadline is Thursday." in user
+            assert "memory: audits are quarterly" in user
+            assert call["attribution"]["stage"] == "critique"
+            outcomes = await _read_outcomes(env.db, "kv")
+            assert outcomes["provenance"] == {"claims": 1, "candidates": 1, "objections": 1}
+        finally:
+            await _teardown(env)
+
+    async def test_no_evidence_is_shown_as_none_found(self, tmp_path):
+        env = await _provenance_env(tmp_path)
+        try:
+            origin = await _log(env, "when is it due?")
+            await _begin_exchange(env, "k0", origin_rowid=origin)
+            await _stage2(env, "k0", [CLAIM])
+            await _run_next_task(env.task)
+            user = env.stub.chat_calls[0]["messages"][1]["content"]
+            assert "no earlier message matched" in user
+        finally:
+            await _teardown(env)
+
+    async def test_objections_reach_the_funnel(self, tmp_path):
+        env = await _provenance_env(tmp_path, with_funnel=True)
+        env.funnel.register_and_wake = AsyncMock()
+        try:
+            origin = await _log(env, "when is it due?")
+            await _begin_exchange(env, "kf", origin_rowid=origin)
+            await _stage2(env, "kf", [CLAIM])
+            await _run_next_task(env.task)
+            env.funnel.register_and_wake.assert_awaited_once()
+            kwargs = env.funnel.register_and_wake.await_args.kwargs
+            assert kwargs["origin"] == "critique"
+            assert kwargs["entries"][0].startswith("[provenance]")
+        finally:
+            await _teardown(env)
+
+    async def test_no_evidence_available_skips_the_critic(self, tmp_path):
+        # An unconfirmed absence must not reach the critic as "no record".
+        env = await _provenance_env(tmp_path)
+        try:
+            await env.plugin.on_message_admitted(
+                channel=env.channel, trace_id="kne", sender="user", text="q?",
+            )
+            await env.outcome.record_exchange("kne", env.channel.id, origin="user")
+            await _stage2(env, "kne", [CLAIM])
+            while not env.task.task_queue.queue.empty():
+                await _run_next_task(env.task)
+            assert env.stub.chat_calls == []
         finally:
             await _teardown(env)
 
 
 # ---------------------------------------------------------------------------
-# #155: the provenance gate on the production path — a real Agent turn on a
-# file DB with MemoryPlugin's message_fts DDL and insert trigger, and the
-# critique probe opened read-only on the same file.
+# #155 on the production path: a real Agent turn on a file DB with
+# MemoryPlugin's message_fts DDL and insert trigger, real AppraisalPlugin
+# stage 2 (stubbed model) and CritiquePlugin's read-only probe on that file.
 # ---------------------------------------------------------------------------
 
 
-CLAIM_REPLY = "As I mentioned earlier, the quarterly audit deadline is Thursday."
+class RoleStub:
+    """An LLM client stand-in answering every call with fixed text."""
+
+    def __init__(self, text):
+        self.text = text
+        self.calls: list[list[dict]] = []
+
+    async def chat(self, messages, tools=None, extra_body=None):
+        self.calls.append(messages)
+        return {"choices": [{"message": {"role": "assistant", "content": self.text}}]}
 
 
-async def _real_path_env(tmp_path, replies):
-    """Agent + persistence on a file DB with the real message_fts trigger,
-    and a CritiquePlugin whose gate decisions are recorded per trace id."""
+def _stage2_reply(past_claims):
+    return json.dumps({
+        "valence": 0.5, "stakes": 0.5, "ambiguity": 0.0, "commitment_density": 0.0,
+        "novelty": 0.5, "correction": False, "past_claims": past_claims,
+    })
+
+
+async def _real_path_env(tmp_path, replies, past_claims):
     from unittest.mock import MagicMock
 
+    from corvidae.llm_plugin import LLMPlugin
+    from corvidae_cognition.appraisal import AppraisalPlugin
     from corvidae_cognition.critique import CritiquePlugin
     from corvidae_cognition.memory import MESSAGE_FTS_DDL, MESSAGE_FTS_INSERT_TRIGGER
     from helpers import build_plugin_and_channel
@@ -847,77 +887,111 @@ async def _real_path_env(tmp_path, replies):
     await db.commit()
 
     pm = agent.pm
-    critique = CritiquePlugin()
-    pm.register(critique, name="critique")
-    cfg = {"daemon": {"session_db": db_path}}
-    await critique.on_init(pm=pm, config=cfg)
-    await critique.on_start(config=cfg)
+    cfg = {"daemon": {"session_db": db_path}, "critique": {"sample_below_rate": 0.0}}
+    outcome = OutcomeLogPlugin()
+    pm.register(outcome, name="outcome_log")
+    await outcome.on_init(pm=pm, config=cfg)
+    await outcome.on_start(config=cfg)
+
+    llm = LLMPlugin()
+    pm.register(llm, name="llm")
+    llm._clients["appraisal"] = RoleStub(_stage2_reply(past_claims))
+    critic = RoleStub(OBJECTION_VERDICT)
+    llm._clients["critic"] = critic
+
+    plugins = []
+    for name, cls in (("appraisal", AppraisalPlugin), ("critique", CritiquePlugin)):
+        p = cls()
+        pm.register(p, name=name)
+        await p.on_init(pm=pm, config=cfg)
+        plugins.append(p)
+    for p in plugins:
+        await p.on_start(config=cfg)
+    critique = plugins[1]
     assert critique._probe_db is not None
-    # The critic itself is out of scope here: only the gate decision is.
-    critique._run_critique = AsyncMock()
 
-    decisions: dict[str, bool] = {}
-    real_gate = critique._provenance_should_fire
+    gathered: dict[str, list] = {}
+    real_gather = critique._gather_evidence
 
-    async def spy(channel, trace_id, response_text):
-        decisions[trace_id] = await real_gate(channel, trace_id, response_text)
-        return decisions[trace_id]
+    async def spy(channel, trace_id, claims):
+        gathered[trace_id] = await real_gather(channel, trace_id, claims)
+        return gathered[trace_id]
 
-    critique._provenance_should_fire = spy
+    critique._gather_evidence = spy
 
     client = MagicMock()
     client.chat = AsyncMock(side_effect=[_make_text_response(r) for r in replies])
     agent._client = client
     return SimpleNamespace(
-        agent=agent, channel=channel, db=db, critique=critique,
-        decisions=decisions,
+        agent=agent, channel=channel, db=db, critic=critic, gathered=gathered,
+        plugins=plugins,
     )
 
 
 async def _real_path_teardown(env):
-    from helpers import drain_task_queue
-
-    await drain_task_queue(env.agent)
-    await env.critique.on_stop()
+    for p in reversed(env.plugins):
+        await p.on_stop()
     await env.agent.pm.get_plugin("task").on_stop()
     await env.db.close()
 
 
 async def _say(env, text):
     from corvidae.trace import mint_trace_id
-    from helpers import drain
+    from helpers import drain, drain_task_queue
 
     trace_id = mint_trace_id()
     await env.agent.on_message(channel=env.channel, sender="user", text=text, trace_id=trace_id)
     await drain(env.agent, env.channel)
+    # Stage 2, then the provenance task stage 2's listener enqueued.
+    await drain_task_queue(env.agent)
+    await drain_task_queue(env.agent)
     return trace_id
 
 
-class TestProvenanceGateRealPath:
-    async def test_unsupported_claim_fires(self, tmp_path):
-        # The reply's own row is in message_fts by the time the gate runs;
-        # it must not count as a record of itself.
-        env = await _real_path_env(tmp_path, [CLAIM_REPLY])
+async def _row_texts(db, rowids):
+    texts = []
+    for rowid in rowids:
+        async with db.execute("SELECT message FROM message_log WHERE id = ?", (rowid,)) as cur:
+            texts.append(json.loads((await cur.fetchone())[0])["content"])
+    return texts
+
+
+class TestProvenanceRealPath:
+    async def test_unsupported_claim_reaches_the_critic_with_no_evidence(self, tmp_path):
+        # The reply's own row is already indexed when the check runs; it
+        # must not be offered as a record of itself.
+        env = await _real_path_env(tmp_path, [CUE_FREE_REPLY], [CLAIM])
         try:
             trace_id = await _say(env, "when is it due?")
-            assert env.decisions[trace_id] is True
+            assert _candidate_rowids(env.gathered[trace_id]) == [[]]
+            [messages] = env.critic.calls
+            assert CLAIM["claim"] in messages[-1]["content"]
+            outcomes = await _read_outcomes(env.db, trace_id)
+            assert outcomes["provenance"]["objections"] == 1
         finally:
             await _real_path_teardown(env)
 
-    async def test_supported_claim_does_not_fire(self, tmp_path):
-        env = await _real_path_env(tmp_path, ["Noted.", CLAIM_REPLY])
+    async def test_supporting_earlier_row_is_put_in_front_of_the_critic(self, tmp_path):
+        env = await _real_path_env(tmp_path, ["Noted.", CLAIM_REPLY], [CLAIM])
         try:
             await _say(env, "Heads up: the quarterly audit deadline is Thursday.")
             trace_id = await _say(env, "when is it due?")
-            assert env.decisions[trace_id] is False
+            [rowids] = _candidate_rowids(env.gathered[trace_id])
+            texts = await _row_texts(env.db, rowids)
+            assert texts[0] == "Heads up: the quarterly audit deadline is Thursday."
+            assert "when is it due?" not in texts and CLAIM_REPLY not in texts
+            # Turn 1 is checked too (the stub claims on every stage 2); a
+            # stylistic lens may also run, so pick the provenance calls.
+            provenance = [c for c in env.critic.calls if "confabulated memory" in c[0]["content"]]
+            assert len(provenance) == 2
+            assert texts[0] in provenance[-1][-1]["content"]
         finally:
             await _real_path_teardown(env)
 
-    async def test_earlier_row_sharing_only_common_words_still_fires(self, tmp_path):
-        env = await _real_path_env(tmp_path, ["Me too.", CLAIM_REPLY])
+    async def test_reply_without_past_claims_calls_no_critic(self, tmp_path):
+        env = await _real_path_env(tmp_path, ["It is due Thursday."], [])
         try:
-            await _say(env, "I like the weather today")
-            trace_id = await _say(env, "when is it due?")
-            assert env.decisions[trace_id] is True
+            await _say(env, "when is it due?")
+            assert env.critic.calls == []
         finally:
             await _real_path_teardown(env)
