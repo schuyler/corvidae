@@ -43,8 +43,9 @@ For each claim:
   auditing is not a record of itself.
 - Your own earlier message (role: assistant) shows only that it was said,
   not that it was true. It supports a claim that something was said; a
-  claim about a fact needs a user message, a summary or the snapshot
-  behind it.
+  claim about a fact needs a user message, a tool result, a summary or the
+  snapshot behind it. A '[Summary of earlier conversation]' turn is a
+  summary, not your own word.
 - If nothing supports it, you asserted a recollection with no record behind
   it: object, quoting the claim exactly.
 - Claims explicitly framed as uncertainty or inference ('I don't recall',

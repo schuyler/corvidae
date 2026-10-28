@@ -1028,7 +1028,25 @@ class TestProvenancePrompts:
 
         prompt = getattr(critique, prompts)["provenance"]
         assert "shows only that it was said" in prompt
-        assert "a user message, a summary or the snapshot" in prompt
+        assert "a user message, a tool result, a summary or the snapshot" in prompt
+
+    def test_summary_rows_are_labelled_summary_not_assistant(self):
+        # Compaction stores a summary as an assistant turn; shown to the
+        # critic under that role it would read as the agent's own word.
+        from corvidae_cognition.critique import CritiquePlugin, _candidate
+
+        row = (9, "test:x", json.dumps({
+            "role": "assistant", "content": "[Summary of earlier conversation]\naudit Thursday",
+        }), "summary", 1.0)
+        candidate = _candidate(row)
+        assert candidate["role"] == "summary"
+        rendered = CritiquePlugin._render_evidence([{"claim": "c", "candidates": [candidate]}])
+        assert ", summary, test:x]" in rendered and "assistant" not in rendered
+
+    def test_fork_prompt_names_the_summary_turn(self):
+        from corvidae_cognition.critique import DEFAULT_FORK_PROMPTS
+
+        assert "[Summary of earlier conversation]" in DEFAULT_FORK_PROMPTS["provenance"]
 
     def test_fork_prompt_excludes_the_audited_response(self):
         from corvidae_cognition.critique import DEFAULT_FORK_PROMPTS

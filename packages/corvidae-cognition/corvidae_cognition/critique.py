@@ -169,8 +169,8 @@ _PROMPT_PROVENANCE = (
     "meaning, not wording.\n"
     "- An earlier message from the agent (role: assistant) shows only that it "
     "was said, not that it was true. It supports a claim that something was "
-    "said; a claim about a fact needs a user message, a summary or the "
-    "snapshot behind it.\n"
+    "said; a claim about a fact needs a user message, a tool result, a "
+    "summary or the snapshot behind it.\n"
     "- If nothing supports it, the agent asserted a recollection with no "
     "record behind it - object, quoting the claim exactly.\n"
     "- Claims explicitly framed as uncertainty or inference ('I don't "
@@ -264,8 +264,9 @@ _FORK_PROMPT_PROVENANCE = (
     "response you are auditing is not a record of itself.\n"
     "- Your own earlier message (role: assistant) shows only that it was "
     "said, not that it was true. It supports a claim that something was "
-    "said; a claim about a fact needs a user message, a summary or the "
-    "snapshot behind it.\n"
+    "said; a claim about a fact needs a user message, a tool result, a "
+    "summary or the snapshot behind it. A '[Summary of earlier "
+    "conversation]' turn is a summary, not your own word.\n"
     "- If nothing supports it, you asserted a recollection with no record "
     "behind it: object, quoting the claim exactly.\n"
     "- Claims explicitly framed as uncertainty or inference ('I don't "
@@ -324,10 +325,13 @@ def _candidate(row) -> dict:
             "%Y-%m-%d %H:%M UTC")
     except (TypeError, ValueError, OverflowError, OSError):
         when = "unknown time"
+    # A compaction summary is stored under an assistant (or user) role; the
+    # critic must see it as a summary, not as the agent's own word.
+    role = "summary" if message_type == "summary" else parsed.get("role") or message_type
     return {
         "rowid": rowid,
         "channel_id": channel_id,
-        "role": parsed.get("role") or message_type,
+        "role": role,
         "content": content if isinstance(content, str) else "",
         "timestamp": when,
         "message_type": message_type,
