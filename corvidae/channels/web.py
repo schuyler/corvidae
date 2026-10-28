@@ -42,6 +42,7 @@ from urllib.parse import urlsplit
 from aiohttp import WSMsgType, web
 
 from corvidae.channel import Channel, ChannelRegistry
+from corvidae.context import unsent_marker_emission
 from corvidae.trace import mint_trace_id
 from corvidae.hooks import TransportPlugin, get_dependency, hookimpl
 from corvidae.outbound import (
@@ -880,6 +881,9 @@ class WebPlugin(TransportPlugin):
         """Map message_log rows to the frames the live path would have sent."""
         frames: list[dict] = []
         tool_names: dict[str, str] = {}
+        # Frames the most recent assistant row produced, so a not-sent
+        # marker right after it can hold back what a gate suppressed live.
+        last_assistant_frames: list[dict] = []
         for row in rows:
             # Unparseable rows are skipped, not fatal.
             try:
@@ -891,14 +895,24 @@ class WebPlugin(TransportPlugin):
             if not isinstance(msg, dict):
                 continue
 
-            # Summaries become dividers; injected context is never shown.
+            # Summaries become dividers; injected context is never shown,
+            # and neither is a message a send gate vetoed (it was never sent).
             if message_type == "summary":
                 frames.append({"type": "divider", "text": _text(msg.get("content"))})
                 continue
             if message_type == "context":
+                # A progress/thinking marker: drop that frame of the
+                # assistant row it follows (the row itself stays MESSAGE).
+                suppressed = unsent_marker_emission(msg.get("content"))
+                if suppressed in ("progress", "thinking"):
+                    held = [f for f in last_assistant_frames if f["type"] == suppressed]
+                    frames = [f for f in frames if not any(f is h for h in held)]
+                continue
+            if message_type == "unsent":
                 continue
 
             role = msg.get("role")
+            last_assistant_frames = []
             if role == "user":
                 frames.append({"type": "user", "text": _text(msg.get("content")), "id": None})
             elif role == "assistant":
@@ -906,11 +920,13 @@ class WebPlugin(TransportPlugin):
                 reasoning = _text(msg.get("reasoning_content"))
                 if reasoning:
                     frames.append({"type": "thinking", "text": reasoning})
+                    last_assistant_frames.append(frames[-1])
                 calls = msg.get("tool_calls")
                 calls = calls if isinstance(calls, list) else []
                 content = strip_thinking(_text(msg.get("content")))
                 if content:
                     frames.append({"type": "progress" if calls else "message", "text": content})
+                    last_assistant_frames.append(frames[-1])
                 for call in calls:
                     if not isinstance(call, dict):
                         continue

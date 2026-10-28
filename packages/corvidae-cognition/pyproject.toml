@@ -16,6 +16,7 @@ funnel = "corvidae_cognition.funnel:FunnelPlugin"
 outcome_log = "corvidae_cognition.outcome_log:OutcomeLogPlugin"
 appraisal = "corvidae_cognition.appraisal:AppraisalPlugin"
 critique = "corvidae_cognition.critique:CritiquePlugin"
+gates = "corvidae_cognition.gates:GatePlugin"
 
 [tool.uv.sources]
 corvidae = { workspace = true }

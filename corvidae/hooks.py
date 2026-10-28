@@ -572,6 +572,55 @@ class AgentSpec:
         """
 
     @hookspec
+    async def should_send_response(
+        self,
+        channel: Channel,
+        text: str,
+        emission: str,
+        trace_id: str | None,
+        meta: dict,
+    ) -> bool | None:
+        """Gate hook: decide whether an outbound emission reaches the channel.
+
+        Grammar class: veto (broadcast; resolved with resolve_reject_wins).
+
+        The outbound mirror of ``should_process_message``. Any False vetoes;
+        None is no opinion. An exception from any implementation fails open
+        (the Agent logs it and sends), so an implementation that can fail
+        should catch and log its own errors rather than discard its
+        siblings' verdicts.
+
+        Four firing sites, two modes:
+
+        - ``emission="final"`` fires between generation and persistence,
+          only when the result's tool calls will not dispatch (a text
+          result, or the max-turns branch). It controls persistence: a veto
+          stores the assistant message as ``MessageType.UNSENT``, skips the
+          transport send, and appends a not-sent marker to the window. The
+          window keeps the text, including across restarts;
+          ``on_agent_response`` still fires.
+        - ``emission`` in ``"progress"``, ``"thinking"``, ``"error"`` fires
+          before that send. A veto suppresses that emission only: the
+          message row is unchanged and tool dispatch proceeds. Progress and
+          thinking vetoes append a not-sent marker; an error veto suppresses
+          an unpersisted send and nothing else.
+
+        All parameters are required (no defaults), so the arg-binding guard
+        catches an impl that re-declares one with a default.
+
+        Args:
+            channel: The Channel the emission is for.
+            text: Exactly the text that would be sent (for "final", the
+                display text, or the max-turns fallback on that branch).
+            emission: One of "final", "progress", "thinking", "error".
+                Treat unknown values as no opinion.
+            trace_id: The current turn's trace id, or None.
+            meta: The trace metadata dict the item carries. Producers stamp
+                plugin-side keys into it (e.g. ``meta["origin"]``); core
+                never does.
+        """
+
+    @hookspec
     async def on_message_admitted(
         self, channel: Channel, trace_id: str, sender: str, text: str
     ) -> None:

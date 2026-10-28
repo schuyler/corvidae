@@ -885,8 +885,12 @@ class CritiquePlugin(CorvidaePlugin):
             return False
         match_expr = " OR ".join(f'"{t}"' for t in terms)
         try:
+            # A withheld (UNSENT) row was never said, so it is no record
+            # that the claim was made.
             async with self._probe_db.execute(
-                "SELECT rowid FROM message_fts WHERE message_fts MATCH ? LIMIT 1",
+                "SELECT rowid FROM message_fts WHERE message_fts MATCH ? "
+                "AND NOT EXISTS (SELECT 1 FROM message_log m "
+                "WHERE m.id = message_fts.rowid AND m.message_type = 'unsent') LIMIT 1",
                 (match_expr,),
             ) as cursor:
                 row = await cursor.fetchone()

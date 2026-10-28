@@ -229,12 +229,19 @@ class CorvidaeAcpAgent:
         # Replay text turns to the client; leave channel.conversation None so
         # the agent loop lazy-loads the same DB rows on the next prompt.
         if history and self._conn is not None:
-            for msg in history:
+            for i, msg in enumerate(history):
                 text = _message_text(msg)
                 if not text:
                     continue
                 role = msg.get("role")
                 msg_type = msg.get("_message_type")
+                if msg_type == MessageType.UNSENT:
+                    # A send gate vetoed it; the client never saw it live.
+                    continue
+                if role == "assistant" and "progress" in _markers_after(history, i):
+                    # Its progress text was suppressed live; a marker in
+                    # the CONTEXT run right after the row says so.
+                    continue
                 if role == "user":
                     update = update_user_message_text(text)
                 elif role == "assistant" or msg_type == MessageType.SUMMARY:
@@ -346,6 +353,23 @@ def _iso8601_utc(ts: float) -> str:
         .isoformat()
         .replace("+00:00", "Z")
     )
+
+
+def _markers_after(history: list[dict], index: int) -> set[str]:
+    """Emissions named by the not-sent markers in the run of CONTEXT rows
+    right after ``history[index]``. The Agent writes a thinking marker and
+    then a progress marker after one assistant row, so one row can carry
+    both."""
+    from corvidae.context import MessageType, unsent_marker_emission
+
+    found: set[str] = set()
+    for msg in history[index + 1:]:
+        if msg.get("_message_type") != MessageType.CONTEXT:
+            break
+        emission = unsent_marker_emission(msg.get("content"))
+        if emission is not None:
+            found.add(emission)
+    return found
 
 
 def _message_text(msg: dict) -> str:

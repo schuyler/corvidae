@@ -229,6 +229,8 @@ The persona is allowed to tune its own gates by default — a deliberate operato
 | `critique.prompt.provenance`, `critique.prompt.adversarial`, `critique.prompt.constrained`, `critique.prompt.predictive` | These are the critic's *system prompts*. An agent that can rewrite its own critic's instructions has no critic. |
 | `appraisal.stage2_prompt` | Same shape: the stage-2 appraisal system prompt. |
 | `critique.provenance.weak_score`, `critique.provenance.max_terms` | Setting `max_terms` to 0 disables the provenance gate's second tier outright; setting `weak_score` to 0 stops it firing whenever memory retrieved anything. Either guts the gate without touching `enabled`. |
+| `gate.engagement.enforce`, `gate.send.enforce` | An injected message should not be able to silence the agent wholesale (enforce engagement with a threshold of 1.0) or un-silence it (turn the decide gate off). |
+| `gate.engagement.threshold`, `gate.send.min_salience` | The same lever by other means: a threshold above 1.0 rejects or withholds everything the gate covers once enforcement is on; 0 turns the gate off. |
 
 These are recommendations, not hardcoded blocks: `set_settings` writes are channel-influenceable, which is exactly the persistence-of-influence shape the design polices elsewhere — but two-process discipline (agent tunes, operator audits via the outcome log) is the accepted trade-off, with the blocklist as the per-key valve.
 
@@ -236,6 +238,7 @@ The complete set of runtime-tunable keys (anything passed to `resolve_tunable`) 
 
 - `appraisal.novelty.no_probe_default`, `appraisal.prior.w_novelty`, `appraisal.prior.w_stakes`, `appraisal.prior.w_valence`, `appraisal.probe.budget_ms`, `appraisal.probe.max_tokens`, `appraisal.probe.rank_scale`, `appraisal.stage2_prompt`, `appraisal.weights.commitment`, `appraisal.weights.disagreement`, `appraisal.weights.imperative`, `appraisal.weights.novelty`, `appraisal.weights.question`
 - `critique.lens.ambiguity`, `critique.lens.commitment`, `critique.lens.disagreement`, `critique.lens.neg_valence`, `critique.prompt.<lens>`, `critique.provenance.enabled`, `critique.provenance.max_terms`, `critique.provenance.weak_score`, `critique.sample_below_rate`
+- `gate.engagement.enforce`, `gate.engagement.threshold`, `gate.send.allow_progress`, `gate.send.allow_thinking`, `gate.send.enforce`, `gate.send.min_salience`
 
 The fork instruction keys (`appraisal.stage2_fork_prompt`, `critique.fork_prompt.<lens>`) are deliberately not on that list: they are read from config only, so they need no `immutable_settings` entry.
 
@@ -259,7 +262,30 @@ Requires the cognition extra (`--extra cognition` on your `uv sync` line; see [c
 | `appraisal.weights.commitment` | `0.20` | Salience weight for numbers/commitment density. |
 | `appraisal.weights.imperative` | `0.10` | Salience weight for imperative markers (feeds salience only, not the vector). |
 
-*(The `critique.*` tunable keys are not individually tabulated here; the complete list is under "Runtime-tunable gate parameters" above. No plugin resolves a `gate.*` key.)*
+*(The `critique.*` tunable keys are not individually tabulated here; the complete list is under "Runtime-tunable gate parameters" above.)*
+
+#### `gate.*` — engagement and decide gates
+
+Requires the cognition extra. `GatePlugin` (entry point `gates`) reads these per decision; see [cognition.md](cognition.md#gateplugin) for what each gate does and what it records in `exchange_log.outcomes`. Both gates fail open: without `AppraisalPlugin`, or when the appraisal compute fails, nothing is rejected or withheld.
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `gate.engagement.enforce` | `false` | Shadow mode while false: the engagement gate computes and records `would_reject` but admits every message. Set it only after calibrating the threshold offline against the recorded verdicts. |
+| `gate.engagement.threshold` | `0.2` | Inbound salience below this would reject (and does once `enforce` is true). |
+| `gate.send.enforce` | `true` | When false, the decide gate records `would_veto` but withholds nothing. |
+| `gate.send.min_salience` | `0.15` | A final from a non-user origin (reminder, heartbeat, task, critique) whose outbound salience is below this is withheld: stored as `unsent`, never sent. A reply to a user is never withheld by this key. |
+| `gate.send.allow_progress` | `true` | False suppresses the intermediate text sent alongside tool calls. |
+| `gate.send.allow_thinking` | `true` | False suppresses reasoning (`OutboundThinking`). |
+
+```yaml
+gate:
+  engagement:
+    enforce: false     # shadow mode
+    threshold: 0.2
+  send:
+    enforce: true
+    min_salience: 0.15
+```
 
 ### `agent.context_compact` — removed
 

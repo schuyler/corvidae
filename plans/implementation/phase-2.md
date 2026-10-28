@@ -69,6 +69,20 @@ thresholds this phase can only guess at.
   CancelledError — WP2.9 gates must treat it as compute failure;
   `_persist_stage1`'s hardcoded "user" origin patches existing rows, so
   future non-user compute sites must thread the real origin).
+- **Sub-phase 2D (WP2.8, WP2.9) is implemented** (#131), after the kernel
+  split. The as-implemented deviations, agreed on #131 because the plan
+  text predates the split's rules: the hook is
+  `should_send_response(channel, text, emission, trace_id, meta)` (no
+  `origin` param; origin is a plugin-side convention, so `GatePlugin`
+  reads `meta["origin"]`, else `user` for an admitted trace, else `task`);
+  the stored type is `MessageType.UNSENT = "unsent"` (the kernel vocabulary
+  rule forbids "withheld" under `corvidae/`); core appends the not-sent
+  marker itself as a persisted CONTEXT row rather than through the funnel's
+  `admit()`; `on_agent_response` gains no flag (it fires on a veto as on a
+  pass). `GatePlugin` lives at
+  `packages/corvidae-cognition/corvidae_cognition/gates.py`. A vetoed final
+  also withholds its reasoning, and web/ACP history replay hold back
+  everything a gate suppressed live (design.md, "The output gate").
 - **2C onward is not started.** The plan below has been through a design
   consistency review, a hand-off audit, and multiple cold-review rounds; all
   accepted amendments are folded into the text. It is intended to be

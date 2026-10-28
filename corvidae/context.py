@@ -54,11 +54,16 @@ class MessageType(str, enum.Enum):
     CONTEXT: plugin-injected contextual information (memory, notes, retrieved
              documents, etc.) that should appear in the prompt but is not part
              of the conversational turn history.
+    UNSENT: an assistant message a should_send_response gate vetoed. It
+            stays in the window (and reloads into it) but no transport ever
+            sees it, including history replay. Compaction and consolidation
+            read MESSAGE rows only, so it is never summarized as said.
     """
 
     MESSAGE = "message"
     SUMMARY = "summary"
     CONTEXT = "context"
+    UNSENT = "unsent"
 
 
 #: Default characters-per-token estimate for rough token counting.
@@ -68,6 +73,50 @@ TOOL_RESULT_PENDING = "[still running — the result will arrive in a later mess
 TOOL_RESULT_ABANDONED = "[did not complete — no result was returned]"
 #: Frame for a tool result whose call is no longer in the window (#79).
 ORPHAN_RESULT_LABEL = "result of an earlier tool call that is no longer shown"
+
+#: Label the not-sent marker opens with. The Agent appends the marker (a
+#: CONTEXT system row) right after the assistant row whose emission a
+#: should_send_response gate vetoed, so it reloads beside that row.
+UNSENT_MARKER_LABEL = "not sent"
+_UNSENT_MARKER_SUBJECTS = {
+    "final": "Your response above was not sent",
+    "progress": "Your progress text beginning «{excerpt}» was not shown",
+    "thinking": "Your reasoning on your latest turn was not shown",
+}
+#: The progress marker quotes this much of the text: build_prompt moves a
+#: tool-calls block to its last result, so the marker renders before the
+#: block and its position alone can't say which text it means. The final
+#: and thinking markers quote nothing (the final sits right above it;
+#: reasoning must not outlive reasoning_history: drop in a marker).
+_UNSENT_MARKER_EXCERPT_CHARS = 40
+
+
+def unsent_marker_text(emission: str, text: str) -> str:
+    """The not-sent marker content for a vetoed ``emission`` of ``text``."""
+    excerpt = " ".join(text.split())
+    if len(excerpt) > _UNSENT_MARKER_EXCERPT_CHARS:
+        excerpt = excerpt[:_UNSENT_MARKER_EXCERPT_CHARS].rstrip() + "…"
+    subject = _UNSENT_MARKER_SUBJECTS.get(emission, f"Your {emission} was not sent")
+    return (
+        f"[{UNSENT_MARKER_LABEL}: {emission}]\n\n"
+        f"{subject.format(excerpt=excerpt)}; the channel did not see it. "
+        "Don't refer to it as something you said."
+    )
+
+
+def unsent_marker_emission(content: object) -> str | None:
+    """The emission a not-sent marker's ``content`` names, or None when the
+    content is not a marker. History replay uses it to hold back what a
+    gate suppressed live."""
+    if not isinstance(content, str):
+        return None
+    prefix = f"[{UNSENT_MARKER_LABEL}: "
+    if not content.startswith(prefix):
+        return None
+    end = content.find("]", len(prefix))
+    if end == -1:
+        return None
+    return content[len(prefix):end]
 
 
 def _visible(msg: dict) -> dict:

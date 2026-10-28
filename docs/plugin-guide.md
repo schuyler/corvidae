@@ -213,6 +213,7 @@ The `config` parameter is optional in `on_config_reload` hookimpls. Pluggy forwa
 | `should_process_message(channel, sender: str, text: str, trace_id: str \| None)` | async broadcast, reject-wins | Gate: decide whether to process a message. Return False to reject, True to accept, None for no opinion. |
 | `on_message_admitted(channel, trace_id: str, sender: str, text: str)` | async broadcast | After should_process_message admits a USER message |
 | `on_message_rejected(channel, trace_id: str, sender: str, text: str)` | async broadcast | After should_process_message vetoes a USER message |
+| `should_send_response(channel, text: str, emission: str, trace_id: str \| None, meta: dict)` | async broadcast, reject-wins | Outbound gate, before each emission (`final`, `progress`, `thinking`, `error`). Return False to withhold, None for no opinion. See [Output gating](#output-gating). |
 | `on_message_persisted(channel, trace_id: str, rowid: int \| None, text: str, meta: dict)` | async broadcast | After the trace-originating message is persisted to the database. Fires once per originating item regardless of persistence outcome (`rowid` may be None). |
 | `send(channel, event: Outbound)` | async broadcast | Outbound delivery: `event` is an `OutboundMessage`, `OutboundThinking`, `OutboundToolStatus` or `OutboundProgress` (`corvidae/outbound.py`). Transports receive it through `TransportPlugin` (see [Writing a transport](#writing-a-transport)) |
 | `on_notify(channel, source: str, text: str, tool_call_id: str \| None, meta: dict \| None)` | async broadcast | Notification injected into channel |
@@ -345,6 +346,7 @@ These hooks return a value. Hooks marked `firstresult=True` (sequential) stop at
 | Hook | Strategy | Returns | Behavior |
 |------|----------|---------|----------|
 | `should_process_message(channel, sender, text, trace_id)` | reject-wins (broadcast) | `bool \| None` | Any `False` vetoes the message; any `True` (with no `False`) accepts; `None` if all defer |
+| `should_send_response(channel, text, emission, trace_id, meta)` | reject-wins (broadcast) | `bool \| None` | Any `False` withholds the emission; anything else sends it |
 | `resolve_llm_error(channel, error)` | `firstresult=True` | `str \| None` | First non-None string wins; chain stops. If all return None, the default message names the failure class (timeout, unreachable server, or an HTTP status) and asks the user to try again. `LLMPlugin` registers a `trylast` handler that explains an unloaded router model, any non-2xx `LLMHTTPError` (naming the status, an actionable hint, and a short provider body), and connection/timeout failures that point at `llm.main.base_url`; it defers (`None`) for anything else. To inspect HTTP failures yourself, check `isinstance(error, corvidae.llm.LLMHTTPError)` and read `error.status`, `error.body`, and `error.model`. |
 | `resolve_compaction(channel, conversation, max_tokens)` | `firstresult=True` | `bool \| None` | First non-None return stops the chain. `CompactionPlugin` uses `trylast` (returns True). Third-party plugins run at default priority. |
 | `transform_tool_result(tool_name, result, channel)` | `firstresult=True` wrapper chain | `str \| None` | Wrappers compose transforms in LIFO order. The seed returns the input unchanged. Non-wrapper hookimpls short-circuit the seed via firstresult. |
@@ -822,7 +824,27 @@ For `firstresult=True` hooks (`resolve_compaction`, `resolve_conversation`, `res
 
 For `should_process_message` (broadcast, resolved with `resolve_reject_wins`), exceptions propagate to the call site.
 
+For `should_send_response`, the Agent catches any exception, logs it at WARNING and sends the emission anyway (fail open). Because apluggy gathers a broadcast without `return_exceptions`, one raising implementation discards every sibling's verdict for that emission, so a gate that can fail should catch and log its own errors and return None.
+
 For `transform_display_text` and `transform_tool_result` (wrapper chain hooks), pluggy propagates exceptions from wrapper implementations to the call site. `transform_display_text` is wrapped in try/except in `_resolve_display_text`.
+
+## Output gating
+
+`should_send_response(channel, text, emission, trace_id, meta)` is the outbound mirror of `should_process_message`: return `False` to withhold, `None` for no opinion. `emission` is `final` (the reply), `progress` (text alongside dispatching tool calls), `thinking` (reasoning) or `error` (the LLM-error fallback); treat anything else as no opinion. `text` is exactly what would be sent. Where each fires and what a veto does to the stored row and the window is in [design.md](design.md#the-output-gate); in short, a vetoed final is kept in the window as `MessageType.UNSENT` and never sent, and any other veto suppresses only that send.
+
+Origin is not a kernel parameter: read `meta["origin"]` if your policy depends on it, and record the traces you see in `on_message_admitted` if you need to recognise user exchanges.
+
+```python
+class QuietHoursPlugin(CorvidaePlugin):
+    @hookimpl
+    async def should_send_response(self, channel, text, emission, trace_id, meta):
+        # Hold back self-initiated finals overnight; never a reply to a person.
+        if emission == "final" and meta.get("origin") == "heartbeat" and self.is_night():
+            return False
+        return None
+```
+
+If you write a transport with history replay, skip `message_type == "unsent"` rows, and use `corvidae.context.unsent_marker_emission(content)` to hold back progress or thinking that a marker says was suppressed. Cognition's `GatePlugin` is the reference implementation ([cognition.md](cognition.md#gateplugin)).
 
 ## Async considerations
 

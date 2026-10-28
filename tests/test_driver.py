@@ -200,3 +200,82 @@ def test_kv_cache_reused_true_when_most_of_the_prefix_was_reused():
     from harness.driver import kv_cache_reused
 
     assert kv_cache_reused(cached_tokens=803, prompt_tokens=820) is True
+
+
+# ---------------------------------------------------------------------------
+# withheld_restart (buster-gate profile, #131): the sessions.db readers and
+# the verdict
+# ---------------------------------------------------------------------------
+
+
+def _withheld_db(tmp_path, rows, exchanges=()):
+    import json
+    import sqlite3
+
+    path = tmp_path / "sessions.db"
+    db = sqlite3.connect(path)
+    db.execute(
+        "CREATE TABLE message_log (id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id TEXT, "
+        "message TEXT, timestamp REAL, message_type TEXT)"
+    )
+    db.execute("CREATE TABLE exchange_log (trace_id TEXT, channel_id TEXT, origin TEXT, outcomes TEXT)")
+    for channel_id, msg, mtype in rows:
+        db.execute(
+            "INSERT INTO message_log (channel_id, message, timestamp, message_type) VALUES (?, ?, 0, ?)",
+            (channel_id, json.dumps(msg), mtype),
+        )
+    for channel_id, origin, outcomes in exchanges:
+        db.execute(
+            "INSERT INTO exchange_log VALUES ('t', ?, ?, ?)",
+            (channel_id, origin, json.dumps(outcomes)),
+        )
+    db.commit()
+    db.close()
+    return path
+
+
+def test_withheld_rowids_and_marker(tmp_path):
+    from harness.driver import has_final_marker_after, withheld_rowids
+
+    ch = "irc:#p-withheld"
+    path = _withheld_db(tmp_path, [
+        (ch, {"role": "system", "content": "[scheduler]\n\nbeat"}, "message"),
+        (ch, {"role": "assistant", "content": "PELICAN-7731"}, "unsent"),
+        (ch, {"role": "system", "content": "[not sent: final]\n\nYour response above was not sent"}, "context"),
+        ("irc:#other", {"role": "assistant", "content": "x"}, "unsent"),
+    ])
+    assert withheld_rowids(path, ch) == [2]
+    assert has_final_marker_after(path, ch, 2) is True
+    assert has_final_marker_after(path, ch, 1) is False
+
+
+def test_vetoed_heartbeat_count(tmp_path):
+    from harness.driver import vetoed_heartbeat_count
+
+    ch = "irc:#p-withheld"
+    path = _withheld_db(tmp_path, [], exchanges=[
+        (ch, "heartbeat", {"send": {"vetoed": True}}),
+        (ch, "heartbeat", {"send": {"vetoed": False}}),
+        (ch, "user", {"send": {"vetoed": True}}),
+    ])
+    assert vetoed_heartbeat_count(path, ch) == 1
+
+
+def test_withheld_restart_verdict_names_first_failing_stage():
+    from harness.driver import withheld_restart_verdict
+
+    assert withheld_restart_verdict(True, True, True, True, True, True)[0] is True
+    passed, why = withheld_restart_verdict(True, True, True, False, True, True)
+    assert passed is False and "sent a withheld reply" in why
+    passed, why = withheld_restart_verdict(True, True, True, True, True, False)
+    assert passed is False and "did not reload" in why
+
+
+def test_buster_gate_profile_is_registered():
+    from harness.driver import PROFILES, WITHHELD_CHANNEL, probe_withheld_restart
+
+    probes, channels = PROFILES["buster-gate"]
+    assert probes == [probe_withheld_restart]
+    assert channels == [WITHHELD_CHANNEL]
+    template = Path(__file__).resolve().parent.parent / "harness" / "buster-gate.yaml.in"
+    assert "min_salience: 1.0" in template.read_text()

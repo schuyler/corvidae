@@ -88,6 +88,15 @@ HEARTBEAT_JOB_CHANNEL = "internal:heartbeat"
 # a slow turn.
 HEARTBEAT_TIMEOUT_S = 240
 
+# withheld_restart probe (buster-gate profile, #131): a heartbeat job on an
+# IRC channel whose finals the decide gate withholds (gate.send.min_salience
+# 1.0). The planted token proves the withheld row reloads into the window.
+WITHHELD_CHANNEL = "#p-withheld"
+WITHHELD_JOB_CHANNEL = "irc:#p-withheld"
+WITHHELD_TOKEN = "PELICAN-7731"
+# Job interval is 30s (buster-gate.yaml.in); same budget as heartbeat_smoke.
+WITHHELD_TIMEOUT_S = 240
+
 # Ordinary single turn. Observed 2-7s (run 7), worst observed 35s on an
 # inflated context. 90s is ~2.5x the worst observation.
 TURN_TIMEOUT_S = 90
@@ -582,6 +591,68 @@ def assistant_rows(db_path: Path, channel_id: str) -> int:
         (channel_id, '%"role": "assistant"%'),
     )
     return rows[0][0] if rows else 0
+
+
+def withheld_rowids(db_path: Path, channel_id: str) -> list[int]:
+    """Ids of `unsent` rows (finals a send gate withheld) on `channel_id`."""
+    rows = _query(
+        db_path,
+        "SELECT id FROM message_log WHERE channel_id = ? AND message_type = 'unsent' ORDER BY id",
+        (channel_id,),
+    )
+    return [r[0] for r in rows]
+
+
+def has_final_marker_after(db_path: Path, channel_id: str, rowid: int) -> bool:
+    """True when the row right after `rowid` on `channel_id` is the
+    Agent's `[not sent: final]` CONTEXT marker."""
+    rows = _query(
+        db_path,
+        "SELECT message, message_type FROM message_log "
+        "WHERE channel_id = ? AND id > ? ORDER BY id LIMIT 1",
+        (channel_id, rowid),
+    )
+    if not rows or rows[0][1] != "context":
+        return False
+    try:
+        content = json.loads(rows[0][0]).get("content") or ""
+    except (ValueError, AttributeError):
+        return False
+    return content.startswith("[not sent: final]")
+
+
+def vetoed_heartbeat_count(db_path: Path, channel_id: str) -> int:
+    """exchange_log rows on `channel_id` whose decide-gate record vetoed a
+    heartbeat-origin final."""
+    if not table_exists(db_path, "exchange_log"):
+        return 0
+    rows = _query(
+        db_path,
+        "SELECT COUNT(*) FROM exchange_log WHERE channel_id = ? AND origin = 'heartbeat' "
+        "AND json_extract(outcomes, '$.send.vetoed') = 1",
+        (channel_id,),
+    )
+    return rows[0][0] if rows else 0
+
+
+def withheld_restart_verdict(
+    withheld: bool, marked: bool, recorded: bool, silent: bool,
+    survived: bool, recalled: bool,
+) -> tuple[bool, str]:
+    """Pass only when every stage held; the first failing stage names the miss."""
+    stages = [
+        (withheld, "no unsent row on the channel within timeout"),
+        (marked, "the unsent row has no [not sent: final] marker after it"),
+        (recorded, "exchange_log has no vetoed heartbeat decision"),
+        (silent, "the bot sent a withheld reply to IRC"),
+        (survived, "the unsent row did not survive the restart as unsent"),
+        (recalled, "after the restart the bot did not recall the withheld token "
+                   "(the row did not reload into the window)"),
+    ]
+    for ok, why in stages:
+        if not ok:
+            return False, why
+    return True, "final withheld, marked and recorded; silent on IRC; reloaded after restart"
 
 
 async def poll_db(predicate: Callable[[], bool], timeout: float, interval: float = 1.0) -> bool:
@@ -1154,6 +1225,61 @@ async def probe_heartbeat_smoke(ctx: RunContext) -> ProbeResult:
                        _transcript(ctx, channel, []))
 
 
+async def probe_withheld_restart(ctx: RunContext) -> ProbeResult:
+    """A heartbeat final on an IRC channel is withheld (stored unsent, with
+    its marker, and the veto recorded), never reaches IRC, and survives a
+    restart: the reloaded window still holds it, so the bot can say what
+    it wrote."""
+    channel = WITHHELD_CHANNEL
+    if not ctx.channel_ready.get(channel):
+        return _skip_result("withheld_restart", channel)
+    sent: list[tuple[float, str]] = []
+    t0 = time.monotonic()
+
+    def result(passed: bool, details: str) -> ProbeResult:
+        return ProbeResult("withheld_restart", passed, details, time.monotonic() - t0,
+                           _transcript(ctx, channel, sent))
+
+    # 1. The beat fires on its own schedule; wait for its withheld row.
+    withheld = await poll_db(
+        lambda: bool(withheld_rowids(ctx.session_db, WITHHELD_JOB_CHANNEL)),
+        WITHHELD_TIMEOUT_S,
+    )
+    rowids = withheld_rowids(ctx.session_db, WITHHELD_JOB_CHANNEL)
+    first = rowids[0] if rowids else None
+    marked = first is not None and has_final_marker_after(ctx.session_db, WITHHELD_JOB_CHANNEL, first)
+    # The decide gate's record is a fire-and-forget write; give it a moment.
+    recorded = await poll_db(
+        lambda: vetoed_heartbeat_count(ctx.session_db, WITHHELD_JOB_CHANNEL) > 0, 15,
+    )
+    # Give a misrouted send a moment to arrive before declaring silence.
+    await asyncio.sleep(5)
+    silent = not [m for m in ctx.client.messages.get(channel, []) if m.nick == ctx.bot_nick]
+    if not (withheld and marked and recorded and silent):
+        return result(*withheld_restart_verdict(withheld, marked, recorded, silent, False, False))
+
+    # 2. Restart; the withheld row must come back as unsent.
+    restart_ts = time.time()
+    subprocess.run(
+        [str(ctx.repo_dir / "harness" / "restart-daemon.sh"), str(ctx.run_dir / "daemon.log")],
+        cwd=ctx.repo_dir, check=True, timeout=120,
+    )
+    if not await ctx.client.wait_for_nick_join(channel, ctx.bot_nick, timeout=90, after_ts=restart_ts):
+        return result(False, "buster did not rejoin the channel after restart")
+    survived = first in withheld_rowids(ctx.session_db, WITHHELD_JOB_CHANNEL)
+
+    # 3. A user question: the reply is user-origin, so the gate never
+    # withholds it, and it can only carry the token if the withheld row
+    # reloaded into the window.
+    recalled = await send_and_await(
+        ctx, channel,
+        "Your heartbeat replies in this channel were withheld and never sent. "
+        "What code did your heartbeat reply contain? Answer with the code only.",
+        WITHHELD_TOKEN, sent, TURN_TIMEOUT_S, after_ts=restart_ts,
+    )
+    return result(*withheld_restart_verdict(True, True, True, True, survived, recalled is not None))
+
+
 PROBES: list[Callable[[RunContext], "asyncio.Future[ProbeResult]"]] = [
     probe_smoke_echo,
     probe_tool_loop,
@@ -1176,6 +1302,7 @@ PROFILES: dict[str, tuple[list[Callable[[RunContext], "asyncio.Future[ProbeResul
     "buster": (PROBES, ALL_CHANNELS),
     "buster-memrole": ([probe_memory_role], [MEMROLE_CHANNEL]),
     "buster-heartbeat": ([probe_heartbeat_smoke], [HEARTBEAT_CHANNEL]),
+    "buster-gate": ([probe_withheld_restart], [WITHHELD_CHANNEL]),
 }
 
 

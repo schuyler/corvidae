@@ -418,8 +418,9 @@ class AppraisalPlugin(CorvidaePlugin):
             self.pm = pm
         self.config: dict = {}
         # Both maps keyed (trace_id, direction); direction ∈ {"in","out"}.
-        # get_or_compute_out (WP2.9) will share this discipline — the two
-        # directions compute over different text and must never alias.
+        # get_or_compute (inbound) and get_or_compute_out (outbound) share
+        # this discipline — the two directions compute over different text
+        # and must never alias.
         self._cache: _LRUDict = _LRUDict(maxsize=CACHE_MAXSIZE)
         self._inflight: dict[tuple[str, str], asyncio.Future] = {}
         # Strong refs to fire-and-forget persist tasks — prevents a
@@ -536,6 +537,28 @@ class AppraisalPlugin(CorvidaePlugin):
         return None
 
     @hookimpl
+    async def should_send_response(self, channel, text, emission, trace_id, meta):
+        """Thin trigger: compute the outbound vector for a final, return None.
+
+        So the vector exists even when no gate plugin is registered, or a
+        gate's coroutine runs first (the pull API dedups the compute). The
+        try/except is load-bearing for the same reason as the inbound
+        trigger: one raising impl in this broadcast would discard every
+        sibling's verdict. An appraisal failure never withholds.
+        """
+        if emission != "final" or trace_id is None:
+            return None
+        try:
+            await self.get_or_compute_out(channel, trace_id, text)
+        except Exception:
+            logger.warning(
+                "outbound stage-1 appraisal failed for %s (failing open)",
+                trace_id, exc_info=True,
+                extra={"channel": channel.id, "trace_id": trace_id},
+            )
+        return None
+
+    @hookimpl
     async def on_message_persisted(self, channel, trace_id, rowid, text, meta) -> None:
         """Record the exchange's true originating text in the bounded LRU.
 
@@ -591,6 +614,20 @@ class AppraisalPlugin(CorvidaePlugin):
         appears.
         """
         return await self._get_or_compute(channel, trace_id, text, "in")
+
+    async def get_or_compute_out(self, channel, trace_id: str, text: str) -> dict:
+        """Return the OUTBOUND stage-1 vector for this exchange, computing once.
+
+        The twin of get_or_compute over the final response text: the same
+        heuristics + probe blend and the same fail-open probe budget (no
+        model call), but its own (trace_id, "out") cache slot and in-flight
+        future. A user exchange computes both directions under one trace
+        id; sharing a slot would hand this caller the inbound vector and
+        never compute or persist ``stage1_out``. First compute
+        fire-and-forget persists it under the envelope's "stage1_out" key.
+        The same cross-task CancelledError warning as get_or_compute applies.
+        """
+        return await self._get_or_compute(channel, trace_id, text, "out")
 
     async def get_appraisal(self, trace_id: str) -> dict | None:
         """Pure reader for the inbound stage-1 vector (no compute)."""
@@ -1076,13 +1113,14 @@ class AppraisalPlugin(CorvidaePlugin):
             columns: dict = {"appraisal": {envelope_key: vector}}
             if probe_score is not None:
                 columns["probe_score"] = probe_score
-            # Origin "user" is per-spec while the inbound gate is the only
-            # compute site — but upsert_exchange patches origin on EXISTING
-            # rows too, so any future non-user-origin caller of
-            # get_or_compute must thread the real origin through here or it
-            # will silently relabel the exchange row (2B review A-4).
+            # Inbound: origin "user" — the inbound gate only fires for user
+            # messages. Outbound: None, because upsert_exchange patches
+            # origin on EXISTING rows and the outbound compute runs for
+            # every origin; the row already exists by the time a final is
+            # gated (2B review A-4), so None leaves its origin alone.
+            origin = "user" if direction == "in" else None
             await outcome_log.upsert_exchange(
-                trace_id, channel.id, "user", **columns
+                trace_id, channel.id, origin, **columns
             )
         except Exception:
             logger.warning(

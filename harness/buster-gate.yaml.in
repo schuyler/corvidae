@@ -1,0 +1,78 @@
+# Buster agent config — output-gate profile (#131). Rendered to
+# $BUSTER_ROOT/state/agent.yaml by run.sh when HARNESS_PROFILE=buster-gate
+# (state dir: @STATE_DIR@).
+#
+# One question: does a withheld final stay withheld across a restart? A
+# heartbeat job on #p-withheld asks for a planted code; the decide gate
+# (gate.send.min_salience 1.0, so every non-user final is withheld) stores
+# the reply as an `unsent` row with its marker, and nothing reaches IRC.
+# After a daemon restart the driver asks for the code: only a window that
+# reloaded the withheld row can answer, and a user-origin reply is never
+# withheld. appraisal, outcome_log and gates are on; the rest of the
+# cognition set stays off as in the default profile.
+
+llm:
+  main:
+    base_url: http://127.0.0.1:8080/v1
+    # Keep in step with buster.yaml.in.
+    model: qwen3.6:35b
+    extra_body:
+      id_slot: 0
+    timeout: 300
+
+daemon:
+  session_db: sessions.db
+  metrics_jsonl: metrics.jsonl
+  max_task_workers: 2
+
+agent:
+  system_prompt: >
+    You are Buster, a test agent used for harness probes. Answer plainly
+    and follow instructions exactly, including any tokens or codes you are
+    asked to repeat back.
+  max_context_tokens: 24000
+  request_logprobs: false
+
+scheduler:
+  timezone: UTC
+  jobs:
+    # A short interval so the probe completes in minutes; every beat is
+    # withheld, so repeats only add unsent rows.
+    - name: heartbeat
+      channel: "irc:#p-withheld"
+      origin: heartbeat
+      every: 30s
+      prompt: >
+        Heartbeat check. Reply with exactly the code PELICAN-7731 and
+        nothing else.
+
+gate:
+  send:
+    enforce: true
+    min_salience: 1.0     # withhold every non-user final
+
+plugins:
+  disabled:
+    - memory
+    - memory_tools
+    - funnel
+    - critique
+    - subagent
+    - mcp
+    - cli
+
+tools:
+  disabled:
+    - shell
+
+irc:
+  host: 127.0.0.1
+  port: 6667
+  nick: buster
+  tls: false
+  channels:
+    - "#p-withheld"
+
+logging:
+  level: INFO
+  file: corvidae.log

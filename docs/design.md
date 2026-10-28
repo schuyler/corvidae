@@ -78,6 +78,7 @@ class AgentSpec:
     async def on_agent_response(self, channel: Channel, request_text: str, response_text: str, trace_id: str | None, meta: dict, logprobs: dict | None) -> None
     async def on_notify(self, channel: Channel, source: str, text: str, tool_call_id: str | None, meta: dict | None) -> None
     async def should_process_message(self, channel: Channel, sender: str, text: str, trace_id: str | None) -> bool | None
+    async def should_send_response(self, channel: Channel, text: str, emission: str, trace_id: str | None, meta: dict) -> bool | None
     async def on_message_admitted(self, channel: Channel, trace_id: str, sender: str, text: str) -> None
     async def on_message_rejected(self, channel: Channel, trace_id: str, sender: str, text: str) -> None
     async def on_message_persisted(self, channel: Channel, trace_id: str, rowid: int | None, text: str, meta: dict) -> None
@@ -107,7 +108,8 @@ returns that single value. Gate hooks
 that need a single resolved value pass the result list to
 `resolve_reject_wins(results)` from `hooks.py`: any `False` in the results
 returns `False`; otherwise any `True` returns `True`; otherwise `None`.
-`should_process_message` is the only hook resolved this way.
+`should_process_message` and `should_send_response` are the hooks resolved
+this way.
 
 Hooks marked `firstresult=True` in the hookspec (`resolve_llm_error`,
 `resolve_compaction`, `transform_tool_result`, `transform_display_text`,
@@ -142,6 +144,7 @@ adding a hook are in [plugin-guide.md](plugin-guide.md#hook-grammar);
 | `on_agent_response` | broadcast | after agent loop produces a text response; no default implementation |
 | `on_notify` | broadcast | inject a notification into a channel queue |
 | `should_process_message` | broadcast / resolve_reject_wins | `on_message`, before enqueue, carrying the transport-minted `trace_id`; no default implementation; None from empty broadcast allows all messages |
+| `should_send_response` | broadcast / resolve_reject_wins | the [output gate](#the-output-gate): before each outbound emission, with `emission` in `final`, `progress`, `thinking`, `error` and the item's `trace_id` and `meta`; a veto of `final` stores the row as `UNSENT`; a raising implementation fails open (logged, sent); no kernel implementation, so with none registered everything is sent |
 | `on_message_admitted` | broadcast | `on_message`, after a USER message is admitted; fires exactly once per admitted message |
 | `on_message_rejected` | broadcast | `on_message`, after a USER message is vetoed; fires exactly once per rejected message |
 | `on_message_persisted` | broadcast | dequeue, after the trace-originating row is persisted; fires once per originating item regardless of outcome (`rowid` may be None) |
@@ -551,11 +554,17 @@ class MessageType(str, enum.Enum):
     MESSAGE = "message"    # ordinary conversation turn (user or assistant)
     SUMMARY = "summary"    # compaction summary replacing older messages
     CONTEXT = "context"    # plugin-injected context (memory, notes, etc.)
+    UNSENT = "unsent"      # assistant message a should_send_response gate vetoed
 ```
 
 `message_type` is a persistence category, orthogonal to conversational role
 (`user`, `assistant`, `tool`, `system`). `CompactionPlugin` only summarizes `MESSAGE`
-entries; `SUMMARY` and `CONTEXT` rows survive compaction.
+entries; `SUMMARY` and `CONTEXT` rows survive compaction. `UNSENT` rows are
+in the window and reload into it, but no transport sees them, including
+history replay. Compaction's standalone summarizer and memory
+consolidation read `MESSAGE` rows only, so they never summarize an `UNSENT`
+row as said; a fork-mode compaction summary works from the window, where the
+row's not-sent marker sits beside it (see [The output gate](#the-output-gate)).
 
 In-memory message dicts carry a `_message_type` metadata key (set by `append()`).
 `build_prompt()` strips it before returning messages to the LLM.
@@ -676,19 +685,34 @@ per-channel `SerialQueue`. The queue's consumer calls
    quota, endpoint/model) and a short provider body; for connection and
    timeout failures it points at `llm.main.base_url`. It defers (`None`)
    on every other error, so the generic message still applies.
-9. Appends the assistant message to conversation; fires `persist_message`
+8b. **The final send gate.** When the result's tool calls will not
+    dispatch (no tool calls, or `turn_counter >= max_turns`), resolves the
+    display text once (the max-turns fallback on that branch) and fires
+    `should_send_response(emission="final")` over it. On the max-turns
+    branch, `tool_calls` is stripped from the assistant message before it
+    is appended, so the row and the window copy both lose it, whatever the
+    verdict.
+9. Appends the assistant message to conversation (as `UNSENT` after a
+   final veto, else `MESSAGE`); fires `persist_message`. Then sends
+   `OutboundThinking` for `reasoning_content`, unless the final was vetoed
+   (the reasoning goes with it) or `should_send_response(emission="thinking")`
+   vetoes it
 10. Calls `after_persist_assistant` hook (broadcast); `ThinkingPlugin`
-    uses this to strip `reasoning_content` from the in-memory copy
+    uses this to strip `reasoning_content` from the in-memory copy. Then
+    appends a not-sent marker for each vetoed emission
 11. **`_handle_response`** — decision point:
     - **Tool calls, under limit** (`turn_counter < max_turns`):
-      increment counter, dispatch tool calls as Tasks, return without
-      sending a response
-    - **Tool calls, at limit**: suppresses tool dispatch. Calls
-      `_resolve_display_text` with `MAX_TURNS_FALLBACK_MESSAGE` as
-      fallback, fires `on_agent_response`, sends text response.
-    - **No tool calls**: increments counter, calls
-      `_resolve_display_text`, fires `on_agent_response`, sends text
-      response
+      increment counter, send the intermediate text as `OutboundProgress`
+      unless `should_send_response(emission="progress")` vetoes it (then
+      a marker is appended instead), dispatch tool calls as Tasks, return
+      without sending a response
+    - **Tool calls, at limit**: suppresses tool dispatch. Uses the display
+      text step 8b resolved (`MAX_TURNS_FALLBACK_MESSAGE` as fallback),
+      fires `on_agent_response`, sends text response unless the final was
+      vetoed.
+    - **No tool calls**: increments counter, uses the display text step
+      8b resolved, fires `on_agent_response`, sends text response unless
+      the final was vetoed
 
 Step 7's `conv.build_prompt(...)` never returns a prompt ending on an
 assistant message. Three facts compose to guarantee it: step 4 only ever
@@ -715,6 +739,63 @@ that value is used; otherwise falls back to `result.text`. When a
 `fallback` is provided and the resolved text is falsy, the fallback is
 returned instead. Hook exceptions are caught, logged, and the input text
 is returned.
+
+### The output gate
+
+`should_send_response(channel, text, emission, trace_id, meta)` is the
+outbound mirror of `should_process_message`: reject-wins over every
+implementation, any `False` vetoes. It fires at four sites, in two modes.
+
+**The persistence-controlling firing** (`emission="final"`, step 8b) runs
+between generation and persistence, and only for results whose tool calls
+will not dispatch: a text result, or the max-turns branch. Never for a
+result whose calls dispatch: hiding that assistant message would orphan its
+`role: "tool"` rows on reload, which OpenAI-compatible servers reject. A
+veto:
+
+- persists the assistant message as `MessageType.UNSENT`;
+- skips the `OutboundMessage` send;
+- still fires `on_agent_response` (the agent thought it; critique can
+  still object);
+- appends a not-sent marker to the window.
+
+The max-turns branch strips `tool_calls` from both the persisted row and
+the window copy regardless of the verdict: those calls never dispatch, so a
+row that kept them would dangle on reload, and stripping only the row would
+leave the live and reloaded windows disagreeing.
+
+**Per-emission firings** at the progress, thinking and error-fallback
+sends suppress that emission only. The assistant row stays `MESSAGE`, keeps
+its `tool_calls`, and tool dispatch proceeds. A progress or thinking veto
+appends a marker; an error veto (in `_run_turn`, where no assistant message
+exists) suppresses the send and nothing else. A vetoed final takes its
+reasoning with it: the thinking send is skipped without consulting the gate.
+
+**The not-sent marker** is a `CONTEXT` system row the Agent appends and
+persists itself (`corvidae.context.unsent_marker_text`), right after the
+assistant row, so it reloads beside it. It opens `[not sent: <emission>]`
+and tells the model the channel didn't see that text and not to cite it as
+said. Only the progress marker quotes its text (40 characters): `build_prompt`
+moves a tool-calls block to its last result, so a progress marker renders
+before the block it describes and needs the excerpt to say which text it
+means. The final marker sits right below its row; the thinking marker quotes
+nothing, so reasoning never outlives `reasoning_history: drop` inside one.
+
+**Transports never see a vetoed emission, including on replay.** The web
+transport's history skips `UNSENT` rows and drops the progress or thinking
+frame of an assistant row followed by a progress or thinking marker. ACP's
+`load_session` replay skips `UNSENT` rows and an assistant row followed by a
+progress marker (it doesn't replay reasoning). `unsent_marker_emission(content)`
+is the shared parser.
+
+**Failure modes.** `_gate_send` catches any exception from the hook, logs it
+at WARNING with the emission and channel, and sends: a broken gate never
+silences the agent. With no implementation registered (the kernel ships
+none), every emission is sent; the only behavioral change from before the
+hook is the max-turns `tool_calls` strip. `meta` is the item's trace
+metadata dict; origin is not a kernel concept, so a gate that needs it reads
+`meta["origin"]` (stamped by producers such as the scheduler) the way
+cognition's `GatePlugin` does ([cognition.md](cognition.md#gateplugin)).
 
 ### Tool call dispatch
 
@@ -2049,8 +2130,10 @@ frames and snapshots the unsent entries, all before its first `await`;
 then it reads the newest 200 `message_log` rows (`ORDER BY timestamp
 DESC, id DESC`, reversed) and queues `history` (rows mapped to frames,
 then one `user` frame per snapshot entry), then the buffered frames. A
-summary row becomes a `divider` at its timestamp; `context` rows and
-`system` messages are skipped; assistant rows give `thinking` (from
+summary row becomes a `divider` at its timestamp; `context` rows,
+`unsent` rows and `system` messages are skipped, and a not-sent marker for
+progress or thinking drops that frame of the assistant row it follows
+([The output gate](#the-output-gate)); assistant rows give `thinking` (from
 `reasoning_content`), then `progress` or `message` (text through
 `strip_thinking`), then a `dispatched` chip per tool call; tool rows give a
 `completed` chip, named via the call id, with task.py's `[Task <id>] `
@@ -2167,7 +2250,8 @@ not LLM config). Tool calls on ACP channels go through a swappable
 `close` (`delete` is not advertised). `session/load` and `session/resume`
 reattach the **same** `acp:<sessionId>` from `sessions.db` (no forked
 history). `session/load` replays user/assistant text (and compaction
-summaries) as `session/update` chunks before responding;
+summaries) as `session/update` chunks before responding, skipping `UNSENT`
+rows and assistant text whose progress send a gate vetoed;
 `session/resume` does not. `session/close` cancels in-flight work and
 drops the in-memory channel while leaving `message_log` intact.
 `session/list` reads an `acp_session_index` sidecar table in the same DB

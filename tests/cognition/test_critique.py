@@ -630,3 +630,35 @@ def test_parse_json_block_error_names_critique_phase_and_long_text():
     message = str(excinfo.value)
     assert "critique" in message.lower()
     assert "PROVIDER_ERROR_MARKER" in message
+
+
+class TestProvenanceProbeIgnoresUnsent:
+    """WP2.8 follow-through: a withheld (UNSENT) row is no record that a
+    claim was made, so the raw-log probe must not count it."""
+
+    async def test_unsent_row_does_not_count_as_a_record(self, tmp_path):
+        from corvidae_cognition.critique import CritiquePlugin
+
+        db_path = str(tmp_path / "sessions.db")
+        db = await aiosqlite.connect(db_path)
+        await init_db(db)
+        await db.execute("CREATE VIRTUAL TABLE message_fts USING fts5(content_text)")
+        cursor = await db.execute(
+            "INSERT INTO message_log (channel_id, message, timestamp, message_type) VALUES (?, ?, ?, ?)",
+            ("test:x", json.dumps({"role": "assistant", "content": "the deadline is Friday"}), 1.0, "unsent"),
+        )
+        await db.execute(
+            "INSERT INTO message_fts(rowid, content_text) VALUES (?, ?)",
+            (cursor.lastrowid, "the deadline is Friday"),
+        )
+        await db.commit()
+
+        plugin = CritiquePlugin()
+        plugin._probe_db = db
+        try:
+            assert await plugin._message_fts_empty("deadline Friday", 8) is True
+            await db.execute("UPDATE message_log SET message_type = 'message'")
+            await db.commit()
+            assert await plugin._message_fts_empty("deadline Friday", 8) is False
+        finally:
+            await db.close()
