@@ -144,6 +144,25 @@ class PersistencePlugin(CorvidaePlugin):
             extra={"journal_mode": actual_mode},
         )
 
+        # Seed the idle tracker: every channel with history is quiet since its
+        # last row, so channel watches fire after a restart with no traffic.
+        # pm is absent when the plugin was built without one (some tests do).
+        # shortcut: hand-built plugin managers omit the idle tracker; make it strict if a non-Runtime entry point appears
+        pm = getattr(self, "pm", None)
+        idle = pm.get_plugin("idle") if pm is not None else None
+        if idle is not None:
+            async with self.db.execute(
+                "SELECT channel_id, MAX(timestamp) FROM message_log GROUP BY channel_id"
+            ) as cursor:
+                rows = await cursor.fetchall()
+            for channel_id, last_ts in rows:
+                idle.note_restored(channel_id, last_ts)
+        else:
+            logger.warning(
+                "no plugin manager or idle tracker (name 'idle'); restart seed "
+                "skipped — Runtime provides both, so this plugin was built by hand"
+            )
+
     @hookimpl
     async def on_stop(self) -> None:
         if self.db:

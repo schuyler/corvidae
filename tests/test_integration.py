@@ -28,7 +28,6 @@ from corvidae.hooks import (
     hookimpl,
     validate_dependencies,
 )
-from corvidae.idle import IdleMonitorPlugin
 from corvidae.llm import LLMClient
 from corvidae.llm_plugin import LLMPlugin
 from corvidae.mcp_client import McpClientPlugin
@@ -237,9 +236,6 @@ async def _build_harness(config: dict) -> IntegrationHarness:
     agent_loop = Agent(pm)
     pm.register(agent_loop, name="agent")
 
-    idle_monitor_plugin = IdleMonitorPlugin(pm)
-    pm.register(idle_monitor_plugin, name="idle_monitor")
-
     validate_dependencies(pm)
 
     # Patch LLMClient so LLMPlugin.on_start() uses the mock instead of creating a real session.
@@ -315,9 +311,6 @@ class TestGroupALifecycle:
         agent_loop = Agent(pm)
         pm.register(agent_loop, name="agent")
 
-        idle_monitor_plugin = IdleMonitorPlugin(pm)
-        pm.register(idle_monitor_plugin, name="idle_monitor")
-
         # Should not raise
         validate_dependencies(pm)
 
@@ -360,8 +353,6 @@ class TestGroupALifecycle:
 
         # TaskPlugin worker stopped
         assert harness.task_plugin._worker_task is None or harness.task_plugin._worker_task.done()
-
-        # IdleMonitorPlugin is now a pure on_idle consumer (no polling task)
 
         # LLM client stop() was called
         harness.mock_client.stop.assert_called_once()

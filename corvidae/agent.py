@@ -26,7 +26,6 @@ Logging:
 
 import asyncio
 import logging
-import time
 
 import aiohttp
 from collections.abc import Callable
@@ -62,6 +61,7 @@ from corvidae.fork import (
     looks_like_tool_call,
     parse_forks_config,
 )
+from corvidae.idle import IdleTracker
 from corvidae.hooks import (
     CorvidaePlugin,
     get_dependency,
@@ -192,11 +192,16 @@ class Agent(CorvidaePlugin):
         _tools: Dict mapping tool names to async callable functions (from ToolCollectionPlugin)
         _tool_schemas: List of tool schemas for LLM function calling (from ToolCollectionPlugin)
         queues: Per-channel serial queues (dict[channel_id, SerialQueue]).
-            Public attribute; IdleMonitorPlugin references this dict directly.
+            Idle detection does not read them: Agent pushes activity and
+            settle events to the kernel IdleTracker.
         _registry: ChannelRegistry, resolved in on_start via get_dependency
     """
 
     depends_on = frozenset({"registry", "task", "llm", "tools"})
+
+    # Class-level default so an Agent built without __init__ (as some tests do)
+    # still reads as having no tracker.
+    _idle: IdleTracker | None = None
 
     def __init__(self, pm=None) -> None:
         if pm is not None:
@@ -209,15 +214,12 @@ class Agent(CorvidaePlugin):
         self._max_tool_result_chars: int = 100_000
         self._chars_per_token: float = DEFAULT_CHARS_PER_TOKEN
         self._base_dir = None
-        self._idle_cooldown: float = 30.0
         self._request_logprobs: bool = False
         self._mid_conversation_system_role: str = "system"
         self._forks: ForksConfig = ForksConfig()
-        # monotonic() time of the last on_idle, or None if it never fired.
-        # (0.0 would read as "fired at boot" and suppress on_idle for the
-        # first cooldown after boot, since monotonic() counts from boot.)
-        self._last_idle_fire: float | None = None
-        self._idle_firing: bool = False
+        # Kernel idle tracker (registered as "idle"), resolved in _start_plugin;
+        # None when the plugin manager was built without one.
+        self._idle: IdleTracker | None = None
         # True between a completed on_start and on_stop; see `started`.
         self._started: bool = False
 
@@ -243,38 +245,28 @@ class Agent(CorvidaePlugin):
         """
         return self._started
 
-    async def _maybe_fire_idle(self) -> None:
-        """Fire on_idle if all queues are empty and cooldown has elapsed.
+    def _note_activity(self, channel_id: str) -> None:
+        """Tell the idle tracker that ``channel_id`` has an inbound item."""
+        # No tracker means idle signals are off; nothing to report.
+        if self._idle is None:
+            return
+        self._idle.note_activity(channel_id)
 
-        Uses a boolean guard (_idle_firing) rather than a lock. This works
-        because asyncio is single-threaded: there is no await between the
-        flag check and the flag set, so no other task can interleave and
-        pass the check before the flag is raised.
-        """
-        if self._idle_firing:
+    def _note_settled(self, channel: Channel) -> None:
+        """Tell the idle tracker ``channel`` is quiet, if no work remains on it."""
+        if self._idle is None:
             return
-        for q in self.queues.values():
-            if not q.is_empty:
-                return
-        # Check task queue
-        task_plugin = self.pm.get_plugin("task")
-        if task_plugin is not None:
-            tq = getattr(task_plugin, "task_queue", None)
-            if tq is not None and not tq.is_idle:
-                return
-        if (
-            self._last_idle_fire is not None
-            and time.monotonic() - self._last_idle_fire < self._idle_cooldown
-        ):
+        # Another queued item means the channel still has work to do.
+        queue = self.queues.get(channel.id)
+        if queue is not None and not queue.is_empty:
             return
-        self._idle_firing = True
-        try:
-            await self.pm.ahook.on_idle()
-            self._last_idle_fire = time.monotonic()
-        except Exception:
-            logger.warning("on_idle hook raised exception", exc_info=True)
-        finally:
-            self._idle_firing = False
+        # Outstanding tool calls (subagent tasks included) are in-flight work;
+        # their results arrive via on_notify and settle the channel again.
+        # Known edge: ACP's cancel_prompt clears pending_tool_call_ids without
+        # processing an item, so that channel stays busy until its next item.
+        if channel.pending_tool_call_ids:
+            return
+        self._idle.note_settled(channel.id)
 
     @hookimpl
     async def on_init(self, pm, config: dict) -> None:
@@ -290,8 +282,6 @@ class Agent(CorvidaePlugin):
         # agent.forks: static operator flags (validated at startup by
         # validate_agent_config, so a bad section never gets this far).
         self._forks = parse_forks_config(agent_config)
-        daemon_config = config.get("daemon", {})
-        self._idle_cooldown = daemon_config.get("idle_cooldown_seconds", 30.0)
 
     async def on_start(self, config: dict) -> None:
         await self._start_plugin(config)
@@ -347,6 +337,8 @@ class Agent(CorvidaePlugin):
             trace_id=trace_id,
             originating=True,
         )
+        # The gate admitted the item: the channel is busy from here.
+        self._note_activity(channel.id)
         queue = self._get_or_create_queue(channel)
         await queue.enqueue(item)
 
@@ -377,6 +369,8 @@ class Agent(CorvidaePlugin):
                 "content_length": len(item.content),
             },
         )
+        # Notifications (scheduler, task completions) are inbound work too.
+        self._note_activity(channel.id)
         queue = self._get_or_create_queue(channel)
         await queue.enqueue(item)
 
@@ -691,45 +685,49 @@ class Agent(CorvidaePlugin):
         loop (as run_agent_loop uses for subagents) would block the queue
         for the entire tool-calling sequence.
         """
-        logger.debug(
-            "processing queue item",
-            extra={
-                "channel": item.channel.id,
-                "role": item.role,
-                "source": item.source,
-                "has_tool_call_id": item.tool_call_id is not None,
-            },
-        )
         channel = item.channel
-
-        # Trace resolution MUST happen here, before the
-        # set_attribution call below, so the widened attribution carries
-        # the id into every LLM call in the turn (including tool Tasks
-        # created during dispatch, which snapshot the context at creation).
-        # If resolution ran inside _process_queue_item_attributed instead
-        # (after attribution is set), usage_log.trace_id would be null
-        # for the whole turn.
-        if item.trace_id is None:
-            inherited = item.meta.get("trace_id") if item.meta else None
-            if inherited is not None:
-                item.trace_id = inherited
-                item.originating = False
-            else:
-                item.trace_id = mint_trace_id()
-                item.originating = True
-
-        # Attribute all LLM activity in this turn (including tool Tasks
-        # created during dispatch, which capture the context at creation)
-        # to the turn stage and this channel. Compaction re-labels itself
-        # around its own LLM call and restores this attribution after.
-        attribution_token = set_attribution(
-            stage="turn", channel_id=channel.id,
-            trace_id=item.trace_id, meta=item.meta,
-        )
+        # The whole body is guarded so a failed or early-returning item still
+        # reports the channel as settled.
         try:
-            await self._process_queue_item_attributed(item, channel)
+            logger.debug(
+                "processing queue item",
+                extra={
+                    "channel": item.channel.id,
+                    "role": item.role,
+                    "source": item.source,
+                    "has_tool_call_id": item.tool_call_id is not None,
+                },
+            )
+            # Trace resolution MUST happen here, before the
+            # set_attribution call below, so the widened attribution carries
+            # the id into every LLM call in the turn (including tool Tasks
+            # created during dispatch, which snapshot the context at creation).
+            # If resolution ran inside _process_queue_item_attributed instead
+            # (after attribution is set), usage_log.trace_id would be null
+            # for the whole turn.
+            if item.trace_id is None:
+                inherited = item.meta.get("trace_id") if item.meta else None
+                if inherited is not None:
+                    item.trace_id = inherited
+                    item.originating = False
+                else:
+                    item.trace_id = mint_trace_id()
+                    item.originating = True
+
+            # Attribute all LLM activity in this turn (including tool Tasks
+            # created during dispatch, which capture the context at creation)
+            # to the turn stage and this channel. Compaction re-labels itself
+            # around its own LLM call and restores this attribution after.
+            attribution_token = set_attribution(
+                stage="turn", channel_id=channel.id,
+                trace_id=item.trace_id, meta=item.meta,
+            )
+            try:
+                await self._process_queue_item_attributed(item, channel)
+            finally:
+                reset_attribution(attribution_token)
         finally:
-            reset_attribution(attribution_token)
+            self._note_settled(channel)
 
     async def _process_queue_item_attributed(
         self, item: QueueItem, channel: Channel
@@ -981,10 +979,7 @@ class Agent(CorvidaePlugin):
             display_text=display_text, unsent=unsent,
         )
 
-        # 11. Push-based idle detection: check if the system became idle
-        await self._maybe_fire_idle()
-
-        # 12. Log phase timing breakdown
+        # 11. Log phase timing breakdown
         _total = _time.monotonic() - _t0
         _phases["other"] = max(0, _total - sum(_phases.values()))
         logger.info(
@@ -1299,6 +1294,15 @@ class Agent(CorvidaePlugin):
         self._tools, self._tool_schemas = tools_plugin.get_tools()
         self._max_tool_result_chars = tools_plugin.max_result_chars
 
+        # The idle tracker is optional: a hand-built plugin manager may lack it.
+        # shortcut: hand-built plugin managers omit the idle tracker; make it strict if a non-Runtime entry point appears
+        self._idle = self.pm.get_plugin("idle")
+        if self._idle is None:
+            logger.warning(
+                "no idle tracker registered (name 'idle'); idle signals are off — "
+                "Runtime registers one, so this plugin manager was built by hand"
+            )
+
         self._warn_if_forks_change_model()
 
         # Everything _process_queue_item needs is in place.
@@ -1331,8 +1335,6 @@ class Agent(CorvidaePlugin):
         self._request_logprobs = agent_config.get("request_logprobs", False)
         self._mid_conversation_system_role = _resolve_mid_conversation_system_role(agent_config)
         self._forks = parse_forks_config(agent_config)
-        daemon_config = config.get("daemon", {})
-        self._idle_cooldown = daemon_config.get("idle_cooldown_seconds", 30.0)
 
         # Re-borrow the LLM client from LLMPlugin after a possible swap.
         # Avoids isinstance check so MagicMock(spec=LLMPlugin) works in tests.

@@ -231,7 +231,6 @@ Any plugin can send: `await self.pm.ahook.send(channel=channel, event=OutboundMe
 | `persist_message(channel, message: dict, message_type: MessageType) -> int \| None` | async broadcast | After every `conv.append()` call; message is the untagged dict (no `_message_type` key). Persistence returns the inserted `message_log` rowid; **exactly one implementation may return non-None** (all others return None). Callers resolve with `resolve_single_result` and attach the rowid to the in-window message as `_db_id`. |
 | `before_compaction(channel, compacted_ids: list[int], cut: int)` | async broadcast, awaited | After the compaction summary succeeded and before `replace_with_summary`. The window still holds the messages about to be dropped (`channel.conversation.messages[:cut]`; `cut` is moved off tool cycles where compaction can afford it, see design.md), so this is where to fork over that prefix (see "Forking the window"). Runs on the response path; failures are logged and never block compaction. |
 | `on_compaction(channel, summary_msg: dict, retain_count: int, compacted_ids: list[int])` | async broadcast | After compaction replaces older messages with a summary; `summary_msg` is the untagged summary dict. `compacted_ids` carries the `message_log` rowids of exactly the removed messages (empty when unknown) — the consolidation range consumed by `MemoryPlugin`. |
-| `on_idle()` | async broadcast | All queues empty and cooldown elapsed; only fires when `IdleMonitorPlugin` is registered |
 | `resolve_channel(channel_id: str) -> Channel \| None` | async firstresult | A caller holding only a persisted `transport:scope` id (`SchedulerPlugin` firing a row after a restart) asks transports for the live channel. Return it for ids your transport owns, else None. Return None for your own id only when it cannot be built yet; the scheduler then retries. See [Channels](#channels). |
 
 `after_persist_assistant` — the DB row is already written when this
@@ -476,10 +475,60 @@ here is a plugin-API change and needs a line in this guide.
 | `corvidae.tool` | `Tool`, `tool_to_schema` |
 | `corvidae.persistence` | `PersistencePlugin`, `add_column_if_missing` |
 | `corvidae.llm_plugin` | `LLMPlugin` |
+| `corvidae.clock` | `Clock`, `Timer` (see [Acting on time and quiet](#acting-on-time-and-quiet)) |
+| `corvidae.idle` | `IdleTracker`, `IdleWatch` |
 | `corvidae.outbound` | `OutboundMessage`, `OutboundThinking`, `OutboundToolStatus`, `OutboundProgress` (for senders and transports) |
 
 The kernel never imports a plugin outside it. A plugin that needs another
 plugin resolves it at runtime with `get_dependency(self.pm, "<name>", Type)`.
+
+## Acting on time and quiet
+
+To run something later, or when a channel or the system has been quiet,
+use the kernel clock and idle tracker. They are not hooks. Declare both
+dependencies and resolve them in `on_init`:
+
+```python
+from corvidae.clock import Clock
+from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
+from corvidae.idle import IdleTracker
+
+
+class Tidy(CorvidaePlugin):
+    depends_on = frozenset({"clock", "idle"})
+
+    @hookimpl
+    async def on_init(self, pm, config):
+        self.pm = pm
+        self.clock = get_dependency(pm, "clock", Clock)
+        self.idle = get_dependency(pm, "idle", IdleTracker)
+
+    @hookimpl
+    async def on_start(self, config):
+        self.watch = self.idle.watch_channels(600, self.on_quiet, name="tidy")
+        self.timer = self.clock.call_later(3600, self.hourly, name="tidy.hourly")
+
+    @hookimpl
+    async def on_stop(self):
+        self.watch.cancel()
+        self.timer.cancel()
+
+    async def on_quiet(self, channel_id: str) -> None: ...
+    async def hourly(self) -> None: ...
+```
+
+`call_later` and `call_at` are one-shot; re-arm from the callback for a
+periodic job. `watch_channels` repeats every `repeat` seconds (default: the
+period) while the channel stays quiet, and `watch_system` does the same for
+the whole system. Cancel watches and timers in `on_stop`; the Runtime
+cancels stragglers afterwards. Callbacks must let `asyncio.CancelledError`
+through. An idle or timer callback is upkeep: it does plugin-owned work and
+must never start a turn or enqueue work on a channel (principle 13), so it
+never calls `on_notify`. Starting a turn on time is agency, which is the
+scheduler's job: its firings go through `on_notify` and run a full turn. In
+tests, `tests/fake_clock.py`'s `install_kernel_clock(pm)` registers
+a fake clock and a real tracker, so time moves only when the test says so.
+Full semantics: [design.md](design.md#clock-and-idle-tracker-clockpy-idlepy).
 
 ## Plugin dependencies
 
@@ -774,7 +823,6 @@ memory            (MemoryPlugin)        — entry point (cognition extra)
 memory_tools      (MemoryToolsPlugin)   — entry point (cognition extra)
 funnel            (FunnelPlugin)        — entry point (cognition extra)
 agent             (Agent)               — entry point
-idle_monitor      (IdleMonitorPlugin)   — entry point
 config_watcher    (ConfigWatcherPlugin) — entry point
 ```
 
@@ -784,9 +832,9 @@ config_watcher    (ConfigWatcherPlugin) — entry point
 
 **Startup order:** `Runtime.start()` broadcasts `on_init`, then `on_start`. `ToolCollectionPlugin.on_start` runs last (trylast) to collect tools. `Runtime.start()` then calls `agent.on_start(config=config)` explicitly after the broadcast completes. `Agent.on_start` does not have `@hookimpl` — it is called only by `Runtime.start()`. Adding `@hookimpl` to `Agent.on_start` would cause double initialization.
 
-**Shutdown order:** `Runtime.stop()` calls `agent.on_stop()` first (drains queues), then `pm.ahook.on_stop()` to tear down all other plugins.
+**Shutdown order:** `Runtime.stop()` calls `agent.on_stop()` first (drains queues), then `pm.ahook.on_stop()` to tear down all other plugins, then stops the idle tracker and closes the kernel clock, which cancels any timers left running.
 
-`idle_monitor` depends on `"agent"`. Its `on_start` uses `@hookimpl(trylast=True)` to run late in the broadcast. Because `Agent.on_start` is called after the broadcast completes, `idle_monitor` is always initialized before `Agent` starts.
+`ChannelRegistry`, the `Clock` (`"clock"`) and the `IdleTracker` (`"idle"`) are registered by `Runtime.start()` before the entry points load, so any plugin can depend on them. See [Acting on time and quiet](#acting-on-time-and-quiet).
 
 ## Plugin disable
 
@@ -1249,35 +1297,11 @@ tools_dict, schemas = tools_plugin.get_tools()
 **Without this plugin:** `Agent` cannot retrieve tools and will raise
 `RuntimeError` during startup.
 
-### IdleMonitorPlugin (`corvidae/idle.py`)
-
-Fires the `on_idle` broadcast hook when all queues are quiescent.
-Entry point name: `"idle_monitor"`.
-
-Currently a stub — implements `on_idle` as a no-op. The idle
-detection logic itself lives in `Agent._maybe_fire_idle`, which
-checks queue quiescence and fires the `on_idle` broadcast.
-Plugins that implement `on_idle` (such as `MemoryPlugin`) receive
-those calls.
-
-**Idle condition:** all `SerialQueue` instances have `is_empty=True`,
-`TaskQueue.is_idle` is `True` (skipped if `TaskPlugin` is not
-registered), and at least `idle_cooldown_seconds` have elapsed since
-the last firing.
-
-**Config:**
-```yaml
-daemon:
-  idle_cooldown_seconds: 30   # minimum seconds between on_idle firings (default 30)
-```
-
-**Without this plugin:** the `on_idle` hook is never fired. Plugins that implement `on_idle` (such as `MemoryPlugin`) will not receive calls.
-
 ### SchedulerPlugin (`corvidae/scheduler.py`)
 
-Clock-driven producer of reminders, operator jobs, and the heartbeat. Entry point name: `"scheduler"`; `depends_on = {"registry", "persistence"}`. Owns the `schedule` table in `sessions.db` (created on first use) and one timer task, which sleeps until the earliest due row and is woken early whenever a row changes. A due row fires through `on_notify` with `source` and `meta["origin"]` set to `reminder` or `heartbeat`, so persistence, critique eligibility, attribution, and the outbound send work unchanged. Jobs under `scheduler.jobs` sync by name on start and on every reload. Full behaviour: [design.md](design.md#schedulerplugin); keys: [configuration.md](configuration.md#scheduler--reminders-periodic-jobs-heartbeat).
+Clock-driven producer of reminders, operator jobs, and the heartbeat. Entry point name: `"scheduler"`; `depends_on = {"registry", "persistence", "clock"}`. Owns the `schedule` table in `sessions.db` (created on first use) and one timer task, which sleeps until the earliest due row and is woken early whenever a row changes. A due row fires through `on_notify` with `source` and `meta["origin"]` set to `reminder` or `heartbeat`, so persistence, critique eligibility, attribution, and the outbound send work unchanged. Jobs under `scheduler.jobs` sync by name on start and on every reload. Full behaviour: [design.md](design.md#schedulerplugin); keys: [configuration.md](configuration.md#scheduler--reminders-periodic-jobs-heartbeat).
 
-It follows the two patterns a plugin owning persistent state and a background task needs. Schema creation is lazy on first use (`PersistencePlugin.db` may not be open during its `on_start`, as with `MemoryPlugin`). The timer is an `asyncio.Task` cancelled in `on_stop` (as with `ConfigWatcherPlugin`). Clock and sleeper are constructor arguments, so its tests never sleep.
+It follows the two patterns a plugin owning persistent state and a background task needs. Schema creation is lazy on first use (`PersistencePlugin.db` may not be open during its `on_start`, as with `MemoryPlugin`). The timer is an `asyncio.Task` cancelled in `on_stop` (as with `ConfigWatcherPlugin`). It sleeps on the kernel clock, so its tests use a fake clock and never sleep.
 
 **Without this plugin:** no reminders and no scheduled jobs; the three tools are absent.
 

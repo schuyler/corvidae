@@ -25,20 +25,6 @@ def test_agent_plugin_depends_on_includes_task():
 
 
 # ---------------------------------------------------------------------------
-# 2. IdleMonitorPlugin.depends_on must include "task"
-# ---------------------------------------------------------------------------
-
-def test_idle_monitor_plugin_depends_on_is_empty():
-    from corvidae.idle import IdleMonitorPlugin
-    assert "task" not in IdleMonitorPlugin.depends_on, (
-        "IdleMonitorPlugin.depends_on should not include 'task' — Part 2 made it a pure on_idle consumer"
-    )
-    assert "agent" not in IdleMonitorPlugin.depends_on, (
-        "IdleMonitorPlugin.depends_on should not include 'agent' — Part 2 made it a pure on_idle consumer"
-    )
-
-
-# ---------------------------------------------------------------------------
 # 3. ThinkingPlugin must have depends_on including "registry"
 # ---------------------------------------------------------------------------
 
@@ -238,7 +224,6 @@ _REGISTERED_PLUGIN_CLASSES = [
     "corvidae.tools.settings.RuntimeSettingsPlugin",
     "corvidae.tool_collection.ToolCollectionPlugin",
     "corvidae.agent.Agent",
-    "corvidae.idle.IdleMonitorPlugin",
 ]
 
 

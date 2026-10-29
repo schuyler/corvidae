@@ -19,7 +19,8 @@ KERNEL = REPO / "corvidae"
 COGNITION = REPO / "packages" / "corvidae-cognition" / "corvidae_cognition"
 
 # Kernel modules a cognition module may import: Part 2 §2's table plus
-# corvidae.outbound, the event types for the send hook (added by WP3).
+# corvidae.outbound, the event types for the send hook (added by WP3),
+# and corvidae.clock / corvidae.idle, the kernel clock and idle tracker (#165).
 # Keep in step with docs/plugin-guide.md, "What the kernel exports to plugins".
 ALLOWED_KERNEL_MODULES = {
     "corvidae.outbound",
@@ -32,6 +33,8 @@ ALLOWED_KERNEL_MODULES = {
     "corvidae.tool",
     "corvidae.persistence",
     "corvidae.llm_plugin",
+    "corvidae.clock",
+    "corvidae.idle",
 }
 
 

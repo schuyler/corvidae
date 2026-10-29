@@ -1,0 +1,70 @@
+# Buster agent config — quiet-period profile. Rendered to
+# $BUSTER_ROOT/state/agent.yaml by run.sh when HARNESS_PROFILE=buster-quiet
+# (state dir: @STATE_DIR@).
+#
+# One question: do consolidation and retention land across silence? With no
+# traffic, the tail of #p-quiet must be consolidated within
+# memory.idle_consolidate_after, also after a restart that leaves a tail,
+# and retention must run on its interval. The scheduler is disabled, which
+# proves retention runs without it. See plans/kernel-clock.md section 7.
+#
+# No llm.embedding role: consolidated records are stored unembedded, a
+# documented degradation, so no embedding server is needed on the host.
+
+llm:
+  main:
+    base_url: http://127.0.0.1:8080/v1
+    # Keep in step with buster.yaml.in.
+    model: qwen3.6:35b
+    extra_body:
+      id_slot: 0
+    timeout: 300
+
+daemon:
+  session_db: sessions.db
+  metrics_jsonl: metrics.jsonl
+  max_task_workers: 2
+
+agent:
+  system_prompt: >
+    You are Buster, a test agent used for harness probes. Answer plainly
+    and follow instructions exactly, including any tokens or codes you are
+    asked to repeat back.
+  max_context_tokens: 24000
+  request_logprobs: false
+
+memory:
+  # Short periods so the probe finishes in minutes.
+  idle_consolidate_after: 45
+  retention:
+    interval: 60
+    max_delay: 30
+
+# memory on; the rest of the cognition set and the Buster hardening stay
+# off as in the memrole profile, plus the scheduler.
+plugins:
+  disabled:
+    - memory_tools
+    - appraisal
+    - critique
+    - outcome_log
+    - subagent
+    - mcp
+    - cli
+    - scheduler
+
+tools:
+  disabled:
+    - shell
+
+irc:
+  host: 127.0.0.1
+  port: 6667
+  nick: buster
+  tls: false
+  channels:
+    - "#p-quiet"
+
+logging:
+  level: INFO
+  file: corvidae.log

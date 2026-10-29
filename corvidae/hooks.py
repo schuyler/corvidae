@@ -849,16 +849,6 @@ class AgentSpec:
             tags: Dimensional tags (e.g. {"role": "main", "stage": "turn"}).
         """
 
-    @hookspec
-    async def on_idle(self) -> None:
-        """Broadcast hook: fired when all queues are empty and cooldown has elapsed.
-
-        Grammar class: observe (broadcast; return value ignored).
-
-        Plugins can use this to perform periodic background work such as
-        polling RSS feeds, checking email, or running maintenance tasks.
-        """
-
     @hookspec(firstresult=True)
     async def resolve_conversation(self, channel: "Channel") -> "list[dict] | None":
         """Resolve the persisted conversation history for a channel.

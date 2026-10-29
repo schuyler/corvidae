@@ -59,3 +59,29 @@ def _reset_corvidae_logger():
     yield
     corvidae_logger.propagate = original_propagate
     corvidae_logger.handlers = original_handlers
+
+
+@pytest.fixture
+def pm():
+    """A plugin manager for install_kernel_clock to register on."""
+    from corvidae.hooks import create_plugin_manager
+
+    return create_plugin_manager()
+
+
+@pytest_asyncio.fixture
+async def kernel_clock(pm):
+    """A FakeClock registered as "clock" plus a started IdleTracker as "idle".
+
+    Yields ``(clock, idle)``. Teardown stops the tracker and closes the
+    clock so no timer task outlives the test. The import is deferred so a
+    broken kernel clock fails the tests that use it, not collection of the
+    whole suite.
+    """
+    from fake_clock import install_kernel_clock
+
+    clock, idle = install_kernel_clock(pm)
+    yield clock, idle
+    # Stop the tracker first, then cancel any timer still live.
+    idle.stop()
+    await clock.close()

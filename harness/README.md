@@ -45,6 +45,7 @@ HARNESS_PROFILE=buster-memrole harness/run-remote.sh [rev]
 | `buster-memrole` | `memory_role` | `#p-memrole` | With `agent.mid_conversation_system_role: user`, the memory block is the last "user" message the model sees; the model still answers the person |
 | `buster-heartbeat` | `heartbeat_smoke` | `#p-heartbeat` | A `scheduler.jobs` heartbeat on `internal:heartbeat` runs a full exchange and sends nothing to IRC |
 | `buster-gate` | `withheld_restart` | `#p-withheld` | A withheld heartbeat final is stored `unsent` with its marker, never reaches IRC, and reloads into the window after a restart (#131) |
+| `buster-quiet` | `quiet_period` | `#p-quiet` | Consolidation and retention land across silence with no traffic, consolidation also lands after a restart, and no turn starts during silence (kernel clock, #165) |
 
 `memory_role` sends a warm-up turn (MemoryPlugin creates its schema on first
 use when its `on_start` ran before the database opened), seeds one memory row
@@ -89,6 +90,27 @@ gate never withholds, and it can carry the code only if the withheld row
 reloaded into the window. Like `restart_recovery`, that last step relies on
 the model recalling a planted token; the other five checks are read
 straight out of `sessions.db`.
+
+`quiet_period` tests behavior across silence. The profile sets
+`memory.idle_consolidate_after: 45`, `memory.retention.interval: 60` and
+`max_delay: 30`, disables the scheduler (so retention is proven to run
+without it) and has no `llm.embedding` role, so records are stored
+unembedded. The probe sends two lines carrying `QUIET_TOKEN_A`, records the
+newest `message_log` id and `retention_meta.last_run`, then sends nothing.
+It waits for `consolidation_watermark` to reach that id with a `memory` row
+covering it (45 s plus 120 s of LLM slack), and for `last_run` to advance
+(60 + 30 + 30 s). It then sends one line with `QUIET_TOKEN_B` and restarts
+the daemon at once, sending nothing afterwards, and waits for the watermark
+and a covering `memory` row for that tail. The verdict does not depend on
+how long the restart takes: consolidation falls due at the last message
+time plus 45 s whichever process is running, so the probe requires the
+restart to begin early enough (`t_stop + 3 + 10 < last_ts + 45`) that the
+old process cannot have consolidated; otherwise it fails as inconclusive.
+Last, `message_log` must hold no `user` or `assistant` rows during either
+silent stretch (system, CONTEXT and tool rows are ignored; a consolidation
+fork persists nothing). The verdict names the first failing stage:
+consolidated, retention ran, restart timing, consolidated after restart,
+stray turn rows.
 
 A run under any profile but `buster` moves its rendered config into the run
 directory when it finishes, so the next `chat.sh` renders the default profile

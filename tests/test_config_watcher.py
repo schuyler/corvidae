@@ -532,6 +532,52 @@ async def test_config_watcher_rejects_invalid_agent_config(tmp_path, caplog):
     assert any("invalid agent config" in r.getMessage() for r in caplog.records)
 
 
+async def test_reload_with_removed_daemon_key_is_rejected(tmp_path, caplog):
+    """R12: _reload_config rejects a reload that carries a removed daemon
+    idle key: it logs the key, leaves agent_defaults alone and dispatches
+    nothing."""
+    from corvidae.channel import ChannelRegistry
+    from corvidae.config_watcher import ConfigWatcherPlugin
+
+    config_file = tmp_path / "agent.yaml"
+    config_file.write_text(
+        "llm:\n  main:\n    base_url: http://localhost\n    model: m\n"
+        "agent:\n  max_turns: 10\n"
+        "daemon:\n  idle_cooldown_seconds: 30\n"
+    )
+
+    registry = ChannelRegistry({"reasoning_history": "drop"})
+    pm = MagicMock()
+    pm.hook.on_config_reload.get_hookimpls.return_value = []
+    pm.get_plugin.return_value = registry
+    plugin = ConfigWatcherPlugin()
+    await plugin.on_init(
+        pm=pm,
+        config={
+            "_config_path": config_file,
+            "_cli_overrides": {},
+            "llm": {"main": {"base_url": "http://localhost", "model": "m"}},
+        },
+    )
+
+    dispatched = []
+
+    async def capture_dispatch(config: dict) -> None:
+        dispatched.append(config)
+
+    plugin._dispatch_config_reload = capture_dispatch
+
+    with caplog.at_level(logging.ERROR, logger="corvidae.config_watcher"):
+        await plugin._reload_config()
+
+    # The reload is rejected before anything is applied or dispatched.
+    assert not dispatched
+    assert registry.agent_defaults == {"reasoning_history": "drop"}
+    # The log names the removed key so the operator can delete it.
+    assert any(r.levelno >= logging.ERROR for r in caplog.records)
+    assert "idle_cooldown_seconds" in caplog.text
+
+
 async def test_config_watcher_rejects_config_without_llm_main(tmp_path, caplog):
     """_reload_config must skip dispatch when llm.main is absent after merge."""
     from corvidae.config_watcher import ConfigWatcherPlugin

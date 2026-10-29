@@ -743,8 +743,9 @@ class TestJobStartup:
     async def test_job_runs_at_startup(self):
         """on_start must trigger the retention job; retention_meta.last_run is set.
 
-        This is the zero-traffic guarantee: on_idle is push-based and never
-        fires on a quiet daemon; the startup trigger ensures coverage.
+        This is the zero-traffic guarantee at boot: a daemon that has been
+        down longer than the interval runs the job without waiting for
+        the clock timer.
         """
         memory, embedder, channel, db = await build_retention_env()
         await memory.wait_for_background_tasks()

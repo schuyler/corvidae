@@ -279,3 +279,141 @@ def test_buster_gate_profile_is_registered():
     assert channels == [WITHHELD_CHANNEL]
     template = Path(__file__).resolve().parent.parent / "harness" / "buster-gate.yaml.in"
     assert "min_salience: 1.0" in template.read_text()
+
+
+# ---------------------------------------------------------------------------
+# buster-quiet profile (R10, plans/kernel-clock.md §7): the quiet-period
+# probe's verdict, its sessions.db readers and its registration
+# ---------------------------------------------------------------------------
+
+
+def _quiet_db(tmp_path):
+    """A sessions.db with the memory, watermark, retention and message_log
+    tables the quiet-period readers query (columns as the real DDL has them
+    for the ones the probe reads)."""
+    import sqlite3
+
+    path = tmp_path / "sessions.db"
+    db = sqlite3.connect(path)
+    db.execute(
+        "CREATE TABLE message_log (id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id TEXT, "
+        "message TEXT, timestamp REAL, message_type TEXT)"
+    )
+    db.execute(
+        "CREATE TABLE memory (id INTEGER PRIMARY KEY AUTOINCREMENT, channel_id TEXT NOT NULL, "
+        "created_at REAL NOT NULL, summary TEXT NOT NULL, importance REAL NOT NULL, "
+        "msg_id_start INTEGER NOT NULL, msg_id_end INTEGER NOT NULL)"
+    )
+    db.execute(
+        "CREATE TABLE consolidation_watermark (channel_id TEXT PRIMARY KEY, "
+        "last_message_id INTEGER NOT NULL)"
+    )
+    db.execute("CREATE TABLE retention_meta (last_run REAL NOT NULL DEFAULT 0)")
+    db.commit()
+    return path, db
+
+
+def test_quiet_period_verdict_names_first_failing_stage():
+    """R10, R8, R2: pass only when every stage held; the first failing
+    stage in order (consolidated_a, retention_ran, restart_timing_ok,
+    consolidated_b, stray_turn_rows) is the one named."""
+    from harness.driver import quiet_period_verdict
+
+    assert quiet_period_verdict(True, True, True, True, 0)[0] is True
+
+    # Each single failure fails and gets its own message.
+    failures = [
+        quiet_period_verdict(False, True, True, True, 0),
+        quiet_period_verdict(True, False, True, True, 0),
+        quiet_period_verdict(True, True, False, True, 0),
+        quiet_period_verdict(True, True, True, False, 0),
+        quiet_period_verdict(True, True, True, True, 2),
+    ]
+    assert all(passed is False for passed, _ in failures)
+    reasons = [why for _, why in failures]
+    assert len(set(reasons)) == len(reasons)
+
+    # With several stages failing, the earliest is named.
+    assert quiet_period_verdict(False, False, False, False, 5)[1] == reasons[0]
+    assert quiet_period_verdict(True, False, False, False, 5)[1] == reasons[1]
+    assert quiet_period_verdict(True, True, False, False, 5)[1] == reasons[2]
+    assert quiet_period_verdict(True, True, True, False, 5)[1] == reasons[3]
+
+
+def test_quiet_db_helpers_read_real_rows(tmp_path):
+    """R10, R1, R4, R8: the four quiet-period readers return what is in
+    sessions.db: the channel's watermark, whether a memory row covers a
+    message id, retention's last run, and user/assistant rows in an open
+    time window."""
+    import json
+
+    from harness.driver import (
+        consolidation_watermark,
+        memory_covering,
+        retention_last_run,
+        turn_rows,
+    )
+
+    ch = "irc:#p-quiet"
+    path, db = _quiet_db(tmp_path)
+
+    # Empty database: no watermark reads as 0, no covering row, no retention run.
+    db.commit()
+    assert consolidation_watermark(path, ch) == 0
+    assert memory_covering(path, ch, 5) is False
+    assert retention_last_run(path) is None
+    assert turn_rows(path, ch, 0, 1000) == 0
+
+    db.execute("INSERT INTO consolidation_watermark VALUES (?, 7)", (ch,))
+    db.execute("INSERT INTO consolidation_watermark VALUES ('irc:#other', 99)")
+    db.execute("INSERT INTO memory (channel_id, created_at, summary, importance, msg_id_start, msg_id_end) "
+               "VALUES (?, 1, 's', 0.5, 3, 7)", (ch,))
+    db.execute("INSERT INTO memory (channel_id, created_at, summary, importance, msg_id_start, msg_id_end) "
+               "VALUES ('irc:#other', 1, 's', 0.5, 1, 99)")
+    db.execute("INSERT INTO retention_meta VALUES (1234.5)")
+    for ts, channel, role in [
+        (100, ch, "user"),            # on the lower bound: excluded
+        (150, ch, "user"),            # counted
+        (160, ch, "assistant"),       # counted
+        (170, ch, "system"),          # not a turn row
+        (180, ch, "tool"),            # not a turn row
+        (190, "irc:#other", "user"),  # other channel
+        (200, ch, "user"),            # on the upper bound: excluded
+    ]:
+        db.execute(
+            "INSERT INTO message_log (channel_id, message, timestamp, message_type) VALUES (?, ?, ?, 'message')",
+            (channel, json.dumps({"role": role, "content": "x"}), ts),
+        )
+    db.commit()
+    db.close()
+
+    assert consolidation_watermark(path, ch) == 7
+    assert memory_covering(path, ch, 7) is True
+    assert memory_covering(path, ch, 8) is False
+    assert retention_last_run(path) == 1234.5
+    assert turn_rows(path, ch, 100, 200) == 2
+    assert turn_rows(path, ch, 160, 200) == 0
+
+
+def test_buster_quiet_profile_is_registered():
+    """R10: the profile maps to probe_quiet_period on #p-quiet, and its
+    template sets the short periods, disables the scheduler (R4 without
+    it), and has no embedding role."""
+    import yaml
+
+    from harness.driver import PROFILES, QUIET_CHANNEL, probe_quiet_period
+
+    probes, channels = PROFILES["buster-quiet"]
+    assert probes == [probe_quiet_period]
+    assert channels == [QUIET_CHANNEL] == ["#p-quiet"]
+
+    harness = Path(__file__).resolve().parent.parent / "harness"
+    cfg = yaml.safe_load((harness / "buster-quiet.yaml.in").read_text().replace("@STATE_DIR@", "/state"))
+    memrole = yaml.safe_load((harness / "buster-memrole.yaml.in").read_text().replace("@STATE_DIR@", "/state"))
+    assert cfg["memory"]["idle_consolidate_after"] == 45
+    assert cfg["memory"]["retention"]["interval"] == 60
+    assert cfg["memory"]["retention"]["max_delay"] == 30
+    assert QUIET_CHANNEL in cfg["irc"]["channels"]
+    assert "embedding" not in cfg["llm"]
+    assert set(cfg["plugins"]["disabled"]) == set(memrole["plugins"]["disabled"]) | {"scheduler"}
+    assert "mid_conversation_system_role" not in cfg["agent"]

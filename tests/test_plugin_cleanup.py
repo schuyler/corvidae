@@ -200,13 +200,6 @@ def test_agent_no_arg_constructor():
     assert plugin is not None
 
 
-def test_idle_monitor_plugin_no_arg_constructor():
-    """IdleMonitorPlugin() must work with no arguments."""
-    from corvidae.idle import IdleMonitorPlugin
-    plugin = IdleMonitorPlugin()
-    assert plugin is not None
-
-
 def test_channel_registry_no_arg_constructor():
     """ChannelRegistry() must work with no arguments (agent_defaults defaults to {})."""
     from corvidae.channel import ChannelRegistry
@@ -331,14 +324,6 @@ def test_agent_subclasses_corvidae_plugin():
     )
 
 
-def test_idle_monitor_plugin_subclasses_corvidae_plugin():
-    from corvidae.hooks import CorvidaePlugin
-    from corvidae.idle import IdleMonitorPlugin
-    assert issubclass(IdleMonitorPlugin, CorvidaePlugin), (
-        "IdleMonitorPlugin must subclass CorvidaePlugin"
-    )
-
-
 # ---------------------------------------------------------------------------
 # 5. Entry points registered in the "corvidae" group
 # ---------------------------------------------------------------------------
@@ -375,7 +360,6 @@ def test_corvidae_entry_points_contain_expected_names():
         "runtime_settings",
         "tools",
         "agent",
-        "idle_monitor",
     }
     missing = expected - names
     assert not missing, (
@@ -402,7 +386,6 @@ def test_corvidae_entry_points_load_correct_classes():
         "runtime_settings": "corvidae.tools.settings:RuntimeSettingsPlugin",
         "tools": "corvidae.tool_collection:ToolCollectionPlugin",
         "agent": "corvidae.agent:Agent",
-        "idle_monitor": "corvidae.idle:IdleMonitorPlugin",
     }
 
     eps = {ep.name: ep for ep in entry_points(group="corvidae")}

@@ -17,7 +17,7 @@ fixes, corrected spec):
   `Agent._request_logprobs`.
 - `Agent.on_init` captures `agent.request_logprobs` config into a new scalar
   `self._request_logprobs` (NOT `self.config` — `Agent` retains no config
-  dict; matches the sibling `_chars_per_token`/`_idle_cooldown` pattern).
+  dict; matches the sibling `_chars_per_token` pattern).
   Step 7 reads this cached scalar, not a config walk.
 
 All WP2.3 tests live in this single file per orchestrator instructions, to
@@ -363,7 +363,7 @@ class TestRequestLogprobsScalarCapture:
         assert plugin._request_logprobs is False
 
     def test_constructor_initializes_request_logprobs_scalar(self):
-        """Matches the sibling _chars_per_token/_idle_cooldown pattern: the
+        """Matches the sibling _chars_per_token pattern: the
         attribute exists with a sane default before on_init ever runs."""
         plugin = Agent()
 

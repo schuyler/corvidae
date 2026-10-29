@@ -191,10 +191,19 @@ def test_agentspec_has_transform_tool_result():
     )
 
 
-def test_agentspec_has_on_idle():
-    """on_idle hookspec exists on AgentSpec."""
-    assert hasattr(AgentSpec, "on_idle"), (
-        "AgentSpec must have an on_idle hookspec"
+def test_agentspec_has_no_on_idle():
+    """R12: on_idle is gone from AgentSpec with no alias, and the
+    idle_monitor entry point is not registered in the corvidae group."""
+    from importlib.metadata import entry_points
+
+    # The hookspec is deleted outright.
+    assert not hasattr(AgentSpec, "on_idle"), (
+        "AgentSpec must not have an on_idle hookspec (R12)"
+    )
+    # IdleMonitorPlugin is deleted, so its entry point must go too.
+    names = {ep.name for ep in entry_points(group="corvidae")}
+    assert "idle_monitor" not in names, (
+        "idle_monitor entry point must be removed (R12)"
     )
 
 

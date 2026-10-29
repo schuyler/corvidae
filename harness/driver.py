@@ -97,6 +97,26 @@ WITHHELD_TOKEN = "PELICAN-7731"
 # Job interval is 30s (buster-gate.yaml.in); same budget as heartbeat_smoke.
 WITHHELD_TIMEOUT_S = 240
 
+# quiet_period probe (buster-quiet profile, plans/kernel-clock.md §7):
+# consolidation and retention landing across silence. The periods match
+# buster-quiet.yaml.in (memory.idle_consolidate_after, retention.interval,
+# retention.max_delay).
+QUIET_CHANNEL = "#p-quiet"
+QUIET_JOB_CHANNEL = "irc:#p-quiet"
+QUIET_TOKEN_A = "QUIET_TOKEN_A"
+QUIET_TOKEN_B = "QUIET_TOKEN_B"
+QUIET_IDLE_S = 45
+QUIET_RETENTION_INTERVAL_S = 60
+QUIET_RETENTION_MAX_DELAY_S = 30
+# Consolidation makes one LLM call after the period; allow for a slow one.
+QUIET_LLM_SLACK_S = 120
+# Slack for the retention timer past interval + max_delay.
+QUIET_RETENTION_SLACK_S = 30
+# Runtime.stop's timeout, plus a margin, bounds how long the old process can
+# live after the restart script starts.
+QUIET_STOP_TIMEOUT_S = 3
+QUIET_RESTART_MARGIN_S = 10
+
 # Ordinary single turn. Observed 2-7s (run 7), worst observed 35s on an
 # inflated context. 90s is ~2.5x the worst observation.
 TURN_TIMEOUT_S = 90
@@ -653,6 +673,88 @@ def withheld_restart_verdict(
         if not ok:
             return False, why
     return True, "final withheld, marked and recorded; silent on IRC; reloaded after restart"
+
+
+def consolidation_watermark(db_path: Path, channel_id: str) -> int:
+    """The channel's `consolidation_watermark.last_message_id`, 0 when it has
+    no row (or the table does not exist yet)."""
+    if not table_exists(db_path, "consolidation_watermark"):
+        return 0
+    rows = _query(
+        db_path,
+        "SELECT last_message_id FROM consolidation_watermark WHERE channel_id = ?",
+        (channel_id,),
+    )
+    return rows[0][0] if rows else 0
+
+
+def memory_covering(db_path: Path, channel_id: str, msg_id: int) -> bool:
+    """True when a `memory` row on `channel_id` reaches message `msg_id`
+    (its `msg_id_end` is at or past it)."""
+    if not table_exists(db_path, "memory"):
+        return False
+    rows = _query(
+        db_path,
+        "SELECT 1 FROM memory WHERE channel_id = ? AND msg_id_end >= ? LIMIT 1",
+        (channel_id, msg_id),
+    )
+    return bool(rows)
+
+
+def retention_last_run(db_path: Path) -> float | None:
+    """`retention_meta.last_run`, None when the table is absent or empty."""
+    if not table_exists(db_path, "retention_meta"):
+        return None
+    rows = _query(db_path, "SELECT last_run FROM retention_meta LIMIT 1", ())
+    return rows[0][0] if rows else None
+
+
+def turn_rows(db_path: Path, channel_id: str, since: float, until: float) -> int:
+    """User and assistant rows on `channel_id` timestamped strictly inside
+    (`since`, `until`). System, CONTEXT and tool rows are not turns."""
+    rows = _query(
+        db_path,
+        "SELECT COUNT(*) FROM message_log WHERE channel_id = ? AND timestamp > ? "
+        "AND timestamp < ? AND json_extract(message, '$.role') IN ('user', 'assistant')",
+        (channel_id, since, until),
+    )
+    return rows[0][0] if rows else 0
+
+
+def channel_max_id(db_path: Path, channel_id: str) -> int:
+    """Newest `message_log` id on `channel_id`, 0 when it has none."""
+    rows = _query(db_path, "SELECT MAX(id) FROM message_log WHERE channel_id = ?", (channel_id,))
+    return rows[0][0] or 0 if rows else 0
+
+
+def channel_last_ts(db_path: Path, channel_id: str) -> float:
+    """Timestamp of the newest `message_log` row on `channel_id`, 0.0 when none."""
+    rows = _query(db_path, "SELECT MAX(timestamp) FROM message_log WHERE channel_id = ?", (channel_id,))
+    return rows[0][0] or 0.0 if rows else 0.0
+
+
+def quiet_period_verdict(
+    consolidated_a: bool, retention_ran: bool, restart_timing_ok: bool,
+    consolidated_b: bool, stray_turn_rows: int,
+) -> tuple[bool, str]:
+    """Pass only when every stage held; the first failing stage names the miss."""
+    stages = [
+        (consolidated_a, "the tail was not consolidated within the idle period plus slack, "
+                         "with no traffic"),
+        (retention_ran, "retention did not run within interval + max_delay + slack, "
+                        "with no traffic and the scheduler disabled"),
+        (restart_timing_ok, "inconclusive: the restart began too long after the last message, "
+                            "so the old process might have consolidated the tail"),
+        (consolidated_b, "the tail left at restart was not consolidated after boot, "
+                         "with no traffic since boot"),
+        (stray_turn_rows == 0, f"{stray_turn_rows} user/assistant row(s) appeared during "
+                               "silence: upkeep started a turn"),
+    ]
+    for ok, why in stages:
+        if not ok:
+            return False, why
+    return True, ("tail consolidated and retention ran across silence; tail consolidated "
+                  "after a restart with no traffic; no turns during silence")
 
 
 async def poll_db(predicate: Callable[[], bool], timeout: float, interval: float = 1.0) -> bool:
@@ -1280,6 +1382,90 @@ async def probe_withheld_restart(ctx: RunContext) -> ProbeResult:
     return result(*withheld_restart_verdict(True, True, True, True, survived, recalled is not None))
 
 
+async def probe_quiet_period(ctx: RunContext) -> ProbeResult:
+    """Consolidation of a channel's tail, and retention, land across silence
+    with no traffic (R1, R4, R8), and consolidation also lands after a
+    restart that leaves a tail (R2). Turn rows during silence must be zero."""
+    channel = QUIET_CHANNEL
+    if not ctx.channel_ready.get(channel):
+        return _skip_result("quiet_period", channel)
+    sent: list[tuple[float, str]] = []
+    t0 = time.monotonic()
+    db = ctx.session_db
+
+    def result(passed: bool, details: str) -> ProbeResult:
+        return ProbeResult("quiet_period", passed, details, time.monotonic() - t0,
+                           _transcript(ctx, channel, sent))
+
+    # 1. Tail: two awaited lines, then record the quiet start and the marks
+    # consolidation and retention must pass.
+    for i in (1, 2):
+        if not await send_and_await_any_reply(
+            ctx, channel, f"Note {i} for the record: the code word is {QUIET_TOKEN_A}. Reply briefly.",
+            sent, TURN_TIMEOUT_S,
+        ):
+            return result(False, "no reply to a tail line before the silence")
+    t_quiet = time.time()
+    tail_a = channel_max_id(db, QUIET_JOB_CHANNEL)
+    retention_before = retention_last_run(db) or 0.0
+
+    # 2. Silence: send nothing; the idle watch consolidates the tail and the
+    # retention timer runs, both on the clock.
+    consolidated_a = await poll_db(
+        lambda: consolidation_watermark(db, QUIET_JOB_CHANNEL) >= tail_a
+        and memory_covering(db, QUIET_JOB_CHANNEL, tail_a),
+        QUIET_IDLE_S + QUIET_LLM_SLACK_S,
+    )
+    retention_ran = await poll_db(
+        lambda: (retention_last_run(db) or 0.0) > max(retention_before, t_quiet),
+        QUIET_RETENTION_INTERVAL_S + QUIET_RETENTION_MAX_DELAY_S + QUIET_RETENTION_SLACK_S,
+    )
+    if not (consolidated_a and retention_ran):
+        return result(*quiet_period_verdict(consolidated_a, retention_ran, True, False, 0))
+
+    # 3. Restart with a fresh tail. Consolidation falls due at last_ts_b + 45
+    # in whichever process runs. The old process stops within the stop
+    # timeout, so if the restart starts early enough it cannot have
+    # consolidated the tail, and any consolidation is the new process's.
+    t_b_sent = time.time()
+    if not await send_and_await_any_reply(
+        ctx, channel, f"One more note: the code word is {QUIET_TOKEN_B}. Reply briefly.",
+        sent, TURN_TIMEOUT_S,
+    ):
+        return result(False, "no reply to the second tail line before the restart")
+    tail_b = channel_max_id(db, QUIET_JOB_CHANNEL)
+    last_ts_b = channel_last_ts(db, QUIET_JOB_CHANNEL)
+    t_stop = time.time()
+    timing_ok = (
+        t_stop + QUIET_STOP_TIMEOUT_S + QUIET_RESTART_MARGIN_S < last_ts_b + QUIET_IDLE_S
+    )
+    if not timing_ok:
+        # Never fail because the restart was slow; fail because this run
+        # cannot say which process consolidated.
+        return result(*quiet_period_verdict(True, True, False, False, 0))
+    subprocess.run(
+        [str(ctx.repo_dir / "harness" / "restart-daemon.sh"), str(ctx.run_dir / "daemon.log")],
+        cwd=ctx.repo_dir, check=True, timeout=120,
+    )
+    restart_done = time.time()
+
+    # Send nothing more; a slow start extends the wait instead of failing it.
+    deadline = max(last_ts_b + QUIET_IDLE_S, restart_done) + QUIET_LLM_SLACK_S
+    consolidated_b = await poll_db(
+        lambda: consolidation_watermark(db, QUIET_JOB_CHANNEL) >= tail_b
+        and memory_covering(db, QUIET_JOB_CHANNEL, tail_b),
+        max(0.0, deadline - time.time()),
+    )
+
+    # 4. No turns during either stretch of silence.
+    verdict_time = time.time()
+    stray = (
+        turn_rows(db, QUIET_JOB_CHANNEL, t_quiet, t_b_sent)
+        + turn_rows(db, QUIET_JOB_CHANNEL, restart_done, verdict_time)
+    )
+    return result(*quiet_period_verdict(True, True, True, consolidated_b, stray))
+
+
 PROBES: list[Callable[[RunContext], "asyncio.Future[ProbeResult]"]] = [
     probe_smoke_echo,
     probe_tool_loop,
@@ -1303,6 +1489,7 @@ PROFILES: dict[str, tuple[list[Callable[[RunContext], "asyncio.Future[ProbeResul
     "buster-memrole": ([probe_memory_role], [MEMROLE_CHANNEL]),
     "buster-heartbeat": ([probe_heartbeat_smoke], [HEARTBEAT_CHANNEL]),
     "buster-gate": ([probe_withheld_restart], [WITHHELD_CHANNEL]),
+    "buster-quiet": ([probe_quiet_period], [QUIET_CHANNEL]),
 }
 
 
