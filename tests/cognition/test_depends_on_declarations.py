@@ -46,3 +46,13 @@ def test_plugin_init_accepts_pm_as_first_positional_arg(dotted_name: str) -> Non
         inspect.Parameter.POSITIONAL_ONLY,
         inspect.Parameter.POSITIONAL_OR_KEYWORD,
     ), f"{dotted_name}.__init__ 'pm' must be positional"
+
+
+def test_memory_depends_on_kernel_clock_and_idle() -> None:
+    """MemoryPlugin declares the kernel clock and idle tracker (R1, R4, R5).
+
+    Production's validate_dependencies enforces these names even though
+    memory resolves the objects leniently.
+    """
+    memory = _load("corvidae_cognition.memory.MemoryPlugin")
+    assert memory.depends_on == frozenset({"persistence", "llm", "clock", "idle"})

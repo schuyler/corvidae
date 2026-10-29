@@ -29,6 +29,7 @@ import yaml
 
 from corvidae.channel import ChannelRegistry, load_channel_config, validate_agent_config
 from corvidae.hooks import CorvidaePlugin, hookimpl
+from corvidae.idle import validate_daemon_config
 from corvidae.runtime import deep_merge
 
 logger = logging.getLogger(__name__)
@@ -184,6 +185,13 @@ class ConfigWatcherPlugin(CorvidaePlugin):
             validate_agent_config(new_config.get("agent", {}))
         except ValueError:
             logger.exception("config reload failed: invalid agent config in %s", self._config_path)
+            return
+
+        # Step 3c: Reject removed daemon idle keys (#165), same as startup.
+        try:
+            validate_daemon_config(new_config.get("daemon") or {})
+        except ValueError:
+            logger.exception("config reload failed: invalid daemon config in %s", self._config_path)
             return
 
         # Step 4: Update agent_defaults on both the class and the registered instance.

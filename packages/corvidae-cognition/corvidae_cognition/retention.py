@@ -2,7 +2,10 @@
 
 bootstrap-mapping §3.1: usage-weighted retention, not culling.
 Constants are §6-tunable; the job runs as a silent background task
-(MemoryPlugin._spawn), never through the TaskQueue.
+(MemoryPlugin._spawn), never through the TaskQueue. MemoryPlugin starts it
+from a kernel-clock timer every ``memory.retention.interval`` (preferring a
+quiet system, at most ``memory.retention.max_delay`` late) and from a
+startup check; ``retention_meta.last_run`` rate-limits both.
 """
 from __future__ import annotations
 

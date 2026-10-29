@@ -770,10 +770,12 @@ that framing. Epistemic framing at consolidation plus the append-only log
 with `recall_raw` are named anti-self-manipulation machinery, not style.
 With the sensitivity plugin loaded, a sensitivity column filters retrieval
 by who is present; without it, retrieval is not filtered by audience. An
-idle scan, run when the system is idle (§3.1.16), is upkeep (principle 13):
-it looks for escalating conflict, repeated elicitation, behavioural
-anomalies, repeated low-trust assertions on one theme, and skill-directory
-writes, and acts through the gates plus operator notification. Skills are a
+idle scan is upkeep (principle 13) that runs preferably when the system is
+idle (§3.1.16) and at least every N (configurable), so traffic or a
+frequent heartbeat cannot starve it: it looks for escalating conflict,
+repeated elicitation, behavioural anomalies, repeated low-trust assertions
+on one theme, and skill-directory writes, and acts through the gates plus
+operator notification. Skills are a
 directory of name, description, instructions and resources, indexed in the
 stable prompt region, loaded by a `use_skill` tool, protected by bundled
 copies, and writable by the agent only behind operator confirmation or a

@@ -854,3 +854,52 @@ class TestPersistenceDegradation:
             r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
         ]
         assert any(channel.id in message for message in warnings), warnings
+
+
+# ---------------------------------------------------------------------------
+# Idle-tracker restart seed (plans/kernel-clock.md, R2)
+# ---------------------------------------------------------------------------
+
+
+async def test_on_start_restores_channels_into_idle_tracker():
+    """R2: on_start seeds the IdleTracker with every channel that has history,
+    quiet since its LAST message_log row, so a channel watch fires for it after
+    a restart with no traffic. Uses MAX(timestamp), not the first row."""
+    from fake_clock import install_kernel_clock
+
+    plugin, registry, db = await _make_plugin_with_db()
+    pm = plugin.pm
+    clock, tracker = install_kernel_clock(pm, started=False)
+    now = clock.now()
+    # Channel A: old first row, recent last row. Channel B: long quiet.
+    for cid, ts in [("a", now - 1000), ("a", now - 100), ("b", now - 400)]:
+        await db.execute(
+            "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
+            "VALUES (?, ?, ?, 'message')",
+            (cid, json.dumps({"role": "user", "content": "x"}), ts),
+        )
+    await db.commit()
+
+    fired: list[str] = []
+
+    async def on_idle(cid):
+        fired.append(cid)
+
+    tracker.watch_channels(300, on_idle, name="seed-test")
+    try:
+        await plugin.on_start(config={})
+        tracker.start()
+
+        # B has been quiet past the period: due at once.
+        await clock.advance(0)
+        assert fired == ["b"]
+        # A went quiet 100 s ago: due 200 s after start (not at start, which
+        # is what its first row would give).
+        await clock.advance(199)
+        assert fired == ["b"]
+        await clock.advance(1)
+        assert fired == ["b", "a"]
+    finally:
+        tracker.stop()
+        await clock.close()
+        await db.close()

@@ -1465,3 +1465,215 @@ def test_cognition_entry_points_come_from_the_cognition_package() -> None:
         stale = [f"{ep.name} = {ep.value}" for ep in cognition
                  if not ep.value.startswith("corvidae_cognition.")]
         assert stale == [], f"entry points outside corvidae_cognition: {stale}"
+
+
+# ---------------------------------------------------------------------------
+# Section 8 — Kernel clock and idle tracker (#165, plans/kernel-clock.md)
+# ---------------------------------------------------------------------------
+
+
+# Plugin entry points the scheduler test switches off: channels, metrics,
+# the config watcher, MCP and the cognition set. The scheduler's own chain
+# (persistence, task, llm, tools, agent) stays loaded.
+_SCHEDULER_TEST_DISABLED = [
+    "cli", "irc", "signal", "discord", "web", "acp", "mcp",
+    "metrics", "usage_log", "metrics_jsonl", "config_watcher", "jsonl_log",
+    "memory", "memory_tools", "funnel", "outcome_log", "appraisal",
+    "critique", "gates",
+]
+
+
+class TestKernelClockRuntime:
+    """Runtime builds, registers, starts and stops the clock and tracker."""
+
+    async def test_registers_clock_and_idle_tracker(self):
+        """R5: start() registers a Clock as "clock" and an IdleTracker as
+        "idle" on the plugin manager, built on that clock."""
+        from corvidae.clock import Clock
+        from corvidae.idle import IdleTracker
+        from corvidae.runtime import Runtime
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".yaml", delete=False
+        ) as f:
+            _write_config(f.name)
+            config_path = f.name
+
+        registered: dict[str, object] = {}
+
+        try:
+            mock_pm, _agent = _make_mock_pm_and_agent()
+
+            def capture_register(plugin, name=None):
+                # Keep every registration by name.
+                registered[name] = plugin
+
+            mock_pm.register = capture_register
+
+            with patch(
+                "corvidae.runtime.create_plugin_manager", return_value=mock_pm
+            ), patch("corvidae.runtime.validate_dependencies"), patch(
+                "corvidae.runtime.configure_logging"
+            ):
+                rt = Runtime(config_path=config_path)
+                await rt.start()
+                await rt.stop()
+
+            assert isinstance(registered.get("clock"), Clock)
+            assert isinstance(registered.get("idle"), IdleTracker)
+            assert rt.clock is registered["clock"]
+            assert rt.idle is registered["idle"]
+        finally:
+            os.unlink(config_path)
+
+    async def test_starts_idle_tracker_after_agent(self):
+        """R3: IdleTracker.start() runs after agent.on_start, so nothing
+        fires before the Agent can take work."""
+        from corvidae.runtime import Runtime
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".yaml", delete=False
+        ) as f:
+            _write_config(f.name)
+            config_path = f.name
+
+        order: list[str] = []
+
+        try:
+            mock_pm, mock_agent = _make_mock_pm_and_agent()
+
+            async def record_agent_start(**kwargs):
+                order.append("agent_on_start")
+
+            mock_agent.on_start = AsyncMock(side_effect=record_agent_start)
+            tracker_cls = MagicMock()
+            tracker_cls.return_value.start.side_effect = (
+                lambda: order.append("idle_start")
+            )
+
+            with patch(
+                "corvidae.runtime.create_plugin_manager", return_value=mock_pm
+            ), patch("corvidae.runtime.validate_dependencies"), patch(
+                "corvidae.runtime.configure_logging"
+            ), patch("corvidae.runtime.IdleTracker", tracker_cls):
+                rt = Runtime(config_path=config_path)
+                await rt.start()
+                await rt.stop()
+
+            assert order == ["agent_on_start", "idle_start"]
+        finally:
+            os.unlink(config_path)
+
+    async def test_stop_stops_tracker_and_closes_clock(self):
+        """R5: stop() runs agent.on_stop, the on_stop broadcast, then
+        idle.stop(), then clock.close(), in that order."""
+        from corvidae.runtime import Runtime
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".yaml", delete=False
+        ) as f:
+            _write_config(f.name)
+            config_path = f.name
+
+        order: list[str] = []
+
+        try:
+            mock_pm, mock_agent = _make_mock_pm_and_agent()
+
+            async def record_agent_stop(**kwargs):
+                order.append("agent_on_stop")
+
+            async def record_broadcast_stop(**kwargs):
+                order.append("broadcast_on_stop")
+                return []
+
+            mock_agent.on_stop = AsyncMock(side_effect=record_agent_stop)
+            mock_pm.ahook.on_stop = AsyncMock(side_effect=record_broadcast_stop)
+
+            with patch(
+                "corvidae.runtime.create_plugin_manager", return_value=mock_pm
+            ), patch("corvidae.runtime.validate_dependencies"), patch(
+                "corvidae.runtime.configure_logging"
+            ):
+                rt = Runtime(config_path=config_path)
+                await rt.start()
+
+                # Record the two kernel shutdown steps on the live objects.
+                async def record_close() -> None:
+                    order.append("clock_close")
+
+                with patch.object(
+                    rt.idle, "stop", side_effect=lambda: order.append("idle_stop")
+                ), patch.object(rt.clock, "close", side_effect=record_close):
+                    await rt.stop()
+
+            assert order == [
+                "agent_on_stop", "broadcast_on_stop", "idle_stop", "clock_close",
+            ]
+        finally:
+            os.unlink(config_path)
+
+    async def test_stop_completes_with_scheduler_parked_on_clock(self, tmp_path):
+        """R6: with the scheduler enabled and its loop parked in clock.sleep,
+        stop() returns within the test timeout, never reaches os._exit, and
+        leaves the scheduler's task cleared."""
+        from corvidae.clock import Clock
+        from corvidae.runtime import Runtime
+
+        config_path = tmp_path / "agent.yaml"
+        _write_config(
+            str(config_path),
+            {
+                "llm": {
+                    "main": {"base_url": "http://127.0.0.1:1", "model": "m"},
+                },
+                "plugins": {"disabled": _SCHEDULER_TEST_DISABLED},
+            },
+        )
+
+        rt = Runtime(config_path=str(config_path))
+        parked = asyncio.Event()
+        real_sleep = Clock.sleep
+
+        async def watching_sleep(self, delay, wake=None):
+            # Flag the moment the scheduler's own loop task parks on the clock.
+            scheduler = rt.pm.get_plugin("scheduler")
+            if scheduler is not None and asyncio.current_task() is scheduler._task:
+                parked.set()
+            await real_sleep(self, delay, wake)
+
+        with patch.object(Clock, "sleep", watching_sleep), patch(
+            "corvidae.runtime.configure_logging"
+        ), patch("os._exit") as mock_os_exit:
+            await rt.start()
+            # Wait for the scheduler loop to park, then shut down around it.
+            await asyncio.wait_for(parked.wait(), timeout=5)
+            await rt.stop()
+
+        mock_os_exit.assert_not_called()
+        assert rt.pm.get_plugin("scheduler")._task is None
+
+    @pytest.mark.parametrize(
+        "key", ["idle_cooldown_seconds", "idle_poll_interval"]
+    )
+    async def test_removed_daemon_idle_key_is_config_error(
+        self, tmp_path, capsys, key
+    ):
+        """R12: a removed daemon idle key stops startup with a one-line
+        Config error naming the key and the file."""
+        from corvidae.runtime import Runtime
+
+        config_path = tmp_path / "agent.yaml"
+        config_path.write_text(
+            "llm:\n  main: {base_url: 'http://127.0.0.1:1', model: m}\n"
+            f"daemon:\n  {key}: 30\n"
+        )
+        rt = Runtime(config_path=str(config_path))
+        with pytest.raises(SystemExit) as excinfo:
+            await rt.start()
+
+        assert excinfo.value.code != 0
+        stderr = capsys.readouterr().err
+        assert any(line.startswith("Config error:") for line in stderr.splitlines())
+        assert f"daemon.{key}" in stderr
+        assert str(config_path) in stderr

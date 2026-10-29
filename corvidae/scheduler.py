@@ -38,8 +38,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-import time
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
@@ -48,6 +46,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import aiosqlite
 
 from corvidae.channel import Channel, ChannelRegistry
+from corvidae.clock import MAX_WALL_SLEEP_SECONDS, Clock
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 from corvidae.tool import Tool, tool_to_schema
 
@@ -65,9 +64,9 @@ DEFAULT_MAX_REMINDERS_PER_CHANNEL = 50
 #: and meta["origin"], which origin-aware plugins key on.
 VALID_ORIGINS = ("reminder", "heartbeat")
 
-#: Longest the timer sleeps in one go even with nothing due sooner, so a
-#: wall-clock jump (suspend/resume, NTP step) is noticed within the hour.
-MAX_SLEEP_SECONDS = 3600.0
+#: Longest the timer sleeps in one go even with nothing due sooner; the
+#: clock owns the cap so a wall-clock jump is noticed within the hour.
+MAX_SLEEP_SECONDS = MAX_WALL_SLEEP_SECONDS
 #: Re-check interval while the persistence DB or Agent is not up yet.
 READY_POLL_SECONDS = 1.0
 #: Back-off after an unexpected error in a timer pass.
@@ -436,23 +435,6 @@ def parse_job(raw: object, base_dir: Path) -> JobSpec:
 
 
 # ---------------------------------------------------------------------------
-# Timer sleeper
-# ---------------------------------------------------------------------------
-
-#: ``await sleeper(wake, timeout)`` returns when ``wake`` is set or
-#: ``timeout`` seconds pass. Injected so tests never sleep.
-Sleeper = Callable[[asyncio.Event, float], Awaitable[None]]
-
-
-async def event_sleeper(wake: asyncio.Event, timeout: float) -> None:
-    """Default sleeper: wait on the event with a timeout."""
-    try:
-        await asyncio.wait_for(wake.wait(), timeout)
-    except TimeoutError:
-        pass
-
-
-# ---------------------------------------------------------------------------
 # Plugin
 # ---------------------------------------------------------------------------
 
@@ -461,8 +443,7 @@ class SchedulerPlugin(CorvidaePlugin):
     """Clock-driven producer of reminder and heartbeat notifications.
 
     Attributes:
-        _clock: Injected wall clock (unix seconds); ``time.time`` in production.
-        _sleeper: Injected timer wait; see ``Sleeper``.
+        _clock: The kernel clock, resolved from the plugin manager in on_init.
         _wake: Set whenever a row is added, cancelled or re-synced, so the
             timer re-arms on the new earliest row immediately.
         _started_up: Startup work (schema, job sync, catch-up) has run.
@@ -474,19 +455,13 @@ class SchedulerPlugin(CorvidaePlugin):
             not resolve yet; each is warned about once, not every retry.
     """
 
-    depends_on = frozenset({"registry", "persistence"})
+    depends_on = frozenset({"registry", "persistence", "clock"})
 
-    def __init__(
-        self,
-        pm=None,
-        *,
-        clock: Callable[[], float] = time.time,
-        sleeper: Sleeper = event_sleeper,
-    ) -> None:
+    def __init__(self, pm=None) -> None:
         if pm is not None:
             self.pm = pm
-        self._clock = clock
-        self._sleeper = sleeper
+        # Set by on_init, once the clock plugin is registered.
+        self._clock: Clock | None = None
         self._registry: ChannelRegistry | None = None
         self._base_dir: Path = Path(".")
 
@@ -515,6 +490,8 @@ class SchedulerPlugin(CorvidaePlugin):
     async def on_init(self, pm, config: dict) -> None:
         """Read the scheduler: block."""
         await super().on_init(pm, config)
+        # Strict lookup: the scheduler cannot run without the kernel clock.
+        self._clock = get_dependency(self.pm, "clock", Clock)
         self._apply_config(config)
 
     @hookimpl
@@ -668,7 +645,7 @@ class SchedulerPlugin(CorvidaePlugin):
                 continue
             specs[spec.name] = spec
 
-        now = self._clock()
+        now = self._clock.now()
         async with self._db_lock:
             existing = {r.name: r for r in await self._fetch(db, "created_by = 'config'", ())}
 
@@ -731,7 +708,7 @@ class SchedulerPlugin(CorvidaePlugin):
         db = await self._ensure_schema()
         if db is None:
             return
-        now = self._clock()
+        now = self._clock.now()
         async with self._db_lock:
             overdue_rows = await self._fetch(db, "enabled = 1 AND next_fire_at <= ?", (now,))
             for row in overdue_rows:
@@ -791,7 +768,7 @@ class SchedulerPlugin(CorvidaePlugin):
             except Exception:
                 logger.exception("scheduler: timer pass failed; retrying")
                 delay = ERROR_RETRY_SECONDS
-            await self._sleeper(self._wake, delay)
+            await self._clock.sleep(delay, self._wake)
 
     async def _tick(self) -> float:
         """One timer pass: fire everything due, return seconds to sleep."""
@@ -802,7 +779,7 @@ class SchedulerPlugin(CorvidaePlugin):
         if db is None:
             return READY_POLL_SECONDS
 
-        now = self._clock()
+        now = self._clock.now()
         due = await self._fetch(db, "enabled = 1 AND next_fire_at <= ? ORDER BY next_fire_at", (now,))
         failed = False
         deferred = False
@@ -830,7 +807,7 @@ class SchedulerPlugin(CorvidaePlugin):
             (earliest,) = await cursor.fetchone()
         if earliest is None:
             return MAX_SLEEP_SECONDS
-        return min(max(earliest - self._clock(), 0.0), MAX_SLEEP_SECONDS)
+        return min(max(earliest - self._clock.now(), 0.0), MAX_SLEEP_SECONDS)
 
     async def _fire(self, db: aiosqlite.Connection, row: ScheduleRow, now: float) -> None:
         """Fire one due row through on_notify.
@@ -875,8 +852,8 @@ class SchedulerPlugin(CorvidaePlugin):
                            extra={"schedule_id": row.id, "channel": row.channel_id})
             return
 
-        # Touch so MemoryPlugin's inactivity check does not consolidate the
-        # channel mid-exchange (on_notify does not update last_active).
+        # Touch so last_active, which orders the web and ACP channel lists,
+        # reflects the firing.
         channel.touch()
         logger.info(
             "scheduler: firing",
@@ -966,7 +943,7 @@ class SchedulerPlugin(CorvidaePlugin):
             cursor = await db.execute(
                 "INSERT INTO schedule (channel_id, origin, text, next_fire_at, created_at, "
                 "created_by, enabled) VALUES (?, 'reminder', ?, ?, ?, 'tool', 1)",
-                (channel_id, text, fire_at, self._clock()),
+                (channel_id, text, fire_at, self._clock.now()),
             )
             row_id = cursor.lastrowid
             await db.commit()
@@ -1032,7 +1009,7 @@ class SchedulerPlugin(CorvidaePlugin):
                 return "Error: reminder text is empty"
             if len(text) > MAX_REMINDER_TEXT_CHARS:
                 return f"Error: reminder text is longer than {MAX_REMINDER_TEXT_CHARS} characters"
-            now = plugin._clock()
+            now = plugin._clock.now()
             try:
                 fire_at = parse_when(when, now, plugin._tz)
             except ValueError as exc:

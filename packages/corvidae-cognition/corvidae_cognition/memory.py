@@ -22,8 +22,15 @@ This module owns the memory schema:
 
 Config:
     memory:
-      idle_consolidate_after: 1800   # seconds of channel inactivity before
-                                     # idle-triggered consolidation
+      idle_consolidate_after: 1800   # seconds a channel must be quiet (no
+                                     # queued or in-flight work) before its
+                                     # tail is consolidated; repeats at this
+                                     # period while the quiet lasts
+      retention:
+        interval: 21600              # seconds between retention runs (clock
+                                     # timer; last_run survives restarts)
+        max_delay: 3600              # longest a due run waits for the system
+                                     # to go quiet before running anyway
       half_life_days: 30             # retrieval recency decay (e-folding days)
       retrieval:
         k: 8                         # KNN candidate count
@@ -36,6 +43,10 @@ Config:
                                      # shared memory
       consolidation_fork_prompt: ... # instruction for forked consolidation
                                      # (agent.forks, #51); static config
+
+Changes to ``idle_consolidate_after`` and ``retention.*`` take effect at
+restart: the idle watch and retention timer are set when the plugin starts.
+A channel that never goes quiet is consolidated through compaction.
 """
 
 from __future__ import annotations
@@ -50,7 +61,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 import aiosqlite
 
@@ -60,11 +71,25 @@ from corvidae.fork import fork_agent, quote, window_db_ids
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 from corvidae.persistence import add_column_if_missing
 
+if TYPE_CHECKING:
+    from corvidae.clock import Clock, Timer
+    from corvidae.idle import IdleTracker, IdleWatch
+
 logger = logging.getLogger("corvidae.memory")
 
 # Seconds a channel must be inactive before the idle trigger consolidates
 # its un-consolidated tail.
 DEFAULT_IDLE_CONSOLIDATE_AFTER = 1800.0
+
+# Seconds between retention runs, and the longest a due run waits for the
+# system to go quiet before running regardless.
+DEFAULT_RETENTION_INTERVAL = 21600.0
+DEFAULT_RETENTION_MAX_DELAY = 3600.0
+# How long the system must be quiet for retention to prefer that moment.
+RETENTION_QUIET_SECONDS = 60.0
+# Minimum wait before retention is re-armed after a failed read, and the
+# floor under the next due time so a failed last_run write cannot loop.
+RETENTION_DB_RETRY_SECONDS = 5.0
 
 # Retrieval scoring parameters. These are tuned parameters, not truths —
 # the §6 eval benchmarks (tests/evals, scripts/eval_memory.py) govern
@@ -579,7 +604,7 @@ class MemoryPlugin(CorvidaePlugin):
             our on_start; schema creation retries lazily on first use.
     """
 
-    depends_on = frozenset({"persistence", "llm"})
+    depends_on = frozenset({"persistence", "llm", "clock", "idle"})
 
     def __init__(self, pm=None) -> None:
         if pm is not None:
@@ -610,6 +635,23 @@ class MemoryPlugin(CorvidaePlugin):
         # asyncio.create_task, never the TaskQueue: every TaskQueue
         # completion triggers a full main-model turn (§2.3, trap #5).
         self._tasks: set[asyncio.Task] = set()
+        # Channels with an idle consolidation in flight; a repeat firing
+        # for one of them is skipped.
+        self._idle_inflight: set[str] = set()
+        # Kernel clock and idle tracker; both set in on_start, or both None.
+        self._clock: Clock | None = None
+        self._idle: IdleTracker | None = None
+        self._retention_interval: float = DEFAULT_RETENTION_INTERVAL
+        self._retention_max_delay: float = DEFAULT_RETENTION_MAX_DELAY
+        # Per-channel consolidation watch.
+        self._idle_watch: IdleWatch | None = None
+        # Timer for the next retention due time (or the read-failure re-arm).
+        self._retention_timer: Timer | None = None
+        # Quiet watch and max-delay deadline, live from due until the run.
+        self._retention_watch: IdleWatch | None = None
+        self._retention_deadline: Timer | None = None
+        # True from the due time until the run starts.
+        self._retention_pending: bool = False
         # Serializes the check-and-insert commit section of consolidation
         # so the watermark compare-and-set is race-free on the shared
         # persistence connection.
@@ -629,8 +671,15 @@ class MemoryPlugin(CorvidaePlugin):
         await super().on_init(pm, config)
         self._memory_cfg = config.get("memory", {}) or {}
         self._embedding_cfg = (config.get("llm", {}) or {}).get("embedding")
-        self._idle_consolidate_after = self._memory_cfg.get(
+        self._idle_consolidate_after = float(self._memory_cfg.get(
             "idle_consolidate_after", DEFAULT_IDLE_CONSOLIDATE_AFTER
+        ))
+        retention_cfg = self._memory_cfg.get("retention", {}) or {}
+        self._retention_interval = float(
+            retention_cfg.get("interval", DEFAULT_RETENTION_INTERVAL)
+        )
+        self._retention_max_delay = float(
+            retention_cfg.get("max_delay", DEFAULT_RETENTION_MAX_DELAY)
         )
         self._consolidation_prompt = self._memory_cfg.get(
             "consolidation_prompt", DEFAULT_CONSOLIDATION_PROMPT
@@ -658,13 +707,27 @@ class MemoryPlugin(CorvidaePlugin):
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
-        """Create the schema on the persistence connection.
+        """Create the schema, run the startup retention check, arm the clock.
 
-        Deferred to first use when the persistence DB has not opened yet
-        (hook-ordering dependent, same pattern as UsageLogPlugin).
-        After schema creation, spawns the message_fts backfill task and the
-        retention startup trigger (both silent background tasks, trap #5).
+        Schema creation is deferred to first use when the persistence DB has
+        not opened yet (hook-ordering dependent, same pattern as
+        UsageLogPlugin). With the schema ready, spawns the message_fts
+        backfill and runs the retention check. Then, when the kernel clock
+        and idle tracker are both registered, registers the per-channel
+        consolidation watch and arms the retention timer.
         """
+        # shortcut: hand-built test plugin managers omit the kernel clock; make it strict if a non-Runtime entry point appears
+        clock = self.pm.get_plugin("clock")
+        idle = self.pm.get_plugin("idle")
+        if clock is None or idle is None:
+            # Memory uses both objects or neither.
+            logger.warning(
+                "memory: no kernel clock/idle tracker registered; idle "
+                "consolidation and periodic retention are off"
+            )
+            clock = idle = None
+        self._clock = clock
+        self._idle = idle
         try:
             db = await self._ensure_schema()
             if db is not None:
@@ -672,13 +735,37 @@ class MemoryPlugin(CorvidaePlugin):
                 # Run synchronously so it completes before on_start returns,
                 # preventing races with tests/callers that call run_retention_job
                 # directly without waiting for background tasks first.
-                await self._retention_startup()
+                await self._run_retention_if_due()
         except Exception:
             logger.warning("memory schema creation deferred", exc_info=True)
+        if self._clock is None or self._idle is None:
+            return
+        # Consolidate each channel's tail once it has been quiet a period.
+        self._idle_watch = self._idle.watch_channels(
+            self._idle_consolidate_after,
+            self._on_channel_idle,
+            name="memory.consolidation",
+        )
+        # Arm even if the schema was not ready; the arm retries its read.
+        await self._arm_retention()
 
     @hookimpl
     async def on_stop(self) -> None:
-        """Cancel tracked background tasks (consolidation in flight)."""
+        """Cancel the watches and timers, then tracked background tasks."""
+        # Stop the idle watches so no new consolidation or retention starts.
+        for watch in (self._idle_watch, self._retention_watch):
+            if watch is not None:
+                watch.cancel()
+        # Cancel the retention timer and its max_delay deadline.
+        for timer in (self._retention_timer, self._retention_deadline):
+            if timer is not None:
+                timer.cancel()
+        # Drop the handles and the pending flag so nothing re-arms.
+        self._idle_watch = None
+        self._retention_watch = None
+        self._retention_timer = None
+        self._retention_deadline = None
+        self._retention_pending = False
         for task in list(self._tasks):
             task.cancel()
         if self._tasks:
@@ -792,40 +879,41 @@ class MemoryPlugin(CorvidaePlugin):
             return
         self._spawn(self._consolidate_range(channel.id, max(compacted_ids), "compaction"))
 
-    @hookimpl
-    async def on_idle(self) -> None:
-        """Trigger B: consolidate the un-consolidated tail of inactive channels.
+    async def _on_channel_idle(self, channel_id: str) -> None:
+        """Trigger B: consolidate a quiet channel's un-consolidated tail.
 
-        Also spawns the retention job (rate-limited by retention_meta.last_run).
-        Inactivity comes from the live Channel's last_active when the
-        channel is registered, else from the newest message_log timestamp
-        (covers backlog on channels this process has not seen traffic on).
+        Called by the idle tracker once the channel has been quiet for
+        ``idle_consolidate_after`` seconds, and again each period while the
+        quiet lasts. Never enqueues anything: the work is a plugin-owned task.
         """
-        self._spawn(self._retention_startup())
+        # A consolidation from an earlier firing is still running.
+        if channel_id in self._idle_inflight:
+            return
         try:
             db = await self._ensure_schema()
             if db is None:
+                # The next repeat retries.
                 return
-            now = time.time()
-            registry = self.pm.get_plugin("registry")
             async with db.execute(
-                "SELECT channel_id, MAX(id), MAX(timestamp) FROM message_log "
-                "GROUP BY channel_id"
+                "SELECT MAX(id) FROM message_log WHERE channel_id = ?",
+                (channel_id,),
             ) as cursor:
-                rows = await cursor.fetchall()
-            for channel_id, max_id, max_ts in rows:
-                watermark = await self._get_watermark(db, channel_id)
-                if max_id <= watermark:
-                    continue
-                last_active = max_ts
-                channel = registry.get(channel_id) if registry is not None else None
-                if channel is not None:
-                    last_active = channel.last_active
-                if now - last_active < self._idle_consolidate_after:
-                    continue
-                self._spawn(self._consolidate_range(channel_id, max_id, "idle"))
+                row = await cursor.fetchone()
+            max_id = row[0] if row is not None else None
+            if max_id is None:
+                return
+            watermark = await self._get_watermark(db, channel_id)
         except Exception:
-            logger.warning("idle consolidation scan failed", exc_info=True)
+            logger.warning(
+                "idle consolidation scan failed for %s", channel_id, exc_info=True
+            )
+            return
+        if max_id <= watermark:
+            return
+        self._idle_inflight.add(channel_id)
+        task = self._spawn(self._consolidate_range(channel_id, max_id, "idle"))
+        # Free the channel for the next firing however the task ends.
+        task.add_done_callback(lambda _t: self._idle_inflight.discard(channel_id))
 
     # ------------------------------------------------------------------
     # Background task tracking (§2.3 — silent, never the TaskQueue)
@@ -888,27 +976,30 @@ class MemoryPlugin(CorvidaePlugin):
         except Exception:
             logger.warning("message_fts backfill failed", exc_info=True)
 
-    async def _retention_startup(self) -> None:
-        """Startup trigger for the retention job (rate-limited by retention_meta).
+    def _now(self) -> float:
+        """Wall time from the kernel clock, or ``time.time()`` without one."""
+        return self._clock.now() if self._clock is not None else time.time()
 
-        Runs the job if the configured interval has elapsed since last_run.
-        Persisting last_run prevents crash-looping daemons from re-running
-        the job on every restart (trap #5). Also preserves the zero-traffic
-        guarantee: daemons idle longer than the interval run the job on next start.
+    async def _run_retention_if_due(self) -> None:
+        """Run the retention job if the interval has elapsed since last_run.
+
+        Persisting last_run before the job prevents crash-looping daemons
+        from re-running it on every restart (trap #5). It also preserves the
+        zero-traffic guarantee: daemons idle longer than the interval run
+        the job on next start. Failures are logged, not raised.
         """
         try:
             db = await self._ensure_schema()
             if db is None:
                 return
-            retention_cfg = self._memory_cfg.get("retention", {}) or {}
-            interval = float(retention_cfg.get("interval", 21600))
+            interval = self._retention_interval
 
             async with db.execute(
                 "SELECT last_run FROM retention_meta LIMIT 1"
             ) as cursor:
                 row = await cursor.fetchone()
 
-            now = time.time()
+            now = self._now()
             last_run = row[0] if row is not None else 0.0
 
             if now - last_run < interval:
@@ -930,6 +1021,83 @@ class MemoryPlugin(CorvidaePlugin):
             await run_retention_job(self, now=now)
         except Exception:
             logger.warning("retention startup trigger failed", exc_info=True)
+
+    async def _arm_retention(self) -> None:
+        """Arm the timer for the next retention due time. Never raises.
+
+        The one place the retention timer is created. Reads last_run and arms
+        at ``last_run + interval``, floored at ``now + RETENTION_DB_RETRY_SECONDS``
+        so a last_run that failed to advance cannot arm in the past and loop
+        at zero delay. If last_run cannot be read, re-arms itself shortly.
+        """
+        if self._clock is None:
+            return
+        try:
+            db = await self._ensure_schema()
+            if db is None:
+                raise RuntimeError("persistence DB not open")
+            async with db.execute(
+                "SELECT last_run FROM retention_meta LIMIT 1"
+            ) as cursor:
+                row = await cursor.fetchone()
+            last_run = row[0] if row is not None else 0.0
+            when = max(
+                last_run + self._retention_interval,
+                self._now() + RETENTION_DB_RETRY_SECONDS,
+            )
+            self._retention_timer = self._clock.call_at(
+                when, self._retention_due, name="memory.retention"
+            )
+        except Exception:
+            logger.warning(
+                "retention: cannot read retention_meta; re-arming in %ss",
+                RETENTION_DB_RETRY_SECONDS,
+                exc_info=True,
+            )
+            self._retention_timer = self._clock.call_later(
+                RETENTION_DB_RETRY_SECONDS,
+                self._arm_retention,
+                name="memory.retention.rearm",
+            )
+
+    async def _retention_due(self) -> None:
+        """Retention is due: run when the system is quiet, or at max_delay."""
+        if self._clock is None or self._idle is None:
+            return
+        self._retention_pending = True
+        # Prefer a quiet moment; the deadline bounds the wait under traffic.
+        self._retention_watch = self._idle.watch_system(
+            RETENTION_QUIET_SECONDS,
+            self._run_retention_now,
+            name="memory.retention.quiet",
+        )
+        self._retention_deadline = self._clock.call_later(
+            self._retention_max_delay,
+            self._run_retention_now,
+            name="memory.retention.max_delay",
+        )
+
+    async def _run_retention_now(self) -> None:
+        """Start the retention cycle once, from whichever trigger fires first."""
+        if not self._retention_pending:
+            return
+        self._retention_pending = False
+        # Cancelling the watch sets its flag, so it cannot re-arm even when
+        # this runs inside its own callback; a started Timer's cancel is a no-op.
+        if self._retention_watch is not None:
+            self._retention_watch.cancel()
+            self._retention_watch = None
+        if self._retention_deadline is not None:
+            self._retention_deadline.cancel()
+            self._retention_deadline = None
+        # Plugin-owned task: the clock callback returns at once, on_stop cancels it.
+        self._spawn(self._retention_cycle())
+
+    async def _retention_cycle(self) -> None:
+        """Run retention if due, then arm the next due time."""
+        # Logs its own failures, so the arm below always runs.
+        await self._run_retention_if_due()
+        await self._arm_retention()
 
     # ------------------------------------------------------------------
     # The consolidation task (single code path for both triggers)

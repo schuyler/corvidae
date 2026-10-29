@@ -17,6 +17,7 @@ import pytest
 import yaml
 
 from corvidae.channel import Channel, ChannelRegistry
+from corvidae.clock import Clock
 from corvidae.context import MessageType
 from corvidae.hooks import create_plugin_manager
 from corvidae.persistence import PersistencePlugin, init_db
@@ -74,6 +75,8 @@ async def _scheduler_on(db_path: Path):
     pm = create_plugin_manager()
     registry = ChannelRegistry({})
     pm.register(registry, name="registry")
+    # The scheduler requires the kernel clock; these tests run on real time.
+    pm.register(Clock(), name="clock")
     persistence = PersistencePlugin()
     persistence.db = conn
     pm.register(persistence, name="persistence")

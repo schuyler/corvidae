@@ -88,7 +88,6 @@ class AgentSpec:
     async def before_agent_turn(self, channel: Channel, trace_id: str | None, meta: dict) -> None
     async def after_persist_assistant(self, channel: Channel, message: dict) -> None
     async def transform_display_text(self, channel: Channel, text: str, result_message: dict) -> str | None
-    async def on_idle(self) -> None
     async def resolve_conversation(self, channel: Channel) -> list[dict] | None
     async def resolve_channel(self, channel_id: str) -> Channel | None
     async def persist_message(self, channel: Channel, message: dict, message_type: MessageType) -> int | None
@@ -119,7 +118,7 @@ resolver function is involved. `transform_tool_result` and
 `transform_display_text` are wrapper chains: `@hookimpl(wrapper=True)`
 implementations compose transforms over an identity seed.
 
-Pure broadcast hooks (e.g. `on_start`, `on_idle`) resolve neither way;
+Pure broadcast hooks (e.g. `on_start`, `on_stop`) resolve neither way;
 their return values are ignored. `persist_message` is the one broadcast
 hook resolved with `resolve_single_result`: every implementation runs and
 at most one (persistence) returns a value.
@@ -154,7 +153,6 @@ adding a hook are in [plugin-guide.md](plugin-guide.md#hook-grammar);
 | `before_agent_turn` | broadcast | `_process_queue_item`, before LLM call; plugins inject context into conversation log |
 | `after_persist_assistant` | broadcast | `_process_queue_item`, after assistant message is persisted; plugins may mutate the in-memory dict |
 | `transform_display_text` | firstresult=True wrapper chain | `_resolve_display_text`, before the reply is sent; return transformed text or None to leave unchanged |
-| `on_idle` | broadcast | `IdleMonitor`, when all queues empty and cooldown elapsed |
 | `resolve_conversation` | firstresult=True | `_process_queue_item`, when `channel.conversation is None`; return list of tagged message dicts or None to defer |
 | `resolve_channel` | firstresult=True | `SchedulerPlugin`, for a persisted channel id the registry does not hold (e.g. a reminder due after a restart); a transport returns the live Channel for ids it owns, created with transport-specific config, or None to defer. `SignalPlugin` and `DiscordPlugin` implement it. A transport may also return None for an id it owns but cannot build yet (Signal before its first alias resolution). For an id whose prefix names a transport that implements the hook, the scheduler retries; for other ids, callers fall back to `registry.get_or_create` from the split id |
 | `persist_message` | broadcast (imperative) | `_process_queue_item` after every `conv.append()`, and `FunnelPlugin` for the CONTEXT it persists; every implementation runs (persistence, JSONL logging). `PersistencePlugin` returns the `message_log` rowid and the caller resolves the list with `resolve_single_result` into `_db_id` |
@@ -725,13 +723,15 @@ last — its call+results block always ends on a `tool` message, real or
 placeholder. This matters because llama.cpp reads a trailing assistant
 message as a prefill and rejects it under `enable_thinking`.
 
-After `_handle_response` completes, `_process_queue_item` calls
-`_maybe_fire_idle()`. This is the push-based idle detection mechanism:
-after each queue item finishes, `Agent` checks whether all `SerialQueue`
-instances in `self.queues` are empty and `TaskQueue.is_idle` is `True`
-(skipped if `TaskPlugin` is not registered). If so, and if at least
-`idle_cooldown_seconds` have elapsed since the last `on_idle` firing,
-it broadcasts the `on_idle` hook.
+The Agent also feeds the kernel idle tracker (see [Clock and idle
+tracker](#clock-and-idle-tracker-clockpy-idlepy)). It calls
+`IdleTracker.note_activity(channel_id)` when an item is enqueued, and
+`note_settled(channel.id)` when an item finishes and nothing remains on the
+channel: its queue is empty and it has no pending tool calls (subagent
+tasks included; their results arrive as notifications that settle the
+channel again). The Agent only pushes; the tracker never reads the
+queues. Without an `"idle"` plugin the Agent logs a warning and idle
+signals are off.
 
 **`_resolve_display_text`** calls `transform_display_text`
 (`firstresult=True` wrapper chain). If the hook returns a value,
@@ -988,30 +988,74 @@ Per-channel file handles are opened lazily in `_get_handle` and held
 open for the plugin lifetime. Channel IDs are sanitized (`/` and `:` →
 `_`) for filenames. All handles are flushed and closed in `on_stop`.
 
-## IdleMonitorPlugin
+## Clock and idle tracker (`clock.py`, `idle.py`)
 
-`idle.py` — a no-op stub that declares `depends_on = set()`. It implements
-the `on_idle` hook with a pass-through body. Registered as the
-`"idle_monitor"` entry point.
+Time passing and the system going quiet are kernel inputs. `Runtime.start()`
+builds one `Clock` and one `IdleTracker` and registers them with the plugin
+manager as `"clock"` and `"idle"` before the entry points load. They are
+not entry-point plugins. Listing either in `plugins.disabled` unregisters
+it, and startup then fails dependency validation. Plugins declare
+`depends_on = frozenset({"clock"})` or `{"clock", "idle"}` and resolve them
+with `get_dependency`.
 
-Idle detection is push-based, not polling-based. After each queue item
-finishes, `Agent._maybe_fire_idle()` checks whether all queues are empty and
-the cooldown has elapsed, then broadcasts `on_idle` directly. See the Agent
-section for the full idle detection logic.
+**Clock.** `now()` is wall time, `monotonic()` is monotonic time, and
+`sleep(delay, wake=None)` sleeps on the monotonic clock until `delay`
+passes or the optional `asyncio.Event` is set. `call_later(delay, cb,
+name=...)` and `call_at(when, cb, name=...)` run an async callback once and
+return a `Timer` whose `cancel()` stops it while it is still waiting
+(a no-op once the callback has started). `call_at` waits on wall time in
+steps of at most an hour, so a suspend or an NTP step is noticed within
+the hour. Timers are one-shot: a periodic job re-arms itself from its
+callback. A callback that raises is logged with the timer's name. A callback
+must let `asyncio.CancelledError` through, because `Clock.close()` stops
+running callbacks that way.
 
-`IdleMonitorPlugin` exists as a registration point for future idle-triggered
-behavior. Other plugins that want to react to idle events implement the
-`on_idle` hook directly.
+**IdleTracker.** It answers "has this channel been quiet for N seconds?" and
+"has the whole system?". A channel is busy from `note_activity` until
+`note_settled`, and quiet from then on. The system is quiet when no
+channel is busy, counted from the last settle (or from `start()`).
 
-**Graceful degradation:** without `IdleMonitorPlugin`, the `on_idle` hook
-may still fire if other plugins implement it, since `Agent._maybe_fire_idle()`
-broadcasts to all registered `on_idle` implementations regardless.
+A plugin registers a watch:
 
-**Config:**
-```yaml
-daemon:
-  idle_cooldown_seconds: 30   # minimum seconds between on_idle firings (default 30)
+```python
+self._watch = idle.watch_channels(1800, self._on_quiet, name="my.plugin")
+self._sys = idle.watch_system(60, self._on_system_quiet, name="my.plugin.sys")
 ```
+
+`watch_channels(period, cb)` calls `cb(channel_id)` once a channel has been
+quiet `period` seconds. `watch_system(period, cb)` calls `cb()` once the
+whole system has been. Both return an `IdleWatch` with `cancel()`. A watch
+repeats every `repeat` seconds (default `period`) while the quiet lasts, and
+only if nothing became active while the callback ran. Activity cancels the
+waiting timers. A callback never starts a turn or enqueues anything; it
+does plugin-owned work (principle 13).
+
+This is a registration API, not a hook. A hook cannot carry per-plugin
+periods, and a broadcast with a global cooldown starves any plugin whose
+period is longer than the cooldown.
+
+**Restart seed.** A freshly booted daemon has seen no traffic, but its
+channels have history. `PersistencePlugin.on_start` calls
+`note_restored(channel_id, last_activity)` for every channel in
+`message_log`, so each is quiet since its last message (wall-time age,
+converted to monotonic). A channel with history that has not spoken since
+before the restart therefore reaches its idle period on schedule instead
+of never. `note_restored` ignores channels the tracker already knows.
+
+**Lifecycle.** The tracker does not fire until `Runtime.start()` calls
+`idle.start()`, after the Agent can take work. Shutdown runs
+`agent.on_stop`, the `on_stop` broadcast, `idle.stop()` and then
+`clock.close()`, which cancels any timers plugins left behind. Plugins
+should still cancel their own watches and timers in `on_stop`.
+
+**Config.** None. Each plugin sets its own period (for instance
+`memory.idle_consolidate_after`). The former `daemon.idle_cooldown_seconds`
+and `daemon.idle_poll_interval` keys are removed, and a config that
+carries either fails at startup (a reload carrying one is rejected).
+
+**Tests.** `tests/fake_clock.py` provides a fake clock and
+`install_kernel_clock(pm)`, which registers a fake clock and a real
+tracker on a plugin manager; tests advance time without sleeping.
 
 ## ThinkingPlugin
 
@@ -1363,8 +1407,7 @@ validation fails at startup.
 `scheduler.py` — the clock-driven producer: reminders, operator-declared
 periodic jobs, and the heartbeat (#59; design rationale in
 `plans/scheduler.md`). Entry point name: `"scheduler"`;
-`depends_on = {"registry", "persistence"}`. `on_idle` is no substitute:
-it is push-based, so a daemon with no traffic never fires it.
+`depends_on = {"registry", "persistence", "clock"}`.
 
 **Rows.** One `schedule` table on the persistence connection. A row is a
 due time, an optional interval, a target channel id, the text, and an
@@ -1395,11 +1438,11 @@ There is no firing log: a firing is a persisted conversation row, and its
 `meta["schedule_id"]` travels with the trace.
 
 **Timer.** One asyncio task sleeps until the earliest enabled row is due
-(at most an hour, so a wall-clock jump is noticed). An `asyncio.Event`
-wakes it early whenever a row is added, cancelled, or re-synced. Before
-firing anything it waits until the persistence DB is open and
-`Agent.started` is True. Clock and sleeper are constructor arguments, so
-tests inject fakes and never sleep.
+(at most an hour, so a wall-clock jump is noticed) with `Clock.sleep`, and
+reads time from `Clock.now`. An `asyncio.Event` wakes it early whenever a
+row is added, cancelled, or re-synced. Before firing anything it waits
+until the persistence DB is open and `Agent.started` is True. Tests
+register a fake clock and never sleep.
 
 **Firing.** The channel is resolved first: `registry.get`, then the
 `resolve_channel` hook, then `registry.get_or_create` from the split id.
@@ -1411,9 +1454,7 @@ config, for example Signal before its first alias resolution (PRD §3.2.7,
 the pass re-arms after `CHANNEL_RETRY_SECONDS` (5 s). A WARNING is logged
 once per row, not once per retry. Once the channel resolves, the row is
 advanced (recurring) or disabled as `fired` (one-shot), at most once.
-`channel.touch()` then runs so
-MemoryPlugin's inactivity check does not consolidate mid-exchange, and
-the plugin calls:
+`channel.touch()` then runs, which only updates `last_active` and with it the order of the web and ACP channel lists. The plugin then calls:
 
 ```python
 await pm.ahook.on_notify(
@@ -2280,7 +2321,6 @@ live API): `tests/test_acp_stdio_smoke.py`.
 ```yaml
 daemon:
   session_db: sessions.db
-  idle_cooldown_seconds: 30   # minimum seconds between on_idle firings (default 30)
 
 llm:
   main:
@@ -2316,7 +2356,7 @@ tools:
   web_search_max_results: 8     # web_search result count (default 8)
 
 memory:
-  idle_consolidate_after: 1800  # seconds of channel inactivity before idle consolidation
+  idle_consolidate_after: 1800  # seconds a channel must be quiet before idle consolidation
   half_life_days: 30            # retrieval recency decay (e-folding time, days)
   retrieval:
     k: 8                        # KNN candidate count
@@ -2384,12 +2424,13 @@ Relative paths resolve against the directory containing `agent.yaml`.
 `Runtime.start()` (`runtime.py`) registers plugins in two stages, not a
 fixed hand-written order:
 
-1. `ChannelRegistry` is the only manually registered plugin —
-   `self.pm.register(self.registry, name="registry")` (runtime.py:128).
+1. Three kernel objects are registered by hand: `ChannelRegistry` as
+   `"registry"`, the `Clock` as `"clock"` and the `IdleTracker` as `"idle"`
+   (`self.pm.register(..., name=...)` in `Runtime.start()`).
 2. Every other plugin loads from the `corvidae` setuptools entry-point
    group: `self.pm.load_setuptools_entrypoints("corvidae")`
-   (runtime.py:141), reading `[project.entry-points.corvidae]` in
-   `pyproject.toml:35-62`. Names listed in `plugins.disabled` are blocked
+   (`runtime.py`), reading `[project.entry-points.corvidae]` in
+   `pyproject.toml`. Names listed in `plugins.disabled` are blocked
    via `pm.set_blocked(name)` before this call, so disabled plugins are
    never instantiated.
 
@@ -2397,7 +2438,7 @@ The kernel's entry points (`[project.entry-points.corvidae]` in the root
 `pyproject.toml`): `persistence`, `jsonl_log`, `core_tools`, `cli`, `irc`,
 `signal`, `discord`, `web`, `acp`, `task`, `subagent`, `mcp`, `llm`,
 `compaction`, `thinking`, `runtime_settings`, `tools`, `metrics`,
-`usage_log`, `metrics_jsonl`, `scheduler`, `agent`, `idle_monitor`,
+`usage_log`, `metrics_jsonl`, `scheduler`, `agent`,
 `config_watcher`. The cognition extra adds `memory`, `memory_tools`,
 `funnel`, `outcome_log`, `appraisal` and `critique` from
 `packages/corvidae-cognition/pyproject.toml`.
@@ -2420,7 +2461,7 @@ entry shows up under `blocked` while the plugin it was meant to block
 still shows up under `loaded`; that mismatch is the operator-visible
 signal of the typo. It is not an error and does not stop the daemon.
 
-After entry points load, `validate_dependencies(pm)` runs (runtime.py:159)
+After entry points load, `validate_dependencies(pm)` runs
 to verify every plugin's `depends_on` set names a registered plugin.
 Startup aborts with `RuntimeError` if any dependency is missing.
 
@@ -2453,17 +2494,17 @@ AcpPlugin           → "registry"    (ChannelRegistry)
 SubagentPlugin      → "llm", "tools"
 CompactionPlugin    → "llm"         (LLMPlugin); soft-uses "agent" for forks
 ThinkingPlugin      → "registry"    (ChannelRegistry)
-MemoryPlugin        → "persistence", "llm"; soft-uses "agent", "registry" for forks  (cognition extra)
+MemoryPlugin        → "persistence", "llm", "clock", "idle"; soft-uses "agent", "registry" for forks  (cognition extra)
 MemoryToolsPlugin   → "memory"      (MemoryPlugin)                                (cognition extra)
 CritiquePlugin      → "task", "llm"; soft-uses "agent" for forks                  (cognition extra)
 OutcomeLogPlugin    → "persistence"                                               (cognition extra)
 AppraisalPlugin     → "persistence"; soft-uses "agent" for forks                  (cognition extra)
 UsageLogPlugin      → "persistence"
-SchedulerPlugin     → "registry", "persistence"
+SchedulerPlugin     → "registry", "persistence", "clock"
 ```
 
 Plugins with `depends_on = set()` (declared but empty):
-`LLMPlugin`, `ToolCollectionPlugin`, `PersistencePlugin`, `IdleMonitorPlugin`,
+`LLMPlugin`, `ToolCollectionPlugin`, `PersistencePlugin`,
 `CoreToolsPlugin`, `McpClientPlugin`, `RuntimeSettingsPlugin`, `JsonlLogPlugin`,
 `TaskPlugin`, `MetricsPlugin`, `MetricsJsonlPlugin`, `ConfigWatcherPlugin`,
 `FunnelPlugin` (cognition extra).
@@ -2494,7 +2535,8 @@ corvidae/
 ├── logging.py            # StructuredFormatter, configure_logging()
 ├── agent.py              # Agent (single-turn dispatch)
 ├── persistence.py        # PersistencePlugin (DB lifecycle, conversation init)
-├── idle.py               # IdleMonitorPlugin (no-op stub; idle detection is push-based in Agent)
+├── clock.py              # Clock, Timer (kernel clock: now, sleep, call_later, call_at)
+├── idle.py               # IdleTracker, IdleWatch (per-channel and system quiet)
 ├── thinking.py           # ThinkingPlugin, strip_thinking(), strip_reasoning_content()
 ├── compaction.py         # CompactionPlugin
 ├── fork.py               # fork prompt builder, cut snap, agent.forks parser (#51)

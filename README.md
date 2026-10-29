@@ -72,7 +72,7 @@ See [docs/configuration.md](docs/configuration.md) for the full reference.
 Key sections:
 
 - `llm.main` — required; `base_url` and `model` are the only mandatory fields
-- `daemon` — SQLite path, task worker count, idle behavior
+- `daemon` — SQLite path, task worker count
 - `agent` — system prompt, token budget, compaction, tool result limits
 - `irc` — omit entirely to disable IRC
 - `channels` — per-channel overrides keyed by `transport:scope` (e.g., `irc:#general`, `cli:local`)
@@ -113,7 +113,6 @@ other tenants.
 | CompactionPlugin | Summarizes older messages when nearing the token budget |
 | ThinkingPlugin | Strips `<thinking>` blocks from display, optionally from prompt history |
 | RuntimeSettingsPlugin | Lets the LLM adjust its own per-channel parameters mid-session |
-| IdleMonitorPlugin | Fires `on_idle` when all queues are quiescent |
 | SchedulerPlugin | Reminders the agent sets with `remind_me`, operator-scheduled jobs, and a heartbeat, fired into channels on the clock |
 | SignalPlugin | Signal transport via a running `signal-cli` daemon |
 | DiscordPlugin | Discord transport (needs `--extra discord`) |

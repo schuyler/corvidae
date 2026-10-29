@@ -18,7 +18,6 @@ daemon:
   session_db: sessions.db
   max_task_workers: 4
   completed_task_buffer: 100
-  idle_cooldown_seconds: 30
 
 agent:
   system_prompt: "You are a helpful assistant."
@@ -110,11 +109,12 @@ Retry behavior applies to transient status codes (429, 500, 502, 503, 504) and c
 | `daemon.session_db` | string | `sessions.db` | Path to the SQLite database file for conversation history. Relative paths are resolved from the working directory. |
 | `daemon.max_task_workers` | integer | `4` | Number of concurrent background task workers in `TaskQueue`. |
 | `daemon.completed_task_buffer` | integer | `100` | Number of completed task records retained in memory for `task_status` output. |
-| `daemon.idle_cooldown_seconds` | number | `30` | Minimum seconds between consecutive `on_idle` hook firings. Idle detection is push-based (`Agent._maybe_fire_idle`); this value governs the cooldown between successive firings. |
 | `daemon.sqlite_journal_mode` | string | `wal` | SQLite journal mode for the session database. Allowed values: `delete`, `truncate`, `persist`, `memory`, `wal`, `off`. Read by `PersistencePlugin`. |
 | `daemon.jsonl_log_dir` | string | — | Directory for per-channel JSONL conversation logs. When set, `JsonlLogPlugin` appends one JSON line per conversation event to `<dir>/<channel_id>.jsonl`. Relative paths are resolved against `_base_dir`. Omit to disable JSONL logging. |
 | `daemon.metrics_jsonl` | string | — | Path of the metrics event log. When set, `MetricsJsonlPlugin` appends one JSON line (`{"ts", "name", "value", "tags"}`) per `on_metrics` event. Relative paths are resolved against `_base_dir`. Omit to disable the metrics JSONL sink. |
 | `daemon.config_poll_interval` | float | `2.0` | Seconds between `agent.yaml` mtime checks by `ConfigWatcherPlugin`. |
+
+`daemon.idle_cooldown_seconds` and `daemon.idle_poll_interval` are removed with the `on_idle` hook. Either one in the config is an error at startup, and a reload carrying one is rejected. Idle work now runs on the kernel clock and each plugin sets its own period (for example `memory.idle_consolidate_after`); delete the key.
 
 ---
 
@@ -304,7 +304,7 @@ A record's `created_at` is the `sessions.db` timestamp of the last message in it
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `memory.idle_consolidate_after` | float | `1800` | Seconds of channel inactivity before the `on_idle` trigger consolidates that channel's un-consolidated tail. |
+| `memory.idle_consolidate_after` | float | `1800` | Seconds a channel must be quiet before idle consolidation runs on its un-consolidated tail, and the period between repeat runs while it stays quiet. A channel that never goes quiet is consolidated through compaction instead. Takes effect at restart. |
 | `memory.half_life_days` | float | `30` | Recency decay constant of the retrieval score (`similarity × exp(-age_days / half_life)`). It is an e-folding time: the factor is `1/e`, not `1/2`, at `half_life_days`. |
 | `memory.retrieval.k` | integer | `8` | Vector-KNN candidate count per retrieval. |
 | `memory.retrieval.bands.strong` | float | `0.75` | Value at or above which a retrieved memory is banded `[strong]`. The value is the decayed score, or raw similarity under `band_on: similarity`. |
@@ -318,7 +318,7 @@ A record's `created_at` is the `sessions.db` timestamp of the last message in it
 
 ### `memory.retention` — Retention job
 
-The retention job runs as a silent background task on daemon startup and after each `on_idle` firing (rate-limited to `memory.retention.interval`). It runs three passes: demotion (remove under-used records from the vector index), re-promotion (restore records whose access stats have risen since demotion), and backfill (embed re-promoted records that are missing vectors). The backfill pass is skipped when embedding is disabled by the `embedding_meta` mismatch guard.
+The retention job runs as a silent background task on daemon startup if it is due, and then on the kernel clock every `memory.retention.interval`. When a run comes due it waits for 60 seconds of system-wide quiet, but at most `memory.retention.max_delay`, so steady traffic cannot starve it. It runs three passes: demotion (remove under-used records from the vector index), re-promotion (restore records whose access stats have risen since demotion), and backfill (embed re-promoted records that are missing vectors). The backfill pass is skipped when embedding is disabled by the `embedding_meta` mismatch guard.
 
 The retention score formula is `importance × (1 + 0.5 × log1p(retrieval_count)) × exp(-age_days / half_life_days)`. All threshold and shape constants are the config keys documented below.
 
@@ -328,7 +328,8 @@ The retention score formula is `importance × (1 + 0.5 × log1p(retrieval_count)
 | `memory.retention.importance_floor` | float | `0.8` | Records with `importance ≥ importance_floor` are never demoted for lack of retrieval traffic. The importance prior ranges 0.0–1.0 (`AppraisalPlugin` wraps the default `RubricPrior` in `AppraisalPrior` when appraisal is enabled). |
 | `memory.retention.demote_below` | float | `0.15` | Retention score threshold. An indexed record whose score falls below this value (and which passes the grace-period and importance-floor checks) is demoted: `indexed=0`, `embedded=0`, vec row deleted. The `memory` row and its FTS entry are preserved. Re-promotion requires the score to rise back to or above this threshold, which happens when the record is accessed via `recall_raw`. |
 | `memory.retention.half_life_days` | float | `90` | Recency half-life for the retention score. Distinct from `memory.half_life_days` (retrieval scoring, default 30). The longer retention half-life gives passive retrieval time to re-warm a record before it demotes. |
-| `memory.retention.interval` | float | `21600` | Minimum seconds between retention job runs (default 6 hours). The last-run timestamp is persisted in the `retention_meta` table so daemon restarts do not reset the interval. A daemon idle longer than `interval` since its last run will still run the job on next start (zero-traffic guarantee). |
+| `memory.retention.interval` | float | `21600` | Seconds between retention job runs (default 6 hours); the period of the clock timer. The last-run timestamp is persisted in the `retention_meta` table so daemon restarts do not reset the interval. A daemon idle longer than `interval` since its last run will still run the job on next start (zero-traffic guarantee). Takes effect at restart. |
+| `memory.retention.max_delay` | float | `3600` | Longest a due run waits for system quiet, in seconds. A run starts when the system has been quiet 60 seconds or when this much time has passed since it came due, whichever is first. Takes effect at restart. |
 | `memory.retention.backfill_batch` | integer | `32` | Maximum number of unembedded indexed records the retention job embeds per run (backfill pass). Bounds embedding API usage when many records need vectors, such as after a re-promotion wave or a period during which embedding was disabled. |
 
 ---
@@ -669,7 +670,6 @@ No restart is required for the changes listed below. Changes that require restar
 | `llm.main` | New `LLMClient` created and started; old client closed asynchronously after in-flight requests finish. |
 | `agent.compaction_threshold` | `CompactionPlugin` reads the new threshold on its next compaction check. |
 | `agent.chars_per_token` | Deprecated. The value is reloaded into `Agent` and `CompactionPlugin` for config compatibility, but has no effect on token counting — `count_tokens()` uses the module-level constant. |
-| `daemon.idle_cooldown_seconds` | `Agent` uses the new cooldown on the next idle check. |
 | `agent.request_logprobs` | `Agent` re-reads the flag; takes effect on the next LLM call. |
 | `agent.mid_conversation_system_role` | `Agent` re-reads the role; takes effect on the next prompt build. The changed rendering of earlier turns costs one full prompt-cache miss. |
 | `agent.compaction_prompt`, `agent.compaction_fork_prompt` | `CompactionPlugin` uses the new prompt on its next compaction. |
@@ -691,7 +691,7 @@ No restart is required for the changes listed below. Changes that require restar
 | `web.host`, `web.port`, `web.allowed_origins`, adding or removing the `web` block | The listener is bound at startup. A reload logs `restart to apply` and keeps serving with the old values. |
 | Existing channel config in `channels:` | Channels already registered retain their original `ChannelConfig` until restart, except `tools.disabled` (above). |
 | `llm.background` | Not updated on reload. |
-| `memory.*` (including `memory.consolidation_prompt` and `memory.consolidation_fork_prompt`) | `MemoryPlugin` reads its section at init only. |
+| `memory.*` (including `memory.consolidation_prompt` and `memory.consolidation_fork_prompt`) | `MemoryPlugin` reads its section at init only. That includes `memory.idle_consolidate_after` and `memory.retention.*`: the idle watch and retention timer are set when the plugin starts. |
 | `tools.max_result_chars`, `tools.shell_timeout`, `tools.web_fetch_timeout` | Deferred; not currently implemented in hot-reload path. |
 
 ### Error handling

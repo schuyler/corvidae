@@ -342,7 +342,7 @@ class TestRequestLogprobsScalarCapturedAtInit:
     async def test_on_init_captures_request_logprobs_true(self):
         """agent.request_logprobs: true in config -> Agent captures it as
         self._request_logprobs = True at on_init, matching the existing
-        _chars_per_token / _idle_cooldown sibling-scalar pattern."""
+        _chars_per_token sibling-scalar pattern."""
         from corvidae.agent import Agent
 
         pm = create_plugin_manager()
@@ -386,7 +386,7 @@ class TestRequestLogprobsScalarCapturedAtInit:
     async def test_on_init_defaults_request_logprobs_false_with_no_agent_key(self):
         """No 'agent' key at all in config -> self._request_logprobs is
         still False (matches the existing agent_config = config.get("agent",
-        {}) fallback pattern used for _chars_per_token / _idle_cooldown)."""
+        {}) fallback pattern used for _chars_per_token)."""
         from corvidae.agent import Agent
 
         pm = create_plugin_manager()

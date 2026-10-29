@@ -22,11 +22,13 @@ from pathlib import Path
 import yaml
 
 from corvidae.channel import ChannelRegistry, load_channel_config, validate_agent_config
+from corvidae.clock import Clock
 from corvidae.hooks import (
     _check_hook_arg_binding,
     create_plugin_manager,
     validate_dependencies,
 )
+from corvidae.idle import IdleTracker, validate_daemon_config
 from corvidae.logging import configure_logging
 
 logger = logging.getLogger(__name__)
@@ -67,6 +69,8 @@ class Runtime:
         self.overrides = overrides or {}
         self.pm = None
         self.registry = None
+        self.clock = None
+        self.idle = None
 
     async def start(self) -> None:
         """Load config, merge overrides, create PM, load plugins, start.
@@ -78,8 +82,10 @@ class Runtime:
         3.  Set config["_base_dir"] from config_path (after merge; cannot be overridden).
         4.  Configure logging (MUST be first operational step after config load).
         5.  Create plugin manager.
-        6.  Create ChannelRegistry and register it with the plugin manager.
-        7.  Load channel config from merged config.
+        6.  Create ChannelRegistry, Clock and IdleTracker and register them
+            with the plugin manager as "registry", "clock" and "idle".
+        7.  Validate the agent and daemon sections; load channel config from
+            merged config.
         7b. Block disabled plugins via pm.set_blocked for each name in
             config["plugins"]["disabled"]. Must precede step 8 so blocked
             plugins are never instantiated by the entry-point loader.
@@ -91,6 +97,8 @@ class Runtime:
         12. Retrieve agent plugin; raise RuntimeError if absent.
             await agent.on_start(config=config) explicitly, after the broadcast
             so that plugins Agent depends on have already started.
+        13. Start the idle tracker, so nothing fires before the Agent can
+            take work.
         """
         # 1. Load YAML config, reporting a missing or malformed file as a
         # one-line operator error instead of an uncaught traceback.
@@ -138,15 +146,21 @@ class Runtime:
         # 5. Create plugin manager
         self.pm = create_plugin_manager()
 
-        # 6. Create ChannelRegistry and register with PM
+        # 6. Create ChannelRegistry, Clock and IdleTracker and register them.
+        # Kernel objects: not loaded from entry points, not disableable.
         self.registry = ChannelRegistry()
         self.pm.register(self.registry, name="registry")
+        self.clock = Clock()
+        self.idle = IdleTracker(self.clock)
+        self.pm.register(self.clock, name="clock")
+        self.pm.register(self.idle, name="idle")
 
         # 7. Validate the agent section and load channel config. A rejected
         # value is an operator error: one line naming the key, the value
         # and the file, like a malformed file above, not a traceback.
         try:
             validate_agent_config(config.get("agent", {}))
+            validate_daemon_config(config.get("daemon") or {})
             self.registry.agent_defaults = config.get("agent", {})
             load_channel_config(config, self.registry)
         except ValueError as exc:
@@ -193,8 +207,11 @@ class Runtime:
             raise RuntimeError("Agent plugin not registered — check entry points")
         await agent.on_start(config=config)
 
+        # 13. Start the idle tracker now that the Agent can take work.
+        self.idle.start()
+
     async def stop(self) -> None:
-        """Graceful shutdown: agent.on_stop, then pm.ahook.on_stop.
+        """Graceful shutdown: agent.on_stop, pm.ahook.on_stop, idle.stop, clock.close.
 
         Runs under a 3-second timeout; os._exit(1) on timeout.
         Raises RuntimeError if agent plugin is not registered.
@@ -217,6 +234,9 @@ class Runtime:
         """Run agent and plugin shutdown in order. Called under a timeout in stop()."""
         await agent.on_stop()
         await self.pm.ahook.on_stop()
+        # Stop the tracker, then cancel any timers plugins left on the clock.
+        self.idle.stop()
+        await self.clock.close()
 
     async def run(self) -> None:
         """start(), wait for SIGINT/SIGTERM, then stop().

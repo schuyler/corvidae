@@ -53,7 +53,7 @@ triggers keep indexing into a table nothing reads. That is harmless;
 ### MemoryPlugin
 
 `memory.py` — autobiographical memory. Entry point
-name: `"memory"`; `depends_on = {"persistence", "llm"}`. Absorbs the former
+name: `"memory"`; `depends_on = {"persistence", "llm", "clock", "idle"}`. Absorbs the former
 `DreamPlugin` embryo (removed): compaction becomes memory formation instead
 of file-based fact scraping.
 
@@ -66,8 +66,14 @@ Two triggers, one watermarked code path:
   The compacted `message_log` id range rides the hook payload (rowid
   threading, below); consolidation never depends on the summary row being
   in the DB.
-- **`on_idle`** — channels inactive past `memory.idle_consolidate_after`
-  seconds get their un-consolidated tail consolidated.
+- **Channel idle** — a channel that has been quiet (per the kernel idle
+  tracker, [design.md](design.md#clock-and-idle-tracker-clockpy-idlepy))
+  for `memory.idle_consolidate_after` seconds gets its un-consolidated
+  tail consolidated, and again each period while the quiet lasts. Channels
+  with history but no traffic since boot count as quiet since their last
+  message, so a restart does not lose them. A channel that never goes
+  quiet never reaches this trigger; it is consolidated through compaction,
+  as dialog leaves the window.
 
 Both spawn a tracked plugin-owned `asyncio.create_task` (never the
 TaskQueue — every TaskQueue completion wakes the main model). The task
@@ -191,12 +197,15 @@ exchange's origin.
 Autobiographical memory: consolidates compacted dialog into first-person
 memory records (SQLite + sqlite-vec + FTS5) and retrieves them into the
 prompt through the admission funnel. Entry point name: `"memory"`;
-`depends_on = {"persistence", "llm"}`. Absorbs the removed `DreamPlugin`.
+`depends_on = {"persistence", "llm", "clock", "idle"}`. Absorbs the removed `DreamPlugin`.
 
-Implements six hooks:
+Implements five hooks and two kernel timers:
 
 - `on_start` — creates the memory schema on the persistence connection
-  (retried lazily on first use; on_start ordering is LIFO across plugins).
+  (retried lazily on first use; on_start ordering is LIFO across plugins),
+  runs the retention check, then registers the two clock-driven pieces
+  below. Without the kernel clock and idle tracker it logs a warning and
+  skips them.
 - `before_compaction` — with `agent.forks` on for `consolidation`, forks
   the memory record from the prefix about to be dropped (when every
   dialog row of the range is in it) and stashes it for the task below.
@@ -204,16 +213,32 @@ Implements six hooks:
   `compacted_ids` range above the per-channel watermark, using the stashed
   fork record when there is one for that range and watermark, else one
   standalone `llm.background` call.
-- `on_idle` — consolidates the un-consolidated tail of channels inactive
-  past `memory.idle_consolidate_after` seconds, forking the live window
-  when forks are on and the range is in it.
 - `before_agent_turn` — embeds the inbound user text, scores candidates
   (`similarity × exp(-age_days / half_life)`, with age from `created_at` or,
   under `memory.retrieval.recency_from: last_used`, from the last
   retrieval), bands them (strong/moderate/weak, on the score or, under
   `memory.retrieval.band_on: similarity`, on raw similarity), admits winners through the funnel, bumps access
   stats for admitted records, and writes a `retrieval_log` row.
-- `on_stop` — cancels in-flight background tasks.
+- `on_stop` — cancels the idle watch and retention timers, then in-flight
+  background tasks.
+
+Two kernel registrations replace the old `on_idle` hook:
+
+- **Idle watch** (`watch_channels`, period `memory.idle_consolidate_after`)
+  — consolidates the un-consolidated tail of the quiet channel, forking
+  the live window when forks are on and the range is in it. One run per
+  channel at a time.
+- **Retention timer** — fires at `last_run + memory.retention.interval`
+  on the clock. It then prefers system quiet: it registers a system idle
+  watch for 60 s of quiet and a deadline `memory.retention.max_delay`
+  seconds out, and runs retention when the first of them fires. Traffic
+  or a frequent heartbeat can delay a run by at most `max_delay`. The
+  `last_run` timestamp is persisted in `retention_meta`, so restarts do
+  not reset the schedule, and a daemon down longer than the interval runs
+  the job at startup.
+
+Changes to `memory.idle_consolidate_after` and `memory.retention.*` take
+effect at restart.
 
 The importance prior is pluggable (`MemoryPlugin.importance_prior`,
 default `RubricPrior`); `AppraisalPlugin` wraps it in `AppraisalPrior`

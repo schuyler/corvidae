@@ -284,29 +284,14 @@ class TestIdleTrigger:
         rowids = await seed_dialog(persistence, channel, [
             ("user", "old talk"), ("assistant", "old reply"),
         ])
-        # Age the messages past the idle threshold (timestamps drive
-        # inactivity when the channel is not in a registry).
-        await db.execute(
-            "UPDATE message_log SET timestamp = timestamp - 4000"
-        )
-        await db.commit()
-
-        await memory.on_idle()
+        # The kernel idle tracker decides when a channel is quiet; the
+        # callback it fires is what the trigger exercises (R1).
+        await memory._on_channel_idle(channel.id)
         await memory.wait_for_background_tasks()
 
         records = await fetch_memories(db)
         assert len(records) == 1
         assert records[0]["msg_id_end"] == rowids[-1]
-        await db.close()
-
-    async def test_idle_skips_recently_active_channel(self):
-        memory, persistence, stub, channel, db = await build_consolidation_env()
-        await seed_dialog(persistence, channel, [
-            ("user", "fresh talk"), ("assistant", "fresh reply"),
-        ])
-        await memory.on_idle()
-        await memory.wait_for_background_tasks()
-        assert await fetch_memories(db) == []
         await db.close()
 
 
@@ -414,15 +399,12 @@ async def drive_compaction_consolidation(memory, persistence, channel):
 
 
 async def drive_idle_consolidation(memory, persistence, channel, db):
-    """Seed dialog, age it past the idle threshold, run the idle trigger."""
+    """Seed dialog and run the idle trigger as the tracker's callback does."""
     await seed_dialog(persistence, channel, [
         ("user", "old talk"),
         ("assistant", "old reply"),
     ])
-    # Timestamps drive inactivity when the channel is not in a registry.
-    await db.execute("UPDATE message_log SET timestamp = timestamp - 4000")
-    await db.commit()
-    await memory.on_idle()
+    await memory._on_channel_idle(channel.id)
     await memory.wait_for_background_tasks()
 
 

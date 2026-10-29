@@ -35,8 +35,8 @@ daemon:
   session_db: sessions.db           # SQLite path for conversation history
   # max_task_workers: 4             # concurrent background task workers
   # completed_task_buffer: 100      # completed tasks retained in memory
-  # idle_cooldown_seconds: 30       # minimum seconds between on_idle firings
-  # idle_poll_interval: 2           # seconds between idle-state checks
+  # idle_cooldown_seconds, idle_poll_interval: removed; either one is a config
+  # error. Idle work runs on the kernel clock, per plugin.
 
 # Agent-level defaults — apply to all channels unless overridden (optional)
 agent:

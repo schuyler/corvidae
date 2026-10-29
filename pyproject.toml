@@ -67,7 +67,6 @@ usage_log = "corvidae.metrics:UsageLogPlugin"
 metrics_jsonl = "corvidae.metrics:MetricsJsonlPlugin"
 scheduler = "corvidae.scheduler:SchedulerPlugin"
 agent = "corvidae.agent:Agent"
-idle_monitor = "corvidae.idle:IdleMonitorPlugin"
 config_watcher = "corvidae.config_watcher:ConfigWatcherPlugin"
 
 [tool.setuptools.packages.find]
