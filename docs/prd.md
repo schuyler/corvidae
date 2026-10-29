@@ -1014,7 +1014,7 @@ record that holds the reasoning.
 | Engagement gate calibrates offline only | §3.2 |
 | Hedging vocabulary is persona, not architecture | §5.9 |
 | Heartbeat acts when warranted, not every beat; deletion is durable sleep | §5.8; `plans/scheduler.md` |
-| Cross-channel sends are a requirement, gated by an operator allowlist that starts empty, a budget, a threat-model entry, and trust and sensitivity when those plugins are loaded | #PR |
+| Cross-channel sends are a requirement, gated by an operator allowlist that starts empty, a budget, a threat-model entry, and trust and sensitivity when those plugins are loaded | #167 |
 | Operator-seeded goals allowed | §5.14 |
 | Memory poisoning answered on the write side with trust tagging (trust plugin) | §3.9, §5.10 |
 | No sandbox; the subagent/MCP seam is where one would attach | §5.11; `design.md`, Known Risks |
@@ -1039,9 +1039,9 @@ record that holds the reasoning.
 | No container image until a second deployment needs one | #37 |
 | Topic structure is the `topic` subject's job, not a retrieval dimension | `shakedown-findings.md` |
 | `plans/new-hooks.md` retired. Per-turn tool filtering and system-prompt transforms are rejected (the tool schemas and system prompt are the head of the prompt, principle 2); inbound-text rewriting is rejected (the log keeps what arrived); config-change notifications are unneeded (tunables resolve at decision time); a compaction veto is rejected (it trades a summary for an over-budget request). A per-call tool veto and per-channel tool sets, fixed per conversation, are tracked for Phase 5's trust work; a channel-created observation waits for a second implementer under §3.1.11 | #31, #148, #149, #150 |
-| The kernel owns the clock; idle keeps firing through quiet, and no plugin needs another's queues to learn of it; the April push-based decoupling stands | #PR; #165 |
-| Upkeep runs on time regardless of agency plugins; the scheduler is agency and optional | #PR |
-| Transports deliver every emission on their own channels regardless of origin | #PR |
-| The agent is one actor; trust and sensitivity, not channel walls; channel compartments are an operator option; the whole-memory default has a threat-model entry | #PR |
-| The operator decides the trust boundary; memory reach and cross-channel flow default open, inbound transports default-deny; safety features layer in as plugins | #PR |
-| Corvidae is a testbed first and a robust harness second | #PR |
+| The kernel owns the clock; idle keeps firing through quiet, and no plugin needs another's queues to learn of it; the April push-based decoupling stands | #167; #165 |
+| Upkeep runs on time regardless of agency plugins; the scheduler is agency and optional | #167 |
+| Transports deliver every emission on their own channels regardless of origin | #167 |
+| The agent is one actor; trust and sensitivity, not channel walls; channel compartments are an operator option; the whole-memory default has a threat-model entry | #167 |
+| The operator decides the trust boundary; memory reach and cross-channel flow default open, inbound transports default-deny; safety features layer in as plugins | #167 |
+| Corvidae is a testbed first and a robust harness second | #167 |
