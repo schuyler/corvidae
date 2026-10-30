@@ -67,7 +67,7 @@ channels:
 The lookup priority is:
 
 1. Per-channel `system_prompt` (if set)
-2. The most specific matching transport-wide entry's `system_prompt` (`discord:dm:*` before `discord:*`)
+2. The most specific matching transport-wide entry that sets `system_prompt` (`discord:dm:*` before `discord:*`)
 3. Agent-level `system_prompt` (fallback)
 4. Built-in default: `"You are a helpful assistant."`
 

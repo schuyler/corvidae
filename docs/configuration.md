@@ -625,7 +625,7 @@ channels:
       disabled: [shell, web_fetch] # here too; task_pipeline goes with shell
 ```
 
-The channel's set is the global list plus its own, resolved when its conversation starts, the same way its system prompt is. The tool schemas sit at the head of the prompt, so they stay fixed for the conversation; rewriting them every turn would rebuild the llama-server KV cache every turn. Forks of the channel send the same schemas.
+The channel's set is the global list plus its own and every matching transport-wide entry's, resolved when its conversation starts, the same way its system prompt is. The tool schemas sit at the head of the prompt, so they stay fixed for the conversation; rewriting them every turn would rebuild the llama-server KV cache every turn. Forks of the channel send the same schemas.
 
 Hiding a tool isn't access control. A model can still call a tool it saw earlier in the conversation, or one named in text someone pasted in. So dispatch enforces the list too: a call to a disabled tool doesn't run. The model gets back `Error: tool 'shell' is disabled on channel irc:#lex (channels.irc:#lex.tools.disabled); it was not run. ...`, and the refusal is logged at WARNING with the tool and channel. Both name every key that disables the tool, so a tool disabled by `discord:*` is reported as `channels.discord:*.tools.disabled`. A `subagent` launched from the channel gets the same narrowed set, so the tool isn't one hop away.
 

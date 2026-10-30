@@ -317,9 +317,10 @@ class ChannelRegistry:
                 continue
             channel.wide_entries = matches
             logger.info(
-                "channel %s: transport-wide entries now %s; tools.disabled applies "
-                "to dispatch at once, other keys at the next turn, the system "
-                "prompt at the next new conversation",
+                "channel %s: transport-wide entries now %s; a narrowed tools.disabled "
+                "is refused at dispatch at once (widening waits for compaction), "
+                "other keys apply at the next turn, the system prompt at the next "
+                "new conversation",
                 channel.id, ", ".join(e.key for e in matches) or "(none)",
                 extra={"channel_id": channel.id, "wide_keys": [e.key for e in matches],
                        "disabled": sorted(channel.disabled_tools)},

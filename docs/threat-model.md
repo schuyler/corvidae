@@ -244,8 +244,8 @@ widens that channel's tools at its next compaction, with no restart, so on
 a channel that still has `write_file` the per-channel list is only as
 strong as the protection on `agent.yaml`. The same goes for a
 transport-wide entry (`channels."discord:*"`, #203): all its keys reload
-live onto every matching channel, so one edit widens a whole transport. It
-can also
+live onto every matching channel, so one edit widens a whole transport.
+`write_file` can also
 rewrite any file named in a list-form `agent.system_prompt`, which is a
 persistent persona change that never touches `agent.yaml` and takes effect
 on the next restart or new channel. `web_fetch` has
