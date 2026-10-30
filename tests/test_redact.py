@@ -12,6 +12,8 @@ Behaviours tested (bootstrap-mapping §4.11–4.12):
   databases without the FTS tables.
 - CLI error context on a missing database (the affected-count tests need a
   full database and live in the cascade file).
+- The ``corvidae.redact`` scrubber extension point (#160), driven with a
+  fake scrubber so it needs no cognition install.
 
 Tests call the redact module's functions directly against a temp DB, not
 through the Click runner, except where the CLI's own output is the subject.
@@ -288,7 +290,6 @@ def test_cli_memory_form_without_memory_table_fails_cleanly(tmp_path, dry_run):
     assert isinstance(result.exception, SystemExit), repr(result.exception)
 
 
-
 # ---------------------------------------------------------------------------
 # The corvidae.redact scrubber extension point (#160)
 # ---------------------------------------------------------------------------
@@ -370,7 +371,33 @@ class TestScrubberExtensionPoint:
         finally:
             await db.close()
         assert result["scrubbed"] == {"fake": 0}
-        assert any("fake" in n for n in notices), notices
+        assert any(n.startswith("SKIP") and "fake" in n for n in notices), notices
+
+    async def test_no_scrubbers_changes_nothing(self, tmp_path, monkeypatch):
+        # Kernel-only install: no scrubbers, no extra notices or counts.
+        from corvidae.commands import redact as redact_module
+
+        monkeypatch.setattr(redact_module, "_redact_scrubbers", lambda: [])
+        db, ids = await _kernel_db(tmp_path)
+        try:
+            notices: list[str] = []
+            result = await redact_messages(db, [ids[0]], notices=notices)
+        finally:
+            await db.close()
+        assert result["affected_messages"] == 1
+        assert result["scrubbed"] == {}
+        assert not any("rows" in n for n in notices), notices
+
+    def test_kernel_never_names_cognition_surfaces(self):
+        # Cognition's tables are reached only through scrubbers it registers.
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent / "corvidae"
+        offenders = [
+            str(path.relative_to(root)) for path in root.rglob("*.py")
+            if "exchange_log" in path.read_text()
+        ]
+        assert offenders == [], offenders
 
     def test_cli_reports_each_scrubber(self, tmp_path, monkeypatch):
         from click.testing import CliRunner

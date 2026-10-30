@@ -266,7 +266,6 @@ class TestFormsAndReporting:
         assert "2 exchange_log rows" in result.output, result.output
 
 
-
 class TestRegistration:
     def test_exchange_log_scrubber_is_registered(self):
         # The kernel finds the scrubber only through the entry point.
