@@ -151,6 +151,30 @@ class TestHeaderEnvironment:
         finally:
             await plugin.on_stop()
 
+    async def test_control_characters_in_resolved_value_are_rejected_unlogged(
+        self, monkeypatch, caplog
+    ):
+        # A token with a trailing newline would make httpx raise an error that
+        # quotes the header value into a logged traceback. It is refused as a
+        # config error instead, without the value, and not retried.
+        monkeypatch.setenv("TEST_MCP_TOKEN", TOKEN + "\n")
+        with caplog.at_level(logging.DEBUG):
+            plugin = await _start({
+                "wiki": {
+                    "transport": "streamable_http",
+                    "url": "http://127.0.0.1:1/mcp",
+                    "headers": {"Authorization": "Bearer ${TEST_MCP_TOKEN}"},
+                }
+            })
+        try:
+            warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+            assert len(warnings) == 1, [r.getMessage() for r in warnings]
+            assert "TEST_MCP_TOKEN" in warnings[0].getMessage()
+            assert not any(TOKEN in str(r.__dict__) for r in caplog.records)
+            assert "wiki" not in plugin._pending_servers
+        finally:
+            await plugin.on_stop()
+
     @pytest.mark.parametrize("token_env", [TOKEN, "wrong-token"])
     async def test_header_values_are_not_logged(
         self, mcp_url, monkeypatch, caplog, token_env

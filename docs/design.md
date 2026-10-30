@@ -1691,11 +1691,12 @@ only); nested occurrences in `properties` are not removed.
 mcp:
   servers:
     <name>:
-      transport: stdio | sse
+      transport: stdio | sse | streamable_http
       command: <executable>   # stdio only
       args: [...]             # stdio only
       env: {...}              # stdio only, optional
-      url: <endpoint>         # sse only
+      url: <endpoint>         # sse and streamable_http
+      headers: {...}          # sse and streamable_http, optional; ${VAR} from the environment
       tool_prefix: <prefix>   # optional; default: server name
       timeout_seconds: 30     # optional; per tool call; default: 30
       connect_timeout_seconds: 30  # optional; handshake bound; default: 30
@@ -1713,6 +1714,19 @@ On a timeout `_connect_server` then logs it once and returns without
 registering the server; any other failure propagates to `on_start`, which
 logs and skips it. The close runs after the timeout has turned
 its cancellation into `TimeoutError`, so teardown is not itself cancelled.
+
+### HTTP transports and headers
+
+`streamable_http` uses the SDK's `streamable_http_client` with an HTTP client
+built by `create_mcp_http_client(headers=...)`. The SDK closes only a client
+it created, so the plugin enters its client into the per-server stack, and it
+closes with the server. `sse` passes the same headers to `sse_client`.
+`_resolve_headers` replaces each `${VAR}` in a header value from
+`os.environ` before anything opens. An unset or empty variable, or one holding CR, LF or NUL (which httpx would reject with an error quoting the value), raises
+`McpHeaderEnvError` (a `ValueError`), whose message names the server, header
+and variable but never a value. `on_start` logs it once and skips the server
+without adding it to `_pending_servers`: the daemon's environment can't
+change, so a retry would fail the same way.
 
 The client targets the mcp 2.x API (`mcp>=2.0`): tool schemas are read from
 `Tool.input_schema` and error results from `CallToolResult.is_error`.

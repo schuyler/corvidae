@@ -10,11 +10,13 @@ Config (top-level 'mcp:' key in agent.yaml):
     mcp:
       servers:
         <name>:
-          transport: stdio | sse
+          transport: stdio | sse | streamable_http
           command: <executable>         # stdio only
           args: [...]                   # stdio only
           env: {...}                    # stdio only, optional
-          url: <endpoint>              # sse only
+          url: <endpoint>              # sse and streamable_http
+          headers: {...}               # sse and streamable_http, optional;
+                                       # values may use ${VAR} from the environment
           tool_prefix: <prefix>        # optional, default: server name
           timeout_seconds: 30          # optional, default: 30 (per tool call)
           connect_timeout_seconds: 30  # optional, default: 30 (connect + initialize + list_tools)
@@ -25,6 +27,8 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import os
+import re
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 
@@ -32,6 +36,56 @@ from corvidae.hooks import CorvidaePlugin, hookimpl
 from corvidae.tool import Tool
 
 logger = logging.getLogger(__name__)
+
+# ${VAR} references in header values, substituted from the environment.
+_ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+class McpHeaderEnvError(ValueError):
+    """A header value names an environment variable that is unset or empty.
+
+    A config error rather than a connect failure: the daemon's environment
+    cannot change under it, so retrying the server would fail the same way.
+    """
+
+
+def _resolve_headers(name: str, headers: dict | None) -> dict[str, str] | None:
+    """Return ``headers`` with every ${VAR} replaced from the environment.
+
+    Raises McpHeaderEnvError naming the server, header and variable when a
+    referenced variable is unset, empty, or contains CR, LF or NUL. The
+    message never includes a header value, so a secret cannot reach the log
+    through it.
+    """
+    if not headers:
+        return None
+    resolved: dict[str, str] = {}
+    for header, value in headers.items():
+        # Substitute each ${VAR}; an unset, empty or multi-line one is a
+        # config error.
+        def _lookup(match: re.Match, header: str = header) -> str:
+            var = match.group(1)
+            env_value = os.environ.get(var)
+            if not env_value:
+                raise McpHeaderEnvError(
+                    f"MCP server {name!r}: header {header!r} references "
+                    f"${{{var}}}, which is not set in the daemon's environment; "
+                    f"set {var} in the environment corvidae runs in and restart. "
+                    "Server skipped."
+                )
+            # CR, LF or NUL is illegal in a header, and httpx's error for it
+            # quotes the value into a logged traceback; refuse it here.
+            if any(ch in env_value for ch in "\r\n\0"):
+                raise McpHeaderEnvError(
+                    f"MCP server {name!r}: header {header!r} references "
+                    f"${{{var}}}, whose value contains a newline or NUL "
+                    f"(often a trailing newline); fix {var} in the daemon's "
+                    "environment and restart. Server skipped."
+                )
+            return env_value
+
+        resolved[str(header)] = _ENV_REF.sub(_lookup, str(value))
+    return resolved
 
 
 @dataclass
@@ -92,6 +146,11 @@ class McpClientPlugin(CorvidaePlugin):
         for server_name, server_cfg in servers_config.items():
             try:
                 await self._connect_server(server_name, server_cfg)
+            except McpHeaderEnvError as exc:
+                # A config error: report it once, with the remedy, and skip
+                # the server for good (no lazy retry; see McpHeaderEnvError).
+                logger.warning("%s", exc, extra={"server": server_name})
+                continue
             except Exception:
                 logger.warning(
                     "MCP server failed to connect, skipping",
@@ -182,20 +241,24 @@ class McpClientPlugin(CorvidaePlugin):
         Args:
             name: Server name from config (used as default tool prefix).
             cfg: Server config dict with transport, command/args/env or url,
-                 and optional tool_prefix, timeout_seconds and
-                 connect_timeout_seconds keys.
+                 and optional headers (HTTP transports), tool_prefix,
+                 timeout_seconds and connect_timeout_seconds keys.
 
         Note: The caller (on_start) catches all exceptions from
         this method, logs them as warnings, and skips the server. Exceptions
         that may arise include ValueError (unknown transport, or a
         non-positive connect_timeout_seconds) and KeyError (missing required
-        config keys like 'command' or 'url'). A handshake that exceeds
+        config keys like 'command' or 'url'). McpHeaderEnvError (a ${VAR}
+        in headers that is unset, empty, or holds a newline) is caught
+        separately and not retried. A handshake that exceeds
         connect_timeout_seconds is logged here and returns without
         registering the server.
         """
         from mcp import ClientSession
         from mcp.client.stdio import StdioServerParameters, stdio_client
         from mcp.client.sse import sse_client
+        from mcp.client.streamable_http import streamable_http_client
+        from mcp.shared._httpx_utils import create_mcp_http_client
 
         transport = cfg["transport"]
         prefix = cfg.get("tool_prefix", name)
@@ -207,6 +270,10 @@ class McpClientPlugin(CorvidaePlugin):
             raise ValueError(
                 f"connect_timeout_seconds must be positive for server {name!r}"
             )
+
+        # Resolve ${VAR} references before anything opens: a missing variable
+        # raises McpHeaderEnvError, which on_start reports without retrying.
+        headers = _resolve_headers(name, cfg.get("headers"))
 
         # Each server gets its own exit stack so a server that fails or hangs
         # mid-connect can be torn down (subprocess included) on the spot,
@@ -229,7 +296,16 @@ class McpClientPlugin(CorvidaePlugin):
                     )
                 elif transport == "sse":
                     read, write = await local_stack.enter_async_context(
-                        sse_client(cfg["url"])
+                        sse_client(cfg["url"], headers=headers)
+                    )
+                elif transport == "streamable_http":
+                    # The SDK closes only an HTTP client it created itself, so
+                    # ours goes on the server's stack and closes with it.
+                    http_client = await local_stack.enter_async_context(
+                        create_mcp_http_client(headers=headers)
+                    )
+                    read, write = await local_stack.enter_async_context(
+                        streamable_http_client(cfg["url"], http_client=http_client)
                     )
                 else:
                     raise ValueError(

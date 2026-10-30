@@ -624,7 +624,11 @@ Signal channels accept either form of key. `signal:<aci>` is the real channel id
 
 Configured by `McpClientPlugin`. The `mcp` section is optional; if absent, no MCP servers are connected. See the [Plugin Guide](plugin-guide.md#mcpclientplugin-corvidae-mcp_clientpy) for full details.
 
-For `transport: stdio`, the required keys are `command` and optionally `args` and `env`. For `transport: sse`, the required key is `url`; `command`, `args`, and `env` are not used.
+For `transport: stdio`, the required keys are `command` and optionally `args` and `env`. For `transport: streamable_http` (MCP's current HTTP transport: one endpoint, usually `/mcp`) and the older `transport: sse`, the required key is `url`, and `headers` is optional; `command`, `args`, and `env` are not used.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `mcp.servers.<name>.headers` | map of string to string | none | HTTP headers sent on every request to the server (`streamable_http` and `sse` only). A value may contain `${VAR}`, replaced at connect time from the daemon's environment; put secrets there, not in `agent.yaml`. If a referenced variable is unset, empty, or contains a newline or NUL (a trailing newline from a secrets file, say), that server is skipped with one WARNING naming the server, the header and the variable, and it is not retried, since the environment can't change without a restart. Only the braced `${VAR}` form is substituted. Header values are never logged. |
 
 ```yaml
 mcp:
@@ -639,6 +643,13 @@ mcp:
       tool_prefix: "fs"        # optional; defaults to server name
       timeout_seconds: 30      # optional; per tool call; default 30
       connect_timeout_seconds: 30  # optional; connect + initialize + list_tools; default 30
+
+    # streamable HTTP transport example, with a bearer token from the environment
+    wiki:
+      transport: streamable_http
+      url: http://localhost:8090/mcp   # required for streamable_http
+      headers:                         # optional; sse takes it too
+        Authorization: "Bearer ${OTTERWIKI_MCP_TOKEN}"   # set in the daemon's environment
 
     # sse transport example
     my_sse_server:
