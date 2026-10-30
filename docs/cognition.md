@@ -436,15 +436,25 @@ model makes both language judgments; the code only fetches evidence:
    the exchange. A hit longer than 500 characters is shown around its
    matched terms, not from its start, so support deep in a long tool result
    still reaches the judge. The judge is told the search shows near
-   matches, not proof of absence, and objects only to claims nothing
-   supports, judged by meaning rather than wording. The system prompt and
+   matches, not proof of absence, and marks a claim unsupported only when
+   nothing supports it, judged by meaning rather than wording. The system prompt and
    every tool result, this exchange's included, are records. The agent's
    own earlier messages show only that something was said: they support a
    claim that it was said, not a claim about a fact. Summary rows are shown
    as `summary`, whatever role compaction stored them under. The reply
-   under audit is in the prefix but is no record of itself. The outcome is
-   recorded as `outcomes.provenance = {claims, candidates, objections}`,
-   and objections reach the funnel tagged `[provenance]`.
+   under audit is in the prefix but is no record of itself. The judge is also
+   told it can't call tools and isn't replying to the user.
+4. **Verdicts.** The fork answers with one verdict per claim, in order:
+   `{"verdicts": [{"claim": 1, "reason": "...", "supported": true}, ...]}`.
+   The response schema pins position *i* to claim *i*, and the parser
+   checks it again (a server may ignore parts of a schema). A reply that
+   isn't exactly one well-formed verdict per claim, in order, fails the
+   fork: an empty or partial answer can't pass as "all supported". Each
+   unsupported verdict becomes an objection quoting the claim from our
+   list, with the judge's reason, and reaches the funnel tagged
+   `[provenance]`. The outcome is recorded as
+   `outcomes.provenance = {claims, candidates, supported, objections}`;
+   `objections: 0` means every claim was judged supported.
 
 The check never runs as a standalone call: a judge working from a rebuilt
 copy of the conversation can't see the system prompt or the exchange's
@@ -458,7 +468,8 @@ skipped for trace … on channel …: <reason>`. The reasons:
 - the window was compacted after the reply (the prefix is no longer what
   the agent saw; CritiquePlugin counts compactions in `before_compaction`);
 - the reply is not in the window;
-- the fork failed or its reply didn't parse (logged with the traceback).
+- the fork failed, or its reply wasn't exactly one well-formed verdict per
+  claim (logged with the traceback).
 
 The fork's availability is checked before the search and again just before
 the fork, after the last await. A skip records no outcome. The check also
@@ -469,7 +480,10 @@ never reach the judge as "nothing matched". A failed stage 2 (malformed
 model output) leaves that exchange unchecked; appraisal logs the failure.
 The candidate count and excerpt length are constants, not tunables: a
 lever that hid evidence would make the judge object to everything.
-`critique.provenance.enabled` is the one switch.
+`critique.provenance.enabled` is the one switch. A
+`critique.fork_prompt.provenance` override must ask for the verdicts format
+above; one written for an objections list fails parsing, and every run
+skips.
 
 ### GatePlugin (`packages/corvidae-cognition/corvidae_cognition/gates.py`)
 
