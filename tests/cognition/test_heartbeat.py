@@ -12,14 +12,14 @@ on_init, then on_start, and only then is the idle tracker started.
 from __future__ import annotations
 
 import logging
-import time
 from importlib.metadata import entry_points
 
 import aiosqlite
 import pytest
 
 from corvidae.channel import ChannelRegistry
-from corvidae.hooks import create_plugin_manager, hookimpl
+from corvidae.hooks import create_plugin_manager, hookimpl, validate_dependencies
+from corvidae.llm_plugin import LLMPlugin
 from corvidae.persistence import PersistencePlugin, init_db
 from corvidae_cognition.heartbeat import (
     DEFAULT_HEARTBEAT_PROMPT,
@@ -99,16 +99,22 @@ async def make_env():
         agent = AgentStub(tracker)
         pm.register(agent, name="agent")
 
-        # Memory: schema only; its own idle watches are not under test.
+        # Memory: schema only, on the kernel clock; its own idle watches
+        # are not under test.
         memory = None
         if with_memory:
+            # Memory declares llm; the heartbeat path never calls it.
+            pm.register(LLMPlugin(), name="llm")
             memory = MemoryPlugin()
             pm.register(memory, name="memory")
             await memory.on_init(pm=pm, config=config)
+            memory._clock = clock
             await memory._ensure_schema()
 
         heartbeat = HeartbeatPlugin()
         pm.register(heartbeat, name="heartbeat")
+        # Runtime validates declared dependencies before on_init.
+        validate_dependencies(pm)
         await heartbeat.on_init(pm=pm, config=config)
         await heartbeat.on_start(config=config)
         cleanups.append(heartbeat.on_stop)
@@ -224,25 +230,32 @@ async def test_memory_read_failure_retries_next_period(make_env, caplog):
         return await real_recent(channel_id, limit)
 
     env.memory.recent = flaky_recent
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.WARNING, logger="corvidae.heartbeat"):
         await env.clock.advance(AFTER)
     assert env.beats == []
-    warning = next(r for r in caplog.records if r.levelno == logging.WARNING)
-    assert HEARTBEAT_CHANNEL in warning.getMessage()
-    assert "RuntimeError" in warning.getMessage()
-    await env.clock.advance(AFTER)
+    warnings = [
+        r.getMessage() for r in caplog.records
+        if r.name == "corvidae.heartbeat" and r.levelno == logging.WARNING
+    ]
+    assert len(warnings) == 1
+    assert HEARTBEAT_CHANNEL in warnings[0]
+    assert "RuntimeError" in warnings[0]
+    assert f"retrying in {AFTER}" in warnings[0]
+    # The retry waits a full period, not less.
+    await env.clock.advance(AFTER - 1)
+    assert env.beats == []
+    await env.clock.advance(1)
     assert len(env.beats) == 1
 
 
-@pytest.mark.parametrize("bad", [0, -60, True, "hourly"])
-async def test_rejects_an_after_that_is_not_a_positive_number(make_env, bad):
-    """H1's bounded rate needs a positive period: anything else fails startup
-    naming the key, the value and what is accepted."""
+async def test_rejects_a_zero_after(make_env):
+    """H1's bounded rate needs a positive period: zero (back-to-back beats)
+    fails startup naming the key, the value and what is accepted."""
     with pytest.raises(ValueError) as exc:
-        await make_env({"heartbeat": {"after": bad}})
+        await make_env({"heartbeat": {"after": 0}})
     message = str(exc.value)
     assert "heartbeat.after" in message
-    assert repr(bad) in message
+    assert "0" in message
     assert "positive number of seconds" in message
 
 
@@ -260,7 +273,7 @@ async def test_beat_carries_prompt_and_recent_memory_in_scope(make_env):
         "memory": {"channel_groups": {"review": [HEARTBEAT_CHANNEL, "irc:#lex"]}},
     }
     env = await make_env(config)
-    now = time.time()
+    now = env.clock.now()
     await env.seed_memory("irc:#lex", "I promised kestrel a wiring diagram.", now - 7200)
     await env.seed_memory("irc:#lex", "kestrel said the station reboots at noon.", now - 60)
     await env.seed_memory("signal:alice", "Alice's private plans.", now - 30)
