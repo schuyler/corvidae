@@ -286,3 +286,19 @@ def test_cli_memory_form_without_memory_table_fails_cleanly(tmp_path, dry_run):
     assert "memory table not present in this database" in result.output
     # A ClickException is a handled exit, not a crash with a traceback.
     assert isinstance(result.exception, SystemExit), repr(result.exception)
+
+
+async def test_db_without_exchange_log_skips_with_notice(tmp_path):
+    """A kernel-only DB has no exchange_log: redact skips it with a notice (#160)."""
+    db = await aiosqlite.connect(str(tmp_path / "k.db"))
+    try:
+        await db.execute("PRAGMA journal_mode = WAL")
+        await init_db(db)
+        row_id = await insert_message(db, "irc:#a", "user", "hello there")
+        notices: list[str] = []
+        result = await redact_messages(db, [row_id], notices=notices)
+        assert result["affected_messages"] == 1
+        assert result["affected_exchanges"] == 0
+        assert any("exchange_log" in n for n in notices), notices
+    finally:
+        await db.close()
