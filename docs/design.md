@@ -1197,7 +1197,8 @@ fork_prompt = build_prompt(window[:cut]) + [{"role": "user", "content": instruct
 **Prefix parity.** `Agent.fork(channel, instruction, *, cut=None,
 extra_body=None)` builds with exactly what step 7 of the agent loop uses:
 the client of the model whose window is forked (`llm.main`, unless a
-stage forks another model's window, PRD §3.7 Critique 4; its `extra_body`,
+stage forks another model's window, PRD §3.7 Critique 4, though no stage
+does yet; its `extra_body`,
 e.g. `id_slot`), the channel's
 conversation tool schemas (`conv.tool_view.schemas`, per-channel since #149),
 `build_prompt(pending_ids, mid_conversation_system_role)`, and the same
@@ -1315,26 +1316,29 @@ default config) it never runs. Every other stage still falls back to a
 standalone call on a miss or failure (critique `_fork_target`,
 `_fork_lens` and `_run_lens`; appraisal stage-2; `compaction.py`'s
 `_fork_summary` fallback; memory consolidation), until #181 converts them
-to skip-on-miss. Also #181's target, not enforced today: per-stage
-reasoning and reply caps (today one global
-`agent.forks.reasoning_budget_tokens` and no reply cap), the headroom
-guarantee below, and treating a fork that would not fit the slot's context
-as a miss.
+to skip-on-miss (compaction to its can't-fail fallback). Also #181's
+target, not enforced today: per-stage reasoning and reply caps (today one
+global `agent.forks.reasoning_budget_tokens` and no reply cap), the
+headroom guarantee in the cost model below, and treating a fork that would
+not fit the slot's context as a miss.
 
 **Cost model.** A fork reuses the cached prefix and prefills only its
-instruction and reply. Exchange-scoped forks run before the slot's next
-main turn (PRD principle 3), and the window is append-only, so their
-prefix is still cached. A standalone call costs its own cold prefill of
-a rebuilt prompt. It doesn't evict the main window when the server keeps
-`cache-ram`: on Lex (one slot, `cache-ram = 32768`) #73's K1 measured the
-main turn after background calls fully cached, restored from host RAM.
-Without `cache-ram`, a standalone call on a single slot evicts the main
-window and the next main turn re-prefills it. Either way only one call
-runs on the slot at a time, so a background call delays a waiting main
-turn by its own slot time; the per-fork reasoning and reply caps bound
-that, and the window at the compaction threshold plus a fork's
-instruction and both caps fits the slot's context, so a fork just short
-of compaction still runs.
+instruction and reply; the window is append-only, so a fork's prefix is
+still cached as long as no compaction has run since. A standalone call
+costs its own cold prefill of a rebuilt prompt. It doesn't evict the main
+window when the server keeps `cache-ram`: on Lex (one slot,
+`cache-ram = 32768`) #73's K1 measured the main turn after background
+calls fully cached, restored from host RAM. Without `cache-ram`, a
+standalone call on a single slot evicts the main window and the next main
+turn re-prefills it. Either way only one call runs on the slot at a time,
+so a background call delays a waiting main turn by its own slot time;
+today only the global `agent.forks.reasoning_budget_tokens` bounds a
+fork's share of that. #181's target adds the rest: exchange-scoped forks
+scheduled before the slot's next main turn (PRD principle 3), per-stage
+reasoning and reply caps, and headroom (the window at the compaction
+threshold plus a fork's instruction and both caps fits the slot's
+context, so a fork just short of compaction still runs). #182 measures
+how long main turns wait today.
 
 **Provenance is fork-only (#164).** The standalone provenance critic
 judged a rebuilt context: a search of earlier messages plus a CONTEXT
