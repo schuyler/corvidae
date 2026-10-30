@@ -170,17 +170,21 @@ agent:
 #   catch_up_window: 3600              # seconds a reminder missed while down may still fire
 #   max_reminders_per_channel: 50      # pending tool-created reminders per channel
 #   jobs:                              # synced by name on start and reload
-#     - name: heartbeat                # unique; removing it disables the job durably
-#       channel: internal:heartbeat    # no transport owns it: replies go to the log only
-#       origin: heartbeat              # reminder (default) | heartbeat
-#       every: 6h                      # required: 30s, 20m, 6h, 1d, 7d, 1h30m
-#       at: "08:00"                    # optional anchor: HH:MM, or ISO datetime for a weekday
-#       prompt_file: prompts/heartbeat.md   # or prompt: "..."
-#     - name: morning-checkin
+#     - name: morning-checkin          # unique; removing it disables the job durably
 #       channel: signal:8f2c1c9a-3e21-4b77-9c3f-1a2b3c4d5e6f
-#       every: 1d
-#       at: "08:30"
-#       prompt: "Good-morning check-in: ask how they slept and what is on today."
+#       every: 1d                      # required: 30s, 20m, 6h, 1d, 7d, 1h30m
+#       at: "08:30"                    # optional anchor: HH:MM, or ISO datetime for a weekday
+#       prompt: "Good-morning check-in: ask how they slept and what is on today."   # or prompt_file: path
+
+# Heartbeat (cognition; optional): a turn the agent starts after this many
+# seconds of system-wide quiet, on internal:heartbeat (no transport owns it,
+# so nothing reaches anyone). It reviews recent memory and acts only if
+# something warrants it; prompt: prompts/heartbeat.md. Absent = asleep:
+# delete or comment out the block and restart to put it to sleep. Needs
+# memory, and reviews only channels grouped with internal:heartbeat in
+# memory.channel_groups, e.g.  lex: [internal:heartbeat, "irc:#lex"]
+# heartbeat:
+#   after: 3600                        # seconds of quiet before a beat; also the gap between beats
 # ACP stdio transport (optional — does not enable ACP by itself).
 # Start with: uv sync --extra acp --extra cognition && uv run corvidae acp
 # For bb: customAcpAgents → `uv run corvidae acp` (see docs/plugin-guide.md).

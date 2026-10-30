@@ -1,5 +1,12 @@
 # SchedulerPlugin — reminders, periodic jobs, heartbeat (#59)
 
+> **Superseded in part (#134).** The heartbeat is no longer a scheduler
+> job. It is cognition's `HeartbeatPlugin`, started on system idle rather
+> than on an interval, and put to sleep by removing `heartbeat.after` from
+> `agent.yaml` (PRD §3.7 Heartbeat; `docs/cognition.md`). The scheduler
+> keeps reminders and operator jobs; `origin: heartbeat` is still accepted
+> so old configs load. The heartbeat passages below are history.
+
 Design for the clock-driven producer that `bootstrap-mapping.md` §3.4
 sketched and that the Lex bring-up needs for unprompted messages, reminders
 and periodic tasks. Everything downstream of the firing already exists:

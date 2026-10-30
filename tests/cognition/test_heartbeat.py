@@ -30,6 +30,8 @@ from corvidae_cognition.memory import MemoryPlugin
 from fake_clock import install_kernel_clock
 
 AFTER = 600
+# Long enough that no plausible default period hides inside it.
+THIRTY_DAYS = 30 * 86400
 
 
 class AgentStub:
@@ -147,7 +149,7 @@ async def test_asleep_heartbeat_needs_no_memory_plugin(make_env):
     """H1/H3: with no heartbeat.after, the plugin starts and stops without
     memory loaded, so an existing config that disables memory still starts."""
     env = await make_env({}, with_memory=False)
-    await env.clock.advance(AFTER * 10)
+    await env.clock.advance(THIRTY_DAYS)
     assert env.beats == []
 
 
@@ -233,14 +235,17 @@ async def test_memory_read_failure_retries_next_period(make_env, caplog):
     with caplog.at_level(logging.WARNING, logger="corvidae.heartbeat"):
         await env.clock.advance(AFTER)
     assert env.beats == []
-    warnings = [
-        r.getMessage() for r in caplog.records
+    records = [
+        r for r in caplog.records
         if r.name == "corvidae.heartbeat" and r.levelno == logging.WARNING
     ]
-    assert len(warnings) == 1
-    assert HEARTBEAT_CHANNEL in warnings[0]
-    assert "RuntimeError" in warnings[0]
-    assert f"retrying in {AFTER}" in warnings[0]
+    assert len(records) == 1
+    message = records[0].getMessage()
+    assert HEARTBEAT_CHANNEL in message
+    assert "RuntimeError" in message
+    assert f"retrying in {AFTER}" in message
+    # The log line carries the traceback.
+    assert records[0].exc_info is not None
     # The retry waits a full period, not less.
     await env.clock.advance(AFTER - 1)
     assert env.beats == []
@@ -255,7 +260,7 @@ async def test_rejects_a_zero_after(make_env):
         await make_env({"heartbeat": {"after": 0}})
     message = str(exc.value)
     assert "heartbeat.after" in message
-    assert "0" in message
+    assert "got 0" in message
     assert "positive number of seconds" in message
 
 
@@ -307,5 +312,5 @@ async def test_sleep_survives_restart(make_env):
     await before.heartbeat.on_stop()
     before.tracker.stop()
     after = await make_env({"heartbeat": {}})
-    await after.clock.advance(AFTER * 10)
+    await after.clock.advance(THIRTY_DAYS)
     assert after.beats == []

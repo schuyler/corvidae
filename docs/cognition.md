@@ -22,6 +22,7 @@ transports.
 | `CritiquePlugin` | `critique` | Reviews the agent's replies after the fact through the stylistic lenses (predictive, constrained, adversarial) and the provenance check |
 | `OutcomeLogPlugin` | `outcome_log` | Records each exchange and its outcome in `exchange_log` |
 | `GatePlugin` | `gates` | The engagement gate (may the agent ignore a message?) and the decide gate (may it stay silent instead of answering?), both over the appraisal vector |
+| `HeartbeatPlugin` | `heartbeat` | Starts a turn on `internal:heartbeat` when the whole system has been quiet for `heartbeat.after` seconds; the turn reviews recent memory and acts only if something warrants it. Asleep unless configured |
 
 Entry-point names are the same as when these plugins lived in the kernel, so
 `plugins.disabled` lists in existing `agent.yaml` files keep working. Without
@@ -253,6 +254,13 @@ The importance prior is pluggable (`MemoryPlugin.importance_prior`,
 default `RubricPrior`); `AppraisalPlugin` wraps it in `AppraisalPrior`
 when appraisal is enabled. Configuration is documented in
 [configuration.md](configuration.md) (`memory.*`, `llm.embedding`).
+
+`recent(channel_id, limit)` is the one read API for other plugins: the
+newest `limit` records (indexed, not redacted) owned by the *other*
+channels in `channel_id`'s scope, as `{summary, channel_id, age_seconds}`
+dicts, newest first, with ages from the kernel clock. The caller's own
+records are left out. `HeartbeatPlugin` uses it. It raises `RuntimeError`
+while the memory DB is not open.
 
 **Without this plugin:** no memory records form and no retrieval happens;
 compaction remains plain lossy summarization.
@@ -528,8 +536,8 @@ implementations concurrently, and the pull API's per-key dedup makes the
 compute run once whoever asks first.
 
 **Origin.** Read from propagated state, never inferred: `meta["origin"]`
-when a producer stamped one (the scheduler stamps `reminder` or
-`heartbeat`, the funnel stamps `critique`), else `user` for a trace the
+when a producer stamped one (the scheduler stamps `reminder`,
+`HeartbeatPlugin` stamps `heartbeat`, the funnel stamps `critique`), else `user` for a trace the
 plugin saw in `on_message_admitted` (a bounded LRU of 1024), else the origin
 `exchange_log` already holds for the trace (so a user exchange whose trace
 fell out of the LRU during a long tool cycle is still `user`), else `task`.
@@ -591,3 +599,63 @@ in either broadcast would drop the message or the reply. The keys are in
 [configuration.md](configuration.md#gate--engagement-and-decide-gates), including the ones an
 operator should consider adding to `agent.immutable_settings` on channels
 with untrusted participants.
+
+### HeartbeatPlugin (`packages/corvidae-cognition/corvidae_cognition/heartbeat.py`)
+
+A turn the agent starts on its own when nothing else is happening (PRD
+§3.7 Heartbeat, principle 13). Entry point name: `"heartbeat"`;
+`depends_on = {"idle", "registry"}`. It needs `memory` only when awake, so
+a config that disables memory still starts while the heartbeat sleeps.
+
+**When it beats.** At `on_start`, if `heartbeat.after` is set, it registers
+a system idle watch (`IdleTracker.watch_system`) with that period. The
+tracker calls it once no channel has had inbound or in-flight work for
+`after` seconds, never while one does. The beat is itself inbound work on
+`internal:heartbeat`, so the system is busy until the beat's turn
+settles, and the next beat is due `after` seconds after that. Traffic on
+any channel cancels the pending beat. The result is at most one beat per
+`after` seconds, never two at once, and none during a conversation. Under
+traffic that never stops it never beats; that is accepted until #214.
+
+**What a beat is.** The plugin reads `MemoryPlugin.recent("internal:heartbeat", 20)`,
+re-checks that the system is still quiet (a message may have landed
+during the read), and calls `on_notify` on `internal:heartbeat` with
+`source="heartbeat"` and `meta={"origin": "heartbeat"}`. The text is the
+heartbeat prompt (`DEFAULT_HEARTBEAT_PROMPT`; documented copy in
+`prompts/heartbeat.md`) followed by the memories, framed as the agent's own
+summaries and as data, or `(none)`. The turn then runs the ordinary
+notification pipeline with the agent's normal tools. The `heartbeat`
+origin keeps the existing conventions: critique doesn't review it, the
+decide gate treats it as non-user, and `exchange_log` records it.
+
+**What it can reach.** No transport owns `internal:heartbeat`, so a beat's
+reply goes to `sessions.db` and the jsonl log, never to a person. Reaching
+a person needs a cross-channel send (PRD §3.5.9, #169), which doesn't exist
+yet; when it lands, the beat uses it like any other tool, behind its
+allowlist and budget. The prompt tells the model that most beats warrant
+nothing, and to say so in one line and stop.
+
+**What it reviews.** Memory is compartmented, so the beat sees only the
+channels that share a `memory.channel_groups` group with
+`internal:heartbeat`. With no group, every beat's list is `(none)`.
+Records consolidated from the beat channel itself are left out of the
+review, so beats don't review earlier beats. One edge: when near-duplicate
+merging leaves a beat-owned record as the survivor of a conversation
+memory, that memory drops out of later reviews.
+
+**Sleep.** The heartbeat is asleep whenever `heartbeat.after` is absent
+(the block deleted, `null` or empty). It reads the key once at `on_init`,
+so sleep is set in `agent.yaml` and survives every restart;
+`plugins.disabled: [heartbeat]` also works. A config reload doesn't change
+it.
+
+**Failures.** A memory read that raises is logged as a WARNING naming the
+channel and the exception, and that beat is skipped; the tracker retries
+`after` seconds later. An invalid `heartbeat.after` (zero, negative,
+boolean, non-numeric) fails startup with a `ValueError`, and an awake
+heartbeat without the memory plugin fails startup with a `RuntimeError`
+saying to enable memory or remove `heartbeat.after`.
+
+There is no goal review yet: goals (#133) are a separate plugin, and
+whichever of the two lands second wires the beat to the goals store.
+Distillation and rehearsal are not part of the heartbeat.

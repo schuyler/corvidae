@@ -1643,6 +1643,33 @@ class MemoryPlugin(CorvidaePlugin):
         candidates.sort(key=lambda c: c["score"], reverse=True)
         return candidates[:k], degraded
 
+    async def recent(self, channel_id: str, limit: int) -> list[dict]:
+        """The newest memories of the other channels in ``channel_id``'s scope.
+
+        Records owned by ``channel_id`` itself are left out, so a channel
+        reviewing its group (the heartbeat) doesn't review its own earlier
+        reviews. Same status filters as retrieval: indexed and not redacted.
+        Returns up to ``limit`` dicts ``{summary, channel_id, age_seconds}``,
+        newest first, aged on the kernel clock. Raises RuntimeError while
+        the memory DB is not open.
+        """
+        db = await self._ensure_schema()
+        if db is None:
+            raise RuntimeError("memory DB is not open yet")
+        scope_sql, scope_params = self._channel_scope(channel_id).sql("channel_id")
+        async with db.execute(
+            "SELECT summary, channel_id, created_at FROM memory "
+            f"WHERE indexed = 1 AND redacted = 0 AND {scope_sql} AND channel_id != ? "
+            "ORDER BY created_at DESC, id DESC LIMIT ?",
+            (*scope_params, channel_id, limit),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        now = self._now()
+        return [
+            {"summary": summary, "channel_id": owner, "age_seconds": max(0.0, now - created_at)}
+            for summary, owner, created_at in rows
+        ]
+
     def _channel_scope(self, channel_id: str) -> ChannelScope:
         """The channels whose memories this channel may retrieve.
 

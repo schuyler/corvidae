@@ -77,7 +77,8 @@ Key sections:
 - `irc` — omit entirely to disable IRC
 - `channels` — per-channel overrides keyed by `transport:scope` (e.g., `irc:#general`, `cli:local`)
 - `mcp` — MCP server connections (optional)
-- `scheduler` — reminder timezone, per-channel reminder cap, and operator jobs such as a heartbeat (optional)
+- `scheduler` — reminder timezone, per-channel reminder cap, and operator jobs (optional)
+- `heartbeat` — seconds of system-wide quiet before the agent starts a turn of its own (optional; asleep without it)
 - `logging` — simplified options (`level`, `file`); see docs/configuration.md
 
 Before pointing the bot at a channel with people you don't trust, read
@@ -113,7 +114,7 @@ other tenants.
 | CompactionPlugin | Summarizes older messages when nearing the token budget |
 | ThinkingPlugin | Strips `<thinking>` blocks from display, optionally from prompt history |
 | RuntimeSettingsPlugin | Lets the LLM adjust its own per-channel parameters mid-session |
-| SchedulerPlugin | Reminders the agent sets with `remind_me`, operator-scheduled jobs, and a heartbeat, fired into channels on the clock |
+| SchedulerPlugin | Reminders the agent sets with `remind_me` and operator-scheduled jobs, fired into channels on the clock |
 | SignalPlugin | Signal transport via a running `signal-cli` daemon |
 | DiscordPlugin | Discord transport (needs `--extra discord`) |
 | WebPlugin | Browser chat UI on localhost |
@@ -129,6 +130,7 @@ other tenants.
 | AppraisalPlugin | Scores each exchange as it happens |
 | CritiquePlugin | Reviews the agent's replies after the fact |
 | OutcomeLogPlugin | Records each exchange and its outcome |
+| HeartbeatPlugin | Starts a turn after a quiet spell to review recent memory, acting only when something warrants it (asleep unless `heartbeat.after` is set) |
 
 ## CLI subcommands
 
