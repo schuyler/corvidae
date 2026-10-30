@@ -1037,7 +1037,23 @@ mcp:
       transport: sse
       url: "http://localhost:8001/sse"
       timeout_seconds: 60
+
+    wiki:
+      transport: streamable_http
+      url: "http://localhost:8090/mcp"
+      headers:
+        Authorization: "Bearer ${OTTERWIKI_MCP_TOKEN}"
 ```
+
+`streamable_http` is MCP's current HTTP transport; `sse` is the older one.
+Both take an optional `headers` map, sent on every request. `${VAR}` in a
+header value is replaced from the daemon's environment at connect time, so
+a token never has to sit in `agent.yaml`. A variable that is unset, empty, or holds a newline or NUL
+skips that server with one WARNING naming the server, header and variable,
+and the server is not queued for the lazy retry below (the environment
+can't change without a restart). Header values never reach the log. The
+plugin builds the HTTP client itself (`create_mcp_http_client`) and closes
+it with the server.
 
 Tool names are prefixed to avoid collisions: a server named `filesystem`
 produces tools like `filesystem__read_file`. Set `tool_prefix: ""` to

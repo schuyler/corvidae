@@ -66,6 +66,10 @@ Assets, roughly in order of how bad it is to lose them:
    (`web.token` or `CORVIDAE_WEB_TOKEN`, or the generated one in the
    daemon log) and its session cookie are a third: whoever holds either
    one drives the agent, tools and all. Changing the token revokes it.
+   An MCP server's bearer token, passed through `${VAR}` in
+   `mcp.servers.<name>.headers`, is a fourth: it lives in the daemon's
+   environment, which `shell` can read (`env`, `/proc/self/environ`), and
+   grants whatever that server grants.
 2. The host account corvidae runs as, and anything it can read or run.
 3. `sessions.db`, the JSONL logs, and the memory tables: plaintext copies
    of every conversation, including end-to-end-encrypted Signal ones.
@@ -328,6 +332,18 @@ its results come back as tool results, neither of them framed. Schema
 sanitization is shallow by design. An MCP server is therefore a supply-chain
 vector for tool-description injection. `transform_tool_result` exists as a
 hook for exactly this and has only a pass-through default.
+
+The HTTP transports (`streamable_http`, `sse`) open an outbound connection
+to whatever `url` names and send the configured `headers`, bearer token
+included, on every request. The SDK follows a redirect only within the
+endpoint's origin, so the token isn't handed to another host that way, but
+a plain `http://` URL sends it in the clear: use `https://` for anything
+off the local machine. Keeping the token in the environment keeps it out of
+`agent.yaml`, which matters if that file is shared or checked in. It does
+not keep it from the model: `shell` can read the daemon's environment, and
+`write_file` can add an MCP server pointed at an attacker's URL with the
+same `${VAR}` header (that takes effect at the next restart, like any
+other `mcp` change).
 
 ### 7. The scheduler re-enters text later
 
