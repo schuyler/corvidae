@@ -235,7 +235,13 @@ Two kernel registrations replace the old `on_idle` hook:
   or a frequent heartbeat can delay a run by at most `max_delay`. The
   `last_run` timestamp is persisted in `retention_meta`, so restarts do
   not reset the schedule, and a daemon down longer than the interval runs
-  the job at startup.
+  the job at startup. At boot memory starts before persistence opens the
+  DB, so arming the timer is deferred: one plain WARNING (`retention:
+  persistence DB not open yet; arming the retention timer deferred,
+  re-arming in 5.0s`), then it re-arms 5 s later. The line repeats every
+  5 s for as long as the DB stays closed (persistence disabled or failed). A real failure to read
+  `retention_meta` with the DB open logs a WARNING with its traceback and
+  re-arms the same way.
 
 Changes to `memory.idle_consolidate_after` and `memory.retention.*` take
 effect at restart.
@@ -345,6 +351,13 @@ remaining columns — retrieval score/raw similarity/hit count, appraisal probe 
 stage-2 JSON, critique's provenance snapshot, and merged outcomes — are
 filled in by `MemoryPlugin`, `AppraisalPlugin`, and `CritiquePlugin`
 through the writer API below, not by `OutcomeLogPlugin` itself.
+
+The table is created in `on_start` when the DB is already open. At boot it
+usually isn't (persistence starts after outcome_log, since `on_start` is
+LIFO), so the plugin logs one plain WARNING (`exchange_log table creation
+deferred until the first write: persistence DB not open yet`) and creates
+the table on the first write. A DDL or migration failure with the DB open
+is still logged at WARNING with its traceback.
 
 Writer API (used by other plugins, not hooks):
 

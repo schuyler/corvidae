@@ -245,3 +245,56 @@ async def test_missing_persistence_db_names_path_and_start_status():
     message = str(excinfo.value)
     assert "custom-sessions.db" in message
     assert "on_start completed: True" in message
+
+
+class TestStartupDeferralLog:
+    """The expected early-boot deferral is one plain warning (#163)."""
+
+    async def test_db_not_open_logs_one_plain_warning(self, caplog):
+        # Persistence opens its DB after outcome_log's on_start (LIFO), so the
+        # deferral is expected: one WARNING naming what is deferred, no traceback.
+        import logging
+
+        from corvidae_cognition.outcome_log import OutcomeLogPlugin
+        from corvidae.persistence import PersistencePlugin
+
+        pm = create_plugin_manager()
+        pm.register(PersistencePlugin(), name="persistence")
+        plugin = OutcomeLogPlugin()
+        pm.register(plugin, name="outcome_log")
+        await plugin.on_init(pm, {})
+        with caplog.at_level(logging.DEBUG, logger="corvidae.outcome_log"):
+            await plugin.on_start({})
+
+        records = [r for r in caplog.records if r.name == "corvidae.outcome_log"
+                   and r.levelno >= logging.WARNING]
+        assert len(records) == 1, [r.getMessage() for r in records]
+        assert records[0].levelno == logging.WARNING
+        assert records[0].exc_info is None
+        message = records[0].getMessage()
+        assert "exchange_log" in message and "first write" in message, message
+
+    async def test_ddl_failure_keeps_traceback(self, caplog):
+        # A DB that is open but whose DDL fails is a real fault: still a
+        # WARNING with the traceback.
+        import logging
+        from unittest.mock import AsyncMock, MagicMock
+
+        from corvidae_cognition.outcome_log import OutcomeLogPlugin
+        from corvidae.persistence import PersistencePlugin
+
+        pm = create_plugin_manager()
+        persistence = PersistencePlugin()
+        persistence.db = MagicMock()
+        persistence.db.execute = AsyncMock(side_effect=RuntimeError("disk I/O error"))
+        pm.register(persistence, name="persistence")
+        plugin = OutcomeLogPlugin()
+        pm.register(plugin, name="outcome_log")
+        await plugin.on_init(pm, {})
+        with caplog.at_level(logging.WARNING, logger="corvidae.outcome_log"):
+            await plugin.on_start({})
+
+        records = [r for r in caplog.records if r.name == "corvidae.outcome_log"]
+        assert len(records) == 1, [r.getMessage() for r in records]
+        assert records[0].levelno == logging.WARNING
+        assert records[0].exc_info is not None

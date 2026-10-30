@@ -489,3 +489,65 @@ async def test_clock_without_idle_tracker_warns_once_and_arms_nothing(
     assert env.clock.live_timer_names() == []
     # Memory ran the check once; when it ran is not pinned.
     assert len(retention_runs) == 1
+
+
+# ---------------------------------------------------------------------------
+# Startup deferral log (#175)
+# ---------------------------------------------------------------------------
+
+
+async def test_retention_arm_before_db_opens_logs_one_plain_warning(
+    make_env, caplog
+):
+    """Memory's on_start runs before persistence opens the DB: the retention
+    arm defers with one plain WARNING (no traceback), then arms once open."""
+    db = await aiosqlite.connect(":memory:")
+    await init_db(db)
+    pm = create_plugin_manager()
+    persistence = PersistencePlugin()  # DB not open yet, as at boot
+    pm.register(persistence, name="persistence")
+    channel = Channel(transport="irc", scope="#test")
+
+    with caplog.at_level(logging.DEBUG, logger="corvidae.memory"):
+        env = await make_env(pm=pm, db=db, persistence=persistence, channel=channel)
+        # Persistence opens the DB; the re-arm then reads retention_meta.
+        persistence.db = db
+        await env.advance(memory_module.RETENTION_DB_RETRY_SECONDS)
+
+    warnings = [r for r in caplog.records
+                if r.name == "corvidae.memory" and r.levelno >= logging.WARNING]
+    assert len(warnings) == 1, [r.getMessage() for r in warnings]
+    assert warnings[0].levelno == logging.WARNING
+    assert warnings[0].exc_info is None
+    message = warnings[0].getMessage()
+    assert "retention" in message and "not open" in message, message
+    assert f"{memory_module.RETENTION_DB_RETRY_SECONDS}s" in message, message
+    assert env.memory._retention_timer is not None
+    assert env.memory._retention_timer.name == "memory.retention"
+
+
+async def test_retention_meta_read_failure_keeps_traceback(make_env, caplog):
+    """A real failure (DB open, reading retention_meta fails) still logs a
+    WARNING with its traceback, and re-arms."""
+    env = await make_env()
+    real_execute = env.db.execute
+
+    # Fail only the retention_meta read the arm performs.
+    def failing_execute(sql, *args, **kwargs):
+        if "FROM retention_meta" in sql:
+            raise sqlite3.OperationalError("disk I/O error")
+        return real_execute(sql, *args, **kwargs)
+
+    env.db.execute = failing_execute
+    try:
+        with caplog.at_level(logging.WARNING, logger="corvidae.memory"):
+            await env.memory._arm_retention()
+    finally:
+        env.db.execute = real_execute
+
+    warnings = [r for r in caplog.records
+                if r.name == "corvidae.memory" and r.levelno >= logging.WARNING]
+    assert len(warnings) == 1, [r.getMessage() for r in warnings]
+    assert warnings[0].levelno == logging.WARNING
+    assert warnings[0].exc_info is not None
+    assert env.memory._retention_timer.name == "memory.retention.rearm"
