@@ -83,6 +83,21 @@ PROVENANCE_EXCERPT_CHARS = 500      # each message's excerpt, in characters
 # and UNSENT (withheld, never said) are not.
 RECORD_MESSAGE_TYPES = ("message", "summary")
 
+# The reply that ends a provenance-triggered turn without sending anything
+# (#202); should_send_response vetoes a final that is exactly this.
+NO_REPLY_MARKER = "NO_REPLY"
+
+# Wake-stub text for a provenance objection. Lives in the stub, not the
+# CONTEXT entry: the funnel frames CONTEXT as data, and this is an
+# instruction written by us.
+PROVENANCE_NOTE = (
+    "Background self-check: the provenance check found claims in your last "
+    "reply that no record supports (see the critique context). By default, "
+    f"send nothing: reply with exactly {NO_REPLY_MARKER} and nothing reaches "
+    "the channel. Reply in the channel only if your earlier reply could lead "
+    "the other party to take an incorrect action; then correct it briefly."
+)
+
 STYLISTIC_LENSES = ("predictive", "constrained", "adversarial")
 
 # Bound on the admitted-trace-id LRU (CritiquePlugin._admitted): "user"
@@ -587,6 +602,29 @@ class CritiquePlugin(CorvidaePlugin):
                 extra={"channel": channel.id, "trace_id": trace_id},
             )
 
+    @hookimpl
+    async def should_send_response(self, channel, text, emission, trace_id, meta):
+        """Veto a provenance turn's final reply when it is the no-reply marker.
+
+        Anything else is no opinion. Errors fail open: a broken check never
+        silences the agent.
+        """
+        try:
+            if (
+                emission == "final"
+                and (meta or {}).get("origin") == "critique"
+                and text.strip() == NO_REPLY_MARKER
+            ):
+                return False
+            return None
+        except Exception:
+            logger.warning(
+                "critique send check failed on %s (emission %s); allowing send",
+                channel.id, emission, exc_info=True,
+                extra={"channel": channel.id, "trace_id": trace_id},
+            )
+            return None
+
     # ------------------------------------------------------------------
     # Eligibility + gating (§2.4)
     # ------------------------------------------------------------------
@@ -870,7 +908,7 @@ class CritiquePlugin(CorvidaePlugin):
                 "supported": supported,
                 "objections": len(objections),
             }}
-            await self._record_and_register(channel, trace_id, outcome, objections)
+            await self._record_and_register(channel, trace_id, outcome, objections, wake=True)
         finally:
             reset_attribution(token)
 
@@ -1024,19 +1062,23 @@ class CritiquePlugin(CorvidaePlugin):
                 "objections": len(objections),
                 "sampled_below_threshold": sampled,
             }}
-            await self._record_and_register(channel, trace_id, outcome, objections)
+            await self._record_and_register(channel, trace_id, outcome, objections, wake=False)
         finally:
             reset_attribution(token)
 
-    async def _record_and_register(self, channel, trace_id, outcome, objections) -> None:
+    async def _record_and_register(
+        self, channel, trace_id, outcome, objections, *, wake: bool,
+    ) -> None:
         """Record a critique outcome and register non-empty verdicts.
 
         The outcome goes in via the ATOMIC merge (never read-merge-write):
         it can interleave with WP2.9's send-gate record and WP2.1's
         {"gate":"rejected"} merge on the same row. Provenance records under
         its own key, so it never overwrites the stylistic run's ``critique``.
-        Non-empty objections re-enter via the funnel as budgeted CONTEXT
-        under origin="critique".
+        Non-empty objections re-enter via the funnel as budgeted CONTEXT.
+        With ``wake`` (provenance) they register under origin="critique"
+        and fire a stub carrying PROVENANCE_NOTE; without it (stylistic)
+        they queue for the channel's next turn and wake nothing (#202).
         """
         outcome_log = self.pm.get_plugin("outcome_log")
         if outcome_log is not None:
@@ -1057,9 +1099,13 @@ class CritiquePlugin(CorvidaePlugin):
             return
         entries = [self._format_objection(o) for o in objections]
         try:
-            await funnel.register_and_wake(
-                channel, origin="critique", source="critique", entries=entries
-            )
+            if wake:
+                await funnel.register_and_wake(
+                    channel, origin="critique", source="critique",
+                    entries=entries, stub_text=PROVENANCE_NOTE,
+                )
+            else:
+                funnel.register(channel, source="critique", entries=entries)
         except Exception:
             logger.warning(
                 "critique verdict registration failed", exc_info=True,
