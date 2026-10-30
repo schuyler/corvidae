@@ -915,7 +915,7 @@ tombstone and skip each absent surface without printing anything: no
 `message_fts` means there is nothing to clear (if `MemoryPlugin` creates
 it later, its backfill indexes the tombstone, not the original); no
 `memory` means no memory cascade; no `memory_vec` skips only the vec-row
-delete. The `memory` form needs the `memory` table and exits with an error
+delete; no `exchange_log` skips its scrub. The `memory` form needs the `memory` table and exits with an error
 (`memory table not present in this database`) without it. The CLI never
 creates schema; schema is daemon-owned.
 
@@ -942,6 +942,20 @@ creates schema; schema is daemon-owned.
   tombstoned message ids.
 - **`range` form:** collects all `message_log` ids in the range and
   delegates to the `message` form cascade.
+- **`exchange_log` (all forms, #160):** when the cognition extra's
+  `exchange_log` table is present, each form then scrubs the conversation
+  text it holds, per channel, for the message ids it tombstoned. The
+  exchange that owns a redacted id X (in that channel, the row with the
+  largest `message_rowid <= X`) has every `appraisal.stage2.past_claims`
+  claim and query replaced with the tombstone text. The number of claims
+  and queries is kept for calibration, and the other appraisal fields are
+  untouched. Every exchange in the channel with `message_rowid >=` the
+  smallest redacted id has its `provenance_snapshot` set to NULL. That
+  deliberately over-scrubs: the snapshot holds the CONTEXT in the window
+  at the turn, nothing maps it back to rows, and any later window may
+  have carried X's text. Exchanges with a NULL `message_rowid` aren't
+  reached. The CLI reports `<N> exchange_log rows` (distinct exchanges
+  changed; a re-run that changes nothing counts zero).
 
 **Verification pass.** After each cascade, the CLI extracts a sample token
 from the original content (before tombstoning) and runs FTS `MATCH` queries
