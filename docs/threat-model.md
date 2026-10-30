@@ -493,7 +493,11 @@ What it doesn't protect against, so you know:
   `corvidae redact` probes for each and silently skips one that is absent;
   its `memory` form fails without the `memory` table. `message_fts` and its
   triggers on `message_log` stay in `sessions.db` if the extra is later
-  removed, and keep indexing message text; `redact` still clears them.
+  removed, and keep indexing message text. `redact` clears them only while
+  it can load sqlite-vec: a database with `memory_vec` (any daemon that ran
+  with sqlite-vec) makes every form refuse until the cognition extra is
+  reinstalled (#198). That keeps a half-finished redaction from happening,
+  at the cost of the only deletion path while the extra is missing.
 
 ## Privilege separation
 

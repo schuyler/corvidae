@@ -25,6 +25,7 @@ import asyncio
 import json
 import logging
 import re
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -132,6 +133,34 @@ async def _probe_tables(db: aiosqlite.Connection) -> set[str]:
     ) as cursor:
         rows = await cursor.fetchall()
     return {row[0] for row in rows}
+
+
+async def _load_sqlite_vec_if_needed(db: aiosqlite.Connection) -> None:
+    """Load sqlite-vec on the CLI's connection when memory_vec exists (#198).
+
+    memory_vec is a vec0 virtual table; without the extension any statement
+    against it fails, and the cascade would crash after message_log was
+    already committed. So load it up front, or refuse before writing
+    anything. The import is lazy: kernel-only installs have no sqlite-vec,
+    and databases without memory_vec never need it.
+    """
+    if "memory_vec" not in await _probe_tables(db):
+        return
+    try:
+        import sqlite_vec
+
+        await db.enable_load_extension(True)
+        await db.load_extension(sqlite_vec.loadable_path())
+        await db.enable_load_extension(False)
+    except (ImportError, AttributeError, sqlite3.Error) as exc:
+        logger.warning("cannot load sqlite-vec for memory_vec", exc_info=True)
+        raise click.ClickException(
+            "This database has memory_vec, which needs the sqlite-vec "
+            f"extension, and it could not be loaded ({type(exc).__name__}). "
+            "Nothing was changed. Install the cognition extra "
+            "(uv sync --extra cognition), or run corvidae redact in the "
+            "daemon's environment."
+        ) from exc
 
 
 async def redact_messages(
@@ -433,6 +462,8 @@ def _message_cmd(ctx, ids):
         conn = await aiosqlite.connect(db_path)
         await conn.execute("PRAGMA busy_timeout = 5000")
         try:
+            # memory_vec needs sqlite-vec on this connection; refuse early.
+            await _load_sqlite_vec_if_needed(conn)
             # Capture sample token before tombstoning for verification
             sample_token = None
             if not dry_run and ids:
@@ -481,6 +512,8 @@ def _memory_cmd(ctx, memory_id):
         conn = await aiosqlite.connect(db_path)
         await conn.execute("PRAGMA busy_timeout = 5000")
         try:
+            # memory_vec needs sqlite-vec on this connection; refuse early.
+            await _load_sqlite_vec_if_needed(conn)
             # Capture sample token from memory summary before tombstoning.
             # Probe first: on a database without the memory schema the query
             # would fail with a raw SQLite error; redact_memory_id reports it.
@@ -532,6 +565,8 @@ def _range_cmd(ctx, start_id, end_id):
         conn = await aiosqlite.connect(db_path)
         await conn.execute("PRAGMA busy_timeout = 5000")
         try:
+            # memory_vec needs sqlite-vec on this connection; refuse early.
+            await _load_sqlite_vec_if_needed(conn)
             # Capture sample token from first message in range before tombstoning
             sample_token = None
             if not dry_run:
