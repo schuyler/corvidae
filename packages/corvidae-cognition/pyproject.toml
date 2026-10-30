@@ -9,6 +9,9 @@ description = "Cognition plugins for corvidae: memory, appraisal, critique, funn
 requires-python = ">=3.13"
 dependencies = ["corvidae", "sqlite-vec>=0.1.9"]
 
+[project.entry-points."corvidae.redact"]
+exchange_log = "corvidae_cognition.outcome_log:redact_exchange_log"
+
 [project.entry-points.corvidae]
 memory = "corvidae_cognition.memory:MemoryPlugin"
 memory_tools = "corvidae_cognition.memory_tools:MemoryToolsPlugin"

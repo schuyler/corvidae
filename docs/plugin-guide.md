@@ -115,11 +115,34 @@ Utility subcommands that do not need the agent runtime omit the `Runtime` import
 
 Entry point modules in `corvidae.commands` are imported at dispatcher load time, before `Runtime.start()` configures logging or creates an event loop. These modules must not have module-level side effects that depend on logging configuration or a running event loop. Standard library imports (`asyncio`, `click`) and `corvidae.runtime` are safe at module level. Avoid importing modules with side effects (network connections, file I/O, logging configuration) at the top level — use lazy imports inside the command function for those.
 
-The existing `corvidae` entry point group (for plugins) and the `corvidae.commands` group (for subcommands) are distinct setuptools groups. Registering in one does not affect the other.
+The existing `corvidae` entry point group (for plugins), the `corvidae.commands` group (for subcommands) and the `corvidae.redact` group (for redact scrubbers, below) are distinct setuptools groups. Registering in one does not affect the others.
 
 The built-in subcommand `scaffold` is registered by corvidae itself under `corvidae.commands`. Do not register an entry point named `scaffold` in the `corvidae.commands` group — a collision will silently overwrite the built-in command, causing unpredictable behavior.
 
 Built-in `corvidae acp` (from `corvidae.channels.acp:acp_command`) starts an ACP v1 agent on stdio. It boots `Runtime` with `overrides={"_acp_mode": True}` so `AcpPlugin` owns the connection; without that flag the plugin stays inert. Install the optional extra first: add `--extra acp` to your `uv sync` line.
+
+## Registering a redact scrubber
+
+`corvidae redact` (see "Operator redaction" in [design.md](design.md)) tombstones `message_log` rows and cascades to memory. A plugin package that copies conversation text into a table of its own registers a scrubber under the `corvidae.redact` entry-point group, so a redaction reaches that copy too. The kernel never names the table.
+
+```toml
+[project.entry-points."corvidae.redact"]
+exchange_log = "corvidae_cognition.outcome_log:redact_exchange_log"
+```
+
+The entry-point name labels the surface in the CLI output (`2 exchange_log rows`) and in skip notices. The object is an async function:
+
+```python
+async def redact_my_table(
+    db: aiosqlite.Connection,  # the CLI's own connection (WAL, busy_timeout 5000)
+    channel_id: str,           # one channel at a time
+    msg_ids: list[int],        # the message_log ids just tombstoned in it
+    dry_run: bool,             # count what would change, write nothing
+    tombstone: str,            # the operator tombstone text to write
+) -> int | None: ...
+```
+
+Every redact form (`message`, `range`, `memory`) calls each scrubber once per channel, after the message tombstones and the memory cascade have committed. Return the number of rows changed (or that would be, under `--dry-run`). Return `None` if your table isn't in this database (the daemon may never have loaded your plugin). The count is then 0, and one `SKIP` line naming your scrubber goes into the `notices` list a caller of `redact_messages` passes. The CLI doesn't print notices, so an operator sees only `0 <name> rows`. The scrubber commits its own writes. Probe for your table rather than creating it, because schema is daemon-owned. An exception propagates and aborts the command after the earlier steps have committed, so make the scrub idempotent: a re-run must finish the job and count nothing already scrubbed. The module is imported each time a redact form runs, inside its event loop, so keep it free of import-time side effects.
 
 ## Hook grammar
 

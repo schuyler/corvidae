@@ -939,7 +939,9 @@ tombstone and skip each absent surface without printing anything: no
 `message_fts` means there is nothing to clear (if `MemoryPlugin` creates
 it later, its backfill indexes the tombstone, not the original); no
 `memory` means no memory cascade; no `memory_vec` skips only the vec-row
-delete. The `memory` form needs the `memory` table and exits with an error
+delete. A scrubber whose table is absent returns None and counts 0 (the
+CLI prints `0 <name> rows`; a library caller of `redact_messages` also
+gets a `SKIP` line in its `notices` list). The `memory` form needs the `memory` table and exits with an error
 (`memory table not present in this database`) without it. The CLI never
 creates schema; schema is daemon-owned.
 
@@ -966,6 +968,26 @@ creates schema; schema is daemon-owned.
   tombstoned message ids.
 - **`range` form:** collects all `message_log` ids in the range and
   delegates to the `message` form cascade.
+- **Registered scrubbers (all forms, #160):** each form then runs every
+  scrubber registered under the `corvidae.redact` entry-point group, once
+  per channel, over the message ids it tombstoned (contract in
+  [plugin-guide.md](plugin-guide.md#registering-a-redact-scrubber)). The
+  kernel doesn't know the tables. The cognition extra registers
+  `exchange_log` (`corvidae_cognition.outcome_log:redact_exchange_log`),
+  which scrubs the conversation text that table holds. The
+  exchange that owns a redacted id X (in that channel, the row with the
+  largest `message_rowid <= X`) has every `appraisal.stage2.past_claims`
+  claim and query replaced with the tombstone text. The number of claims
+  and queries is kept for calibration, and the other appraisal fields are
+  untouched. Every exchange in the channel with `message_rowid >=` the
+  smallest redacted id has its `provenance_snapshot` set to NULL. That
+  deliberately over-scrubs: the snapshot holds the CONTEXT in the window
+  at the turn, nothing maps it back to rows, and any later window may
+  have carried X's text. Exchanges with a NULL `message_rowid` aren't
+  reached. The CLI prints `<N> <name> rows` per scrubber, here
+  `<N> exchange_log rows` (distinct exchanges changed; a re-run that
+  changes nothing counts zero), and the result dict carries the counts
+  as `scrubbed: {name: N}`.
 
 **Verification pass.** After each cascade, the CLI extracts a sample token
 from the original content (before tombstoning) and runs FTS `MATCH` queries

@@ -12,6 +12,8 @@ Behaviours tested (bootstrap-mapping §4.11–4.12):
   databases without the FTS tables.
 - CLI error context on a missing database (the affected-count tests need a
   full database and live in the cascade file).
+- The ``corvidae.redact`` scrubber extension point (#160), driven with a
+  fake scrubber so it needs no cognition install.
 
 Tests call the redact module's functions directly against a temp DB, not
 through the Click runner, except where the CLI's own output is the subject.
@@ -303,3 +305,133 @@ def test_cli_kernel_db_needs_no_sqlite_vec(tmp_path, monkeypatch):
 
     assert result.exit_code == 0, result.output + repr(result.exception)
     assert "1 of 1 messages" in result.output
+
+
+# ---------------------------------------------------------------------------
+# The corvidae.redact scrubber extension point (#160)
+# ---------------------------------------------------------------------------
+
+
+class _FakeScrubber:
+    """Records its calls; returns ``count`` (None = surface absent)."""
+
+    def __init__(self, count):
+        self.count = count
+        self.calls: list[tuple] = []
+
+    async def __call__(self, db, channel_id, msg_ids, dry_run, tombstone):
+        self.calls.append((channel_id, list(msg_ids), dry_run, tombstone))
+        return self.count
+
+
+async def _kernel_db(tmp_path):
+    """A WAL kernel DB with two messages on irc:#a and one on irc:#b."""
+    db = await aiosqlite.connect(str(tmp_path / "k.db"))
+    await db.execute("PRAGMA journal_mode = WAL")
+    await init_db(db)
+    ids = [
+        await insert_message(db, "irc:#a", "user", "first secret"),
+        await insert_message(db, "irc:#b", "user", "other channel"),
+        await insert_message(db, "irc:#a", "assistant", "second secret"),
+    ]
+    return db, ids
+
+
+class TestScrubberExtensionPoint:
+    async def test_scrubber_runs_per_channel_with_tombstoned_ids(
+        self, tmp_path, monkeypatch
+    ):
+        # Each registered scrubber gets every channel's tombstoned ids and
+        # the tombstone text; its count lands under its name.
+        from corvidae.commands import redact as redact_module
+
+        fake = _FakeScrubber(3)
+        monkeypatch.setattr(redact_module, "_redact_scrubbers", lambda: [("fake", fake)])
+        db, ids = await _kernel_db(tmp_path)
+        try:
+            result = await redact_messages(db, ids)
+        finally:
+            await db.close()
+        calls = sorted(fake.calls)
+        assert [(c[0], c[1], c[2]) for c in calls] == [
+            ("irc:#a", [ids[0], ids[2]], False),
+            ("irc:#b", [ids[1]], False),
+        ]
+        assert all("redacted by operator" in c[3] for c in calls)
+        assert result["scrubbed"] == {"fake": 6}
+
+    async def test_dry_run_passes_flag_and_writes_nothing(self, tmp_path, monkeypatch):
+        from corvidae.commands import redact as redact_module
+
+        fake = _FakeScrubber(1)
+        monkeypatch.setattr(redact_module, "_redact_scrubbers", lambda: [("fake", fake)])
+        db, ids = await _kernel_db(tmp_path)
+        try:
+            result = await redact_messages(db, [ids[0]], dry_run=True)
+            assert (await get_message(db, ids[0]))["message"]["content"] == "first secret"
+        finally:
+            await db.close()
+        assert [c[2] for c in fake.calls] == [True]
+        assert result["scrubbed"] == {"fake": 1}
+
+    async def test_absent_surface_gives_skip_notice(self, tmp_path, monkeypatch):
+        # A scrubber returning None reports its surface is absent.
+        from corvidae.commands import redact as redact_module
+
+        monkeypatch.setattr(
+            redact_module, "_redact_scrubbers", lambda: [("fake", _FakeScrubber(None))]
+        )
+        db, ids = await _kernel_db(tmp_path)
+        try:
+            notices: list[str] = []
+            result = await redact_messages(db, [ids[0]], notices=notices)
+        finally:
+            await db.close()
+        assert result["scrubbed"] == {"fake": 0}
+        assert any(n.startswith("SKIP") and "fake" in n for n in notices), notices
+
+    async def test_no_scrubbers_changes_nothing(self, tmp_path, monkeypatch):
+        # Kernel-only install: no scrubbers, no extra notices or counts.
+        from corvidae.commands import redact as redact_module
+
+        monkeypatch.setattr(redact_module, "_redact_scrubbers", lambda: [])
+        db, ids = await _kernel_db(tmp_path)
+        try:
+            notices: list[str] = []
+            result = await redact_messages(db, [ids[0]], notices=notices)
+        finally:
+            await db.close()
+        assert result["affected_messages"] == 1
+        assert result["scrubbed"] == {}
+        assert not any("rows" in n for n in notices), notices
+
+    def test_kernel_never_names_cognition_surfaces(self):
+        # Cognition's tables are reached only through scrubbers it registers.
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent / "corvidae"
+        offenders = [
+            str(path.relative_to(root)) for path in root.rglob("*.py")
+            if "exchange_log" in path.read_text()
+        ]
+        assert offenders == [], offenders
+
+    def test_cli_reports_each_scrubber(self, tmp_path, monkeypatch):
+        from click.testing import CliRunner
+
+        from corvidae.commands import redact as redact_module
+
+        monkeypatch.setattr(
+            redact_module, "_redact_scrubbers", lambda: [("fake", _FakeScrubber(2))]
+        )
+        path = str(tmp_path / "k.db")
+
+        async def build() -> int:
+            db, ids = await _kernel_db(tmp_path)
+            await db.close()
+            return ids[0]
+
+        msg_id = asyncio.run(build())
+        result = CliRunner().invoke(redact_command, ["--db", path, "message", str(msg_id)])
+        assert result.exit_code == 0, result.output
+        assert "2 fake rows" in result.output, result.output

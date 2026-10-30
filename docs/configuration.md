@@ -454,7 +454,7 @@ sqlite3 sessions.db \
 uv run corvidae redact --db sessions.db message <id> [<id> ...]
 ```
 
-Pass the ids explicitly rather than using the `range` form: `message_log` ids are global across all channels, so an id range spans whatever other channels were active in the same window. The redaction cascades to intersecting memory records and to both FTS surfaces; see "Operator redaction" in [design.md](design.md). The jsonl logs are separate files and are not touched — delete them yourself.
+Pass the ids explicitly rather than using the `range` form: `message_log` ids are global across all channels, so an id range spans whatever other channels were active in the same window. The redaction cascades to intersecting memory records, to both FTS surfaces, and to the text `exchange_log` copies from the conversation (`past_claims`, `provenance_snapshot`); see "Operator redaction" in [design.md](design.md). The jsonl logs are separate files and are not touched — delete them yourself.
 
 ---
 

@@ -317,3 +317,115 @@ class OutcomeLogPlugin(CorvidaePlugin):
                 (*params, trace_id),
             )
         await db.commit()
+
+
+# ------------------------------------------------------------------
+# Operator redaction: the exchange_log scrubber for `corvidae redact`
+# ------------------------------------------------------------------
+
+
+def _scrub_past_claims(appraisal_json: str | None, tombstone: str) -> str | None:
+    """Return appraisal JSON with stage2.past_claims text tombstoned, or None
+    when there is nothing to change.
+
+    Each claim and each of its queries becomes ``tombstone``, so the number
+    of claims and queries survives for calibration while the words do not.
+    No appraisal, no stage 2, or claims already tombstoned → None.
+    """
+    # NULL is the common case: most exchanges never get a stage-2 appraisal.
+    # The column is written by outcome_log's JSON merge, so it parses, and
+    # appraisal normalizes past_claims to a list of {claim, queries}.
+    if appraisal_json is None:
+        return None
+    appraisal = json.loads(appraisal_json)
+    stage2 = appraisal.get("stage2") or {}
+    claims = stage2.get("past_claims")
+    if not claims:
+        return None
+    scrubbed = [
+        {"claim": tombstone, "queries": [tombstone] * len(claim["queries"])}
+        for claim in claims
+    ]
+    # Already scrubbed by an earlier redaction: report no change.
+    if scrubbed == claims:
+        return None
+    stage2["past_claims"] = scrubbed
+    return json.dumps(appraisal)
+
+
+async def redact_exchange_log(
+    db: aiosqlite.Connection,
+    channel_id: str,
+    msg_ids: list[int],
+    dry_run: bool,
+    tombstone: str,
+) -> int | None:
+    """Scrub exchange_log text derived from redacted messages in one channel.
+
+    For each redacted id X: the exchange that owns X (in the channel, the
+    largest message_rowid <= X) gets its stage-2 past_claims tombstoned.
+    Every exchange in the channel with message_rowid >= the smallest X loses
+    its provenance_snapshot, since any later window may have carried X's
+    text as CONTEXT. Exchanges with a NULL message_rowid are not reached.
+
+    Registered as the ``exchange_log`` scrubber in the ``corvidae.redact``
+    entry-point group, which ``corvidae redact`` runs per channel over the
+    ids it tombstoned (#160). Returns the number of exchanges changed (or
+    that would be, in dry-run mode), or None when the table is absent.
+    """
+    # A DB whose daemon never ran outcome_log has no table to scrub.
+    async with db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'exchange_log'"
+    ) as cursor:
+        if await cursor.fetchone() is None:
+            return None
+    if not msg_ids:
+        return 0
+    changed: set[str] = set()
+
+    # Find each redacted id's owning exchange, once per exchange.
+    owners: set[str] = set()
+    for msg_id in msg_ids:
+        async with db.execute(
+            "SELECT trace_id FROM exchange_log "
+            "WHERE channel_id = ? AND message_rowid IS NOT NULL "
+            "AND message_rowid <= ? ORDER BY message_rowid DESC LIMIT 1",
+            (channel_id, msg_id),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is not None:
+            owners.add(row[0])
+
+    # Tombstone the owners' past_claims text.
+    for trace_id in owners:
+        async with db.execute(
+            "SELECT appraisal FROM exchange_log WHERE trace_id = ?", (trace_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+        scrubbed = _scrub_past_claims(row[0], tombstone)
+        if scrubbed is None:
+            continue
+        changed.add(trace_id)
+        if not dry_run:
+            await db.execute(
+                "UPDATE exchange_log SET appraisal = ? WHERE trace_id = ?",
+                (scrubbed, trace_id),
+            )
+
+    # Drop every snapshot in the channel from the first redacted id on.
+    snapshot_where = (
+        "WHERE channel_id = ? AND message_rowid >= ? "
+        "AND provenance_snapshot IS NOT NULL"
+    )
+    snapshot_args = (channel_id, min(msg_ids))
+    async with db.execute(
+        f"SELECT trace_id FROM exchange_log {snapshot_where}", snapshot_args
+    ) as cursor:
+        changed.update(row[0] for row in await cursor.fetchall())
+    if not dry_run:
+        await db.execute(
+            f"UPDATE exchange_log SET provenance_snapshot = NULL {snapshot_where}",
+            snapshot_args,
+        )
+        await db.commit()
+    return len(changed)
