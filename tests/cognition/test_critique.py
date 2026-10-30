@@ -14,7 +14,8 @@
   exchange; the provenance critic (a model) judges support. No regex or
   word list judges language anywhere on that path;
 - silent execution: empty verdict -> no on_notify, outcome recorded;
-  non-empty -> funnel registration + one stub;
+  non-empty stylistic -> funnel registration, no stub; non-empty
+  provenance -> funnel registration + one stub carrying PROVENANCE_NOTE;
 - runtime-tunable thresholds via channel.runtime_overrides (directive 2).
 """
 

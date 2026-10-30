@@ -351,5 +351,6 @@ class TestStubText:
         )
         funnel.pm.ahook.on_notify.assert_awaited_once()
         assert funnel.pm.ahook.on_notify.await_args.kwargs["text"] == "custom stub words"
+        assert funnel.pm.ahook.on_notify.await_args.kwargs["meta"]["origin"] == "critique"
 
         await db.close()
