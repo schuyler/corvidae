@@ -180,11 +180,26 @@ class FunnelPlugin(CorvidaePlugin):
         (``register_and_wake``) drains only on a turn whose
         ``meta["origin"]`` matches; the origin comes from ``meta``, never
         parsed from stub text (§2.2/§4.7 no-inference rule). The pending
-        flag is cleared FIRST: a failure inside admission leaves payloads
-        registered, and the next producer's stub re-arms the channel rather
-        than wedging it. Payloads unregister at successful admission;
-        entries the budget dropped stay registered for the next drain.
+        flag is cleared FIRST, before either drain: a failure inside
+        admission leaves payloads registered, and the next producer's stub
+        re-arms the channel rather than wedging it. Payloads unregister at
+        successful admission; entries the budget dropped stay registered
+        for the next drain.
         """
+        origin = (meta or {}).get("origin")
+        pair = (channel.id, origin) if origin is not None else None
+        # Clear the pending flag on ANY matching-origin turn, even when
+        # nothing is queued — BEFORE either drain and the empty-registry
+        # early return. A payload registered mid-drain (after this flag was
+        # discarded) gets admitted by the in-progress drain, so its own
+        # stub's turn arrives with an empty registry; returning without
+        # clearing the flag here would leave it set forever, and every later
+        # register_and_wake would see it and never fire a stub — wedging the
+        # pair until restart. A spurious extra stub is harmless (this drain
+        # early-returns); a missing stub is not.
+        if pair is not None:
+            self._stub_pending.discard(pair)
+
         # Stub-less payloads: any turn on this channel admits them.
         next_turn = self._next_turn.get(channel.id)
         if next_turn:
@@ -194,20 +209,9 @@ class FunnelPlugin(CorvidaePlugin):
             else:
                 del self._next_turn[channel.id]
 
-        origin = (meta or {}).get("origin")
-        if origin is None:
+        # Origin-keyed payloads: only a turn with the matching origin.
+        if pair is None:
             return
-        pair = (channel.id, origin)
-        # Clear the pending flag on ANY matching-origin turn, even when
-        # nothing is queued — BEFORE the empty-registry early return. A
-        # payload registered mid-drain (after this flag was discarded) gets
-        # admitted by the in-progress drain, so its own stub's turn arrives
-        # with an empty registry; returning without clearing the flag here
-        # would leave it set forever, and every later register_and_wake
-        # would see it and never fire a stub — wedging the pair until
-        # restart. A spurious extra stub is harmless (this drain
-        # early-returns); a missing stub is not.
-        self._stub_pending.discard(pair)
         payloads = self._deferred.get(pair)
         if not payloads:
             return

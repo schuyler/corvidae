@@ -1099,6 +1099,8 @@ class CritiquePlugin(CorvidaePlugin):
             return
         entries = [self._format_objection(o) for o in objections]
         try:
+            # Provenance wakes the channel with the no-reply note; stylistic
+            # objections wait for the channel's next turn.
             if wake:
                 await funnel.register_and_wake(
                     channel, origin="critique", source="critique",
