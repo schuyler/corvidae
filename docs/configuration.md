@@ -169,7 +169,7 @@ Each stage has a fork instruction, next to its standalone prompt where it has on
 | `agent.compaction_fork_prompt` | `prompts/compaction_fork.md` | Appended to the dropped prefix. |
 | `memory.consolidation_fork_prompt` | `prompts/memory_consolidation_fork.md` | Followed by a sentence naming where the range starts. Restart-only, like the rest of `memory.*`. |
 | `appraisal.stage2_fork_prompt` | `prompts/appraisal_fork.md` | Followed by quotes of the exchange's opening message and of the response sent, and the retrieval profile. |
-| `critique.fork_prompt.<lens>` | `prompts/critique_<lens>_fork.md` | Followed by quotes of the exchange's opening message and of the response sent; provenance also gets each claim's search hits and the CONTEXT snapshot. Provenance has no standalone prompt. |
+| `critique.fork_prompt.<lens>` | `prompts/critique_<lens>_fork.md` | Followed by quotes of the exchange's opening message and of the response sent; provenance also gets each claim's search hits and the CONTEXT snapshot. Provenance has no standalone prompt, and an override must ask for its per-claim verdicts format or every run skips. |
 
 These are static config, read with `corvidae.tuning.config_value`. Unlike
 `appraisal.stage2_prompt` and `critique.prompt.<lens>`, they aren't runtime
