@@ -493,7 +493,11 @@ What it doesn't protect against, so you know:
   `corvidae redact` probes for each and silently skips one that is absent;
   its `memory` form fails without the `memory` table. `message_fts` and its
   triggers on `message_log` stay in `sessions.db` if the extra is later
-  removed, and keep indexing message text; `redact` still clears them.
+  removed, and keep indexing message text. `redact` clears them only while
+  it can load sqlite-vec: a database with `memory_vec` (any daemon that ran
+  with sqlite-vec) makes every form refuse until the cognition extra is
+  reinstalled (#198). That keeps a half-finished redaction from happening,
+  at the cost of the only deletion path while the extra is missing.
 - `exchange_log` copies conversation text into two columns: stage-2
   `past_claims` (quoted from the reply) and `provenance_snapshot` (the
   CONTEXT in the window). `corvidae redact` scrubs both (#160), through
@@ -504,10 +508,7 @@ What it doesn't protect against, so you know:
   every snapshot in the channel from the redacted message on is
   dropped. What `redact` still doesn't reach: exchanges whose
   `message_rowid` is NULL, the JSONL logs and the daemon log, and any
-  copy taken out of `sessions.db` (a calibration export, a backup). Until
-  #198 is fixed, `redact` can also fail partway when the cascade reaches
-  a memory record on a database with `memory_vec`, because its connection
-  doesn't load sqlite-vec.
+  copy taken out of `sessions.db` (a calibration export, a backup).
 
 ## Privilege separation
 

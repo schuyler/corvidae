@@ -44,8 +44,9 @@ They own these tables in `sessions.db`: `memory`, `memory_fts`,
 two triggers, `message_log_ai` and `message_log_au`, on the kernel's
 `message_log` table. The kernel never reads them. They live in the database,
 not in code, so an operator who removes the extra keeps them, and the
-triggers keep indexing into a table nothing reads. That is harmless;
-`corvidae redact` still clears them
+triggers keep indexing into a table nothing reads. That is harmless, but
+`memory_vec` stays too, and `corvidae redact` needs sqlite-vec to touch it:
+reinstall the extra before redacting, or every form refuses
 ([design.md](design.md#operator-redaction-corvidae-redact)).
 
 ## Design

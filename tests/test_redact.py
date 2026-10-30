@@ -290,6 +290,23 @@ def test_cli_memory_form_without_memory_table_fails_cleanly(tmp_path, dry_run):
     assert isinstance(result.exception, SystemExit), repr(result.exception)
 
 
+def test_cli_kernel_db_needs_no_sqlite_vec(tmp_path, monkeypatch):
+    """Without memory_vec the CLI never needs sqlite-vec (#198): with the
+    module unimportable, the message form still tombstones and exits 0."""
+    import sys
+
+    from click.testing import CliRunner
+
+    db_path = str(tmp_path / "sessions.db")
+    asyncio.run(_make_kernel_db(db_path))
+    monkeypatch.setitem(sys.modules, "sqlite_vec", None)
+
+    result = CliRunner().invoke(redact_command, ["--db", db_path, "message", "1"])
+
+    assert result.exit_code == 0, result.output + repr(result.exception)
+    assert "1 of 1 messages" in result.output
+
+
 # ---------------------------------------------------------------------------
 # The corvidae.redact scrubber extension point (#160)
 # ---------------------------------------------------------------------------

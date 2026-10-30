@@ -667,3 +667,96 @@ def test_cli_message_output_says_how_many_ids_found(tmp_path):
 
     assert result.exit_code == 0, result.output
     assert "0 of 1" in result.output
+
+
+# ---------------------------------------------------------------------------
+# The CLI on a full database with memory_vec (#198)
+# ---------------------------------------------------------------------------
+
+
+async def _full_db_with_embedded_memory(path: str) -> dict:
+    """A file DB with memory_vec (vec0), a two-message dialog and a memory
+    record over it with a vec row. Returns the ids."""
+    import sqlite_vec
+
+    db = await make_full_db(path)
+    channel = "irc:#test"
+    msg1 = await insert_message(db, channel, "user", "the kestrel nests on Brannan")
+    msg2 = await insert_message(db, channel, "assistant", "noted, Brannan Street")
+    mem_id = await insert_memory(db, channel, "kestrel nest on Brannan", msg1, msg2)
+    await db.execute("UPDATE memory SET embedded = 1 WHERE id = ?", (mem_id,))
+    await db.execute(
+        "INSERT INTO memory_vec (memory_id, embedding) VALUES (?, ?)",
+        (mem_id, sqlite_vec.serialize_float32([1.0] + [0.0] * 31)),
+    )
+    await db.commit()
+    await db.close()
+    return {"msg1": msg1, "msg2": msg2, "mem": mem_id}
+
+
+async def _state(path: str, ids: dict) -> tuple[dict, dict, bool]:
+    """(message msg1, memory record, vec row present) read with sqlite-vec loaded."""
+    import sqlite_vec
+
+    db = await aiosqlite.connect(path)
+    try:
+        await db.enable_load_extension(True)
+        await db.load_extension(sqlite_vec.loadable_path())
+        return (
+            await get_message(db, ids["msg1"]),
+            await get_memory(db, ids["mem"]),
+            await vec_exists(db, ids["mem"]),
+        )
+    finally:
+        await db.close()
+
+
+class TestCliWithMemoryVec:
+    def test_memory_form_completes_and_deletes_vec_row(self, tmp_path):
+        from click.testing import CliRunner
+
+        path = str(tmp_path / "sessions.db")
+        ids = asyncio.run(_full_db_with_embedded_memory(path))
+        result = CliRunner().invoke(
+            redact_command, ["--db", path, "memory", str(ids["mem"])]
+        )
+        assert result.exit_code == 0, (result.output, result.exception)
+        message, memory, has_vec = asyncio.run(_state(path, ids))
+        assert "redacted" in message["message"]["content"]
+        assert memory["redacted"] == 1
+        assert not has_vec
+
+    def test_message_cascade_completes_and_deletes_vec_row(self, tmp_path):
+        from click.testing import CliRunner
+
+        path = str(tmp_path / "sessions.db")
+        ids = asyncio.run(_full_db_with_embedded_memory(path))
+        result = CliRunner().invoke(
+            redact_command, ["--db", path, "message", str(ids["msg1"])]
+        )
+        assert result.exit_code == 0, (result.output, result.exception)
+        message, memory, has_vec = asyncio.run(_state(path, ids))
+        assert "redacted" in message["message"]["content"]
+        assert memory["redacted"] == 1
+        assert not has_vec
+
+    def test_unloadable_sqlite_vec_refuses_before_writing(self, tmp_path, monkeypatch):
+        import sys
+
+        from click.testing import CliRunner
+
+        path = str(tmp_path / "sessions.db")
+        ids = asyncio.run(_full_db_with_embedded_memory(path))
+        # The extension cannot be imported: redact must not start writing.
+        monkeypatch.setitem(sys.modules, "sqlite_vec", None)
+        result = CliRunner().invoke(
+            redact_command, ["--db", path, "message", str(ids["msg1"])]
+        )
+        monkeypatch.delitem(sys.modules, "sqlite_vec")
+        assert result.exit_code != 0
+        assert "memory_vec" in result.output, result.output
+        assert "cognition" in result.output, result.output  # the remedy
+        message, memory, has_vec = asyncio.run(_state(path, ids))
+        assert "kestrel" in message["message"]["content"]
+        assert memory["redacted"] == 0
+        assert has_vec

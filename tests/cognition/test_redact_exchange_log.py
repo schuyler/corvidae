@@ -250,11 +250,6 @@ class TestFormsAndReporting:
         async def build() -> int:
             db, ids = await _db_with_dialog(path)
             mem_id = await insert_memory(db, "irc:#a", "kestrel nest", ids["u1"], ids["a1"])
-            # The CLI's own connection does not load sqlite-vec, so a vec0
-            # memory_vec table would crash it (a separate, pre-existing bug).
-            # Drop it here, where the extension is loaded.
-            await db.execute("DROP TABLE IF EXISTS memory_vec")
-            await db.commit()
             await db.close()
             return mem_id
 
