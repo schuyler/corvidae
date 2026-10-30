@@ -1196,7 +1196,9 @@ fork_prompt = build_prompt(window[:cut]) + [{"role": "user", "content": instruct
 
 **Prefix parity.** `Agent.fork(channel, instruction, *, cut=None,
 extra_body=None)` builds with exactly what step 7 of the agent loop uses:
-the `llm.main` client (its `extra_body`, e.g. `id_slot`), the channel's
+the client of the model whose window is forked (`llm.main`, unless a
+stage forks another model's window, PRD §3.7 Critique 4; its `extra_body`,
+e.g. `id_slot`), the channel's
 conversation tool schemas (`conv.tool_view.schemas`, per-channel since #149),
 `build_prompt(pending_ids, mid_conversation_system_role)`, and the same
 runtime-override filter (`_llm_overrides`). Any difference in what reaches
@@ -1294,11 +1296,13 @@ deployment meets it, and holds for llama.cpp's llama-server with one KV
 slot and Swift-1.5 (a Qwen 3.8 fine-tune); another backend may answer
 differently.
 
-**Fork by default (#180).** Every background call that has a live window
+**Fork by default (#180, implemented by #181).** This is the target,
+not the current code. Every background call that has a live window
 forks it: compaction from the dropped prefix; compaction-time
 consolidation from the same prefix in `before_compaction`, while the
 window is whole; idle consolidation from the full window; stage-2
-appraisal and each critique lens from the window at run time; provenance
+appraisal and each critique lens from the prefix ending at the exchange's
+final reply, as provenance does; provenance
 from the prefix ending at the exchange's final reply. Each forks only
 while the rows it needs are still in the window; for an exchange-scoped
 stage, a compaction between the reply and the fork is a miss, since the
@@ -1306,8 +1310,16 @@ prefix would no longer be what the agent saw. A fork that would not fit
 the slot's context is a miss too. A miss skips the stage with a warning
 (the rescue is a retry or a skip, never a standalone call), except
 compaction, which takes its can't-fail fallback. Today only provenance
-works this way; the other stages still fall back to standalone (the table
-above) until #73 flips `enabled`.
+follows this: it is fork-only, and with forks off for critique (the
+default config) it never runs. Every other stage still falls back to a
+standalone call on a miss or failure (critique `_fork_target`,
+`_fork_lens` and `_run_lens`; appraisal stage-2; `compaction.py`'s
+`_fork_summary` fallback; memory consolidation), until #181 converts them
+to skip-on-miss. Also #181's target, not enforced today: per-stage
+reasoning and reply caps (today one global
+`agent.forks.reasoning_budget_tokens` and no reply cap), the headroom
+guarantee below, and treating a fork that would not fit the slot's context
+as a miss.
 
 **Cost model.** A fork reuses the cached prefix and prefills only its
 instruction and reply. Exchange-scoped forks run before the slot's next
@@ -1337,7 +1349,9 @@ pass: the fork row and the main turn after it reuse the cached prefix
 (K1), the fork prompt begins with the main prompt (K2), and
 `response_format` holds under `tool_choice: "none"` with tools present
 (K3). On Lex at 913f7ab (appraisal and critique forking) all three
-passed; the flip of `enabled` is tracked there. #73's comparisons of fork
+passed; K3 ran offline on a Lex `sessions.db` snapshot. K3 also found
+the 2,048 reasoning budget binding on 5/10 appraisal and 9/10 provenance
+forks; #186 tracks it. The flip of `enabled` is tracked in #73. #73's comparisons of fork
 against standalone (planted-defect recall per lens, consolidation and
 compaction fidelity) are benchmarks, not gates.
 
