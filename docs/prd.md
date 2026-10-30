@@ -126,7 +126,9 @@ one is a bug even if its tests pass.
 8. **Local-first: one process, one machine, one SQLite file.** No message
    broker, no worker pool, no workflow engine. The database runs in WAL
    mode as a requirement, because a second process (the redact CLI) and a
-   second connection (the appraisal probe) read it concurrently.
+   second connection (the appraisal probe) read it concurrently. This is
+   about the agent's process and state; model endpoints are wherever the
+   operator points them (§3.6).
 
 9. **The operator is trusted; everyone else is text.** Prompt injection is
    the threat, not other tenants. Anything that arrived from a channel, a
@@ -179,7 +181,7 @@ one is a bug even if its tests pass.
     notify the operator, and runs whether or not anyone is talking and
     whatever agency plugins are loaded. Agency is a turn started on time or
     on the agent's own initiative rather than as a continuation of an
-    exchange: the scheduler's reminders and heartbeat are agency;
+    exchange: reminders and the heartbeat are agency;
     provenance objections and task results continue an exchange and are
     not; stylistic critique objections start no turn at all. Agency is
     optional. Without agency plugins the agent never initiates a turn and
@@ -271,7 +273,9 @@ one is a bug even if its tests pass.
     period the plugin chooses, and keeps getting that signal at a bounded
     rate through sustained quiet. The signal never fires for a channel with
     work queued or in flight. No plugin needs another component's queues to
-    learn that a channel is idle.
+    learn that a channel is idle. A plugin may give its idle work a latency
+    bound: the quiet the work needs shrinks the longer it has waited, so it
+    runs no later than the bound whatever the traffic (principle 13).
 
 ### 3.2 Transports
 
@@ -486,7 +490,8 @@ Per transport:
     texting-length turns in a one-on-one chat app, short turns that don't
     take over a group channel, longer answers where the medium invites them
     (the web UI, a coding session), and only the formatting the transport
-    can display. The operator decides what each channel's register is and
+    can display. The register also sets how readily the agent lets a
+    conversation end (§3.7, the right to silence). The operator decides what each channel's register is and
     can give a whole class of channels one, including channels that don't
     exist yet (each new Signal contact, each ACP session), without listing
     them. How the register is achieved (prompt material, history, context,
@@ -587,7 +592,10 @@ Per transport:
    consuming plugins implement their own two-step fallbacks (appraisal,
    critic) on their windowless paths. The embedding role has its own
    endpoint, a required `dimensions`, and document/query prefixes
-   matching the model card.
+   matching the model card. Any role may point at a remote endpoint. Its
+   credentials come from the environment, never from config. Whatever a
+   role is sent leaves the host, and `docs/threat-model.md` says which
+   stages send what (principle 9).
 2. Retries transient status codes and connection errors with capped
    exponential backoff, honours `Retry-After`, and waits out a router's
    "model is not loaded" for `model_not_loaded_wait` seconds. A terminal
@@ -764,6 +772,15 @@ deciding only what to newly append and in what order.
    traffic, never by live exploration. The decide gate withholds a
    task-origin final that adds nothing; a direct user reply is never
    withheld by defaults.
+5. The agent itself may decline any turn, a direct user turn included,
+   when it judges it has nothing true, relevant and substantial to add
+   (Grice's maxims). The channel's register (§3.3.11) sets the norm:
+   where the register is a task, a request addressed to the agent is
+   always answered; in conversational registers, a conversation that has
+   concluded gets silence. A declined turn sends nothing, is withheld as a
+   vetoed final is (item 2) so the agent knows it stayed silent, and is
+   recorded in the outcome log. In conversational registers it errs toward
+   silence: a missed reply costs the user one re-prompt.
 
 **Outcome log.** One `exchange_log` row per trace (origin, originating
 rowid, retrieval profile, probe score, both appraisal stages, provenance
@@ -786,6 +803,12 @@ concluded X, because...") and the heartbeat's review reads retired-goal
 records beside the open list, so an agent with a clock but no memory of
 its own conclusions cannot re-adopt a concluded purpose from the same
 evidence that produced it.
+
+**Heartbeat.** The heartbeat is a turn the agent starts when the system
+is idle (§3.1.16), with a latency bound so a busy system can't starve it.
+It reviews recent memory and open and retired goals, assesses itself, and
+acts only when the assessment warrants it. Putting it to sleep is durable
+across restarts.
 
 **People, observations, semantic facts.** `person` records keyed by
 `(transport, scope, sender)`, auto-created on first contact, carrying a
@@ -911,7 +934,7 @@ design: `docs/design.md`, Forks. The requirements are outcomes:
 ### 3.9 Scheduler
 
 1. One `schedule` table: due time, optional interval, target channel id,
-   text, origin (`reminder | heartbeat`), creator (`config | tool`),
+   text, origin (`reminder`), creator (`config | tool`),
    enabled flag and a durable disabled reason. There is no firing log; a
    firing is a persisted conversation row.
 2. Each row fires at its due time, using the kernel clock (§3.1.15), and
@@ -938,11 +961,7 @@ design: `docs/design.md`, Forks. The requirements are outcomes:
    cross-channel send and passes its gate (§3.5.9). They parse `when`
    themselves, refuse a bare number, cap pending rows per target channel
    and text length, and refuse to cancel config jobs.
-8. The heartbeat reviews recent memory and open goals, self-assesses
-   through a critique template with a distillation and rehearsal slot, and
-   acts only when the assessment warrants it. Deleting the heartbeat is a
-   durable sleep state that a restart does not undo.
-9. Cross-channel sends are specified in §3.5.9. Recurring reminders
+8. Cross-channel sends are specified in §3.5.9. Recurring reminders
    by tool need a per-channel budget first. Cron syntax waits for an
    operator to need it. Retention runs on the kernel clock (§3.1.15,
    §3.7 Memory 6) and does not depend on the scheduler.
@@ -1036,9 +1055,12 @@ design: `docs/design.md`, Forks. The requirements are outcomes:
    with a scripted interlocutor: recalls across restart, hedges weak
    memories, refuses to remember fabricated events, pushes back on flawed
    premises, declines a capable request, initiates unprompted, goes
-   dormant on heartbeat deletion.
-7. Phase 6 benchmarks are authored before their toggles are built.
-8. A third evaluation tier, below CI and the scheduled LLM-judged
+   dormant while the heartbeat sleeps.
+7. The right to silence (§3.7) has a behavioural eval: in a
+   conversational register, closers get silence and substantive questions
+   get replies; in a task register, every addressed request is answered.
+8. Phase 6 benchmarks are authored before their toggles are built.
+9. A third evaluation tier, below CI and the scheduled LLM-judged
    benchmarks, is the operator judging over weeks: consistency of voice,
    distinctiveness, legible drift, generalization under novel probes.
    Personality is longitudinal and relational and its main failure mode
@@ -1077,7 +1099,11 @@ record that holds the reasoning.
 | Best-guess defaults first; thresholds fit from experience; no closed-loop auto-fit | operator directives 1, 3 |
 | Engagement gate calibrates offline only | §3.2 |
 | Hedging vocabulary is persona, not architecture | §5.9 |
-| Heartbeat acts when warranted, not every beat; deletion is durable sleep | §5.8; `plans/scheduler.md` |
+| Heartbeat acts when warranted, not every beat; sleep is durable | §5.8; `plans/scheduler.md` |
+| The heartbeat starts on system idle, not on a schedule | #134 |
+| Idle-triggered work may carry a latency bound: the quiet it needs decays with waiting, so traffic can't starve it | #214 |
+| The agent may decline any turn when it has nothing to add (Grice's maxims, by register); gates still never withhold a direct reply by default | #215 |
+| Model endpoints may be remote; a role's credentials come from the environment, and the threat model names what each role sends | #217 |
 | Cross-channel sends are a requirement, gated by an operator allowlist that starts empty, a budget, a threat-model entry, and trust and sensitivity when those plugins are loaded | #167 |
 | Operator-seeded goals allowed | §5.14 |
 | Memory poisoning answered on the write side with trust tagging (trust plugin) | §3.9, §5.10 |
