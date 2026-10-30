@@ -1009,7 +1009,7 @@ Registered by `RuntimeSettingsPlugin` (entry point name: `runtime_settings`).
 
 | Tool | Parameters | What it does |
 |------|------------|--------------|
-| `set_settings` | `settings: dict` | Updates per-channel runtime settings. Accepts LLM inference parameters and framework parameters. Pass `null` for a key to revert it to the static config value. Returns the current overrides after the update. |
+| `set_settings` | `settings: dict` | Updates per-channel runtime settings. Accepts LLM inference parameters, framework parameters and dotted plugin tunables; any other key rejects the call. Pass `null` for a key to revert it to the static config value. Returns the current overrides after the update. |
 
 ### SchedulerPlugin tools
 
@@ -1290,15 +1290,15 @@ Implements one hook:
 
 The `set_settings` tool accepts a `settings` dict. Supported keys include
 LLM inference parameters (`temperature`, `top_p`, `top_k`,
-`frequency_penalty`, `presence_penalty`, `max_tokens`), framework
+`frequency_penalty`, `presence_penalty`, `max_tokens`, `seed`), framework
 parameters (`max_turns`, `max_context_tokens`, `reasoning_history`),
 and dotted plugin tunables (`critique.*`, `appraisal.*`; see
 configuration.md). Pass `null` for a key to clear the override and revert to
 the static config value. `system_prompt` is always blocked. Additional keys
 can be blocked via `agent.immutable_settings` in `agent.yaml`. Any other
-undotted key that isn't blocklisted is forwarded verbatim into the LLM request body and can override `model` and
-`messages`, so the `system_prompt` block is not a guarantee about the system
-prompt; see [threat-model.md](threat-model.md), finding 1.
+undotted key (`messages`, `model`, `tools`, …) rejects the whole call; only
+the inference parameters reach the LLM request body. See
+[threat-model.md](threat-model.md), finding 1.
 
 **Config:**
 ```yaml

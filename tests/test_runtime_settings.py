@@ -778,3 +778,130 @@ class TestSetSettingsAuditLogging:
         assert not info_records, (
             f"No INFO must be emitted when the call is rejected. Got: {info_records}"
         )
+
+
+# ---------------------------------------------------------------------------
+# set_settings tool: undotted keys are allowlisted (GitHub issue #206)
+# ---------------------------------------------------------------------------
+
+
+class TestSetSettingsAllowlist:
+    """Undotted keys outside the allowlist would land in the LLM request
+    body, where they replace the conversation or repoint the server
+    (docs/threat-model.md, finding 1), so set_settings refuses them."""
+
+    @pytest.mark.parametrize(
+        "key", ["messages", "model", "tools", "tool_choice", "stream", "tool_backend", "cwd"]
+    )
+    async def test_unlisted_undotted_key_rejected_without_mutation(self, key):
+        """The whole call is refused and nothing changes, and the message
+        names the rejected key, the accepted keys, and that dotted plugin
+        tunables are also allowed."""
+        set_settings = _get_set_settings_fn()
+        channel = _make_channel()
+
+        result = await set_settings(
+            settings={key: "x", "temperature": 0.3}, _ctx=_make_tool_context(channel)
+        )
+
+        assert channel.runtime_overrides == {}
+        assert result.startswith("Error")
+        assert key in result
+        # The accepted set is listed so the caller can correct the call.
+        for accepted in ("temperature", "seed", "max_turns", "reasoning_history"):
+            assert accepted in result
+        assert "dotted" in result
+        assert "Nothing was changed" in result
+
+    async def test_null_for_unlisted_key_rejected(self):
+        """Clearing is refused too, so the model can't drop transport
+        metadata (ACP's cwd) parked on runtime_overrides."""
+        set_settings = _get_set_settings_fn()
+        channel = _make_channel(runtime_overrides={"cwd": "/work"})
+
+        result = await set_settings(settings={"cwd": None}, _ctx=_make_tool_context(channel))
+
+        assert result.startswith("Error")
+        assert "cwd" in result
+        assert channel.runtime_overrides == {"cwd": "/work"}
+
+    async def test_rejection_logged_at_warning_with_keys(self, caplog):
+        """The refusal is logged with the rejected keys for the audit trail."""
+        import logging
+        set_settings = _get_set_settings_fn()
+        channel = _make_channel()
+
+        with caplog.at_level(logging.WARNING, logger="corvidae.tools.settings"):
+            await set_settings(settings={"model": "other"}, _ctx=_make_tool_context(channel))
+
+        records = [r for r in caplog.records if r.name == "corvidae.tools.settings"]
+        assert any(getattr(r, "rejected", None) == ["model"] for r in records)
+
+    @pytest.mark.parametrize(
+        "key, value",
+        [
+            ("temperature", 0.5),
+            ("top_p", 0.9),
+            ("top_k", 40),
+            ("frequency_penalty", 0.1),
+            ("presence_penalty", 0.1),
+            ("max_tokens", 512),
+            ("seed", 7),
+            ("max_turns", 5),
+            ("max_context_tokens", 8000),
+            ("reasoning_history", "keep"),
+            ("critique.sample_below_rate", 0.2),
+        ],
+    )
+    async def test_allowlisted_and_dotted_keys_accepted(self, key, value):
+        """Every documented inference and framework key, plus any dotted
+        plugin tunable, is still accepted."""
+        set_settings = _get_set_settings_fn()
+        channel = _make_channel()
+
+        await set_settings(settings={key: value}, _ctx=_make_tool_context(channel))
+
+        assert channel.runtime_overrides == {key: value}
+
+    async def test_blocklist_still_applies_to_allowlisted_key(self):
+        """immutable_settings narrows the allowlist: an operator can pin
+        temperature."""
+        set_settings = _get_set_settings_fn(immutable_settings={"temperature"})
+        channel = _make_channel()
+
+        result = await set_settings(settings={"temperature": 0.9}, _ctx=_make_tool_context(channel))
+
+        assert "immutable" in result
+        assert channel.runtime_overrides == {}
+
+    def test_tunable_framework_keys_are_channel_config_fields(self):
+        """Every framework key set_settings accepts is a real ChannelConfig
+        field, and the prompt and tool list are not among them."""
+        from corvidae.agent import FRAMEWORK_KEYS
+        from corvidae.tools.settings import TUNABLE_FRAMEWORK_KEYS
+
+        assert TUNABLE_FRAMEWORK_KEYS <= FRAMEWORK_KEYS
+        assert "system_prompt" not in TUNABLE_FRAMEWORK_KEYS
+        assert "disabled_tools" not in TUNABLE_FRAMEWORK_KEYS
+
+
+class TestLlmOverridesAllowlist:
+    """Agent._llm_overrides forwards only allowlisted inference keys, so an
+    override that reached runtime_overrides some other way still can't
+    reach the request body (defense in depth for issue #206)."""
+
+    def test_only_inference_keys_forwarded(self):
+        from corvidae.agent import Agent
+
+        channel = _make_channel(runtime_overrides={
+            "temperature": 0.3,
+            "seed": 1,
+            "model": "other",
+            "messages": [],
+            "tool_choice": "required",
+            "max_turns": 4,
+            "cwd": "/work",
+            "memory.k": 4,
+        })
+
+        assert Agent._llm_overrides(channel) == {"temperature": 0.3, "seed": 1}

@@ -2,13 +2,17 @@
 
 The set_settings tool lets the agent update LLM inference parameters (e.g.
 temperature, top_p) and framework parameters (e.g. max_turns) for the current
-channel at runtime. An operator-configurable blocklist prevents mutation of
-sensitive keys. "system_prompt" is always blocked regardless of operator config.
+channel at runtime. Undotted keys must be on an allowlist (INFERENCE_KEYS plus
+TUNABLE_FRAMEWORK_KEYS, GitHub issue #206): any other undotted key would be
+forwarded into the LLM request body, where ``messages`` or ``model`` replace
+the conversation or repoint the server. An operator-configurable blocklist
+narrows what remains. "system_prompt" is always blocked regardless of
+operator config.
 
 Dotted keys (e.g. "<plugin>.<tunable>") are plugin tunables resolved
 per-decision by ``corvidae.tuning.resolve_tunable`` — they take effect on the
 next plugin decision without restart and are NEVER forwarded to the LLM
-request body (agent.py step 7 excludes any key containing a dot).
+request body (agent.py step 7 forwards only INFERENCE_KEYS).
 set_settings is per-channel; the config-reload surface is global. Operators
 can block individual tunables from agent self-tuning via
 ``agent.immutable_settings`` (see docs/configuration.md for the recommended
@@ -17,11 +21,25 @@ blocklist on multi-speaker channels).
 
 import logging
 
-from corvidae.channel import parse_reasoning_history
+from corvidae.channel import INFERENCE_KEYS, parse_reasoning_history
 from corvidae.hooks import CorvidaePlugin, hookimpl
 from corvidae.tool import Tool, tool_to_schema
 
 logger = logging.getLogger(__name__)
+
+# The ChannelConfig fields set_settings may change. system_prompt and
+# disabled_tools are deliberately absent: the model must not rewrite its
+# own prompt or widen its own tool set.
+TUNABLE_FRAMEWORK_KEYS = frozenset({"max_turns", "max_context_tokens", "reasoning_history"})
+
+# Every undotted key set_settings accepts. Dotted keys are plugin tunables
+# (corvidae.tuning) and are never forwarded to the LLM.
+ACCEPTED_UNDOTTED_KEYS = INFERENCE_KEYS | TUNABLE_FRAMEWORK_KEYS
+
+
+def _unaccepted_keys(settings: dict) -> list[str]:
+    """The undotted keys in ``settings`` that are not on the allowlist."""
+    return sorted(k for k in settings if "." not in k and k not in ACCEPTED_UNDOTTED_KEYS)
 
 
 class RuntimeSettingsPlugin(CorvidaePlugin):
@@ -74,12 +92,13 @@ class RuntimeSettingsPlugin(CorvidaePlugin):
         plugin = self
 
         async def set_settings(settings: dict, _ctx) -> str:
-            """Update runtime settings for this conversation. Keys include LLM
-            inference parameters (temperature, top_p, top_k, frequency_penalty,
-            presence_penalty, max_tokens) and framework parameters (max_turns,
-            max_context_tokens, reasoning_history: drop | exchange | keep).
-            Pass null for a key to clear that override and revert to the
-            static config value.
+            """Update runtime settings for this conversation. Accepted keys:
+            LLM inference parameters (temperature, top_p, top_k,
+            frequency_penalty, presence_penalty, max_tokens, seed), framework
+            parameters (max_turns, max_context_tokens, reasoning_history:
+            drop | exchange | keep), and dotted plugin tunables. Any other
+            key is rejected. Pass null for a key to clear that override and
+            revert to the static config value.
             Returns the current settings after the update."""
             # Blocklist check runs first — before any mutations.
             blocked = [k for k in settings if k in plugin.blocklist]
@@ -91,6 +110,25 @@ class RuntimeSettingsPlugin(CorvidaePlugin):
                 return (
                     f"Error: the following settings are immutable and cannot be changed: "
                     f"{', '.join(sorted(blocked))}"
+                )
+
+            # Allowlist check, also before any mutation: an undotted key off
+            # the list would land in the LLM request body (issue #206).
+            # Clearing one is refused too, so transport metadata parked on
+            # runtime_overrides (ACP's cwd) can't be dropped.
+            rejected = _unaccepted_keys(settings)
+            if rejected:
+                logger.warning(
+                    "set_settings: keys outside the allowlist rejected",
+                    extra={"rejected": rejected},
+                )
+                return (
+                    f"Error: set_settings does not accept {', '.join(rejected)}. "
+                    f"Accepted keys: inference parameters "
+                    f"({', '.join(sorted(INFERENCE_KEYS))}), framework parameters "
+                    f"({', '.join(sorted(TUNABLE_FRAMEWORK_KEYS))}), and dotted "
+                    f"plugin tunables (<plugin>.<setting>). "
+                    f"Nothing was changed; retry without the rejected keys."
                 )
 
             channel = _ctx.channel
