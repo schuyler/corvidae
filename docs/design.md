@@ -180,7 +180,8 @@ class ChannelConfig:
 
 `resolve(agent_defaults, runtime_overrides=None)` returns a dict with all
 values resolved. Resolution order: built-in defaults → agent-level YAML →
-per-channel YAML → runtime overrides (set by `set_settings` tool).
+matching transport-wide entries, least specific first → per-channel YAML →
+runtime overrides (set by `set_settings` tool).
 Defaults: `max_context_tokens=24000`, `reasoning_history="drop"`,
 `max_turns=10`. `resolve` normalizes `reasoning_history` to the
 `ReasoningHistory` enum and raises `ValueError` on any other value.
@@ -201,18 +202,42 @@ class Channel:
     turn_counter: int = 0                   # consecutive LLM turns without user message
     pending_tool_call_ids: set = set()      # tool call IDs awaiting results; cleared when all results collected
     runtime_overrides: dict = {}            # per-channel runtime overrides set by set_settings tool
+    wide_entries: tuple[WideEntry, ...] = ()  # matching transport-wide entries, least specific first
 ```
 
-`channel.id` returns `"{transport}:{scope}"`.
+`channel.id` returns `"{transport}:{scope}"`. `channel.disabled_tools` is
+the union of `config.disabled_tools` and every `wide_entries` list.
+
+**Transport-wide entries** (#203). A `channels:` key ending in `*` is a
+`WideEntry(key, prefix, config)`: it covers every channel whose id starts
+with `prefix`, the key without its `*` (`signal:*`, `discord:dm:*`,
+`acp:*`). They exist for channels config can't name ahead of time: Signal
+DMs keyed on ACIs, ACP sessions with minted ids, Discord channels the bot is
+mentioned in. `parse_wide_key` accepts only `transport:*` and
+`transport:<scope-prefix>*`; only a trailing `*` is special, so exact keys
+that contain `*` (IRC allows it) load as before. Two prefixes that match the
+same id are always prefixes of each other, so ordering by length is total:
+more specific wins whatever order the keys appear in.
 
 **ChannelRegistry** — lifecycle management. `get_or_create(transport,
-scope, config)` returns an existing channel or creates one.
-`resolve_config(channel)` calls `channel.config.resolve(agent_defaults,
-runtime_overrides=channel.runtime_overrides)` so runtime overrides are
-factored into every resolution.
+scope, config)` returns an existing channel or creates one, assigning its
+matching wide entries. `resolve_config(channel)` overlays the channel's
+wide entries' scalar fields on `agent_defaults`, then calls
+`channel.config.resolve(layered, runtime_overrides=channel.runtime_overrides)`,
+so the existing per-field fallback gives exact > wide > agent and runtime
+overrides are factored into every resolution. `set_wide_entries(entries)`
+replaces the wide set and re-matches every registered channel, logging at
+INFO each channel whose matches change.
 
 `load_channel_config(config, registry)` pre-registers channels from
-YAML before `on_start`.
+YAML before `on_start`, and runs again on reload. It validates every entry,
+exact and wide, before applying any; it sets the wide entries first, so
+exact channels it then registers are matched at creation, and it never
+registers a wide key as a channel. Wide entries therefore reload like
+`agent:`: scalar keys apply to running channels from the next turn. A
+conversation's system prompt is set once, when its `ContextWindow` is
+created (compaction and forks keep it), so a prompt edit at any layer
+reaches only conversations that start after the reload.
 
 **resolve_system_prompt(value, base_dir)** — if `value` is a string,
 returns it directly. If a list of paths, reads each file and
@@ -434,8 +459,10 @@ Tools that don't declare `_ctx` work without modification.
 `channels.<id>.tools.disabled` (#149) narrows one channel on top of the
 global `tools.disabled`. It is parsed into `ChannelConfig.disabled_tools`
 by `load_channel_config`. The global list is already gone from the
-registry, so the channel's effective set is the registry minus its own
-list. `expand_disabled` adds coupled tools: `shell` and `task_pipeline`
+registry, so the channel's effective set is the registry minus
+`Channel.disabled_tools`: its own list unioned with every matching
+transport-wide entry's (#203), so no layer can re-enable a tool another
+disabled. `expand_disabled` adds coupled tools: `shell` and `task_pipeline`
 go together (PRD §3.5.3), for the global list too.
 
 - **Schemas are fixed per conversation.** When `Agent` initializes a
@@ -449,9 +476,11 @@ go together (PRD §3.5.3), for the global list too.
   a running conversation's schemas can change.
 - **Dispatch enforces.** Each tool task checks the name against
   `disabled_on(channel)` when it runs. That is the conversation view's set
-  plus the live `ChannelConfig` list. A disabled call returns
-  `refusal_message` as the tool result (naming the tool, channel and
-  config key) and is logged at WARNING. Hiding is not access control: the
+  plus the live `Channel.disabled_tools`. A disabled call returns
+  `refusal_message` as the tool result (naming the tool, channel and every
+  config key that disables it, via `disabling_keys`, so a tool a wide
+  entry disabled is reported under `channels.<wide key>.tools.disabled`)
+  and is logged at WARNING with the same keys. Hiding is not access control: the
   model can call a tool it saw earlier or one named in injected text. This
   is a config list, not the `should_execute_tool` hook (#148).
 - **Subagents inherit.** `SubagentPlugin` excludes `disabled_on(channel)`
@@ -459,8 +488,9 @@ go together (PRD §3.5.3), for the global list too.
 - **Hot reload.** `load_channel_config` validates every entry before it
   applies any. For channels already registered it updates only
   `disabled_tools`, in place, so a Signal ACI channel that shares its
-  alias's `ChannelConfig` follows. Because dispatch reads the union,
-  narrowing is enforced on the next call. The schemas, and any widening,
+  alias's `ChannelConfig` follows. Transport-wide entries are replaced
+  and re-matched on every live channel (`set_wide_entries`). Because
+  dispatch reads the union, narrowing is enforced on the next call. The schemas, and any widening,
   wait for the next compaction or conversation start.
 
 ## Conversation Management

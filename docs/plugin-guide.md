@@ -1365,7 +1365,7 @@ On each poll cycle, when the mtime has changed:
 2. CLI overrides are deep-merged on top of the new YAML.
 3. The result is validated (must be a dict with `llm.main`).
 4. `ChannelRegistry.agent_defaults` is updated from the new `agent` section.
-5. `load_channel_config` is called to register any new channel entries (existing channels are not updated).
+5. `load_channel_config` is called: it registers new exact entries, updates `tools.disabled` on channels already registered, and replaces transport-wide entries (`signal:*`), re-matching them on every live channel. A malformed section changes no channel.
 6. `on_config_reload` is dispatched to each plugin individually. A plugin that raises logs an error but does not block the other plugins.
 
 **Config:**

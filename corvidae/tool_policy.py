@@ -13,7 +13,9 @@ Two views of a channel's list exist on purpose:
   and again at a compaction boundary, is what the schemas are built from.
   Tool schemas head the prompt, so they never change mid-conversation
   (principle 2), and forks reuse them (prefix parity, `docs/design.md`, Forks).
-- The **live** ChannelConfig list, which a hot reload updates.
+- The **live** list, ``Channel.disabled_tools``: the channel's own
+  ChannelConfig list plus every matching transport-wide entry's
+  (``channels."signal:*"``, issue #203), which a hot reload updates.
 
 Dispatch refuses a tool disabled in either, so a narrowing reload takes
 effect at once even while the schemas still list the tool until the next
@@ -124,17 +126,41 @@ def _schema_name(schema: dict) -> str | None:
 
 def disabled_on(channel: "Channel") -> frozenset[str]:
     """Tools refused on ``channel`` right now: the conversation's view
-    plus the live config, so a narrowing reload applies at once."""
-    live = expand_disabled(channel.config.disabled_tools)
+    plus the live config (the channel's own list and every matching
+    transport-wide entry's), so a narrowing reload applies at once."""
+    live = expand_disabled(channel.disabled_tools)
     conversation = channel.conversation
     view = getattr(conversation, "tool_view", None) if conversation is not None else None
     return live | view.disabled if view is not None else live
+
+
+def disabling_keys(tool_name: str, channel: "Channel", *, expand: bool = True) -> list[str]:
+    """The ``channels.<key>.tools.disabled`` config keys that disable
+    ``tool_name`` on ``channel``: its exact entry and each matching
+    transport-wide entry (issue #203) whose list names it.
+
+    With ``expand`` a list also counts when it names a coupled tool
+    (``shell`` disables ``task_pipeline``). Falls back to the channel's own
+    key when no live list names the tool, which happens when only the
+    conversation's view still disables it after a widening reload.
+    """
+    def names(listed: frozenset[str]) -> bool:
+        return tool_name in (expand_disabled(listed) if expand else listed)
+
+    keys = [
+        f"channels.{entry.key}.tools.disabled"
+        for entry in channel.wide_entries
+        if names(entry.config.disabled_tools)
+    ]
+    if names(channel.config.disabled_tools) or not keys:
+        keys.insert(0, f"channels.{channel.id}.tools.disabled")
+    return keys
 
 
 def refusal_message(tool_name: str, channel: "Channel") -> str:
     """The tool result the model gets for a call to a disabled tool."""
     return (
         f"Error: tool '{tool_name}' is disabled on channel {channel.id} "
-        f"(channels.{channel.id}.tools.disabled); it was not run. "
+        f"({', '.join(disabling_keys(tool_name, channel))}); it was not run. "
         "Do not retry it here; use another tool or answer without it."
     )

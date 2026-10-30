@@ -206,8 +206,9 @@ class ConfigWatcherPlugin(CorvidaePlugin):
             registry.agent_defaults = new_agent_defaults
 
         # Step 5: Re-run load_channel_config to pick up new channel entries.
-        # Existing channels are NOT updated (they retain their original ChannelConfig
-        # until restart). load_channel_config is a no-op for channels that already exist.
+        # Existing channels keep their own ChannelConfig until restart, except
+        # tools.disabled; transport-wide entries ("signal:*") are replaced and
+        # re-matched against every live channel, like agent defaults above.
         try:
             load_channel_config(new_config, registry)
         except ValueError:

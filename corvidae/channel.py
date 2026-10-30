@@ -7,6 +7,7 @@ from the config file.
 
 Logging:
     - INFO: channel registered from config
+    - INFO: a live channel's transport-wide entries changed on reload
     - WARNING: invalid channel key format
     - DEBUG: channel config resolved
 """
@@ -114,7 +115,9 @@ class ChannelConfig:
     # channels.<id>.tools.disabled, layered on the global tools.disabled
     # (issue #149). Unlike the fields above it is not merged by resolve():
     # the Agent snapshots it per conversation (corvidae/tool_policy.py),
-    # and a hot reload updates it on channels already registered.
+    # and a hot reload updates it on channels already registered. The
+    # channel's effective list (Channel.disabled_tools) also unions every
+    # matching transport-wide entry's list (issue #203).
     disabled_tools: frozenset[str] = frozenset()
 
     def resolve(self, agent_defaults: dict, runtime_overrides: dict | None = None) -> dict:
@@ -170,6 +173,54 @@ class ChannelConfig:
         return resolved
 
 
+#: ChannelConfig fields resolved by ChannelConfig.resolve (disabled_tools
+#: is unioned by Channel.disabled_tools instead).
+_SCALAR_FIELDS = ("system_prompt", "max_context_tokens", "reasoning_history", "max_turns")
+
+#: The suffix that turns a ``channels:`` key into a transport-wide entry.
+WIDE_SUFFIX = "*"
+
+#: The key forms a transport-wide entry accepts, for error messages.
+_WIDE_FORMS = "'transport:*' or 'transport:<scope-prefix>*' (e.g. 'signal:*', 'discord:dm:*')"
+
+
+@dataclass(frozen=True)
+class WideEntry:
+    """A ``channels:`` entry whose key ends in ``*`` (issue #203).
+
+    It covers every channel whose id starts with ``prefix`` (the key
+    without its ``*``), including channels config never names: Signal DMs
+    keyed on ACIs, ACP sessions with minted ids, Discord channels the bot
+    is mentioned in. Never hashed (``config`` is a mutable dataclass);
+    entries are compared by equality only.
+    """
+
+    key: str
+    prefix: str
+    config: ChannelConfig
+
+    def matches(self, channel_id: str) -> bool:
+        """Whether this entry covers ``channel_id``."""
+        return channel_id.startswith(self.prefix)
+
+
+def parse_wide_key(key: str) -> str:
+    """Return the id prefix of a transport-wide ``channels:`` key, or raise
+    ValueError naming the key and the accepted forms.
+
+    Only the trailing ``*`` is special; a second ``*`` or a key without a
+    ``transport:`` in front of the ``*`` is rejected.
+    """
+    prefix = key[: -len(WIDE_SUFFIX)]
+    transport, colon, _ = prefix.partition(":")
+    if WIDE_SUFFIX in prefix or not colon or not transport:
+        raise ValueError(
+            f"Invalid transport-wide channel key {key!r} in channels — expected "
+            f"{_WIDE_FORMS}, with '*' only at the end"
+        )
+    return prefix
+
+
 @dataclass
 class Channel:
     """A conversation scope tied to a transport."""
@@ -180,18 +231,33 @@ class Channel:
     conversation: "ContextWindow | None" = None
     created_at: float = field(default_factory=time)
     last_active: float = field(default_factory=time)
-    turn_counter: int = 0  # Consecutive LLM turns without user message. Lives on Channel
-    pending_tool_call_ids: set = field(default_factory=set)  # Tool call IDs awaiting results. Cleared when all results collected.
-    runtime_overrides: dict = field(default_factory=dict)  # Per-channel runtime overrides set by the set_settings tool.
+    # Consecutive LLM turns without user message. Lives on Channel
     # (not on Agent) because the re-entrant agent loop design means tool
     # results re-enter via on_notify → serial queue → _process_queue_item.
     # The counter must be accessible across re-entries; Channel is the only
     # per-conversation object that persists across these re-entries.
+    turn_counter: int = 0
+    pending_tool_call_ids: set = field(default_factory=set)  # Tool call IDs awaiting results. Cleared when all results collected.
+    runtime_overrides: dict = field(default_factory=dict)  # Per-channel runtime overrides set by the set_settings tool.
+    # Transport-wide entries matching this channel, least specific first.
+    # ChannelRegistry assigns them at creation and on every config load, so
+    # a reload reaches live channels the way an agent: edit does.
+    wide_entries: tuple["WideEntry", ...] = ()
 
     @property
     def id(self) -> str:
         """The string key used for storage and routing."""
         return f"{self.transport}:{self.scope}"
+
+    @property
+    def disabled_tools(self) -> frozenset[str]:
+        """Tools this channel's config disables: its own list plus every
+        matching transport-wide entry's. A union, so no layer can re-enable
+        a tool another layer disabled."""
+        disabled = set(self.config.disabled_tools)
+        for entry in self.wide_entries:
+            disabled |= entry.config.disabled_tools
+        return frozenset(disabled)
 
     def touch(self) -> None:
         """Update last_active to now."""
@@ -220,6 +286,45 @@ class ChannelRegistry:
         """
         self.agent_defaults = agent_defaults if agent_defaults is not None else {}
         self.channels: dict[str, Channel] = {}
+        # Transport-wide channels: entries, set by load_channel_config.
+        self.wide_entries: tuple[WideEntry, ...] = ()
+
+    def _matching(self, channel_id: str) -> tuple[WideEntry, ...]:
+        """The wide entries covering ``channel_id``, least specific first.
+
+        Two matching prefixes of one id are always prefixes of each other,
+        so ordering by length is a total order; equal prefixes would be the
+        same key, which a mapping can't repeat.
+        """
+        return tuple(sorted(
+            (e for e in self.wide_entries if e.matches(channel_id)),
+            key=lambda e: len(e.prefix),
+        ))
+
+    def set_wide_entries(self, entries: tuple[WideEntry, ...]) -> None:
+        """Replace the transport-wide entries and re-match every live channel.
+
+        Wide entries reload like ``agent:``: a live channel sees the new
+        values at its next resolution (a conversation's system prompt and
+        tool schemas stay as they started until compaction or restart; see
+        docs/configuration.md). Each live channel whose matches change is
+        logged, so a reload never changes what a channel gets silently.
+        """
+        self.wide_entries = tuple(entries)
+        for channel in self.channels.values():
+            matches = self._matching(channel.id)
+            if matches == channel.wide_entries:
+                continue
+            channel.wide_entries = matches
+            logger.info(
+                "channel %s: transport-wide entries now %s; a narrowed tools.disabled "
+                "is refused at dispatch at once (widening waits for compaction), "
+                "other keys apply at the next turn, the system prompt at the next "
+                "new conversation",
+                channel.id, ", ".join(e.key for e in matches) or "(none)",
+                extra={"channel_id": channel.id, "wide_keys": [e.key for e in matches],
+                       "disabled": sorted(channel.disabled_tools)},
+            )
 
     def get_or_create(
         self,
@@ -238,6 +343,7 @@ class ChannelRegistry:
                 transport=transport,
                 scope=scope,
                 config=config or ChannelConfig(),
+                wide_entries=self._matching(channel_id),
             )
         channel = self.channels[channel_id]
         channel.touch()
@@ -248,8 +354,19 @@ class ChannelRegistry:
         return self.channels.get(channel_id)
 
     def resolve_config(self, channel: Channel) -> dict:
-        """Resolve channel config with agent-level fallbacks and runtime overrides."""
-        return channel.config.resolve(self.agent_defaults, runtime_overrides=channel.runtime_overrides)
+        """Resolve channel config with agent-level fallbacks and runtime overrides.
+
+        Matching transport-wide entries are overlaid on the agent defaults,
+        least specific first, so ChannelConfig.resolve's per-key fallback
+        gives: exact entry > wide entries > agent > built-in.
+        """
+        layered = dict(self.agent_defaults)
+        for entry in channel.wide_entries:
+            for name in _SCALAR_FIELDS:
+                value = getattr(entry.config, name)
+                if value is not None:
+                    layered[name] = value
+        return channel.config.resolve(layered, runtime_overrides=channel.runtime_overrides)
 
     def all(self) -> list[Channel]:
         """Return all registered channels."""
@@ -267,11 +384,16 @@ def load_channel_config(config: dict, registry: ChannelRegistry) -> None:
     in Runtime.start() enforces this — load_channel_config is called between
     plugin manager creation and the on_start hook.
 
-    Reads the top-level "channels" dict from config. Each key must be
-    in "transport:scope" format.
+    Reads the top-level "channels" dict from config. Each key is either an
+    exact channel id in "transport:scope" format, or a transport-wide key
+    ending in ``*`` ("signal:*", "discord:dm:*") that covers every channel
+    whose id starts with the text before the ``*`` (issue #203). Both kinds
+    accept the same keys.
 
-    Also runs on hot reload. A channel already registered keeps its
-    ChannelConfig except for ``tools.disabled``, which is updated in place
+    Also runs on hot reload. Transport-wide entries are replaced and
+    re-matched against every live channel (ChannelRegistry.set_wide_entries),
+    so they reload like ``agent:``. A channel already registered keeps its
+    own ChannelConfig except for ``tools.disabled``, which is updated in place
     (shared with any Signal ACI channel created from an E.164 alias); the
     Agent applies it to schemas at the next conversation start or
     compaction, and to dispatch at once (corvidae/tool_policy.py). Every
@@ -279,21 +401,30 @@ def load_channel_config(config: dict, registry: ChannelRegistry) -> None:
     nothing.
 
     Raises:
-        ValueError: If a channel key does not contain a colon separator, or
-            an entry uses the removed keep_thinking_in_history key, an
-            invalid reasoning_history value, or a malformed tools block.
+        ValueError: If a channel key does not contain a colon separator, a
+            transport-wide key is malformed, or an entry is not a mapping,
+            uses the removed keep_thinking_in_history key, an invalid
+            reasoning_history value, or a malformed tools block.
     """
     channels_config = config.get("channels", {})
     # Validate and build every entry first; apply only if all are good.
     parsed: list[tuple[str, str, str, ChannelConfig]] = []
+    wide: list[WideEntry] = []
     for channel_id, overrides in channels_config.items():
-        parts = channel_id.split(":", 1)
-        if len(parts) != 2:
-            logger.warning("invalid channel key format: %s", channel_id)
-            raise ValueError(
-                f"Invalid channel key {channel_id!r} — expected 'transport:scope'"
-            )
-        transport, scope = parts
+        # A trailing '*' makes a transport-wide key; anything else is an
+        # exact channel id (which may itself contain '*', as IRC allows).
+        is_wide = channel_id.endswith(WIDE_SUFFIX)
+        if is_wide:
+            prefix = parse_wide_key(channel_id)
+        else:
+            parts = channel_id.split(":", 1)
+            if len(parts) != 2:
+                logger.warning("invalid channel key format: %s", channel_id)
+                raise ValueError(
+                    f"Invalid channel key {channel_id!r} — expected 'transport:scope' "
+                    f"or a transport-wide {_WIDE_FORMS}"
+                )
+            transport, scope = parts
         if overrides is None:
             overrides = {}
         elif not isinstance(overrides, dict):
@@ -310,7 +441,14 @@ def load_channel_config(config: dict, registry: ChannelRegistry) -> None:
                 overrides.get("tools"), f"channels.{channel_id}"
             ),
         )
-        parsed.append((channel_id, transport, scope, channel_config))
+        if is_wide:
+            wide.append(WideEntry(key=channel_id, prefix=prefix, config=channel_config))
+        else:
+            parsed.append((channel_id, transport, scope, channel_config))
+
+    # Wide entries first, so exact channels registered below are matched
+    # against the new set at creation. A wide key is never a channel.
+    registry.set_wide_entries(tuple(wide))
 
     for channel_id, transport, scope, channel_config in parsed:
         existing = registry.get(channel_id)

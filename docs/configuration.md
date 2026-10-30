@@ -564,7 +564,7 @@ Advertised ACP session capabilities: `loadSession`, `list`, `resume`,
 
 ## `channels` — per-channel overrides
 
-Keys are `transport:scope` identifiers (e.g., `irc:#general`, `cli:local`). Each value is a mapping of overrides applied on top of `agent` defaults. Any key absent from the channel block uses the `agent`-level default.
+Keys are `transport:scope` identifiers (e.g., `irc:#general`, `cli:local`), or transport-wide keys ending in `*` (e.g., `signal:*`) that cover every channel of a transport; see [Transport-wide entries](#transport-wide-entries). Each value is a mapping of overrides applied on top of `agent` defaults. Any key absent from the channel block uses the transport-wide entry's value if one matches, else the `agent`-level default.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
@@ -574,7 +574,7 @@ Keys are `transport:scope` identifiers (e.g., `irc:#general`, `cli:local`). Each
 | `reasoning_history` | `drop` \| `exchange` \| `keep` | `agent.reasoning_history` | Controls `reasoning_content` retention for this channel. |
 | `tools.disabled` | list of strings | `[]` | Tools this channel cannot use, on top of the global `tools.disabled`. The channel can only narrow; it can't re-enable a globally disabled tool, and `set_settings` can't change the list. `shell` and `task_pipeline` disable together. See [Per-channel tool sets](#per-channel-tool-sets). |
 
-Channels not listed here are created on-demand when a message arrives and use `agent` defaults for all fields.
+Channels not listed here are created on-demand when a message arrives and use matching transport-wide entries, then `agent` defaults.
 
 ```yaml
 channels:
@@ -587,6 +587,30 @@ channels:
       - prompts/cli-addendum.txt
     reasoning_history: keep
 ```
+
+### Transport-wide entries
+
+Some channels can't be listed ahead of time. Signal DMs are keyed on each contact's ACI, ACP sessions get a fresh id per session, and the bot answers in any Discord channel it's mentioned in. A key ending in `*` covers all of them: it matches every channel whose id starts with the text before the `*`, including channels that first appear after the config was loaded.
+
+```yaml
+channels:
+  signal:*:                        # every Signal DM, current and future
+    system_prompt: [prompts/SOUL.md, prompts/chat.md, prompts/signal_dm.md]
+  discord:*:                       # Discord server channels and threads (and DMs, below)
+    system_prompt: [prompts/SOUL.md, prompts/chat.md, prompts/discord_group.md]
+    tools:
+      disabled: [shell, web_fetch]
+  discord:dm:*:                    # Discord DMs: more specific than discord:*
+    system_prompt: [prompts/SOUL.md, prompts/chat.md]
+  signal:8f2c1c9a-3e21-4b77-9c3f-1a2b3c4d5e6f:
+    max_turns: 20                  # one contact keeps the Signal prompt, with more turns
+```
+
+A transport-wide entry accepts the same keys as an exact one. Each setting resolves in this order, last wins: built-in default, `agent:`, matching transport-wide entries from least to most specific (so `discord:dm:*` beats `discord:*` whatever order they're written in), the channel's exact entry, then `set_settings` runtime overrides. A Signal phone-number alias counts as an exact entry. `tools.disabled` is the exception: it's the union of the global list and every matching entry, so a more specific entry can narrow further but can't re-enable a tool.
+
+The accepted key forms are `transport:*` and `transport:<scope-prefix>*`. A `*` anywhere else in a key ending in `*`, or a key with no `transport:` before the `*`, is rejected at startup, and on reload, naming the key. Only a trailing `*` is special, so an exact key like `irc:#c*t` still works; the one casualty is an IRC channel whose name itself ends in `*`, which now reads as a transport-wide key. Matching is on channel ids, so `signal:+1*` would match only phone-number alias entries, never a conversation (Signal conversations are keyed on ACIs). A transport-wide key is never a channel itself. This is a prefix match, not the glob syntax `memory.channel_groups` uses: `*` means "the rest of the id" and only at the end, and `?` has no meaning.
+
+Transport-wide entries reload like `agent:` does: a running channel sees the new values at its next use. `max_turns`, `max_context_tokens` and `reasoning_history` apply from the next turn, and `tools.disabled` follows the rules under [Per-channel tool sets](#per-channel-tool-sets). A conversation's system prompt is fixed when it starts and survives compaction, so a prompt edit reaches only channels created after the reload, or everything after a restart. Removing a transport-wide entry also takes effect live. Each running channel whose matching entries change is logged at INFO.
 
 ### Per-channel tool sets
 
@@ -601,18 +625,18 @@ channels:
       disabled: [shell, web_fetch] # here too; task_pipeline goes with shell
 ```
 
-The channel's set is the global list plus its own, resolved when its conversation starts, the same way its system prompt is. The tool schemas sit at the head of the prompt, so they stay fixed for the conversation; rewriting them every turn would rebuild the llama-server KV cache every turn. Forks of the channel send the same schemas.
+The channel's set is the global list plus its own and every matching transport-wide entry's, resolved when its conversation starts, the same way its system prompt is. The tool schemas sit at the head of the prompt, so they stay fixed for the conversation; rewriting them every turn would rebuild the llama-server KV cache every turn. Forks of the channel send the same schemas.
 
-Hiding a tool isn't access control. A model can still call a tool it saw earlier in the conversation, or one named in text someone pasted in. So dispatch enforces the list too: a call to a disabled tool doesn't run. The model gets back `Error: tool 'shell' is disabled on channel irc:#lex (channels.irc:#lex.tools.disabled); it was not run. ...`, and the refusal is logged at WARNING with the tool and channel. A `subagent` launched from the channel gets the same narrowed set, so the tool isn't one hop away.
+Hiding a tool isn't access control. A model can still call a tool it saw earlier in the conversation, or one named in text someone pasted in. So dispatch enforces the list too: a call to a disabled tool doesn't run. The model gets back `Error: tool 'shell' is disabled on channel irc:#lex (channels.irc:#lex.tools.disabled); it was not run. ...`, and the refusal is logged at WARNING with the tool and channel. Both name every key that disables the tool, so a tool disabled by `discord:*` is reported as `channels.discord:*.tools.disabled`. A `subagent` launched from the channel gets the same narrowed set, so the tool isn't one hop away.
 
-`tools` accepts only `disabled`. Anything else is rejected at startup, and on reload, naming the key, the rejected value and the accepted keys. A name that matches no loaded tool is logged at WARNING when the conversation starts. That catches typos, though an MCP tool whose server hasn't connected yet reads the same way.
+`tools` accepts only `disabled`. Anything else is rejected at startup, and on reload, naming the key, the rejected value and the accepted keys. A name that matches no loaded tool is logged at WARNING, naming the key it's under, when the conversation starts. That catches typos, though an MCP tool whose server hasn't connected yet reads the same way.
 
-**On hot reload** the list is live for channels that are already running. This is the one channel key that is; the others need a restart.
+**On hot reload** the list is live for channels that are already running. In an exact entry it's the only live key; the others need a restart. A transport-wide entry's keys are all live (see [Transport-wide entries](#transport-wide-entries)).
 
 - **Narrowing** (adding a tool to the list) is enforced at dispatch on the next call. The schemas keep listing the tool until the next compaction or conversation start, so the model may try it and be refused.
 - **Widening** (removing a tool from the list) takes effect at the next compaction or conversation start. Until then the tool stays hidden and refused, so the head of the prompt never changes mid-conversation.
 - A call that was already dispatched runs to completion.
-- Removing a channel's whole entry from `channels:` keeps its last list until restart. To re-enable everything on a running channel, set `disabled: []`.
+- Removing a channel's whole exact entry from `channels:` keeps its last list until restart. To re-enable everything on a running channel, set `disabled: []`. Removing a transport-wide entry takes effect live.
 
 Discord channels are keyed on numeric ids: `discord:<channel_id>` for a server channel, `discord:<thread_id>` for a thread (a thread has its own id and its own history, so it does not inherit its parent channel's override), and `discord:dm:<user_id>` for a DM. Names are not accepted, because they change and the id is the persistence key.
 
@@ -693,8 +717,9 @@ No restart is required for the changes listed below. Changes that require restar
 | `agent.immutable_settings` | `RuntimeSettingsPlugin` resets its blocklist and re-applies the new list. Constructor-supplied immutable keys are always retained. |
 | New channel entries in `channels:` | `load_channel_config` registers newly added channels. |
 | `channels.<id>.tools.disabled` on a registered channel | Updated in place. Dispatch refuses a newly disabled tool at once; the schemas follow at the next compaction or conversation start, never mid-conversation. See [Per-channel tool sets](#per-channel-tool-sets). A reload with a malformed entry changes no channel. |
+| Transport-wide entries (`channels.<transport>:*`) | Replaced and re-matched against every running channel. Scalar keys apply from the next turn, `tools.disabled` as above, the system prompt only to conversations that start after the reload. See [Transport-wide entries](#transport-wide-entries). |
 | `web.token` | A changed token logs out every browser (their sockets close and the page says the session expired). A token removed from config falls back to `CORVIDAE_WEB_TOKEN` as the daemon started with it, else a fresh generated one, which is logged. Changing `CORVIDAE_WEB_TOKEN` itself needs a restart. |
-| `agent` defaults | `ChannelRegistry.agent_defaults` is updated; new channels created after the reload use the new defaults. |
+| `agent` defaults | `ChannelRegistry.agent_defaults` is updated. `max_turns`, `max_context_tokens` and `reasoning_history` are resolved every turn, so running channels pick them up at their next turn; `system_prompt` reaches only conversations that start after the reload. |
 
 ### What requires restart
 
@@ -702,7 +727,7 @@ No restart is required for the changes listed below. Changes that require restar
 |---------|--------|
 | `irc.host`, `irc.port`, `irc.nick` | IRC transport is connected at startup; changing connection parameters requires reconnection. |
 | `web.host`, `web.port`, `web.allowed_origins`, adding or removing the `web` block | The listener is bound at startup. A reload logs `restart to apply` and keeps serving with the old values. |
-| Existing channel config in `channels:` | Channels already registered retain their original `ChannelConfig` until restart, except `tools.disabled` (above). |
+| Existing exact entries in `channels:` | Channels already registered retain their original `ChannelConfig` until restart, except `tools.disabled` (above). Transport-wide entries are live (above). |
 | `llm.background` | Not updated on reload. |
 | `memory.*` (including `memory.consolidation_prompt` and `memory.consolidation_fork_prompt`) | `MemoryPlugin` reads its section at init only. That includes `memory.idle_consolidate_after` and `memory.retention.*`: the idle watch and retention timer are set when the plugin starts. |
 | `tools.max_result_chars`, `tools.shell_timeout`, `tools.web_fetch_timeout` | Deferred; not currently implemented in hot-reload path. |
