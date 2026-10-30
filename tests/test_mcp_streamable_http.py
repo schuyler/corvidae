@@ -10,9 +10,8 @@ mocks.
 
 import asyncio
 import logging
-import socket
 from collections.abc import AsyncIterator
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import uvicorn
@@ -52,14 +51,9 @@ def _bearer_app(token: str):
 @pytest.fixture
 async def mcp_url() -> AsyncIterator[str]:
     """Serve the bearer-protected MCP app on a free port; yield its /mcp URL."""
-    # Reserve a free port, then hand it to uvicorn.
-    sock = socket.socket()
-    sock.bind(("127.0.0.1", 0))
-    port = sock.getsockname()[1]
-    sock.close()
-
+    # Port 0: the OS picks a free port at bind time, so there is no race.
     server = uvicorn.Server(
-        uvicorn.Config(_bearer_app(TOKEN), host="127.0.0.1", port=port,
+        uvicorn.Config(_bearer_app(TOKEN), host="127.0.0.1", port=0,
                        log_level="warning", lifespan="on")
     )
     task = asyncio.create_task(server.serve())
@@ -67,6 +61,7 @@ async def mcp_url() -> AsyncIterator[str]:
     async with asyncio.timeout(5):
         while not server.started:
             await asyncio.sleep(0.02)
+    port = server.servers[0].sockets[0].getsockname()[1]
     try:
         yield f"http://127.0.0.1:{port}/mcp"
     finally:
@@ -122,35 +117,48 @@ class TestStreamableHttp:
 
 class TestHeaderEnvironment:
     async def test_missing_env_var_names_server_header_and_variable(
-        self, monkeypatch, caplog
+        self, mcp_url, monkeypatch, caplog
     ):
-        # An unset variable is a config error: one warning saying what to set,
-        # and no lazy retry, because the daemon's environment cannot change.
+        # An unset variable is a config error: exactly one warning saying what
+        # to set, and no lazy retry, because the daemon's environment cannot
+        # change. A second, correctly configured server still connects.
         monkeypatch.delenv("TEST_MCP_MISSING", raising=False)
+        monkeypatch.setenv("TEST_MCP_TOKEN", TOKEN)
         with caplog.at_level(logging.WARNING, logger="corvidae.mcp_client"):
             plugin = await _start({
                 "wiki": {
                     "transport": "streamable_http",
                     "url": "http://127.0.0.1:1/mcp",
                     "headers": {"Authorization": "Bearer ${TEST_MCP_MISSING}"},
-                }
+                },
+                "good": {
+                    "transport": "streamable_http",
+                    "url": mcp_url,
+                    "headers": {"Authorization": "Bearer ${TEST_MCP_TOKEN}"},
+                    "connect_timeout_seconds": 5,
+                },
             })
         try:
-            messages = [r.getMessage() for r in caplog.records
-                        if r.levelno == logging.WARNING]
-            assert any(
-                "wiki" in m and "Authorization" in m and "TEST_MCP_MISSING" in m
-                and "environment" in m
-                for m in messages
-            ), messages
-            assert plugin._servers == []
+            warnings = [r for r in caplog.records
+                        if r.levelno >= logging.WARNING
+                        and r.name == "corvidae.mcp_client"]
+            assert len(warnings) == 1, [r.getMessage() for r in warnings]
+            message = warnings[0].getMessage()
+            for needle in ("wiki", "Authorization", "TEST_MCP_MISSING", "environment"):
+                assert needle in message, message
+            assert [s.name for s in plugin._servers] == ["good"]
             assert "wiki" not in plugin._pending_servers
         finally:
             await plugin.on_stop()
 
-    async def test_header_values_are_not_logged(self, mcp_url, monkeypatch, caplog):
-        # The resolved token must not appear in any log record.
-        monkeypatch.setenv("TEST_MCP_TOKEN", TOKEN)
+    @pytest.mark.parametrize("token_env", [TOKEN, "wrong-token"])
+    async def test_header_values_are_not_logged(
+        self, mcp_url, monkeypatch, caplog, token_env
+    ):
+        # Neither the accepted token (success path) nor a rejected one (the
+        # 401 failure path, which logs with a traceback) appears anywhere in
+        # a log record: message, extra fields or formatted traceback.
+        monkeypatch.setenv("TEST_MCP_TOKEN", token_env)
         with caplog.at_level(logging.DEBUG):
             plugin = await _start({
                 "wiki": {
@@ -161,15 +169,19 @@ class TestHeaderEnvironment:
                 }
             })
         try:
-            assert plugin._servers, "server should have connected"
-            assert not any(TOKEN in r.getMessage() for r in caplog.records)
+            assert bool(plugin._servers) == (token_env == TOKEN)
+            formatter = logging.Formatter()
+            for record in caplog.records:
+                text = str(record.__dict__)
+                if record.exc_info:
+                    text += formatter.formatException(record.exc_info)
+                assert token_env not in text, record.getMessage()
         finally:
             await plugin.on_stop()
 
     async def test_sse_transport_sends_headers(self, monkeypatch):
         # sse_client receives the resolved headers. Mocked: the SDK's
         # MCPServer has no bearer-protected SSE fixture worth standing up.
-        from unittest.mock import AsyncMock, patch
 
         monkeypatch.setenv("TEST_MCP_TOKEN", TOKEN)
         session = MagicMock()
