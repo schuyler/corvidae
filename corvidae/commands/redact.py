@@ -25,10 +25,9 @@ import asyncio
 import json
 import logging
 import re
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-
-import sqlite3
 
 import aiosqlite
 import click
@@ -157,8 +156,8 @@ async def _load_sqlite_vec_if_needed(db: aiosqlite.Connection) -> None:
         logger.warning("cannot load sqlite-vec for memory_vec", exc_info=True)
         raise click.ClickException(
             "This database has memory_vec, which needs the sqlite-vec "
-            f"extension, and it could not be loaded ({type(exc).__name__}: "
-            f"{exc}). Nothing was changed. Install the cognition extra "
+            f"extension, and it could not be loaded ({type(exc).__name__}). "
+            "Nothing was changed. Install the cognition extra "
             "(uv sync --extra cognition), or run corvidae redact in the "
             "daemon's environment."
         ) from exc
