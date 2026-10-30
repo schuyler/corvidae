@@ -28,6 +28,7 @@ Logging:
 from __future__ import annotations
 
 import logging
+import math
 
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 from corvidae.idle import IdleTracker, IdleWatch
@@ -69,8 +70,8 @@ def parse_after(config: dict) -> float | None:
     """Return ``heartbeat.after`` in seconds, or None when the heartbeat sleeps.
 
     Raises ValueError, naming the key, the value and what is accepted, for
-    anything but a positive number: a zero period would mean back-to-back
-    beats.
+    anything but a positive finite number: a zero period would mean
+    back-to-back beats.
     """
     block = config.get("heartbeat") or {}
     if not isinstance(block, dict):
@@ -81,8 +82,14 @@ def parse_after(config: dict) -> float | None:
     value = block.get("after")
     if value is None:
         return None
-    # bool is an int subclass; True is not a period.
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+    # bool is an int subclass; True is not a period. NaN would arm at zero
+    # delay (back-to-back beats) and infinity would never beat.
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value <= 0
+    ):
         raise ValueError(
             f"heartbeat.after: got {value!r}; expected a positive number of "
             "seconds — check agent.yaml, or remove the key to keep the "

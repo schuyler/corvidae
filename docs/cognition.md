@@ -651,7 +651,7 @@ it.
 
 **Failures.** A memory read that raises is logged as a WARNING naming the
 channel and the exception, and that beat is skipped; the tracker retries
-`after` seconds later. An invalid `heartbeat.after` (zero, negative,
+`after` seconds later. An invalid `heartbeat.after` (zero, negative, non-finite,
 boolean, non-numeric) fails startup with a `ValueError`, and an awake
 heartbeat without the memory plugin fails startup with a `RuntimeError`
 saying to enable memory or remove `heartbeat.after`.
