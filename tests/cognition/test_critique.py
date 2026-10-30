@@ -44,7 +44,7 @@ OBJECTION_VERDICT = json.dumps({"objections": [
 ]})
 
 
-def verdicts_text(*supported, claims=None):
+def verdicts_text(*supported):
     """A provenance fork reply: one verdict per flag, claim index in order."""
     return json.dumps({"verdicts": [
         {"claim": i + 1, "reason": f"reason {i + 1}", "supported": flag}

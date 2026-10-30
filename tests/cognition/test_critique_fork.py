@@ -282,11 +282,10 @@ def _funnel_entries(env):
     return env.funnel.register_and_wake.await_args.kwargs["entries"]
 
 
-async def _verdict_run(tmp_path, text, n=3, with_funnel=True):
+async def _verdict_run(tmp_path, text, n=3):
     agent = RenderingForkAgent({"critique"}, text=text)
-    env = await _provenance_env(tmp_path, with_funnel=with_funnel)
-    if with_funnel:
-        env.funnel.register_and_wake = AsyncMock()
+    env = await _provenance_env(tmp_path, with_funnel=True)
+    env.funnel.register_and_wake = AsyncMock()
     await _provenance_exchange(env, agent)
     await _run_provenance(env, claims=_claims(n))
     return env, agent
@@ -311,6 +310,8 @@ def test_provenance_extra_body_is_a_fixed_length_tuple_schema():
     assert len(array["prefixItems"]) == 3
     for i, item in enumerate(array["prefixItems"]):
         assert item["type"] == "object"
+        # The verdict is generated after its written reason.
+        assert list(item["properties"]) == ["claim", "reason", "supported"]
         assert item["properties"] == {
             "claim": {"const": i + 1},
             "reason": {"type": "string"},
@@ -357,7 +358,7 @@ async def test_one_unsupported_claim_of_three_is_one_objection(tmp_path):
         await _teardown(env)
 
 
-async def test_objection_quotes_our_claim_not_a_model_echo(tmp_path):
+def test_objection_quotes_our_claim_not_a_model_echo():
     from corvidae_cognition.critique import CritiquePlugin
 
     objections, supported = CritiquePlugin._verdicts_from_text(
@@ -393,10 +394,11 @@ def _v(claim, reason="r", supported=True):
     _verdicts(_v(1), _v(2), _v(3), _v(4)),
     _verdicts(_v(2), _v(1), _v(3)),
     _verdicts(_v(1), _v(2), _v(3, supported="yes")),
-    _verdicts(_v(1), _v(2), _v(True)),
+    _verdicts(_v(1), _v(2), _v(3, supported=1)),
+    _verdicts(_v(True), _v(2), _v(3)),
     _verdicts(_v(1), _v(2), _v(3, reason=None)),
 ], ids=["old-format", "empty", "two-for-three", "four-for-three", "wrong-order",
-        "supported-not-bool", "claim-is-bool", "reason-not-str"])
+        "supported-not-bool", "supported-is-int", "claim-is-bool", "reason-not-str"])
 async def test_malformed_verdicts_skip_the_check(tmp_path, caplog, text):
     agent = RenderingForkAgent({"critique"}, text=text)
     env = await _provenance_env(tmp_path, with_funnel=True)
