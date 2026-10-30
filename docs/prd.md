@@ -481,6 +481,16 @@ Per transport:
 9. `<think>` blocks are stripped from display, never from the DB.
 10. Double-buffer compaction (build the compacted prompt in a second KV
     slot and swap) is out of scope until it has its own decision.
+11. The agent writes in the social register of the channel it's in:
+    texting-length turns in a one-on-one chat app, short turns that don't
+    take over a group channel, longer answers where the medium invites them
+    (the web UI, a coding session), and only the formatting the transport
+    can display. The operator decides what each channel's register is and
+    can give a whole class of channels one, including channels that don't
+    exist yet (each new Signal contact, each ACP session), without listing
+    them. How the register is achieved (prompt material, history, context,
+    sampling) is a design choice, not a requirement; the bar is behavioural
+    (principle 6), and an essay-length reply to a one-line text is a bug.
 
 ### 3.4 Persistence
 
@@ -954,7 +964,10 @@ design: `docs/design.md`, Forks. The requirements are outcomes:
    every key, commented out; `agent.minimal.yaml.example` is the kernel
    alone.
 2. Resolution order for channel settings: built-in defaults, agent-level
-   YAML, per-channel YAML keyed by channel id, runtime overrides.
+   YAML, transport-wide YAML (an entry covering every channel whose id
+   starts with a given prefix; less specific before more specific),
+   per-channel YAML keyed by channel id, runtime overrides. A channel's disabled tools are the
+   union of every layer, so a layer can narrow but never re-enable.
 3. `agent.yaml` is hot-reloaded on mtime change with per-plugin error
    isolation; the configuration doc states which keys apply live and which
    need a restart; a malformed reload changes nothing.

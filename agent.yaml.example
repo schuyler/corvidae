@@ -213,10 +213,25 @@ agent:
 #         Authorization: "Bearer ${OTTERWIKI_MCP_TOKEN}"
 
 # Per-channel config (optional)
-# Keys must be "transport:scope". Overrides agent defaults where set.
+# Keys are "transport:scope", or transport-wide "transport:*" /
+# "transport:<scope-prefix>*" covering every channel whose id starts with
+# the text before the "*", including ones created later (each new Signal
+# contact, each ACP session). Only a trailing "*" is special here, unlike
+# memory.channel_groups, which uses glob patterns. Resolution, last wins:
+# agent defaults, transport-wide (less specific first), exact entry,
+# set_settings. tools.disabled is the union of every layer.
 channels:
   cli:local:
     system_prompt: "You are a helpful assistant running in CLI mode."
+  # Chat register for chat apps (docs/prompt-guide.md, "Chat register fragments"):
+  # signal:*:                       # every Signal DM, current and future
+  #   system_prompt: [prompts/SOUL.md, prompts/chat.md, prompts/signal_dm.md]
+  # discord:*:                      # Discord server channels and threads
+  #   system_prompt: [prompts/SOUL.md, prompts/chat.md, prompts/discord_group.md]
+  # discord:dm:*:                   # Discord DMs; beats discord:* (more specific)
+  #   system_prompt: [prompts/SOUL.md, prompts/chat.md]
+  # acp:*:                          # every ACP session (ids are minted per session)
+  #   max_turns: 30
   # irc:#lex:
   #   system_prompt: "You are Sherman, an IRC bot in #lex."
   #   max_context_tokens: 8000

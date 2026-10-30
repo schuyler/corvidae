@@ -54,17 +54,30 @@ channels:
       - prompts/cli-addendum.txt
 ```
 
+A transport-wide entry (a key ending in `*`) sets the prompt for every channel of a transport, including ones that don't exist yet, such as each new Signal contact or ACP session:
+
+```yaml
+channels:
+  signal:*:
+    system_prompt: [prompts/SOUL.md, prompts/chat.md, prompts/signal_dm.md]
+  discord:dm:*:
+    system_prompt: [prompts/SOUL.md, prompts/chat.md]
+```
+
 The lookup priority is:
 
 1. Per-channel `system_prompt` (if set)
-2. Agent-level `system_prompt` (fallback)
-3. Built-in default: `"You are a helpful assistant."`
+2. The most specific matching transport-wide entry's `system_prompt` (`discord:dm:*` before `discord:*`)
+3. Agent-level `system_prompt` (fallback)
+4. Built-in default: `"You are a helpful assistant."`
+
+See [configuration.md](configuration.md#transport-wide-entries) for the key forms and reload behaviour.
 
 Runtime overrides (via the `set_settings` tool) can change many channel settings, and the `system_prompt` key is always blocked. That block is narrower than it sounds: an undotted key such as `messages` is forwarded into the LLM request body and replaces the whole conversation, system prompt included. See [threat-model.md](threat-model.md), finding 1, and `agent.immutable_settings` in [configuration.md](configuration.md) for the stopgap.
 
 ### When it is resolved
 
-The system prompt is resolved **on the first message to a channel**. It is stored in `channel.conversation.system_prompt` (a `ContextWindow` attribute) and does not change for the lifetime of that conversation. Restarting the daemon re-reads the config and creates a fresh `ContextWindow`.
+The system prompt is resolved **on the first message to a channel**. It is stored in `channel.conversation.system_prompt` (a `ContextWindow` attribute) and does not change for the lifetime of that conversation: compaction and forks keep it, and a hot reload doesn't touch it. Restarting the daemon re-reads the config and creates a fresh `ContextWindow`. History reloaded after the restart keeps the old prompt's replies, which the model tends to imitate until compaction drops them.
 
 ---
 
@@ -122,7 +135,7 @@ class MemoryPlugin(CorvidaePlugin):
 
 `CONTEXT` entries survive compaction — `CompactionPlugin` only summarizes `MESSAGE` entries.
 
-Each message injected during `before_agent_turn` is individually persisted by `Agent` via `persist_message`, in a loop that runs after the hook completes (agent.py:741–758).
+Each message injected during `before_agent_turn` is individually persisted by `Agent` via `persist_message`, in a loop that runs after the hook completes (`Agent._process_queue_item_attributed`).
 
 ### Avoiding duplicate injections
 
@@ -182,6 +195,18 @@ A typical prompt for a CLI session with a composable system prompt:
 
 `ContextCompactPlugin` was a disabled-by-default background-block system that summarized older conversation segments and injected them via `before_agent_turn`. It has been removed: it is superseded by `MemoryPlugin` (memory consolidation and retrieval — see [design.md](design.md)), and per-turn token stats now live in the `usage_log` table.
 
+## Chat register fragments
+
+Chat apps have their own social norms: short turns, one thought at a time, and no formatting the transport can't show. An instruction-tuned model's default is a structured, paragraph-length answer, and an adjective like "concise" in a persona doesn't move it far. These fragments describe the behaviour concretely and show a few example exchanges, which steer the register much better than adjectives. Like the memory fragment below, they're persona, not architecture, and nothing loads them unless you list them:
+
+| File | For | What it adds |
+|------|-----|--------------|
+| `prompts/chat.md` | any chat channel | Texting norms: match the other person's length, answer first, no headers or bold, gist before detail, plus example exchanges. |
+| `prompts/signal_dm.md` | Signal DMs | Plain text only: Signal shows Markdown as literal asterisks and pound signs. |
+| `prompts/discord_group.md` | Discord server channels | Group manners: short turns so the bot doesn't take over the channel; code blocks are fine. |
+
+Pair them per transport with transport-wide entries (see the example under [Per-channel overrides](#per-channel-overrides)): `signal:*` gets `chat.md` + `signal_dm.md`, `discord:*` gets `chat.md` + `discord_group.md`, `discord:dm:*` gets `chat.md` alone. Leave them off the web UI, the CLI and ACP sessions, where longer answers are the point. The examples in `chat.md` avoid any reference to earlier conversation, because a model that copies that habit starts inventing shared history. In group channels the model can't yet see who is speaking (#204), so `discord_group.md` doesn't ask it to address people by name.
+
 ## Memory calibration fragment
 
 `prompts/memory_calibration.md` is a documented system-prompt fragment for deployments running `MemoryPlugin`: assert only strongly-banded memories, hedge moderate ones, frame unretrieved claims as inference, and treat "I have no memory of that" as a correct answer when retrieval comes back empty. It is **not** auto-injected — epistemic hedging vocabulary is persona, not architecture. Add it to a channel's `system_prompt` file list if you want the behavior.
@@ -194,17 +219,18 @@ Retrieval quality depends on `llm.embedding.document_prefix` and `llm.embedding.
 
 | Component | File | What it does |
 |-----------|------|--------------|
-| `resolve_system_prompt()` | `corvidae/channel.py:303` | Reads file list or returns literal string |
-| `ChannelConfig.resolve()` | `corvidae/channel.py:115` | Merges agent defaults, channel overrides, runtime overrides |
-| `ContextWindow` | `corvidae/context.py:83` | Holds messages and system prompt in memory |
-| `ContextWindow.build_prompt()` | `corvidae/context.py:139` | Assembles final message list for LLM |
-| `count_tokens()` | `corvidae/context.py:33` | Tiktoken-based token count (cl100k_base); char-based fallback |
-| `ContextWindow.token_estimate()` | `corvidae/context.py:230` | Token count for all messages; delegates to `count_tokens()` |
-| `ContextWindow.remove_by_type()` | `corvidae/context.py:242` | Clears in-memory entries of a given type |
-| Lazy initialization | `corvidae/agent.py:636` | First-message conversation setup |
-| `before_agent_turn` hook | `corvidae/agent.py:734` | Context injection point |
-| `resolve_compaction` hook | `corvidae/agent.py:722` | Compaction trigger |
-| `after_persist_assistant` hook | `corvidae/agent.py:800` | Post-LLM in-memory message post-processing |
+| `resolve_system_prompt()` | `corvidae/channel.py` | Reads file list or returns literal string |
+| `ChannelConfig.resolve()` | `corvidae/channel.py` | Merges agent defaults, channel overrides, runtime overrides |
+| `ChannelRegistry.resolve_config()` | `corvidae/channel.py` | Overlays matching transport-wide entries on the agent defaults, then calls `ChannelConfig.resolve()` |
+| `ContextWindow` | `corvidae/context.py` | Holds messages and system prompt in memory |
+| `ContextWindow.build_prompt()` | `corvidae/context.py` | Assembles final message list for LLM |
+| `count_tokens()` | `corvidae/context.py` | Tiktoken-based token count (cl100k_base); char-based fallback |
+| `ContextWindow.token_estimate()` | `corvidae/context.py` | Token count for all messages; delegates to `count_tokens()` |
+| `ContextWindow.remove_by_type()` | `corvidae/context.py` | Clears in-memory entries of a given type |
+| Lazy initialization | `corvidae/agent.py` (`_process_queue_item_attributed`) | First-message conversation setup |
+| `before_agent_turn` hook | `corvidae/agent.py` | Context injection point |
+| `resolve_compaction` hook | `corvidae/agent.py` | Compaction trigger |
+| `after_persist_assistant` hook | `corvidae/agent.py` | Post-LLM in-memory message post-processing |
 | `ThinkingPlugin` | `corvidae/thinking.py` | Strips `reasoning_content` from in-memory history |
 
 For full configuration details, see [configuration.md](configuration.md).

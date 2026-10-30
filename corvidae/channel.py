@@ -231,13 +231,14 @@ class Channel:
     conversation: "ContextWindow | None" = None
     created_at: float = field(default_factory=time)
     last_active: float = field(default_factory=time)
-    turn_counter: int = 0  # Consecutive LLM turns without user message. Lives on Channel
-    pending_tool_call_ids: set = field(default_factory=set)  # Tool call IDs awaiting results. Cleared when all results collected.
-    runtime_overrides: dict = field(default_factory=dict)  # Per-channel runtime overrides set by the set_settings tool.
+    # Consecutive LLM turns without user message. Lives on Channel
     # (not on Agent) because the re-entrant agent loop design means tool
     # results re-enter via on_notify → serial queue → _process_queue_item.
     # The counter must be accessible across re-entries; Channel is the only
     # per-conversation object that persists across these re-entries.
+    turn_counter: int = 0
+    pending_tool_call_ids: set = field(default_factory=set)  # Tool call IDs awaiting results. Cleared when all results collected.
+    runtime_overrides: dict = field(default_factory=dict)  # Per-channel runtime overrides set by the set_settings tool.
     # Transport-wide entries matching this channel, least specific first.
     # ChannelRegistry assigns them at creation and on every config load, so
     # a reload reaches live channels the way an agent: edit does.

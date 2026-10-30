@@ -242,7 +242,10 @@ persistent and quiet rather than immediate. A channel's own
 `channels.<id>.tools.disabled` *is* hot-reloaded. Removing an entry from it
 widens that channel's tools at its next compaction, with no restart, so on
 a channel that still has `write_file` the per-channel list is only as
-strong as the protection on `agent.yaml`. It can also
+strong as the protection on `agent.yaml`. The same goes for a
+transport-wide entry (`channels."discord:*"`, #203): all its keys reload
+live onto every matching channel, so one edit widens a whole transport. It
+can also
 rewrite any file named in a list-form `agent.system_prompt`, which is a
 persistent persona change that never touches `agent.yaml` and takes effect
 on the next restart or new channel. `web_fetch` has
@@ -293,9 +296,13 @@ dangerous tools off an IRC channel the operator configures, for example
 `channels: {"irc:#lex": {tools: {disabled: [shell, write_file, read_file,
 subagent]}}}`, while the operator's own channels keep them. Dispatch
 enforces the list, not just the schemas. It doesn't cover PM channels:
-a stranger's PM channel is keyed on a nick nobody configured, so it gets
-the global set. Until PMs are gated, the global `tools.disabled` is the
-only control there.
+a stranger's PM channel is keyed on a nick nobody configured, so no exact
+entry reaches it. A transport-wide `irc:*` entry does (#203), since it
+covers channels created at runtime, but it covers every IRC channel and an
+exact entry can't re-enable a tool it disables (the lists are unioned), so
+it can't spare the operator's own IRC channels. Nicks share no prefix that
+would single out PMs. Until PMs are gated, `irc:*` or the global
+`tools.disabled` is the control there.
 
 Discord is built like Signal, not like IRC. The transport's
 `should_process_message` is a default-deny allowlist of numeric user ids; an
