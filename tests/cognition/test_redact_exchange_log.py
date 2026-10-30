@@ -1,5 +1,10 @@
 """`corvidae redact` reaches exchange_log (#160).
 
+The scrub is cognition's: outcome_log owns exchange_log and registers its
+scrubber under the ``corvidae.redact`` entry-point group, which the kernel
+redact CLI runs after tombstoning. These tests go through the real entry
+point.
+
 exchange_log holds text copied out of the conversation in two columns:
 ``appraisal.stage2.past_claims`` (claims quoted from the reply, plus search
 phrases built from them) and ``provenance_snapshot`` (the CONTEXT messages
@@ -139,7 +144,7 @@ class TestPastClaims:
                 "SELECT provenance_snapshot FROM exchange_log WHERE trace_id = 't1'"
             ) as cursor:
                 assert (await cursor.fetchone())[0] is None
-            assert result["affected_exchanges"] == 2
+            assert result["scrubbed"]["exchange_log"] == 2
         finally:
             await db.close()
 
@@ -182,7 +187,7 @@ class TestFormsAndReporting:
             mem_id = await insert_memory(db, "irc:#a", "kestrel nest", ids["u1"], ids["a1"])
             result = await redact_memory_id(db, mem_id, dry_run=True)
             # t1 (claims + snapshot) and t2 (snapshot).
-            assert result["affected_exchanges"] == 2
+            assert result["scrubbed"]["exchange_log"] == 2
             appraisal, snapshot = await _row(db, "t1")
             assert appraisal["stage2"]["past_claims"] == CLAIMS
             assert snapshot is not None
@@ -194,7 +199,7 @@ class TestFormsAndReporting:
         try:
             result = await redact_messages(db, [ids["u1"]], dry_run=True)
             # t1 (claims + snapshot) and t2 (snapshot) would change.
-            assert result["affected_exchanges"] == 2
+            assert result["scrubbed"]["exchange_log"] == 2
             appraisal, snapshot = await _row(db, "t1")
             assert appraisal["stage2"]["past_claims"] == CLAIMS
             assert snapshot is not None
@@ -205,7 +210,7 @@ class TestFormsAndReporting:
         db, ids = await _db_with_dialog()
         try:
             result = await redact_messages(db, [ids["u1"]])
-            assert result["affected_exchanges"] == 2
+            assert result["scrubbed"]["exchange_log"] == 2
         finally:
             await db.close()
 
@@ -260,3 +265,26 @@ class TestFormsAndReporting:
         assert result.exit_code == 0, result.output
         assert "2 exchange_log rows" in result.output, result.output
 
+
+
+class TestRegistration:
+    def test_exchange_log_scrubber_is_registered(self):
+        # The kernel finds the scrubber only through the entry point.
+        from importlib.metadata import entry_points
+
+        found = {ep.name: ep for ep in entry_points(group="corvidae.redact")}
+        assert "exchange_log" in found, sorted(found)
+        assert callable(found["exchange_log"].load())
+
+    async def test_db_without_exchange_log_skips_with_notice(self):
+        # A DB whose daemon never ran outcome_log has no exchange_log table.
+        db = await make_full_db()
+        try:
+            row_id = await insert_message(db, "irc:#a", "user", "hello there")
+            notices: list[str] = []
+            result = await redact_messages(db, [row_id], notices=notices)
+            assert result["affected_messages"] == 1
+            assert result["scrubbed"]["exchange_log"] == 0
+            assert any("exchange_log" in n for n in notices), notices
+        finally:
+            await db.close()
