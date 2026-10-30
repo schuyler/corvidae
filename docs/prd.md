@@ -179,8 +179,9 @@ one is a bug even if its tests pass.
     notify the operator, and runs whether or not anyone is talking and
     whatever agency plugins are loaded. Agency is a turn started on time or
     on the agent's own initiative rather than as a continuation of an
-    exchange: the scheduler's reminders and heartbeat are agency; critique
-    objections and task results continue an exchange and are not. Agency is
+    exchange: the scheduler's reminders and heartbeat are agency;
+    provenance objections and task results continue an exchange and are
+    not; stylistic critique objections start no turn at all. Agency is
     optional. Without agency plugins the agent never initiates a turn and
     has no reminders or heartbeat, and its upkeep still runs. No plugin's
     documented behaviour may depend on traffic it does not control.
@@ -679,7 +680,9 @@ here; append and persist one CONTEXT row with its rowid attached. Non-
 tool-call notification payloads register with the funnel and are admitted
 at the turn their stub triggers, coalesced per `(channel, origin)`, so a
 critique verdict cannot ride a reminder's stub; payloads unregister at
-admission, and the pending flag clears when a drain is attempted. Salience
+admission, and the pending flag clears when a drain is attempted. A payload
+can instead register without a stub; it is admitted at the channel's next
+turn, whatever that turn's origin, and wakes nothing. Salience
 arbitration across sources is a policy swap inside the funnel (Phase 6),
 deciding only what to newly append and in what order.
 
@@ -729,9 +732,13 @@ deciding only what to newly append and in what order.
    are judged, against the stored originating message; `critique`,
    `heartbeat`, and `task` exchanges are exempt, unbypassable by tool use.
    Withheld responses stay eligible.
-4. Empty objections are recorded and wake nothing. Non-empty objections
-   re-enter as framed CONTEXT through the funnel's deferred path at the
-   turn their stub triggers. Where two models are deployed (a critic on a
+4. Empty objections are recorded and wake nothing. Stylistic objections
+   re-enter as framed CONTEXT at the channel's next turn and wake nothing,
+   so a self-check never sends the user an unsolicited message.
+   Provenance objections re-enter at the turn their stub triggers, and the
+   agent may end that turn without sending anything. It is told that
+   silence is the default, and to reply only when it judges its earlier
+   reply could lead the other party to take an incorrect action. Where two models are deployed (a critic on a
    different model from `llm.main`), each keeps its own append-only
    window, and the critic forks the window of the one that did not
    generate.
