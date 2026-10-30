@@ -70,12 +70,24 @@ one is a bug even if its tests pass.
    message so the cached prefix stays stable. Background calls that need the
    conversation fork it (§3.8) rather than rebuilding it.
 
-3. **Background cognition never blocks the main turn.** The agent loop is
-   single-turn dispatch: one LLM call per queue item, tool calls as tasks,
-   results re-entering as notifications. Appraisal, critique,
-   consolidation, and retention run as silent tasks or plugin-owned tasks
-   and shape the *next* turn. The inbound gate runs inside the transport
-   read path and never calls a model.
+3. **Background cognition avoids blocking the main turn.** The point is
+   interactivity. The agent loop is single-turn dispatch: one LLM call per
+   queue item, tool calls as tasks, results re-entering as notifications.
+   Appraisal, critique, consolidation, and retention run opportunistically
+   as silent tasks or plugin-owned tasks, and shape the *next* turn.
+   Background work runs in the gaps between main turns. Deferral is bounded
+   so interactivity can't starve it: an exchange's own background work
+   (stage-2 appraisal, critique) finishes before the next main turn on the
+   slot begins, so its results are in place for the turn that reads them.
+   Other queued background work (upkeep) yields to a waiting main turn:
+   beyond any exchange-scoped work still owed and past-due upkeep, the main
+   turn waits at most for the call already running. Upkeep that is past due
+   runs next, ahead of a waiting main turn, so traffic can't starve it
+   (principle 13). On one KV slot a background call can't run beside the
+   main turn, so the requirement is to keep its slot time short (a fork
+   with bounded output, §3.8) and out of the way; it is not a guarantee of
+   zero delay. The inbound gate runs inside the transport read path and
+   never calls a model.
 
 4. **The conversation log is append-only.** `message_log` rows are never
    deleted and their order is never rewritten. Compaction hides; memory
@@ -101,13 +113,13 @@ one is a bug even if its tests pass.
    reconstruct general knowledge the weights already hold. Expect the
    honest eval to retire scaffolding.
 
-7. **Cheap, always-on perception gates expensive cognition.** One
-   appraisal signal has three consumers: engagement, deliberation depth,
+7. **Cheap, always-on perception gates expensive cognition.** One appraisal
+   signal has three consumers: engagement, deliberation depth,
    consolidation strength. Epistemic checks stay independent of the
    appraisal scores: the provenance check fires on any claim about the past
-   and is judged against retrieved records, never on generator confidence. Thresholds ship as commented
-   best guesses, are tuned from the outcome log, and are never auto-fitted
-   in a closed loop.
+   and is judged against records, never on generator confidence. Thresholds
+   ship as commented best guesses, are tuned from the outcome log, and are
+   never auto-fitted in a closed loop.
 
 8. **Local-first: one process, one machine, one SQLite file.** No message
    broker, no worker pool, no workflow engine. The database runs in WAL
@@ -414,10 +426,19 @@ Per transport:
    otherwise snap forward to drop the cycle whole if half the retention
    budget survives, otherwise keep the walk's cut. Only MESSAGE rows are
    summarized; SUMMARY and CONTEXT rows survive. Prior summaries carry
-   forward, bounded to a fraction of the budget.
+   forward, bounded to a fraction of the budget. Compaction is never
+   skipped for a missed or failed fork: when its fork misses or fails, a
+   fallback that cannot fail brings the window back within budget, logs a
+   warning naming the channel and what was lost, and leaves the agent
+   answering. The same fallback covers any window over budget that
+   compaction won't or can't take (too few rows to compact, a few huge
+   ones): a window over budget is always brought back within budget. A
+   failed compaction must never wedge the agent; that failure is what
+   ended nanobot, the harness corvidae replaced.
 3. The summary's role follows how it was written. A forked summary is
    the agent's own first-person account and persists as `assistant`. A
-   standalone summary is a neutral paraphrase of other people's messages
+   standalone summary (replays and evals only; live compaction always
+   forks, §3.8) is a neutral paraphrase of other people's messages
    and tool output and persists as `user`, under the same
    data-not-instructions framing the funnel uses, for the reason
    `docs/threat-model.md` finding 3 gives for CONTEXT. Either way a
@@ -551,8 +572,9 @@ Per transport:
 1. OpenAI-compatible chat completions over aiohttp. Roles `main`,
    `background`, `embedding`; any unconfigured role falls back to `main`;
    consuming plugins implement their own two-step fallbacks (appraisal,
-   critic). The embedding role has its own endpoint, a required
-   `dimensions`, and document/query prefixes matching the model card.
+   critic) on their windowless paths. The embedding role has its own
+   endpoint, a required `dimensions`, and document/query prefixes
+   matching the model card.
 2. Retries transient status codes and connection errors with capped
    exponential backoff, honours `Retry-After`, and waits out a router's
    "model is not loaded" for `model_not_loaded_wait` seconds. A terminal
@@ -580,7 +602,7 @@ only through the funnel.
    payload, never reconstructed from timestamps) and on idle (channels
    idle, per §3.1.16, for `memory.idle_consolidate_after`), against a
    per-channel watermark so the two never double-store, in a plugin-owned
-   task that never wakes the main model.
+   task that never starts a turn.
 2. A record is a first-person summary with epistemic framing preserved,
    dated by when the conversation happened, embedded, linked to its
    `message_log` id range, and scored by a pluggable importance prior
@@ -621,11 +643,12 @@ only through the funnel.
    not on traffic.
 7. Consolidation keeps topically distinct conversations in one range
    separate: the record names identifying detail from each, and no fact
-   from one is attributed to the other. The consolidation prompt carries
-   its own calibration language, since the channel's system prompt does
-   not reach that call. Topic structure is the `topic` subject type's job
-   (below), not a retrieval dimension, and the harness conflation probe is
-   what says whether that holds.
+   from one is attributed to the other. The standalone consolidation
+   prompt (seeding, imports, replays and evals, which have no window to
+   fork) carries its own calibration language, since the channel's system
+   prompt does not reach it. Topic structure is the `topic` subject
+   type's job (below), not a retrieval dimension, and the harness
+   conflation probe is what says whether that holds.
 8. `corvidae redact` (`message`, `memory`, `range` forms, `--dry-run`)
    tombstones `message_log` content in place and cascades to every
    derived surface on the same channel: memory summaries, flags, vectors,
@@ -657,11 +680,11 @@ deciding only what to newly append and in what order.
    calls a model. Novelty is specified as surprise, composed from the
    probe and the heuristics; input-side perplexity is future-if-provider-
    supports.
-2. Stage 2 runs post-acceptance, off the response path, as a silent task
-   or a fork: the fuller vector (valence, stakes, ambiguity, commitment
-   density, novelty), the importance prior, the memory record's valence
-   tag. A tier-2 readout head over the embedding replaces the model call
-   only once trained (Phase 5; #141).
+2. Stage 2 runs post-acceptance, off the response path, as a fork in a
+   silent task (§3.8): the fuller vector (valence, stakes, ambiguity,
+   commitment density, novelty), the importance prior, the memory record's
+   valence tag. A tier-2 readout head over the embedding replaces the
+   model call only once trained (Phase 5; #141).
 3. Vectors are keyed by trace id and direction in a bounded store and
    persisted to `exchange_log`; the compute is pull-based because
    broadcast hooks dispatch concurrently.
@@ -676,22 +699,28 @@ deciding only what to newly append and in what order.
    appraisal vector (ambiguity to predictive, commitments to constrained,
    negative valence with disagreement to adversarial), samples below
    threshold at `critique.sample_below_rate` as the false-negative bound,
-   and runs each lens as a fork or a standalone schema-constrained call on
-   the critic client.
+   and runs each lens as a schema-constrained fork (§3.8).
 2. The provenance check runs on any claim about the past, independent of
-   the appraisal scores. Stage-2 appraisal (a model) lists the claims; the
-   code fetches the evidence (the memory snapshot and the closest earlier
-   raw-dialog messages within the channel's retrieval scope, the exchange's
-   own rows excluded); the provenance critic (a model) judges whether any
-   record supports each claim. Generator confidence is never evidence.
+   the appraisal scores. Stage-2 appraisal (a model) lists the claims. The
+   provenance critic (a model) judges whether any record supports each
+   claim, and its evidence is what the agent had when it wrote the reply:
+   the forked window up to the reply (the system prompt, the exchange's
+   own rows including its tool results, and the CONTEXT admitted for it),
+   plus a keyword search, fetched by code, of earlier raw-dialog messages
+   within the channel's retrieval scope, which reaches what has left the
+   window; its hits are quoted to the critic as data, not instructions.
+   The reply is never a record of itself. Generator confidence is
+   never evidence.
 3. Eligibility is by propagated origin: `user` and `reminder` exchanges
    are judged, against the stored originating message; `critique`,
    `heartbeat`, and `task` exchanges are exempt, unbypassable by tool use.
    Withheld responses stay eligible.
 4. Empty objections are recorded and wake nothing. Non-empty objections
    re-enter as framed CONTEXT through the funnel's deferred path at the
-   turn their stub triggers. Where two models are deployed, the critic is
-   bound to the one that did not generate.
+   turn their stub triggers. Where two models are deployed (a critic on a
+   different model from `llm.main`), each keeps its own append-only
+   window, and the critic forks the window of the one that did not
+   generate.
 
 **Output gate and the right to silence.**
 
@@ -829,29 +858,57 @@ if it wins. The encode/retrieve gate is expected to lose.
    rendered window plus one `user` instruction. It mutates nothing,
    persists nothing, fires no hooks, dispatches no tools, and raises
    `ForkRefused` on any reply carrying a tool call, structured or written
-   out as text.
-2. Prefix parity is a hard rule: the `llm.main` client and its
-   `extra_body`, the same tool schemas, the same `build_prompt` arguments,
-   the same runtime-override filter, `reasoning_effort` untouched. On top:
-   `tool_choice: "none"`, `agent.forks.reasoning_budget_tokens`, the
-   stage's `response_format`, applied after overrides so `set_settings`
-   cannot re-enable tools.
-3. Compaction forks from the dropped prefix; compaction-time consolidation
-   forks from the same prefix in `before_compaction` while the window is
-   whole; idle consolidation, stage-2 appraisal, and each critique lens
-   fork from the full window at run time, and only when the rows they need
-   are still in it. Every miss falls back to the stage's standalone call.
-   Seeding, imports, replays and evals are always standalone. Subagents
-   never fork.
-4. Fork instructions live beside each standalone prompt, in the second
-   person, and are static config that `set_settings` cannot write.
-5. Each stage forks only once #73's measurements (planted-defect recall
-   per lens, consolidation and compaction fidelity, cached-token reuse per
-   fork row) favour it; appraisal and critique are measured before
-   consolidation and compaction. #73 tracks which stages do.
-6. Each forkable call is attributed `mode = fork | standalone` in
-   `usage_log`. Forks on with a different `llm.background` model logs a
-   startup warning that those stages move to the main model.
+   out as text. An exchange-scoped stage (stage-2 appraisal, the critique
+   lenses) forks from the prefix ending at the exchange's final reply, so
+   it never sees rows written after that reply. The window is append-only
+   and those forks run before the slot's next main turn (principle 3), so
+   that prefix is still a cache hit.
+2. Prefix parity is a hard rule: the client of the model whose window is
+   forked (`llm.main`, unless the stage forks another model's window,
+   §3.7 Critique 4) and its `extra_body`, the same tool schemas, the same
+   `build_prompt` arguments, the same runtime-override filter,
+   `reasoning_effort` untouched. On top: `tool_choice: "none"`, the
+   stage's reasoning and reply caps (item 5), and the stage's
+   `response_format`, applied after overrides so `set_settings` cannot
+   re-enable tools or lift the caps.
+3. Every background call that has a live window forks it. On the
+   single-KV-slot deployment (§1) a fork is the cheap path: the cached
+   prefix is reused, and only the instruction and the reply are prefilled.
+   A standalone prompt re-prefills from nothing, evicts the main window's
+   cache, and judges from a rebuilt copy of the conversation it was meant
+   to see. Compaction forks from the dropped prefix; compaction-time
+   consolidation forks from the same prefix in `before_compaction`, while
+   the window is whole and before compaction proceeds; idle consolidation
+   forks from the full window; stage-2 appraisal and each critique lens
+   fork as item 1 says. Each forks only while the rows it needs are still
+   in the window; for an exchange-scoped stage, a compaction between the
+   reply and the fork is a miss, since the prefix would no longer be what
+   the agent saw. A fork that would not fit the slot's context (item 5) is
+   a miss too. A miss skips the stage and logs a warning naming the stage,
+   the channel, the trace if there is one, and what was missing (principle
+   5; the rescue is a retry or a skip, never a standalone call). Compaction
+   is the exception: a missed or failed compaction fork is never skipped
+   and takes §3.3's can't-fail fallback. Seeding, imports, replays and
+   evals have no window and are standalone. Subagents never fork.
+4. Fork instructions live beside the standalone prompts the windowless
+   paths use, in the second person, and are static config that
+   `set_settings` cannot write.
+5. Bounded output and headroom: every fork's reasoning and reply are
+   capped, per stage, by operator config applied after runtime overrides,
+   so `set_settings` cannot lift the caps; they don't touch the cached
+   prefix. The window at the compaction threshold, plus a fork's
+   instruction and both caps, fits the slot's context, so a fork just
+   short of compaction still runs.
+6. Forking ships once #73's cache probes pass: the fork row and the
+   main turn after it reuse the cached prefix, the fork prompt begins with
+   the main prompt, and `response_format` holds under `tool_choice:
+   "none"`. #73's comparisons of fork against standalone (planted-defect
+   recall per lens, consolidation and compaction fidelity) are benchmarks,
+   not gates.
+7. Each forkable call is attributed `mode = fork | standalone` in
+   `usage_log`. A forking stage runs on the forked window's model even
+   when `llm.background` names a different one, and startup logs a
+   warning saying so.
 
 ### 3.9 Scheduler
 
@@ -922,8 +979,8 @@ if it wins. The encode/retrieve gate is expected to lose.
    need a restart; a malformed reload changes nothing.
 4. Dotted tunables resolve at decision time through override, then live
    config, then default; they never reach the request body. Static keys
-   (fork prompts, `request_logprobs`, `mid_conversation_system_role`) are
-   operator-only.
+   (fork prompts, fork output caps, `request_logprobs`,
+   `mid_conversation_system_role`) are operator-only.
 5. Prompts under `prompts/` are documentation copies cited by path; no
    code loads them. Persona is prompt material, never architecture.
 6. Subcommands: `serve`, `cli`, `acp`, `scaffold`, `redact`, `calibrate`,
@@ -967,10 +1024,12 @@ if it wins. The encode/retrieve gate is expected to lose.
 4. Deterministic retrieval metrics (recall@k, MRR, tokens) run in CI over
    operator-authored fixtures; live evals run behind `--run-eval`;
    consolidation replay and compaction evals run out of band.
-5. Fork evals (#73): a window-render replay instrument, a planted-defect
-   exchange fixture per lens, consolidation and compaction fixtures,
-   deterministic where possible and judged where not, reporting shifts and
-   failing on regressions.
+5. Fork evals (#73): the cache probes that gate enabling forks (§3.8),
+   then a window-render replay instrument, a planted-defect exchange
+   fixture per lens, and consolidation and compaction fixtures,
+   deterministic where possible and judged where not. Past the cache
+   probes they are benchmarks that report shifts and regressions; they
+   gate nothing.
 6. Persyn's §9 criteria run as an integration suite against a live daemon
    with a scripted interlocutor: recalls across restart, hedges weak
    memories, refuses to remember fabricated events, pushes back on flawed
@@ -1002,7 +1061,7 @@ record that holds the reasoning.
 | Compaction is memory formation, not forgetting | §3.1 |
 | Two forks off one prefix for compaction and consolidation, not one combined call | `plans/forks.md` |
 | Compaction forks from the dropped prefix, not a described cut | `plans/forks.md` |
-| Forks only where measured; appraisal and critique measured first | `plans/forks.md` |
+| Every background call with a live window forks it; a miss skips, never falls back to standalone; #73's cache probes gate forking, its fork-vs-standalone comparisons don't | #180 |
 | Demote, don't delete; usage-weighted retention; near-duplicate merge at consolidation | §3.1 |
 | Operator-only `redact` is the one deletion path; it stays in the kernel | §3.1; `kernel-split.md` Decisions |
 | Knowledge graph cut, not optional | §5.7 |
