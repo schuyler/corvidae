@@ -303,3 +303,54 @@ class TestMidDrainRegistrationWedge:
         assert "payload C" in _window_context_text(conv)
 
         await db.close()
+
+
+class TestRegisterWithoutStub:
+    """FunnelPlugin.register queues for the channel's next turn, whatever its origin."""
+
+    @pytest.mark.parametrize("meta", [{}, {"origin": "reminder"}])
+    async def test_admitted_at_next_turn_of_any_origin(self, meta):
+        funnel, channel, conv, db = await build_funnel()
+
+        funnel.register(channel, source="critique", entries=["a style note"])
+
+        await funnel.before_agent_turn(channel=channel, trace_id="k1", meta=meta)
+        assert "a style note" in _window_context_text(conv)
+
+        await db.close()
+
+    async def test_admitted_only_once(self):
+        funnel, channel, conv, db = await build_funnel()
+
+        funnel.register(channel, source="critique", entries=["a style note"])
+        await funnel.before_agent_turn(channel=channel, trace_id="k1", meta={})
+        assert "a style note" in _window_context_text(conv)
+
+        msg_count = len(conv.messages)
+        await funnel.before_agent_turn(channel=channel, trace_id="k2", meta={})
+        assert len(conv.messages) == msg_count
+
+        await db.close()
+
+    async def test_fires_no_notify(self):
+        funnel, channel, conv, db = await build_funnel()
+
+        funnel.register(channel, source="critique", entries=["a style note"])
+        funnel.pm.ahook.on_notify.assert_not_awaited()
+
+        await db.close()
+
+
+class TestStubText:
+    async def test_stub_text_replaces_the_count_text(self):
+        funnel, channel, conv, db = await build_funnel()
+
+        await funnel.register_and_wake(
+            channel, origin="critique", source="critique",
+            entries=["a verdict"], stub_text="custom stub words",
+        )
+        funnel.pm.ahook.on_notify.assert_awaited_once()
+        assert funnel.pm.ahook.on_notify.await_args.kwargs["text"] == "custom stub words"
+        assert funnel.pm.ahook.on_notify.await_args.kwargs["meta"]["origin"] == "critique"
+
+        await db.close()

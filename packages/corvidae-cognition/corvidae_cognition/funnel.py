@@ -78,6 +78,9 @@ class FunnelPlugin(CorvidaePlugin):
         # critique-eligible — the recursion loop reopened one coalesce deep.
         self._deferred: dict[tuple[str, str], list[tuple[str, list[str]]]] = {}
         self._stub_pending: set[tuple[str, str]] = set()
+        # Stub-less payloads (#202), keyed by channel.id alone: admitted at
+        # the channel's next turn whatever its origin, and waking nothing.
+        self._next_turn: dict[str, list[tuple[str, list[str]]]] = {}
 
     @hookimpl
     async def on_init(self, pm, config: dict) -> None:
@@ -94,12 +97,30 @@ class FunnelPlugin(CorvidaePlugin):
         self._default_budget = funnel_cfg.get("default_budget", DEFAULT_BUDGET_TOKENS)
         self._budgets = dict(funnel_cfg.get("budgets", {}) or {})
 
+    def register(self, channel, source: str, entries: list[str]) -> None:
+        """Queue a payload for the channel's next turn, without waking it.
+
+        Producer API for payloads that must not cause a turn of their own
+        (#202). The drain in ``before_agent_turn`` admits it at the next
+        turn on ``channel`` of any origin, including a user turn. Empty
+        ``entries`` is a no-op.
+
+        Args:
+            channel: The Channel whose next turn admits the payload.
+            source: Frame label at admission ("critique", ...).
+            entries: Pre-formatted lines to admit.
+        """
+        if not entries:
+            return
+        self._next_turn.setdefault(channel.id, []).append((source, list(entries)))
+
     async def register_and_wake(
         self,
         channel,
         origin: str,
         source: str,
         entries: list[str],
+        stub_text: str | None = None,
     ) -> None:
         """Queue a deferred payload and wake the channel with one stub.
 
@@ -117,6 +138,7 @@ class FunnelPlugin(CorvidaePlugin):
             source: Frame label at admission ("critique", …).
             entries: Pre-formatted lines to admit on the matching-origin
                 drain.
+            stub_text: Text of the wake stub; None gives the count text.
         """
         if not entries:
             return
@@ -133,7 +155,10 @@ class FunnelPlugin(CorvidaePlugin):
             await self.pm.ahook.on_notify(
                 channel=channel,
                 source=source,
-                text=f"{pending_count} pending {source} item(s)",
+                text=(
+                    stub_text if stub_text is not None
+                    else f"{pending_count} pending {source} item(s)"
+                ),
                 tool_call_id=None,
                 meta={"origin": origin},
             )
@@ -148,40 +173,73 @@ class FunnelPlugin(CorvidaePlugin):
 
     @hookimpl
     async def before_agent_turn(self, channel, trace_id, meta) -> None:
-        """Drain deferred payloads matching the triggering turn's origin.
+        """Drain stub-less payloads, then payloads matching the turn's origin.
 
-        The origin comes from ``meta["origin"]``, never parsed from stub
-        text (§2.2/§4.7 no-inference rule). The pending flag is
-        cleared FIRST: a failure inside admission leaves payloads
-        registered, and the next producer's stub re-arms the channel rather
-        than wedging it. Payloads unregister at successful admission;
-        entries the budget dropped stay registered for the next stub.
+        The next-turn queue (``register``) drains on every turn of the
+        channel, whatever its origin. The origin-keyed queue
+        (``register_and_wake``) drains only on a turn whose
+        ``meta["origin"]`` matches; the origin comes from ``meta``, never
+        parsed from stub text (§2.2/§4.7 no-inference rule). The pending
+        flag is cleared FIRST, before either drain: a failure inside
+        admission leaves payloads registered, and the next producer's stub
+        re-arms the channel rather than wedging it. Payloads unregister at
+        successful admission; entries the budget dropped stay registered
+        for the next drain.
         """
         origin = (meta or {}).get("origin")
-        if origin is None:
-            return
-        pair = (channel.id, origin)
+        pair = (channel.id, origin) if origin is not None else None
         # Clear the pending flag on ANY matching-origin turn, even when
-        # nothing is queued — BEFORE the empty-registry early return. A
-        # payload registered mid-drain (after this flag was discarded) gets
-        # admitted by the in-progress drain, so its own stub's turn arrives
-        # with an empty registry; returning without clearing the flag here
-        # would leave it set forever, and every later register_and_wake
-        # would see it and never fire a stub — wedging the pair until
-        # restart. A spurious extra stub is harmless (this drain
+        # nothing is queued — BEFORE either drain and the empty-registry
+        # early return. A payload registered mid-drain (after this flag was
+        # discarded) gets admitted by the in-progress drain, so its own
+        # stub's turn arrives with an empty registry; returning without
+        # clearing the flag here would leave it set forever, and every later
+        # register_and_wake would see it and never fire a stub — wedging the
+        # pair until restart. A spurious extra stub is harmless (this drain
         # early-returns); a missing stub is not.
-        self._stub_pending.discard(pair)
+        if pair is not None:
+            self._stub_pending.discard(pair)
+
+        # Stub-less payloads: any turn on this channel admits them.
+        next_turn = self._next_turn.get(channel.id)
+        if next_turn:
+            remaining = await self._drain(channel, next_turn)
+            if remaining:
+                self._next_turn[channel.id] = remaining
+            else:
+                del self._next_turn[channel.id]
+
+        # Origin-keyed payloads: only a turn with the matching origin.
+        if pair is None:
+            return
         payloads = self._deferred.get(pair)
         if not payloads:
             return
 
+        remaining = await self._drain(channel, payloads)
+        if remaining:
+            self._deferred[pair] = remaining
+        else:
+            del self._deferred[pair]
+
+    async def _drain(
+        self,
+        channel,
+        payloads: list[tuple[str, list[str]]],
+    ) -> list[tuple[str, list[str]]]:
+        """Admit queued payloads; return those that must stay queued.
+
+        Returns ``payloads`` unchanged when the channel has no conversation
+        window. A payload whose admission raises is kept whole; entries the
+        budget dropped are kept as leftovers.
+        """
         conv = getattr(channel, "conversation", None)
         if conv is None:
             logger.warning(
                 "deferred drain skipped: channel has no conversation window",
-                extra={"channel_id": channel.id, "origin": origin},
+                extra={"channel_id": channel.id},
             )
-            return
+            return payloads
 
         remaining: list[tuple[str, list[str]]] = []
         for source, entries in payloads:
@@ -189,11 +247,11 @@ class FunnelPlugin(CorvidaePlugin):
                 admitted = await self.admit(channel, conv, source, entries)
             except Exception:
                 # Admission failed — keep the whole payload registered for
-                # the next stub-armed drain.
+                # the next drain.
                 logger.warning(
                     "deferred admission failed; payload retained",
                     exc_info=True,
-                    extra={"channel_id": channel.id, "origin": origin, "source": source},
+                    extra={"channel_id": channel.id, "source": source},
                 )
                 remaining.append((source, entries))
                 continue
@@ -213,11 +271,7 @@ class FunnelPlugin(CorvidaePlugin):
             ]
             if leftover:
                 remaining.append((source, leftover))
-
-        if remaining:
-            self._deferred[pair] = remaining
-        else:
-            del self._deferred[pair]
+        return remaining
 
     async def admit(
         self,

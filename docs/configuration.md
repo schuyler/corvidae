@@ -380,7 +380,7 @@ A heartbeat costs a main-model turn per beat on the shared backend; keep the int
 
 Requires the cognition extra (`--extra cognition` on your `uv sync` line; see [cognition.md](cognition.md)). Without it these keys are ignored.
 
-`FunnelPlugin` is the single chokepoint for tail CONTEXT admission (dedupe, budgets, injection framing). It also owns deferred registration: non-tool-call notification payloads queue per `(channel, origin)` via `register_and_wake()`, one stub notification wakes the channel per pending pair, and the drain in `before_agent_turn` admits everything queued for the triggering exchange's origin. The deferred registry is in-memory by design (payloads pending at shutdown are dropped) and adds no config keys — drained payloads spend the same per-source budgets below.
+`FunnelPlugin` is the single chokepoint for tail CONTEXT admission (dedupe, budgets, injection framing). It also owns deferred registration: non-tool-call notification payloads queue per `(channel, origin)` via `register_and_wake()`, one stub notification wakes the channel per pending pair, and the drain in `before_agent_turn` admits everything queued for the triggering exchange's origin. `register()` queues a payload with no stub and no wake: it is admitted at the channel's next turn, whatever that turn's origin. The deferred registry is in-memory by design (payloads pending at shutdown are dropped) and adds no config keys — drained payloads spend the same per-source budgets below.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
