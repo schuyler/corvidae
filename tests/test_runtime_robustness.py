@@ -92,8 +92,12 @@ class TestNullPluginsSection:
         with pytest.raises(SystemExit) as excinfo:
             await _start(path, pm)
         assert excinfo.value.code == 1
-        err = capsys.readouterr().err
-        assert err.startswith("Config error:"), err
+        # Pick the Config error line itself: an earlier test can leave a
+        # logging handler that writes "--- Logging error ---" to stderr.
+        lines = [line for line in capsys.readouterr().err.splitlines()
+                 if line.startswith("Config error:")]
+        assert len(lines) == 1, lines
+        err = lines[0]
         assert needle in err and "memory" in err and path in err, err
         assert "list" in err, err  # the accepted form
         pm.set_blocked.assert_not_called()

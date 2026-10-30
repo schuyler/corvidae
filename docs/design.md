@@ -825,6 +825,21 @@ conversation, and calls `_run_turn` again. The system message is stored
 as such and sent as `agent.mid_conversation_system_role` (see
 `build_prompt` above).
 
+If the `on_notify` broadcast raises, `TaskPlugin` logs a WARNING with the
+channel, task id and tool call id and, for a tool task, calls
+`Agent.deliver_tool_error`, which queues an error `role: "tool"` result
+straight onto the channel's serial queue. Without it the id would stay in
+`pending_tool_call_ids` and the tool cycle would never finish (#173). The
+broadcast runs every hookimpl via `asyncio.gather`, so a third-party
+hookimpl can raise after `Agent.on_notify` already queued the real result.
+The Agent therefore records each queued tool result as
+`(channel_id, tool_call_id)` in `_queued_tool_results` until the item is
+processed (dropped in the same step that discards the id from
+`pending_tool_call_ids`), and `deliver_tool_error` does nothing if the
+result is already queued or no longer pending. The model never sees two
+results for one call. A task lost before it reaches `_on_task_complete`
+is not covered.
+
 Multi-turn reasoning emerges from this cycle without blocking the
 channel queue.
 
@@ -1047,6 +1062,19 @@ of never. `note_restored` ignores channels the tracker already knows.
 `agent.on_stop`, the `on_stop` broadcast, `idle.stop()` and then
 `clock.close()`, which cancels any timers plugins left behind. Plugins
 should still cancel their own watches and timers in `on_stop`.
+
+**Failed start.** If `Runtime.start()` raises (`Exception`, not the
+`SystemExit` a config error raises before any plugin loads),
+`Runtime.run` runs `_cleanup_failed_start()` before re-raising: the
+`on_stop` broadcast, `idle.stop()` and `clock.close()`, under the same 3 s
+bound as `stop()` (as there, an `on_stop` that raises skips the last two;
+`asyncio.run` cancels leftover timers on exit). `agent.on_stop` is skipped, since the Agent may not
+have started. Without this, persistence's open aiosqlite connection (a
+non-daemon worker thread) kept the interpreter from exiting, so a daemon
+whose plugin failed to start stayed alive and silent (#177). A cleanup
+failure or timeout is logged at WARNING and the start exception is the one
+that propagates, so the process exits non-zero. A plugin's `on_stop`
+therefore has to tolerate running without its `on_start` having finished.
 
 **Config.** None. Each plugin sets its own period (for instance
 `memory.idle_consolidate_after`). The former `daemon.idle_cooldown_seconds`
@@ -2530,8 +2558,9 @@ plugins that need another plugin's state resolve it lazily via
 sequence.
 
 Immediately after entry points load, `Runtime.start()` logs `"plugins
-loaded"` with `loaded` (the sorted names `pm.list_name_plugin()` actually
-returns) and `blocked` (the configured `plugins.disabled` list, verbatim
+loaded"` with `loaded` (the sorted names `pm.list_name_plugin()` returns
+with a plugin object; pluggy keeps each blocked name as `(name, None)`, and
+those are left out) and `blocked` (the configured `plugins.disabled` list, verbatim
 — not narrowed to names that matched a real plugin). A misspelled disable
 entry shows up under `blocked` while the plugin it was meant to block
 still shows up under `loaded`; that mismatch is the operator-visible

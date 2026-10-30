@@ -210,6 +210,9 @@ class Agent(CorvidaePlugin):
         self._tools: dict[str, Callable] = {}
         self._tool_schemas: list[dict] = []
         self.queues: dict[str, SerialQueue] = {}
+        # (channel_id, tool_call_id) of tool results queued but not yet
+        # processed, so deliver_tool_error never adds a second result (#173).
+        self._queued_tool_results: set[tuple[str, str]] = set()
         self._registry: ChannelRegistry | None = None
         self._max_tool_result_chars: int = 100_000
         self._chars_per_token: float = DEFAULT_CHARS_PER_TOKEN
@@ -373,6 +376,41 @@ class Agent(CorvidaePlugin):
         self._note_activity(channel.id)
         queue = self._get_or_create_queue(channel)
         await queue.enqueue(item)
+        # Remember a queued tool result until it is processed. No await may
+        # come before this point: deliver_tool_error relies on the record
+        # existing by the time a failed on_notify broadcast returns.
+        if tool_call_id:
+            self._queued_tool_results.add((channel.id, tool_call_id))
+
+    async def deliver_tool_error(
+        self, channel, tool_call_id: str, text: str, meta: dict | None
+    ) -> bool:
+        """Queue an error tool result when on_notify failed to deliver one (#173).
+
+        Enqueues straight onto the channel's serial queue, not through the
+        on_notify broadcast that just failed. Does nothing when a result for
+        ``tool_call_id`` is already queued (another plugin's hookimpl raised
+        after this Agent's succeeded) or the id is no longer pending, so the
+        model never sees two results for one call. Returns True if it queued.
+        """
+        if (channel.id, tool_call_id) in self._queued_tool_results:
+            return False
+        if tool_call_id not in channel.pending_tool_call_ids:
+            return False
+        item = QueueItem(
+            role=QueueItemRole.NOTIFICATION,
+            content=text,
+            channel=channel,
+            source="task",
+            tool_call_id=tool_call_id,
+            meta=meta or {},
+        )
+        queue = self._get_or_create_queue(channel)
+        await queue.enqueue(item)
+        self._queued_tool_results.add((channel.id, tool_call_id))
+        # The error result is inbound work like any notification.
+        self._note_activity(channel.id)
+        return True
 
     def _get_or_create_queue(self, channel) -> SerialQueue:
         """Return existing SerialQueue for channel or create and start a new one."""
@@ -823,6 +861,9 @@ class Agent(CorvidaePlugin):
         # agent remains responsive while tools run.
         if item.role == QueueItemRole.NOTIFICATION and item.tool_call_id:
             channel.pending_tool_call_ids.discard(item.tool_call_id)
+            # Same step as the discard: a result is either queued or no
+            # longer pending, never neither (see deliver_tool_error).
+            self._queued_tool_results.discard((channel.id, item.tool_call_id))
             if channel.pending_tool_call_ids:
                 logger.debug(
                     "tool result buffered, pending: %d",

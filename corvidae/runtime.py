@@ -34,6 +34,38 @@ from corvidae.logging import configure_logging
 logger = logging.getLogger(__name__)
 
 
+def disabled_plugins_from(config: dict) -> list[str]:
+    """Return ``plugins.disabled`` as a list of names, validated.
+
+    A missing or null section, or a null ``disabled``, means nothing is
+    disabled. Raises ValueError naming the key, the rejected value and the
+    accepted form for anything else, so a bare string is never iterated
+    letter by letter into a block list.
+    """
+    # A missing or null section disables nothing; it must otherwise be a mapping.
+    plugins = config.get("plugins")
+    if plugins is None:
+        return []
+    if not isinstance(plugins, dict):
+        raise ValueError(
+            f"plugins must be a mapping with a `disabled` list of plugin "
+            f"names, got {plugins!r}"
+        )
+    # A null disabled list is the same as none; anything else must be a
+    # list of names.
+    disabled = plugins.get("disabled")
+    if disabled is None:
+        return []
+    if not isinstance(disabled, list) or not all(
+        isinstance(name, str) for name in disabled
+    ):
+        raise ValueError(
+            f"plugins.disabled must be a list of plugin names (strings), "
+            f"got {disabled!r}"
+        )
+    return disabled
+
+
 def deep_merge(base: dict, overrides: dict) -> dict:
     """Deep-merge overrides on top of base, returning a new dict.
 
@@ -161,6 +193,7 @@ class Runtime:
         try:
             validate_agent_config(config.get("agent", {}))
             validate_daemon_config(config.get("daemon") or {})
+            disabled_plugins = disabled_plugins_from(config)
             self.registry.agent_defaults = config.get("agent", {})
             load_channel_config(config, self.registry)
         except ValueError as exc:
@@ -170,7 +203,6 @@ class Runtime:
 
         # 7b. Block disabled plugins before loading entry points so they are
         #     never instantiated. Must precede load_setuptools_entrypoints.
-        disabled_plugins = config.get("plugins", {}).get("disabled", [])
         for name in disabled_plugins:
             self.pm.set_blocked(name)
 
@@ -180,7 +212,11 @@ class Runtime:
         # 8a. Record the effective plugin set: what actually loaded and what
         # the operator asked to disable, verbatim (a typo must still show up
         # here even though the plugin it was meant to block still loaded).
-        loaded_names = sorted(name for name, _plugin in self.pm.list_name_plugin())
+        # pluggy keeps each blocked name as (name, None); those did not load.
+        loaded_names = sorted(
+            name for name, plugin in self.pm.list_name_plugin()
+            if plugin is not None
+        )
         logger.info(
             "plugins loaded",
             extra={"loaded": loaded_names, "blocked": disabled_plugins},
@@ -238,6 +274,29 @@ class Runtime:
         self.idle.stop()
         await self.clock.close()
 
+    async def _cleanup_failed_start(self) -> None:
+        """Best-effort shutdown after start() raised (#177).
+
+        Runs the on_stop broadcast, stops the idle tracker and closes the
+        clock under the same 3-second bound as stop(). Skips agent.on_stop,
+        since the agent may never have started. Every failure here is logged
+        and swallowed, so the start failure is what the caller sees.
+        """
+        # Config loading failed before a plugin manager existed: nothing to close.
+        if self.pm is None:
+            return
+        # Same steps and bound as stop(), minus agent.on_stop. clock and idle
+        # exist whenever pm does (start() creates all three together).
+        try:
+            async with asyncio.timeout(3.0):
+                await self.pm.ahook.on_stop()
+                self.idle.stop()
+                await self.clock.close()
+        except TimeoutError:
+            logger.warning("cleanup after failed startup timed out after 3s")
+        except Exception:
+            logger.warning("cleanup after failed startup raised", exc_info=True)
+
     async def run(self) -> None:
         """start(), wait for SIGINT/SIGTERM, then stop().
 
@@ -276,7 +335,14 @@ class Runtime:
 
         loop.add_signal_handler(signal.SIGINT, _handle_stop_signal)
 
-        await self.start()
+        try:
+            await self.start()
+        except Exception:
+            # Close whatever did start (persistence's aiosqlite connection has
+            # a non-daemon thread that would otherwise hang interpreter exit),
+            # then let the failure propagate so the process exits non-zero.
+            await self._cleanup_failed_start()
+            raise
         _starting = False
         loop.add_signal_handler(signal.SIGTERM, _handle_stop_signal)
 
