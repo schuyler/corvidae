@@ -176,7 +176,7 @@ pluggy exposes, so that half is checked in review.
 |------|------|------|
 | `on_init(pm, config: dict)` | async broadcast | After all plugins are registered, before `on_start`. Use to store `pm`, read config values, and resolve references to other plugins. Do not create runtime resources here. |
 | `on_start(config: dict)` | async broadcast | Once at startup, after `on_init`. Use to open runtime resources: DB connections, network clients, file handles, asyncio tasks. |
-| `on_stop()` | async broadcast | On SIGINT/SIGTERM, before process exits (a SIGINT during startup is held until `on_start` finishes; a SIGTERM then ends the process without `on_stop`) |
+| `on_stop()` | async broadcast | On SIGINT/SIGTERM, before process exits (a SIGINT during startup is held until `on_start` finishes; a SIGTERM then ends the process without `on_stop`). Also after a failed startup, before the error propagates, so it may run when this plugin's `on_start` (or `on_init`) never ran or didn't finish: guard each resource with a None check. |
 | `on_config_reload(config: dict)` | async broadcast | When `agent.yaml` is modified while the daemon is running. The config dict has been re-parsed, merged with CLI overrides, and validated before dispatch. |
 
 `config` is the full parsed `agent.yaml` dict. The key `_base_dir` (a `Path`) is set by `Runtime.start()` pointing to the config file's directory.
@@ -834,6 +834,8 @@ config_watcher    (ConfigWatcherPlugin) — entry point
 
 **Shutdown order:** `Runtime.stop()` calls `agent.on_stop()` first (drains queues), then `pm.ahook.on_stop()` to tear down all other plugins, then stops the idle tracker and closes the kernel clock, which cancels any timers left running.
 
+**Failed startup:** if `Runtime.start()` raises an exception (a plugin's `on_init` or `on_start`, say; not a config error, which exits before any plugin loads), `Runtime.run` runs the `on_stop` broadcast, stops the idle tracker and closes the clock, under the same 3 s bound, then re-raises so the process exits non-zero. `agent.on_stop()` is skipped. A plugin's `on_stop` must therefore cope with resources its `on_start` never opened.
+
 `ChannelRegistry`, the `Clock` (`"clock"`) and the `IdleTracker` (`"idle"`) are registered by `Runtime.start()` before the entry points load, so any plugin can depend on them. See [Acting on time and quiet](#acting-on-time-and-quiet).
 
 ## Plugin disable
@@ -853,7 +855,8 @@ Only entry-point plugins can be disabled this way. Manually registered plugins (
 This is a startup-time mechanism. It does not interact with hot-reload.
 
 Right after entry points load, `Runtime.start()` logs a `"plugins loaded"`
-line with `loaded` (the sorted names that actually registered) and
+line with `loaded` (the sorted names that actually registered, not the
+blocked ones) and
 `blocked` (the `plugins.disabled` list from config, verbatim). Compare the
 two to confirm a disable took effect: a misspelled name lands in
 `blocked` while the plugin it was meant to block still appears in
@@ -1237,7 +1240,10 @@ clients and will raise `RuntimeError` during startup.
 ### TaskPlugin (`corvidae/task.py`)
 
 Owns the `TaskQueue` and delivers task results via the `on_notify` hook.
-Entry point name: `"task"`.
+Entry point name: `"task"`. If that broadcast raises for a tool task, it
+logs the failure and asks the Agent (`deliver_tool_error`) to queue an
+error tool result instead, unless the real result was already queued, so
+the tool cycle still finishes.
 
 **Config:**
 ```yaml
