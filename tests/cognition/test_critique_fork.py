@@ -6,6 +6,7 @@ fork misses falls back alone to its standalone call."""
 import json
 
 import pytest
+from unittest.mock import AsyncMock
 
 from corvidae_cognition.critique import DEFAULT_FORK_PROMPTS, OBJECTION_EXTRA_BODY
 from corvidae.fork import ForkRefused
@@ -13,7 +14,8 @@ from corvidae.fork import ForkRefused
 from corvidae.context import MessageType
 from helpers import FakeForkAgent, window_of
 from .test_critique import (
-    CLAIM, EMPTY_VERDICT, OBJECTION_VERDICT, SYSTEM_PROMPT, TOOL_TEXT, RenderingForkAgent,
+    CLAIM, EMPTY_VERDICT, SUPPORTED_VERDICT, SYSTEM_PROMPT, TOOL_TEXT, UNSUPPORTED_VERDICT,
+    RenderingForkAgent, verdicts_text,
     _provenance_env, _provenance_exchange, _provenance_instructions, _read_outcomes,
     _run_provenance, _teardown, build_critique,
 )
@@ -110,7 +112,7 @@ async def _provenance_fork_env(tmp_path, agent, **kwargs):
 
 
 async def test_provenance_fork_request_starts_with_the_system_prompt(tmp_path):
-    agent = RenderingForkAgent({"critique"}, text=EMPTY_VERDICT)
+    agent = RenderingForkAgent({"critique"}, text=SUPPORTED_VERDICT)
     env, _ = await _provenance_fork_env(tmp_path, agent)
     try:
         await _run_provenance(env)
@@ -124,7 +126,7 @@ async def test_provenance_fork_request_starts_with_the_system_prompt(tmp_path):
 
 
 async def test_provenance_fork_request_has_the_exchanges_tool_result(tmp_path):
-    agent = RenderingForkAgent({"critique"}, text=EMPTY_VERDICT)
+    agent = RenderingForkAgent({"critique"}, text=SUPPORTED_VERDICT)
     env, ex = await _provenance_fork_env(tmp_path, agent)
     try:
         await _run_provenance(env)
@@ -137,7 +139,7 @@ async def test_provenance_fork_request_has_the_exchanges_tool_result(tmp_path):
 
 
 async def test_provenance_fork_ends_at_the_reply(tmp_path):
-    agent = RenderingForkAgent({"critique"}, text=EMPTY_VERDICT)
+    agent = RenderingForkAgent({"critique"}, text=SUPPORTED_VERDICT)
     env, ex = await _provenance_fork_env(tmp_path, agent)
     try:
         ex.conv.messages.append({
@@ -194,7 +196,7 @@ def _reply_not_in_window(env, ex, agent):
     (_reply_not_in_window, {"critique"}, "the reply is not in the window"),
 ])
 async def test_provenance_miss_skips_with_a_warning(tmp_path, caplog, mutate, agent_stages, reason):
-    agent = RenderingForkAgent(agent_stages, text=OBJECTION_VERDICT)
+    agent = RenderingForkAgent(agent_stages, text=UNSUPPORTED_VERDICT)
     env, ex = await _provenance_fork_env(tmp_path, agent)
     try:
         mutate(env, ex, agent)
@@ -206,7 +208,7 @@ async def test_provenance_miss_skips_with_a_warning(tmp_path, caplog, mutate, ag
 
 
 async def test_provenance_skips_when_the_reply_was_not_persisted(tmp_path, caplog):
-    agent = RenderingForkAgent({"critique"}, text=OBJECTION_VERDICT)
+    agent = RenderingForkAgent({"critique"}, text=UNSUPPORTED_VERDICT)
     env, ex = await _provenance_fork_env(tmp_path, agent, persist_reply=False)
     try:
         with caplog.at_level("WARNING", logger="corvidae.critique"):
@@ -217,7 +219,7 @@ async def test_provenance_skips_when_the_reply_was_not_persisted(tmp_path, caplo
 
 
 async def test_provenance_skips_when_the_window_was_compacted_after_the_reply(tmp_path, caplog):
-    agent = RenderingForkAgent({"critique"}, text=OBJECTION_VERDICT)
+    agent = RenderingForkAgent({"critique"}, text=UNSUPPORTED_VERDICT)
     env, ex = await _provenance_fork_env(tmp_path, agent)
     try:
         # before_compaction fires ahead of replace_with_summary; on_compaction
@@ -235,7 +237,7 @@ async def test_provenance_skips_when_the_window_was_compacted_after_the_reply(tm
 async def test_provenance_skips_when_compaction_lands_during_the_check(tmp_path, caplog):
     # The compaction begins while the evidence search is awaiting, after the
     # pre-check passed: the check must look again before it forks.
-    agent = RenderingForkAgent({"critique"}, text=OBJECTION_VERDICT)
+    agent = RenderingForkAgent({"critique"}, text=UNSUPPORTED_VERDICT)
     env, ex = await _provenance_fork_env(tmp_path, agent)
     gather = env.plugin._gather_evidence
 
@@ -256,7 +258,7 @@ async def test_provenance_skips_when_compaction_lands_during_the_check(tmp_path,
 
 @pytest.mark.parametrize("error", [ForkRefused("tool call"), RuntimeError("down")])
 async def test_provenance_fork_failure_skips_without_a_standalone_call(tmp_path, caplog, error):
-    agent = RenderingForkAgent({"critique"}, text=OBJECTION_VERDICT, error=error)
+    agent = RenderingForkAgent({"critique"}, text=UNSUPPORTED_VERDICT, error=error)
     env, ex = await _provenance_fork_env(tmp_path, agent)
     try:
         with caplog.at_level("WARNING", logger="corvidae.critique"):
@@ -264,3 +266,152 @@ async def test_provenance_fork_failure_skips_without_a_standalone_call(tmp_path,
         await _assert_skipped(env, agent, caplog, "the fork failed", fork_calls=1)
     finally:
         await _teardown(env)
+
+
+# ---------------------------------------------------------------------------
+# Per-claim provenance verdicts (#186)
+# ---------------------------------------------------------------------------
+
+def _claims(n):
+    return [{"claim": f"claim number {i + 1} is true", "queries": [f"claim{i + 1}"]}
+            for i in range(n)]
+
+
+def _funnel_entries(env):
+    env.funnel.register_and_wake.assert_awaited_once()
+    return env.funnel.register_and_wake.await_args.kwargs["entries"]
+
+
+async def _verdict_run(tmp_path, text, n=3, with_funnel=True):
+    agent = RenderingForkAgent({"critique"}, text=text)
+    env = await _provenance_env(tmp_path, with_funnel=with_funnel)
+    if with_funnel:
+        env.funnel.register_and_wake = AsyncMock()
+    await _provenance_exchange(env, agent)
+    await _run_provenance(env, claims=_claims(n))
+    return env, agent
+
+
+def test_provenance_extra_body_is_a_fixed_length_tuple_schema():
+    from corvidae_cognition.critique import provenance_extra_body
+
+    body = provenance_extra_body(3)
+    assert list(body) == ["response_format"]
+    fmt = body["response_format"]
+    assert fmt["type"] == "json_schema"
+    assert fmt["json_schema"]["name"] == "provenance_verdicts"
+    schema = fmt["json_schema"]["schema"]
+    assert schema["type"] == "object"
+    assert schema["required"] == ["verdicts"]
+    assert schema["additionalProperties"] is False
+    array = schema["properties"]["verdicts"]
+    assert array["type"] == "array"
+    assert array["minItems"] == array["maxItems"] == 3
+    assert "items" not in array
+    assert len(array["prefixItems"]) == 3
+    for i, item in enumerate(array["prefixItems"]):
+        assert item["type"] == "object"
+        assert item["properties"] == {
+            "claim": {"const": i + 1},
+            "reason": {"type": "string"},
+            "supported": {"type": "boolean"},
+        }
+        assert sorted(item["required"]) == ["claim", "reason", "supported"]
+        assert item["additionalProperties"] is False
+
+
+def test_provenance_extra_body_is_sized_per_request():
+    from corvidae_cognition.critique import provenance_extra_body
+
+    array = provenance_extra_body(1)["response_format"]["json_schema"]["schema"][
+        "properties"]["verdicts"]
+    assert array["minItems"] == array["maxItems"] == 1
+    assert len(array["prefixItems"]) == 1
+
+
+@pytest.mark.parametrize("n", [1, 3])
+async def test_provenance_fork_carries_the_schema_sized_to_the_claims(tmp_path, n):
+    from corvidae_cognition.critique import provenance_extra_body
+
+    env, agent = await _verdict_run(tmp_path, verdicts_text(*[True] * n), n=n)
+    try:
+        [call] = agent.calls
+        assert call["extra_body"] == provenance_extra_body(n)
+    finally:
+        await _teardown(env)
+
+
+async def test_one_unsupported_claim_of_three_is_one_objection(tmp_path):
+    env, agent = await _verdict_run(
+        tmp_path, json.dumps({"verdicts": [
+            {"claim": 1, "reason": "seen in the tool result", "supported": True},
+            {"claim": 2, "reason": "nothing says so", "supported": False},
+            {"claim": 3, "reason": "the user said it", "supported": True}]}))
+    try:
+        assert _funnel_entries(env) == [
+            f"[provenance] {_claims(3)[1]['claim']} \u2014 nothing says so"]
+        outcomes = await _read_outcomes(env.db, "kp")
+        assert outcomes["provenance"] == {
+            "claims": 3, "candidates": 0, "supported": 2, "objections": 1}
+    finally:
+        await _teardown(env)
+
+
+async def test_objection_quotes_our_claim_not_a_model_echo(tmp_path):
+    from corvidae_cognition.critique import CritiquePlugin
+
+    objections, supported = CritiquePlugin._verdicts_from_text(
+        verdicts_text(False), [{"claim": "the real claim text"}])
+    assert supported == 0
+    assert objections == [
+        {"claim": "the real claim text", "objection": "reason 1", "lens": "provenance"}]
+
+
+async def test_all_supported_records_the_outcome_and_registers_nothing(tmp_path):
+    env, agent = await _verdict_run(tmp_path, verdicts_text(True, True, True))
+    try:
+        env.funnel.register_and_wake.assert_not_awaited()
+        outcomes = await _read_outcomes(env.db, "kp")
+        assert outcomes["provenance"] == {
+            "claims": 3, "candidates": 0, "supported": 3, "objections": 0}
+    finally:
+        await _teardown(env)
+
+
+def _verdicts(*items):
+    return json.dumps({"verdicts": list(items)})
+
+
+def _v(claim, reason="r", supported=True):
+    return {"claim": claim, "reason": reason, "supported": supported}
+
+
+@pytest.mark.parametrize("text", [
+    json.dumps({"objections": []}),
+    json.dumps({"verdicts": []}),
+    _verdicts(_v(1), _v(2)),
+    _verdicts(_v(1), _v(2), _v(3), _v(4)),
+    _verdicts(_v(2), _v(1), _v(3)),
+    _verdicts(_v(1), _v(2), _v(3, supported="yes")),
+    _verdicts(_v(1), _v(2), _v(True)),
+    _verdicts(_v(1), _v(2), _v(3, reason=None)),
+], ids=["old-format", "empty", "two-for-three", "four-for-three", "wrong-order",
+        "supported-not-bool", "claim-is-bool", "reason-not-str"])
+async def test_malformed_verdicts_skip_the_check(tmp_path, caplog, text):
+    agent = RenderingForkAgent({"critique"}, text=text)
+    env = await _provenance_env(tmp_path, with_funnel=True)
+    env.funnel.register_and_wake = AsyncMock()
+    try:
+        await _provenance_exchange(env, agent)
+        with caplog.at_level("WARNING", logger="corvidae.critique"):
+            await _run_provenance(env, claims=_claims(3))
+        await _assert_skipped(env, agent, caplog, "the fork failed", fork_calls=1)
+        env.funnel.register_and_wake.assert_not_awaited()
+    finally:
+        await _teardown(env)
+
+
+def test_provenance_instruction_rules_out_tools_and_replying_to_the_user():
+    prompt = DEFAULT_FORK_PROMPTS["provenance"]
+    assert "can't call tools" in prompt
+    assert "not a reply to the user" in prompt
