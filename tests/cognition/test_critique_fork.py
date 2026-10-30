@@ -278,7 +278,10 @@ def _claims(n):
 
 
 def _funnel_entries(env):
+    from corvidae_cognition.critique import PROVENANCE_NOTE
+
     env.funnel.register_and_wake.assert_awaited_once()
+    assert env.funnel.register_and_wake.await_args.kwargs["stub_text"] == PROVENANCE_NOTE
     return env.funnel.register_and_wake.await_args.kwargs["entries"]
 
 

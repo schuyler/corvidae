@@ -21,7 +21,7 @@
 import asyncio
 import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import aiosqlite
 import pytest
@@ -467,23 +467,27 @@ class TestExecution:
         assert attr.get("trace_id") == "kempty"
         await _teardown(env)
 
-    async def test_nonempty_verdict_registers_and_delivers_context(self, tmp_path):
+    async def test_stylistic_objection_registers_without_waking(self, tmp_path):
         appraisal = FakeAppraisal(stage2={"ambiguity": 0.9})
         env = await build_critique(tmp_path, appraisal=appraisal,
                                    chat_text=OBJECTION_VERDICT, with_funnel=True)
         notify = AsyncMock()
         env.pm.ahook.on_notify = notify
+        # Spy on both funnel entry points; register keeps its real behaviour.
+        register = Mock(wraps=env.funnel.register)
+        env.funnel.register = register
+        env.funnel.register_and_wake = AsyncMock()
         await _fire(env, "kfull", origin="user")
         await _run_next_task(env.task)
         outcomes = await _read_outcomes(env.db, "kfull")
         assert outcomes["critique"]["objections"] == 1
-        # One stub fired for the critique origin.
-        notify.assert_awaited_once()
-        assert notify.await_args.kwargs["meta"] == {"origin": "critique"}
-        # Drain on a critique-origin turn → verdict appears as framed CONTEXT.
-        await env.funnel.before_agent_turn(
-            env.channel, trace_id="kfull", meta={"origin": "critique"},
-        )
+        # Registered without a stub: no wake of any kind.
+        register.assert_called_once()
+        assert "no record says Friday" in "\n".join(register.call_args.kwargs["entries"])
+        env.funnel.register_and_wake.assert_not_awaited()
+        notify.assert_not_awaited()
+        # A turn with no origin (a user turn) admits the verdict as framed CONTEXT.
+        await env.funnel.before_agent_turn(env.channel, trace_id="kfull", meta={})
         context_text = "\n".join(
             m.get("content") or ""
             for m in env.channel.conversation.messages
@@ -923,6 +927,8 @@ class TestProvenanceCritic:
             await _teardown(env)
 
     async def test_objections_reach_the_funnel(self, tmp_path):
+        from corvidae_cognition.critique import PROVENANCE_NOTE
+
         env = await _provenance_env(tmp_path, with_funnel=True)
         env.funnel.register_and_wake = AsyncMock()
         agent = RenderingForkAgent({"critique"}, text=UNSUPPORTED_VERDICT)
@@ -933,6 +939,7 @@ class TestProvenanceCritic:
             kwargs = env.funnel.register_and_wake.await_args.kwargs
             assert kwargs["origin"] == "critique"
             assert kwargs["entries"][0].startswith("[provenance]")
+            assert kwargs["stub_text"] == PROVENANCE_NOTE
         finally:
             await _teardown(env)
 
@@ -1255,3 +1262,34 @@ class TestProvenancePrompts:
         prompt = _provenance_fork_prompt().lower()
         assert "your system prompt" in prompt
         assert "tool results from this exchange" in prompt
+
+
+def test_provenance_note_names_the_no_reply_marker():
+    from corvidae_cognition.critique import NO_REPLY_MARKER, PROVENANCE_NOTE
+
+    assert NO_REPLY_MARKER in PROVENANCE_NOTE
+
+
+class TestNoReplyVeto:
+    """CritiquePlugin.should_send_response vetoes a critique turn's NO_REPLY."""
+
+    async def _verdict(self, text="NO_REPLY", emission="final", origin="critique"):
+        from corvidae_cognition.critique import CritiquePlugin
+
+        return await CritiquePlugin().should_send_response(
+            channel=Channel(transport="test", scope="veto"),
+            text=text, emission=emission, trace_id="kveto", meta={"origin": origin},
+        )
+
+    @pytest.mark.parametrize("text", ["NO_REPLY", "  NO_REPLY\n"])
+    async def test_marker_on_a_critique_final_is_vetoed(self, text):
+        assert await self._verdict(text=text) is False
+
+    async def test_user_origin_has_no_opinion(self):
+        assert await self._verdict(origin="user") is None
+
+    async def test_progress_emission_has_no_opinion(self):
+        assert await self._verdict(emission="progress") is None
+
+    async def test_other_text_has_no_opinion(self):
+        assert await self._verdict(text="The deadline is Thursday.") is None
