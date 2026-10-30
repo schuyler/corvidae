@@ -491,10 +491,10 @@ Per transport:
     take over a group channel, longer answers where the medium invites them
     (the web UI, a coding session), and only the formatting the transport
     can display. The register also sets how readily the agent lets a
-    conversation end (§3.7, the right to silence). The operator decides what each channel's register is and
-    can give a whole class of channels one, including channels that don't
-    exist yet (each new Signal contact, each ACP session), without listing
-    them. How the register is achieved (prompt material, history, context,
+    conversation end (§3.7, the right to silence). The operator decides
+    what each channel's register is and can give a whole class of channels
+    one, including channels that don't exist yet (each new Signal contact,
+    each ACP session), without listing them. How the register is achieved (prompt material, history, context,
     sampling) is a design choice, not a requirement; the bar is behavioural
     (principle 6), and an essay-length reply to a one-line text is a bug.
 
@@ -807,8 +807,9 @@ evidence that produced it.
 **Heartbeat.** The heartbeat is a turn the agent starts when the system
 is idle (§3.1.16), with a latency bound so a busy system can't starve it.
 It reviews recent memory and open and retired goals, assesses itself, and
-acts only when the assessment warrants it. Putting it to sleep is durable
-across restarts.
+acts only when the assessment warrants it. It runs on a channel no
+transport owns, so it reaches a person only through a gated cross-channel
+send (§3.5.9). Putting it to sleep is durable across restarts.
 
 **People, observations, semantic facts.** `person` records keyed by
 `(transport, scope, sender)`, auto-created on first contact, carrying a
@@ -844,8 +845,8 @@ with `recall_raw` are named anti-self-manipulation machinery, not style.
 With the sensitivity plugin loaded, a sensitivity column filters retrieval
 by who is present; without it, retrieval is not filtered by audience. An
 idle scan is upkeep (principle 13) that runs preferably when the system is
-idle (§3.1.16) and at least every N (configurable), so traffic or a
-frequent heartbeat cannot starve it: it looks for escalating conflict,
+idle (§3.1.16) and at least every N (configurable), so traffic or the
+heartbeat cannot starve it: it looks for escalating conflict,
 repeated elicitation, behavioural anomalies, repeated low-trust assertions
 on one theme, and skill-directory writes, and acts through the gates plus
 operator notification. Skills are a
@@ -885,7 +886,7 @@ as facts about the relationship), triggered by dropped commitments that
 retrieval should have surfaced; and endogenous goal candidates (curiosity:
 unresolved high-surprise episodes from the outcome log; care: dormant
 commitments and long-quiet valued relationships), delivered only as inputs
-to the heartbeat's distillation slot behind the act-if-warranted and
+to the heartbeat behind the act-if-warranted and
 output gates, triggered by a month of heartbeats in which the agent never
 initiates anything the operator judges worth initiating.
 
@@ -946,7 +947,7 @@ design: `docs/design.md`, Forks. The requirements are outcomes:
    `get_or_create` for ids no resolving transport owns), counts as an
    inbound item on that channel (§3.1.16), and injects through
    `on_notify` with `meta={"origin", "schedule_id"}`; the whole pipeline
-   then runs. A heartbeat on a channel no transport owns reaches
+   then runs. A firing on a channel no transport owns reaches
    persistence only.
 4. Reminder text is framed as data with its quote marks neutralized;
    operator jobs are framed as the operator's; a late firing is prefixed
@@ -1099,8 +1100,7 @@ record that holds the reasoning.
 | Best-guess defaults first; thresholds fit from experience; no closed-loop auto-fit | operator directives 1, 3 |
 | Engagement gate calibrates offline only | §3.2 |
 | Hedging vocabulary is persona, not architecture | §5.9 |
-| Heartbeat acts when warranted, not every beat; sleep is durable | §5.8; `plans/scheduler.md` |
-| The heartbeat starts on system idle, not on a schedule | #134 |
+| The heartbeat starts on system idle, not on a schedule, and acts only when warranted; sleep is durable | §5.8; #134 |
 | Idle-triggered work may carry a latency bound: the quiet it needs decays with waiting, so traffic can't starve it | #214 |
 | The agent may decline any turn when it has nothing to add (Grice's maxims, by register); gates still never withhold a direct reply by default | #215 |
 | Model endpoints may be remote; a role's credentials come from the environment, and the threat model names what each role sends | #217 |
