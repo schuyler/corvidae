@@ -151,7 +151,7 @@ The LLM has access to these tools out of the box:
 - `web_search` — DuckDuckGo search, results as title/URL/snippet
 - `task_pipeline` — run a YAML/JSON DAG of shell commands in dependency order
 - `task_status` — check status of background tasks
-- `set_settings` — adjust agent parameters (the `system_prompt` key is blocked, but read docs/threat-model.md finding 1 before trusting that; other keys configurable as immutable)
+- `set_settings` — adjust sampling parameters, turn and context limits, and plugin tunables (an allowlist in code; other keys configurable as immutable)
 - `subagent` — launch a background agent with its own LLM session
 
 MCP servers add their tools to this list at startup.

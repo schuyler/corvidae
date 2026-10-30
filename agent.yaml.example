@@ -65,15 +65,9 @@ agent:
   # mid_conversation_system_role: system  # system | user. Role for system messages after the first
   #                                    (memory CONTEXT, notifications, scheduled firings). Set user for strict chat templates
   #                                    (Qwen 3.8, Swift-1.5) that reject a non-leading system message.
-  # immutable_settings:             # keys the agent cannot change via set_settings (system_prompt always blocked)
+  # immutable_settings:             # keys the agent cannot change via set_settings (system_prompt always blocked;
+  #                                 # undotted keys outside the built-in allowlist are always refused)
   #   - max_turns                   # example: prevent the agent from extending its own turn limit
-  #   # Block these everywhere: undotted keys are forwarded into the LLM
-  #   # request body, and these override the conversation itself
-  #   # (docs/threat-model.md, finding 1):
-  #   - messages
-  #   - model
-  #   - tools
-  #   - tool_choice
   #   # Recommended additions for multi-speaker channels with untrusted
   #   # participants (see docs/configuration.md "Runtime-tunable gate parameters"):
   #   # - critique.provenance.enabled

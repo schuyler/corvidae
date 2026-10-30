@@ -1841,15 +1841,23 @@ async def set_settings(settings: dict, _ctx: ToolContext) -> str
 
 The `settings` dict is intended for:
 
-- LLM inference keys: `temperature`, `top_p`, `top_k`, `frequency_penalty`,
-  `presence_penalty`, `max_tokens`
-- Framework keys: `max_turns`, `max_context_tokens`, `reasoning_history`
+- LLM inference keys (`INFERENCE_KEYS`, `channel.py`): `temperature`,
+  `top_p`, `top_k`, `frequency_penalty`, `presence_penalty`, `max_tokens`,
+  `seed`
+- Framework keys (`TUNABLE_FRAMEWORK_KEYS`, `tools/settings.py`):
+  `max_turns`, `max_context_tokens`, `reasoning_history`
 - Dotted plugin tunables (`critique.*`, `appraisal.*`; see configuration.md)
 
-Keys are not validated, except `reasoning_history`, which is rejected
-(with no overrides applied) unless it is `drop`, `exchange`, or `keep` — a
-stored bad value would make every later config resolve raise. See the
-Blocklist note below for what the lack of validation means.
+Undotted keys are allowlisted (GitHub issue #206): any undotted key outside
+the first two lists rejects the whole call, with no overrides applied, a
+`null` included. The request body accepts keys that replace the
+conversation (`messages`), repoint the server (`model`) or rewrite the
+tool list (`tools`, `tool_choice`), and a blocklist can't name every key a
+server honors; see [threat-model.md](threat-model.md), finding 1. As a
+second line, `Agent._llm_overrides` forwards only `INFERENCE_KEYS` into
+the request body. Values are not validated, except `reasoning_history`,
+which is rejected unless it is `drop`, `exchange`, or `keep` — a stored bad
+value would make every later config resolve raise.
 
 Pass `null` for a key to clear that override and revert to the static config value.
 
@@ -1857,7 +1865,8 @@ Pass `null` for a key to clear that override and revert to the static config val
 
 On success: a confirmation string listing current overrides (or noting that all
 overrides have been cleared). On blocked keys: an error string naming the
-blocked keys.
+blocked keys. On keys outside the allowlist: an error string naming them
+and listing the accepted keys.
 
 ### Blocklist
 
@@ -1870,12 +1879,9 @@ agent:
     - max_turns
 ```
 
-Note the limit of what this buys: any undotted key that is neither a
-framework key nor blocklisted is forwarded verbatim into the LLM request
-body, where it can override `model` and `messages`, so blocking
-`system_prompt` does not by itself protect the system prompt. Blocklisting
-`messages`, `model`, `tools` and `tool_choice` covers the known cases; see
-[threat-model.md](threat-model.md), finding 1.
+The blocklist is checked first, then the allowlist above, so it only
+narrows what the allowlist accepts. Its main use is the dotted gate keys
+(configuration.md, "Runtime-tunable gate parameters").
 
 ### Persistence
 

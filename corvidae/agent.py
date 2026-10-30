@@ -39,7 +39,7 @@ from corvidae.channel import (
     Channel,
     ChannelConfig,
     ChannelRegistry,
-    RUNTIME_META_KEYS,
+    INFERENCE_KEYS,
     resolve_system_prompt,
 )
 from corvidae.context import (
@@ -1045,17 +1045,17 @@ class Agent(CorvidaePlugin):
     def _llm_overrides(channel: Channel) -> dict:
         """The channel's runtime overrides that go into the request body.
 
-        Framework keys are channel config, dotted keys are plugin tunables
-        (see corvidae.tuning), and RUNTIME_META_KEYS are transport metadata —
-        none may leak into the request body. Shared by the main turn and
-        forks, which must send the same body to keep the cached prefix.
+        Only INFERENCE_KEYS are forwarded (GitHub issue #206). set_settings
+        already refuses other undotted keys; this filter keeps framework
+        keys, dotted plugin tunables (see corvidae.tuning), transport
+        metadata, and anything else that reaches runtime_overrides out of
+        the body. Shared by the main turn and forks, which must send the
+        same body to keep the cached prefix.
         """
         return {
             k: v
             for k, v in channel.runtime_overrides.items()
-            if k not in FRAMEWORK_KEYS
-            and k not in RUNTIME_META_KEYS
-            and "." not in k
+            if k in INFERENCE_KEYS
         }
 
     def fork_enabled(self, stage: str) -> bool:

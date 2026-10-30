@@ -27,6 +27,21 @@ from corvidae.tool_policy import parse_channel_tools
 # merge into resolved ChannelConfig or forward to the LLM request body.
 RUNTIME_META_KEYS = frozenset({"cwd", "tool_backend"})
 
+# The inference parameters set_settings may change and the agent forwards
+# into the LLM request body (GitHub issue #206). An allowlist, because the
+# body accepts keys that replace the conversation (messages), repoint the
+# server (model) or rewrite the tool list (tools, tool_choice), and no
+# blocklist can name every key a given server honors.
+INFERENCE_KEYS = frozenset({
+    "temperature",
+    "top_p",
+    "top_k",
+    "frequency_penalty",
+    "presence_penalty",
+    "max_tokens",
+    "seed",
+})
+
 if TYPE_CHECKING:
     from corvidae.context import ContextWindow
 

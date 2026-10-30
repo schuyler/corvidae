@@ -73,7 +73,7 @@ The lookup priority is:
 
 See [configuration.md](configuration.md#transport-wide-entries) for the key forms and reload behaviour.
 
-Runtime overrides (via the `set_settings` tool) can change many channel settings, and the `system_prompt` key is always blocked. That block is narrower than it sounds: an undotted key such as `messages` is forwarded into the LLM request body and replaces the whole conversation, system prompt included. See [threat-model.md](threat-model.md), finding 1, and `agent.immutable_settings` in [configuration.md](configuration.md) for the stopgap.
+Runtime overrides (via the `set_settings` tool) can change sampling parameters, `max_turns`, `max_context_tokens`, `reasoning_history` and dotted plugin tunables. The `system_prompt` key is always blocked, and any other undotted key, such as `messages`, is refused, so the model can't replace the conversation through the request body. Plugin prompt tunables (`critique.prompt.*`, `appraisal.stage2_prompt`) are still writable unless listed in `agent.immutable_settings`; see [threat-model.md](threat-model.md), findings 1 and 2.
 
 ### When it is resolved
 

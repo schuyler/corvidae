@@ -104,37 +104,40 @@ everything.
 
 Most severe first. File references are to the reviewed commit.
 
-### 1. `set_settings` can rewrite the system prompt and switch models
+### 1. `set_settings` could rewrite the system prompt and switch models (fixed, #206)
 
-The one hard rule `RuntimeSettingsPlugin` enforces is that `system_prompt`
-is immutable. It checks the literal key (`tools/settings.py`). But every
-override that is not a framework key and does not contain a dot is
-forwarded into the LLM request body (`agent.py`, step 7), and
-`LLMClient.chat` applies it with `payload.update(extra_body)` *after*
-setting `model` and `messages` (`llm.py`). So:
+At the reviewed commit, the one hard rule `RuntimeSettingsPlugin` enforced
+was that `system_prompt` is immutable. It checked the literal key
+(`tools/settings.py`). But every override that was not a framework key and
+did not contain a dot was forwarded into the LLM request body (`agent.py`,
+step 7), and `LLMClient.chat` applies it with `payload.update(extra_body)`
+*after* setting `model` and `messages` (`llm.py`). So:
 
 ```python
 set_settings({"messages": [{"role": "system", "content": "..."}]})
 ```
 
-replaces the entire conversation, operator prompt included, on every
-subsequent turn. `set_settings({"model": "..."})` repoints a shared server.
-`tools` and `tool_choice` land the same way, as does `stream`, which only
-breaks the response parser (a self-inflicted outage, not a bypass, so the
-blocklists below leave it out). Verified with a fake session: the outgoing
-payload carried the override's model and messages.
-The override lives in memory and lasts until restart, unlike findings 3
-and 4, which persist.
+replaced the entire conversation, operator prompt included, on every
+subsequent turn. `set_settings({"model": "..."})` repointed a shared server.
+`tools` and `tool_choice` landed the same way, as did `stream`, which only
+breaks the response parser. Verified with a fake session: the outgoing
+payload carried the override's model and messages. The transport metadata
+keys `cwd` and `tool_backend` were writable too.
 
-Fix shape: allowlist the inference keys you mean (`temperature`, `top_p`,
-`top_k`, the penalties, `max_tokens`, `seed`) instead of blocklisting the
-ones you don't. Stopgap today: the blocklist is a literal key match, so
-adding `messages`, `model`, `tools` and `tool_choice` to
-`agent.immutable_settings` blocks the demonstrated attacks. It cannot
-enumerate every request-body key a given server honors, which is why the
-real fix is an allowlist in code. If you don't need agent self-tuning at
-all, `tools.disabled: [set_settings]` closes this finding and the next one
-outright.
+Fixed with an allowlist in code. `set_settings` accepts an undotted key
+only if it is an inference parameter (`INFERENCE_KEYS` in `channel.py`:
+`temperature`, `top_p`, `top_k`, `frequency_penalty`, `presence_penalty`,
+`max_tokens`, `seed`) or one of the framework keys `max_turns`,
+`max_context_tokens` and `reasoning_history`. Any other undotted key
+refuses the whole call before anything changes, a `null` (clear)
+included, and the error names the rejected keys and the accepted set.
+Independently, `Agent._llm_overrides` forwards only `INFERENCE_KEYS` into
+the request body, so an override that reaches `runtime_overrides` some
+other way still stays out of it. `agent.immutable_settings` narrows the
+allowlist further; it is no longer the only thing between the model and
+`messages`. Dotted plugin tunables are still open by default; that is
+finding 2. If you don't need agent self-tuning at all,
+`tools.disabled: [set_settings]` closes finding 2 outright too.
 
 ### 2. The model can turn off its own gates
 
@@ -537,11 +540,9 @@ of it.
 
 ## What to do first
 
-1. Allowlist inference keys in `set_settings`. A small change; closes the
-   only outright bypass. Until then, put `messages`, `model`, `tools` and
-   `tool_choice` in `immutable_settings`, or disable `set_settings`
-   entirely if you don't need self-tuning; it's config, not code.
-2. Same day, same file: put the recommended set from
+1. Done (#206): `set_settings` allowlists its undotted keys, which closed
+   the only outright bypass.
+2. Put the recommended set from
    [configuration.md](configuration.md) ("Runtime-tunable gate
    parameters"), prompt keys included, in `immutable_settings`.
 3. Make `agent.yaml` and any system-prompt files owned by another user and
