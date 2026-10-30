@@ -44,6 +44,17 @@ OBJECTION_VERDICT = json.dumps({"objections": [
 ]})
 
 
+def verdicts_text(*supported):
+    """A provenance fork reply: one verdict per flag, claim index in order."""
+    return json.dumps({"verdicts": [
+        {"claim": i + 1, "reason": f"reason {i + 1}", "supported": flag}
+        for i, flag in enumerate(supported)]})
+
+
+SUPPORTED_VERDICT = verdicts_text(True)
+UNSUPPORTED_VERDICT = verdicts_text(False)
+
+
 class StubClient:
     def __init__(self, chat_text=OBJECTION_VERDICT):
         self.chat_text = chat_text
@@ -863,7 +874,7 @@ class TestProvenanceCritic:
 
     async def test_fork_sees_claims_evidence_and_snapshot(self, tmp_path):
         env = await _provenance_env(tmp_path)
-        agent = RenderingForkAgent({"critique"}, text=OBJECTION_VERDICT)
+        agent = RenderingForkAgent({"critique"}, text=UNSUPPORTED_VERDICT)
         try:
             ex = await _provenance_exchange(
                 env, agent, support="Heads up: the quarterly audit deadline is Thursday.")
@@ -881,7 +892,7 @@ class TestProvenanceCritic:
             assert call["attribution"]["stage"] == "critique"
             assert env.stub.chat_calls == []
             outcomes = await _read_outcomes(env.db, "kp")
-            assert outcomes["provenance"] == {"claims": 1, "candidates": 1, "objections": 1}
+            assert outcomes["provenance"] == {"claims": 1, "candidates": 1, "supported": 0, "objections": 1}
         finally:
             await _teardown(env)
 
@@ -889,7 +900,7 @@ class TestProvenanceCritic:
         # The tool row indexes the claim's words but sits inside the exchange
         # (and the window), so it is in the fork request, not the search.
         env = await _provenance_env(tmp_path)
-        agent = RenderingForkAgent({"critique"}, text=EMPTY_VERDICT)
+        agent = RenderingForkAgent({"critique"}, text=SUPPORTED_VERDICT)
         try:
             ex = await _provenance_exchange(env, agent)
             evidence = await env.plugin._gather_evidence(env.channel, "kp", [CLAIM])
@@ -902,7 +913,7 @@ class TestProvenanceCritic:
 
     async def test_no_evidence_is_shown_as_none_found(self, tmp_path):
         env = await _provenance_env(tmp_path)
-        agent = RenderingForkAgent({"critique"}, text=EMPTY_VERDICT)
+        agent = RenderingForkAgent({"critique"}, text=SUPPORTED_VERDICT)
         try:
             await _provenance_exchange(env, agent)
             await _run_provenance(env)
@@ -914,7 +925,7 @@ class TestProvenanceCritic:
     async def test_objections_reach_the_funnel(self, tmp_path):
         env = await _provenance_env(tmp_path, with_funnel=True)
         env.funnel.register_and_wake = AsyncMock()
-        agent = RenderingForkAgent({"critique"}, text=OBJECTION_VERDICT)
+        agent = RenderingForkAgent({"critique"}, text=UNSUPPORTED_VERDICT)
         try:
             await _provenance_exchange(env, agent, trace_id="kf")
             await _run_provenance(env, "kf")
@@ -931,7 +942,7 @@ class TestProvenanceCritic:
         # objection. A lone surrogate (a truncated emoji escape in the
         # model's JSON) is one real input that makes sqlite's bind raise.
         env = await _provenance_env(tmp_path)
-        agent = RenderingForkAgent({"critique"}, text=OBJECTION_VERDICT)
+        agent = RenderingForkAgent({"critique"}, text=UNSUPPORTED_VERDICT)
         try:
             await _provenance_exchange(
                 env, agent, trace_id="kfail",
@@ -951,7 +962,7 @@ class TestProvenanceCritic:
         # with the fork available but no originating row to bound the
         # search, the check is skipped.
         env = await _provenance_env(tmp_path)
-        agent = RenderingForkAgent({"critique"}, text=OBJECTION_VERDICT)
+        agent = RenderingForkAgent({"critique"}, text=UNSUPPORTED_VERDICT)
         try:
             await _provenance_exchange(env, agent, trace_id="kne")
             env.plugin._originating_rowid.pop("kne")
@@ -967,7 +978,7 @@ class TestProvenanceCritic:
         from corvidae_cognition.critique import PROVENANCE_EXCERPT_CHARS
 
         env = await _provenance_env(tmp_path)
-        agent = RenderingForkAgent({"critique"}, text=EMPTY_VERDICT)
+        agent = RenderingForkAgent({"critique"}, text=SUPPORTED_VERDICT)
         long_text = ("filler words about nothing " * 30) + " the zebrafish permit lapses Friday " + (
             "more filler " * 60)
         assert long_text.index("zebrafish") > PROVENANCE_EXCERPT_CHARS
@@ -988,7 +999,7 @@ class TestProvenanceCritic:
 
     async def test_short_hit_is_shown_whole(self, tmp_path):
         env = await _provenance_env(tmp_path)
-        agent = RenderingForkAgent({"critique"}, text=EMPTY_VERDICT)
+        agent = RenderingForkAgent({"critique"}, text=SUPPORTED_VERDICT)
         try:
             await _provenance_exchange(
                 env, agent, support="Heads up: the quarterly audit deadline is Thursday.")
@@ -1000,7 +1011,7 @@ class TestProvenanceCritic:
 
     async def test_non_string_content_hit_is_shown_empty(self, tmp_path):
         env = await _provenance_env(tmp_path)
-        agent = RenderingForkAgent({"critique"}, text=EMPTY_VERDICT)
+        agent = RenderingForkAgent({"critique"}, text=SUPPORTED_VERDICT)
         try:
             cursor = await env.db.execute(
                 "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
@@ -1112,7 +1123,7 @@ async def _real_path_env(tmp_path, replies, past_claims):
             "request": build_fork_prompt(
                 ch.conversation, cut, instruction, frozenset(), "system"),
         })
-        return ForkResult(text=OBJECTION_VERDICT, message={"role": "assistant"})
+        return ForkResult(text=UNSUPPORTED_VERDICT, message={"role": "assistant"})
 
     agent.fork = fork
 

@@ -57,7 +57,7 @@ channels:
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `plugins.disabled` | list of strings | `[]` | Entry-point plugin names to block from loading. `Runtime.start()` calls `pm.set_blocked(name)` for each entry before entry points are loaded; blocked plugins are never instantiated. Names must match the entry-point name from `[project.entry-points.corvidae]` in `pyproject.toml` (e.g. `memory`, `funnel`, `appraisal`, `critique`, `outcome_log`, `memory_tools`, `subagent`, `mcp`, `cli`). Only entry-point plugins can be disabled this way — manually registered plugins cannot be blocked via config. |
+| `plugins.disabled` | list of strings | `[]` | Entry-point plugin names to block from loading. `Runtime.start()` calls `pm.set_blocked(name)` for each entry before entry points are loaded; blocked plugins are never instantiated. Names must match the entry-point name from `[project.entry-points.corvidae]` in `pyproject.toml` (e.g. `memory`, `funnel`, `appraisal`, `critique`, `outcome_log`, `memory_tools`, `subagent`, `mcp`, `cli`). Only entry-point plugins can be disabled this way — manually registered plugins cannot be blocked via config. A null `plugins:` or `disabled:` means nothing is disabled; any other non-list value (a bare string, say) or a non-string entry fails startup with a `Config error` naming the key and value. |
 
 `agent.minimal.yaml.example` disables `memory`, `memory_tools`, `funnel`, `appraisal`, `critique`, and `outcome_log` — the cognition plugin set — leaving the core agent loop, multi-turn tool calling, compaction, and persistence/restart recovery intact. See the [Plugin Guide](plugin-guide.md#plugin-disable) for the hook-level mechanics.
 
@@ -169,7 +169,7 @@ Each stage has a fork instruction, next to its standalone prompt where it has on
 | `agent.compaction_fork_prompt` | `prompts/compaction_fork.md` | Appended to the dropped prefix. |
 | `memory.consolidation_fork_prompt` | `prompts/memory_consolidation_fork.md` | Followed by a sentence naming where the range starts. Restart-only, like the rest of `memory.*`. |
 | `appraisal.stage2_fork_prompt` | `prompts/appraisal_fork.md` | Followed by quotes of the exchange's opening message and of the response sent, and the retrieval profile. |
-| `critique.fork_prompt.<lens>` | `prompts/critique_<lens>_fork.md` | Followed by quotes of the exchange's opening message and of the response sent; provenance also gets each claim's search hits and the CONTEXT snapshot. Provenance has no standalone prompt. |
+| `critique.fork_prompt.<lens>` | `prompts/critique_<lens>_fork.md` | Followed by quotes of the exchange's opening message and of the response sent; provenance also gets each claim's search hits and the CONTEXT snapshot. Provenance has no standalone prompt, and an override must ask for its per-claim verdicts format or every run skips. |
 
 These are static config, read with `corvidae.tuning.config_value`. Unlike
 `appraisal.stage2_prompt` and `critique.prompt.<lens>`, they aren't runtime
@@ -624,7 +624,11 @@ Signal channels accept either form of key. `signal:<aci>` is the real channel id
 
 Configured by `McpClientPlugin`. The `mcp` section is optional; if absent, no MCP servers are connected. See the [Plugin Guide](plugin-guide.md#mcpclientplugin-corvidae-mcp_clientpy) for full details.
 
-For `transport: stdio`, the required keys are `command` and optionally `args` and `env`. For `transport: sse`, the required key is `url`; `command`, `args`, and `env` are not used.
+For `transport: stdio`, the required keys are `command` and optionally `args` and `env`. For `transport: streamable_http` (MCP's current HTTP transport: one endpoint, usually `/mcp`) and the older `transport: sse`, the required key is `url`, and `headers` is optional; `command`, `args`, and `env` are not used.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `mcp.servers.<name>.headers` | map of string to string | none | HTTP headers sent on every request to the server (`streamable_http` and `sse` only). A value may contain `${VAR}`, replaced at connect time from the daemon's environment; put secrets there, not in `agent.yaml`. If a referenced variable is unset, empty, or contains a newline or NUL (a trailing newline from a secrets file, say), that server is skipped with one WARNING naming the server, the header and the variable, and it is not retried, since the environment can't change without a restart. Only the braced `${VAR}` form is substituted. Header values are never logged. |
 
 ```yaml
 mcp:
@@ -639,6 +643,13 @@ mcp:
       tool_prefix: "fs"        # optional; defaults to server name
       timeout_seconds: 30      # optional; per tool call; default 30
       connect_timeout_seconds: 30  # optional; connect + initialize + list_tools; default 30
+
+    # streamable HTTP transport example, with a bearer token from the environment
+    wiki:
+      transport: streamable_http
+      url: http://localhost:8090/mcp   # required for streamable_http
+      headers:                         # optional; sse takes it too
+        Authorization: "Bearer ${OTTERWIKI_MCP_TOKEN}"   # set in the daemon's environment
 
     # sse transport example
     my_sse_server:

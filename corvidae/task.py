@@ -320,9 +320,44 @@ class TaskPlugin(CorvidaePlugin):
                     **task.meta,
                 },
             )
-        except Exception:
+        except Exception as exc:
             logger.warning(
                 "on_notify hook failed in _on_task_complete",
                 exc_info=True,
-                extra={"channel": task.channel.id, "task_id": task.task_id},
+                extra={
+                    "channel": task.channel.id,
+                    "task_id": task.task_id,
+                    "tool_call_id": task.tool_call_id,
+                },
+            )
+            # A tool call must still get a result, or the channel's tool
+            # cycle waits forever (#173). Deliver an error result straight
+            # to the Agent's queue; it skips this if the real one got there.
+            if task.tool_call_id:
+                await self._deliver_tool_error(task, exc)
+
+    async def _deliver_tool_error(self, task: Task, exc: Exception) -> None:
+        """Hand the Agent an error result for a task whose on_notify raised."""
+        text = (
+            f"[Task {task.task_id}] Error: the result of this tool call could "
+            f"not be delivered ({type(exc).__name__}); the tool may have run. "
+            "Check its effects before retrying."
+        )
+        # Duck-typed: task.py does not import the Agent. A missing Agent
+        # raises AttributeError here and is logged like any other failure.
+        try:
+            agent = self.pm.get_plugin("agent")
+            await agent.deliver_tool_error(
+                task.channel, task.tool_call_id, text,
+                {"task_id": task.task_id, "trace_id": task.trace_id, **task.meta},
+            )
+        except Exception:
+            logger.error(
+                "fallback delivery of an error result for tool call %s on "
+                "channel %s raised; if no result was queued the channel waits "
+                "on it until restart",
+                task.tool_call_id, task.channel.id,
+                exc_info=True,
+                extra={"channel": task.channel.id, "task_id": task.task_id,
+                       "tool_call_id": task.tool_call_id},
             )

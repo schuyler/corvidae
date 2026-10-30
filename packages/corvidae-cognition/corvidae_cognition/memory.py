@@ -1035,7 +1035,15 @@ class MemoryPlugin(CorvidaePlugin):
         try:
             db = await self._ensure_schema()
             if db is None:
-                raise RuntimeError("persistence DB not open")
+                # Expected at boot: memory starts before persistence opens
+                # the DB (on_start is LIFO). One plain line, no traceback (#175).
+                logger.warning(
+                    "retention: persistence DB not open yet; arming the "
+                    "retention timer deferred, re-arming in %ss",
+                    RETENTION_DB_RETRY_SECONDS,
+                )
+                self._schedule_retention_rearm()
+                return
             async with db.execute(
                 "SELECT last_run FROM retention_meta LIMIT 1"
             ) as cursor:
@@ -1054,11 +1062,15 @@ class MemoryPlugin(CorvidaePlugin):
                 RETENTION_DB_RETRY_SECONDS,
                 exc_info=True,
             )
-            self._retention_timer = self._clock.call_later(
-                RETENTION_DB_RETRY_SECONDS,
-                self._arm_retention,
-                name="memory.retention.rearm",
-            )
+            self._schedule_retention_rearm()
+
+    def _schedule_retention_rearm(self) -> None:
+        """Retry _arm_retention after RETENTION_DB_RETRY_SECONDS."""
+        self._retention_timer = self._clock.call_later(
+            RETENTION_DB_RETRY_SECONDS,
+            self._arm_retention,
+            name="memory.retention.rearm",
+        )
 
     async def _retention_due(self) -> None:
         """Retention is due: run when the system is quiet, or at max_delay."""

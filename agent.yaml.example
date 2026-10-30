@@ -201,11 +201,16 @@ agent:
 # mcp:
 #   servers:
 #     fs:
-#       transport: stdio                 # stdio | sse
+#       transport: stdio                 # stdio | sse | streamable_http
 #       command: npx
 #       args: ["-y", "@modelcontextprotocol/server-filesystem", "/path"]
 #       timeout_seconds: 30              # per tool call
 #       connect_timeout_seconds: 30      # startup handshake; a server that misses it is skipped
+#     wiki:
+#       transport: streamable_http       # MCP's current HTTP transport
+#       url: http://localhost:8090/mcp
+#       headers:                         # sse and streamable_http; ${VAR} comes from the environment
+#         Authorization: "Bearer ${OTTERWIKI_MCP_TOKEN}"
 
 # Per-channel config (optional)
 # Keys must be "transport:scope". Overrides agent defaults where set.
