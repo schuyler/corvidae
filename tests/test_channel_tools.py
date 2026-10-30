@@ -2,7 +2,7 @@
 
 ``channels.<id>.tools.disabled`` narrows a channel's tool set on top of the
 global ``tools.disabled``. The narrowed schemas are fixed for the
-conversation (principle 2), shared with forks (PRD §3.8.2), and enforced at
+conversation (principle 2), shared with forks (`docs/design.md`, Forks), and enforced at
 dispatch, not only hidden: a model can call a tool it saw earlier or one
 named in injected text.
 """
@@ -229,7 +229,7 @@ class TestChannelSchemas:
             await _teardown(plugin, db)
 
     async def test_fork_sends_the_channels_schemas(self):
-        """Prefix parity (PRD §3.8.2): a fork of the channel uses the same
+        """Prefix parity (`docs/design.md`, Forks): a fork of the channel uses the same
         per-channel schemas the turn did."""
         plugin, channel, db, _ = await _agent_with_tools(frozenset({"shell"}))
         try:

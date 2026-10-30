@@ -12,7 +12,7 @@ Two views of a channel's list exist on purpose:
 - The conversation's **ToolView**, resolved when the conversation starts
   and again at a compaction boundary, is what the schemas are built from.
   Tool schemas head the prompt, so they never change mid-conversation
-  (principle 2), and forks reuse them (prefix parity, PRD §3.8.2).
+  (principle 2), and forks reuse them (prefix parity, `docs/design.md`, Forks).
 - The **live** ChannelConfig list, which a hot reload updates.
 
 Dispatch refuses a tool disabled in either, so a narrowing reload takes
