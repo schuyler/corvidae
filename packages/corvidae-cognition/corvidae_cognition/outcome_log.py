@@ -125,6 +125,15 @@ class OutcomeLogPlugin(CorvidaePlugin):
         # Best-effort early DDL; falls back to lazy creation on first write
         # if the persistence DB hasn't opened yet (hook-ordering dependent).
         try:
+            # The usual case at boot: persistence starts after us (on_start
+            # is LIFO). Expected, so one plain line, no traceback (#163).
+            if self._resolve_db() is None:
+                logger.warning(
+                    "exchange_log table creation deferred until the first "
+                    "write: persistence DB not open yet (daemon.session_db=%r)",
+                    self._db_path,
+                )
+                return
             await self._ensure_table()
         except Exception:
             logger.warning("exchange_log table creation deferred", exc_info=True)
