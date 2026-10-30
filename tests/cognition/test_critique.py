@@ -29,7 +29,7 @@ import pytest
 from corvidae.attribution import get_attribution
 from corvidae.channel import Channel, ChannelConfig
 from corvidae.context import ContextWindow, MessageType
-from corvidae.hooks import CorvidaePlugin, create_plugin_manager, hookimpl
+from corvidae.hooks import CorvidaePlugin, create_plugin_manager, hookimpl, resolve_reject_wins
 from corvidae_cognition.outcome_log import OutcomeLogPlugin
 from corvidae.persistence import PersistencePlugin, init_db
 from corvidae.task import TaskPlugin, TaskQueue
@@ -1276,10 +1276,15 @@ class TestNoReplyVeto:
     async def _verdict(self, text="NO_REPLY", emission="final", origin="critique"):
         from corvidae_cognition.critique import CritiquePlugin
 
-        return await CritiquePlugin().should_send_response(
+        # Dispatch through the plugin manager, as the kernel's _gate_send
+        # does, so a method missing @hookimpl is never consulted.
+        pm = create_plugin_manager()
+        pm.register(CritiquePlugin(), name="critique")
+        results = await pm.ahook.should_send_response(
             channel=Channel(transport="test", scope="veto"),
             text=text, emission=emission, trace_id="kveto", meta={"origin": origin},
         )
+        return resolve_reject_wins(results)
 
     @pytest.mark.parametrize("text", ["NO_REPLY", "  NO_REPLY\n"])
     async def test_marker_on_a_critique_final_is_vetoed(self, text):

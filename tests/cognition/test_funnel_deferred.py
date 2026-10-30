@@ -324,6 +324,7 @@ class TestRegisterWithoutStub:
 
         funnel.register(channel, source="critique", entries=["a style note"])
         await funnel.before_agent_turn(channel=channel, trace_id="k1", meta={})
+        assert "a style note" in _window_context_text(conv)
 
         msg_count = len(conv.messages)
         await funnel.before_agent_turn(channel=channel, trace_id="k2", meta={})
