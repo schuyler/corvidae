@@ -78,7 +78,13 @@ from corvidae.outbound import (
 from corvidae.queue import SerialQueue
 from corvidae.task import Task
 from corvidae.tool import dispatch_tool_call
-from corvidae.tool_policy import ToolView, build_tool_view, disabled_on, refusal_message
+from corvidae.tool_policy import (
+    ToolView,
+    build_tool_view,
+    disabled_on,
+    disabling_keys,
+    refusal_message,
+)
 
 logger = logging.getLogger("corvidae.agent")
 
@@ -1155,14 +1161,21 @@ class Agent(CorvidaePlugin):
         typo there silently disables nothing. An MCP tool whose server has
         not connected yet reads the same way; the warning says so.
         """
-        disabled = channel.config.disabled_tools
+        disabled = channel.disabled_tools
         view = build_tool_view(self._tools, self._tool_schemas, disabled)
         unknown = sorted(name for name in disabled if name not in self._tools)
         if unknown:
+            # Name the config keys that carry the unknown names: a typo in a
+            # transport-wide entry is fixed under its own key, not the channel's.
+            keys = sorted({
+                key for name in unknown
+                for key in disabling_keys(name, channel, expand=False)
+            })
             logger.warning(
-                "channels.%s.tools.disabled names no loaded tool: %s; check the "
-                "spelling (loaded: %s), or ignore if an MCP server has not connected yet",
-                channel.id, ", ".join(unknown), ", ".join(sorted(self._tools)),
+                "%s names no loaded tool: %s (channel %s); check the spelling "
+                "(loaded: %s), or ignore if an MCP server has not connected yet",
+                ", ".join(keys), ", ".join(unknown), channel.id,
+                ", ".join(sorted(self._tools)),
                 extra={"channel": channel.id},
             )
         return view
@@ -1268,8 +1281,8 @@ class Agent(CorvidaePlugin):
                 name = call["function"]["name"]
                 if name in disabled_on(channel):
                     logger.warning(
-                        "refused tool %s on %s: disabled by channels.%s.tools.disabled",
-                        name, channel.id, channel.id,
+                        "refused tool %s on %s: disabled by %s",
+                        name, channel.id, ", ".join(disabling_keys(name, channel)),
                         extra={"channel": channel.id, "tool": name, "tool_call_id": call["id"]},
                     )
                     return refusal_message(name, channel)

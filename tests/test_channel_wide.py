@@ -74,6 +74,20 @@ class TestCoverage:
         assert resolved["system_prompt"] == "DISCORD-DM"
         assert resolved["max_turns"] == 4
 
+    def test_more_specific_wins_whatever_the_config_order(self):
+        """R3: specificity, not the order keys appear in agent.yaml."""
+        config = {
+            "channels": {
+                "discord:dm:*": {"system_prompt": "DISCORD-DM"},
+                "discord:*": {"system_prompt": "DISCORD-GROUP", "max_turns": 4},
+            }
+        }
+        registry = _registry(config)
+        resolved = _resolved(registry, "discord", "dm:42")
+        assert resolved["system_prompt"] == "DISCORD-DM"
+        assert resolved["max_turns"] == 4
+        assert _resolved(registry, "discord", "77")["system_prompt"] == "DISCORD-GROUP"
+
     def test_web_keeps_the_agent_default(self):
         """R4."""
         registry = _registry(CHAT_CONFIG)
@@ -117,6 +131,29 @@ class TestPrecedence:
         resolved = registry.resolve_config(registry.get("signal:aci-1"))
         assert resolved["max_turns"] == 7
         assert resolved["system_prompt"] == "SIGNAL"
+
+    def test_every_scalar_key_resolves_through_a_wide_entry(self):
+        """R7: a wide entry accepts every key an exact entry does. One
+        assertion per ChannelConfig scalar field, so a field the overlay
+        forgets fails here."""
+        from dataclasses import fields
+
+        from corvidae.channel import ReasoningHistory
+
+        values = {
+            "system_prompt": "WIDE",
+            "max_context_tokens": 4000,
+            "reasoning_history": "keep",
+            "max_turns": 2,
+        }
+        scalar_fields = {f.name for f in fields(ChannelConfig)} - {"disabled_tools"}
+        assert scalar_fields == set(values), "a new ChannelConfig field needs a case here"
+        registry = _registry({"channels": {"signal:*": values}})
+        resolved = _resolved(registry, "signal", "aci-15")
+        assert resolved["system_prompt"] == "WIDE"
+        assert resolved["max_context_tokens"] == 4000
+        assert resolved["reasoning_history"] is ReasoningHistory.KEEP
+        assert resolved["max_turns"] == 2
 
     def test_wide_beats_agent_and_agent_fills_the_rest(self):
         registry = _registry({"channels": {"signal:*": {"max_turns": 3}}})
@@ -185,6 +222,13 @@ class TestDisabledTools:
         assert "channels.signal:*.tools.disabled" in message
         assert channel.id in message
 
+    def test_refusal_for_a_coupled_tool_names_the_wide_key(self):
+        """``shell`` disabled widely takes ``task_pipeline`` with it; the
+        refusal still names the key that did it."""
+        registry = _registry({"channels": {"signal:*": {"tools": {"disabled": ["shell"]}}}})
+        channel = registry.get_or_create("signal", "aci-16")
+        assert "channels.signal:*.tools.disabled" in refusal_message("task_pipeline", channel)
+
     def test_refusal_names_the_exact_key_when_the_exact_entry_disabled_it(self):
         config = {
             "channels": {
@@ -249,6 +293,21 @@ class TestValidation:
         assert registry.all() == []
         assert _resolved(registry, "signal", "aci-8")["system_prompt"] == "AGENT"
 
+    def test_invalid_exact_entry_keeps_the_previous_wide_entries(self):
+        """D4: a valid wide entry beside an invalid exact one is not applied."""
+        registry = _registry({"channels": {"signal:*": {"system_prompt": "OLD"}}})
+        with pytest.raises(ValueError, match=r"channels\.irc:#lex"):
+            load_channel_config(
+                {
+                    "channels": {
+                        "signal:*": {"system_prompt": "NEW"},
+                        "irc:#lex": {"reasoning_history": "sometimes"},
+                    }
+                },
+                registry,
+            )
+        assert _resolved(registry, "signal", "aci-17")["system_prompt"] == "OLD"
+
     def test_invalid_reload_keeps_the_previous_wide_entries(self):
         registry = _registry({"channels": {"signal:*": {"system_prompt": "SIGNAL"}}})
         with pytest.raises(ValueError):
@@ -291,7 +350,9 @@ class TestReload:
                 {"channels": {"signal:*": {"tools": {"disabled": ["shell"]}}}}, registry
             )
         assert any(
-            r.levelno == logging.INFO and channel.id in r.getMessage()
+            r.levelno == logging.INFO
+            and channel.id in r.getMessage()
+            and "signal:*" in r.getMessage()
             for r in caplog.records
         )
 
