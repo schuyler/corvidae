@@ -834,7 +834,7 @@ config_watcher    (ConfigWatcherPlugin) — entry point
 
 **Shutdown order:** `Runtime.stop()` calls `agent.on_stop()` first (drains queues), then `pm.ahook.on_stop()` to tear down all other plugins, then stops the idle tracker and closes the kernel clock, which cancels any timers left running.
 
-**Failed startup:** if anything in `Runtime.start()` raises (a plugin's `on_init` or `on_start`, say), `Runtime.run` runs the `on_stop` broadcast, stops the idle tracker and closes the clock, under the same 3 s bound, then re-raises so the process exits non-zero. `agent.on_stop()` is skipped. A plugin's `on_stop` must therefore cope with resources its `on_start` never opened.
+**Failed startup:** if `Runtime.start()` raises an exception (a plugin's `on_init` or `on_start`, say; not a config error, which exits before any plugin loads), `Runtime.run` runs the `on_stop` broadcast, stops the idle tracker and closes the clock, under the same 3 s bound, then re-raises so the process exits non-zero. `agent.on_stop()` is skipped. A plugin's `on_stop` must therefore cope with resources its `on_start` never opened.
 
 `ChannelRegistry`, the `Clock` (`"clock"`) and the `IdleTracker` (`"idle"`) are registered by `Runtime.start()` before the entry points load, so any plugin can depend on them. See [Acting on time and quiet](#acting-on-time-and-quiet).
 
