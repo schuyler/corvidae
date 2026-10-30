@@ -10,6 +10,7 @@ is the union of every layer, so a channel can only narrow.
 
 from __future__ import annotations
 
+import logging
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -281,6 +282,19 @@ class TestReload:
         load_channel_config({"channels": {"signal:*": {"tools": {"disabled": ["shell"]}}}}, registry)
         assert "shell" in disabled_on(channel)
 
+    def test_reload_that_changes_a_live_channel_is_logged(self, caplog):
+        """D5: a reload that changes what a live channel gets is never silent."""
+        registry = _registry({"channels": {"signal:*": {}}})
+        channel = registry.get_or_create("signal", "aci-14")
+        with caplog.at_level(logging.INFO, logger="corvidae.channel"):
+            load_channel_config(
+                {"channels": {"signal:*": {"tools": {"disabled": ["shell"]}}}}, registry
+            )
+        assert any(
+            r.levelno == logging.INFO and channel.id in r.getMessage()
+            for r in caplog.records
+        )
+
     def test_removing_a_wide_entry_takes_effect_live(self):
         registry = _registry({"channels": {"signal:*": {"max_turns": 3}}})
         channel = registry.get_or_create("signal", "aci-13")
@@ -347,7 +361,36 @@ class TestThroughTheAgent:
         finally:
             await _teardown(plugin, db)
 
-    async def test_wide_disabled_tool_is_hidden_and_refused(self):
+    async def test_unknown_name_warning_names_the_wide_key(self, caplog):
+        """D6: a typo in a wide entry points the operator at the key that
+        is actually in their config."""
+        plugin, _, db = await build_plugin_and_channel(agent_defaults=dict(AGENT))
+
+        async def read_file(path: str) -> str:
+            """Read a file."""
+            return "contents"
+
+        plugin._tools = {"read_file": read_file}
+        plugin._tool_schemas = [tool_to_schema(read_file)]
+        try:
+            registry = plugin._registry
+            load_channel_config(
+                {"channels": {"signal:*": {"tools": {"disabled": ["shel"]}}}}, registry
+            )
+            channel = registry.get_or_create("signal", "aci-24")
+            with caplog.at_level(logging.WARNING, logger="corvidae.agent"):
+                await _system_sent(plugin, channel)
+            warnings = [
+                r.getMessage() for r in caplog.records
+                if r.levelno == logging.WARNING and "shel" in r.getMessage()
+            ]
+            assert warnings, "expected a warning naming the unknown tool"
+            assert any("channels.signal:*.tools.disabled" in w for w in warnings)
+            assert not any(f"channels.{channel.id}.tools.disabled" in w for w in warnings)
+        finally:
+            await _teardown(plugin, db)
+
+    async def test_wide_disabled_tool_is_hidden_and_refused(self, caplog):
         plugin, _, db = await build_plugin_and_channel(agent_defaults=dict(AGENT))
         calls: list[str] = []
 
@@ -375,10 +418,21 @@ class TestThroughTheAgent:
                 _make_text_response("done"),
             ])
             plugin._client = client
-            await plugin.on_message(channel=channel, sender="u", text="go", trace_id=mint_trace_id())
-            await drain(plugin, channel)
-            await drain_task_queue(plugin)
-            await drain(plugin, channel)
+            with caplog.at_level(logging.WARNING, logger="corvidae.agent"):
+                await plugin.on_message(
+                    channel=channel, sender="u", text="go", trace_id=mint_trace_id()
+                )
+                await drain(plugin, channel)
+                await drain_task_queue(plugin)
+                await drain(plugin, channel)
+
+            # The operator's log names the key that disabled it (D6).
+            refusals = [
+                r.getMessage() for r in caplog.records
+                if r.levelno == logging.WARNING and "refused tool shell" in r.getMessage()
+            ]
+            assert refusals
+            assert all("channels.signal:*.tools.disabled" in m for m in refusals)
 
             first = client.chat.call_args_list[0]
             names = [s["function"]["name"] for s in first.kwargs["tools"] or []]
