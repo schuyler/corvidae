@@ -115,7 +115,7 @@ Utility subcommands that do not need the agent runtime omit the `Runtime` import
 
 Entry point modules in `corvidae.commands` are imported at dispatcher load time, before `Runtime.start()` configures logging or creates an event loop. These modules must not have module-level side effects that depend on logging configuration or a running event loop. Standard library imports (`asyncio`, `click`) and `corvidae.runtime` are safe at module level. Avoid importing modules with side effects (network connections, file I/O, logging configuration) at the top level — use lazy imports inside the command function for those.
 
-The existing `corvidae` entry point group (for plugins) and the `corvidae.commands` group (for subcommands) are distinct setuptools groups. Registering in one does not affect the other.
+The existing `corvidae` entry point group (for plugins), the `corvidae.commands` group (for subcommands) and the `corvidae.redact` group (for redact scrubbers, below) are distinct setuptools groups. Registering in one does not affect the others.
 
 The built-in subcommand `scaffold` is registered by corvidae itself under `corvidae.commands`. Do not register an entry point named `scaffold` in the `corvidae.commands` group — a collision will silently overwrite the built-in command, causing unpredictable behavior.
 
@@ -142,7 +142,7 @@ async def redact_my_table(
 ) -> int | None: ...
 ```
 
-Every redact form (`message`, `range`, `memory`) calls each scrubber once per channel, after the message tombstones and the memory cascade have committed. Return the number of rows changed (or that would be, under `--dry-run`). Return `None` if your table isn't in this database: the daemon may never have loaded your plugin, and that becomes one `SKIP` notice. The scrubber commits its own writes. Probe for your table rather than creating it, because schema is daemon-owned. An exception propagates and aborts the command after the earlier steps have committed, so make the scrub idempotent: a re-run must finish the job and count nothing already scrubbed. The module is imported when `corvidae redact` runs, so the same no-side-effects rule as `corvidae.commands` applies.
+Every redact form (`message`, `range`, `memory`) calls each scrubber once per channel, after the message tombstones and the memory cascade have committed. Return the number of rows changed (or that would be, under `--dry-run`). Return `None` if your table isn't in this database (the daemon may never have loaded your plugin). The count is then 0, and one `SKIP` line naming your scrubber goes into the `notices` list a caller of `redact_messages` passes. The CLI doesn't print notices, so an operator sees only `0 <name> rows`. The scrubber commits its own writes. Probe for your table rather than creating it, because schema is daemon-owned. An exception propagates and aborts the command after the earlier steps have committed, so make the scrub idempotent: a re-run must finish the job and count nothing already scrubbed. The module is imported each time a redact form runs, inside its event loop, so keep it free of import-time side effects.
 
 ## Hook grammar
 

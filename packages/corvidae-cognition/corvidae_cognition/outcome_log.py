@@ -370,9 +370,9 @@ async def redact_exchange_log(
     ) as cursor:
         if await cursor.fetchone() is None:
             return None
-    changed: set[str] = set()
     if not msg_ids:
         return 0
+    changed: set[str] = set()
 
     # Find each redacted id's owning exchange, once per exchange.
     owners: set[str] = set()

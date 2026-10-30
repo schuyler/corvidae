@@ -915,8 +915,9 @@ tombstone and skip each absent surface without printing anything: no
 `message_fts` means there is nothing to clear (if `MemoryPlugin` creates
 it later, its backfill indexes the tombstone, not the original); no
 `memory` means no memory cascade; no `memory_vec` skips only the vec-row
-delete. A scrubber whose table is absent returns None, which skips it
-with a notice. The `memory` form needs the `memory` table and exits with an error
+delete. A scrubber whose table is absent returns None and counts 0 (the
+CLI prints `0 <name> rows`; a library caller of `redact_messages` also
+gets a `SKIP` line in its `notices` list). The `memory` form needs the `memory` table and exits with an error
 (`memory table not present in this database`) without it. The CLI never
 creates schema; schema is daemon-owned.
 
