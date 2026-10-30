@@ -494,9 +494,10 @@ Per transport:
     conversation end (§3.7, the right to silence). The operator decides
     what each channel's register is and can give a whole class of channels
     one, including channels that don't exist yet (each new Signal contact,
-    each ACP session), without listing them. How the register is achieved (prompt material, history, context,
-    sampling) is a design choice, not a requirement; the bar is behavioural
-    (principle 6), and an essay-length reply to a one-line text is a bug.
+    each ACP session), without listing them. How the register is achieved
+    (prompt material, history, context, sampling) is a design choice, not a
+    requirement; the bar is behavioural (principle 6), and an essay-length
+    reply to a one-line text is a bug.
 
 ### 3.4 Persistence
 
@@ -770,8 +771,8 @@ deciding only what to newly append and in what order.
    everything) unless `gate.engagement.enforce` is set; enforcing is the
    operator's choice, made after calibrating offline against logged
    traffic, never by live exploration. The decide gate withholds a
-   task-origin final that adds nothing; a direct user reply is never
-   withheld by defaults.
+   task-origin final that adds nothing; no gate withholds a direct user
+   reply by default.
 5. The agent itself may decline any turn, a direct user turn included,
    when it judges it has nothing true, relevant and substantial to add
    (Grice's maxims). The channel's register (§3.3.11) sets the norm:
@@ -947,8 +948,9 @@ design: `docs/design.md`, Forks. The requirements are outcomes:
    `get_or_create` for ids no resolving transport owns), counts as an
    inbound item on that channel (§3.1.16), and injects through
    `on_notify` with `meta={"origin", "schedule_id"}`; the whole pipeline
-   then runs. A firing on a channel no transport owns reaches
-   persistence only.
+   then runs. A firing on a channel no transport owns is delivered by no
+   transport; it reaches a person only through a cross-channel send
+   (§3.5.9).
 4. Reminder text is framed as data with its quote marks neutralized;
    operator jobs are framed as the operator's; a late firing is prefixed
    with how overdue it was.
