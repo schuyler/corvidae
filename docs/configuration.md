@@ -148,11 +148,13 @@ renders the channel's window exactly as the main turn does, appends one
 llama-server that reuses the cached prefix instead of evicting it, and the
 agent's own system prompt is in view, so records and summaries are written
 in its voice. Any fork failure falls back to the stage's standalone call,
-as does a stage whose rows have left the window. See [design.md](design.md#forks).
+as does a stage whose rows have left the window. The provenance check is
+the exception: it runs only as a fork, and without one it skips with a
+warning ([cognition.md](cognition.md#critiqueplugin-the-provenance-check-packagescorvidae-cognitioncorvidae_cognitioncritiquepy)). See [design.md](design.md#forks).
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `agent.forks.enabled` | boolean | `false` | Master switch. `false` leaves every stage on its standalone call. |
+| `agent.forks.enabled` | boolean | `false` | Master switch. `false` leaves every stage on its standalone call; the provenance check then skips, with a warning, on every exchange that has past claims. |
 | `agent.forks.reasoning_budget_tokens` | integer or null | `2048` | Sent as `reasoning_budget_tokens` on every fork. A fork keeps the main reasoning effort, because the chat template renders it into the system block and changing it would break the cached prefix; this per-request budget bounds the fork's think instead. `null` sends nothing (server default). llama-server applies it only when the template declares thinking tags. |
 | `agent.forks.stages` | list of strings or null | `null` | Which stages fork: `compaction`, `consolidation`, `appraisal`, `critique`. `null` means all of them. A name no plugin uses matches nothing. `consolidation`, `appraisal` and `critique` belong to the cognition extra; without it only `compaction` exists. |
 
@@ -160,14 +162,14 @@ Any other key under `agent.forks`, a non-boolean `enabled`, a negative or
 non-integer budget, or `stages` that isn't a list of strings fails at
 startup, and a reload carrying one is rejected.
 
-Each stage has a fork instruction next to its standalone prompt:
+Each stage has a fork instruction, next to its standalone prompt where it has one:
 
 | Key | Default copy | Notes |
 |-----|--------------|-------|
 | `agent.compaction_fork_prompt` | `prompts/compaction_fork.md` | Appended to the dropped prefix. |
 | `memory.consolidation_fork_prompt` | `prompts/memory_consolidation_fork.md` | Followed by a sentence naming where the range starts. Restart-only, like the rest of `memory.*`. |
 | `appraisal.stage2_fork_prompt` | `prompts/appraisal_fork.md` | Followed by quotes of the exchange's opening message and of the response sent, and the retrieval profile. |
-| `critique.fork_prompt.<lens>` | `prompts/critique_<lens>_fork.md` | Followed by quotes of the exchange's opening message and of the response sent; provenance also gets the CONTEXT snapshot. |
+| `critique.fork_prompt.<lens>` | `prompts/critique_<lens>_fork.md` | Followed by quotes of the exchange's opening message and of the response sent; provenance also gets each claim's search hits and the CONTEXT snapshot. Provenance has no standalone prompt. |
 
 These are static config, read with `corvidae.tuning.config_value`. Unlike
 `appraisal.stage2_prompt` and `critique.prompt.<lens>`, they aren't runtime
@@ -226,7 +228,7 @@ The persona is allowed to tune its own gates by default — a deliberate operato
 |-----|--------------|
 | `critique.provenance.enabled` | The correctness gate — a prompt-injected "stop second-guessing yourself" must not be able to disable the confabulation check. |
 | `critique.sample_below_rate` | The standing experiment's integrity — an agent tuning its own sampling to zero blinds the critique false-negative bound. |
-| `critique.prompt.provenance`, `critique.prompt.adversarial`, `critique.prompt.constrained`, `critique.prompt.predictive` | These are the critic's *system prompts*. An agent that can rewrite its own critic's instructions has no critic. |
+| `critique.prompt.adversarial`, `critique.prompt.constrained`, `critique.prompt.predictive` | These are the critic's *system prompts*. An agent that can rewrite its own critic's instructions has no critic. |
 | `appraisal.stage2_prompt` | Same shape: the stage-2 appraisal system prompt. It is also where past claims are detected for the provenance check, so a prompt that never lists any switches the confabulation check off without touching `critique.provenance.enabled`. |
 | `gate.engagement.enforce`, `gate.send.enforce` | An injected message should not be able to silence the agent wholesale (enforce engagement with a threshold of 1.0) or un-silence it (turn the decide gate off). |
 | `gate.engagement.threshold`, `gate.send.min_salience` | The same lever by other means: a threshold above 1.0 rejects or withholds everything the gate covers once enforcement is on; 0 turns the gate off. |
@@ -261,7 +263,7 @@ Requires the cognition extra (`--extra cognition` on your `uv sync` line; see [c
 | `appraisal.weights.commitment` | `0.20` | Salience weight for numbers/commitment density. |
 | `appraisal.weights.imperative` | `0.10` | Salience weight for imperative markers (feeds salience only, not the vector). |
 
-`critique.provenance.enabled` (default `true`) switches the provenance check. Besides the critic's prompt (`critique.prompt.provenance`, above), it has no other tunables. Stage-2 appraisal detects the past claims and the provenance critic judges them, so the check needs the `appraisal` plugin. See [cognition.md](cognition.md#critiqueplugin-the-provenance-check-packagescorvidae-cognitioncorvidae_cognitioncritiquepy).
+`critique.provenance.enabled` (default `true`) switches the provenance check. It has no other tunables; its instruction is the static `critique.fork_prompt.provenance`. Stage-2 appraisal detects the past claims and a fork of the window judges them, so the check needs the `appraisal` plugin and `agent.forks` covering `critique`. See [cognition.md](cognition.md#critiqueplugin-the-provenance-check-packagescorvidae-cognitioncorvidae_cognitioncritiquepy).
 
 *(The `critique.*` tunable keys are not individually tabulated here; the complete list is under "Runtime-tunable gate parameters" above.)*
 

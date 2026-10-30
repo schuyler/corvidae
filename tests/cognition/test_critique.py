@@ -34,6 +34,8 @@ from corvidae_cognition.outcome_log import OutcomeLogPlugin
 from corvidae.persistence import PersistencePlugin, init_db
 from corvidae.task import TaskPlugin, TaskQueue
 
+from helpers import FakeForkAgent
+
 
 EMPTY_VERDICT = json.dumps({"objections": []})
 OBJECTION_VERDICT = json.dumps({"objections": [
@@ -558,6 +560,87 @@ def _candidate_rowids(evidence):
     return [[c["rowid"] for c in e["candidates"]] for e in evidence]
 
 
+SYSTEM_PROMPT = "You are Lex. Standing fact: the office is in Lisbon."
+TOOL_TEXT = "lookup result: the quarterly audit deadline is Thursday"
+
+
+class RenderingForkAgent(FakeForkAgent):
+    """A fake fork agent that also records the messages the fork request
+    would carry (build_fork_prompt on the channel's window and the cut)."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.requests: list[list[dict]] = []
+
+    async def fork(self, channel, instruction, *, cut=None, extra_body=None):
+        from corvidae.fork import build_fork_prompt
+
+        if channel.conversation is not None:
+            self.requests.append(build_fork_prompt(
+                channel.conversation, cut, instruction, frozenset(), "system"))
+        return await super().fork(
+            channel, instruction, cut=cut, extra_body=extra_body)
+
+
+def _row(role, content, rowid, **extra):
+    msg = {"role": role, "content": content, "_message_type": MessageType.MESSAGE, **extra}
+    if rowid is not None:
+        msg["_db_id"] = rowid
+    return msg
+
+
+async def _provenance_exchange(env, agent, trace_id="kp", reply_text=CUE_FREE_REPLY,
+                               support=None, persist_reply=True):
+    """A finished exchange in a live window: user message, a tool call and
+    its result, then the reply. The rows are in message_log (and the FTS
+    index) and in the channel's window; the exchange is begun and
+    on_agent_response has fired. ``agent`` is registered as the Agent plugin."""
+    from corvidae.context import ContextWindow
+
+    env.pm.register(agent, name="agent")
+    if support:
+        await _log(env, support)
+    origin = await _log(env, "when is it due?")
+    call_row = await _log(env, "", role="assistant")
+    tool_row = await _log(env, TOOL_TEXT, role="tool")
+    reply_row = await _log(env, reply_text, role="assistant")
+    conv = ContextWindow(env.channel.id)
+    conv.system_prompt = SYSTEM_PROMPT
+    conv.messages = [
+        _row("user", "when is it due?", origin),
+        _row("assistant", "", call_row, tool_calls=[{
+            "id": "c1", "type": "function",
+            "function": {"name": "lookup", "arguments": "{}"}}]),
+        _row("tool", TOOL_TEXT, tool_row, tool_call_id="c1"),
+        _row("assistant", reply_text, reply_row if persist_reply else None),
+    ]
+    env.channel.conversation = conv
+    await _begin_exchange(env, trace_id, origin_rowid=origin)
+    await env.plugin.on_agent_response(
+        channel=env.channel, request_text="when is it due?", response_text=reply_text,
+        trace_id=trace_id, meta={}, logprobs=None,
+    )
+    return SimpleNamespace(origin=origin, tool_row=tool_row, reply_row=reply_row,
+                           conv=conv, trace_id=trace_id)
+
+
+async def _run_provenance(env, trace_id="kp", claims=None):
+    """Deliver stage 2's claims and run the provenance task they enqueue."""
+    await _stage2(env, trace_id, [CLAIM] if claims is None else claims)
+    await _run_next_task(env.task)
+
+
+def _provenance_instructions(agent):
+    return [c["instruction"] for c in agent.calls
+            if c["instruction"].startswith(_provenance_fork_prompt())]
+
+
+def _provenance_fork_prompt():
+    from corvidae_cognition.critique import DEFAULT_FORK_PROMPTS
+
+    return DEFAULT_FORK_PROMPTS["provenance"]
+
+
 class TestProvenanceTrigger:
     async def test_registers_a_stage2_listener(self, tmp_path):
         env = await _provenance_env(tmp_path)
@@ -776,49 +859,65 @@ class TestProvenanceEvidence:
 
 
 class TestProvenanceCritic:
-    async def test_critic_sees_claims_evidence_and_snapshot(self, tmp_path):
+    """The provenance check runs as a fork of the window (#164)."""
+
+    async def test_fork_sees_claims_evidence_and_snapshot(self, tmp_path):
         env = await _provenance_env(tmp_path)
+        agent = RenderingForkAgent({"critique"}, text=OBJECTION_VERDICT)
         try:
-            await _log(env, "Heads up: the quarterly audit deadline is Thursday.")
-            origin = await _log(env, "when is it due?")
-            await _begin_exchange(env, "kv", origin_rowid=origin)
+            ex = await _provenance_exchange(
+                env, agent, support="Heads up: the quarterly audit deadline is Thursday.")
             await env.outcome.update_exchange(
-                "kv", provenance_snapshot=json.dumps([{"content": "memory: audits are quarterly"}]),
+                "kp", provenance_snapshot=json.dumps([{"content": "memory: audits are quarterly"}]),
             )
-            await _stage2(env, "kv", [CLAIM])
-            await _run_next_task(env.task)
-            [call] = env.stub.chat_calls
-            system, user = (m["content"] for m in call["messages"])
-            assert "confabulated memory" in system
-            assert CLAIM["claim"] in user
-            assert "Heads up: the quarterly audit deadline is Thursday." in user
-            assert "memory: audits are quarterly" in user
+            await _run_provenance(env)
+            [call] = agent.calls
+            instruction = call["instruction"]
+            assert instruction.startswith(_provenance_fork_prompt())
+            assert "confabulated memory" in instruction
+            assert CLAIM["claim"] in instruction
+            assert "Heads up: the quarterly audit deadline is Thursday." in instruction
+            assert "memory: audits are quarterly" in instruction
             assert call["attribution"]["stage"] == "critique"
-            outcomes = await _read_outcomes(env.db, "kv")
+            assert env.stub.chat_calls == []
+            outcomes = await _read_outcomes(env.db, "kp")
             assert outcomes["provenance"] == {"claims": 1, "candidates": 1, "objections": 1}
+        finally:
+            await _teardown(env)
+
+    async def test_same_exchange_rows_are_not_candidates(self, tmp_path):
+        # The tool row indexes the claim's words but sits inside the exchange
+        # (and the window), so it is in the fork request, not the search.
+        env = await _provenance_env(tmp_path)
+        agent = RenderingForkAgent({"critique"}, text=EMPTY_VERDICT)
+        try:
+            ex = await _provenance_exchange(env, agent)
+            evidence = await env.plugin._gather_evidence(env.channel, "kp", [CLAIM])
+            assert _candidate_rowids(evidence) == [[]]
+            await _run_provenance(env)
+            [request] = agent.requests
+            assert any(m.get("content") == TOOL_TEXT for m in request)
         finally:
             await _teardown(env)
 
     async def test_no_evidence_is_shown_as_none_found(self, tmp_path):
         env = await _provenance_env(tmp_path)
+        agent = RenderingForkAgent({"critique"}, text=EMPTY_VERDICT)
         try:
-            origin = await _log(env, "when is it due?")
-            await _begin_exchange(env, "k0", origin_rowid=origin)
-            await _stage2(env, "k0", [CLAIM])
-            await _run_next_task(env.task)
-            user = env.stub.chat_calls[0]["messages"][1]["content"]
-            assert "no earlier message matched" in user
+            await _provenance_exchange(env, agent)
+            await _run_provenance(env)
+            [instruction] = _provenance_instructions(agent)
+            assert "no earlier message matched" in instruction
         finally:
             await _teardown(env)
 
     async def test_objections_reach_the_funnel(self, tmp_path):
         env = await _provenance_env(tmp_path, with_funnel=True)
         env.funnel.register_and_wake = AsyncMock()
+        agent = RenderingForkAgent({"critique"}, text=OBJECTION_VERDICT)
         try:
-            origin = await _log(env, "when is it due?")
-            await _begin_exchange(env, "kf", origin_rowid=origin)
-            await _stage2(env, "kf", [CLAIM])
-            await _run_next_task(env.task)
+            await _provenance_exchange(env, agent, trace_id="kf")
+            await _run_provenance(env, "kf")
             env.funnel.register_and_wake.assert_awaited_once()
             kwargs = env.funnel.register_and_wake.await_args.kwargs
             assert kwargs["origin"] == "critique"
@@ -832,33 +931,93 @@ class TestProvenanceCritic:
         # objection. A lone surrogate (a truncated emoji escape in the
         # model's JSON) is one real input that makes sqlite's bind raise.
         env = await _provenance_env(tmp_path)
+        agent = RenderingForkAgent({"critique"}, text=OBJECTION_VERDICT)
         try:
-            await _log(env, "Heads up: the quarterly audit deadline is Thursday.")
-            origin = await _log(env, "when is it due?")
-            await _begin_exchange(env, "kfail", origin_rowid=origin)
+            await _provenance_exchange(
+                env, agent, trace_id="kfail",
+                support="Heads up: the quarterly audit deadline is Thursday.")
             claims = [CLAIM, {"claim": "we agreed on Tuesday", "queries": ["\ud83d Tuesday"]}]
             with caplog.at_level("WARNING", logger="corvidae.critique"):
                 assert await env.plugin._gather_evidence(env.channel, "kfail", claims) is None
-                await _stage2(env, "kfail", claims)
-                await _run_next_task(env.task)
-            assert env.stub.chat_calls == []
+                await _run_provenance(env, "kfail", claims)
+            assert agent.calls == [] and env.stub.chat_calls == []
             assert "evidence search failed for trace kfail" in caplog.text
             assert "skipping the provenance check" in caplog.text
         finally:
             await _teardown(env)
 
-    async def test_no_evidence_available_skips_the_critic(self, tmp_path):
-        # An unconfirmed absence must not reach the critic as "no record".
+    async def test_no_evidence_available_skips_the_critic(self, tmp_path, caplog):
+        # An unconfirmed absence must not reach the critic as "no record":
+        # with the fork available but no originating row to bound the
+        # search, the check is skipped.
         env = await _provenance_env(tmp_path)
+        agent = RenderingForkAgent({"critique"}, text=OBJECTION_VERDICT)
         try:
-            await env.plugin.on_message_admitted(
-                channel=env.channel, trace_id="kne", sender="user", text="q?",
+            await _provenance_exchange(env, agent, trace_id="kne")
+            env.plugin._originating_rowid.pop("kne")
+            with caplog.at_level("WARNING", logger="corvidae.critique"):
+                await _run_provenance(env, "kne")
+            assert agent.calls == [] and env.stub.chat_calls == []
+            assert "no originating message_log row" in caplog.text
+        finally:
+            await _teardown(env)
+
+    async def test_long_hit_is_shown_around_the_match(self, tmp_path):
+        # R7: the matched term sits past the 500-character excerpt limit.
+        from corvidae_cognition.critique import PROVENANCE_EXCERPT_CHARS
+
+        env = await _provenance_env(tmp_path)
+        agent = RenderingForkAgent({"critique"}, text=EMPTY_VERDICT)
+        long_text = ("filler words about nothing " * 30) + " the zebrafish permit lapses Friday " + (
+            "more filler " * 60)
+        assert long_text.index("zebrafish") > PROVENANCE_EXCERPT_CHARS
+        # Neither the head nor the tail of the row reaches the match.
+        assert len(long_text) - long_text.index("zebrafish") > PROVENANCE_EXCERPT_CHARS
+        try:
+            await _provenance_exchange(env, agent, support=long_text)
+            claim = {"claim": "the permit lapses Friday", "queries": ["zebrafish"]}
+            await _run_provenance(env, claims=[claim])
+            [instruction] = _provenance_instructions(agent)
+            assert "zebrafish permit lapses Friday" in instruction
+            assert "……" not in instruction
+            line = next(ln for ln in instruction.splitlines() if "zebrafish" in ln and "«" in ln)
+            excerpt = line[line.index("«") + 1:line.rindex("»")]
+            assert len(excerpt) <= PROVENANCE_EXCERPT_CHARS
+        finally:
+            await _teardown(env)
+
+    async def test_short_hit_is_shown_whole(self, tmp_path):
+        env = await _provenance_env(tmp_path)
+        agent = RenderingForkAgent({"critique"}, text=EMPTY_VERDICT)
+        try:
+            await _provenance_exchange(
+                env, agent, support="Heads up: the quarterly audit deadline is Thursday.")
+            await _run_provenance(env)
+            [instruction] = _provenance_instructions(agent)
+            assert "«Heads up: the quarterly audit deadline is Thursday.»" in instruction
+        finally:
+            await _teardown(env)
+
+    async def test_non_string_content_hit_is_shown_empty(self, tmp_path):
+        env = await _provenance_env(tmp_path)
+        agent = RenderingForkAgent({"critique"}, text=EMPTY_VERDICT)
+        try:
+            cursor = await env.db.execute(
+                "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
+                "VALUES (?, ?, ?, ?)",
+                (env.channel.id, json.dumps({"role": "user", "content": [{"type": "text"}]}),
+                 1.0, "message"),
             )
-            await env.outcome.record_exchange("kne", env.channel.id, origin="user")
-            await _stage2(env, "kne", [CLAIM])
-            while not env.task.task_queue.queue.empty():
-                await _run_next_task(env.task)
-            assert env.stub.chat_calls == []
+            await env.db.execute(
+                "INSERT INTO message_fts(rowid, content_text) VALUES (?, ?)",
+                (cursor.lastrowid, "zebrafish permit"),
+            )
+            await env.db.commit()
+            await _provenance_exchange(env, agent)
+            claim = {"claim": "the permit lapses Friday", "queries": ["zebrafish"]}
+            await _run_provenance(env, claims=[claim])
+            [instruction] = _provenance_instructions(agent)
+            assert "«»" in instruction
         finally:
             await _teardown(env)
 
@@ -940,12 +1099,29 @@ async def _real_path_env(tmp_path, replies, past_claims):
 
     critique._gather_evidence = spy
 
+    # Forks on for critique; the fork request is recorded and answered with
+    # an objection (the agent's own client is reserved for the turns).
+    from corvidae.fork import ForkResult, ForksConfig, build_fork_prompt
+
+    agent._forks = ForksConfig(enabled=True, stages=frozenset({"critique"}))
+    forks: list[dict] = []
+
+    async def fork(ch, instruction, *, cut=None, extra_body=None):
+        forks.append({
+            "instruction": instruction, "cut": cut,
+            "request": build_fork_prompt(
+                ch.conversation, cut, instruction, frozenset(), "system"),
+        })
+        return ForkResult(text=OBJECTION_VERDICT, message={"role": "assistant"})
+
+    agent.fork = fork
+
     client = MagicMock()
     client.chat = AsyncMock(side_effect=[_make_text_response(r) for r in replies])
     agent._client = client
     return SimpleNamespace(
         agent=agent, channel=channel, db=db, critic=critic, gathered=gathered,
-        plugins=plugins,
+        plugins=plugins, forks=forks,
     )
 
 
@@ -977,22 +1153,28 @@ async def _row_texts(db, rowids):
     return texts
 
 
+def _real_provenance_forks(env):
+    prompt = _provenance_fork_prompt()
+    return [f for f in env.forks if f["instruction"].startswith(prompt)]
+
+
 class TestProvenanceRealPath:
-    async def test_unsupported_claim_reaches_the_critic_with_no_evidence(self, tmp_path):
+    async def test_unsupported_claim_reaches_the_fork_with_no_evidence(self, tmp_path):
         # The reply's own row is already indexed when the check runs; it
         # must not be offered as a record of itself.
         env = await _real_path_env(tmp_path, [CUE_FREE_REPLY], [CLAIM])
         try:
             trace_id = await _say(env, "when is it due?")
             assert _candidate_rowids(env.gathered[trace_id]) == [[]]
-            [messages] = env.critic.calls
-            assert CLAIM["claim"] in messages[-1]["content"]
+            [fork] = _real_provenance_forks(env)
+            assert CLAIM["claim"] in fork["instruction"]
+            assert env.critic.calls == []
             outcomes = await _read_outcomes(env.db, trace_id)
             assert outcomes["provenance"]["objections"] == 1
         finally:
             await _real_path_teardown(env)
 
-    async def test_supporting_earlier_row_is_put_in_front_of_the_critic(self, tmp_path):
+    async def test_supporting_earlier_row_is_put_in_front_of_the_fork(self, tmp_path):
         env = await _real_path_env(tmp_path, ["Noted.", CLAIM_REPLY], [CLAIM])
         try:
             await _say(env, "Heads up: the quarterly audit deadline is Thursday.")
@@ -1001,18 +1183,21 @@ class TestProvenanceRealPath:
             texts = await _row_texts(env.db, rowids)
             assert texts[0] == "Heads up: the quarterly audit deadline is Thursday."
             assert "when is it due?" not in texts and CLAIM_REPLY not in texts
-            # Turn 1 is checked too (the stub claims on every stage 2); a
-            # stylistic lens may also run, so pick the provenance calls.
-            provenance = [c for c in env.critic.calls if "confabulated memory" in c[0]["content"]]
+            # Turn 1 is checked too: the stub claims on every stage 2.
+            provenance = _real_provenance_forks(env)
             assert len(provenance) == 2
-            assert texts[0] in provenance[-1][-1]["content"]
+            assert texts[0] in provenance[-1]["instruction"]
+            assert env.critic.calls == []
+            # The fork ends at the reply of the exchange it audits.
+            assert provenance[-1]["request"][-2]["content"] == CLAIM_REPLY
         finally:
             await _real_path_teardown(env)
 
-    async def test_reply_without_past_claims_calls_no_critic(self, tmp_path):
+    async def test_reply_without_past_claims_runs_no_provenance_fork(self, tmp_path):
         env = await _real_path_env(tmp_path, ["It is due Thursday."], [])
         try:
             await _say(env, "when is it due?")
+            assert _real_provenance_forks(env) == []
             assert env.critic.calls == []
         finally:
             await _real_path_teardown(env)
@@ -1022,11 +1207,8 @@ class TestProvenancePrompts:
     """The critic must not take the agent's word for a fact: its own
     earlier statement shows only that it said so (PR #156 follow-up)."""
 
-    @pytest.mark.parametrize("prompts", ["DEFAULT_PROMPTS", "DEFAULT_FORK_PROMPTS"])
-    def test_own_earlier_statement_is_not_a_record_of_a_fact(self, prompts):
-        import corvidae_cognition.critique as critique
-
-        prompt = getattr(critique, prompts)["provenance"]
+    def test_own_earlier_statement_is_not_a_record_of_a_fact(self):
+        prompt = _provenance_fork_prompt()
         assert "shows only that it was said" in prompt
         assert "a user message, a tool result, a summary or the snapshot" in prompt
 
@@ -1052,3 +1234,13 @@ class TestProvenancePrompts:
         from corvidae_cognition.critique import DEFAULT_FORK_PROMPTS
 
         assert "not a record of itself" in DEFAULT_FORK_PROMPTS["provenance"]
+
+    def test_provenance_has_no_standalone_prompt(self):
+        from corvidae_cognition.critique import DEFAULT_PROMPTS
+
+        assert "provenance" not in DEFAULT_PROMPTS
+
+    def test_fork_prompt_counts_system_prompt_and_tool_results_as_records(self):
+        prompt = _provenance_fork_prompt().lower()
+        assert "your system prompt" in prompt
+        assert "tool results from this exchange" in prompt

@@ -19,7 +19,7 @@ transports.
 | `MemoryToolsPlugin` | `memory_tools` | `search_memory` and `recall_raw` tools for the model |
 | `FunnelPlugin` | `funnel` | Admits retrieved context into the window under a budget |
 | `AppraisalPlugin` | `appraisal` | Scores every inbound message at the gate (novelty, commitment density, disagreement, question, salience), then appraises the exchange once the agent has answered |
-| `CritiquePlugin` | `critique` | Reviews the agent's replies after the fact through several lenses (provenance, predictive, constrained, adversarial) |
+| `CritiquePlugin` | `critique` | Reviews the agent's replies after the fact through the stylistic lenses (predictive, constrained, adversarial) and the provenance check |
 | `OutcomeLogPlugin` | `outcome_log` | Records each exchange and its outcome in `exchange_log` |
 | `GatePlugin` | `gates` | The engagement gate (may the agent ignore a message?) and the decide gate (may it stay silent instead of answering?), both over the appraisal vector |
 
@@ -417,7 +417,9 @@ model makes both language judgments; the code only fetches evidence:
    syntax in the model's phrases is never parsed. Results are ranked
    by bm25, and up to 5 per claim are kept. Only these rows count:
    - rows from before the exchange's originating row. The exchange's own
-     rows, the reply included, are already indexed when the check runs.
+     rows, the reply included, are already indexed when the check runs;
+     the judge sees them in the window instead, and the reply is no record
+     of itself.
    - `message` and `summary` rows. CONTEXT (injected data, including
      earlier critique) and `unsent` rows are never a record of something
      said.
@@ -425,28 +427,48 @@ model makes both language judgments; the code only fetches evidence:
      (`memory.channel_groups`), or the channel alone without MemoryPlugin.
      The excerpts reach the critic, and its objections re-enter the window,
      so an unscoped search would carry text across channels.
-3. **Judgment.** The provenance critic gets each claim with its closest
-   earlier messages (excerpts capped at 500 characters) and the CONTEXT
-   snapshot recorded for the exchange. It's told the search shows near
+3. **Judgment.** The check runs as a fork of the window, cut just after
+   the exchange's final reply, so the judge sees what the agent saw
+   when it wrote it: the system prompt, the exchange's own rows (tool
+   results included), and the CONTEXT admitted for it. Rows written after
+   the reply aren't in it. The instruction appended to that prefix lists
+   each claim with its search hits and the CONTEXT snapshot recorded for
+   the exchange. A hit longer than 500 characters is shown around its
+   matched terms, not from its start, so support deep in a long tool result
+   still reaches the judge. The judge is told the search shows near
    matches, not proof of absence, and objects only to claims nothing
-   supports, judged by meaning rather than wording. The agent's own earlier
-   messages show only that something was said: they support a claim that
-   it was said, not a claim about a fact, which needs a user message, a
-   tool result, a summary or the snapshot behind it. Summary rows are
-   shown to the critic as `summary`, whatever role compaction stored them
-   under. In the fork, the response under audit is in the window but is not
-   a record of itself. It runs as a fork of the window when `agent.forks` covers `critique` and the exchange is still
-   in the window; otherwise it's a standalone call. The outcome is recorded
-   as `outcomes.provenance = {claims, candidates, objections}`, and
-   objections reach the funnel tagged `[provenance]`.
+   supports, judged by meaning rather than wording. The system prompt and
+   every tool result, this exchange's included, are records. The agent's
+   own earlier messages show only that something was said: they support a
+   claim that it was said, not a claim about a fact. Summary rows are shown
+   as `summary`, whatever role compaction stored them under. The reply
+   under audit is in the prefix but is no record of itself. The outcome is
+   recorded as `outcomes.provenance = {claims, candidates, objections}`,
+   and objections reach the funnel tagged `[provenance]`.
 
-The check doesn't run, and logs a warning naming what's missing, when there
-is no AppraisalPlugin, no read-only probe on `message_fts`, no originating
-row for the exchange, or a search fails. An absence it couldn't look for
-must never reach the critic as "nothing matched". A failed stage 2 (malformed model
-output) leaves that exchange unchecked; appraisal logs the failure. The
-candidate count and excerpt length are constants, not tunables: a lever
-that hid evidence would make the critic object to everything.
+The check never runs as a standalone call: a judge working from a rebuilt
+copy of the conversation can't see the system prompt or the exchange's
+tool results, and flags well-grounded facts as made up (#164). When the
+fork isn't possible, the check skips and logs `critique provenance check
+skipped for trace … on channel …: <reason>`. The reasons:
+
+- forks are not enabled for critique (`agent.forks`);
+- no live window;
+- the reply was not recorded or not persisted;
+- the window was compacted after the reply (the prefix is no longer what
+  the agent saw; CritiquePlugin counts compactions in `before_compaction`);
+- the reply is not in the window;
+- the fork failed or its reply didn't parse (logged with the traceback).
+
+The fork's availability is checked before the search and again just before
+the fork, after the last await. A skip records no outcome. The check also
+doesn't run, and logs a warning naming what's missing, when there is no
+AppraisalPlugin, no read-only probe on `message_fts`, no originating row
+for the exchange, or a search fails. An absence it couldn't look for must
+never reach the judge as "nothing matched". A failed stage 2 (malformed
+model output) leaves that exchange unchecked; appraisal logs the failure.
+The candidate count and excerpt length are constants, not tunables: a
+lever that hid evidence would make the judge object to everything.
 `critique.provenance.enabled` is the one switch.
 
 ### GatePlugin (`packages/corvidae-cognition/corvidae_cognition/gates.py`)

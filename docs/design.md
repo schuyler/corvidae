@@ -1215,7 +1215,8 @@ written out as text (`<tool_call>`, a `<function…>` tag, a bare
 `{"name", "arguments"}` object), raises `ForkRefused`. No live window or
 no main client raises `ForkUnavailable`.
 Every caller treats any fork exception, or an empty or unparseable reply,
-as a miss: it logs at WARNING and makes its standalone call instead. A
+as a miss: it logs at WARNING and makes its standalone call instead
+(except the provenance check, which skips). A
 standalone JSON parse failure names the failing phase (consolidation,
 appraisal, or critique) and includes up to 500 characters of the provider
 text in the `ValueError`.
@@ -1230,7 +1231,8 @@ Stage names are opaque to core (it never names cognition plugins).
 | `consolidation` (compaction trigger) | dropped prefix | inline in `before_compaction`; the record is stashed and the `on_compaction` task consumes it | also: a range dialog row is not in `messages[:cut]`; the watermark moved since the fork |
 | `consolidation` (idle trigger) | full window | in the idle task | also: no registered channel or live window; a range row not in the window |
 | `appraisal` (stage 2) | full window at run time | silent TaskQueue task | also: the exchange's originating rowid has left the window (or was never persisted) |
-| `critique` (each lens) | full window at run time | silent TaskQueue task | same as appraisal; a lens whose fork misses falls back alone |
+| `critique` (each stylistic lens) | full window at run time | silent TaskQueue task | same as appraisal; a lens whose fork misses falls back alone |
+| `critique` (provenance) | prefix ending at the exchange's final reply | silent TaskQueue task | never: a miss (forks off, no live window, reply not recorded or not in the window, a compaction since the reply) or a failed fork skips with a warning |
 
 Seeding, imports, `consolidate_replay.py` and the `eval_*` scripts have no
 live window and always run standalone. Subagents are unchanged: workers
@@ -1240,17 +1242,21 @@ The compaction and consolidation forks share one prefix: the second
 fork's prefill is just its instruction. Containment for consolidation is
 exact: every `message`-type row in the range must be a `_db_id` in the
 fork's window (summary rows are skipped; a live window's summary has no
-rowid and summaries are never consolidated). Appraisal and critique check
+rowid and summaries are never consolidated). Appraisal and the stylistic lenses check
 the originating rowid recorded by their own `on_message_persisted`
 (critique per lens, right before each fork, since an earlier lens's fork
 is an await during which compaction can drop the exchange), and read the
 window at run time, so a fork after the user has said more still sees the
 exchange. The instruction names it by quoting its opening message and the
 response the user was sent, which can differ from the window's last
-assistant message (the max-turns fallback).
+assistant message (the max-turns fallback). The provenance check instead
+records the reply's rowid and the channel's compaction count in
+`on_agent_response` (the count is bumped in `before_compaction`, before
+the window changes), and checks both before its search and again right
+before the fork.
 
 **Instructions.** Each stage has a fork instruction beside its standalone
-prompt, written to the agent in the second person:
+prompt (provenance has none), written to the agent in the second person:
 `agent.compaction_fork_prompt`, `memory.consolidation_fork_prompt`,
 `appraisal.stage2_fork_prompt`, `critique.fork_prompt.<lens>` (documented
 copies in `prompts/*_fork.md`). They are read from static config with
@@ -1260,7 +1266,7 @@ starts ("the whole conversation above", "what follows the summary at its
 top", or a quote of the first new message when rows below the watermark
 are still in view). Appraisal appends the exchange quotes and the
 retrieval profile. Critique appends the exchange quotes, and the
-provenance lens still passes the CONTEXT snapshot inline, along with each
+provenance check also passes the CONTEXT snapshot inline, along with each
 past claim and its closest earlier messages.
 
 **Configuration** (`agent.forks`, validated at startup and on reload by
