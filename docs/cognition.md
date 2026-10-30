@@ -346,6 +346,13 @@ stage-2 JSON, critique's provenance snapshot, and merged outcomes — are
 filled in by `MemoryPlugin`, `AppraisalPlugin`, and `CritiquePlugin`
 through the writer API below, not by `OutcomeLogPlugin` itself.
 
+It also registers the `exchange_log` scrubber (`redact_exchange_log`)
+under the `corvidae.redact` entry-point group. When `corvidae redact`
+tombstones a message, the owning exchange's stage-2 `past_claims` text is
+tombstoned (claim and query counts kept), and every snapshot in that
+channel from the message on is dropped (see "Operator redaction" in
+[design.md](design.md)).
+
 Writer API (used by other plugins, not hooks):
 
 - `record_exchange(trace_id, channel_id, origin=None, message_rowid=None)`

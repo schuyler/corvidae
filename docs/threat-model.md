@@ -480,7 +480,10 @@ What it doesn't protect against, so you know:
   removed, and keep indexing message text; `redact` still clears them.
 - `exchange_log` copies conversation text into two columns: stage-2
   `past_claims` (quoted from the reply) and `provenance_snapshot` (the
-  CONTEXT in the window). `corvidae redact` scrubs both (#160). The
+  CONTEXT in the window). `corvidae redact` scrubs both (#160), through
+  the `exchange_log` scrubber the cognition extra registers under
+  `corvidae.redact`. A plugin that keeps its own copy of conversation text
+  and registers no scrubber is not reached. The
   owning exchange's claims are tombstoned with their counts kept, and
   every snapshot in the channel from the redacted message on is
   dropped. What `redact` still doesn't reach: exchanges whose

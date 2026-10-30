@@ -13,11 +13,9 @@ Forms:
     corvidae redact --db sessions.db memory <memory_id>
     corvidae redact --db sessions.db range <start_id> <end_id>
 
-exchange_log (owned by the cognition extra's outcome_log) copies conversation
-text into two columns, and is scrubbed too when present (#160): the
-redacted message's owning exchange loses its stage-2 past_claims text
-(counts kept), and every exchange in the channel from that message on loses
-its provenance_snapshot.
+Plugin packages that copy conversation text into their own tables register
+a scrubber under the ``corvidae.redact`` entry-point group; every form runs
+each one over the ids it tombstoned, per channel (#160).
 
 The message_fts update trigger (message_log_au, plain DELETE — not the FTS5
 'delete' command) propagates tombstones to message_fts automatically when the
@@ -31,7 +29,9 @@ import asyncio
 import json
 import logging
 import re
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
+from importlib.metadata import entry_points
 from pathlib import Path
 
 import aiosqlite
@@ -140,104 +140,58 @@ async def _probe_tables(db: aiosqlite.Connection) -> set[str]:
     return {row[0] for row in rows}
 
 
-def _scrub_past_claims(appraisal_json: str | None, tombstone: str) -> str | None:
-    """Return appraisal JSON with stage2.past_claims text tombstoned, or None
-    when there is nothing to change.
+RedactScrubber = Callable[
+    [aiosqlite.Connection, str, list[int], bool, str], Awaitable[int | None]
+]
 
-    Each claim and each of its queries becomes ``tombstone``, so the number
-    of claims and queries survives for calibration while the words do not.
-    No appraisal, no stage 2, or claims already tombstoned → None.
+
+def _redact_scrubbers() -> list[tuple[str, RedactScrubber]]:
+    """Load the scrubbers registered under the ``corvidae.redact`` group.
+
+    A plugin package that copies conversation text into its own tables
+    registers one, named for the surface it scrubs, so redact reaches that
+    text without the kernel knowing the table.
     """
-    # NULL is the common case: most exchanges never get a stage-2 appraisal.
-    # The column is written by outcome_log's JSON merge, so it parses, and
-    # appraisal normalizes past_claims to a list of {claim, queries}.
-    if appraisal_json is None:
-        return None
-    appraisal = json.loads(appraisal_json)
-    stage2 = appraisal.get("stage2") or {}
-    claims = stage2.get("past_claims")
-    if not claims:
-        return None
-    scrubbed = [
-        {"claim": tombstone, "queries": [tombstone] * len(claim["queries"])}
-        for claim in claims
-    ]
-    # Already scrubbed by an earlier redaction: report no change.
-    if scrubbed == claims:
-        return None
-    stage2["past_claims"] = scrubbed
-    return json.dumps(appraisal)
+    return [(ep.name, ep.load()) for ep in entry_points(group="corvidae.redact")]
 
 
-async def _scrub_exchange_log(
+async def _run_scrubbers(
     db: aiosqlite.Connection,
-    channel_id: str,
-    msg_ids: list[int],
+    by_channel: dict[str, list[int]],
     dry_run: bool,
     iso_date: str,
-) -> set[str]:
-    """Scrub exchange_log text derived from redacted messages in one channel.
+    notices: list | None,
+) -> dict[str, int]:
+    """Run every registered scrubber once per channel over the tombstoned ids.
 
-    For each redacted id X: the exchange that owns X (in the channel, the
-    largest message_rowid <= X) gets its stage-2 past_claims tombstoned.
-    Every exchange in the channel with message_rowid >= the smallest X loses
-    its provenance_snapshot, since any later window may have carried X's
-    text as CONTEXT. Exchanges with a NULL message_rowid are not reached.
-
-    Returns the trace ids changed (or that would be, in dry-run mode). The
-    caller checks that the exchange_log table exists.
+    A scrubber is awaited as ``scrub(db, channel_id, msg_ids, dry_run,
+    tombstone)`` and returns the rows it changed (or would, in dry-run
+    mode), or None when its surface is not in this database, which adds
+    one SKIP notice. Returns ``{scrubber name: rows changed}``.
     """
-    changed: set[str] = set()
-    if not msg_ids:
-        return changed
     tombstone = _tombstone_content(iso_date)
+    scrubbed: dict[str, int] = {}
+    for name, scrub in _redact_scrubbers():
+        # Sum the per-channel counts; remember whether the surface was absent.
+        total = 0
+        absent = False
+        for channel_id, ids in by_channel.items():
+            count = await scrub(db, channel_id, ids, dry_run, tombstone)
+            if count is None:
+                absent = True
+            else:
+                total += count
+        scrubbed[name] = total
+        if absent and notices is not None:
+            notices.append(f"SKIP: {name} not present in this database; {name} scrub skipped")
+    return scrubbed
 
-    # Find each redacted id's owning exchange, once per exchange.
-    owners: set[str] = set()
-    for msg_id in msg_ids:
-        async with db.execute(
-            "SELECT trace_id FROM exchange_log "
-            "WHERE channel_id = ? AND message_rowid IS NOT NULL "
-            "AND message_rowid <= ? ORDER BY message_rowid DESC LIMIT 1",
-            (channel_id, msg_id),
-        ) as cursor:
-            row = await cursor.fetchone()
-        if row is not None:
-            owners.add(row[0])
 
-    # Tombstone the owners' past_claims text.
-    for trace_id in owners:
-        async with db.execute(
-            "SELECT appraisal FROM exchange_log WHERE trace_id = ?", (trace_id,)
-        ) as cursor:
-            row = await cursor.fetchone()
-        scrubbed = _scrub_past_claims(row[0], tombstone)
-        if scrubbed is None:
-            continue
-        changed.add(trace_id)
-        if not dry_run:
-            await db.execute(
-                "UPDATE exchange_log SET appraisal = ? WHERE trace_id = ?",
-                (scrubbed, trace_id),
-            )
-
-    # Drop every snapshot in the channel from the first redacted id on.
-    snapshot_where = (
-        "WHERE channel_id = ? AND message_rowid >= ? "
-        "AND provenance_snapshot IS NOT NULL"
+def _scrubbed_summary(result: dict) -> str:
+    """The CLI's per-scrubber tail, e.g. ", 2 exchange rows"."""
+    return "".join(
+        f", {count} {name} rows" for name, count in result.get("scrubbed", {}).items()
     )
-    snapshot_args = (channel_id, min(msg_ids))
-    async with db.execute(
-        f"SELECT trace_id FROM exchange_log {snapshot_where}", snapshot_args
-    ) as cursor:
-        changed.update(row[0] for row in await cursor.fetchall())
-    if not dry_run:
-        await db.execute(
-            f"UPDATE exchange_log SET provenance_snapshot = NULL {snapshot_where}",
-            snapshot_args,
-        )
-        await db.commit()
-    return changed
 
 
 async def redact_messages(
@@ -251,14 +205,14 @@ async def redact_messages(
     Step 0: probe schema; skip absent surfaces with notices.
     Step 1: tombstone message rows (message_fts updated by trigger if present).
     Step 2: cascade to same-channel intersecting memory records.
-    Step 3: scrub exchange_log text derived from the redacted rows.
+    Step 3: run the registered scrubbers over the redacted rows.
     The caller prints verification; this function returns stats.
 
     Returns:
         ``affected_messages`` is the number of supplied ids that actually
         existed and were tombstoned (in dry-run mode, would have been),
-        ``affected_memories`` is the cascade count, ``affected_exchanges``
-        the number of exchange_log rows scrubbed, and ``requested_messages``
+        ``affected_memories`` is the cascade count, ``scrubbed``
+        maps each registered scrubber to the rows it changed, and ``requested_messages``
         is the number of ids supplied. The CLI prints ``found of requested``
         so a mistyped id is visible instead of reporting a confident hit.
 
@@ -270,7 +224,6 @@ async def redact_messages(
     has_memory = "memory" in tables
     has_memory_vec = "memory_vec" in tables
     has_message_fts = "message_fts" in tables
-    has_exchange_log = "exchange_log" in tables
 
     if notices is not None:
         if not has_message_fts:
@@ -280,11 +233,6 @@ async def redact_messages(
             )
         if not has_memory:
             notices.append("SKIP: memory table not present (pre-1b DB); memory cascade skipped")
-        if not has_exchange_log:
-            notices.append(
-                "SKIP: exchange_log table not present (no cognition extra); "
-                "exchange_log scrub skipped"
-            )
 
     iso_date = _iso_date()
 
@@ -313,17 +261,12 @@ async def redact_messages(
             ) as cursor:
                 cnt_row = await cursor.fetchone()
             affected_memories += cnt_row[0] if cnt_row else 0
-        # Count the exchange_log rows the scrub would change.
-        dry_exchanges: set[str] = set()
-        if has_exchange_log:
-            for channel_id, ids in dry_by_channel.items():
-                dry_exchanges |= await _scrub_exchange_log(
-                    db, channel_id, ids, dry_run=True, iso_date=iso_date
-                )
         return {
             "affected_messages": affected_messages,
             "affected_memories": affected_memories,
-            "affected_exchanges": len(dry_exchanges),
+            "scrubbed": await _run_scrubbers(
+                db, dry_by_channel, True, iso_date, notices
+            ),
             "requested_messages": len(message_ids),
         }
 
@@ -385,18 +328,13 @@ async def redact_messages(
                 affected_memories += 1
         await db.commit()
 
-    # Step 3: scrub exchange_log text derived from the redacted messages.
-    affected_exchanges: set[str] = set()
-    if has_exchange_log:
-        for channel_id, ids in by_channel.items():
-            affected_exchanges |= await _scrub_exchange_log(
-                db, channel_id, ids, dry_run=False, iso_date=iso_date
-            )
+    # Step 3: let registered scrubbers clear text derived from these rows.
+    scrubbed = await _run_scrubbers(db, by_channel, False, iso_date, notices)
 
     return {
         "affected_messages": affected_messages,
         "affected_memories": affected_memories,
-        "affected_exchanges": len(affected_exchanges),
+        "scrubbed": scrubbed,
         "requested_messages": len(message_ids),
     }
 
@@ -417,7 +355,6 @@ async def redact_memory_id(
     tables = await _probe_tables(db)
     has_memory = "memory" in tables
     has_memory_vec = "memory_vec" in tables
-    has_exchange_log = "exchange_log" in tables
 
     if not has_memory:
         raise ValueError("memory table not present in this database")
@@ -443,16 +380,12 @@ async def redact_memory_id(
             (channel_id, msg_id_start, msg_id_end),
         ) as cursor:
             dry_ids = [row[0] for row in await cursor.fetchall()]
-        # Count the exchange_log rows the scrub would change.
-        dry_exchanges: set[str] = set()
-        if has_exchange_log:
-            dry_exchanges = await _scrub_exchange_log(
-                db, channel_id, dry_ids, dry_run=True, iso_date=iso_date
-            )
         return {
             "affected_messages": len(dry_ids),
             "affected_memories": 1,
-            "affected_exchanges": len(dry_exchanges),
+            "scrubbed": await _run_scrubbers(
+                db, {channel_id: dry_ids}, True, iso_date, None
+            ),
         }
 
     # Step 1: tombstone own-channel message rows only.
@@ -512,17 +445,15 @@ async def redact_memory_id(
                 affected_memories += 1
         await db.commit()
 
-    # Step 3: scrub exchange_log text derived from the redacted range.
-    affected_exchanges: set[str] = set()
-    if has_exchange_log:
-        affected_exchanges = await _scrub_exchange_log(
-            db, channel_id, redacted_msg_ids, dry_run=False, iso_date=iso_date
-        )
+    # Step 3: let registered scrubbers clear text derived from the range.
+    scrubbed = await _run_scrubbers(
+        db, {channel_id: redacted_msg_ids}, False, iso_date, None
+    )
 
     return {
         "affected_messages": len(msg_rows),
         "affected_memories": affected_memories,
-        "affected_exchanges": len(affected_exchanges),
+        "scrubbed": scrubbed,
     }
 
 
@@ -543,7 +474,7 @@ async def redact_range(
 
     message_ids = [row[0] for row in rows]
     if not message_ids:
-        return {"affected_messages": 0, "affected_memories": 0, "affected_exchanges": 0}
+        return {"affected_messages": 0, "affected_memories": 0, "scrubbed": {}}
     return await redact_messages(db, message_ids, dry_run=dry_run)
 
 
@@ -602,15 +533,15 @@ def _message_cmd(ctx, ids):
                 click.echo(
                     f"[dry-run] would redact {result['affected_messages']} of "
                     f"{requested} messages, "
-                    f"{result.get('affected_memories', 0)} memory records, "
-                    f"{result.get('affected_exchanges', 0)} exchange_log rows"
+                    f"{result.get('affected_memories', 0)} memory records"
+                    f"{_scrubbed_summary(result)}"
                 )
             else:
                 click.echo(
                     f"Redacted {result['affected_messages']} of {requested} "
                     f"messages, "
-                    f"{result.get('affected_memories', 0)} memory records, "
-                    f"{result.get('affected_exchanges', 0)} exchange_log rows"
+                    f"{result.get('affected_memories', 0)} memory records"
+                    f"{_scrubbed_summary(result)}"
                 )
                 if sample_token:
                     click.echo(await _verify_fts_clean(conn, sample_token))
@@ -655,14 +586,14 @@ def _memory_cmd(ctx, memory_id):
             if dry_run:
                 click.echo(
                     f"[dry-run] would redact {result['affected_messages']} messages, "
-                    f"{result['affected_memories']} memory records, "
-                    f"{result['affected_exchanges']} exchange_log rows"
+                    f"{result['affected_memories']} memory records"
+                    f"{_scrubbed_summary(result)}"
                 )
             else:
                 click.echo(
                     f"Redacted {result['affected_messages']} messages, "
-                    f"{result['affected_memories']} memory records, "
-                    f"{result['affected_exchanges']} exchange_log rows"
+                    f"{result['affected_memories']} memory records"
+                    f"{_scrubbed_summary(result)}"
                 )
                 if sample_token:
                     click.echo(await _verify_fts_clean(conn, sample_token))
@@ -707,15 +638,15 @@ def _range_cmd(ctx, start_id, end_id):
                 click.echo(
                     f"[dry-run] would redact {result['affected_messages']} of "
                     f"{requested} messages, "
-                    f"{result.get('affected_memories', 0)} memory records, "
-                    f"{result.get('affected_exchanges', 0)} exchange_log rows"
+                    f"{result.get('affected_memories', 0)} memory records"
+                    f"{_scrubbed_summary(result)}"
                 )
             else:
                 click.echo(
                     f"Redacted {result['affected_messages']} of {requested} "
                     f"messages, "
-                    f"{result.get('affected_memories', 0)} memory records, "
-                    f"{result.get('affected_exchanges', 0)} exchange_log rows"
+                    f"{result.get('affected_memories', 0)} memory records"
+                    f"{_scrubbed_summary(result)}"
                 )
                 if sample_token:
                     click.echo(await _verify_fts_clean(conn, sample_token))

@@ -121,6 +121,29 @@ The built-in subcommand `scaffold` is registered by corvidae itself under `corvi
 
 Built-in `corvidae acp` (from `corvidae.channels.acp:acp_command`) starts an ACP v1 agent on stdio. It boots `Runtime` with `overrides={"_acp_mode": True}` so `AcpPlugin` owns the connection; without that flag the plugin stays inert. Install the optional extra first: add `--extra acp` to your `uv sync` line.
 
+## Registering a redact scrubber
+
+`corvidae redact` (see "Operator redaction" in [design.md](design.md)) tombstones `message_log` rows and cascades to memory. A plugin package that copies conversation text into a table of its own registers a scrubber under the `corvidae.redact` entry-point group, so a redaction reaches that copy too. The kernel never names the table.
+
+```toml
+[project.entry-points."corvidae.redact"]
+exchange_log = "corvidae_cognition.outcome_log:redact_exchange_log"
+```
+
+The entry-point name labels the surface in the CLI output (`2 exchange_log rows`) and in skip notices. The object is an async function:
+
+```python
+async def redact_my_table(
+    db: aiosqlite.Connection,  # the CLI's own connection (WAL, busy_timeout 5000)
+    channel_id: str,           # one channel at a time
+    msg_ids: list[int],        # the message_log ids just tombstoned in it
+    dry_run: bool,             # count what would change, write nothing
+    tombstone: str,            # the operator tombstone text to write
+) -> int | None: ...
+```
+
+Every redact form (`message`, `range`, `memory`) calls each scrubber once per channel, after the message tombstones and the memory cascade have committed. Return the number of rows changed (or that would be, under `--dry-run`). Return `None` if your table isn't in this database: the daemon may never have loaded your plugin, and that becomes one `SKIP` notice. The scrubber commits its own writes. Probe for your table rather than creating it, because schema is daemon-owned. An exception propagates and aborts the command after the earlier steps have committed, so make the scrub idempotent: a re-run must finish the job and count nothing already scrubbed. The module is imported when `corvidae redact` runs, so the same no-side-effects rule as `corvidae.commands` applies.
+
 ## Hook grammar
 
 A hook's name tells you how its results are resolved. Every hookspec name
