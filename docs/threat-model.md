@@ -47,7 +47,7 @@ a claim. The provenance critic is shown excerpts of earlier raw-log
 messages. Those excerpts are limited to the channel's memory scope, so no
 text crosses a channel boundary that memory wouldn't already cross. But
 they are quoted, untrusted text in the critic's prompt, framed as data, and
-the critic's objections re-enter the window as CONTEXT. The number of
+the critic's objections re-enter the window as CONTEXT (provenance objections also wake a turn whose stub tells the agent it may reply `NO_REPLY` to send nothing; that veto applies to critique-origin turns only). The number of
 claims (5) and excerpts (5 per claim, 500 characters each) is capped, so
 one reply can't fan out into an unbounded critic prompt. Leaving sandboxing out
 of the MVP was a reasonable call, but it matters here: the attacker is not

@@ -189,7 +189,9 @@ funnel also owns deferred registration: non-tool-call notification
 payloads queue per `(channel, origin)` via `register_and_wake()`, one
 stub notification wakes the channel per pending pair, and the drain in
 `before_agent_turn` admits everything queued for the triggering
-exchange's origin.
+exchange's origin. `register()` queues without a stub: those payloads wake
+nothing and are admitted at the channel's next turn, whatever its origin
+(user turns included), before the origin-matched drain.
 
 ## Plugin reference
 
@@ -335,7 +337,9 @@ CritiquePlugin, OutcomeLogPlugin) share over this key — not a core
 concept. `'user'` is recognized by subscribing to `on_message_admitted`
 rather than by a value in `meta`; `'task'` is the default OutcomeLogPlugin
 applies when `meta["origin"]` is absent on a notification-born
-trace.
+trace. `stub_text=` replaces the default "N pending … item(s)" stub text
+(the provenance check's use). `register(channel, source, entries)` is the
+no-wake variant: no stub, no origin.
 
 ### OutcomeLogPlugin (`packages/corvidae-cognition/corvidae_cognition/outcome_log.py`)
 
@@ -473,7 +477,15 @@ model makes both language judgments; the code only fetches evidence:
    fork: an empty or partial answer can't pass as "all supported". Each
    unsupported verdict becomes an objection quoting the claim from our
    list, with the judge's reason, and reaches the funnel tagged
-   `[provenance]`. The outcome is recorded as
+   `[provenance]`. Stylistic objections queue through `register` and wait for
+the channel's next turn. Provenance objections wake the channel with a
+stub whose text tells the agent the default is to send nothing: reply
+exactly `NO_REPLY`, and reply in the channel only if its earlier reply
+could lead the other party to take an incorrect action. The plugin's
+`should_send_response` vetoes a `final` on a critique-origin turn whose
+stripped text is `NO_REPLY`; the kernel stores it as `unsent` with the
+not-sent marker. No other emission or origin is affected. The outcome is
+recorded as
    `outcomes.provenance = {claims, candidates, supported, objections}`;
    `objections: 0` means every claim was judged supported.
 
