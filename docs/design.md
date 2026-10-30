@@ -443,10 +443,10 @@ go together (PRD §3.5.3), for the global list too.
   dict, schema list) beside the system prompt and stores it as
   `conv.tool_view`. Every turn and every `Agent.fork` of the channel sends
   that same list object, so the prompt head is byte-identical across turns
-  (principle 2) and forks keep prefix parity (PRD §3.8.2). `Agent` also
-  implements `on_compaction` and re-resolves the view there. Compaction
-  already rebuilds the KV cache, so this is the only point where a running
-  conversation's schemas can change.
+  (principle 2) and forks keep prefix parity (see [Forks](#forks)).
+  `Agent` also implements `on_compaction` and re-resolves the view there.
+  Compaction already rebuilds the KV cache, so this is the only point where
+  a running conversation's schemas can change.
 - **Dispatch enforces.** Each tool task checks the name against
   `disabled_on(channel)` when it runs. That is the conversation view's set
   plus the live `ChannelConfig` list. A disabled call returns
@@ -1184,10 +1184,8 @@ LLM context window is exceeded.
 main window (GitHub issue #51; plan of record `plans/forks.md`). Off by
 default: `agent.forks.enabled`.
 
-On a single llama-server KV slot, every separate background prompt evicts
-the main context, and compaction re-prefills the whole window. A **fork**
-instead renders the channel's window exactly as the main turn does, up to
-a cut, and appends one `user` instruction. The prompt is then a prefix of
+A **fork** renders the channel's window exactly as the main turn does, up
+to a cut, and appends one `user` instruction. The prompt is then a prefix of
 what the server already holds, so it reuses the cached KV, and it carries
 the agent's own system prompt, so first-person records and summaries are
 written by the agent they describe.
@@ -1201,8 +1199,11 @@ extra_body=None)` builds with exactly what step 7 of the agent loop uses:
 the `llm.main` client (its `extra_body`, e.g. `id_slot`), the channel's
 conversation tool schemas (`conv.tool_view.schemas`, per-channel since #149),
 `build_prompt(pending_ids, mid_conversation_system_role)`, and the same
-runtime-override filter (`_llm_overrides`). `reasoning_effort` is left
-alone, because the chat template renders it into the system block.
+runtime-override filter (`_llm_overrides`). Any difference in what reaches
+the template breaks the prefix and the cache with it. `reasoning_effort`
+is left alone, because Qwen 3.8/Swift's template renders the effort
+sentence first in the system block: a fork at a different effort would
+miss the cache from its first token.
 On top of that a fork sends `tool_choice: "none"` (tools stay in the
 render), `reasoning_budget_tokens` from `agent.forks.reasoning_budget_tokens`
 (a per-request sampler budget that never touches the template), and the
@@ -1256,7 +1257,9 @@ the window changes), and checks both before its search and again right
 before the fork.
 
 **Instructions.** Each stage has a fork instruction beside its standalone
-prompt (provenance has none), written to the agent in the second person:
+prompt (provenance has none), written to the agent in the second person.
+The voice is a choice, not a measured result; #186's prompt-voice A/B will
+say whether it matters:
 `agent.compaction_fork_prompt`, `memory.consolidation_fork_prompt`,
 `appraisal.stage2_fork_prompt`, `critique.fork_prompt.<lens>` (documented
 copies in `prompts/*_fork.md`). They are read from static config with
@@ -1284,10 +1287,59 @@ With forks on and `llm.background` set to a different model than
 `llm.main`, `Agent.on_start` logs a warning: forked stages move to the
 main model.
 
-**Not yet settled.** Whether `response_format` is enforced under
-`tool_choice: "none"` with tools present, and `/apply-template` parity with
-and without `tool_choice`, need the live checks in #73 (K2, K3); the
-harness probes and the flip of `enabled` are tracked there.
+### Forks on the deployed backend
+
+The PRD (§3.8) states what forks must achieve. What follows is how the
+deployment meets it, and holds for llama.cpp's llama-server with one KV
+slot and Swift-1.5 (a Qwen 3.8 fine-tune); another backend may answer
+differently.
+
+**Fork by default (#180).** Every background call that has a live window
+forks it: compaction from the dropped prefix; compaction-time
+consolidation from the same prefix in `before_compaction`, while the
+window is whole; idle consolidation from the full window; stage-2
+appraisal and each critique lens from the window at run time; provenance
+from the prefix ending at the exchange's final reply. Each forks only
+while the rows it needs are still in the window; for an exchange-scoped
+stage, a compaction between the reply and the fork is a miss, since the
+prefix would no longer be what the agent saw. A fork that would not fit
+the slot's context is a miss too. A miss skips the stage with a warning
+(the rescue is a retry or a skip, never a standalone call), except
+compaction, which takes its can't-fail fallback. Today only provenance
+works this way; the other stages still fall back to standalone (the table
+above) until #73 flips `enabled`.
+
+**Cost model.** A fork reuses the cached prefix and prefills only its
+instruction and reply. Exchange-scoped forks run before the slot's next
+main turn (PRD principle 3), and the window is append-only, so their
+prefix is still cached. A standalone call costs its own cold prefill of
+a rebuilt prompt. It doesn't evict the main window when the server keeps
+`cache-ram`: on Lex (one slot, `cache-ram = 32768`) #73's K1 measured the
+main turn after background calls fully cached, restored from host RAM.
+Without `cache-ram`, a standalone call on a single slot evicts the main
+window and the next main turn re-prefills it. Either way only one call
+runs on the slot at a time, so a background call delays a waiting main
+turn by its own slot time; the per-fork reasoning and reply caps bound
+that, and the window at the compaction threshold plus a fork's
+instruction and both caps fits the slot's context, so a fork just short
+of compaction still runs.
+
+**Provenance is fork-only (#164).** The standalone provenance critic
+judged a rebuilt context: a search of earlier messages plus a CONTEXT
+snapshot. It missed support in the system prompt and the exchange's own
+tool results, and objected to claims those supported (a `USER.md` fact, a
+`grep` result from two turns earlier). The forked window up to the reply
+is what the agent had, so provenance runs only as that fork and skips on
+a miss.
+
+**Rollout gate (#73).** Forking ships once #73's cache probes
+pass: the fork row and the main turn after it reuse the cached prefix
+(K1), the fork prompt begins with the main prompt (K2), and
+`response_format` holds under `tool_choice: "none"` with tools present
+(K3). On Lex at 913f7ab (appraisal and critique forking) all three
+passed; the flip of `enabled` is tracked there. #73's comparisons of fork
+against standalone (planted-defect recall per lens, consolidation and
+compaction fidelity) are benchmarks, not gates.
 
 ## Task System
 
