@@ -78,8 +78,7 @@ agent:
   #   # participants (see docs/configuration.md "Runtime-tunable gate parameters"):
   #   # - critique.provenance.enabled
   #   # - critique.sample_below_rate
-  #   # - critique.prompt.provenance     # the critic's own system prompts
-  #   # - critique.prompt.adversarial
+  #   # - critique.prompt.adversarial   # the critic's own system prompts
   #   # - critique.prompt.constrained
   #   # - critique.prompt.predictive
   #   # - appraisal.stage2_prompt
