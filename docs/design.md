@@ -908,6 +908,15 @@ the mode is not WAL, it aborts with a message naming the current mode and
 how to convert. The `corvidae` daemon configures WAL on startup; a
 daemon-created DB is always WAL.
 
+**sqlite-vec.** `memory_vec` is a `vec0` virtual table, so the CLI's
+connection must load sqlite-vec before the cascade touches it. Each form
+loads it right after connecting when `memory_vec` exists (lazily
+imported, so kernel-only installs never need it). If it can't be loaded,
+the form refuses before writing anything: one line naming `memory_vec`
+and the remedy (install the `cognition` extra, or run redact in the
+daemon's environment). Before #198 the cascade crashed on `vec0` after
+`message_log` was already committed.
+
 **Schema-presence probe (pre-memory-schema and kernel-only DBs).** Before
 touching any surface, the CLI probes `sqlite_master` for the tables it
 needs. The `message` and `range` forms always write the message
