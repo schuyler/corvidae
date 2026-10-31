@@ -110,9 +110,11 @@ async def test_rendered_model_output_is_sanitised(make_env):
         browser = await _launch(pw)
         try:
             page = await browser.new_page()
-            # Log in (the token trades for the session cookie), then load the app.
+            # Log in (the token trades for the session cookie). The login
+            # answer meta-refreshes to "/"; wait for that navigation instead
+            # of starting a second goto, which races it and flakes.
             await page.goto(f"{env.base}/?token={TOKEN}")
-            await page.goto(f"{env.base}/")
+            await page.wait_for_url(f"{env.base}/")
             # Wait until the server has finished the page's subscribe/history.
             for _ in range(200):
                 if any(c.conversation == "web:main" and c.buffer is None
