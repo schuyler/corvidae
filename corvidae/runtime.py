@@ -32,6 +32,7 @@ from corvidae.hooks import (
 )
 from corvidae.idle import IdleTracker, validate_daemon_config
 from corvidae.logging import configure_logging
+from corvidae.mcp_client import validate_mcp_config
 
 logger = logging.getLogger(__name__)
 
@@ -201,6 +202,9 @@ class Runtime:
             validate_agent_config(config.get("agent", {}))
             validate_daemon_config(config.get("daemon") or {})
             disabled_plugins = disabled_plugins_from(config)
+            # A disabled mcp plugin never reads its block, so skip the check.
+            if "mcp" not in disabled_plugins:
+                validate_mcp_config(config)
             self.registry.agent_defaults = config.get("agent", {})
             load_channel_config(config, self.registry)
         except ValueError as exc:

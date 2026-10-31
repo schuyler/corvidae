@@ -1511,6 +1511,69 @@ class TestConfigTypeErrors:
             await plugin.on_stop()
 
 
+class TestConfigShapeErrors:
+    """Remaining shape/value gaps are rejected once, never retried (#265)."""
+
+    @pytest.mark.parametrize("bad, key, shown", [
+        ({"transport": "stdio", "command": None}, "mcp.servers.bad.command", "None"),
+        ({"transport": "stdio", "command": ["x"]}, "mcp.servers.bad.command", "['x']"),
+        ({"transport": "sse", "url": None}, "mcp.servers.bad.url", "None"),
+        ({"transport": "stdio", "command": "c", "args": "x"},
+         "mcp.servers.bad.args", "'x'"),
+        ({"transport": "stdio", "command": "c", "args": [1]},
+         "mcp.servers.bad.args", "[1]"),
+        ({"transport": "stdio", "command": "c", "env": ["A=1"]},
+         "mcp.servers.bad.env", "['A=1']"),
+        ({"transport": "stdio", "command": "c",
+          "connect_timeout_seconds": float("nan")},
+         "mcp.servers.bad.connect_timeout_seconds", "nan"),
+        ({"transport": "stdio", "command": "c",
+          "connect_timeout_seconds": float("inf")},
+         "mcp.servers.bad.connect_timeout_seconds", "inf"),
+        ({"transport": "stdio", "command": "c", "timeout_seconds": float("nan")},
+         "mcp.servers.bad.timeout_seconds", "nan"),
+    ])
+    async def test_bad_shape_skipped_once_and_not_retried(
+        self, pm, kernel_clock, sdk, caplog, bad, key, shown
+    ):
+        sdk.up.add("good")
+        config = _servers("good")
+        config["mcp"]["servers"] = {"bad": bad, **config["mcp"]["servers"]}
+        caplog.set_level(logging.WARNING, logger="corvidae.mcp_client")
+        plugin, _ = await _start_plugin(pm, config)
+        try:
+            assert [s.name for s in plugin._servers] == ["good"]
+            assert plugin._pending_servers == {}
+            skips = [r for r in caplog.records if r.levelno == logging.WARNING
+                     and r.__dict__.get("server") == "bad"]
+            assert len(skips) == 1
+            msg = skips[0].getMessage()
+            assert key in msg and shown in msg
+            assert "failed to connect" not in msg
+        finally:
+            await plugin.on_stop()
+
+    @pytest.mark.parametrize("mcp, key, shown", [
+        (["x"], "mcp", "['x']"),
+        ({"servers": ["a"]}, "mcp.servers", "['a']"),
+        ({"servers": "a"}, "mcp.servers", "'a'"),
+    ])
+    async def test_non_mapping_block_raises_named_value_error(
+        self, pm, mcp, key, shown
+    ):
+        from corvidae.mcp_client import McpClientPlugin
+        with pytest.raises(ValueError) as excinfo:
+            await McpClientPlugin().on_init(pm=pm, config={"mcp": mcp})
+        assert key in str(excinfo.value) and shown in str(excinfo.value)
+
+    @pytest.mark.parametrize("mcp", [None, {}, {"servers": None}])
+    async def test_null_or_empty_block_means_no_servers(self, pm, mcp):
+        from corvidae.mcp_client import McpClientPlugin
+        plugin = McpClientPlugin()
+        await plugin.on_init(pm=pm, config={"mcp": mcp})
+        assert plugin._servers_config == {}
+
+
 class TestRetryLoopSurvivesRebuildError:
     async def test_rebuild_registry_error_is_logged_and_loop_continues(
         self, pm, kernel_clock, sdk, caplog

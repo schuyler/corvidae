@@ -727,10 +727,18 @@ backoff ladder (10 s, doubling to 300 s, reset when a retry succeeds), with no
 tool call needed, so a daemon whose servers were all down recovers without a
 restart; each failed retry logs a WARNING naming the server, the error and the
 next delay. An MCP tool call also retries pending servers as a fast path,
-unless a retry is already running. A server skipped for a config error (unknown
-`transport`, missing `command`/`url`, non-positive `connect_timeout_seconds`,
-unset `${VAR}` in `headers`) is never retried: fix the config and restart. The
-`mcp` section itself is not hot-reloaded.
+unless a retry is already running. A server skipped for a config error is logged
+once, naming `mcp.servers.<name>.<key>` and the rejected value, and never
+retried: fix the config and restart. The errors are: a server entry that is not
+a mapping, an unknown `transport`, a missing or null (or non-string) `command`/`url`,
+`args` that is not a list of strings, `env` that is not a mapping, `headers`
+that is not a mapping, a `timeout_seconds` or `connect_timeout_seconds` that is
+not a finite number (`.nan`, `.inf`, a string or a list), a non-positive
+`connect_timeout_seconds`, and an unset `${VAR}` in `headers`. A malformed
+block as a whole fails startup with a `Config error` naming the key and value:
+`mcp` that is not a mapping, or `mcp.servers` that is neither null nor a mapping
+(`mcp: null` and `servers: null` just mean no servers). The `mcp` section itself
+is not hot-reloaded.
 
 ---
 

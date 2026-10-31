@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import math
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 
@@ -115,20 +116,60 @@ class _ServerSettings:
 
 
 def _as_seconds(name: str, cfg: dict, key: str) -> float:
-    """Read a numeric seconds key (default 30), naming key and value on error."""
+    """Read a numeric seconds key (default 30), naming key and value on error.
+
+    NaN and infinity are rejected too: NaN would read as a connect failure
+    and be retried forever, and an infinite bound is no bound.
+    """
     value = cfg.get(key, 30)
     try:
-        return float(value)
+        seconds = float(value)
     except (TypeError, ValueError):
         raise ValueError(
             f"mcp.servers.{name}.{key} must be a number, got {value!r}"
         ) from None
+    # A non-finite number would never time out or always fail.
+    if not math.isfinite(seconds):
+        raise ValueError(
+            f"mcp.servers.{name}.{key} must be a finite number, got {value!r}"
+        )
+    return seconds
+
+
+def validate_mcp_config(config: dict) -> dict:
+    """Return the ``mcp.servers`` mapping of ``config``, validated.
+
+    A missing or null ``mcp`` block, or a null ``servers``, means no servers.
+    Raises ValueError naming the key and the rejected value when ``mcp`` is
+    not a mapping or ``mcp.servers`` is neither null nor a mapping, so
+    ``Runtime.start()`` can report it as a ``Config error`` like any other
+    malformed block instead of an AttributeError traceback.
+    """
+    # mcp: null (or absent) configures nothing; otherwise it must be a mapping.
+    block = config.get("mcp")
+    if block is None:
+        return {}
+    if not isinstance(block, dict):
+        raise ValueError(
+            f"mcp must be a mapping with a servers key, got {block!r}"
+        )
+    # servers: null configures nothing; otherwise a mapping of name to entry.
+    servers = block.get("servers")
+    if servers is None:
+        return {}
+    if not isinstance(servers, dict):
+        raise ValueError(
+            f"mcp.servers must be a mapping of server names to settings, "
+            f"got {servers!r}"
+        )
+    return servers
 
 
 def _parse_server_config(name: str, cfg: dict) -> _ServerSettings:
     """Validate one server's config and resolve its ${VAR} headers.
 
-    Raises McpHeaderEnvError, ValueError or KeyError for a config error:
+    Raises McpHeaderEnvError, ValueError or KeyError for a config error (any
+    other exception is also treated as one by on_start):
     the daemon cannot fix these by retrying, so callers skip the server for
     good. Raised before any transport opens, which keeps a config error
     distinguishable from a connect failure (which is retried). Messages name
@@ -147,8 +188,29 @@ def _parse_server_config(name: str, cfg: dict) -> _ServerSettings:
             f"unknown transport {transport!r} for MCP server {name!r}; "
             f"set mcp.servers.{name}.transport to one of {', '.join(_TRANSPORTS)}"
         )
-    # Each transport needs its endpoint key; KeyError names it.
-    cfg["command" if transport == "stdio" else "url"]
+    # Each transport needs its endpoint key (KeyError names it), as a string.
+    endpoint_key = "command" if transport == "stdio" else "url"
+    endpoint = cfg[endpoint_key]
+    if not isinstance(endpoint, str) or not endpoint:
+        raise ValueError(
+            f"mcp.servers.{name}.{endpoint_key} must be a non-empty string, "
+            f"got {endpoint!r}"
+        )
+    # args is a list of strings and env a mapping; the SDK rejects anything
+    # else at connect time, which would be retried forever.
+    args = cfg.get("args")
+    if args is not None and (
+        not isinstance(args, list) or not all(isinstance(a, str) for a in args)
+    ):
+        raise ValueError(
+            f"mcp.servers.{name}.args must be a list of strings, got {args!r}"
+        )
+    env = cfg.get("env")
+    if env is not None and not isinstance(env, dict):
+        raise ValueError(
+            f"mcp.servers.{name}.env must be a mapping of variable names "
+            f"to values, got {env!r}"
+        )
     prefix = cfg.get("tool_prefix", name)
     timeout = _as_seconds(name, cfg, "timeout_seconds")
     connect_timeout = _as_seconds(name, cfg, "connect_timeout_seconds")
@@ -240,7 +302,8 @@ class McpClientPlugin(CorvidaePlugin):
     @hookimpl
     async def on_init(self, pm, config: dict) -> None:
         await super().on_init(pm, config)
-        self._servers_config = config.get("mcp", {}).get("servers", {})
+        # Raises ValueError for a malformed mcp block (Runtime reports it).
+        self._servers_config = validate_mcp_config(config)
 
     @hookimpl
     async def on_start(self, config: dict) -> None:

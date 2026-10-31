@@ -371,6 +371,26 @@ class TestRuntimeStart:
         assert "Config error:" in stderr
         assert str(config_path) in stderr
 
+    async def test_start_non_mapping_mcp_servers_reports_config_error_and_exits(
+        self, tmp_path, capsys
+    ):
+        """A list for mcp.servers prints a Config error naming the key (#265)."""
+        from corvidae.runtime import Runtime
+
+        config_path = tmp_path / "agent.yaml"
+        config_path.write_text(
+            "llm:\n  main: {base_url: http://x, model: m}\nmcp:\n  servers: [a]\n"
+        )
+        rt = Runtime(config_path=str(config_path))
+        with pytest.raises(SystemExit) as excinfo:
+            await rt.start()
+
+        assert excinfo.value.code != 0
+        stderr = capsys.readouterr().err
+        assert "Config error:" in stderr
+        assert "mcp.servers" in stderr and "['a']" in stderr
+        assert str(config_path) in stderr
+
     async def test_start_unknown_channel_key_reports_config_error_and_exits(
         self, tmp_path, capsys
     ):
