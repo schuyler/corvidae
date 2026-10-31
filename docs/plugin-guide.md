@@ -51,7 +51,7 @@ Plugins are loaded via setuptools entry points. Declare them in `pyproject.toml`
 my_plugin = "my_package:MyPlugin"
 ```
 
-`Runtime.start()` calls `pm.load_setuptools_entrypoints("corvidae")`, which instantiates each entry point class with no arguments and registers it. `validate_dependencies(pm)` runs next, then `pm.ahook.on_init(pm=pm, config=config)` broadcasts to all registered plugins.
+`Runtime.start()` calls `pm.load_setuptools_entrypoints("corvidae")`, which instantiates each entry point class with no arguments and registers it. Then `install_plugin_hookspecs(pm)` installs [plugin-declared hooks](#declaring-hooks-in-a-plugin), the arg-binding guard checks every hookimpl, `validate_dependencies(pm)` runs, hookimpls with no spec are reported, and `pm.ahook.on_init(pm=pm, config=config)` broadcasts to all registered plugins.
 
 All plugin classes must be instantiable with no arguments. `pm` and `config` are delivered via `on_init`.
 
@@ -149,7 +149,9 @@ Every redact form (`message`, `range`, `memory`) calls each scrubber once per ch
 A hook's name tells you how its results are resolved. Every hookspec name
 starts with a prefix that fixes its pluggy options, or is a bare imperative
 verb on a short allowlist. `tests/test_hook_grammar.py` checks names against
-pluggy options.
+pluggy options. Hooks a plugin declares itself also carry the owner's
+plugin name after the prefix, can't be bare imperatives, and are checked
+at startup; see [Declaring hooks in a plugin](#declaring-hooks-in-a-plugin).
 
 | Prefix | pluggy spec | Resolution | Core uses result | Implementations |
 |---|---|---|---|---|
@@ -198,8 +200,9 @@ A hook that only one plugin calls doesn't belong in the kernel's
 the plugin class to a class of `@hookspec` methods:
 
 ```python
-from corvidae.hooks import CorvidaePlugin, hookspec
+from corvidae.hooks import TransportPlugin, hookspec
 
+# PanelRegistry stands for whatever object the owner hands implementers.
 class WebConsoleSpec:
     @hookspec
     async def on_web_console_init(self, panels: PanelRegistry) -> None:
