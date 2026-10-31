@@ -687,9 +687,45 @@ class TestOutboundQueue:
         warnings = [
             r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
         ]
-        assert any(
-            "irc:#test" in m and "dropped" in m and "3" in m for m in warnings
-        ), warnings
+        # Only the drop line counts: three drops, the last reporting dropped=3
+        # (the "queued ... not dropped" line must not satisfy this).
+        drops = [m for m in warnings if "dropped oldest" in m]
+        assert len(drops) == 3, warnings
+        assert all("irc:#test" in m for m in drops), drops
+        assert "dropped=3" in drops[-1], drops
+
+    async def test_overflow_during_flush_spares_in_flight_head(self, caplog):
+        """A send at the bound mid-flush must not drop the entry in flight."""
+        plugin, client, parent, channel = _make_queue_fixture()
+        sent: list[str] = []
+        injected = False
+
+        async def msg(target, line):
+            """Record the line; on the first one, send into a full queue."""
+            nonlocal injected
+            sent.append(line)
+            if not injected:
+                injected = True
+                await plugin.send(channel=channel, event=OutboundMessage(text="N"))
+
+        with patch.object(_irc_module, "_OUTBOUND_QUEUE_MAX", 3):
+            # Distinct lengths let the drop log identify which entry went.
+            for text in ("A", "BBBB", "C"):
+                await plugin.send(channel=channel, event=OutboundMessage(text=text))
+            client.connected = True
+            client.message = msg
+            with caplog.at_level(logging.WARNING, logger="corvidae.irc_plugin"):
+                await plugin._flush_outbound()
+
+        # The in-flight head is delivered once; the undelivered B is the
+        # one dropped, and the log says so.
+        assert sent == ["A", "C", "N"]
+        drops = [
+            r.getMessage()
+            for r in caplog.records
+            if "dropped oldest" in r.getMessage()
+        ]
+        assert len(drops) == 1 and "chars=4" in drops[0], drops
 
     async def test_flushed_message_splits_like_connected_send(self):
         """R4: a queued multi-line message flushes as the connected send does."""

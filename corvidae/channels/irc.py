@@ -120,6 +120,9 @@ class IRCPlugin(TransportPlugin):
         self._irc_nick: str = "corvidae"
         self._irc_tls: bool = False
         # Output held while disconnected, oldest first (#106).
+        # True while _flush_outbound is delivering _outbound[0]; that entry
+        # is in flight and must not be dropped by overflow handling.
+        self._flushing = False
         self._outbound: collections.deque[tuple[Channel, str]] = collections.deque()
         # Messages dropped from the queue in the current outage.
         self._dropped: int = 0
@@ -198,8 +201,14 @@ class IRCPlugin(TransportPlugin):
             or self._outbound
         ):
             # Bounded: drop the oldest entry rather than grow without limit.
-            if len(self._outbound) >= _OUTBOUND_QUEUE_MAX:
-                old_channel, old_text = self._outbound.popleft()
+            # While flushing, the head is in flight (the flush pops it after
+            # delivery), so the oldest droppable entry is index 1.
+            drop_index = 1 if self._flushing else 0
+            if len(self._outbound) >= _OUTBOUND_QUEUE_MAX and len(
+                self._outbound
+            ) > drop_index:
+                old_channel, old_text = self._outbound[drop_index]
+                del self._outbound[drop_index]
                 self._dropped += 1
                 logger.warning(
                     "IRC outbound queue full, dropped oldest message "
@@ -222,32 +231,42 @@ class IRCPlugin(TransportPlugin):
     async def _flush_outbound(self) -> None:
         """Deliver queued output in order; keep any remainder on failure."""
         flushed = 0
-        # Pop only after delivery so a failure leaves the rest queued, and
-        # concurrent sends keep queueing behind the head.
-        while self._outbound:
-            if self.client is None or not self.client.connected:
-                break
-            channel, text = self._outbound[0]
-            try:
-                await self._deliver(channel, text)
-            except Exception:
-                logger.warning(
-                    "IRC flush of queued output failed (channel=%s, "
-                    "%d still queued); will retry on next connect",
-                    channel.id,
-                    len(self._outbound),
-                    exc_info=True,
-                )
-                return
-            self._outbound.popleft()
-            flushed += 1
+        stopped_early = False
+        # Mark the head as in flight so overflow drops never remove it.
+        self._flushing = True
+        try:
+            # Pop only after delivery so a failure leaves the rest queued, and
+            # concurrent sends keep queueing behind the head.
+            while self._outbound:
+                if self.client is None or not self.client.connected:
+                    stopped_early = True
+                    break
+                channel, text = self._outbound[0]
+                try:
+                    await self._deliver(channel, text)
+                except Exception:
+                    logger.warning(
+                        "IRC flush of queued output failed (channel=%s, "
+                        "%d still queued); will retry on next connect",
+                        channel.id,
+                        len(self._outbound),
+                        exc_info=True,
+                    )
+                    return
+                self._outbound.popleft()
+                flushed += 1
+        finally:
+            self._flushing = False
+        # Report accurately: a disconnect mid-flush leaves a remainder.
         logger.info(
-            "IRC outbound queue flushed (sent=%d, dropped=%d, remaining=%d)",
+            "IRC outbound flush %s (sent=%d, dropped=%d, remaining=%d)",
+            "stopped on disconnect" if stopped_early else "complete",
             flushed,
             self._dropped,
             len(self._outbound),
         )
-        self._dropped = 0
+        if not stopped_early:
+            self._dropped = 0
 
     async def send_progress(self, channel: Channel, event: OutboundProgress) -> None:
         """Show intermediate text as an ordinary message."""
