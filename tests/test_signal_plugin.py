@@ -983,6 +983,25 @@ class TestOutboundSend:
         finally:
             await _stop_plugin(h)
 
+    async def test_reply_with_no_outstanding_message_is_delivered(self, tmp_path):
+        """An agent-started turn (a reminder, say) answers no inbound
+        message: the reply still goes out and the outstanding count stays
+        at zero rather than going negative (design.md, Signal section)."""
+        h = await _start_plugin(tmp_path)
+        try:
+            channel = h.registry.get_or_create("signal", AUTH_ACI)
+            assert h.plugin._outstanding.get(channel.id, 0) == 0
+            await h.plugin.send(channel=channel, event=OutboundMessage(text="reminder: stand up"))
+            # Wait for the send frame and check its text.
+            while True:
+                frame = await h.server.next_request(timeout=5)
+                if frame.get("method") == "send":
+                    break
+            assert "reminder: stand up" in (_extract_text(frame) or "")
+            assert h.plugin._outstanding.get(channel.id, 0) == 0
+        finally:
+            await _stop_plugin(h)
+
     async def test_send_message_failure_is_logged_and_does_not_raise(self, tmp_path, caplog):
         h = await _start_plugin(tmp_path)
         try:

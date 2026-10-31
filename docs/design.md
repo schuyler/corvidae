@@ -2204,9 +2204,23 @@ stripping IRC needs. `send_progress` uses the same delivery path but skips
 the outstanding-count bookkeeping: it is mid-turn liveness, not the reply.
 Outbound is text only.
 
-Group conversations are out of scope; agent-initiated (unprompted) sends
-and any privacy handling specific to disappearing messages are not
-implemented.
+Signal delivers a reply to a turn of any origin on a channel it owns. A
+reminder firing on a `signal:` channel injects through `on_notify`, and
+the reply leaves through the same `send` path as a reply to a person; it
+needs no inbound message to answer. The outstanding-reply count is guarded
+at zero for such a reply (`SignalPlugin._decrement_outstanding` never goes
+below 0), so an agent-started turn neither errors nor skews typing. This is
+[PRD §3.2.10](prd.md): a transport delivers every emission on a channel it
+owns, whatever originated the turn, and liveness and reply bookkeeping
+tolerate a reply that answers no outstanding message. Sending to a channel
+*other than* the turn's own is a separate capability (PRD §3.5.9: operator
+allowlist that starts empty, plus a budget); see the scheduler's "Not in
+phase one: a `send_to_channel` tool" note under
+[SchedulerPlugin](#schedulerplugin) and the deferred entry in
+`docs/threat-model.md`.
+
+Group conversations are out of scope, as is any privacy handling specific
+to disappearing messages.
 
 ### Discord (`channels/discord.py`)
 
@@ -2344,8 +2358,17 @@ There is no local Discord server, so there is no harness end-to-end test
 for this transport; behavior is pinned by `tests/test_discord_plugin.py`
 against fake clients. The first real connection is the real test.
 
-Out of scope: voice, slash commands, embeds, attachments in either
-direction, reactions, and agent-initiated (unprompted) sends.
+Replies to agent-started turns on a Discord channel (a reminder, say) are
+delivered through the normal send path: `_deliver` resolves the destination
+from the channel id, so no inbound message is needed. The outstanding count
+is guarded at zero in `DiscordPlugin._decrement_outstanding`, as on Signal.
+Sending to a channel other than the turn's own is a separate capability,
+not provided by the transport: PRD §3.5.9 (operator allowlist that starts
+empty, plus a budget); see the scheduler's "Not in phase one: a
+`send_to_channel` tool" note and `docs/threat-model.md`.
+
+Out of scope: voice, slash commands, embeds, and attachments in either
+direction, and reactions.
 
 ### Web (`channels/web.py`)
 
