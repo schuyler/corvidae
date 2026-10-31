@@ -491,6 +491,15 @@ stage-2 JSON, critique's provenance snapshot, and merged outcomes — are
 filled in by `MemoryPlugin`, `AppraisalPlugin`, and `CritiquePlugin`
 through the writer API below, not by `OutcomeLogPlugin` itself.
 
+A message refused by a transport gate (an allowlist refusing a stranger)
+leaves no row: both insert paths (`record_exchange` and `upsert_exchange`)
+skip any channel the `ChannelRegistry` does not hold, so no writer
+(`on_message_rejected`, appraisal's stage-1 persist, the gates) can grow
+`exchange_log` or leave a refused sender's channel id behind. With no
+registry plugin the guard fails open and records. Rejections on known
+channels (the engagement gate) keep their `gate: rejected` row, with a null
+`message_rowid`.
+
 It also registers the `exchange_log` scrubber (`redact_exchange_log`)
 under the `corvidae.redact` entry-point group. When `corvidae redact`
 tombstones a message, the owning exchange's stage-2 `past_claims` text is

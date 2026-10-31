@@ -62,6 +62,11 @@ async def _setup_outcome_log(pm, db):
     pm.register(plugin, name="outcome_log")
     await plugin.on_init(pm, {})
     await plugin.on_start({})
+    # The writers skip channels the registry never held (#261), so the
+    # channel these tests write rows for must be registered.
+    registry = pm.get_plugin("registry")
+    if registry is not None:
+        registry.get_or_create("irc", "#general")
     return plugin
 
 
