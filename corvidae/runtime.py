@@ -26,6 +26,8 @@ from corvidae.clock import Clock
 from corvidae.hooks import (
     _check_hook_arg_binding,
     create_plugin_manager,
+    install_plugin_hookspecs,
+    report_orphan_hookimpls,
     validate_dependencies,
 )
 from corvidae.idle import IdleTracker, validate_daemon_config
@@ -122,7 +124,12 @@ class Runtime:
             config["plugins"]["disabled"]. Must precede step 8 so blocked
             plugins are never instantiated by the entry-point loader.
         8.  Load entry-point plugins (corvidae group).
-        9.  Validate plugin dependencies.
+        8a. Log the effective plugin set.
+        8b. Install plugin-declared hookspecs (install_plugin_hookspecs), so
+            every spec exists before the guard below and before on_init.
+        8c. Run the hook arg-binding guard over the full plugin set.
+        9.  Validate plugin dependencies, then report hookimpls left with no
+            spec (report_orphan_hookimpls).
         10. await pm.ahook.on_init(pm=pm, config=config).
         11. await pm.ahook.on_start(config=config).
             NOTE: Agent.on_start has no @hookimpl — the broadcast skips it.
@@ -222,14 +229,22 @@ class Runtime:
             extra={"loaded": loaded_names, "blocked": disabled_plugins},
         )
 
-        # 8b. Guard the full, real plugin set against pluggy's silent-drop
+        # 8b. Install the hookspecs plugins declare (#229). Every plugin is
+        #     registered by now, and specs must exist before the guard
+        #     below checks impls against them and before any on_init calls
+        #     another plugin's hook.
+        install_plugin_hookspecs(self.pm)
+
+        # 8c. Guard the full, real plugin set against pluggy's silent-drop
         #     arg-binding bug class. create_plugin_manager() only checks the
         #     seed hooks; the real entry-point plugins are not registered
         #     until the line above, so this second check covers them.
         _check_hook_arg_binding(self.pm)
 
-        # 9. Validate dependencies
+        # 9. Validate dependencies, then report hookimpls with no spec: a
+        #    typo, or an owner that isn't loaded.
         validate_dependencies(self.pm)
+        report_orphan_hookimpls(self.pm)
 
         # 10. on_init broadcast
         await self.pm.ahook.on_init(pm=self.pm, config=config)

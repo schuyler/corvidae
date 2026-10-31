@@ -51,7 +51,7 @@ Plugins are loaded via setuptools entry points. Declare them in `pyproject.toml`
 my_plugin = "my_package:MyPlugin"
 ```
 
-`Runtime.start()` calls `pm.load_setuptools_entrypoints("corvidae")`, which instantiates each entry point class with no arguments and registers it. `validate_dependencies(pm)` runs next, then `pm.ahook.on_init(pm=pm, config=config)` broadcasts to all registered plugins.
+`Runtime.start()` calls `pm.load_setuptools_entrypoints("corvidae")`, which instantiates each entry point class with no arguments and registers it. Then `install_plugin_hookspecs(pm)` installs [plugin-declared hooks](#declaring-hooks-in-a-plugin), the arg-binding guard checks every hookimpl, `validate_dependencies(pm)` runs, hookimpls with no spec are reported, and `pm.ahook.on_init(pm=pm, config=config)` broadcasts to all registered plugins.
 
 All plugin classes must be instantiable with no arguments. `pm` and `config` are delivered via `on_init`.
 
@@ -149,7 +149,9 @@ Every redact form (`message`, `range`, `memory`) calls each scrubber once per ch
 A hook's name tells you how its results are resolved. Every hookspec name
 starts with a prefix that fixes its pluggy options, or is a bare imperative
 verb on a short allowlist. `tests/test_hook_grammar.py` checks names against
-pluggy options.
+pluggy options. Hooks a plugin declares itself also carry the owner's
+plugin name after the prefix, can't be bare imperatives, and are checked
+at startup; see [Declaring hooks in a plugin](#declaring-hooks-in-a-plugin).
 
 | Prefix | pluggy spec | Resolution | Core uses result | Implementations |
 |---|---|---|---|---|
@@ -190,6 +192,71 @@ value on an existing hook, or waits for its second consumer. Pick the name
 from the table above. The test checks the prefix against the pluggy
 options; whether the core reads a hook's return value is not something
 pluggy exposes, so that half is checked in review.
+
+### Declaring hooks in a plugin
+
+A hook that only one plugin calls doesn't belong in the kernel's
+`AgentSpec`. The plugin that calls it owns it instead. Set `hookspecs` on
+the plugin class to a class of `@hookspec` methods:
+
+```python
+from corvidae.hooks import TransportPlugin, hookspec
+
+# PanelRegistry stands for whatever object the owner hands implementers.
+class WebConsoleSpec:
+    @hookspec
+    async def on_web_console_init(self, panels: PanelRegistry) -> None:
+        """Panel plugins add their panels to ``panels``."""
+
+class WebPlugin(TransportPlugin):
+    hookspecs = WebConsoleSpec
+
+    async def on_start(self, config):
+        await self.pm.ahook.on_web_console_init(panels=self._panels)
+```
+
+`Runtime.start()` installs every declared spec right after entry points
+load (`install_plugin_hookspecs`), before the arg-binding guard and
+before `on_init`, so any plugin's `on_init` can already call the hook.
+Startup fails, naming the hook, the plugin and the fix, when a
+declaration breaks one of these rules:
+
+- **Grammar, with the owner named.** The name starts with a grammar prefix
+  from the table above, then the owning plugin's registered name and an
+  underscore: `on_web_…`, `should_web_…`, `resolve_web_…`,
+  `transform_web_…`. Bare imperatives stay kernel-only. The prefix still
+  fixes the pluggy options (`resolve_`/`transform_` need
+  `firstresult=True`; the others must not have it).
+- **One owner per hook.** A name declared by two plugins, or by a plugin
+  and `AgentSpec`, is an error in either registration order. To share a
+  hook, depend on its owner and call it; any plugin can call any hook.
+- **Transform seeds come from the owner.** A `transform_` hook needs an
+  `@hookimpl(trylast=True)` on the owner itself that returns its input
+  unchanged, which is what `_SeedHooksPlugin` provides for kernel transforms.
+
+The owner segment is the plugin's registered name: its entry-point name,
+or the `name=` passed to `pm.register`. Renaming an entry point renames
+its hooks. A plugin registered without a name, or under a name that can't
+appear in a Python identifier (`web-console`), can't own hooks. The
+declaration is read from the class, so a base class can declare for a
+subclass, but only one plugin registered from that class hierarchy can
+own the hooks. A plugin that is a module rather than a class instance
+can't declare hooks.
+
+A plugin hook still has to earn its name under the admission rule in
+[Adding a hook](#adding-a-hook). Owning it yourself changes where the spec
+lives, not whether it should exist.
+
+Implementing a plugin's hook is the same as implementing a kernel hook:
+write a `@hookimpl` with the same name, and declare the dependency (see
+[Plugin dependencies](#plugin-dependencies)). The hook's contract is
+documented by its owner, not in [Available hooks](#available-hooks).
+
+At startup, a hookimpl whose name matches no spec is logged at WARNING
+(`plugin 'x' implements hook 'on_web_consol_init', which no loaded plugin
+declares`), since it will never be called. Usually that's a typo. The
+exception is an impl for a hook owned by one of your `optional_depends_on`
+plugins that isn't loaded: that's expected, and is logged at DEBUG.
 
 ## Available hooks
 
@@ -573,6 +640,24 @@ registry = tools_plugin.get_registry()
 ```
 
 `get_dependency` raises `RuntimeError` if the plugin is not found and `TypeError` if it is the wrong type.
+
+A plugin that uses another plugin when it's there and works without it
+declares `optional_depends_on` instead. A missing optional dependency is
+not an error, and optional dependencies aren't part of cycle detection.
+Look the plugin up with `pm.get_plugin(name)` and treat `None` as absent
+(it's `None` whether the plugin is disabled or not installed):
+
+```python
+class ProfilerPanel(CorvidaePlugin):
+    optional_depends_on = frozenset({"web"})
+
+    @hookimpl
+    async def on_web_console_init(self, panels):
+        panels.add(...)  # only called when web is loaded
+```
+
+If the owner is absent, the impl stays registered with no spec and is
+never called. See [Declaring hooks in a plugin](#declaring-hooks-in-a-plugin).
 
 ## Injecting context before agent turns
 

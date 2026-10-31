@@ -15,18 +15,20 @@ from collections.abc import Iterable
 import pytest
 from pluggy import HookCaller
 
-from corvidae.hooks import AgentSpec, _SeedHooksPlugin, create_plugin_manager
+from corvidae.hooks import (
+    HOOK_GRAMMAR,
+    IMPERATIVE_HOOKS,
+    AgentSpec,
+    _SeedHooksPlugin,
+    create_plugin_manager,
+)
 
-# Prefix class -> (prefixes, the pluggy spec options every member must have).
-GRAMMAR: dict[str, tuple[tuple[str, ...], dict[str, bool]]] = {
-    "observe": (("on_", "before_", "after_"), {"firstresult": False}),
-    "veto": (("should_",), {"firstresult": False}),
-    "resolve": (("resolve_",), {"firstresult": True}),
-    "transform": (("transform_",), {"firstresult": True}),
-}
+# The grammar table lives in the kernel so the startup check on
+# plugin-declared hookspecs (#229) and these tests share one definition.
+GRAMMAR = HOOK_GRAMMAR
 
 # Bare imperative names: broadcast, caller-defined use of the result list.
-IMPERATIVE = {"send", "register_tools", "persist_message"}
+IMPERATIVE = IMPERATIVE_HOOKS
 
 # Names retired by renames or folds; none may come back as a hookspec.
 RETIRED = {

@@ -96,7 +96,45 @@ class AgentSpec:
 ```
 
 `create_plugin_manager()` in `hooks.py` creates the manager and adds
-hookspecs.
+the `AgentSpec` hookspecs.
+
+### Plugin-declared hookspecs
+
+A plugin can own hooks that only it calls by setting `hookspecs` on its
+class to a class of `@hookspec` methods (#229). The kernel doesn't change
+per hook: `install_plugin_hookspecs(pm)` installs every declaration at
+startup, after entry points load and before the arg-binding guard and
+`on_init`. pluggy verifies hookimpls registered before their spec when
+`add_hookspecs` runs, so registration order between owner and
+implementers doesn't matter.
+
+`install_plugin_hookspecs` makes two passes, so no outcome depends on
+entry-point order. Pass one collects every declaration and fails on any
+name with more than one owner, counting names that already have a spec
+(`AgentSpec`). Pass two, per plugin, checks the name against the hook
+grammar (`HOOK_GRAMMAR` in `hooks.py`, the same table
+`tests/test_hook_grammar.py` uses for `AgentSpec`), with the owner's
+registered plugin name right after the prefix (`on_web_<name>`). It also
+checks the pluggy options match the prefix, installs the specs, and
+requires the owner's own `trylast` seed for each `transform_` hook. Bare
+imperatives are kernel-only. Every failure raises `PluginValidationError`
+naming the hook, the plugin and the fix.
+
+Implementers declare a hard (`depends_on`) or optional
+(`optional_depends_on`) dependency on the owner. If an optional owner is
+absent, its implementers' impls stay registered with no spec and are
+never called. `report_orphan_hookimpls(pm)`, run after
+`validate_dependencies`, logs each hookimpl with no spec at WARNING,
+naming the plugin and the hook. The exception is a hook whose owner
+segment names one of the implementer's `optional_depends_on` plugins
+that isn't loaded (blocked or not installed), which logs at DEBUG.
+
+Known limit: a plugin name containing an underscore makes the owner
+segment ambiguous against a shorter name (`memory` could declare
+`on_memory_tools_x`). That can't cause a silent clash, because a second
+declaration of the same name still fails. Its only effect is that such an
+orphan can be logged at DEBUG when the real owner is a different absent
+plugin.
 
 ### Broadcast dispatch and result resolution
 
@@ -128,7 +166,10 @@ Hook names follow a grammar: the prefix tells you the resolution
 first non-None result, `transform_` runs a wrapper chain), and a short
 allowlist of bare imperatives covers the rest. The table and the rule for
 adding a hook are in [plugin-guide.md](plugin-guide.md#hook-grammar);
-`tests/test_hook_grammar.py` enforces the name/option half.
+`tests/test_hook_grammar.py` enforces the name/option half for
+`AgentSpec`, and `install_plugin_hookspecs` enforces it at startup for
+[plugin-declared hooks](#plugin-declared-hookspecs), which also carry the
+owner's plugin name after the prefix.
 
 ### Hook reference
 
@@ -2679,9 +2720,14 @@ entry shows up under `blocked` while the plugin it was meant to block
 still shows up under `loaded`; that mismatch is the operator-visible
 signal of the typo. It is not an error and does not stop the daemon.
 
-After entry points load, `validate_dependencies(pm)` runs
+Next, `install_plugin_hookspecs(pm)` installs the hookspecs plugins
+declare ([Plugin-declared hookspecs](#plugin-declared-hookspecs)), and
+the hook arg-binding guard checks every impl against the full set of
+specs. Then `validate_dependencies(pm)` runs
 to verify every plugin's `depends_on` set names a registered plugin.
 Startup aborts with `RuntimeError` if any dependency is missing.
+`report_orphan_hookimpls(pm)` then logs any hookimpl left with no spec,
+before the `on_init` broadcast.
 
 ## Plugin Dependencies
 
@@ -2700,6 +2746,12 @@ registered; raises `TypeError` if the plugin is not an instance of
 **`validate_dependencies(pm)`** — iterates every registered plugin, checks
 for a `depends_on` attribute, and raises `RuntimeError` naming the missing
 dependency and the plugin that declared it. Runs once at startup.
+
+**`optional_depends_on`** — a class-level set of plugin names the plugin
+uses when they are loaded. `validate_dependencies` ignores it, so a
+missing name is fine and it takes no part in cycle detection. Its only
+reader is `report_orphan_hookimpls`, which logs at DEBUG rather than
+WARNING for an impl of a hook owned by an absent optional dependency.
 
 ### Current dependency graph
 
