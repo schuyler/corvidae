@@ -113,12 +113,15 @@ jobs:
 
       # Chromium plus the system libraries it needs on the runner.
       - name: Install Playwright Chromium
-        run: uv run --no-sync --with playwright==1.64.1 playwright install --with-deps chromium
+        run: uv run --no-sync --with playwright==1.64.0 playwright install --with-deps chromium
 
       # -rs lists skips; a skip means the guard did not run, so fail on one.
       - name: Run web render smoke test
+        # shell: bash makes GitHub run with -eo pipefail, so a failing or
+        # erroring pytest fails the step instead of being masked by tee.
+        shell: bash
         run: |
-          uv run --no-sync --with playwright==1.64.1 pytest -q -rs tests/test_web_render_smoke.py | tee smoke.log
+          uv run --no-sync --with playwright==1.64.0 pytest -q -rs tests/test_web_render_smoke.py | tee smoke.log
           if grep -q SKIPPED smoke.log; then
             echo "web render smoke test was skipped; Playwright or its browser is unusable" >&2
             exit 1
