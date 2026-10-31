@@ -241,8 +241,11 @@ harness/chat.sh
 
 starts `buster-daemon` if it isn't already running (rendering
 `state/agent.yaml` first if needed) — no probes, no snapshot — and prints
-join instructions: any IRC client to `$BUSTER_HOST:6667`, no password, then
-`/join #chat`. `#chat` is a channel no probe touches, so it's safe to talk
+join instructions: an IRC client to `$BUSTER_HOST:6667`, no password, then
+`/join #chat`. IRC is default-deny (#77), so Buster ignores you until your
+nick is in `irc.allow` in `harness/buster.yaml.in` (or `state/agent.yaml`);
+add it and restart the daemon. `session.sh` with a custom `--nick` needs
+that nick in `irc.allow` too. `#chat` is a channel no probe touches, so it's safe to talk
 in even while a probe run is in progress on `run.sh`'s daemon — but stay
 out of the `#p-*` channels while probes are running, since a human
 message there will confuse a probe's reply-matching.

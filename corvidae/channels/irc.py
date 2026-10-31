@@ -2,6 +2,7 @@
 
 import asyncio
 import collections
+import contextvars
 import logging
 from typing import Optional
 
@@ -18,6 +19,17 @@ from corvidae.channels.split import split_message
 from corvidae.trace import mint_trace_id
 from corvidae.hooks import TransportPlugin, get_dependency, hookimpl
 from corvidae.outbound import OutboundMessage, OutboundProgress
+
+
+# The account named by the tag of the PRIVMSG being handled, set by
+# IRCClient.on_raw. Each on_raw runs in its own task, so the value is local to
+# that message and survives pydle's WHOIS suspensions, unlike pydle's shared
+# users[nick] record, which other lines and WHOIS replies rewrite. _UNSET
+# means no PRIVMSG is being handled; the gate treats it as not logged in.
+_UNSET = object()
+_message_account: contextvars.ContextVar = contextvars.ContextVar(
+    "irc_message_account", default=_UNSET
+)
 
 
 class IRCClient(pydle.Client):
@@ -49,6 +61,36 @@ class IRCClient(pydle.Client):
             message.command,
             message.params,
         )
+
+    async def on_raw(self, message):
+        """Capture each PRIVMSG's own account tag before anything can suspend.
+
+        With account-tag negotiated every PRIVMSG carries the tag iff the
+        sender is logged in, so the tag (absent => not logged in) is the only
+        account the allowlist trusts (#77). It is held in a task-local
+        ContextVar, set before any await, and read by IRCPlugin._decide.
+        pydle's users[nick] is never consulted for the verdict: it is shared
+        across lines, is rewritten by WHOIS replies for whoever holds the
+        nick, and is not cleared on an untagged message. The record is still
+        overwritten from the tag so pydle's own state stays consistent.
+        """
+        token = None
+        if message.command == "PRIVMSG" and self._capabilities.get("account-tag"):
+            nick, _ = self._parse_user(message.source)
+            tag = message.tags.get("account")
+            # pydle parses a valueless tag as True; only a non-empty string
+            # is an account name. Anything else counts as not logged in.
+            account = tag if isinstance(tag, str) and tag else None
+            # Set before the first await: this is the message's identity.
+            token = _message_account.set(account)
+            await self._sync_user(
+                nick, {"account": account, "identified": account is not None}
+            )
+        try:
+            await super().on_raw(message)
+        finally:
+            if token is not None:
+                _message_account.reset(token)
 
     async def on_connect(self):
         """Join configured channels after connecting."""
@@ -119,6 +161,15 @@ class IRCPlugin(TransportPlugin):
         self._irc_port: int = 6667
         self._irc_nick: str = "corvidae"
         self._irc_tls: bool = False
+        # Nicks / services account names allowed to drive the agent, as
+        # configured; compared under the server's casemapping at match time.
+        # Empty means nobody: IRC is default-deny (#77).
+        self._allow: set[str] = set()
+        # Verdicts decided once per message in the synchronous path, keyed
+        # by the transport-minted trace_id: (allowed, account). Nothing
+        # re-reads pydle's mutable user state after a suspension point.
+        # Entries live only while on_message runs (see _dispatch).
+        self._verdicts: dict[str, tuple[bool, Optional[str]]] = {}
         # Output held while disconnected, oldest first (#106).
         # True while _flush_outbound is delivering _outbound[0]; that entry
         # is in flight and must not be dropped by overflow handling.
@@ -140,6 +191,28 @@ class IRCPlugin(TransportPlugin):
         self._irc_tls = irc_config.get("tls", False)
         self._message_chunk_size = irc_config.get("message_chunk_size", 400)
 
+        # Validate the allowlist at startup so a typo fails loudly, naming the
+        # field, instead of silently locking everyone out (or in).
+        if "allow" in irc_config:
+            allow = irc_config["allow"]
+            if not isinstance(allow, list) or not all(
+                isinstance(entry, str) for entry in allow
+            ):
+                raise ValueError(
+                    "irc: config field 'allow' must be a list of nicks or "
+                    f"account names (got {allow!r}) — fix the irc.allow key "
+                    "in agent.yaml"
+                )
+            # Stored raw; _fold applies the server's casemapping at match time.
+            self._allow = set(allow)
+        else:
+            # Upgrade notice: IRC used to accept everyone.
+            logger.warning(
+                "irc: no 'allow' list in the irc config block; IRC is "
+                "default-deny and will ignore every sender until irc.allow "
+                "is set in agent.yaml"
+            )
+
     @hookimpl
     async def on_start(self, config: dict) -> None:
         self._registry = get_dependency(self.pm, "registry", ChannelRegistry)
@@ -153,31 +226,142 @@ class IRCPlugin(TransportPlugin):
         )
         self._connect_task = asyncio.create_task(self.client.connect_with_retry())
 
+    # Capabilities that make pydle track services accounts for us when
+    # account-tag is not negotiated (with account-tag, the tag is used alone).
+    _ACCOUNT_CAPS = ("account-notify", "extended-join")
+
+    def _account_tag_negotiated(self) -> bool:
+        """Whether the server tags each PRIVMSG with the sender's account."""
+        caps = getattr(self.client, "_capabilities", None) or {}
+        return bool(caps.get("account-tag"))
+
+    def _account_of(self, nick: str) -> tuple[bool, Optional[str]]:
+        """(network reports accounts, the sender's account or None).
+
+        With account-tag negotiated the account is only the one in the
+        message's own tag (captured by IRCClient.on_raw); no tag, or no
+        message in flight, means not logged in. Otherwise it comes from
+        pydle's tracked user state, with account support inferred from the
+        negotiated IRCv3 capabilities or from the nick already having an
+        account (e.g. learned from WHOIS). That state is shared and can lag
+        the sender (a residual risk, docs/threat-model.md).
+        """
+        if self._account_tag_negotiated():
+            account = _message_account.get()
+            return True, (None if account is _UNSET else account)
+        users = getattr(self.client, "users", None) or {}
+        info = users.get(nick) or {}
+        account = info.get("account") or None
+        caps = getattr(self.client, "_capabilities", None) or {}
+        supported = bool(account) or any(caps.get(c) for c in self._ACCOUNT_CAPS)
+        return supported, account
+
+    def _fold(self, name: str) -> str:
+        """Normalize a nick/account under the server's CASEMAPPING.
+
+        Uses the client's normalizer (ascii / rfc1459 / strict-rfc1459), not
+        str.casefold, which is broader than any server (``straße`` vs
+        ``strasse``). Before a client exists, falls back to ASCII lowering.
+        """
+        normalize = getattr(self.client, "normalize", None)
+        if normalize is None:
+            return name.lower()
+        return normalize(name)
+
+    def _match(self, supported: bool, account: Optional[str], nick: str) -> bool:
+        """Default-deny match. Where the network has accounts the account
+        must match (an unidentified or unknown sender is refused); otherwise
+        the nick does."""
+        identity = account if supported else nick
+        if identity is None:
+            return False
+        # Normalize both sides at match time.
+        allowed = {self._fold(entry) for entry in self._allow}
+        return self._fold(identity) in allowed
+
+    def _decide(self, nick: str) -> tuple[bool, Optional[str]]:
+        """Decide once, synchronously: (allowed, account) for this sender.
+
+        One account lookup feeds both the verdict and the logged account.
+        Must run before any await on the message's path; the result is
+        recorded and never recomputed.
+        """
+        supported, account = self._account_of(nick)
+        return self._match(supported, account, nick), account
+
+    def _gate_channel(self, scope: str, allowed: bool) -> Channel:
+        """The channel to gate a message on, given the recorded verdict.
+
+        An allowed sender gets the registered channel. A refused one gets an
+        existing registry entry if there is one, else an unregistered
+        Channel, so nothing outlives the refusal (#77, as Signal #103).
+        """
+        if allowed:
+            return self._registry.get_or_create("irc", scope)
+        existing = self._registry.get(f"irc:{scope}")
+        if existing is not None:
+            return existing
+        return Channel(transport="irc", scope=scope)
+
+    @hookimpl
+    async def should_process_message(
+        self, channel: Channel, sender: str, text: str, trace_id: str
+    ) -> bool | None:
+        """Default-deny gate: only an irc.allow sender may drive the agent.
+
+        Reports the verdict recorded for trace_id when the message arrived;
+        it does not re-read user state. No recorded verdict means deny.
+        trace_id is bound without a default (tests/test_hook_arg_binding.py).
+        """
+        if not self.owns(channel):
+            return None
+        verdict = self._verdicts.get(trace_id)
+        if verdict is None:
+            logger.warning(
+                "irc: no recorded verdict for message from nick=%s "
+                "(trace_id=%s); refusing",
+                sender,
+                trace_id,
+            )
+            return False
+        allowed, account = verdict
+        if allowed:
+            return True
+        # Silent refusal: log once, say nothing to the sender.
+        logger.info(
+            "irc: rejected message from unauthorized sender nick=%s%s",
+            sender,
+            f" account={account}" if account else "",
+        )
+        return False
+
+    async def _dispatch(self, scope: str, by: str, message: str) -> None:
+        """Decide the sender's verdict once, then hand the message on."""
+        # Synchronous: no await between reading user state and recording.
+        allowed, account = self._decide(by)
+        channel = self._gate_channel(scope, allowed)
+        # Transport-minted id; the Agent uses it verbatim (#95).
+        trace_id = mint_trace_id()
+        self._verdicts[trace_id] = (allowed, account)
+        try:
+            await self.pm.ahook.on_message(
+                channel=channel, sender=by, text=message, trace_id=trace_id
+            )
+        finally:
+            # Admitted, refused or failed: the verdict dies with the message.
+            self._verdicts.pop(trace_id, None)
+
     async def on_channel_message(self, target, by, message):
         """Forward channel messages to agent loop (called by IRCClient)."""
         if self.client is not None and by == self.client.nickname:
             return
-        channel = self._registry.get_or_create("irc", target)
-        await self.pm.ahook.on_message(
-            channel=channel,
-            sender=by,
-            text=message,
-            # Transport-minted id; the Agent uses it verbatim (#95).
-            trace_id=mint_trace_id(),
-        )
+        await self._dispatch(target, by, message)
 
     async def on_private_message(self, target, by, message):
         """Forward private messages to agent loop (called by IRCClient)."""
         if self.client is not None and by == self.client.nickname:
             return
-        channel = self._registry.get_or_create("irc", by)
-        await self.pm.ahook.on_message(
-            channel=channel,
-            sender=by,
-            text=message,
-            # Transport-minted id; the Agent uses it verbatim (#95).
-            trace_id=mint_trace_id(),
-        )
+        await self._dispatch(by, by, message)
 
     async def _deliver(self, channel: Channel, text: str) -> None:
         """Send text now: one PRIVMSG per non-blank line, split to fit."""

@@ -40,6 +40,7 @@ irc:
   port: 6667
   nick: corvidae
   tls: false
+  allow: []               # default-deny: nobody may drive the agent until set
   channels: []
   message_chunk_size: 400
 
@@ -444,6 +445,7 @@ The `irc` section is optional. If absent, `IRCPlugin` does not connect.
 | `irc.port` | integer | `6667` | IRC server port. |
 | `irc.nick` | string | `corvidae` | Bot nickname. |
 | `irc.tls` | boolean | `false` | Use TLS for the IRC connection. |
+| `irc.allow` | list of strings | `[]` (nobody) | Senders who may drive the agent, in channels and in private messages. **IRC is default-deny:** with no `allow`, or an empty one, every sender is refused, so a config that used IRC before this key existed goes silent until it is set. Startup logs one WARNING naming `irc.allow` when the key is absent. Where the network reports services accounts (IRCv3 `account-notify`/`account-tag`, or account data pydle learned from WHOIS), an entry matches the sender's **account**, not the nick: a user logged in as `alice` is admitted under any nick, and someone using the nick `alice` who is logged in as another account, or not identified (or whose account the bot doesn't know, as with a PM from someone who shares no channel with it on a network without `account-tag`), is refused. With `account-tag` negotiated the account comes only from that message's own tag (no tag means not logged in, and the nick is never used as a fallback); pydle's tracked user record is not consulted, so a stale record, a WHOIS reply or another line can't admit a later user of the same nick. Each message is judged once, when it arrives, and that verdict is the one used for it: a later line in the same socket read can't change it. Without `account-tag`, the account is whatever pydle's tracked user record holds at that moment, which can lag a logout (a residual risk, see `docs/threat-model.md`). On a network with no account support, an entry matches the **nick**, which is unauthenticated: anyone can take the nick, so treat the list as a convenience there, not a credential. Matching uses the server's CASEMAPPING (ascii, rfc1459), so `alice[` and `alice{` are one nick on an rfc1459 network. A refused sender gets no reply, no channel and no history, and one INFO line names the nick (and account when known). Anything but a list of strings raises at startup: `irc: config field 'allow' must be a list of nicks or account names`. Read at startup; changing it needs a restart. |
 | `irc.channels` | list of strings | `[]` | IRC channels to join on connect (e.g., `["#general", "#dev"]`). |
 | `irc.message_chunk_size` | integer | `400` | Maximum UTF-8 bytes per outbound IRC message. Messages longer than this are split using three-tier splitting: paragraphs → sentences → words. Must be at least 6; a smaller value raises `ValueError` the first time a reply is split. |
 
@@ -599,7 +601,7 @@ Keys are `transport:scope` identifiers (e.g., `irc:#general`, `cli:local`), or t
 |-----|------|---------|-------------|
 | `system_prompt` | string or list of strings | `agent.system_prompt` | System prompt for this channel. Same format as `agent.system_prompt`. |
 | `max_context_tokens` | integer | `agent.max_context_tokens` | Token budget for this channel's conversation history. |
-| `max_turns` | integer | `agent.max_turns` | Maximum consecutive tool-calling turns for this channel. |
+| `max_turns` | integer | `agent.max_turns` | Maximum consecutive tool-calling turns for this channel. Must be an integer; a wrong type is rejected when the file is parsed (a `Config error` at startup, a logged reload error on reload), not at turn time. |
 | `reasoning_history` | `drop` \| `exchange` \| `keep` | `agent.reasoning_history` | Controls `reasoning_content` retention for this channel. |
 | `tools.disabled` | list of strings | `[]` | Tools this channel cannot use, on top of the global `tools.disabled`. The channel can only narrow; it can't re-enable a globally disabled tool, and `set_settings` can't change the list. `shell` and `task_pipeline` disable together. See [Per-channel tool sets](#per-channel-tool-sets). |
 
@@ -666,6 +668,7 @@ Hiding a tool isn't access control. A model can still call a tool it saw earlier
 
 - **Narrowing** (adding a tool to the list) is enforced at dispatch on the next call. The schemas keep listing the tool until the next compaction or conversation start, so the model may try it and be refused.
 - **Widening** (removing a tool from the list) takes effect at the next compaction or conversation start. Until then the tool stays hidden and refused, so the head of the prompt never changes mid-conversation.
+- A registry change is the exception to "schemas change only at compaction or conversation start": when a plugin rebuilds the registry (an MCP server reconnecting) the new tool set applies at the next turn, narrowed by the conversation's existing disabled set.
 - A call that was already dispatched runs to completion.
 - Removing a channel's whole exact entry from `channels:` keeps its last list until restart. To re-enable everything on a running channel, set `disabled: []`. Removing a transport-wide entry takes effect live.
 
@@ -764,6 +767,7 @@ No restart is required for the changes listed below. Changes that require restar
 | Setting | Reason |
 |---------|--------|
 | `irc.host`, `irc.port`, `irc.nick` | IRC transport is connected at startup; changing connection parameters requires reconnection. |
+| `irc.allow` | The allowlist is parsed once in `on_init`; a reload keeps the old one. |
 | `web.host`, `web.port`, `web.allowed_origins`, adding or removing the `web` block | The listener is bound at startup. A reload logs `restart to apply` and keeps serving with the old values. |
 | Existing exact entries in `channels:` | Channels already registered retain their original `ChannelConfig` until restart, except `tools.disabled` (above). Transport-wide entries are live (above). |
 | `llm.background` | Not updated on reload. |

@@ -104,10 +104,16 @@ class ToolView:
     disabled: frozenset[str] = frozenset()
     tools: dict[str, Callable] = field(default_factory=dict)
     schemas: list[dict] = field(default_factory=list)
+    # The registry generation this view was built from (#109): the Agent
+    # rebuilds the view when the registry has moved past it.
+    generation: int = 0
 
 
 def build_tool_view(
-    tools: dict[str, Callable], schemas: list[dict], disabled: Iterable[str]
+    tools: dict[str, Callable],
+    schemas: list[dict],
+    disabled: Iterable[str],
+    generation: int = 0,
 ) -> ToolView:
     """Filter the daemon's tools and schemas down to one channel's set."""
     blocked = expand_disabled(disabled)
@@ -115,6 +121,7 @@ def build_tool_view(
         disabled=blocked,
         tools={name: fn for name, fn in tools.items() if name not in blocked},
         schemas=[s for s in schemas if _schema_name(s) not in blocked],
+        generation=generation,
     )
 
 

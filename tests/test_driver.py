@@ -9,7 +9,9 @@ import time
 import types
 from pathlib import Path
 
-from harness.driver import split_irc_text
+import yaml
+
+from harness.driver import derive_driver_nick, split_irc_text
 
 
 def test_text_under_limit_is_one_chunk():
@@ -417,3 +419,18 @@ def test_buster_quiet_profile_is_registered():
     assert "embedding" not in cfg["llm"]
     assert set(cfg["plugins"]["disabled"]) == set(memrole["plugins"]["disabled"]) | {"scheduler"}
     assert "mid_conversation_system_role" not in cfg["agent"]
+
+
+def test_every_harness_template_allows_the_driver_nick():
+    """IRC is default-deny (#77): each template must allow the nick the
+    probe driver registers with, or the harness silently gets no replies."""
+    import glob
+
+    harness = Path(__file__).resolve().parent.parent / "harness"
+    for path in sorted(glob.glob(str(harness / "buster*.yaml.in"))):
+        cfg = yaml.safe_load(Path(path).read_text().replace("@STATE_DIR@", "/state"))
+        irc = cfg["irc"]
+        assert derive_driver_nick(irc["nick"]) in irc.get("allow", []), (
+            f"{path}: irc.allow must include the driver nick "
+            f"{derive_driver_nick(irc['nick'])!r}"
+        )

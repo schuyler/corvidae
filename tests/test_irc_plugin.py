@@ -151,12 +151,15 @@ class TestIRCClientEvents:
         plugin = IRCPlugin(pm)
         pm.register(plugin, name="irc")
         plugin._registry = registry  # bypass on_start
+        plugin._allow = {"user"}  # IRC is default-deny (#77)
 
         with patch('corvidae.channels.irc.IRCClient') as mock_client_class:
             mock_client = MagicMock()
             mock_client_class.return_value = mock_client
             plugin.client = mock_client
             plugin.client.nickname = "TestBot"
+            plugin.client.users = {}
+            plugin.client._capabilities = {}
 
             # Simulate channel message
             await plugin.on_channel_message(
@@ -188,6 +191,8 @@ class TestIRCClientEvents:
             mock_client_class.return_value = mock_client
             plugin.client = mock_client
             plugin.client.nickname = "TestBot"
+            plugin.client.users = {}
+            plugin.client._capabilities = {}
 
             # Simulate message from self
             await plugin.on_channel_message(
@@ -204,12 +209,15 @@ class TestIRCClientEvents:
         plugin = IRCPlugin(pm)
         pm.register(plugin, name="irc")
         plugin._registry = registry  # bypass on_start
+        plugin._allow = {"user"}  # IRC is default-deny (#77)
 
         with patch('corvidae.channels.irc.IRCClient') as mock_client_class:
             mock_client = MagicMock()
             mock_client_class.return_value = mock_client
             plugin.client = mock_client
             plugin.client.nickname = "TestBot"
+            plugin.client.users = {}
+            plugin.client._capabilities = {}
 
             # Simulate private message
             await plugin.on_private_message(
@@ -765,3 +773,224 @@ class TestOutboundQueue:
         client.message = slow_message
         await plugin._flush_outbound()
         assert sent == ["old1", "old2", "new"]
+
+
+# ---------------------------------------------------------------------------
+# Issue #77 — sender authorization (default-deny irc.allow)
+# ---------------------------------------------------------------------------
+
+
+def _allow_config(**irc_overrides) -> dict:
+    """An irc config block (optionally with allow) for on_init."""
+    return {"irc": {**IRC_CONFIG["irc"], **irc_overrides}}
+
+
+def _fake_client(
+    users: dict | None = None, capabilities: dict | None = None
+) -> MagicMock:
+    """A stand-in for the pydle client: nick, user state and CAP state."""
+    client = MagicMock()
+    client.nickname = "TestBot"
+    client.connected = True
+    client.users = users or {}
+    client._capabilities = capabilities or {}
+    client.normalize = str.lower  # ascii casemapping, as pydle's default
+    return client
+
+
+async def _gate_plugin(allow=None, *, users=None, capabilities=None):
+    """A configured IRCPlugin on a real pm, with a fake pydle client."""
+    pm, registry = _make_pm_with_registry()
+    plugin = IRCPlugin(pm)
+    pm.register(plugin, name="irc")
+    config = _allow_config() if allow is None else _allow_config(allow=allow)
+    await plugin.on_init(pm=pm, config=config)
+    plugin._registry = registry
+    plugin.client = _fake_client(users, capabilities)
+    return pm, registry, plugin
+
+
+async def _verdict(plugin, nick: str, channel_scope: str = "#test") -> bool | None:
+    """The plugin's should_process_message verdict for a message from nick.
+
+    Records the verdict the way the transport does on arrival (decided once,
+    from the user state at that moment), then runs the hook.
+    """
+    plugin._verdicts["t1"] = plugin._decide(nick)
+    return await plugin.should_process_message(
+        channel=Channel(transport="irc", scope=channel_scope),
+        sender=nick, text="hi", trace_id="t1",
+    )
+
+
+class TestSenderGate:
+    @pytest.mark.parametrize("allow", [None, []], ids=["no-allow-key", "empty-allow"])
+    @pytest.mark.parametrize("scope", ["#test", "bob"], ids=["channel", "pm"])
+    async def test_no_allowlist_refuses_everyone(self, allow, scope):
+        """R1: default-deny, in channels and PMs."""
+        _pm, _reg, plugin = await _gate_plugin(allow)
+        assert await _verdict(plugin, "bob", scope) is False
+
+    @pytest.mark.parametrize("scope", ["#test", "alice"], ids=["channel", "pm"])
+    async def test_allowlisted_nick_admitted_others_refused(self, scope):
+        """R2: alice in, bob out, in a channel and in a PM."""
+        _pm, _reg, plugin = await _gate_plugin(["alice"])
+        assert await _verdict(plugin, "alice", scope) is True
+        assert await _verdict(plugin, "bob", scope) is False
+
+    async def test_other_transports_get_no_opinion(self):
+        """CLAUDE.md: an inbound hookimpl must ignore channels it doesn't own."""
+        _pm, _reg, plugin = await _gate_plugin([])
+        verdict = await plugin.should_process_message(
+            channel=Channel(transport="signal", scope="x"),
+            sender="bob", text="hi", trace_id="t1",
+        )
+        assert verdict is None
+
+    async def test_refusal_logs_one_info_line_and_sends_nothing(self, caplog):
+        """R4: one INFO naming transport and nick; nothing goes to IRC."""
+        pm, _reg, plugin = await _gate_plugin(["alice"])
+        with caplog.at_level(logging.INFO, logger="corvidae.irc_plugin"):
+            assert await _verdict(plugin, "mallory") is False
+        lines = [r for r in caplog.records if r.levelno == logging.INFO]
+        assert len(lines) == 1
+        assert "irc" in lines[0].getMessage() and "mallory" in lines[0].getMessage()
+        plugin.client.message.assert_not_called()
+        pm.ahook.send.assert_not_called()
+
+    async def test_refusal_log_names_account_when_known(self, caplog):
+        """R4: the account is named when the network reported one."""
+        users = {"mallory": {"account": "eve"}}
+        _pm, _reg, plugin = await _gate_plugin(["alice"], users=users)
+        with caplog.at_level(logging.INFO, logger="corvidae.irc_plugin"):
+            await _verdict(plugin, "mallory")
+        msg = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO][0]
+        assert "mallory" in msg and "eve" in msg
+
+
+class TestAccountMatching:
+    CAPS = {"account-notify": True}
+
+    async def test_nick_alice_with_other_account_refused(self):
+        """R3: nick alice but logged in as eve is not alice."""
+        users = {"alice": {"account": "eve", "identified": True}}
+        _pm, _reg, plugin = await _gate_plugin(["alice"], users=users, capabilities=self.CAPS)
+        assert await _verdict(plugin, "alice") is False
+
+    async def test_unidentified_sender_refused_on_account_network(self):
+        """R3: account None on an account-capable network is refused."""
+        users = {"alice": {"account": None, "identified": False}}
+        _pm, _reg, plugin = await _gate_plugin(["alice"], users=users, capabilities=self.CAPS)
+        assert await _verdict(plugin, "alice") is False
+
+    async def test_unknown_user_refused_on_account_network(self):
+        """Risk: a PM sender pydle has no state for must not fall back to the nick."""
+        _pm, _reg, plugin = await _gate_plugin(["alice"], users={}, capabilities=self.CAPS)
+        assert await _verdict(plugin, "alice") is False
+
+    async def test_account_alice_admitted_under_any_nick(self):
+        """R3: the account follows the person across nick changes."""
+        users = {"alice_away": {"account": "alice", "identified": True}}
+        _pm, _reg, plugin = await _gate_plugin(["alice"], users=users, capabilities=self.CAPS)
+        assert await _verdict(plugin, "alice_away") is True
+
+    async def test_account_data_without_caps_still_matches_account(self):
+        """A WHOIS-learned account counts even if no CAP was negotiated."""
+        users = {"alice": {"account": "eve"}}
+        _pm, _reg, plugin = await _gate_plugin(["alice"], users=users)
+        assert await _verdict(plugin, "alice") is False
+
+    async def test_network_without_accounts_matches_nick(self):
+        """R3: no account support at all -> the entry matches the nick."""
+        users = {"alice": {"account": None, "identified": False}}
+        _pm, _reg, plugin = await _gate_plugin(["alice"], users=users)
+        assert await _verdict(plugin, "alice") is True
+        assert await _verdict(plugin, "bob") is False
+
+    async def test_nick_match_is_case_insensitive(self):
+        """IRC nicks are case-insensitive; Alice is alice."""
+        _pm, _reg, plugin = await _gate_plugin(["alice"])
+        assert await _verdict(plugin, "Alice") is True
+
+
+class TestConfigValidation:
+    @pytest.mark.parametrize("bad", ["alice", {"a": 1}, ["alice", 3], 5])
+    async def test_malformed_allow_raises_naming_the_field(self, bad):
+        """R6: the field name and what it must be."""
+        pm, _registry = _make_pm_with_registry()
+        plugin = IRCPlugin(pm)
+        with pytest.raises(ValueError) as exc:
+            await plugin.on_init(pm=pm, config=_allow_config(allow=bad))
+        assert (
+            "irc: config field 'allow' must be a list of nicks or account names"
+            in str(exc.value)
+        )
+
+    async def test_missing_allow_logs_default_deny_warning(self, caplog):
+        """R7: one WARNING naming the key when allow is absent."""
+        pm, _registry = _make_pm_with_registry()
+        plugin = IRCPlugin(pm)
+        with caplog.at_level(logging.WARNING, logger="corvidae.irc_plugin"):
+            await plugin.on_init(pm=pm, config=_allow_config())
+        warns = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warns) == 1
+        assert "irc.allow" in warns[0] and "default-deny" in warns[0]
+
+    async def test_present_allow_logs_no_warning(self, caplog):
+        """R7: no warning once allow is set (even if empty)."""
+        pm, _registry = _make_pm_with_registry()
+        plugin = IRCPlugin(pm)
+        with caplog.at_level(logging.WARNING, logger="corvidae.irc_plugin"):
+            await plugin.on_init(pm=pm, config=_allow_config(allow=["alice"]))
+        assert not [r for r in caplog.records if r.levelno == logging.WARNING]
+
+
+class TestRefusedSenderLeavesNothing:
+    async def _real_stack(self, tmp_path, allow):
+        """A real Agent + persistence on a file DB, with the IRC plugin."""
+        from tests.helpers import build_plugin_and_channel
+
+        agent, _ch, db = await build_plugin_and_channel(
+            db_path=str(tmp_path / "sessions.db"), mock_send=True,
+        )
+        agent._client = MagicMock()
+        agent._mark_started()  # the gate runs only once the agent has started (#71)
+        pm = agent.pm
+        registry = agent._registry
+        plugin = IRCPlugin(pm)
+        pm.register(plugin, name="irc")
+        await plugin.on_init(pm=pm, config=_allow_config(allow=allow))
+        plugin._registry = registry
+        plugin.client = _fake_client()
+        return pm, registry, plugin, db
+
+    async def test_refused_pm_leaves_no_rows_and_no_channel(self, tmp_path):
+        """R5: no message_log rows, no registry entry for irc:mallory."""
+        pm, registry, plugin, db = await self._real_stack(tmp_path, ["alice"])
+        try:
+            await plugin.on_private_message("TestBot", "mallory", "let me in")
+            async with db.execute("SELECT COUNT(*) FROM message_log") as cur:
+                assert (await cur.fetchone())[0] == 0
+            assert registry.get("irc:mallory") is None
+            assert registry.by_transport("irc") == []
+            pm.ahook.send.assert_not_called()
+        finally:
+            await db.close()
+
+    async def test_refused_channel_message_leaves_no_channel(self, tmp_path):
+        """R5: the same holds for a refused sender in a joined channel."""
+        pm, registry, plugin, db = await self._real_stack(tmp_path, ["alice"])
+        try:
+            await plugin.on_channel_message("#test", "mallory", "hi")
+            assert registry.by_transport("irc") == []
+        finally:
+            await db.close()
+
+    async def test_allowlisted_pm_still_gets_a_channel(self, tmp_path):
+        """Control: the allowed sender's channel is registered."""
+        pm, registry, plugin, db = await self._real_stack(tmp_path, ["alice"])
+        try:
+            await plugin.on_private_message("TestBot", "alice", "hello")
+            assert registry.get("irc:alice") is not None
+        finally:
+            await db.close()

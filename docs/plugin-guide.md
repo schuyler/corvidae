@@ -1185,8 +1185,10 @@ doubling to 300 s, reset on success, stopped in `on_stop`. An MCP tool call
 also triggers a retry unless one is already running. A successful retry adds
 its tools to the cached list and the shared registry; a failed retry logs a
 WARNING naming the server, the exception type and the next delay, and leaves
-the current tool call untouched. Until a running Agent re-reads the registry
-(#109), reconnected tools are not visible to a conversation already started.
+the current tool call untouched. A reconnect rebuilds the registry
+and the running Agent picks the tools up on its next turn (#109); a plugin
+that calls `ToolCollectionPlugin.rebuild_registry` at runtime reaches the
+Agent the same way.
 
 **Without this plugin:** MCP servers cannot be used. No tools are affected
 if the `mcp:` config key is absent — the plugin no-ops.

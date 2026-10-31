@@ -517,7 +517,19 @@ go together (PRD §3.5.3), for the global list too.
   (principle 2) and forks keep prefix parity (see [Forks](#forks)).
   `Agent` also implements `on_compaction` and re-resolves the view there.
   Compaction already rebuilds the KV cache, so this is the only point where
-  a running conversation's schemas can change.
+  a running conversation's schemas can change, with one exception: a
+  registry change.
+- **Registry changes reach the next turn.** `ToolCollectionPlugin.generation`
+  goes up whenever `rebuild_registry` yields different tool names or schemas
+  (an MCP server reconnecting, #107/#109). `Agent` records the generation
+  beside its `get_tools()` snapshot and, at the top of each queue item,
+  re-reads the snapshot when the generation has moved, logging one INFO line
+  naming the tools added and removed. Each conversation's view is then
+  rebuilt lazily from the new set and the view's own `disabled` set (a
+  reloaded `channels.<id>.tools.disabled` still waits for compaction). With
+  no change nothing is rebuilt and the schema list stays the same object.
+  The change costs one prefix-cache miss on that channel. Dispatch reads the
+  refreshed dict, so a removed tool is refused as unknown.
 - **Dispatch enforces.** Each tool task checks the name against
   `disabled_on(channel)` when it runs. That is the conversation view's set
   plus the live `Channel.disabled_tools`. A disabled call returns
@@ -1909,7 +1921,8 @@ round that reconnects something, exit when nothing is pending. Every MCP tool
 call also runs a retry round as a fast path. One `asyncio.Lock` serialises
 rounds, and a tool call that finds it held skips rather than wait out a
 handshake, so the loop and a tool call never connect a server twice. A
-successful retry rebuilds the cached tool list and the shared registry. Config
+successful retry rebuilds the cached tool list and the shared registry, and the
+running Agent re-reads it on its next turn (#109). Config
 errors (`McpHeaderEnvError`, `ValueError`, `KeyError` from
 `_parse_server_config`, which runs before any transport opens) are reported
 once and never queued. `on_stop` sets a stopping flag, cancels the loop, then
@@ -2157,6 +2170,38 @@ nick it failed to reach. Joins configured channels on connect.
 Forwards both channel and private messages. `split_message` splits
 outgoing text into 400-byte chunks preserving paragraph/sentence
 boundaries.
+
+Sender authorization (#77) is default-deny, as for Signal and Discord.
+`irc.allow` is validated in `on_init` (not a list of strings raises, naming
+the field) and the plugin's `should_process_message` refuses every sender
+not on it, in channels and PMs, with one INFO line and no reply; a missing
+`allow` logs a startup WARNING. Where pydle has account data (IRCv3
+`account-notify`/`account-tag`/`extended-join` negotiated, or an account
+already known for the sender), entries match the services account and an
+unidentified or unknown sender is refused; with no account support they
+match the nick. The allowlist is checked before the channel is resolved
+(as in Signal, #103): a refused sender gets an unregistered `Channel` (or
+an existing registry entry), so nothing is added to the registry and no
+`message_log` rows or memory follow. With `account-tag` negotiated,
+`IRCClient.on_raw` captures the PRIVMSG's own `account` tag (none means not
+logged in) into a task-local `ContextVar` before any `await`; each `on_raw`
+runs in its own task, so the value survives pydle's WHOIS suspensions.
+`IRCPlugin._decide` reads only that value and never `users[nick]`, which is
+shared across lines and which WHOIS replies rewrite for whoever holds the
+nick (on a network without WHOX, an unknown nick makes pydle WHOIS it
+mid-message). There is no nick fallback in that mode. `on_raw` also
+overwrites the pydle record from the tag, only to keep pydle consistent. The
+verdict is decided once per message, synchronously, in
+`IRCPlugin._dispatch` (before any `await`) with a single account lookup, and
+recorded by the message's transport-minted `trace_id`.
+`should_process_message` only reports that recorded verdict (no verdict
+means deny) and the entry is dropped when `on_message` returns, because
+pydle runs a task per line and a later line's `on_raw` can rewrite
+`users[nick]` while an earlier message is still in the hook pipeline.
+Without `account-tag`, the account is whatever `users[nick]` holds when the
+message arrives (pydle's tracked state; a residual risk). Entries and
+senders are compared under the server's CASEMAPPING via the client's
+`normalize`.
 
 While the client is disconnected (including the reconnect backoff, up to
 300s), outbound text is not dropped: it goes into a bounded in-memory queue
@@ -2825,6 +2870,7 @@ irc:
   host: irc.lan
   port: 6667
   nick: agent
+  allow: [alice]                # default-deny; nick, or services account where the network has them
   channels:
     - "#channel"
 

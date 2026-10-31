@@ -414,6 +414,15 @@ def _short_repr(value: object) -> str:
     return text
 
 
+def _check_int_key(value: object, where: str) -> None:
+    """Raise ValueError unless value is None or an integer (bool excluded)."""
+    if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
+        raise ValueError(
+            f"{where} must be an integer, got {_short_repr(value)} "
+            f"({type(value).__name__}); use a whole number or remove the key"
+        )
+
+
 @dataclass(frozen=True)
 class ParsedChannels:
     """The validated result of parse_channel_config, ready to apply.
@@ -437,16 +446,32 @@ def parse_channel_config(config: dict) -> ParsedChannels:
     (issue #203). Both kinds accept the same keys.
 
     Raises:
-        ValueError: If a channel key does not contain a colon separator, a
+        ValueError: If the section is not a mapping, a key is not a string
+            (#242), max_turns or max_context_tokens is not an integer, a
+            channel key does not contain a colon separator, a
             transport-wide key is malformed, or an entry is not a mapping,
             uses the removed keep_thinking_in_history key, an unknown key
             (#205), an invalid reasoning_history value, or a malformed tools
             block.
     """
-    channels_config = config.get("channels", {})
+    channels_config = config.get("channels")
+    # An empty YAML section parses as null: no channels.
+    if channels_config is None:
+        channels_config = {}
+    elif not isinstance(channels_config, dict):
+        raise ValueError(
+            f"channels must be a mapping of channel id to settings, got "
+            f"{_short_repr(channels_config)} ({type(channels_config).__name__})"
+        )
     parsed: list[tuple[str, str, str, ChannelConfig]] = []
     wide: list[WideEntry] = []
     for channel_id, overrides in channels_config.items():
+        # YAML permits non-string keys (123:, true:); reject them by name.
+        if not isinstance(channel_id, str):
+            raise ValueError(
+                f"channels.{channel_id} has a {type(channel_id).__name__} key; "
+                f"channel ids must be strings like 'transport:scope'"
+            )
         # A trailing '*' makes a transport-wide key; anything else is an
         # exact channel id (which may itself contain '*', as IRC allows).
         is_wide = channel_id.endswith(WIDE_SUFFIX)
@@ -479,6 +504,9 @@ def parse_channel_config(config: dict) -> ParsedChannels:
                 f"channels.{channel_id}: unknown key(s) {rejected}; "
                 f"accepted: {', '.join(CHANNEL_ENTRY_KEYS)}"
             )
+        # Fail now, not at turn time, on a scalar of the wrong type.
+        for int_key in ("max_turns", "max_context_tokens"):
+            _check_int_key(overrides.get(int_key), f"channels.{channel_id}.{int_key}")
         channel_config = ChannelConfig(
             system_prompt=overrides.get("system_prompt"),
             max_context_tokens=overrides.get("max_context_tokens"),

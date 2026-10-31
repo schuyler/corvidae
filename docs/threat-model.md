@@ -16,7 +16,7 @@ default-deny with silent refusal, memory is compartmentalized per channel
 retrieved context is framed as data, tool `_ctx` is hidden from the model,
 SQL is parameterized, signal-cli is pinned and signature-verified, and the
 docs are candid about plaintext at rest. The Discord transport follows
-Signal's model, not IRC's: default-deny, silent refusal, and outbound
+Signal's model: default-deny, silent refusal, and outbound
 mentions disabled. The web transport binds loopback by default, needs a
 token that can't be turned off, and renders model output through
 DOMPurify under a strict CSP.
@@ -83,7 +83,8 @@ Assets, roughly in order of how bad it is to lose them:
 Adversaries:
 
 - **Anyone in an IRC channel the bot has joined**, or anyone who can PM
-  it. IRC nicks are unauthenticated on most networks.
+  it. They are refused unless on `irc.allow`, but IRC nicks are
+  unauthenticated on networks without services accounts.
 - **Anyone in a Discord server the bot has been invited to**, who can
   @-mention it, and anyone Discord lets DM it.
   The allowlist refuses them, silently; see finding 5.
@@ -272,28 +273,48 @@ root the file tools in a directory, and have `agent.yaml` and the prompt
 files owned by another user and read-only to the daemon (if the daemon
 user owns them, `shell` can `chmod` them back).
 
-### 5. IRC has no sender authorization
+### 5. IRC had no sender authorization (mitigated, #77)
 
-Signal has a default-deny allowlist. IRC accepts every channel message and
-every private message from anyone (`channels/irc.py`), and a PM from a
-stranger auto-creates a persistent channel keyed on their nick. A PM to the
-bot is a private conversation with full tool access, for anyone who can
-reach the server. Because that channel is keyed on the nick, whoever holds
-the nick later inherits the earlier conversation's history and memory
-compartment, so "memory is compartmentalized per channel" means less on
-IRC than it does on Signal. Glob members in `memory.channel_groups`
-(`irc:*`, or `*` alone) widen this further: every channel the pattern
-matches, including ones a stranger creates later by sending a PM, shares
-one memory compartment with every other member of the group. That
-includes the near-duplicate merge (#58): a channel in the group can
-consolidate a near-duplicate of a member's memory and supersede it, so its
-own wording replaces the original record and inherits its importance and
-retrieval count. Only
-Signal's allowlist bounds which channels can come into existence under
-`signal:*`: Signal checks it before resolving the channel, so a refused
-sender adds nothing to the registry (#103). Discord and IRC still create
-the channel before their gate runs. At minimum, PMs should be off by default or
-gated by an `irc.allow` list, bringing it in line with Signal.
+IRC used to accept every channel message and every private message from
+anyone, and a PM from a stranger auto-created a persistent channel keyed on
+their nick: a private conversation with full tool access for anyone who
+could reach the server, whose history and memory compartment the next
+holder of that nick inherited. Glob members in `memory.channel_groups`
+(`irc:*`, or `*` alone) widened that to every channel a stranger could
+create by PM.
+
+Now IRC is default-deny like Signal. `irc.allow` lists the senders who may
+drive the agent; with none, everyone is refused, in channels and PMs. A
+refusal is one INFO line and no reply. The allowlist is checked before the
+channel is resolved, so a refused sender adds nothing to the registry and
+leaves no `message_log` rows or memory, and a stranger can no longer
+multiply channels (which also bounds finding 7). Where the network reports
+services accounts, an entry matches the account, not the nick, so using
+someone's nick is not enough. Residual risks:
+
+- **Networks without accounts.** There an entry matches the nick, and
+  nicks are unauthenticated: anyone who takes an allowlisted nick is that
+  user. Use a network with services and account tags for anything that
+  matters.
+- **Account matching trusts the server, and without `account-tag` pydle's
+  state.** With `account-tag` the account comes only from that message's own
+  tag, which the network sets (no tag means not logged in, no nick fallback);
+  pydle's user record is never consulted. Without it, matching relies on
+  pydle's tracked state (`account-notify`, `extended-join`, WHOIS), which
+  only knows users it has seen, can lag a logout, is shared across lines, and
+  for a user who only ever sends PMs (no shared channel) is never cleared
+  once learned. An ircd or services that mis-tags, or a message delivered
+  between a logout and its notification or a nick change racing a WHOIS on a
+  network without `account-tag`, defeats it. Prefer networks that send
+  `account-tag`.
+- **Allowed users in a shared channel** are an injection path in the same
+  sense as for Discord (below): the channel's history is one conversation,
+  and what an allowed user pastes in is untrusted content.
+- **Upgrade.** A deployment that used IRC goes silent until `irc.allow` is
+  set; startup logs a WARNING saying so.
+
+Discord still creates the channel before its gate runs; IRC and Signal
+check the allowlist first.
 
 Partial mitigation (#149): `channels.<id>.tools.disabled` takes the
 dangerous tools off an IRC channel the operator configures, for example
@@ -305,8 +326,9 @@ entry reaches it. A transport-wide `irc:*` entry does (#203), since it
 covers channels created at runtime, but it covers every IRC channel and an
 exact entry can't re-enable a tool it disables (the lists are unioned), so
 it can't spare the operator's own IRC channels. Nicks share no prefix that
-would single out PMs. Until PMs are gated, `irc:*` or the global
-`tools.disabled` is the control there.
+would single out PMs. PMs are now gated by `irc.allow`, so only allowlisted
+senders reach a PM channel; `irc:*` or the global `tools.disabled` is still
+the control for narrowing what those channels can do.
 
 Discord is built like Signal, not like IRC. The transport's
 `should_process_message` is a default-deny allowlist of numeric user ids; an
@@ -380,10 +402,12 @@ string with little memory of who wanted it. What bounds it:
   calling channel's rows.
 - **Volume.** `scheduler.max_reminders_per_channel` (default 50) caps
   pending reminders per channel, and text is capped at 2000 characters.
-  The cap is per channel, and finding 5 lets a stranger open new IRC PM
-  channels at will, so the total is not bounded on IRC. Each firing costs
-  a main-model turn. A reminder fires once, so a burst is bounded, but 50
-  per channel across many channels is still load.
+  The cap is per channel. Finding 5 used to let a stranger open new IRC PM
+  channels at will; with `irc.allow` (#77) only allowlisted senders can,
+  so the number of channels, and with it the total, is bounded by who the
+  operator allowed. Each firing costs a main-model turn. A reminder fires
+  once, so a burst is bounded, but 50 per channel across several allowed
+  senders is still load.
 
 `scheduler.jobs` in `agent.yaml` is the operator-only surface. A job can
 target any channel id, including a Signal contact, and recur, and its
@@ -635,7 +659,7 @@ of it.
    read-only to the daemon. Otherwise `write_file` plus hot reload (or the
    next restart) undoes every other item on this list.
 4. Flip the defaults: `shell`, `read_file`, `write_file`, `task_pipeline`,
-   `subagent` and IRC PMs opt-in. Root the file tools in a directory when
+   `subagent` opt-in (IRC PMs are covered by `irc.allow`, #77). Root the file tools in a directory when
    they are on. Meanwhile, add `write_file` to `tools.disabled` wherever
    `shell` already is, `buster.yaml.in` included (`task_pipeline` now goes
    with `shell` automatically). Channels with untrusted participants can
