@@ -213,7 +213,9 @@ class TestRuntimeStartup:
             # task that reaches Agent.on_message mid-broadcast.
             await orig(self, config)
             registry = self.pm.get_plugin("registry")
-            channel = registry.get_or_create("irc", "main")
+            # Not an irc: channel: since #77 IRC's gate refuses messages it did
+            # not judge, and this test is about the startup hold, not IRC.
+            channel = registry.get_or_create("test", "main")
             delivered.append(asyncio.create_task(
                 self.pm.ahook.on_message(
                     channel=channel, sender="u", text="early", trace_id=mint_trace_id(),
@@ -229,7 +231,7 @@ class TestRuntimeStartup:
                 await asyncio.wait_for(asyncio.gather(*delivered), 5)
                 agent = rt.pm.get_plugin("agent")
                 await _drain_all(agent)
-                channel = rt.pm.get_plugin("registry").get_or_create("irc", "main")
+                channel = rt.pm.get_plugin("registry").get_or_create("test", "main")
                 assert channel.conversation.messages[-1]["content"] == "held reply"
             finally:
                 await asyncio.wait_for(rt.stop(), 5)

@@ -953,7 +953,8 @@ class TestRefusedSenderLeavesNothing:
         agent, _ch, db = await build_plugin_and_channel(
             db_path=str(tmp_path / "sessions.db"), mock_send=True,
         )
-        agent._client = MagicMock()  # the gate runs only once the agent is ready
+        agent._client = MagicMock()
+        agent._mark_started()  # the gate runs only once the agent has started (#71)
         pm = agent.pm
         registry = agent._registry
         plugin = IRCPlugin(pm)
