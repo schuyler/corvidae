@@ -11,7 +11,8 @@ moves, this document is wrong until someone fixes it.
 Corvidae is a personal agent daemon for a single machine, and the design
 says so. Within that model it does several things right: Signal is
 default-deny with silent refusal, memory is compartmentalized per channel
-(or per operator-configured channel group),
+(or per operator-configured channel group; goals are agent-wide, finding
+10),
 retrieved context is framed as data, tool `_ctx` is hidden from the model,
 SQL is parameterized, signal-cli is pinned and signature-verified, and the
 docs are candid about plaintext at rest. The Discord transport follows
@@ -478,7 +479,30 @@ What it doesn't protect against, so you know:
 - **What you type is untrusted text too.** Paste a web page into the chat
   and it's in the context, same as anywhere else; see finding 3.
 
-### 10. Smaller things
+### 10. Goals are agent-wide and re-enter every window
+
+`GoalsPlugin` (#133) keeps open goals the agent can add, update and retire,
+and shows them in a CONTEXT entry on every turn. Three things follow.
+
+- **No compartment.** Goals are agent-wide: every channel sees every goal,
+  crossing `memory.channel_groups`. A goal written from a private channel
+  appears on a public one at its next turn. This is a recorded variance from
+  PRD principle 14 (#220). Nothing in a goal is scoped to its origin.
+- **Injected text can steer them.** Untrusted text on any channel can make
+  the model call `add_goal`, `update_goal` or `retire_goal`, seeded goals
+  included: the tools don't check who set a goal. An added goal
+  re-enters every window on every channel until it is retired, which is
+  persistence for injected text of the same kind as finding 7 but without a
+  firing time or a per-channel scope. The entry is admitted through the
+  funnel, so it gets the funnel's framing and budget, a soft mitigation as in
+  finding 3. `channels.<id>.tools.disabled` can remove the goal tools on a
+  public channel; the entry still shows there.
+- **`redact` doesn't reach goal text.** `corvidae redact` has no scrubber for
+  the `goals` table. Text in a goal, or a retired goal's text, survives a
+  redaction of the message it came from. A retirement record is an ordinary
+  memory and is reached the way other memories are.
+
+### 11. Smaller things
 
 - `read_file` has a stat-then-read race and follows symlinks. Irrelevant
   while finding 4 stands.

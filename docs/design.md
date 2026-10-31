@@ -2633,7 +2633,7 @@ The kernel's entry points (`[project.entry-points.corvidae]` in the root
 `compaction`, `thinking`, `runtime_settings`, `tools`, `metrics`,
 `usage_log`, `metrics_jsonl`, `scheduler`, `agent`,
 `config_watcher`. The cognition extra adds `memory`, `memory_tools`,
-`funnel`, `outcome_log`, `appraisal` and `critique` from
+`funnel`, `outcome_log`, `appraisal`, `critique` and `goals` from
 `packages/corvidae-cognition/pyproject.toml`.
 
 `Runtime.start()` loads them with pluggy's `load_setuptools_entrypoints`,
@@ -2767,6 +2767,7 @@ packages/corvidae-cognition/   # the cognition extra (docs/cognition.md)
     ├── funnel.py         # FunnelPlugin (context-admission funnel)
     ├── appraisal.py      # AppraisalPlugin
     ├── critique.py       # CritiquePlugin
+    ├── goals.py          # GoalsPlugin (goals table, add/update/retire_goal)
     └── outcome_log.py    # OutcomeLogPlugin (exchange_log)
 ```
 

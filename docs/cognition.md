@@ -20,6 +20,7 @@ transports.
 | `FunnelPlugin` | `funnel` | Admits retrieved context into the window under a budget |
 | `AppraisalPlugin` | `appraisal` | Scores every inbound message at the gate (novelty, commitment density, disagreement, question, salience), then appraises the exchange once the agent has answered |
 | `CritiquePlugin` | `critique` | Reviews the agent's replies after the fact through the stylistic lenses (predictive, constrained, adversarial) and the provenance check |
+| `GoalsPlugin` | `goals` | The agent's open goals: three tools to add, update and retire them, and a CONTEXT entry listing the open ones each turn |
 | `OutcomeLogPlugin` | `outcome_log` | Records each exchange and its outcome in `exchange_log` |
 | `GatePlugin` | `gates` | The engagement gate (may the agent ignore a message?) and the decide gate (may it stay silent instead of answering?), both over the appraisal vector |
 | `HeartbeatPlugin` | `heartbeat` | Starts a turn on `internal:heartbeat` when the whole system has been quiet for `heartbeat.after` seconds; the turn reviews recent memory and acts only if something warrants it. Asleep unless configured |
@@ -39,7 +40,7 @@ as before the split.
 
 They own these tables in `sessions.db`: `memory`, `memory_fts`,
 `memory_vec`, `embedding_meta`, `consolidation_watermark`,
-`retention_meta`, `retrieval_log` and `exchange_log`.
+`retention_meta`, `retrieval_log`, `exchange_log` and `goals`.
 
 **One object crosses the line.** `MemoryPlugin` creates `message_fts` and
 two triggers, `message_log_ai` and `message_log_au`, on the kernel's
@@ -348,6 +349,81 @@ applies when `meta["origin"]` is absent on a notification-born
 trace. `stub_text=` replaces the default "N pending … item(s)" stub text
 (the provenance check's use). `register(channel, source, entries)` is the
 no-wake variant: no stub, no origin.
+
+### GoalsPlugin (`packages/corvidae-cognition/corvidae_cognition/goals.py`)
+
+Keeps the agent's open goals in SQLite and shows them in the window. Entry
+point name: `"goals"`; `depends_on = frozenset({"persistence", "memory",
+"funnel", "clock"})`. Owns the `goals` table in `sessions.db` (`id`, `text`,
+`created_at`, `updated_at`, `retired_at`, `memory_id`), created in
+`on_start` when the DB is open and on first use otherwise.
+
+**Tools:** one per verb, so a channel can disable creation alone with
+`channels.<id>.tools.disabled`.
+
+| Tool | Parameters | What it does |
+|------|------------|--------------|
+| `add_goal` | `text: str` | Inserts an open goal and returns `Goal #N added.` Whitespace runs in `text`, newlines included, collapse to one space; empty text returns an error string. |
+| `update_goal` | `id: int`, `text: str` | Replaces the text of an open goal and bumps its `updated_at`, returning `Goal #N updated.` An unknown or retired id, or empty text, returns an error string. |
+| `retire_goal` | `id: int`, `conclusion: str` | Writes a memory record of the conclusion, then marks the goal retired, returning `Goal #N retired; conclusion recorded as memory #M.` An unknown or retired id, or an empty conclusion, returns an error string, as does a missing channel context. |
+
+**Goals entry:** `before_agent_turn` admits one CONTEXT entry through the
+funnel under the source `goals` (budget `funnel.budgets.goals`, falling
+back to `funnel.default_budget`; see [configuration.md](configuration.md)).
+With open goals it reads:
+
+```
+Open goals as of 2026-10-30 14:02:11 UTC (this list replaces any earlier goals list):
+#3 Finish the migration notes
+#5 Learn what Schuyler wants from the wiki
+```
+
+With none, including when every goal is retired, it reads `No open goals as
+of … (this replaces any earlier goals list).` A database with no goal rows
+at all admits nothing. The timestamp is the latest `updated_at` over all
+rows, retired ones included, not the current time, so the entry changes only
+when a goal does and the funnel's dedupe drops an unchanged one. The
+supersession clause is what lets an older entry still in the window be read
+as stale: the latest entry is current.
+
+**Visibility:** goals are agent-wide. Every channel sees every goal,
+whatever `memory.channel_groups` says. A goal added or retired on one channel
+shows up on the others at their next turn. This is a recorded variance from
+the compartmentalization of memory; see finding 10 in
+[threat-model.md](threat-model.md).
+
+**Retirement record:** `retire_goal` calls `MemoryPlugin.write_record` first
+and updates the goal only once that succeeds, so no goal is retired without
+its record. If the record can't be written, the tool returns an error string
+and the goal stays open. The record belongs to the retiring channel, has
+importance `1.0` (above the retention floor, so it stays retrievable), and
+links to the newest real message on that channel as both ends of its message
+range. Its summary is:
+
+```
+I retired my goal "<goal text>" (set YYYY-MM-DD). <conclusion>
+```
+
+The goal row keeps the new record's id in `memory_id`. Because the record is
+an ordinary memory, passive retrieval and `search_memory` find it under the
+usual channel-scope rules. `write_record` embeds the summary (falling back
+to `embedded=0` for backfill) and inserts under the memory plugin's DB lock;
+`write_record` shares `_insert_record` (insert, vec row, near-dup merge)
+with consolidation, so the record can absorb a near-duplicate memory; the
+returned id is the surviving record's.
+
+**Operator CLI:** `corvidae goals --db PATH seed TEXT` inserts an open goal
+from a second process, registered under the `corvidae.commands` entry-point
+group. `PATH` must be an existing `sessions.db` in WAL mode (the daemon sets
+it on startup); the command refuses a missing file or another journal mode,
+and an empty `TEXT`. The daemon reads the table each turn, so the goal
+appears on every channel at its next turn.
+
+The heartbeat's goal review (#134) is wired separately; this plugin adds
+no heartbeat behavior.
+
+**Without this plugin:** the goal tools, the goals entry and the `goals`
+table are absent. Goals already in an existing database stay there unread.
 
 ### OutcomeLogPlugin (`packages/corvidae-cognition/corvidae_cognition/outcome_log.py`)
 
