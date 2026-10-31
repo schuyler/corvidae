@@ -532,6 +532,81 @@ async def test_config_watcher_rejects_invalid_agent_config(tmp_path, caplog):
     assert any("invalid agent config" in r.getMessage() for r in caplog.records)
 
 
+async def test_reload_with_invalid_channels_entry_changes_nothing(tmp_path, caplog):
+    """#208 R1/R2: a reload whose channels: section is rejected changes
+    nothing: agent_defaults (instance and class), wide entries, a registered
+    channel's tools.disabled and plugin on_config_reload all stay put, and the
+    ERROR log names the key, the file and that the reload was skipped."""
+    from corvidae.channel import ChannelConfig, ChannelRegistry, WideEntry
+    from corvidae.config_watcher import ConfigWatcherPlugin
+
+    config_file = tmp_path / "agent.yaml"
+    # New file: changed agent.max_turns, changed wide entry, malformed tools.
+    config_file.write_text(
+        "llm:\n  main:\n    base_url: http://localhost\n    model: m\n"
+        "agent:\n  max_turns: 99\n"
+        "channels:\n"
+        "  'irc:#a':\n    tools:\n      disabled: [web]\n"
+        "  'irc:*':\n    max_turns: 7\n"
+        "  'irc:#x':\n    tools: [shell]\n"
+    )
+
+    old_defaults = {"max_turns": 5}
+    saved_class_defaults = ChannelRegistry.agent_defaults
+    registry = ChannelRegistry(old_defaults)
+    old_wide = (
+        WideEntry(key="irc:*", prefix="irc:", config=ChannelConfig(max_turns=3)),
+    )
+    registry.set_wide_entries(old_wide)
+    channel = registry.get_or_create(
+        "irc", "#a", config=ChannelConfig(disabled_tools=frozenset({"shell"}))
+    )
+    class_defaults_before = ChannelRegistry.agent_defaults
+
+    spy = MagicMock()
+    pm = MagicMock()
+    pm.hook.on_config_reload.get_hookimpls.return_value = []
+    pm.get_plugin.return_value = registry
+    plugin = ConfigWatcherPlugin()
+    await plugin.on_init(
+        pm=pm,
+        config={
+            "_config_path": config_file,
+            "_cli_overrides": {},
+            "llm": {"main": {"base_url": "http://localhost", "model": "m"}},
+        },
+    )
+
+    async def capture_dispatch(config: dict) -> None:
+        spy(config)
+
+    plugin._dispatch_config_reload = capture_dispatch
+
+    try:
+        with caplog.at_level(logging.ERROR, logger="corvidae.config_watcher"):
+            await plugin._reload_config()
+
+        assert registry.agent_defaults is old_defaults
+        assert registry.agent_defaults == {"max_turns": 5}
+        assert ChannelRegistry.agent_defaults is class_defaults_before
+        assert registry.wide_entries == old_wide
+        assert channel.config.disabled_tools == frozenset({"shell"})
+        spy.assert_not_called()
+    finally:
+        # The class attribute is shared state; put it back for other tests.
+        ChannelRegistry.agent_defaults = saved_class_defaults
+
+    # R2: the message (not only the traceback) names key, file, and the skip.
+    errors = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+    assert any(
+        "channels.irc:#x.tools" in m
+        and str(config_file) in m
+        and "reload skipped" in m
+        for m in errors
+    ), errors
+    assert "agent defaults still applied" not in caplog.text
+
+
 async def test_reload_with_removed_daemon_key_is_rejected(tmp_path, caplog):
     """R12: _reload_config rejects a reload that carries a removed daemon
     idle key: it logs the key, leaves agent_defaults alone and dispatches

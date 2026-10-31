@@ -392,28 +392,27 @@ class ChannelRegistry:
         return [c for c in self.channels.values() if c.transport == transport]
 
 
-def load_channel_config(config: dict, registry: ChannelRegistry) -> None:
-    """Pre-register channels from the config file.
+@dataclass(frozen=True)
+class ParsedChannels:
+    """The validated result of parse_channel_config, ready to apply.
 
-    Precondition: This must run before on_start is called. The ordering
-    in Runtime.start() enforces this — load_channel_config is called between
-    plugin manager creation and the on_start hook.
+    ``exact`` holds ``(channel_id, transport, scope, config)`` per exact
+    entry; ``wide`` holds the transport-wide entries (issue #203).
+    """
 
-    Reads the top-level "channels" dict from config. Each key is either an
-    exact channel id in "transport:scope" format, or a transport-wide key
-    ending in ``*`` ("signal:*", "discord:dm:*") that covers every channel
-    whose id starts with the text before the ``*`` (issue #203). Both kinds
-    accept the same keys.
+    exact: tuple[tuple[str, str, str, ChannelConfig], ...] = ()
+    wide: tuple[WideEntry, ...] = ()
 
-    Also runs on hot reload. Transport-wide entries are replaced and
-    re-matched against every live channel (ChannelRegistry.set_wide_entries),
-    so they reload like ``agent:``. A channel already registered keeps its
-    own ChannelConfig except for ``tools.disabled``, which is updated in place
-    (shared with any Signal ACI channel created from an E.164 alias); the
-    Agent applies it to schemas at the next conversation start or
-    compaction, and to dispatch at once (corvidae/tool_policy.py). Every
-    entry is validated before any is applied, so a malformed file changes
-    nothing.
+
+def parse_channel_config(config: dict) -> ParsedChannels:
+    """Validate the top-level ``channels`` dict and build its entries.
+
+    Pure: touches no registry or other state, so a hot reload can validate
+    the channels section before it applies anything (#208). Each key is
+    either an exact channel id in "transport:scope" format, or a
+    transport-wide key ending in ``*`` ("signal:*", "discord:dm:*") that
+    covers every channel whose id starts with the text before the ``*``
+    (issue #203). Both kinds accept the same keys.
 
     Raises:
         ValueError: If a channel key does not contain a colon separator, a
@@ -422,7 +421,6 @@ def load_channel_config(config: dict, registry: ChannelRegistry) -> None:
             reasoning_history value, or a malformed tools block.
     """
     channels_config = config.get("channels", {})
-    # Validate and build every entry first; apply only if all are good.
     parsed: list[tuple[str, str, str, ChannelConfig]] = []
     wide: list[WideEntry] = []
     for channel_id, overrides in channels_config.items():
@@ -460,12 +458,26 @@ def load_channel_config(config: dict, registry: ChannelRegistry) -> None:
             wide.append(WideEntry(key=channel_id, prefix=prefix, config=channel_config))
         else:
             parsed.append((channel_id, transport, scope, channel_config))
+    return ParsedChannels(exact=tuple(parsed), wide=tuple(wide))
 
+
+def apply_channel_config(parsed: ParsedChannels, registry: ChannelRegistry) -> None:
+    """Apply entries from parse_channel_config to the registry.
+
+    Does no validation, so it cannot raise ValueError on parsed input.
+    Transport-wide entries are replaced and re-matched against every live
+    channel (ChannelRegistry.set_wide_entries), so they reload like
+    ``agent:``. A channel already registered keeps its own ChannelConfig
+    except for ``tools.disabled``, which is updated in place (shared with
+    any Signal ACI channel created from an E.164 alias); the Agent applies
+    it to schemas at the next conversation start or compaction, and to
+    dispatch at once (corvidae/tool_policy.py).
+    """
     # Wide entries first, so exact channels registered below are matched
     # against the new set at creation. A wide key is never a channel.
-    registry.set_wide_entries(tuple(wide))
+    registry.set_wide_entries(parsed.wide)
 
-    for channel_id, transport, scope, channel_config in parsed:
+    for channel_id, transport, scope, channel_config in parsed.exact:
         existing = registry.get(channel_id)
         if existing is not None:
             # Reload: only the tool list is live for a registered channel.
@@ -484,6 +496,23 @@ def load_channel_config(config: dict, registry: ChannelRegistry) -> None:
             "channel registered from config",
             extra={"channel_id": channel_id},
         )
+
+
+def load_channel_config(config: dict, registry: ChannelRegistry) -> None:
+    """Pre-register channels from the config file: parse, then apply.
+
+    Precondition: This must run before on_start is called. The ordering
+    in Runtime.start() enforces this — load_channel_config is called between
+    plugin manager creation and the on_start hook.
+
+    Every entry is validated (parse_channel_config) before any is applied,
+    so a malformed file changes nothing. Hot reload calls the two halves
+    itself so it can validate before touching ``agent:`` defaults.
+
+    Raises:
+        ValueError: As parse_channel_config.
+    """
+    apply_channel_config(parse_channel_config(config), registry)
 
 
 def resolve_system_prompt(value: str | list[str], base_dir: Path) -> str:

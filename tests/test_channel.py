@@ -7,7 +7,9 @@ from corvidae.channel import (
     ChannelConfig,
     ChannelRegistry,
     ReasoningHistory,
+    apply_channel_config,
     load_channel_config,
+    parse_channel_config,
     validate_agent_config,
 )
 
@@ -304,6 +306,49 @@ class TestLoadChannelConfig:
         config = {"channels": {"irc:#lex": {"reasoning_history": "yes"}}}
         with pytest.raises(ValueError, match="reasoning_history"):
             load_channel_config(config, ChannelRegistry({}))
+
+    def test_parse_channel_config_touches_no_registry(self):
+        """#208 R3: parse_channel_config is pure; it returns the exact and
+        wide entries and makes no call on any registry."""
+        from unittest.mock import MagicMock
+
+        config = {"channels": {
+            "irc:#lex": {"max_turns": 3},
+            "signal:*": {"tools": {"disabled": ["shell"]}},
+        }}
+        registry = MagicMock()
+        parsed = parse_channel_config(config)
+        assert registry.method_calls == []
+        assert [p[0] for p in parsed.exact] == ["irc:#lex"]
+        assert [w.key for w in parsed.wide] == ["signal:*"]
+        # Applying the parsed result is what touches the registry.
+        apply_channel_config(parsed, registry)
+        registry.set_wide_entries.assert_called_once()
+
+    @pytest.mark.parametrize("config", [
+        {"channels": {"nocolon": {}}},
+        {"channels": {"irc:#a": "text"}},
+        {"channels": {"irc:#a": {"keep_thinking_in_history": True}}},
+        {"channels": {"irc:#a": {"reasoning_history": "yes"}}},
+        {"channels": {"irc:#a": {"tools": ["shell"]}}},
+        {"channels": {"signal:*x*": {}}},
+    ])
+    def test_parse_channel_config_raises_on_malformed(self, config):
+        """#208 R3: parse_channel_config rejects what load_channel_config did."""
+        with pytest.raises(ValueError):
+            parse_channel_config(config)
+
+    def test_apply_channel_config_never_raises_value_error(self):
+        """#208 risk: apply on parsed input cannot fail validation, so a reload
+        that parsed cleanly cannot half-apply."""
+        registry = ChannelRegistry({})
+        parsed = parse_channel_config({"channels": {
+            "irc:#a": {"max_turns": 2}, "irc:*": {"max_turns": 4},
+            "signal:+1555": None,
+        }})
+        apply_channel_config(parsed, registry)
+        apply_channel_config(parsed, registry)  # a reload over existing channels
+        assert registry.get("irc:#a") is not None
 
     def test_load_channel_config_no_channels_section(self):
         """Missing 'channels' key is a no-op."""
