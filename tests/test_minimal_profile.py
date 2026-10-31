@@ -178,7 +178,7 @@ class TestMinimalProfile:
             )
 
             registry = rt.pm.get_plugin("registry")
-            main_channel = registry.get_or_create("irc", "main")
+            main_channel = registry.get_or_create("test", "main")
 
             # (b) A user message produces a response.
             await rt.pm.ahook.on_message(
@@ -207,7 +207,7 @@ class TestMinimalProfile:
             # compaction threshold.
             compact_config_path = _write_minimal_config(
                 tmp_path, session_db,
-                extra_channels={"irc:compact": {"max_context_tokens": 200}},
+                extra_channels={"test:compact": {"max_context_tokens": 200}},
             )
             # Re-render with the tight-limit channel pre-registered; same
             # running daemon, so reload the channel config directly rather
@@ -216,7 +216,7 @@ class TestMinimalProfile:
             with open(compact_config_path) as f:
                 reloaded = yaml.safe_load(f)
             load_channel_config(reloaded, registry)
-            compact_channel = registry.get("irc:compact")
+            compact_channel = registry.get("test:compact")
             assert compact_channel is not None
 
             filler = "the quick brown fox jumps over the lazy dog. " * 15
@@ -264,7 +264,7 @@ class TestMinimalProfile:
             )
 
             registry2 = rt2.pm.get_plugin("registry")
-            main_channel2 = registry2.get_or_create("irc", "main")
+            main_channel2 = registry2.get_or_create("test", "main")
 
             await rt2.pm.ahook.on_message(
                 channel=main_channel2, sender="user", text="are you still there?",

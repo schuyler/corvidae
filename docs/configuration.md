@@ -40,6 +40,7 @@ irc:
   port: 6667
   nick: corvidae
   tls: false
+  allow: []               # default-deny: nobody may drive the agent until set
   channels: []
   message_chunk_size: 400
 
@@ -444,6 +445,7 @@ The `irc` section is optional. If absent, `IRCPlugin` does not connect.
 | `irc.port` | integer | `6667` | IRC server port. |
 | `irc.nick` | string | `corvidae` | Bot nickname. |
 | `irc.tls` | boolean | `false` | Use TLS for the IRC connection. |
+| `irc.allow` | list of strings | `[]` (nobody) | Senders who may drive the agent, in channels and in private messages. **IRC is default-deny:** with no `allow`, or an empty one, every sender is refused, so a config that used IRC before this key existed goes silent until it is set. Startup logs one WARNING naming `irc.allow` when the key is absent. Where the network reports services accounts (IRCv3 `account-notify`/`account-tag`, or account data pydle learned from WHOIS), an entry matches the sender's **account**, not the nick: a user logged in as `alice` is admitted under any nick, and someone using the nick `alice` who is logged in as another account, or not identified (or whose account the bot doesn't know yet, as with a PM from someone who shares no channel with it), is refused. On a network with no account support, an entry matches the **nick**, which is unauthenticated: anyone can take the nick, so treat the list as a convenience there, not a credential. Matching ignores case. A refused sender gets no reply, no channel and no history, and one INFO line names the nick (and account when known). Anything but a list of strings raises at startup: `irc: config field 'allow' must be a list of nicks or account names`. Read at startup; changing it needs a restart. |
 | `irc.channels` | list of strings | `[]` | IRC channels to join on connect (e.g., `["#general", "#dev"]`). |
 | `irc.message_chunk_size` | integer | `400` | Maximum UTF-8 bytes per outbound IRC message. Messages longer than this are split using three-tier splitting: paragraphs → sentences → words. Must be at least 6; a smaller value raises `ValueError` the first time a reply is split. |
 
@@ -757,6 +759,7 @@ No restart is required for the changes listed below. Changes that require restar
 | Setting | Reason |
 |---------|--------|
 | `irc.host`, `irc.port`, `irc.nick` | IRC transport is connected at startup; changing connection parameters requires reconnection. |
+| `irc.allow` | The allowlist is parsed once in `on_init`; a reload keeps the old one. |
 | `web.host`, `web.port`, `web.allowed_origins`, adding or removing the `web` block | The listener is bound at startup. A reload logs `restart to apply` and keeps serving with the old values. |
 | Existing exact entries in `channels:` | Channels already registered retain their original `ChannelConfig` until restart, except `tools.disabled` (above). Transport-wide entries are live (above). |
 | `llm.background` | Not updated on reload. |

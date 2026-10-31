@@ -2059,6 +2059,20 @@ Forwards both channel and private messages. `split_message` splits
 outgoing text into 400-byte chunks preserving paragraph/sentence
 boundaries.
 
+Sender authorization (#77) is default-deny, as for Signal and Discord.
+`irc.allow` is validated in `on_init` (not a list of strings raises, naming
+the field) and the plugin's `should_process_message` refuses every sender
+not on it, in channels and PMs, with one INFO line and no reply; a missing
+`allow` logs a startup WARNING. Where pydle has account data (IRCv3
+`account-notify`/`account-tag`/`extended-join` negotiated, or an account
+already known for the sender), entries match the services account and an
+unidentified or unknown sender is refused; with no account support they
+match the nick. The allowlist is checked before the channel is resolved
+(as in Signal, #103): a refused sender gets an unregistered `Channel` (or
+an existing registry entry), so nothing is added to the registry and no
+`message_log` rows or memory follow. Account lookup reads pydle's
+`users[nick]` and `_capabilities`.
+
 While the client is disconnected (including the reconnect backoff, up to
 300s), outbound text is not dropped: it goes into a bounded in-memory queue
 (`_OUTBOUND_QUEUE_MAX`, 50, a module constant, not configurable). Each queued
@@ -2726,6 +2740,7 @@ irc:
   host: irc.lan
   port: 6667
   nick: agent
+  allow: [alice]                # default-deny; nick, or services account where the network has them
   channels:
     - "#channel"
 

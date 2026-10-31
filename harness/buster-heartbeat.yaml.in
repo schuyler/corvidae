@@ -67,6 +67,10 @@ irc:
   port: 6667
   nick: buster
   tls: false
+  # IRC is default-deny (#77): the probe driver's nick (harness/driver.py
+  # derive_driver_nick("buster")) must be allowed or the harness gets no replies.
+  allow:
+    - busterd
   channels:
     - "#p-heartbeat"
 

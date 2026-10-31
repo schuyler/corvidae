@@ -119,6 +119,9 @@ class IRCPlugin(TransportPlugin):
         self._irc_port: int = 6667
         self._irc_nick: str = "corvidae"
         self._irc_tls: bool = False
+        # Casefolded nicks / services account names allowed to drive the
+        # agent. Empty means nobody: IRC is default-deny (#77).
+        self._allow: set[str] = set()
         # Output held while disconnected, oldest first (#106).
         # True while _flush_outbound is delivering _outbound[0]; that entry
         # is in flight and must not be dropped by overflow handling.
@@ -140,6 +143,28 @@ class IRCPlugin(TransportPlugin):
         self._irc_tls = irc_config.get("tls", False)
         self._message_chunk_size = irc_config.get("message_chunk_size", 400)
 
+        # Validate the allowlist at startup so a typo fails loudly, naming the
+        # field, instead of silently locking everyone out (or in).
+        if "allow" in irc_config:
+            allow = irc_config["allow"]
+            if not isinstance(allow, list) or not all(
+                isinstance(entry, str) for entry in allow
+            ):
+                raise ValueError(
+                    "irc: config field 'allow' must be a list of nicks or "
+                    f"account names (got {allow!r}) — fix the irc.allow key "
+                    "in agent.yaml"
+                )
+            # IRC nicks and account names are case-insensitive.
+            self._allow = {entry.casefold() for entry in allow}
+        else:
+            # Upgrade notice: IRC used to accept everyone.
+            logger.warning(
+                "irc: no 'allow' list in the irc config block; IRC is "
+                "default-deny and will ignore every sender until irc.allow "
+                "is set in agent.yaml"
+            )
+
     @hookimpl
     async def on_start(self, config: dict) -> None:
         self._registry = get_dependency(self.pm, "registry", ChannelRegistry)
@@ -153,11 +178,71 @@ class IRCPlugin(TransportPlugin):
         )
         self._connect_task = asyncio.create_task(self.client.connect_with_retry())
 
+    # Capabilities that make pydle track services accounts for us.
+    _ACCOUNT_CAPS = ("account-notify", "account-tag", "extended-join")
+
+    def _account_of(self, nick: str) -> tuple[bool, Optional[str]]:
+        """(network reports accounts, the sender's account or None).
+
+        The account comes from pydle's user state. Account support is
+        inferred from the negotiated IRCv3 capabilities, or from the sender
+        already having an account (e.g. learned from WHOIS).
+        """
+        users = getattr(self.client, "users", None) or {}
+        info = users.get(nick) or {}
+        account = info.get("account") or None
+        caps = getattr(self.client, "_capabilities", None) or {}
+        supported = bool(account) or any(caps.get(c) for c in self._ACCOUNT_CAPS)
+        return supported, account
+
+    def _is_allowed(self, nick: str) -> bool:
+        """Default-deny check. Where the network has accounts the account
+        must match (an unidentified or unknown sender is refused); otherwise
+        the nick does."""
+        supported, account = self._account_of(nick)
+        identity = account if supported else nick
+        return identity is not None and identity.casefold() in self._allow
+
+    def _gate_channel(self, scope: str, nick: str) -> Channel:
+        """The channel to gate a message on.
+
+        An allowed sender gets the registered channel. A refused one gets an
+        existing registry entry if there is one, else an unregistered
+        Channel, so nothing outlives the refusal (#77, as Signal #103).
+        """
+        if self._is_allowed(nick):
+            return self._registry.get_or_create("irc", scope)
+        existing = self._registry.get(f"irc:{scope}")
+        if existing is not None:
+            return existing
+        return Channel(transport="irc", scope=scope)
+
+    @hookimpl
+    async def should_process_message(
+        self, channel: Channel, sender: str, text: str, trace_id: str
+    ) -> bool | None:
+        """Default-deny gate: only an irc.allow sender may drive the agent.
+
+        trace_id is bound without a default (tests/test_hook_arg_binding.py).
+        """
+        if not self.owns(channel):
+            return None
+        if self._is_allowed(sender):
+            return True
+        # Silent refusal: log once, say nothing to the sender.
+        _supported, account = self._account_of(sender)
+        logger.info(
+            "irc: rejected message from unauthorized sender nick=%s%s",
+            sender,
+            f" account={account}" if account else "",
+        )
+        return False
+
     async def on_channel_message(self, target, by, message):
         """Forward channel messages to agent loop (called by IRCClient)."""
         if self.client is not None and by == self.client.nickname:
             return
-        channel = self._registry.get_or_create("irc", target)
+        channel = self._gate_channel(target, by)
         await self.pm.ahook.on_message(
             channel=channel,
             sender=by,
@@ -170,7 +255,7 @@ class IRCPlugin(TransportPlugin):
         """Forward private messages to agent loop (called by IRCClient)."""
         if self.client is not None and by == self.client.nickname:
             return
-        channel = self._registry.get_or_create("irc", by)
+        channel = self._gate_channel(by, by)
         await self.pm.ahook.on_message(
             channel=channel,
             sender=by,
