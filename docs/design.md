@@ -557,7 +557,9 @@ paths: SQLite, JSONL, and any future storage backends.
 `on_compaction` inserts a summary row whose timestamp encodes the boundary:
 `oldest_retained_message.timestamp - 1e-6`. `resolve_conversation` filters with
 `WHERE timestamp > summary_ts`, returning only the summary plus retained and new
-messages. Old rows remain in the DB but are invisible to the working set.
+messages. Old rows remain in the DB but are invisible to the working set. If the
+newest summary row fails to decode, `resolve_conversation` falls back to an older
+summary or the full history (see [resolve_conversation](#resolve_conversation)).
 
 `remove_by_type()` operates on the in-memory list only. Old CONTEXT rows in the DB
 become invisible after the next compaction (their timestamps fall below the boundary).
@@ -911,6 +913,18 @@ Implements `resolve_conversation` (firstresult=True). Called by `Agent` when
 the timestamp filter so only the compaction boundary and newer rows are returned.
 Returns a list of tagged message dicts (with `_message_type` set). Logs an INFO
 event when history is loaded.
+
+A corrupt summary row degrades the load instead of aborting it. A summary row
+that fails to decode (invalid JSON, invalid UTF-8, or JSON that is not an
+object) is skipped with a WARNING naming its row id and channel, and the
+next-newest summary is tried with its own timestamp boundary. Because
+`message_log` is append-only, an older summary plus the rows after it still
+covers the whole conversation, only less compressed. If no summary decodes, the
+query widens to the full non-summary history. Either fallback can return more
+history than the last compaction kept; the `resolve_compaction` pass before each
+LLM call can compact it again once it crosses the compaction threshold. An
+ordinary row with invalid JSON is likewise skipped with a WARNING naming its row
+id.
 
 ### persist_message
 

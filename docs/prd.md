@@ -512,7 +512,8 @@ Per transport:
    working set.
 3. A corrupt row, ordinary or summary, is skipped and logged with its id;
    the rest of the channel's history still loads. A corrupt summary
-   degrades to the full history.
+   degrades to the newest summary that decodes, or to the full history
+   when none does.
 4. Restart recovery reloads the window from the boundary forward, and
    in-flight tool calls get an "abandoned" placeholder result unless a
    plugin delivers a real one through the seam provided for it.
