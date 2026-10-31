@@ -224,15 +224,15 @@ Fix shape: deliver CONTEXT as a `user` turn (or a tool result) with the
 same framing, and reserve `system` for text the operator wrote.
 
 Available as an opt-in: `agent.mid_conversation_system_role: user` sends
-every system message after the operator's system prompt (all four
-places above) as `user`, with the framing unchanged. It is applied at prompt
-build, so the stored rows keep `role: system`. The default in the tree
-is still `system`, because the evals were tuned against it; PRD §3.3 7
-makes `user` the default once the harness `memory_role` probe passes. One behavioural
-caveat: CONTEXT is appended after the person's message, so with `user`
-the framed block becomes the last user turn the model sees. Check in
-`harness/` that the model still answers the person before you make it the
-default.
+every system message after the operator's system prompt (all four places
+above) as `user`, with the framing unchanged. It is applied at prompt
+build, so the stored rows keep `role: system`. The default in the tree is
+still `system`, because the evals were tuned against it; PRD §3.3 7 makes
+`user` the default once the harness `memory_role` probe passes. One
+behavioural caveat: CONTEXT is appended after the person's message, so
+with `user` the framed block becomes the last user turn the model sees.
+Check in `harness/` that the model still answers the person before you
+make it the default.
 
 Compaction is the adjacent problem. Summaries paraphrase other people's
 IRC messages and raw tool output and are stored as `role: assistant`

@@ -516,16 +516,16 @@ Per transport:
    of the system role; it is the default, gated on the harness
    `memory_role` probe showing the model still answers the person with the
    framed block as the last user turn.
-8. The system prompt is a string or a list of file paths concatenated
-   with blank lines, resolved against the config directory once per
+8. The system prompt is a string or a list of file paths concatenated with
+   blank lines, resolved against the config directory once per
    conversation, and again at a compaction boundary when an unlocked
    runtime override changed it (principle 15). It is the head of the
-   window, so principle 2 governs it: nothing mutates it per turn. Plugin-contributed sections (the skills
-   index, the self-model) are re-resolved only at a compaction boundary or
-   when a conversation starts, because compaction already rebuilds the KV
-   cache for everything after the system prompt; or appended to the
-   current window, and moved to the system prompt at the next compaction
-   or conversation boundary.
+   window, so principle 2 governs it: nothing mutates it per turn.
+   Plugin-contributed sections (the skills index, the self-model) are
+   re-resolved only at a compaction boundary or when a conversation
+   starts, because compaction already rebuilds the KV cache for everything
+   after the system prompt; or appended to the current window, and moved
+   to the system prompt at the next compaction or conversation boundary.
 9. `<think>` blocks are stripped from display, never from the DB.
 10. Double-buffer compaction (build the compacted prompt in a second KV
     slot and swap) is out of scope until it has its own decision.
