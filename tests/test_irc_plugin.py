@@ -341,7 +341,7 @@ class TestSendMessage:
         assert calls == ["line1", "line2"]
 
     async def test_send_message_warns_when_disconnected(self, caplog):
-        """Dropped output is logged with the channel and its length."""
+        """Queued output is logged with the channel, length and queue depth."""
         pm, registry = _make_pm_with_registry()
         plugin = IRCPlugin(pm)
         pm.register(plugin, name="irc")
@@ -358,7 +358,10 @@ class TestSendMessage:
         warnings = [
             r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
         ]
-        assert any("#test" in m and "11" in m for m in warnings), warnings
+        assert any(
+            "irc:#test" in m and "11" in m and "queued" in m and "depth=1" in m
+            for m in warnings
+        ), warnings
 
     async def test_send_message_real_split_no_blank_lines(self):
         """Integration: real split_message + send_message produces no blank PRIVMSGs."""
@@ -623,3 +626,106 @@ async def test_retry_warning_names_host_port_and_nick(caplog):
     assert "irc.example.com" in caplog.text
     assert "6667" in caplog.text
     assert "TestBot" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# #106 — outbound queue while disconnected, flushed after reconnect
+# ---------------------------------------------------------------------------
+
+
+def _make_queue_fixture():
+    """Build a plugin with a real IRCClient whose join/message share one mock.
+
+    Returns (plugin, client, parent, channel); `parent.mock_calls` is a single
+    ordered call list covering both join and message.
+    """
+    pm, registry = _make_pm_with_registry()
+    plugin = IRCPlugin(pm)
+    pm.register(plugin, name="irc")
+    plugin.channels = ["#test"]
+    client = IRCClient(plugin, "TestBot")
+    parent = MagicMock()
+    parent.join = AsyncMock()
+    parent.message = AsyncMock()
+    client.join = parent.join
+    client.message = parent.message
+    client.connected = False
+    plugin.client = client
+    return plugin, client, parent, registry.get_or_create("irc", "#test")
+
+
+class TestOutboundQueue:
+    async def test_send_while_disconnected_queues_then_flushes_on_connect(self):
+        """R1: queued output is delivered in order, after the joins."""
+        plugin, client, parent, channel = _make_queue_fixture()
+        await plugin.send(channel=channel, event=OutboundMessage(text="first"))
+        await plugin.send_progress(channel, OutboundProgress(text="second"))
+        parent.message.assert_not_awaited()
+
+        client.connected = True
+        await client.on_connect()
+
+        names = [c[0] for c in parent.mock_calls]
+        assert names == ["join", "message", "message"]
+        sent = [c.args for c in parent.message.await_args_list]
+        assert sent == [("#test", "first"), ("#test", "second")]
+
+    async def test_queue_overflow_drops_oldest_and_logs(self, caplog):
+        """R2: the oldest entries go first; WARNING names channel and count."""
+        plugin, client, parent, channel = _make_queue_fixture()
+        with patch.object(_irc_module, "_OUTBOUND_QUEUE_MAX", 4):
+            with caplog.at_level(logging.WARNING, logger="corvidae.irc_plugin"):
+                for i in range(7):
+                    await plugin.send(
+                        channel=channel, event=OutboundMessage(text=f"m{i}")
+                    )
+            client.connected = True
+            await client.on_connect()
+
+        sent = [c.args[1] for c in parent.message.await_args_list]
+        assert sent == ["m3", "m4", "m5", "m6"]
+        warnings = [
+            r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
+        ]
+        assert any(
+            "irc:#test" in m and "dropped" in m and "3" in m for m in warnings
+        ), warnings
+
+    async def test_flushed_message_splits_like_connected_send(self):
+        """R4: a queued multi-line message flushes as the connected send does."""
+        text = "line one\n\nline two\n" + "y" * 500
+        plugin, client, parent, channel = _make_queue_fixture()
+        client.connected = True
+        await plugin.send(channel=channel, event=OutboundMessage(text=text))
+        expected = [c.args for c in parent.message.await_args_list]
+        assert len(expected) >= 3
+
+        plugin2, client2, parent2, channel2 = _make_queue_fixture()
+        await plugin2.send(channel=channel2, event=OutboundMessage(text=text))
+        client2.connected = True
+        await client2.on_connect()
+        assert [c.args for c in parent2.message.await_args_list] == expected
+
+    async def test_send_during_flush_keeps_order(self):
+        """R5: a send made mid-flush is delivered after older queued ones."""
+        plugin, client, parent, channel = _make_queue_fixture()
+        await plugin.send(channel=channel, event=OutboundMessage(text="old1"))
+        await plugin.send(channel=channel, event=OutboundMessage(text="old2"))
+        client.connected = True
+
+        sent: list[str] = []
+        injected = False
+
+        async def slow_message(target, line):
+            """Record the line; on the first one, inject a new send."""
+            nonlocal injected
+            sent.append(line)
+            if not injected:
+                injected = True
+                await plugin.send(
+                    channel=channel, event=OutboundMessage(text="new")
+                )
+
+        client.message = slow_message
+        await plugin._flush_outbound()
+        assert sent == ["old1", "old2", "new"]

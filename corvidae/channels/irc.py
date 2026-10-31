@@ -1,12 +1,17 @@
 """IRC transport plugin using pydle library."""
 
 import asyncio
+import collections
 import logging
 from typing import Optional
 
 import pydle
 
 logger = logging.getLogger("corvidae.irc_plugin")
+
+# Most messages held while disconnected; the oldest is dropped past this, so a
+# long outage (up to the 300s backoff cap and beyond) cannot grow memory.
+_OUTBOUND_QUEUE_MAX = 50
 
 from corvidae.channel import Channel, ChannelRegistry
 from corvidae.channels.split import split_message
@@ -50,6 +55,8 @@ class IRCClient(pydle.Client):
         await super().on_connect()
         for channel in self.plugin.channels:
             await self.join(channel)
+        # Deliver output queued during the outage, after the joins.
+        await self.plugin._flush_outbound()
 
     async def on_channel_message(self, target, by, message):
         """Forward channel messages to plugin."""
@@ -112,6 +119,10 @@ class IRCPlugin(TransportPlugin):
         self._irc_port: int = 6667
         self._irc_nick: str = "corvidae"
         self._irc_tls: bool = False
+        # Output held while disconnected, oldest first (#106).
+        self._outbound: collections.deque[tuple[Channel, str]] = collections.deque()
+        # Messages dropped from the queue in the current outage.
+        self._dropped: int = 0
 
     @hookimpl
     async def on_init(self, pm, config: dict) -> None:
@@ -165,18 +176,9 @@ class IRCPlugin(TransportPlugin):
             trace_id=mint_trace_id(),
         )
 
-    async def send_message(self, channel: Channel, event: OutboundMessage) -> None:
-        """Deliver a reply as one PRIVMSG per non-blank line, split to fit."""
-        text = event.text
-        if self.client is None or not self.client.connected:
-            # Say so rather than dropping the reply into the void.
-            logger.warning(
-                "IRC message not delivered: client not connected "
-                "(channel=%s, chars=%d)",
-                channel.id,
-                len(text),
-            )
-            return
+    async def _deliver(self, channel: Channel, text: str) -> None:
+        """Send text now: one PRIVMSG per non-blank line, split to fit."""
+        # Split into chunks that fit an IRC line, then send line by line.
         chunks = split_message(text, max_len=self._message_chunk_size)
         for chunk in chunks:
             for line in chunk.split('\n'):
@@ -185,12 +187,81 @@ class IRCPlugin(TransportPlugin):
                     continue
                 await self.client.message(channel.scope, line)
 
+    async def send_message(self, channel: Channel, event: OutboundMessage) -> None:
+        """Deliver a reply, or queue it while disconnected or mid-flush."""
+        text = event.text
+        # Queue when offline, or when older output is still waiting, so a new
+        # message cannot overtake queued ones.
+        if (
+            self.client is None
+            or not self.client.connected
+            or self._outbound
+        ):
+            # Bounded: drop the oldest entry rather than grow without limit.
+            if len(self._outbound) >= _OUTBOUND_QUEUE_MAX:
+                old_channel, old_text = self._outbound.popleft()
+                self._dropped += 1
+                logger.warning(
+                    "IRC outbound queue full, dropped oldest message "
+                    "(channel=%s, chars=%d, dropped=%d this outage)",
+                    old_channel.id,
+                    len(old_text),
+                    self._dropped,
+                )
+            self._outbound.append((channel, text))
+            logger.warning(
+                "IRC message queued until reconnect, not dropped "
+                "(channel=%s, chars=%d, depth=%d)",
+                channel.id,
+                len(text),
+                len(self._outbound),
+            )
+            return
+        await self._deliver(channel, text)
+
+    async def _flush_outbound(self) -> None:
+        """Deliver queued output in order; keep any remainder on failure."""
+        flushed = 0
+        # Pop only after delivery so a failure leaves the rest queued, and
+        # concurrent sends keep queueing behind the head.
+        while self._outbound:
+            if self.client is None or not self.client.connected:
+                break
+            channel, text = self._outbound[0]
+            try:
+                await self._deliver(channel, text)
+            except Exception:
+                logger.warning(
+                    "IRC flush of queued output failed (channel=%s, "
+                    "%d still queued); will retry on next connect",
+                    channel.id,
+                    len(self._outbound),
+                    exc_info=True,
+                )
+                return
+            self._outbound.popleft()
+            flushed += 1
+        logger.info(
+            "IRC outbound queue flushed (sent=%d, dropped=%d, remaining=%d)",
+            flushed,
+            self._dropped,
+            len(self._outbound),
+        )
+        self._dropped = 0
+
     async def send_progress(self, channel: Channel, event: OutboundProgress) -> None:
         """Show intermediate text as an ordinary message."""
         await self.send_message(channel, OutboundMessage(text=event.text))
 
     @hookimpl
     async def on_stop(self) -> None:
+        if self._outbound:
+            # Queue is memory-only; say so rather than lose it silently.
+            logger.warning(
+                "IRC shutting down with %d queued message(s) undelivered; "
+                "they are discarded",
+                len(self._outbound),
+            )
         task = self._connect_task
         self._connect_task = None  # shutdown signal
         if task is not None:
