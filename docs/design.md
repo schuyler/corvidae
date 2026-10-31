@@ -887,8 +887,15 @@ parsing, unknown-tool detection, invocation, error wrapping, logging, and
 the `transform_tool_result` hook. The closure returns `result.content`; the
 TaskPlugin delivers it via `on_notify`.
 
-`TaskPlugin` is declared in `Agent.depends_on`. Tool dispatch logs an error
-and returns without enqueuing if the task queue is unavailable.
+`TaskPlugin` is declared in `Agent.depends_on`. Without a task queue,
+tool dispatch logs an error naming the channel and the requested tools (with
+the remedy: the `task` plugin is registered, since startup requires it, but
+has no queue, so check that `TaskPlugin.on_start` ran and that the plugin
+registered as `task` is `TaskPlugin`) and sends an error result for each call
+through `on_notify`. If that broadcast raises for a call, dispatch logs a
+WARNING with the channel, tool call id and tool name, and falls back to
+`Agent.deliver_tool_error` (#110). One call's failure does not stop the rest
+of the batch.
 
 Closure capture uses default argument binding to avoid the
 loop-variable capture bug.
@@ -917,7 +924,8 @@ processed (dropped in the same step that discards the id from
 `pending_tool_call_ids`), and `deliver_tool_error` does nothing if the
 result is already queued or no longer pending. The model never sees two
 results for one call. A task lost before it reaches `_on_task_complete`
-is not covered.
+is not covered. The no-task-queue path in `_dispatch_tool_calls` uses the
+same fallback and guards.
 
 Multi-turn reasoning emerges from this cycle without blocking the
 channel queue.

@@ -1355,7 +1355,8 @@ Owns the `TaskQueue` and delivers task results via the `on_notify` hook.
 Entry point name: `"task"`. If that broadcast raises for a tool task, it
 logs the failure and asks the Agent (`deliver_tool_error`) to queue an
 error tool result instead, unless the real result was already queued, so
-the tool cycle still finishes.
+the tool cycle still finishes. The Agent's own no-task-queue error path
+falls back to `deliver_tool_error` the same way.
 
 **Config:**
 ```yaml

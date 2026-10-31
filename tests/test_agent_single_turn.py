@@ -18,7 +18,7 @@ from corvidae.agent import Agent
 from corvidae.turn import AgentTurnResult, run_agent_turn  # noqa: F401 (used in comments/type checking)
 from corvidae.channel import ChannelConfig, ChannelRegistry
 from corvidae.persistence import init_db
-from corvidae.hooks import create_plugin_manager
+from corvidae.hooks import create_plugin_manager, hookimpl
 from corvidae.persistence import PersistencePlugin
 from corvidae.task import Task, TaskPlugin, TaskQueue
 from corvidae.tool import ToolContext
@@ -674,6 +674,13 @@ class TestNoTaskQueueLogsError:
             "task" in r.message.lower() or "queue" in r.message.lower()
             for r in error_records
         ), f"Expected error log about missing task queue, got: {[r.message for r in error_records]}"
+        # R5: the line names the channel, the requested tool and the remedy.
+        assert any(
+            channel.id in r.message
+            and "my_tool" in r.message
+            and "`task` plugin" in r.message
+            for r in error_records
+        ), f"ERROR must name channel, tool and remedy, got: {[r.message for r in error_records]}"
 
         await db.close()
 
@@ -730,6 +737,143 @@ class TestNoTaskQueueEmitsToolResult:
         # ...and the turn completed with a second LLM call.
         assert mock_client.chat.await_count == 2
 
+        await db.close()
+
+
+# ---------------------------------------------------------------------------
+# #110: no TaskQueue and on_notify raises -> still an error result
+# ---------------------------------------------------------------------------
+
+
+class _RaisingNotifier:
+    """Peer plugin whose on_notify hookimpl always raises."""
+
+    @hookimpl
+    async def on_notify(self, channel, source, text, tool_call_id, meta):
+        """Fail like a broken peer implementation."""
+        raise RuntimeError("peer on_notify broke")
+
+
+async def _no_queue_setup(
+    calls, peer_first: bool = False, wholesale: bool = False, raiser: bool = True
+):
+    """Build an Agent with no TaskPlugin, scripted LLM replies and a raising
+    on_notify. Returns (plugin, channel, db, mock_client)."""
+    db = await aiosqlite.connect(":memory:")
+    await init_db(db)
+    pm = create_plugin_manager()
+    registry = ChannelRegistry(AGENT_DEFAULTS)
+    pm.register(registry, name="registry")
+    pm.ahook.send = AsyncMock()
+    pm.ahook.on_agent_response = AsyncMock()
+    persistence = PersistencePlugin(pm)
+    persistence.db = db
+    persistence._registry = registry
+    pm.register(persistence, name="persistence")
+    if peer_first:
+        # Registration order does not matter: apluggy gathers hookimpls, so the
+        # Agent's on_notify queues the result before the peer's raise lands.
+        pm.register(_RaisingNotifier(), name="raiser")
+    plugin = Agent(pm)
+    pm.register(plugin, name="agent")
+    plugin._registry = registry
+    if raiser and not peer_first and not wholesale:
+        pm.register(_RaisingNotifier(), name="raiser")
+    if wholesale:
+        # Simulates the Agent hookimpl being missing.
+        pm.ahook.on_notify = AsyncMock(side_effect=RuntimeError("no on_notify"))
+
+    async def my_tool(x: str) -> str:
+        """A tool."""
+        return "result"
+
+    plugin._tools = {"my_tool": my_tool}
+    mock_client = MagicMock()
+    mock_client.chat = AsyncMock(side_effect=[
+        _make_tool_call_response(calls),
+        _make_text_response("done"),
+    ])
+    plugin._client = mock_client
+    channel = registry.get_or_create("test", "scope_notq")
+    return plugin, channel, db, mock_client
+
+
+class TestNoTaskQueueRaisingOnNotify:
+    @pytest.mark.parametrize("mode", ["peer", "wholesale"])
+    async def test_raising_on_notify_still_delivers_error(self, caplog, mode):
+        """R1/R3: a raising on_notify falls back to deliver_tool_error."""
+        import logging
+
+        plugin, channel, db, client = await _no_queue_setup(
+            [_make_tool_call("call-notq", "my_tool", {"x": "v"})],
+            wholesale=(mode == "wholesale"),
+        )
+        with caplog.at_level(logging.WARNING, logger="corvidae.agent"):
+            await plugin.on_message(channel=channel, sender="user", text="hi", trace_id=mint_trace_id())
+            await drain(plugin, channel)
+
+        tool_msgs = [m for m in client.chat.await_args_list[1].args[0] if m.get("role") == "tool"]
+        assert [m["tool_call_id"] for m in tool_msgs] == ["call-notq"]
+        assert "my_tool" in tool_msgs[0]["content"]
+        assert "task queue is unavailable" in tool_msgs[0]["content"]
+        assert channel.pending_tool_call_ids == set()
+        assert client.chat.await_count == 2
+        warns = [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING
+            and channel.id in r.message and "call-notq" in r.message
+        ]
+        assert warns and all(r.exc_info for r in warns)
+        await db.close()
+
+    async def test_batch_failure_does_not_stop_other_calls(self, caplog):
+        """R4: both calls get a result and both failures are logged."""
+        import logging
+
+        plugin, channel, db, client = await _no_queue_setup(
+            [
+                _make_tool_call("call-a", "my_tool", {"x": "1"}),
+                _make_tool_call("call-b", "my_tool", {"x": "2"}),
+            ],
+            wholesale=True,
+        )
+        with caplog.at_level(logging.WARNING, logger="corvidae.agent"):
+            await plugin.on_message(channel=channel, sender="user", text="hi", trace_id=mint_trace_id())
+            await drain(plugin, channel)
+
+        tool_msgs = [m for m in client.chat.await_args_list[1].args[0] if m.get("role") == "tool"]
+        assert sorted(m["tool_call_id"] for m in tool_msgs) == ["call-a", "call-b"]
+        for cid in ("call-a", "call-b"):
+            assert any(
+                r.levelno == logging.WARNING and cid in r.message and r.exc_info
+                for r in caplog.records
+            )
+        await db.close()
+
+    async def test_peer_raising_after_agent_queued_gives_one_result(self):
+        """R2: no second result when Agent.on_notify already queued one."""
+        plugin, channel, db, client = await _no_queue_setup(
+            [_make_tool_call("call-notq", "my_tool", {"x": "v"})],
+            peer_first=True,
+        )
+        await plugin.on_message(channel=channel, sender="user", text="hi", trace_id=mint_trace_id())
+        await drain(plugin, channel)
+
+        tool_msgs = [m for m in channel.conversation.messages if m.get("role") == "tool"]
+        assert [m["tool_call_id"] for m in tool_msgs] == ["call-notq"]
+        assert client.chat.await_count == 2
+        await db.close()
+
+    async def test_deliver_tool_error_unused_when_on_notify_succeeds(self):
+        """R2: the fallback is not called on the healthy path."""
+        plugin, channel, db, client = await _no_queue_setup(
+            [_make_tool_call("call-notq", "my_tool", {"x": "v"})],
+            raiser=False,
+        )
+        plugin.deliver_tool_error = AsyncMock(wraps=plugin.deliver_tool_error)
+        await plugin.on_message(channel=channel, sender="user", text="hi", trace_id=mint_trace_id())
+        await drain(plugin, channel)
+        plugin.deliver_tool_error.assert_not_awaited()
         await db.close()
 
 
