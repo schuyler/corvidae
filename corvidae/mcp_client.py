@@ -1,8 +1,8 @@
 """McpClientPlugin — MCP client that exposes MCP server tools to the agent loop.
 
 Connects to configured MCP servers during on_start, caches the tool list for
-synchronous delivery via register_tools, and keeps sessions alive via
-AsyncExitStack for the daemon's lifetime.
+synchronous delivery via register_tools, and keeps each server's session alive
+in a long-lived owner task for the daemon's lifetime.
 
 Design rationale: plans/mcp-client-plugin.md
 
@@ -28,7 +28,7 @@ import asyncio
 import inspect
 import logging
 from contextlib import AsyncExitStack
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from corvidae.envref import EnvRefError, expand_env_refs
 from corvidae.hooks import CorvidaePlugin, hookimpl
@@ -43,6 +43,14 @@ class McpHeaderEnvError(ValueError):
     A config error rather than a connect failure: the daemon's environment
     cannot change under it, so retrying the server would fail the same way.
     """
+
+
+def _exc_type_names(exc: BaseException) -> str:
+    """Name an exception's type, looking inside anyio/asyncio exception
+    groups so the log says which error actually occurred."""
+    if isinstance(exc, BaseExceptionGroup):
+        return ", ".join(sorted({_exc_type_names(e) for e in exc.exceptions}))
+    return type(exc).__name__
 
 
 def _resolve_headers(name: str, headers: dict | None) -> dict[str, str] | None:
@@ -78,6 +86,28 @@ def _resolve_headers(name: str, headers: dict | None) -> dict[str, str] | None:
     return resolved
 
 
+# Upper bound on how long on_stop waits for owner tasks to close their
+# transports. Runtime gives the whole stop broadcast 3 s, so stay under it.
+_STOP_BOUND_SECONDS = 2.5
+# After cancelling a straggler, how long to wait for it to unwind.
+_CANCEL_GRACE_SECONDS = 0.3
+
+
+@dataclass
+class _ServerOwner:
+    """The long-lived task that owns one server's transport and session.
+
+    anyio requires a cancel scope to exit in the task that entered it, and
+    on_start and on_stop run in different tasks, so everything a server opens
+    is entered and exited inside ``task``. ``stop`` tells it to close up.
+    """
+
+    name: str
+    stack: AsyncExitStack = field(default_factory=AsyncExitStack)
+    stop: asyncio.Event = field(default_factory=asyncio.Event)
+    task: asyncio.Task | None = None
+
+
 @dataclass
 class _McpServerState:
     """Runtime state for one connected MCP server."""
@@ -93,10 +123,11 @@ class McpClientPlugin(CorvidaePlugin):
     """Plugin that connects to MCP servers and exposes their tools to Corvidae.
 
     Lifecycle:
-        on_start  — connects to MCP servers via AsyncExitStack, fetches tool
-                    lists, builds cached Tool list.
+        on_start  — connects to MCP servers, each in its own owner task,
+                    fetches tool lists, builds cached Tool list.
         register_tools — extends tool_registry with cached Tool instances (sync)
-        on_stop   — closes all sessions and transports via AsyncExitStack.aclose()
+        on_stop   — signals every owner task to close its session and
+                    transport, and awaits them together within a bound
 
     Ordering: main.py calls Agent.on_start explicitly after the
     broadcast, so MCP connections are guaranteed to complete before
@@ -110,7 +141,8 @@ class McpClientPlugin(CorvidaePlugin):
             self.pm = pm
         self._servers: list[_McpServerState] = []
         self._cached_tools: list[Tool] = []
-        self._exit_stack: AsyncExitStack | None = None
+        # One owner task per connected server (name -> owner).
+        self._owners: dict[str, _ServerOwner] = {}
         self._servers_config: dict = {}
         # Configs for servers that did not connect at startup, retried on the
         # next MCP tool call (name -> config).
@@ -129,28 +161,34 @@ class McpClientPlugin(CorvidaePlugin):
             logger.debug("McpClientPlugin: no servers configured")
             return
 
-        self._exit_stack = AsyncExitStack()
-        await self._exit_stack.__aenter__()
         self._pending_servers = {}
 
-        for server_name, server_cfg in servers_config.items():
-            try:
-                await self._connect_server(server_name, server_cfg)
-            except McpHeaderEnvError as exc:
-                # A config error: report it once, with the remedy, and skip
-                # the server for good (no lazy retry; see McpHeaderEnvError).
-                logger.warning("%s", exc, extra={"server": server_name})
-                continue
-            except Exception:
-                logger.warning(
-                    "MCP server failed to connect, skipping",
-                    extra={"server": server_name},
-                    exc_info=True,
-                )
-            # A server that did not register (exception or timeout) is kept
-            # for a lazy reconnect rather than skipped for the process lifetime.
-            if not any(server.name == server_name for server in self._servers):
-                self._pending_servers[server_name] = server_cfg
+        try:
+            for server_name, server_cfg in servers_config.items():
+                try:
+                    await self._connect_server(server_name, server_cfg)
+                except McpHeaderEnvError as exc:
+                    # A config error: report it once, with the remedy, and skip
+                    # the server for good (no lazy retry; see McpHeaderEnvError).
+                    logger.warning("%s", exc, extra={"server": server_name})
+                    continue
+                except Exception:
+                    logger.warning(
+                        "MCP server failed to connect, skipping",
+                        extra={"server": server_name},
+                        exc_info=True,
+                    )
+                # A server that did not register (exception or timeout) is kept
+                # for a lazy reconnect rather than skipped for the process
+                # lifetime.
+                if not any(server.name == server_name for server in self._servers):
+                    self._pending_servers[server_name] = server_cfg
+        except asyncio.CancelledError:
+            # Interrupted mid-connect: the servers already connected have
+            # owner tasks that nothing else will stop, so close them before
+            # the cancellation continues.
+            await self._stop_owners()
+            raise
 
         self._cached_tools = self._build_tool_list()
         logger.info(
@@ -160,20 +198,66 @@ class McpClientPlugin(CorvidaePlugin):
 
     @hookimpl
     async def on_stop(self) -> None:
-        """Close all MCP sessions and transports via AsyncExitStack."""
-        if self._exit_stack:
-            try:
-                await self._exit_stack.aclose()
-            # AsyncExitStack.aclose() aggregates cleanup from multiple MCP
-            # transports whose exception types are not under this codebase's
-            # control, so narrowing the catch to specific types is not feasible.
-            except Exception:
-                logger.warning(
-                    "McpClientPlugin: error during exit stack cleanup", exc_info=True
-                )
-            finally:
-                self._exit_stack = None
+        """Close every MCP session and transport via its owner task."""
+        await self._stop_owners()
         logger.debug("McpClientPlugin stopped")
+
+    async def _stop_owners(self) -> None:
+        """Signal all owner tasks to exit and await them together.
+
+        Concurrent, not one after another: the SDK's stdio_client can take
+        about 2 s per server to terminate a process, and Runtime allows the
+        whole stop broadcast 3 s. An owner that has not finished within
+        _STOP_BOUND_SECONDS is cancelled and logged. Never raises (a
+        cancellation of this coroutine itself excepted).
+        """
+        owners = list(self._owners.values())
+        tasks = [o.task for o in owners if o.task is not None]
+        # Tell every owner to close its transport at the same moment.
+        for owner in owners:
+            owner.stop.set()
+        try:
+            if tasks:
+                _, pending = await asyncio.wait(tasks, timeout=_STOP_BOUND_SECONDS)
+            else:
+                pending = set()
+            # Cancel stragglers and give them a moment to unwind.
+            for owner in owners:
+                if owner.task in pending:
+                    logger.warning(
+                        "MCP server %r did not shut down within %ss and was "
+                        "cancelled; the server process may need to be killed "
+                        "by hand",
+                        owner.name, _STOP_BOUND_SECONDS,
+                        extra={"server": owner.name},
+                    )
+                    owner.task.cancel()
+            if pending:
+                await asyncio.wait(pending, timeout=_CANCEL_GRACE_SECONDS)
+        except asyncio.CancelledError:
+            # on_stop itself was cancelled (stop budget spent): cancel the
+            # owners so none outlives the daemon, then let it propagate.
+            for task in tasks:
+                task.cancel()
+            raise
+        finally:
+            self._servers.clear()
+            self._owners.clear()
+            self._cached_tools = []
+        # Any owner that died with an exception its own task did not log.
+        for owner in owners:
+            task = owner.task
+            if task is None or not task.done() or task.cancelled():
+                continue
+            exc = task.exception()
+            if exc is not None:
+                logger.warning(
+                    "MCP server %r owner task failed (%s); the server "
+                    "process may need to be killed by hand",
+                    owner.name, _exc_type_names(exc),
+                    extra={"server": owner.name},
+                    exc_info=exc,
+                )
 
     @hookimpl
     def register_tools(self, tool_registry: list) -> None:
@@ -221,11 +305,13 @@ class McpClientPlugin(CorvidaePlugin):
     async def _connect_server(self, name: str, cfg: dict) -> None:
         """Connect to one MCP server and register its tools.
 
-        Enters the transport and session into a per-server exit stack, all
-        within connect_timeout_seconds (default 30). On success that stack is
-        handed to self._exit_stack, so the server stays alive for the
-        daemon's lifetime and closes with the rest on on_stop; on failure or
-        timeout it is closed at once, terminating a stdio subprocess.
+        Starts a per-server owner task that enters the transport and session
+        and runs the handshake within connect_timeout_seconds (default 30),
+        then waits for it to report. On success the owner stays alive for the
+        daemon's lifetime and closes its own resources when on_stop signals
+        it, so enter and exit happen in the same task; on failure or timeout
+        the owner closes everything at once (terminating a stdio subprocess)
+        and this method returns only after that teardown has finished.
         Appends a _McpServerState entry to self._servers on success.
 
         Args:
@@ -241,15 +327,13 @@ class McpClientPlugin(CorvidaePlugin):
         config keys like 'command' or 'url'). McpHeaderEnvError (a ${VAR}
         in headers that is unset, empty, or holds a newline) is caught
         separately and not retried. A handshake that exceeds
-        connect_timeout_seconds is logged here and returns without
+        connect_timeout_seconds is logged by the owner and returns without
         registering the server.
         """
-        from mcp import ClientSession
-        from mcp.client.stdio import StdioServerParameters, stdio_client
-        from mcp.client.sse import sse_client
-        from mcp.client.streamable_http import streamable_http_client
-        from mcp.shared._httpx_utils import create_mcp_http_client
-
+        # Read every config value the owner needs here, before anything
+        # opens: a missing transport or non-numeric timeout raises in this
+        # task, where on_start logs it and queues the server, instead of
+        # killing the owner task with ``ready`` unresolved.
         transport = cfg["transport"]
         prefix = cfg.get("tool_prefix", name)
         timeout = float(cfg.get("timeout_seconds", 30))
@@ -265,15 +349,87 @@ class McpClientPlugin(CorvidaePlugin):
         # raises McpHeaderEnvError, which on_start reports without retrying.
         headers = _resolve_headers(name, cfg.get("headers"))
 
-        # Each server gets its own exit stack so a server that fails or hangs
-        # mid-connect can be torn down (subprocess included) on the spot,
-        # without touching servers that already connected.
-        local_stack = AsyncExitStack()
+        # The owner task opens and (later) closes everything this server
+        # needs; `ready` carries its handshake result back to this task.
+        owner = _ServerOwner(name=name)
+        ready: asyncio.Future = asyncio.get_running_loop().create_future()
+        owner.task = asyncio.create_task(
+            self._run_owner(
+                owner, cfg, headers, connect_timeout, ready,
+                transport=transport, prefix=prefix, timeout=timeout,
+            ),
+            name=f"mcp-owner-{name}",
+        )
+        try:
+            state = await ready
+        except BaseException:
+            # Failed, or this task was cancelled mid-connect: make sure the
+            # owner has cancelled and finished its teardown before leaving,
+            # so no subprocess outlives the failure.
+            owner.task.cancel()
+            await asyncio.wait([owner.task])
+            raise
+        if state is None:
+            # Timed out; the owner logged it and closed everything.
+            await asyncio.wait([owner.task])
+            return
+
+        if name in self._owners:
+            # A concurrent retry connected this server first. Keep that
+            # owner and close this duplicate, so no owner is orphaned.
+            logger.warning(
+                "MCP server %r connected twice (concurrent retry); closing "
+                "the duplicate connection",
+                name, extra={"server": name},
+            )
+            owner.stop.set()
+            await asyncio.wait([owner.task])
+            return
+
+        # Connected: the owner stays alive until on_stop signals it.
+        self._owners[name] = owner
+        self._servers.append(state)
+        logger.info(
+            "MCP server connected",
+            extra={"server": name, "transport": transport,
+                   "tools": len(state.mcp_tools)},
+        )
+
+    async def _run_owner(
+        self,
+        owner: _ServerOwner,
+        cfg: dict,
+        headers: dict[str, str] | None,
+        connect_timeout: float,
+        ready: asyncio.Future,
+        *,
+        transport: str,
+        prefix: str,
+        timeout: float,
+    ) -> None:
+        """Body of a server's owner task: connect, serve, close.
+
+        Resolves ``ready`` with the server's _McpServerState (or None after
+        a connect timeout, or the connect exception), then waits for
+        ``owner.stop`` and closes the server's resources in this same task.
+        Teardown errors are logged here, not raised, so they cannot break
+        on_stop's other servers. Anything raised before ``ready`` resolves
+        (including the SDK imports) resolves it with that exception and
+        closes the stack, so _connect_server never waits forever.
+        """
+        name = owner.name
+        stack = owner.stack
         deadline = asyncio.timeout(connect_timeout)
         try:
-            # Bound the whole handshake: a server that never answers
-            # initialize (or list_tools) would otherwise block the on_start
-            # broadcast, and with it daemon startup, forever (#72).
+            from mcp import ClientSession
+            from mcp.client.stdio import StdioServerParameters, stdio_client
+            from mcp.client.sse import sse_client
+            from mcp.client.streamable_http import streamable_http_client
+            from mcp.shared._httpx_utils import create_mcp_http_client
+
+            # Bound the whole handshake inside this task: a server that never
+            # answers initialize (or list_tools) would otherwise block the
+            # on_start broadcast, and with it daemon startup, forever (#72).
             async with deadline:
                 if transport == "stdio":
                     params = StdioServerParameters(
@@ -281,20 +437,20 @@ class McpClientPlugin(CorvidaePlugin):
                         args=cfg.get("args", []),
                         env=cfg.get("env") or None,
                     )
-                    read, write = await local_stack.enter_async_context(
+                    read, write = await stack.enter_async_context(
                         stdio_client(params)
                     )
                 elif transport == "sse":
-                    read, write = await local_stack.enter_async_context(
+                    read, write = await stack.enter_async_context(
                         sse_client(cfg["url"], headers=headers)
                     )
                 elif transport == "streamable_http":
                     # The SDK closes only an HTTP client it created itself, so
                     # ours goes on the server's stack and closes with it.
-                    http_client = await local_stack.enter_async_context(
+                    http_client = await stack.enter_async_context(
                         create_mcp_http_client(headers=headers)
                     )
-                    read, write = await local_stack.enter_async_context(
+                    read, write = await stack.enter_async_context(
                         streamable_http_client(cfg["url"], http_client=http_client)
                     )
                 else:
@@ -302,7 +458,7 @@ class McpClientPlugin(CorvidaePlugin):
                         f"Unknown MCP transport {transport!r} for server {name!r}"
                     )
 
-                session = await local_stack.enter_async_context(
+                session = await stack.enter_async_context(
                     ClientSession(read, write)
                 )
                 await session.initialize()
@@ -311,36 +467,55 @@ class McpClientPlugin(CorvidaePlugin):
         except BaseException as exc:
             # Runs outside the timeout block, so the cancel the timeout used
             # has already become TimeoutError and teardown is not cancelled.
-            await self._close_failed_server(name, local_stack)
+            await self._close_failed_server(name, stack)
             # Our own bound expired: log it once, without the traceback of
-            # the cancelled handshake, and skip the server. Any other
-            # failure (including a TimeoutError raised inside the
-            # handshake) propagates to on_start's logged skip.
+            # the cancelled handshake, and report "not registered". Any other
+            # failure (including a TimeoutError raised inside the handshake)
+            # goes to _connect_server and on to on_start's logged skip.
             if isinstance(exc, TimeoutError) and deadline.expired():
                 logger.warning(
                     "MCP server connect timed out after %ss; unavailable",
                     connect_timeout,
                     extra={"server": name},
                 )
+                if not ready.done():
+                    ready.set_result(None)
                 return
-            raise
+            if not ready.done():
+                if isinstance(exc, asyncio.CancelledError):
+                    ready.cancel()
+                else:
+                    ready.set_exception(exc)
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            return
 
-        # Connected: hand the server's resources to the daemon-lifetime stack
-        # so on_stop closes them with everything else.
-        self._exit_stack.push_async_callback(local_stack.aclose)
-
-        self._servers.append(_McpServerState(
+        # Connected: report to _connect_server, then hold the transport open
+        # until on_stop signals. The close runs in this task, the one that
+        # entered the cancel scopes.
+        ready.set_result(_McpServerState(
             name=name,
             session=session,
             prefix=prefix,
             timeout_seconds=timeout,
             mcp_tools=result.tools,
         ))
-
-        logger.info(
-            "MCP server connected",
-            extra={"server": name, "transport": transport, "tools": len(result.tools)},
-        )
+        try:
+            await owner.stop.wait()
+        finally:
+            try:
+                await stack.aclose()
+            # Transport cleanup raises types outside this codebase's control
+            # (anyio, mcp); one server's failure must not break the others'
+            # shutdown, so log it with the server and exception type.
+            except Exception as exc:
+                logger.warning(
+                    "MCP server %r raised %s while shutting down; the server "
+                    "process may need to be killed by hand",
+                    name, _exc_type_names(exc),
+                    extra={"server": name},
+                    exc_info=True,
+                )
 
     async def _close_failed_server(self, name: str, stack: AsyncExitStack) -> None:
         """Tear down a server whose connect failed, logging (never raising)
@@ -348,7 +523,7 @@ class McpClientPlugin(CorvidaePlugin):
         try:
             await stack.aclose()
         # Transport cleanup raises types outside this codebase's control
-        # (anyio, mcp), as in on_stop.
+        # (anyio, mcp), as in the owner's shutdown.
         except Exception:
             logger.warning(
                 "MCP server cleanup after failed connect raised",

@@ -85,3 +85,38 @@ async def kernel_clock(pm):
     # Stop the tracker first, then cancel any timer still live.
     idle.stop()
     await clock.close()
+
+
+@pytest.fixture
+def mcp_request_log():
+    """The RequestLog the ``mcp_url`` server records into."""
+    from mcp_http_server import RequestLog
+
+    return RequestLog()
+
+
+@pytest_asyncio.fixture
+async def mcp_url(mcp_request_log):
+    """Serve the bearer-protected MCP app on a free port; yield its /mcp URL."""
+    import asyncio
+
+    import uvicorn
+
+    from mcp_http_server import TOKEN, bearer_app
+
+    # Port 0: the OS picks a free port at bind time, so there is no race.
+    server = uvicorn.Server(
+        uvicorn.Config(bearer_app(TOKEN, mcp_request_log), host="127.0.0.1",
+                       port=0, log_level="warning", lifespan="on")
+    )
+    task = asyncio.create_task(server.serve())
+    # Wait for the listener before the test connects.
+    async with asyncio.timeout(5):
+        while not server.started:
+            await asyncio.sleep(0.02)
+    port = server.servers[0].sockets[0].getsockname()[1]
+    try:
+        yield f"http://127.0.0.1:{port}/mcp"
+    finally:
+        server.should_exit = True
+        await task

@@ -10,63 +10,12 @@ mocks.
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-import uvicorn
-from mcp.server.mcpserver import MCPServer
 
 from corvidae.mcp_client import McpClientPlugin
-
-TOKEN = "s3cret-test-token"
-
-
-def _bearer_app(token: str):
-    """An ASGI app: the MCP streamable-HTTP endpoint at /mcp, refusing any
-    HTTP request without the expected bearer token."""
-    server = MCPServer("echo-http")
-
-    # The one tool the tests call.
-    @server.tool()
-    def echo(text: str) -> str:
-        return text
-
-    inner = server.streamable_http_app()
-
-    async def app(scope, receive, send):
-        # Check the bearer token on HTTP requests; lifespan passes straight
-        # through so the session manager starts and stops with uvicorn.
-        if scope["type"] == "http":
-            headers = dict(scope["headers"])
-            if headers.get(b"authorization") != f"Bearer {token}".encode():
-                await send({"type": "http.response.start", "status": 401, "headers": []})
-                await send({"type": "http.response.body", "body": b""})
-                return
-        await inner(scope, receive, send)
-
-    return app
-
-
-@pytest.fixture
-async def mcp_url() -> AsyncIterator[str]:
-    """Serve the bearer-protected MCP app on a free port; yield its /mcp URL."""
-    # Port 0: the OS picks a free port at bind time, so there is no race.
-    server = uvicorn.Server(
-        uvicorn.Config(_bearer_app(TOKEN), host="127.0.0.1", port=0,
-                       log_level="warning", lifespan="on")
-    )
-    task = asyncio.create_task(server.serve())
-    # Wait for the listener before the test connects.
-    async with asyncio.timeout(5):
-        while not server.started:
-            await asyncio.sleep(0.02)
-    port = server.servers[0].sockets[0].getsockname()[1]
-    try:
-        yield f"http://127.0.0.1:{port}/mcp"
-    finally:
-        server.should_exit = True
-        await task
+from mcp_http_server import TOKEN
 
 
 async def _start(servers: dict) -> McpClientPlugin:

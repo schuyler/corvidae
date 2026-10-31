@@ -582,14 +582,12 @@ Per transport:
    client with the calling channel's tool set minus itself and a persona-neutral
    prompt; it returns a task id at once and its result arrives as a
    notification like any other tool.
-8. MCP servers connect at startup over stdio or SSE, each inside its own
-   exit stack with a bounded handshake, fail-soft per server; servers that
-   failed at startup are retried on a bounded backoff loop without
-   needing a tool call to trigger it; a reconnected server's tools reach
-   the running Agent; sessions are owned by long-lived tasks so entering
-   and exiting happen in the same task and shutdown terminates stdio
-   subprocesses cleanly. Tools are named `<prefix>__<tool>`, first wins
-   on collision, top-level JSON Schema metadata keys are stripped.
+8. MCP servers connect at startup over any transport the client
+   supports, fail-soft per server. A server that fails recovers without a
+   restart or a triggering tool call, and its tools reach the running
+   Agent. Shutdown closes every server cleanly. Tools are named
+   `<prefix>__<tool>`, first wins on collision, top-level JSON Schema
+   metadata keys are stripped.
 9. Cross-channel sends: the agent can send to a channel other than the
    current turn's own, only to destinations on an operator allowlist,
    which starts empty, and within a send budget. When the trust and
