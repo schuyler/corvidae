@@ -106,6 +106,8 @@ class _FakeClient:
 
     def __init__(self, model="qwen3.6:35b", base_url="http://127.0.0.1:8080/v1"):
         self.calls = []
+        # extra_body of each chat() call, parallel to self.calls
+        self.extra_bodies = []
         self.model = model
         self.base_url = base_url
 
@@ -117,6 +119,7 @@ class _FakeClient:
 
     async def chat(self, messages, tools=None, extra_body=None):
         self.calls.append(messages)
+        self.extra_bodies.append(extra_body)
         return {
             "choices": [
                 {
@@ -270,6 +273,39 @@ async def test_build_messages_matches_what_the_plugin_actually_sends():
     await plugin._summarize_range(dialog)
 
     assert client.calls[0] == build_messages("SYSTEM TEXT", dialog)
+
+
+async def test_replay_sends_the_same_extra_body_as_the_daemon(tmp_path):
+    """#245: since #199 _summarize_range constrains output with a
+    response_format schema; replay must send it too, or prompt-variant
+    comparisons measure unconstrained output the daemon never produces."""
+    from corvidae_cognition.memory import MemoryPlugin
+    from harness.consolidate_replay import run_replay
+
+    # Daemon side: what _summarize_range sends.
+    daemon_client = _FakeClient()
+    plugin = MemoryPlugin()
+    plugin._llm = lambda: _FakeLLMPlugin(daemon_client)
+    await plugin._summarize_range([{"role": "user", "content": "hi"}])
+
+    # Replay side: what run_replay sends for the same dialog.
+    db_path = tmp_path / "t.db"
+    db = await _seed_db(db_path, [_row(1, "user", "hi")])
+    await db.close()
+    replay_client = _FakeClient()
+    await run_replay(
+        db_path=db_path,
+        channel_id="irc:#s-compact",
+        after_id=0,
+        through_id=1,
+        prompt_text="PROMPT",
+        trials=1,
+        out_dir=tmp_path / "out",
+        client=replay_client,
+    )
+
+    assert daemon_client.extra_bodies[0]
+    assert replay_client.extra_bodies == daemon_client.extra_bodies
 
 
 async def test_replay_uses_the_same_llm_role_as_the_daemon():
