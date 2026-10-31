@@ -1250,21 +1250,45 @@ class Agent(CorvidaePlugin):
         channel.pending_tool_call_ids |= {call["id"] for call in tool_calls}
 
         if task_queue is None:
-            logger.error("tool calls requested but no TaskQueue available")
+            logger.error(
+                "Tool calls %s requested on %s but no task queue is available "
+                "— enable the `task` plugin (remove it from plugins.disabled "
+                "in agent.yaml)",
+                [call["function"]["name"] for call in tool_calls],
+                channel.id,
+                extra={"channel": channel.id},
+            )
             # No queue means no TaskPlugin to deliver results; inject an error
             # result per call so the tool cycle can complete.
             for call in tool_calls:
-                await self.pm.ahook.on_notify(
-                    channel=channel,
-                    source="task",
-                    text=(
-                        f"[Task unavailable] Error: tool "
-                        f"'{call['function']['name']}' was not executed "
-                        "because the task queue is unavailable"
-                    ),
-                    tool_call_id=call["id"],
-                    meta={"trace_id": trace_id, **meta},
+                call_id = call["id"]
+                fn_name = call["function"]["name"]
+                text = (
+                    f"[Task unavailable] Error: tool '{fn_name}' was not "
+                    "executed because the task queue is unavailable"
                 )
+                notify_meta = {"trace_id": trace_id, **meta}
+                # One call's failed delivery must not stop the rest.
+                try:
+                    await self.pm.ahook.on_notify(
+                        channel=channel,
+                        source="task",
+                        text=text,
+                        tool_call_id=call_id,
+                        meta=notify_meta,
+                    )
+                except Exception:
+                    logger.warning(
+                        "on_notify failed delivering no-task-queue error for "
+                        "tool %s call %s on %s; queueing it directly",
+                        fn_name, call_id, channel.id,
+                        exc_info=True,
+                        extra={"channel": channel.id, "tool_call_id": call_id, "tool": fn_name},
+                    )
+                    # Safe after a partial broadcast: deliver_tool_error
+                    # skips ids already queued or no longer pending, so the
+                    # model never sees two results for one call.
+                    await self.deliver_tool_error(channel, call_id, text, notify_meta)
             return
 
         for call in tool_calls:
