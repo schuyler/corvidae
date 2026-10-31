@@ -2074,8 +2074,15 @@ an existing registry entry), so nothing is added to the registry and no
 `IRCClient.on_raw` overwrites the sender's pydle user record from each
 PRIVMSG's own tags before dispatch (no `account` tag means not logged in),
 because pydle only copies the tag for already-known nicks and never clears
-it. Without that cap, account lookup reads pydle's `users[nick]` and
-`_capabilities`. Entries and senders are compared under the server's
+it. The verdict is decided once per message, synchronously, in
+`IRCPlugin._dispatch` (before any `await`), from `users[nick]` and
+`_capabilities`, and recorded by the message's transport-minted `trace_id`.
+`should_process_message` only reports that recorded verdict (no verdict
+means deny) and the entry is dropped when `on_message` returns, because
+pydle runs a task per line and a later line's `on_raw` can rewrite
+`users[nick]` while an earlier message is still in the hook pipeline.
+Without `account-tag`, the account is whatever pydle's record holds when the
+message arrives. Entries and senders are compared under the server's
 CASEMAPPING via the client's `normalize`.
 
 While the client is disconnected (including the reconnect backoff, up to

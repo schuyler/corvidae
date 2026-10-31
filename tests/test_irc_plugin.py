@@ -811,7 +811,12 @@ async def _gate_plugin(allow=None, *, users=None, capabilities=None):
 
 
 async def _verdict(plugin, nick: str, channel_scope: str = "#test") -> bool | None:
-    """The plugin's should_process_message verdict for a message from nick."""
+    """The plugin's should_process_message verdict for a message from nick.
+
+    Records the verdict the way the transport does on arrival (decided once,
+    from the user state at that moment), then runs the hook.
+    """
+    plugin._verdicts["t1"] = plugin._decide(nick)
     return await plugin.should_process_message(
         channel=Channel(transport="irc", scope=channel_scope),
         sender=nick, text="hi", trace_id="t1",

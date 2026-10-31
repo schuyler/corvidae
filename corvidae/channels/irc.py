@@ -139,8 +139,14 @@ class IRCPlugin(TransportPlugin):
         self._irc_nick: str = "corvidae"
         self._irc_tls: bool = False
         # Nicks / services account names allowed to drive the agent, as
-        # configured; compared under the server's casemapping at match time. Empty means nobody: IRC is default-deny (#77).
+        # configured; compared under the server's casemapping at match time.
+        # Empty means nobody: IRC is default-deny (#77).
         self._allow: set[str] = set()
+        # Verdicts decided once per message in the synchronous path, keyed
+        # by the transport-minted trace_id: (allowed, account). Nothing
+        # re-reads pydle's mutable user state after a suspension point.
+        # Entries live only while on_message runs (see _dispatch).
+        self._verdicts: dict[str, tuple[bool, Optional[str]]] = {}
         # Output held while disconnected, oldest first (#106).
         # True while _flush_outbound is delivering _outbound[0]; that entry
         # is in flight and must not be dropped by overflow handling.
@@ -238,14 +244,24 @@ class IRCPlugin(TransportPlugin):
         allowed = {self._fold(entry) for entry in self._allow}
         return self._fold(identity) in allowed
 
-    def _gate_channel(self, scope: str, nick: str) -> Channel:
-        """The channel to gate a message on.
+    def _decide(self, nick: str) -> tuple[bool, Optional[str]]:
+        """Decide once, synchronously: (allowed, account) for this sender.
+
+        Must run before any await on the message's path; later lines'
+        on_raw overwrite pydle's users[nick], so the result is recorded
+        and never recomputed.
+        """
+        _supported, account = self._account_of(nick)
+        return self._is_allowed(nick), account
+
+    def _gate_channel(self, scope: str, allowed: bool) -> Channel:
+        """The channel to gate a message on, given the recorded verdict.
 
         An allowed sender gets the registered channel. A refused one gets an
         existing registry entry if there is one, else an unregistered
         Channel, so nothing outlives the refusal (#77, as Signal #103).
         """
-        if self._is_allowed(nick):
+        if allowed:
             return self._registry.get_or_create("irc", scope)
         existing = self._registry.get(f"irc:{scope}")
         if existing is not None:
@@ -258,14 +274,25 @@ class IRCPlugin(TransportPlugin):
     ) -> bool | None:
         """Default-deny gate: only an irc.allow sender may drive the agent.
 
+        Reports the verdict recorded for trace_id when the message arrived;
+        it does not re-read user state. No recorded verdict means deny.
         trace_id is bound without a default (tests/test_hook_arg_binding.py).
         """
         if not self.owns(channel):
             return None
-        if self._is_allowed(sender):
+        verdict = self._verdicts.get(trace_id)
+        if verdict is None:
+            logger.warning(
+                "irc: no recorded verdict for message from nick=%s "
+                "(trace_id=%s); refusing",
+                sender,
+                trace_id,
+            )
+            return False
+        allowed, account = verdict
+        if allowed:
             return True
         # Silent refusal: log once, say nothing to the sender.
-        _supported, account = self._account_of(sender)
         logger.info(
             "irc: rejected message from unauthorized sender nick=%s%s",
             sender,
@@ -273,31 +300,33 @@ class IRCPlugin(TransportPlugin):
         )
         return False
 
+    async def _dispatch(self, scope: str, by: str, message: str) -> None:
+        """Decide the sender's verdict once, then hand the message on."""
+        # Synchronous: no await between reading user state and recording.
+        allowed, account = self._decide(by)
+        channel = self._gate_channel(scope, allowed)
+        # Transport-minted id; the Agent uses it verbatim (#95).
+        trace_id = mint_trace_id()
+        self._verdicts[trace_id] = (allowed, account)
+        try:
+            await self.pm.ahook.on_message(
+                channel=channel, sender=by, text=message, trace_id=trace_id
+            )
+        finally:
+            # Admitted, refused or failed: the verdict dies with the message.
+            self._verdicts.pop(trace_id, None)
+
     async def on_channel_message(self, target, by, message):
         """Forward channel messages to agent loop (called by IRCClient)."""
         if self.client is not None and by == self.client.nickname:
             return
-        channel = self._gate_channel(target, by)
-        await self.pm.ahook.on_message(
-            channel=channel,
-            sender=by,
-            text=message,
-            # Transport-minted id; the Agent uses it verbatim (#95).
-            trace_id=mint_trace_id(),
-        )
+        await self._dispatch(target, by, message)
 
     async def on_private_message(self, target, by, message):
         """Forward private messages to agent loop (called by IRCClient)."""
         if self.client is not None and by == self.client.nickname:
             return
-        channel = self._gate_channel(by, by)
-        await self.pm.ahook.on_message(
-            channel=channel,
-            sender=by,
-            text=message,
-            # Transport-minted id; the Agent uses it verbatim (#95).
-            trace_id=mint_trace_id(),
-        )
+        await self._dispatch(by, by, message)
 
     async def _deliver(self, channel: Channel, text: str) -> None:
         """Send text now: one PRIVMSG per non-blank line, split to fit."""
