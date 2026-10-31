@@ -2310,12 +2310,16 @@ silence. The bot has no way to tell them it is configured to ignore them.
 outstanding message for a channel the transport sends the typing indicator
 immediately and starts a refresh loop that re-sends every 8s (Discord's
 indicator lasts about 10s) while the channel's outstanding count stays
-positive. The transport mints the message's trace id and passes it to
-`on_message`; the id keys nothing here, since the outstanding count needs no
-identity. `send_message` gives one slot back. `on_message_rejected` gives
-one back only for an allowlisted sender — the only kind that ever took one —
-so a refused stranger @-mentioning the bot cannot stop typing owed to an
-allowed user in the same channel. A refresh loop still asleep from an
+positive. The transport mints the message's trace id, takes the
+slot for an allowlisted sender, and passes the id to `on_message`; a
+`finally` around that call gives the slot back unless `on_message_admitted`
+fired for the id. Admission fires before `on_message` returns, so a gate
+veto, an agent that is not ready yet, or a raise or cancellation all land
+there. `send_message` gives back the slot of an admitted message. Only an
+allowlisted sender ever took a slot, so a refused stranger @-mentioning the
+bot gives nothing back and cannot stop typing owed to an allowed user in
+the same channel; no `on_message_rejected` implementation is needed.
+A refresh loop still asleep from an
 earlier turn is reused rather than doubled, so a channel has at most one,
 and `on_stop` cancels it. Typing is only ever sent for an
 allowlisted sender, so an unauthorized user gets no sign the bot is live.
