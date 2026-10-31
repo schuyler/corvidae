@@ -168,7 +168,7 @@ class TestDaemonStartupWithNoSignalBlock:
             "plugins": {
                 "disabled": [
                     "memory", "memory_tools", "funnel", "appraisal",
-                    "critique", "outcome_log",
+                    "critique", "outcome_log", "goals",
                 ],
             },
         }
@@ -283,7 +283,7 @@ class TestDaemonStartupWithMalformedSignalBlock:
             "plugins": {
                 "disabled": [
                     "memory", "memory_tools", "funnel", "appraisal",
-                    "critique", "outcome_log",
+                    "critique", "outcome_log", "goals",
                 ],
             },
             **_malformed_config(socket=None),

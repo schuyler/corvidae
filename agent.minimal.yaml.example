@@ -1,10 +1,10 @@
 # Minimal profile — the cognition plugin set (long-term memory, appraisal,
-# critique, the engagement/decide gates, and the heartbeat) disabled. A kernel-only install (`uv sync` without
+# critique, goals, the engagement/decide gates, and the heartbeat) disabled. A kernel-only install (`uv sync` without
 # `--extra cognition`) doesn't have those plugins, so it needs no disable
 # list; the list below is for installs that have the extra.
 #
 # What this profile gives up: no memory retrieval or consolidation across
-# sessions, no appraisal scoring, and no deferred self-critique. What it
+# sessions, no appraisal scoring, no deferred self-critique, and no goals. What it
 # keeps: the core agent loop, multi-turn tool calling, compaction, and
 # persistence/restart recovery.
 
@@ -35,3 +35,4 @@ plugins:
     - outcome_log
     - gates
     - heartbeat
+    - goals

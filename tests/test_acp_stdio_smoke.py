@@ -134,6 +134,7 @@ def _write_smoke_config(path: Path, *, base_url: str, session_db: Path) -> None:
                 "appraisal",
                 "critique",
                 "outcome_log",
+                "goals",
             ]
         },
         "logging": {
