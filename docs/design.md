@@ -2539,11 +2539,15 @@ block raises (the watcher logs it) and changes nothing.
 `app.css`, `app.js` (plain JS, no build) and vendored marked 15.0.12 and
 DOMPurify 3.2.6 (`vendor/README.md` records versions, hashes and
 licences). Model text reaches the DOM through one sink:
-`DOMPurify.sanitize(marked.parse(text))` with `style` attributes and tags
-forbidden; links get `target="_blank" rel="noopener noreferrer"`.
+`DOMPurify.sanitize(marked.parse(text))` with `style`, `class`, `id` and
+`data-*` attributes and `style` tags forbidden (so a reply can't borrow the
+app's classes or ids); links get `target="_blank" rel="noopener noreferrer"`.
 Everything else uses `textContent`. Thinking and dividers render in closed
 `<details>`. The page reconnects with backoff (1 s → 30 s) and, after
 three failed connects, checks `/` for a 401 to detect an expired session.
+`tests/test_web_render_smoke.py` checks the sanitising in headless Chrome;
+it skips without Playwright, so CI doesn't run it. Run it by hand with
+`uv run --with playwright pytest tests/test_web_render_smoke.py`.
 
 Known limitations:
 - a turn that ends in an exception without a `send_message` leaves the
