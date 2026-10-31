@@ -12,6 +12,9 @@ Tools:
 
 Operator: ``corvidae goals --db PATH seed TEXT`` inserts a goal from a
 second process; the daemon reads the table every turn.
+
+Heartbeat: ``retired_goals`` gives the heartbeat's review the newest
+retirement records (agent-wide).
 """
 
 from __future__ import annotations
@@ -151,6 +154,29 @@ class GoalsPlugin(CorvidaePlugin):
 
     def _now(self) -> float:
         return self.pm.get_plugin("clock").now()
+
+    async def retired_goals(self, limit: int) -> list[dict]:
+        """The newest-retired goals' conclusions, for the heartbeat's review.
+
+        Each is {"age_seconds", "summary"}: the age since retirement on the
+        kernel clock, and the retirement record's summary (a superseded
+        record keeps its summary; a redacted one shows its tombstone).
+        Agent-wide, like the goals list (#220).
+        """
+        db = await self._require_db()
+        now = self._now()
+        async with db.execute(
+            "SELECT g.retired_at, m.summary FROM goals g "
+            "JOIN memory m ON m.id = g.memory_id "
+            "WHERE g.retired_at IS NOT NULL "
+            "ORDER BY g.retired_at DESC, g.id DESC LIMIT ?",
+            (limit,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [
+            {"age_seconds": max(0.0, now - retired_at), "summary": summary}
+            for retired_at, summary in rows
+        ]
 
     @hookimpl
     def register_tools(self, tool_registry: list) -> None:

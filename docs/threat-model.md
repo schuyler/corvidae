@@ -487,7 +487,10 @@ and shows them in a CONTEXT entry on every turn. Three things follow.
 - **No compartment.** Goals are agent-wide: every channel sees every goal,
   crossing `memory.channel_groups`. A goal written from a private channel
   appears on a public one at its next turn. This is a recorded variance from
-  PRD principle 14 (#220). Nothing in a goal is scoped to its origin.
+  PRD principle 14 (#220). Nothing in a goal is scoped to its origin. The
+  heartbeat's review shows every retired goal's conclusion too, whatever
+  channel it was retired on, so a conclusion written on a private channel
+  reaches the heartbeat's window.
 - **Injected text can steer them.** Untrusted text on any channel can make
   the model call `add_goal`, `update_goal` or `retire_goal`, seeded goals
   included: the tools don't check who set a goal. An added goal

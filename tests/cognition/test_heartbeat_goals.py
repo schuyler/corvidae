@@ -1,10 +1,4 @@
-"""Tests for the heartbeat's goal review (#133 addendum, H2 goals half).
-
-Red phase: tests 1 and 3 fail with
-    AttributeError: module 'corvidae_cognition.heartbeat' has no attribute
-    'GOALS_INSTRUCTION'
-because the constants and the goals wiring in _beat do not exist yet.
-"""
+"""Tests for the heartbeat's goal review (#133 addendum, H2 goals half)."""
 
 import hashlib
 import json

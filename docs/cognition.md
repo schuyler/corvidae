@@ -23,7 +23,7 @@ transports.
 | `GoalsPlugin` | `goals` | The agent's open goals: three tools to add, update and retire them, and a CONTEXT entry listing the open ones each turn |
 | `OutcomeLogPlugin` | `outcome_log` | Records each exchange and its outcome in `exchange_log` |
 | `GatePlugin` | `gates` | The engagement gate (may the agent ignore a message?) and the decide gate (may it stay silent instead of answering?), both over the appraisal vector |
-| `HeartbeatPlugin` | `heartbeat` | Starts a turn on `internal:heartbeat` when the whole system has been quiet for `heartbeat.after` seconds; the turn reviews recent memory and acts only if something warrants it. Asleep unless configured |
+| `HeartbeatPlugin` | `heartbeat` | Starts a turn on `internal:heartbeat` when the whole system has been quiet for `heartbeat.after` seconds; the turn reviews recent memory (and goals, when loaded) and acts only if something warrants it. Asleep unless configured |
 
 Entry-point names are the same as when these plugins lived in the kernel, so
 `plugins.disabled` lists in existing `agent.yaml` files keep working. Without
@@ -419,8 +419,12 @@ it on startup); the command refuses a missing file or another journal mode,
 and an empty `TEXT`. The daemon reads the table each turn, so the goal
 appears on every channel at its next turn.
 
-The heartbeat's goal review (#134) is wired separately; this plugin adds
-no heartbeat behavior.
+**Heartbeat review.** A beat's turn carries the goals entry like any other
+turn. When this plugin is loaded, the heartbeat also asks
+`retired_goals(20)` for the newest retirement records (agent-wide, newest
+first, each with its age) and appends them to the beat with an instruction
+to take a next step on an open goal or retire a finished one, and not to
+take up a retired goal again without something new (see HeartbeatPlugin).
 
 **Without this plugin:** the goal tools, the goals entry and the `goals`
 table are absent. Goals already in an existing database stay there unread.
@@ -699,8 +703,12 @@ during the read), and calls `on_notify` on `internal:heartbeat` with
 `source="heartbeat"` and `meta={"origin": "heartbeat"}`. The text is the
 heartbeat prompt (`DEFAULT_HEARTBEAT_PROMPT`; documented copy in
 `prompts/heartbeat.md`) followed by the memories, framed as the agent's own
-summaries and as data, or `(none)`. The turn then runs the ordinary
-notification pipeline with the agent's normal tools. The `heartbeat`
+summaries and as data, or `(none)`. When the goals plugin is loaded, the
+text then carries `GOALS_INSTRUCTION` and the conclusions of up to 20
+retired goals (`GoalsPlugin.retired_goals`), framed as data, or `(none)`;
+without it, no goals text appears. A failed memory or retired-goals read
+skips the beat, which is retried after one period. The turn then runs the
+ordinary notification pipeline with the agent's normal tools. The `heartbeat`
 origin keeps the existing conventions: critique doesn't review it, the
 decide gate treats it as non-user, and `exchange_log` records it.
 
@@ -725,7 +733,7 @@ so sleep is set in `agent.yaml` and survives every restart;
 `plugins.disabled: [heartbeat]` also works. A config reload doesn't change
 it.
 
-**Failures.** A memory read that raises is logged as a WARNING naming the
+**Failures.** A memory or retired-goals read that raises is logged as a WARNING naming the
 channel and the exception, and that beat is skipped; the tracker retries
 `after` seconds later. An invalid `heartbeat.after` (zero, negative, non-finite,
 boolean, non-numeric) fails startup with a `ValueError`, and an awake
