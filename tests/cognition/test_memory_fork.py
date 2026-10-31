@@ -160,3 +160,17 @@ async def test_range_boundary_sentence(env, summary, watermark_index, expected):
         await mem_db.commit()
     await memory._consolidate_range(channel.id, ids[-1], "idle")
     assert expected in agent.calls[0]["instruction"]
+
+
+async def test_forks_send_the_record_schema(env):
+    """#199: compaction and idle forks carry the same response_format as the
+    standalone call."""
+    memory, stub, channel, db, ids = env
+    agent = _use(memory, FakeForkAgent({"consolidation"}, text=FORK_JSON))
+    await _compaction(memory, channel, ids[:3], cut=3)
+    await memory._consolidate_range(channel.id, ids[-1], "idle")
+    assert len(agent.calls) == 2
+    for call in agent.calls:
+        schema = call["extra_body"]["response_format"]["json_schema"]["schema"]
+        assert schema["required"] == ["summary"]
+        assert set(schema["properties"]) == {"summary", "topic_tags", "participants"}
