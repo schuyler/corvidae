@@ -14,6 +14,7 @@ Config:
     agent:
       max_tool_result_chars: 100000  # migrated to tools.max_result_chars
 """
+import json
 import logging
 from corvidae.hooks import CorvidaePlugin, hookimpl
 from corvidae.tool import Tool, ToolRegistry
@@ -33,6 +34,11 @@ class ToolCollectionPlugin(CorvidaePlugin):
         self.registry: ToolRegistry | None = None
         self.max_result_chars: int = 100_000
         self._disabled: list[str] = []
+        # Bumped by rebuild_registry whenever the tool set (names or
+        # schemas) differs from the previous build, so a consumer such as
+        # the Agent can tell cheaply whether its snapshot is stale (#109).
+        self.generation: int = 0
+        self._fingerprint: str | None = None
 
     @hookimpl
     async def on_init(self, pm, config: dict) -> None:
@@ -84,6 +90,14 @@ class ToolCollectionPlugin(CorvidaePlugin):
 
         self.registry = tool_registry
         logger.info("Tools collected: %d", len(tool_registry))
+
+        # Advance the generation only when the names or schemas changed.
+        fingerprint = json.dumps(
+            tool_registry.schemas(), sort_keys=True, default=str
+        )
+        if fingerprint != self._fingerprint:
+            self._fingerprint = fingerprint
+            self.generation += 1
 
     def get_tools(self) -> tuple[dict, list[dict]]:
         """Return (tools_dict, tool_schemas) for the agent loop."""
