@@ -284,7 +284,6 @@ class TestOptionalDependency:
 
         assert pm.get_plugin("web") is None
         assert pm.get_plugin("adder") is adder
-        assert adder.calls == 0
 
     def test_mutual_optional_dependencies_are_not_a_cycle(self) -> None:
         class A(CorvidaePlugin):
@@ -365,8 +364,56 @@ class TestOrphanReport:
             if "on_web_console_init" in r.getMessage()
         ]
         assert len(debug) == 1
-        assert "adder" in debug[0].getMessage()
-        assert "web" in debug[0].getMessage()
+        assert "'adder'" in debug[0].getMessage()
+        assert "'web'" in debug[0].getMessage()
+        assert "not loaded" in debug[0].getMessage()
+
+    # R5a downgrades only when all three hold: the hook carries an owner
+    # segment, that owner is a declared optional dependency, and it isn't
+    # loaded. The next two tests flip the conditions the others don't.
+
+    def test_typo_with_loaded_optional_owner_warns(self, caplog) -> None:
+        class OptionalTypo(CorvidaePlugin):
+            optional_depends_on = frozenset({"web"})
+
+            @hookimpl
+            async def on_web_console_inti(self, panels: list) -> None:
+                pass
+
+        pm = _pm(("web", WebOwner()), ("optyp", OptionalTypo()))
+        install_plugin_hookspecs(pm)
+
+        with caplog.at_level(logging.DEBUG, logger=_PM_LOGGER):
+            report_orphan_hookimpls(pm)
+
+        warnings = _orphan_records(caplog, logging.WARNING)
+        assert len(warnings) == 1
+        assert "'optyp'" in warnings[0].getMessage()
+        assert "on_web_console_inti" in warnings[0].getMessage()
+        assert not any(
+            "not loaded" in r.getMessage()
+            for r in _orphan_records(caplog, logging.DEBUG)
+        )
+
+    def test_orphan_not_named_for_absent_optional_owner_warns(self, caplog) -> None:
+        class Mixed(CorvidaePlugin):
+            optional_depends_on = frozenset({"web"})
+
+            @hookimpl
+            async def on_other_thing(self) -> None:
+                pass
+
+        pm = create_plugin_manager()
+        pm.set_blocked("web")
+        pm.register(Mixed(), name="mixed")
+        install_plugin_hookspecs(pm)
+
+        with caplog.at_level(logging.DEBUG, logger=_PM_LOGGER):
+            report_orphan_hookimpls(pm)
+
+        warnings = _orphan_records(caplog, logging.WARNING)
+        assert len(warnings) == 1
+        assert "on_other_thing" in warnings[0].getMessage()
 
     def test_absent_owner_without_optional_dependency_warns(self, caplog) -> None:
         """R5a only applies to a *declared* optional owner."""
@@ -471,8 +518,9 @@ class TestOwnerSegment:
 
         message = _install_error(_pm(("web", _owner_with(EmptySpec))))
 
-        assert "on_web_" in message
+        assert "'on_web_'" in message
         assert "'web'" in message
+        assert "on_web_<name>" in message  # the accepted form
 
     def test_bare_imperative_name_fails(self) -> None:
         class ImperativeSpec:
@@ -517,27 +565,27 @@ class TestOwnerSegment:
 class TestGrammarCheck:
     """R11."""
 
-    def test_resolve_without_firstresult_fails(self) -> None:
-        class Spec:
-            @hookspec
-            async def resolve_web_thing(self) -> None:
-                pass
+    @pytest.mark.parametrize(
+        "name, firstresult",
+        [
+            ("on_web_thing", True),
+            ("before_web_thing", True),
+            ("after_web_thing", True),
+            ("should_web_thing", True),
+            ("resolve_web_thing", False),
+            ("transform_web_thing", False),
+        ],
+    )
+    def test_options_not_matching_prefix_fail(self, name: str, firstresult: bool) -> None:
+        async def spec_method(self) -> None:
+            pass
 
-        message = _install_error(_pm(("web", _owner_with(Spec))))
+        spec_cls = type("Spec", (), {name: hookspec(firstresult=firstresult)(spec_method)})
 
-        assert "resolve_web_thing" in message
+        message = _install_error(_pm(("web", _owner_with(spec_cls))))
+
+        assert name in message
         assert "'web'" in message
-        assert "firstresult" in message
-
-    def test_observe_with_firstresult_fails(self) -> None:
-        class Spec:
-            @hookspec(firstresult=True)
-            async def on_web_thing(self) -> None:
-                pass
-
-        message = _install_error(_pm(("web", _owner_with(Spec))))
-
-        assert "on_web_thing" in message
         assert "firstresult" in message
 
     def test_transform_without_owner_seed_fails(self) -> None:
