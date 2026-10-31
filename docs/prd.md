@@ -146,11 +146,11 @@ one is a bug even if its tests pass.
    sandboxing. Fixed floors protect the operator's own control surface
    rather than draw a trust boundary, and stay fixed, among them: web auth
    cannot be turned off (§3.2 Web), `redact` is never a tool (§3.7
-   Memory 8), and `set_settings` can't lift a lock the operator set
-   (§3.5.6). What the agent may change about itself is not a floor: the
-   system prompt and the static keys (fork instructions and caps among
-   them) are locked by default, and operator config can unlock each one
-   (principle 15). The model's authority is unbounded and
+   Memory 8), and `set_settings` can't lift a lock or change the lock
+   list (§3.5.6). What the agent may change about itself is not a floor: the
+   system prompt and the static keys of §3.8.4 and §3.11.4 (fork
+   instructions and caps among them) are locked by default, and operator
+   config can unlock each one (principle 15). The model's authority is unbounded and
    unsandboxed by decision; `docs/threat-model.md` is the standing record
    of what that costs and is updated whenever untrusted text can reach
    somewhere new or a tool can do something new.
@@ -209,7 +209,7 @@ one is a bug even if its tests pass.
     framework can let the agent change, at runtime and through its own
     tools, its prompts (the system prompt, background-stage and fork
     instructions, the critic's and appraiser's prompts), its tunables and
-    caps, and its workspace. No deployment is required to allow any of it.
+    its caps. No deployment is required to allow any of it.
     A restriction on self-modification is a mechanism the framework
     supports and a deployment configures, never a prohibition in the
     architecture: the shipped defaults lock some keys (§3.5.6, §3.8.4,
@@ -217,7 +217,8 @@ one is a bug even if its tests pass.
     any of them. Unlocking widens what the agent may change about itself;
     it never opens the request body (§3.5.6) or the floors of principle 9.
     A change to the head of the window (the system prompt) takes effect
-    when the window is next rebuilt, not mid-window (principle 2). What
+    at the channel's next compaction boundary or conversation start, not
+    mid-window (§3.3 8; principle 2). What
     unlocking each key costs is recorded in `docs/threat-model.md`
     (principle 9).
 
@@ -507,7 +508,8 @@ Per transport:
    framed block as the last user turn.
 8. The system prompt is a string or a list of file paths concatenated
    with blank lines, resolved against the config directory once per
-   conversation. It is the head of the window, so principle 2 governs it:
+   conversation, and again at a compaction boundary when an unlocked
+   runtime override changed it (principle 15). It is the head of the window, so principle 2 governs it:
    nothing mutates it per turn. Plugin-contributed sections (the skills
    index, the self-model) are re-resolved only at a compaction boundary or
    when a conversation starts, because compaction already rebuilds the KV
@@ -598,11 +600,11 @@ Per transport:
    `messages`, `model`, `tools` and the other non-inference keys stay out.
    The persona may tune its own gates by default, with the documented
    recommended blocklist for channels with untrusted participants;
-   `agent.immutable_settings` locks more. `system_prompt` and the static
-   keys (§3.8.4, §3.11.4) are locked by default, and operator config can
+   `agent.immutable_settings` locks more. `system_prompt` and the
+   unlockable static keys (§3.8.4, §3.11.4) are locked by default, and operator config can
    unlock each one (principle 15). An unlocked `system_prompt` change
-   takes effect at the channel's next window rebuild, not mid-window
-   (principle 2). `set_settings` can't change the lock list itself.
+   takes effect at the channel's next compaction boundary or conversation
+   start, as plugin sections do (§3.3 8; principle 2). `set_settings` can't change the lock list itself.
 7. `subagent` launches a background agent on the shared `background`
    client with the calling channel's tool set minus itself and a persona-neutral
    prompt; it returns a task id at once and its result arrives as a
@@ -956,10 +958,10 @@ design: `docs/design.md`, Forks. The requirements are outcomes:
 3. Background work doesn't degrade the next main turn: it reuses the
    window rather than rebuilding it, leaves the main window's cached prefix
    intact, and keeps its slot time short (principles 2 and 3).
-4. Each background stage's reasoning and reply are capped, per stage, by
-   operator config applied after runtime overrides, and its instructions
-   are static config. By default `set_settings` can neither lift the caps
-   nor rewrite the instructions; operator config can unlock either
+4. Each background stage's reasoning and reply are capped per stage, and
+   its instructions are static config. By default operator config is
+   applied after runtime overrides, so `set_settings` can neither lift the
+   caps nor rewrite the instructions; operator config can unlock either
    (principle 15), and the threat model records the cost (principle 9).
    The window at the compaction threshold, plus a stage's instruction and
    both caps, fits the context whichever layer set them, so a stage just
@@ -1041,10 +1043,11 @@ design: `docs/design.md`, Forks. The requirements are outcomes:
    need a restart; a malformed reload changes nothing.
 4. Dotted tunables resolve at decision time through override, then live
    config, then default; they never reach the request body. Static keys
-   (fork prompts, fork output caps, `request_logprobs`,
-   `mid_conversation_system_role`) are set by the operator and locked
-   against the agent by default; operator config can unlock each one
-   (principle 15).
+   (fork prompts, fork output caps, `mid_conversation_system_role`) are
+   set by the operator and locked against the agent by default; operator
+   config can unlock each one (principle 15). `request_logprobs` stays
+   operator-only: it adds `logprobs` to the request body (§3.5.6), and it
+   is a calibration switch, not self-modification.
 5. Prompts under `prompts/` are documentation copies cited by path; no
    code loads them. Persona is prompt material, never architecture.
 6. Subcommands: `serve`, `cli`, `acp`, `scaffold`, `redact`, `calibrate`,

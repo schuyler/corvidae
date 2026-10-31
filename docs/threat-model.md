@@ -182,14 +182,30 @@ goal (PRD principle 15): the framework must be able to let the agent
 rewrite its own prompts, gates and caps, and each deployment decides how
 far. This finding records what that capacity costs on a channel with
 untrusted participants. The defence is the operator's lock list, not a
-fixed prohibition. In the tree today `system_prompt` and the static keys
-can't be unlocked at all; the PRD now requires that operator config can
-unlock them (#ISSUE). Unlocking `system_prompt` has the same cost as the
-prompt tunables above, applied to the agent's own instructions: a prompt
-injection that talks the model into an edit rewrites the persona on that
-channel until the override is cleared or the daemon restarts. Request-body keys (`messages`,
-`model`, `tools`) are not self-modification and stay out of reach
-whatever the config (finding 1).
+fixed prohibition.
+
+In the tree today `set_settings` can't be unlocked for `system_prompt`
+or the static keys. The agent can still rewrite them another way, through
+`write_file` on `agent.yaml` or on a system-prompt file (finding 4). The
+PRD now requires that operator config can unlock them for `set_settings`
+(#ISSUE). Each unlock has its own cost:
+
+- `system_prompt`: the same cost as the prompt tunables above, applied to
+  the agent's own instructions. A prompt injection that talks the model
+  into an edit rewrites the persona on that channel from its next
+  compaction or conversation start. The edit lasts until the override is
+  cleared and the window is next rebuilt, or the daemon restarts
+  (overrides are per channel and in memory only).
+- `mid_conversation_system_role`: the same injection can move framed
+  CONTEXT and notifications back into the `system` role, undoing the
+  mitigation in finding 3.
+- A background stage's output caps: the agent can lengthen that stage's
+  slot time on every exchange. The caps still have to fit the context
+  (PRD §3.8.4).
+
+`request_logprobs` and the request-body keys (`messages`, `model`,
+`tools`) are not self-modification and stay out of reach whatever the
+config (finding 1).
 
 ### 3. Untrusted text is promoted to the `system` role
 
