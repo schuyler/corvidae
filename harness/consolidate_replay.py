@@ -38,6 +38,7 @@ import yaml
 
 from corvidae.llm import LLMClient
 from corvidae_cognition.memory import (
+    CONSOLIDATION_EXTRA_BODY,
     DEFAULT_CONSOLIDATION_PROMPT,
     _dialog_transcript,
     _parse_json_block,
@@ -73,6 +74,7 @@ def parse_range(s: str) -> tuple[int, int]:
 
 # ---------------------------------------------------------------------------
 # Call assembly (D2) — identical to _summarize_range's payload
+# (messages here; extra_body=CONSOLIDATION_EXTRA_BODY is passed in run_replay)
 # ---------------------------------------------------------------------------
 
 
@@ -178,7 +180,10 @@ async def run_replay(
         with (out_dir / "trials.jsonl").open("w") as f:
             for i in range(trials):
                 start = time.monotonic()
-                response = await client.chat(messages)
+                # Same response_format constraint _summarize_range sends (#199).
+                response = await client.chat(
+                    messages, extra_body=CONSOLIDATION_EXTRA_BODY
+                )
                 latency_s = time.monotonic() - start
                 text = response["choices"][0]["message"]["content"]
                 record: dict = {"index": i, "latency_s": latency_s, "raw_output": text}
