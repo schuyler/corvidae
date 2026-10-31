@@ -77,7 +77,10 @@ class IRCClient(pydle.Client):
         token = None
         if message.command == "PRIVMSG" and self._capabilities.get("account-tag"):
             nick, _ = self._parse_user(message.source)
-            account = message.tags.get("account") or None
+            tag = message.tags.get("account")
+            # pydle parses a valueless tag as True; only a non-empty string
+            # is an account name. Anything else counts as not logged in.
+            account = tag if isinstance(tag, str) and tag else None
             # Set before the first await: this is the message's identity.
             token = _message_account.set(account)
             await self._sync_user(
@@ -223,8 +226,9 @@ class IRCPlugin(TransportPlugin):
         )
         self._connect_task = asyncio.create_task(self.client.connect_with_retry())
 
-    # Capabilities that make pydle track services accounts for us.
-    _ACCOUNT_CAPS = ("account-notify", "account-tag", "extended-join")
+    # Capabilities that make pydle track services accounts for us when
+    # account-tag is not negotiated (with account-tag, the tag is used alone).
+    _ACCOUNT_CAPS = ("account-notify", "extended-join")
 
     def _account_tag_negotiated(self) -> bool:
         """Whether the server tags each PRIVMSG with the sender's account."""
@@ -274,11 +278,6 @@ class IRCPlugin(TransportPlugin):
         # Normalize both sides at match time.
         allowed = {self._fold(entry) for entry in self._allow}
         return self._fold(identity) in allowed
-
-    def _is_allowed(self, nick: str) -> bool:
-        """Whether nick passes the allowlist right now."""
-        supported, account = self._account_of(nick)
-        return self._match(supported, account, nick)
 
     def _decide(self, nick: str) -> tuple[bool, Optional[str]]:
         """Decide once, synchronously: (allowed, account) for this sender.

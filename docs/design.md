@@ -2087,8 +2087,9 @@ means deny) and the entry is dropped when `on_message` returns, because
 pydle runs a task per line and a later line's `on_raw` can rewrite
 `users[nick]` while an earlier message is still in the hook pipeline.
 Without `account-tag`, the account is whatever `users[nick]` holds when the
-message arrives (pydle's tracked state; a residual risk). Entries and senders are compared under the server's
-CASEMAPPING via the client's `normalize`.
+message arrives (pydle's tracked state; a residual risk). Entries and
+senders are compared under the server's CASEMAPPING via the client's
+`normalize`.
 
 While the client is disconnected (including the reconnect backoff, up to
 300s), outbound text is not dropped: it goes into a bounded in-memory queue

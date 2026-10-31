@@ -104,16 +104,16 @@ async def test_tagged_channel_message_admitted():
 async def test_rfc1459_casemapping_equivalence():
     """alice[ and alice{ are the same nick under rfc1459 casemapping."""
     plugin, client, _seen = _stack(["alice["], caps={}, case_mapping="rfc1459")
-    assert plugin._is_allowed("alice{") is True
-    assert plugin._is_allowed("ALICE[") is True
-    assert plugin._is_allowed("alice") is False
+    assert plugin._decide("alice{")[0] is True
+    assert plugin._decide("ALICE[")[0] is True
+    assert plugin._decide("alice")[0] is False
 
 
 async def test_ascii_casemapping_does_not_fold_unicode():
     """straße is not strasse: casefold() would wrongly equate them."""
     plugin, client, _seen = _stack(["strasse"], caps={}, case_mapping="ascii")
-    assert plugin._is_allowed("straße") is False
-    assert plugin._is_allowed("STRASSE") is True
+    assert plugin._decide("straße")[0] is False
+    assert plugin._decide("STRASSE")[0] is True
 
 
 async def test_two_lines_one_read_impersonator_refused_through_gathered_hook():
