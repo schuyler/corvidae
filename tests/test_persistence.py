@@ -869,7 +869,13 @@ class TestPersistenceDegradation:
         def msg(role: str, content: str) -> tuple:
             return ("?", (json.dumps({"role": role, "content": content}),))
 
-        # Timeline: m1 | older summary @1.5 | m2 | corrupt summary @2.5 | m3
+        # Timeline: m0 | oldest summary @0.5 | m1 | older summary @1.5 | m2 |
+        # corrupt summary @2.5 | m3. Two summaries decode, so the test pins
+        # that the newest of them wins, not merely the first found.
+        await self._insert_row(db, channel.id, 0.2, "message", *msg("user", "m0"))
+        await self._insert_row(
+            db, channel.id, 0.5, "summary", *msg("assistant", "[oldest summary]")
+        )
         await self._insert_row(db, channel.id, 1.0, "message", *msg("user", "m1"))
         await self._insert_row(
             db, channel.id, 1.5, "summary", *msg("assistant", "[older summary]")
@@ -884,7 +890,8 @@ class TestPersistenceDegradation:
         with caplog.at_level(logging.WARNING, logger="corvidae.persistence"):
             result = await plugin.resolve_conversation(channel=channel)
 
-        # The older summary's boundary applies: m1 is excluded, m2 and m3 load.
+        # The older summary's boundary applies: m0 and m1 are excluded, m2 and
+        # m3 load.
         assert [m["content"] for m in result] == ["[older summary]", "m2", "m3"]
         assert result[0]["_message_type"] == MessageType.SUMMARY
         warnings = self._warnings(caplog)
