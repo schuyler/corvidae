@@ -266,17 +266,11 @@ async def _wait_until(predicate, timeout: float = 5.0, interval: float = 0.01) -
 
 
 async def _drive_gate(pm, *, channel, sender: str, text: str, trace_id: str = "tid") -> bool | None:
-    """Run the message gate the way Agent.on_message does (reject-wins, then
-    on_message_rejected on a veto)."""
+    """Run the message gate the way Agent.on_message does (reject-wins)."""
     results = await pm.ahook.should_process_message(
         channel=channel, sender=sender, text=text, trace_id=trace_id,
     )
-    decision = resolve_reject_wins(results)
-    if decision is False:
-        await pm.ahook.on_message_rejected(
-            channel=channel, trace_id=trace_id, sender=sender, text=text,
-        )
-    return decision
+    return resolve_reject_wins(results)
 
 
 @dataclass
@@ -316,7 +310,14 @@ async def _start_plugin(
     pm = create_plugin_manager()
     registry = ChannelRegistry(AGENT_DEFAULTS)
     pm.register(registry, name="registry")
-    pm.ahook.on_message = AsyncMock()
+    # Like Agent.on_message, the default mock admits the message (firing
+    # on_message_admitted before returning) so it keeps its typing slot.
+    async def _admit(channel, sender, text, trace_id):
+        await pm.ahook.on_message_admitted(
+            channel=channel, trace_id=trace_id, sender=sender, text=text,
+        )
+
+    pm.ahook.on_message = AsyncMock(side_effect=_admit)
 
     config: dict = dict(extra_config or {})
     if not omit_block:
@@ -941,22 +942,106 @@ class TestTyping:
             await h.plugin.on_stop()
 
     async def test_refused_stranger_does_not_stop_owed_typing(self, fast_typing):
-        """A refused sender never took an outstanding slot, so their
-        rejection must not give one back: typing for an allowlisted user's
-        turn in the same channel keeps running."""
+        """R3: a refused sender never took a slot, so its message returning
+        unadmitted gives nothing back: typing for an allowlisted user's turn
+        in the same channel keeps running."""
         h = await _start_plugin()
         try:
-            h.plugin._enqueue(make_dm("work"), BOT_ID)
-            await _wait_until(lambda: h.messageable.typing_count >= 2)
-            ch = h.registry.get(f"discord:dm:{AUTH_ID}")
-            await h.plugin.on_message_rejected(
-                channel=ch, trace_id="tid", sender=str(OTHER_ID), text="hi",
-            )
+            # An owed turn holds one slot on the stranger's own DM channel.
+            ch = h.registry.get_or_create("discord", f"dm:{OTHER_ID}")
+            await h.plugin._begin_typing(ch)
+            assert h.plugin._outstanding[ch.id] == 1
+            # The stranger's message returns unadmitted (gate veto).
+            h.pm.ahook.on_message = AsyncMock()
+            await h.plugin._handle_message(make_dm("hi", author_id=OTHER_ID), BOT_ID)
             assert h.plugin._outstanding[ch.id] == 1
             before = h.messageable.typing_count
             await _wait_until(lambda: h.messageable.typing_count >= before + 2)
         finally:
             await h.plugin.on_stop()
+
+    async def test_typing_stops_when_message_returns_unadmitted(self, fast_typing):
+        """R1(a): on_message returning without admitting (gate veto, agent
+        not ready) gives the slot back and the refresh loop stops."""
+        h = await _start_plugin()
+        try:
+            h.pm.ahook.on_message = AsyncMock()  # returns, never admits
+            await h.plugin._handle_message(make_dm("work"), BOT_ID)
+            ch = h.registry.get(f"discord:dm:{AUTH_ID}")
+            assert h.plugin._outstanding.get(ch.id, 0) == 0
+            await self._assert_typing_stops(h)
+        finally:
+            await h.plugin.on_stop()
+
+    async def test_typing_stops_when_on_message_raises(self, fast_typing):
+        """R1(b): a raising on_message still gives the slot back."""
+        h = await _start_plugin()
+        try:
+            h.pm.ahook.on_message = AsyncMock(side_effect=RuntimeError("gate blew up"))
+            with pytest.raises(RuntimeError):
+                await h.plugin._handle_message(make_dm("work"), BOT_ID)
+            ch = h.registry.get(f"discord:dm:{AUTH_ID}")
+            assert h.plugin._outstanding.get(ch.id, 0) == 0
+            await self._assert_typing_stops(h)
+        finally:
+            await h.plugin.on_stop()
+
+    async def test_typing_stops_when_on_message_cancelled(self, fast_typing):
+        """R1(c): cancelling on_message still gives the slot back."""
+        h = await _start_plugin()
+        try:
+            started = asyncio.Event()
+
+            async def hang(**_kw):
+                started.set()
+                await asyncio.sleep(60)
+
+            h.pm.ahook.on_message = AsyncMock(side_effect=hang)
+            task = asyncio.create_task(h.plugin._handle_message(make_dm("work"), BOT_ID))
+            await asyncio.wait_for(started.wait(), 5)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            ch = h.registry.get(f"discord:dm:{AUTH_ID}")
+            assert h.plugin._outstanding.get(ch.id, 0) == 0
+            await self._assert_typing_stops(h)
+        finally:
+            await h.plugin.on_stop()
+
+    async def test_admitted_message_keeps_slot_until_reply(self, fast_typing):
+        """R2: an admitted message holds its slot after on_message returns;
+        send_message gives it back."""
+        h = await _start_plugin()
+        try:
+            await h.plugin._handle_message(make_dm("work"), BOT_ID)
+            ch = h.registry.get(f"discord:dm:{AUTH_ID}")
+            assert h.plugin._outstanding[ch.id] == 1
+            assert not h.plugin._admitted  # bookkeeping id consumed
+            await h.plugin.send(channel=ch, event=OutboundMessage(text="done"))
+            assert h.plugin._outstanding.get(ch.id, 0) == 0
+        finally:
+            await h.plugin.on_stop()
+
+    async def test_admission_on_other_transport_is_ignored(self):
+        """R4: another transport's admission doesn't touch Discord state."""
+        h = await _start_plugin()
+        try:
+            other = h.registry.get_or_create("signal", "+15550001111")
+            await h.plugin.on_message_admitted(
+                channel=other, trace_id="t", sender="x", text="hi",
+            )
+            assert h.plugin._admitted == set()
+            assert not hasattr(h.plugin, "on_message_rejected")
+        finally:
+            await h.plugin.on_stop()
+
+    @staticmethod
+    async def _assert_typing_stops(h: Harness) -> None:
+        """Typing sends settle: no new ones after the refresh loop ends."""
+        await asyncio.sleep(TYPING_REFRESH_FOR_TESTS * 3)
+        settled = h.messageable.typing_count
+        await asyncio.sleep(TYPING_REFRESH_FOR_TESTS * 6)
+        assert h.messageable.typing_count == settled
 
     async def test_one_refresh_loop_per_channel_and_stop_cancels_it(self, fast_typing):
         """Re-arming typing while the previous refresh loop is still asleep
@@ -987,23 +1072,6 @@ class TestTyping:
         finally:
             await h.plugin.on_stop()
         assert _live_loops() == []
-
-    async def test_typing_stops_after_rejection(self, fast_typing):
-        """on_message_rejected also gives the outstanding slot back."""
-        h = await _start_plugin()
-        try:
-            h.plugin._enqueue(make_dm("work"), BOT_ID)
-            await _wait_until(lambda: h.messageable.typing_count >= 2)
-            ch = h.registry.get(f"discord:dm:{AUTH_ID}")
-            await h.plugin.on_message_rejected(
-                channel=ch, trace_id="tid", sender=str(AUTH_ID), text="work",
-            )
-            await asyncio.sleep(TYPING_REFRESH_FOR_TESTS * 3)
-            settled = h.messageable.typing_count
-            await asyncio.sleep(TYPING_REFRESH_FOR_TESTS * 6)
-            assert h.messageable.typing_count == settled
-        finally:
-            await h.plugin.on_stop()
 
     async def test_send_progress_keeps_typing_alive(self, fast_typing):
         """R13: send_progress does not decrement outstanding."""
