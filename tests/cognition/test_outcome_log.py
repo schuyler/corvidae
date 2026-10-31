@@ -298,3 +298,61 @@ class TestStartupDeferralLog:
         assert len(records) == 1, [r.getMessage() for r in records]
         assert records[0].levelno == logging.WARNING
         assert records[0].exc_info is not None
+
+
+class TestRejectedRefusals:
+    """#261: a transport-gate refusal of an unknown channel leaves no row."""
+
+    async def _count(self, db, trace_id: str) -> int:
+        # Count exchange_log rows for one trace id.
+        async with db.execute(
+            "SELECT COUNT(*) FROM exchange_log WHERE trace_id = ?", (trace_id,)
+        ) as cursor:
+            return (await cursor.fetchone())[0]
+
+    async def _env(self, db, with_registry: bool = True):
+        # Build the plugin, optionally with a ChannelRegistry registered.
+        from corvidae.channel import ChannelRegistry
+
+        plugin = await _setup(db)
+        registry = None
+        if with_registry:
+            registry = ChannelRegistry({})
+            plugin.pm.register(registry, name="registry")
+        return plugin, registry
+
+    async def test_refused_stranger_writes_no_row(self, db):
+        from corvidae.channel import Channel
+
+        plugin, _ = await self._env(db)
+        # A transient channel the registry never held, as a refused sender gets.
+        stranger = Channel(transport="irc", scope="mallory")
+        await plugin.on_message_rejected(
+            channel=stranger, trace_id="t-refused", sender="mallory", text="hi"
+        )
+        assert await self._count(db, "t-refused") == 0
+
+    async def test_rejected_known_channel_keeps_row(self, db):
+        plugin, registry = await self._env(db)
+        known = registry.get_or_create("irc", "alice")
+        await plugin.on_message_rejected(
+            channel=known, trace_id="t-known", sender="alice", text="ok"
+        )
+        async with db.execute(
+            "SELECT channel_id, message_rowid, outcomes FROM exchange_log "
+            "WHERE trace_id = ?", ("t-known",),
+        ) as cursor:
+            row = await cursor.fetchone()
+        assert row[0] == "irc:alice"
+        assert row[1] is None
+        assert '"gate": "rejected"' in row[2] or '"gate":"rejected"' in row[2]
+
+    async def test_no_registry_fails_open(self, db):
+        from corvidae.channel import Channel
+
+        plugin, _ = await self._env(db, with_registry=False)
+        await plugin.on_message_rejected(
+            channel=Channel(transport="irc", scope="bob"),
+            trace_id="t-noreg", sender="bob", text="hi",
+        )
+        assert await self._count(db, "t-noreg") == 1

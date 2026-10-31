@@ -155,6 +155,19 @@ class OutcomeLogPlugin(CorvidaePlugin):
 
     @hookimpl
     async def on_message_rejected(self, channel, trace_id: str, sender: str, text: str) -> None:
+        # A transport gate refuses strangers on a transient channel the
+        # registry never held (#261). Writing a row keyed on that id grows
+        # exchange_log without bound and keeps a trace of a refused sender,
+        # and the row feeds no calibration. Rejections on known channels
+        # (the engagement gate) keep theirs. With no registry plugin
+        # available, fail open and record, so a calibration row is never lost.
+        registry = self.pm.get_plugin("registry")
+        if registry is not None and registry.get(channel.id) is None:
+            logger.debug(
+                "exchange_log: no row for transport-refused message on %s (trace %s)",
+                channel.id, trace_id,
+            )
+            return
         try:
             await self.record_exchange(trace_id, channel.id, origin="user")
             await self.update_exchange(trace_id, outcomes={"gate": "rejected"})
