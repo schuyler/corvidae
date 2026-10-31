@@ -660,6 +660,8 @@ class MemoryPlugin(CorvidaePlugin):
         # Only MemoryPlugin writes to it, so its transactions are atomic by
         # construction.
         self._write_db: aiosqlite.Connection | None = None
+        # True only when memory opened _write_db itself (not the shared fallback).
+        self._owns_write_db = False
         self._write_path: str = "<unknown>"
         self._vec_available = False
         self._encoder_mismatch = False
@@ -829,7 +831,9 @@ class MemoryPlugin(CorvidaePlugin):
         if self._write_db is not None:
             write_db, self._write_db = self._write_db, None
             try:
-                await write_db.close()
+                # The in-memory fallback is the persistence connection: not ours.
+                if self._owns_write_db:
+                    await write_db.close()
             except Exception:
                 logger.warning(
                     "memory write connection failed to close cleanly",
@@ -1954,8 +1958,12 @@ class MemoryPlugin(CorvidaePlugin):
         try:
             await conn.execute(f"PRAGMA journal_mode={journal_mode}")
             await conn.execute(f"PRAGMA busy_timeout={int(WRITE_BUSY_TIMEOUT_MS)}")
-            if self._vec_available:
-                await self._load_vec_extension(conn)
+            if self._vec_available and not await self._load_vec_extension(conn):
+                logger.warning(
+                    "memory: sqlite-vec failed to load on the write connection "
+                    "for %s; vector inserts on it will fail until restart "
+                    "(check the sqlite-vec install)", path,
+                )
         except BaseException:
             # Don't leak the half-configured connection's worker thread.
             await conn.close()
@@ -1977,6 +1985,7 @@ class MemoryPlugin(CorvidaePlugin):
         # Re-check: another task may have opened it while the schema ran.
         if self._write_db is None:
             self._write_db = await self._open_write_db(shared)
+            self._owns_write_db = self._write_db is not shared
         return self._write_db
 
     @asynccontextmanager
@@ -2010,19 +2019,31 @@ class MemoryPlugin(CorvidaePlugin):
                 raise
         try:
             yield conn
+            # COMMIT is inside the try: a failed commit (SQLITE_BUSY against a
+            # long reader) must roll back rather than leave the lock held.
+            await (conn.execute("COMMIT") if own_txn else conn.commit())
         except BaseException:
             # Undo every statement of the section, including cancellation.
             try:
                 await (conn.execute("ROLLBACK") if own_txn else conn.rollback())
             except Exception:
                 logger.warning(
-                    "memory write rollback failed on %s; the write connection "
-                    "may hold a partial transaction until it is closed",
+                    "memory write rollback failed on %s; closing the write "
+                    "connection so the next memory write reopens a clean one "
+                    "(restart the daemon if writes keep failing)",
                     path, exc_info=True,
                 )
+                if own_txn:
+                    # Drop the wedged connection; closing releases its lock.
+                    self._write_db = None
+                    try:
+                        await conn.close()
+                    except Exception:
+                        logger.warning(
+                            "memory write connection on %s failed to close "
+                            "after a failed rollback", path, exc_info=True,
+                        )
             raise
-        else:
-            await (conn.execute("COMMIT") if own_txn else conn.commit())
 
     def _resolve_db(self) -> aiosqlite.Connection | None:
         """Return the persistence plugin's DB connection, or None if not open yet."""

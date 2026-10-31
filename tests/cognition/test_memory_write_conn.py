@@ -9,6 +9,7 @@ discard another plugin's pending row.
 
 import asyncio
 import logging
+import sqlite3
 
 import aiosqlite
 import pytest
@@ -433,4 +434,92 @@ class TestWriteConnectionLifecycle:
         # No commit or refresh on db: a read sees the record at once.
         assert len(await fetch_memories(db)) == 1
         assert await fetch_watermark(db, channel.id) == rowids[-1]
+        await stop(memory, db)
+
+
+class TestFailedCommit:
+    """A failed COMMIT rolls back; a failed ROLLBACK drops the connection."""
+
+    async def _fail_commit(self, memory, rollback_too=False):
+        """Make the first COMMIT (and optionally ROLLBACK) on the write conn raise."""
+        wdb = await memory._write_conn()
+        real = wdb.execute
+        state = {"commit": 0}
+
+        async def before(sql):
+            head = sql.strip().upper()
+            if head == "COMMIT" and state["commit"] == 0:
+                state["commit"] += 1
+                raise sqlite3.OperationalError("database is locked")
+            if head == "ROLLBACK" and rollback_too and state["commit"] == 1:
+                raise sqlite3.OperationalError("disk I/O error")
+
+        hook_execute(wdb, before)
+        return wdb, real
+
+    async def test_failed_commit_rolls_back_and_retry_stores_one(self, tmp_path):
+        memory, persistence, stub, channel, db = await build_consolidation_env(
+            db_path=str(tmp_path / "sessions.db")
+        )
+        rowids = await seed_dialog(persistence, channel, DIALOG)
+        wdb, real = await self._fail_commit(memory)
+        await consolidate(memory, channel, rowids)
+        # No partial rows and no transaction left holding the lock.
+        assert len(await fetch_memories(db)) == 0
+        assert not wdb.in_transaction
+        wdb.execute = real
+        await consolidate(memory, channel, rowids)
+        assert len(await fetch_memories(db)) == 1
+        # The persistence connection can still write.
+        await db.execute("PRAGMA busy_timeout=50")
+        await db.execute(
+            "INSERT INTO message_log (channel_id, message, timestamp, message_type)"
+            " VALUES ('x', '{}', 1, 'message')"
+        )
+        await db.commit()
+        await stop(memory, db)
+
+    async def test_failed_rollback_reopens_write_connection(self, tmp_path, caplog):
+        memory, persistence, stub, channel, db = await build_consolidation_env(
+            db_path=str(tmp_path / "sessions.db")
+        )
+        rowids = await seed_dialog(persistence, channel, DIALOG)
+        wdb, real = await self._fail_commit(memory, rollback_too=True)
+        with caplog.at_level(logging.WARNING, logger=LOGGER):
+            await consolidate(memory, channel, rowids)
+        assert memory._write_db is None
+        assert any("sessions.db" in r.getMessage() for r in caplog.records)
+        # The next write reopens a clean connection and succeeds.
+        await consolidate(memory, channel, rowids)
+        assert memory._write_db is not None and memory._write_db is not wdb
+        assert len(await fetch_memories(db)) == 1
+        await stop(memory, db)
+
+
+class TestWriteConnOwnership:
+    async def test_inmemory_fallback_on_stop_leaves_persistence_open(self):
+        memory, persistence, stub, channel, db = await build_consolidation_env()
+        assert await memory._write_conn() is db
+        await memory.on_stop()
+        # The persistence connection is still usable.
+        async with db.execute("SELECT 1") as cursor:
+            assert (await cursor.fetchone())[0] == 1
+        await db.close()
+
+    async def test_vec_load_failure_on_write_conn_warns(self, tmp_path, caplog):
+        memory, persistence, stub, channel, db = await build_consolidation_env(
+            db_path=str(tmp_path / "sessions.db")
+        )
+        await memory._write_db.close()
+        memory._write_db = None
+        memory._vec_available = True
+
+        async def fail(_conn):
+            return False
+
+        memory._load_vec_extension = fail
+        with caplog.at_level(logging.WARNING, logger=LOGGER):
+            await memory._write_conn()
+        assert any("sessions.db" in r.getMessage() and "sqlite-vec" in r.getMessage()
+                   for r in caplog.records)
         await stop(memory, db)
