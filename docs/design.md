@@ -577,10 +577,10 @@ All operations are synchronous; no database access:
 - `replace_with_summary(summary_msg, retain_count)` — replaces older messages
   with a summary in-memory, retaining the `retain_count` most-recent entries.
   Raises `ValueError` if `retain_count` exceeds `len(messages)`.
-- `remove_by_type(message_type)` — removes all entries of the given `MessageType`
-  from the in-memory list. Returns the number removed. Raises `ValueError` if called
-  with `MessageType.MESSAGE` or `MessageType.SUMMARY`. Plugins use this to clean up
-  stale `CONTEXT` entries from an earlier turn before re-injecting fresh ones.
+- The window only grows at the tail (`append`) and truncates at the head
+  (`replace_with_summary`). Nothing is inserted, removed or mutated
+  mid-window, so there is no method for removing entries by type; stale
+  `CONTEXT` entries retire by aging past the compaction boundary.
 
 After each `conv.append()`, `Agent` fires `persist_message` (broadcast)
 so persistence plugins can write to their storage. After `replace_with_summary()`,
@@ -605,8 +605,8 @@ messages. Old rows remain in the DB but are invisible to the working set. If the
 newest summary row fails to decode, `resolve_conversation` falls back to an older
 summary or the full history (see [resolve_conversation](#resolve_conversation)).
 
-`remove_by_type()` operates on the in-memory list only. Old CONTEXT rows in the DB
-become invisible after the next compaction (their timestamps fall below the boundary).
+Old CONTEXT rows in the DB become invisible after the next compaction (their
+timestamps fall below the boundary), exactly as they leave the in-memory window.
 
 **Thinking token handling** — three layers:
 - Display: `ThinkingPlugin.transform_display_text` calls `strip_thinking()`
