@@ -5,6 +5,7 @@ from time import time
 from corvidae.channel import (
     Channel,
     ChannelConfig,
+    CHANNEL_ENTRY_KEYS,
     ChannelRegistry,
     ReasoningHistory,
     apply_channel_config,
@@ -349,6 +350,85 @@ class TestLoadChannelConfig:
         apply_channel_config(parsed, registry)
         apply_channel_config(parsed, registry)  # a reload over existing channels
         assert registry.get("irc:#a") is not None
+
+    @pytest.mark.parametrize("key", ["irc:#a", "signal:*"])
+    def test_unknown_entry_key_is_rejected(self, key):
+        """#205 R1: an unknown key in an exact or wide entry raises, naming
+        channels.<id>.<key>, the value and every accepted key."""
+        config = {"channels": {key: {"max_turn": 5}}}
+        with pytest.raises(ValueError) as excinfo:
+            load_channel_config(config, ChannelRegistry({}))
+        msg = str(excinfo.value)
+        assert f"channels.{key}.max_turn" in msg
+        assert "5" in msg
+        for accepted in ("system_prompt", "max_context_tokens", "max_turns",
+                         "reasoning_history", "tools"):
+            assert accepted in msg
+
+    def test_several_unknown_entry_keys_named_sorted_once(self):
+        """#205 R1: all unknown keys appear in one message, sorted."""
+        config = {"channels": {"irc:#a": {"zeta": 1, "max_tokens": 200, "max_turns": 3}}}
+        with pytest.raises(ValueError) as excinfo:
+            parse_channel_config(config)
+        msg = str(excinfo.value)
+        assert msg.index("channels.irc:#a.max_tokens") < msg.index("channels.irc:#a.zeta")
+        assert "200" in msg
+
+    def test_unknown_entry_key_value_is_truncated(self):
+        """#205: a long rejected value is repr-truncated, not dumped."""
+        config = {"channels": {"irc:#a": {"bogus": "x" * 5000}}}
+        with pytest.raises(ValueError) as excinfo:
+            parse_channel_config(config)
+        assert "channels.irc:#a.bogus" in str(excinfo.value)
+        assert len(str(excinfo.value)) < 600
+
+    def test_removed_keep_thinking_key_keeps_migration_message(self):
+        """#205 R4: the specific migration text wins over the generic one."""
+        config = {"channels": {"irc:#a": {"keep_thinking_in_history": True}}}
+        with pytest.raises(ValueError, match="use reasoning_history") as excinfo:
+            parse_channel_config(config)
+        assert "unknown key" not in str(excinfo.value)
+
+    def test_entry_keys_match_channel_config_fields(self):
+        """CHANNEL_ENTRY_KEYS must track ChannelConfig, or a new field would be
+        rejected as unknown."""
+        import dataclasses
+
+        fields = {f.name for f in dataclasses.fields(ChannelConfig)}
+        assert set(CHANNEL_ENTRY_KEYS) == (fields - {"disabled_tools"}) | {"tools"}
+
+    @pytest.mark.parametrize("path", [
+        "agent.yaml.example", "agent.minimal.yaml.example", "harness/buster.yaml.in",
+    ])
+    def test_shipped_channel_entries_still_load(self, path):
+        """#205 R5: every channels: entry shipped in the repo, including the
+        commented examples of agent.yaml.example, passes validation."""
+        import re
+        from pathlib import Path
+
+        import yaml
+
+        text = (Path(__file__).resolve().parent.parent / path).read_text()
+        # Uncomment example entries: '  # key:' and '  #   indented' lines
+        # (prose comments have spaces before any colon, so they stay comments).
+        lines = ["channels:"]
+        in_section = False
+        for line in text.splitlines():
+            # Only the top-level channels: section is of interest.
+            if line == "channels:":
+                in_section = True
+                continue
+            if in_section and line and not line.startswith((" ", "#")):
+                break
+            if not in_section:
+                continue
+            m = re.match(r"^  # (\s*\S+:.*|\s{2,}.*)$", line)
+            if m and (m.group(1).startswith(" ") or " " not in m.group(1).split(":")[0]):
+                line = "  " + m.group(1)
+            lines.append(line)
+        doc = yaml.safe_load("\n".join(lines))
+        assert doc["channels"], path
+        parse_channel_config({"channels": doc["channels"]})
 
     def test_load_channel_config_no_channels_section(self):
         """Missing 'channels' key is a no-op."""

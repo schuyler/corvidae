@@ -371,6 +371,28 @@ class TestRuntimeStart:
         assert "Config error:" in stderr
         assert str(config_path) in stderr
 
+    async def test_start_unknown_channel_key_reports_config_error_and_exits(
+        self, tmp_path, capsys
+    ):
+        """#205 R2: an unknown key in a channels: entry stops startup with a
+        one-line Config error naming channels.<id>.<key> and the file."""
+        from corvidae.runtime import Runtime
+
+        config_path = tmp_path / "agent.yaml"
+        config_path.write_text(
+            "llm:\n  main: {base_url: 'http://127.0.0.1:1', model: m}\n"
+            "channels:\n  'signal:abc':\n    max_turn: 5\n"
+        )
+        rt = Runtime(config_path=str(config_path))
+        with pytest.raises(SystemExit) as excinfo:
+            await rt.start()
+
+        assert excinfo.value.code != 0
+        stderr = capsys.readouterr().err
+        assert any(line.startswith("Config error:") for line in stderr.splitlines())
+        assert "channels.signal:abc.max_turn" in stderr
+        assert str(config_path) in stderr
+
     async def test_start_invalid_channel_config_reports_config_error_and_exits(
         self, tmp_path, capsys
     ):

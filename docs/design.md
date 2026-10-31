@@ -272,7 +272,7 @@ INFO each channel whose matches change.
 
 `load_channel_config(config, registry)` pre-registers channels from
 YAML before `on_start`. It is `parse_channel_config(config)` (pure: validates
-every entry, exact and wide, touching no registry) followed by
+every entry, exact and wide, and rejects keys outside `CHANNEL_ENTRY_KEYS`, touching no registry) followed by
 `apply_channel_config(parsed, registry)`. Reload calls the two itself:
 `ConfigWatcherPlugin` parses before it updates `agent_defaults`, so a rejected
 `channels:` entry skips the whole reload. Applying sets the wide entries first, so

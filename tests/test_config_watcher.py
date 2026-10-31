@@ -607,6 +607,45 @@ async def test_reload_with_invalid_channels_entry_changes_nothing(tmp_path, capl
     assert "agent defaults still applied" not in caplog.text
 
 
+async def test_reload_with_unknown_channel_key_changes_nothing(tmp_path, caplog):
+    """#205 R3: a reload that adds channels.<id>.max_tokens is refused whole:
+    the ERROR names the key and agent_defaults stays as it was."""
+    from corvidae.channel import ChannelRegistry
+    from corvidae.config_watcher import ConfigWatcherPlugin
+
+    config_file = tmp_path / "agent.yaml"
+    config_file.write_text(
+        "llm:\n  main:\n    base_url: http://localhost\n    model: m\n"
+        "agent:\n  max_turns: 99\n"
+        "channels:\n  'irc:#new':\n    max_tokens: 200\n"
+    )
+    saved_class_defaults = ChannelRegistry.agent_defaults
+    registry = ChannelRegistry({"max_turns": 5})
+    pm = MagicMock()
+    pm.hook.on_config_reload.get_hookimpls.return_value = []
+    pm.get_plugin.return_value = registry
+    plugin = ConfigWatcherPlugin()
+    await plugin.on_init(
+        pm=pm,
+        config={
+            "_config_path": config_file,
+            "_cli_overrides": {},
+            "llm": {"main": {"base_url": "http://localhost", "model": "m"}},
+        },
+    )
+    try:
+        with caplog.at_level(logging.ERROR, logger="corvidae.config_watcher"):
+            await plugin._reload_config()
+        assert registry.agent_defaults == {"max_turns": 5}
+        assert registry.get("irc:#new") is None
+        assert registry.wide_entries == ()
+    finally:
+        ChannelRegistry.agent_defaults = saved_class_defaults
+    errors = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+    assert any("channels.irc:#new.max_tokens" in m and "reload skipped" in m
+               for m in errors), errors
+
+
 async def test_reload_with_removed_daemon_key_is_rejected(tmp_path, caplog):
     """R12: _reload_config rejects a reload that carries a removed daemon
     idle key: it logs the key, leaves agent_defaults alone and dispatches

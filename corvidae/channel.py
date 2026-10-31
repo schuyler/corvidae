@@ -118,10 +118,24 @@ def validate_agent_config(agent: dict) -> None:
     parse_forks_config(agent)
 
 
+#: The keys a ``channels:`` entry (exact or transport-wide) accepts; any other
+#: key is rejected (#205). Keep in step with the ChannelConfig fields below.
+CHANNEL_ENTRY_KEYS: tuple[str, ...] = (
+    "system_prompt", "max_context_tokens", "max_turns", "reasoning_history", "tools",
+)
+
+#: Longest repr of a rejected value printed in an error message.
+_MAX_VALUE_REPR = 60
+
+
 @dataclass
 class ChannelConfig:
     """Per-channel configuration. Falls back to agent-level defaults
-    for any field set to None."""
+    for any field set to None.
+
+    A new config-settable field must also be added to CHANNEL_ENTRY_KEYS,
+    or the entry that sets it is rejected as an unknown key.
+    """
 
     system_prompt: str | list[str] | None = None
     max_context_tokens: int | None = None
@@ -392,6 +406,14 @@ class ChannelRegistry:
         return [c for c in self.channels.values() if c.transport == transport]
 
 
+def _short_repr(value: object) -> str:
+    """repr(value), cut to _MAX_VALUE_REPR characters for error messages."""
+    text = repr(value)
+    if len(text) > _MAX_VALUE_REPR:
+        return text[: _MAX_VALUE_REPR - 3] + "..."
+    return text
+
+
 @dataclass(frozen=True)
 class ParsedChannels:
     """The validated result of parse_channel_config, ready to apply.
@@ -417,8 +439,9 @@ def parse_channel_config(config: dict) -> ParsedChannels:
     Raises:
         ValueError: If a channel key does not contain a colon separator, a
             transport-wide key is malformed, or an entry is not a mapping,
-            uses the removed keep_thinking_in_history key, an invalid
-            reasoning_history value, or a malformed tools block.
+            uses the removed keep_thinking_in_history key, an unknown key
+            (#205), an invalid reasoning_history value, or a malformed tools
+            block.
     """
     channels_config = config.get("channels", {})
     parsed: list[tuple[str, str, str, ChannelConfig]] = []
@@ -445,6 +468,17 @@ def parse_channel_config(config: dict) -> ParsedChannels:
                 f"Channel config for {channel_id!r} must be a mapping, got {type(overrides).__name__!r}"
             )
         _check_reasoning_keys(overrides, f"channels.{channel_id}")
+        # Reject keys no layer reads, so a typo or a wished-for key is loud.
+        unknown = sorted(k for k in overrides if k not in CHANNEL_ENTRY_KEYS)
+        if unknown:
+            rejected = ", ".join(
+                f"channels.{channel_id}.{k} = {_short_repr(overrides[k])}"
+                for k in unknown
+            )
+            raise ValueError(
+                f"channels.{channel_id}: unknown key(s) {rejected}; "
+                f"accepted: {', '.join(CHANNEL_ENTRY_KEYS)}"
+            )
         channel_config = ChannelConfig(
             system_prompt=overrides.get("system_prompt"),
             max_context_tokens=overrides.get("max_context_tokens"),
