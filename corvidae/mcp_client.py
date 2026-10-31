@@ -27,18 +27,14 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
-import os
-import re
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 
+from corvidae.envref import EnvRefError, expand_env_refs
 from corvidae.hooks import CorvidaePlugin, hookimpl
 from corvidae.tool import Tool
 
 logger = logging.getLogger(__name__)
-
-# ${VAR} references in header values, substituted from the environment.
-_ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
 class McpHeaderEnvError(ValueError):
@@ -63,28 +59,22 @@ def _resolve_headers(name: str, headers: dict | None) -> dict[str, str] | None:
     for header, value in headers.items():
         # Substitute each ${VAR}; an unset, empty or multi-line one is a
         # config error.
-        def _lookup(match: re.Match, header: str = header) -> str:
-            var = match.group(1)
-            env_value = os.environ.get(var)
-            if not env_value:
+        try:
+            resolved[str(header)] = expand_env_refs(str(value))
+        except EnvRefError as exc:
+            if exc.reason == "multiline":
                 raise McpHeaderEnvError(
                     f"MCP server {name!r}: header {header!r} references "
-                    f"${{{var}}}, which is not set in the daemon's environment; "
-                    f"set {var} in the environment corvidae runs in and restart. "
-                    "Server skipped."
-                )
-            # CR, LF or NUL is illegal in a header, and httpx's error for it
-            # quotes the value into a logged traceback; refuse it here.
-            if any(ch in env_value for ch in "\r\n\0"):
-                raise McpHeaderEnvError(
-                    f"MCP server {name!r}: header {header!r} references "
-                    f"${{{var}}}, whose value contains a newline or NUL "
-                    f"(often a trailing newline); fix {var} in the daemon's "
+                    f"${{{exc.var}}}, whose value contains a newline or NUL "
+                    f"(often a trailing newline); fix {exc.var} in the daemon's "
                     "environment and restart. Server skipped."
-                )
-            return env_value
-
-        resolved[str(header)] = _ENV_REF.sub(_lookup, str(value))
+                ) from None
+            raise McpHeaderEnvError(
+                f"MCP server {name!r}: header {header!r} references "
+                f"${{{exc.var}}}, which is not set in the daemon's environment; "
+                f"set {exc.var} in the environment corvidae runs in and restart. "
+                "Server skipped."
+            ) from None
     return resolved
 
 
