@@ -2209,7 +2209,10 @@ reminder firing on a `signal:` channel injects through `on_notify`, and
 the reply leaves through the same `send` path as a reply to a person; it
 needs no inbound message to answer. The outstanding-reply count is guarded
 at zero for such a reply (`SignalPlugin._decrement_outstanding` never goes
-below 0), so an agent-started turn neither errors nor skews typing. This is
+below 0), so a reply that answers no message neither errors nor drives the
+count negative. The count can't tell which message a reply answers, though: a
+reminder reply that lands while a person's message is outstanding gives back
+that message's typing slot early (#101). This is
 [PRD §3.2.10](prd.md): a transport delivers every emission on a channel it
 owns, whatever originated the turn, and liveness and reply bookkeeping
 tolerate a reply that answers no outstanding message. Sending to a channel
@@ -2361,13 +2364,14 @@ against fake clients. The first real connection is the real test.
 Replies to agent-started turns on a Discord channel (a reminder, say) are
 delivered through the normal send path: `_deliver` resolves the destination
 from the channel id, so no inbound message is needed. The outstanding count
-is guarded at zero in `DiscordPlugin._decrement_outstanding`, as on Signal.
+is guarded at zero in `DiscordPlugin._decrement_outstanding`, as on Signal,
+with the same early typing-slot release (#101).
 Sending to a channel other than the turn's own is a separate capability,
 not provided by the transport: PRD §3.5.9 (operator allowlist that starts
 empty, plus a budget); see the scheduler's "Not in phase one: a
 `send_to_channel` tool" note and `docs/threat-model.md`.
 
-Out of scope: voice, slash commands, embeds, and attachments in either
+Out of scope: voice, slash commands, embeds, attachments in either
 direction, and reactions.
 
 ### Web (`channels/web.py`)

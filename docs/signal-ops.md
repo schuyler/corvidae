@@ -284,7 +284,7 @@ Behavior that looks like a bug and isn't:
 - **Reactions, quotes, edits, and delete-for-everyone** are ignored. None of
   them carry message text, so they fall out of the same filter.
 - **Outbound is text only.** The agent cannot send attachments.
-- **The bot has no way to message a channel on its own initiative.** A
+- **The bot can't message a different channel on its own.** A
   reminder or other agent-started turn on a Signal channel is delivered
   there, but a send to a different channel isn't implemented.
 - **Disappearing messages are stored like any other message**, with no
