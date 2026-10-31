@@ -489,9 +489,11 @@ filled in by `MemoryPlugin`, `AppraisalPlugin`, and `CritiquePlugin`
 through the writer API below, not by `OutcomeLogPlugin` itself.
 
 A message refused by a transport gate (an allowlist refusing a stranger)
-leaves no row: `on_message_rejected` skips any channel the
-`ChannelRegistry` does not hold, so refused senders cannot grow
-`exchange_log` or leave their channel id behind. Rejections on known
+leaves no row: both insert paths (`record_exchange` and `upsert_exchange`)
+skip any channel the `ChannelRegistry` does not hold, so no writer
+(`on_message_rejected`, appraisal's stage-1 persist, the gates) can grow
+`exchange_log` or leave a refused sender's channel id behind. With no
+registry plugin the guard fails open and records. Rejections on known
 channels (the engagement gate) keep their `gate: rejected` row, with a null
 `message_rowid`.
 

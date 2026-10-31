@@ -356,3 +356,63 @@ class TestRejectedRefusals:
             trace_id="t-noreg", sender="bob", text="hi",
         )
         assert await self._count(db, "t-noreg") == 1
+
+
+class _DenyTransport:
+    """Transport stand-in whose gate refuses every message (an allowlist)."""
+
+    from corvidae.hooks import hookimpl as _hookimpl
+
+    @_hookimpl
+    async def should_process_message(self, channel, sender, text, trace_id):
+        return False
+
+
+class TestUnregisteredChannelRefusals:
+    """#261 review: no writer may insert a row for a channel the registry never held."""
+
+    async def test_refused_stranger_leaves_no_row_in_any_writer(self, db, tmp_path):
+        from corvidae.channel import Channel, ChannelRegistry
+        from corvidae_cognition.appraisal import AppraisalPlugin
+        from corvidae_cognition.gates import GatePlugin
+
+        # Wire registry + outcome_log + appraisal + gates + a refusing transport.
+        plugin = await _setup(db)
+        pm = plugin.pm
+        pm.register(ChannelRegistry({}), name="registry")
+        cfg = {"daemon": {"session_db": str(tmp_path / "s.db")}}
+        appraisal = AppraisalPlugin()
+        pm.register(appraisal, name="appraisal")
+        await appraisal.on_init(pm=pm, config=cfg)
+        await appraisal.on_start(config=cfg)
+        gates = GatePlugin()
+        pm.register(gates, name="gates")
+        await gates.on_init(pm=pm, config=cfg)
+        pm.register(_DenyTransport(), name="deny")
+
+        # A stranger on a channel the registry does not hold is refused.
+        ch = Channel(transport="irc", scope="mallory")
+        await pm.ahook.should_process_message(
+            channel=ch, sender="mallory", text="hello there", trace_id="tr1"
+        )
+        await pm.ahook.on_message_rejected(
+            channel=ch, trace_id="tr1", sender="mallory", text="hello there"
+        )
+        # Let fire-and-forget persistence tasks finish.
+        for _ in range(20):
+            await asyncio.sleep(0.01)
+        await appraisal.on_stop()
+
+        async with db.execute("SELECT channel_id FROM exchange_log") as cursor:
+            rows = await cursor.fetchall()
+        assert rows == [], f"refused stranger left rows: {rows}"
+
+    async def test_direct_writers_skip_unregistered_channel(self, db):
+        from corvidae.channel import ChannelRegistry
+
+        plugin = await _setup(db)
+        plugin.pm.register(ChannelRegistry({}), name="registry")
+        await plugin.record_exchange("t1", "irc:mallory")
+        await plugin.upsert_exchange("t2", "irc:mallory", outcomes={"x": 1})
+        async with db.execute("SELECT count(*) FROM exchange_log") as cursor:
+            assert (await cursor.fetchone())[0] == 0

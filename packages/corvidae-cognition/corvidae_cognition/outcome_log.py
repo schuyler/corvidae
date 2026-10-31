@@ -90,6 +90,26 @@ class OutcomeLogPlugin(CorvidaePlugin):
         persistence = get_dependency(self.pm, "persistence", PersistencePlugin)
         return persistence.db
 
+    def _channel_is_known(self, channel_id: str, trace_id: str) -> bool:
+        """Return False when the registry never held channel_id (#261).
+
+        A transport gate refuses strangers on a transient channel the
+        registry never held. A row keyed on that id would grow exchange_log
+        without bound and keep a trace of a refused sender, and it feeds no
+        calibration. Every insert path (record_exchange, upsert_exchange)
+        asks this, so no writer (appraisal, gates, hooks) can leak one.
+        With no registry plugin, fail open and record, so a calibration row
+        is never lost.
+        """
+        registry = self.pm.get_plugin("registry")
+        if registry is not None and registry.get(channel_id) is None:
+            logger.debug(
+                "exchange_log: no row for unregistered channel %s (trace %s)",
+                channel_id, trace_id,
+            )
+            return False
+        return True
+
     async def _ensure_table(self) -> aiosqlite.Connection:
         """Create the exchange_log table on first use and return the DB.
 
@@ -155,19 +175,8 @@ class OutcomeLogPlugin(CorvidaePlugin):
 
     @hookimpl
     async def on_message_rejected(self, channel, trace_id: str, sender: str, text: str) -> None:
-        # A transport gate refuses strangers on a transient channel the
-        # registry never held (#261). Writing a row keyed on that id grows
-        # exchange_log without bound and keeps a trace of a refused sender,
-        # and the row feeds no calibration. Rejections on known channels
-        # (the engagement gate) keep theirs. With no registry plugin
-        # available, fail open and record, so a calibration row is never lost.
-        registry = self.pm.get_plugin("registry")
-        if registry is not None and registry.get(channel.id) is None:
-            logger.debug(
-                "exchange_log: no row for transport-refused message on %s (trace %s)",
-                channel.id, trace_id,
-            )
-            return
+        # Unregistered (transport-refused) channels are skipped by the
+        # writers themselves; the update below is a no-op without a row.
         try:
             await self.record_exchange(trace_id, channel.id, origin="user")
             await self.update_exchange(trace_id, outcomes={"gate": "rejected"})
@@ -209,6 +218,8 @@ class OutcomeLogPlugin(CorvidaePlugin):
             message_rowid: message_log.id of the originating message; None
                 for gate-rejected exchanges.
         """
+        if not self._channel_is_known(channel_id, trace_id):
+            return
         db = await self._ensure_table()
         await db.execute(
             "INSERT OR IGNORE INTO exchange_log "
@@ -313,6 +324,8 @@ class OutcomeLogPlugin(CorvidaePlugin):
             ValueError: Same as update_exchange.
         """
         self._validate_columns(columns)
+        if not self._channel_is_known(channel_id, trace_id):
+            return
         db = await self._ensure_table()
         await db.execute(
             "INSERT OR IGNORE INTO exchange_log "
