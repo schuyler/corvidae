@@ -1103,8 +1103,12 @@ quiet `period` seconds. `watch_system(period, cb)` calls `cb()` once the
 whole system has been. Both return an `IdleWatch` with `cancel()`. A watch
 repeats every `repeat` seconds (default `period`) while the quiet lasts, and
 only if nothing became active while the callback ran. Activity cancels the
-waiting timers. A callback never starts a turn or enqueues anything; it
-does plugin-owned work (principle 13).
+waiting timers. An upkeep callback (consolidation, retention) never starts
+a turn or enqueues anything; it does plugin-owned work. The one agency
+watcher, cognition's `HeartbeatPlugin`, starts a turn from its system
+watch through `on_notify` (principle 13; [cognition.md](cognition.md#heartbeatplugin)).
+A callback that awaits before acting can call `system_quiet()` to re-check
+that no channel went busy in the meantime.
 
 This is a registration API, not a hook. A hook cannot carry per-plugin
 periods, and a broadcast with a global cooldown starves any plugin whose
@@ -1569,14 +1573,16 @@ validation fails at startup.
 
 ## SchedulerPlugin
 
-`scheduler.py` — the clock-driven producer: reminders, operator-declared
-periodic jobs, and the heartbeat (#59; design rationale in
+`scheduler.py` — the clock-driven producer: reminders and operator-declared
+periodic jobs (#59; design rationale in
 `plans/scheduler.md`). Entry point name: `"scheduler"`;
 `depends_on = {"registry", "persistence", "clock"}`.
 
 **Rows.** One `schedule` table on the persistence connection. A row is a
 due time, an optional interval, a target channel id, the text, and an
-origin (`reminder` or `heartbeat`). Reminders come from the `remind_me`
+origin (`reminder`; `heartbeat` is still accepted so old configs load, but
+the heartbeat is now cognition's `HeartbeatPlugin`, started on system idle).
+Reminders come from the `remind_me`
 tool and are pinned to the calling channel. Jobs come from
 `scheduler.jobs` in `agent.yaml` and are synced by `name`.
 
@@ -1585,7 +1591,7 @@ CREATE TABLE schedule (
   id INTEGER PRIMARY KEY,
   name TEXT UNIQUE,            -- config jobs only; NULL for tool-created rows
   channel_id TEXT NOT NULL,    -- "transport:scope", the persistence key
-  origin TEXT NOT NULL,        -- 'reminder' | 'heartbeat'
+  origin TEXT NOT NULL,        -- 'reminder' ('heartbeat' accepted for old configs)
   text TEXT NOT NULL,          -- the objective, as the agent or operator wrote it
   next_fire_at REAL NOT NULL,  -- unix seconds, UTC
   interval_seconds REAL,       -- NULL means one-shot
@@ -1630,8 +1636,8 @@ await pm.ahook.on_notify(
 
 From there the normal pipeline runs: serial queue, persistence,
 origin-keyed consumers, attribution, and `send`, whose reply on the
-row's channel is the unprompted message. A heartbeat on a channel no
-transport owns (`internal:heartbeat`) reaches the log and persistence
+row's channel is the unprompted message. A job on a channel no
+transport owns (such as `internal:notes`) reaches the log and persistence
 only, because `TransportPlugin.send` delivers only to the transport that
 owns a channel. The originating notification resets `turn_counter`
 (step 3 of [Message processing](#message-processing)).
@@ -1645,7 +1651,7 @@ owns a channel. The originating notification resets `turn_counter`
 quote. Config jobs read `Scheduled job "<name>" (set by the operator,
 every <interval>) is due. Job prompt: «...». ...`. A late catch-up firing
 is prefixed `[overdue by 42m, daemon was down]`. The row is stored as
-`role: system` with the `[reminder]`/`[heartbeat]` prefix like any
+`role: system` with the `[reminder]` prefix like any
 notification, and rendered under `agent.mid_conversation_system_role`
 (`user` on templates that reject a non-leading system message). No role
 parameter was added to `on_notify`.
@@ -2557,12 +2563,14 @@ scheduler:
   catch_up_window: 3600         # seconds a missed one-shot may be late and still fire
   max_reminders_per_channel: 50 # pending tool-created reminders per channel
   jobs:                         # operator-declared recurring jobs, synced by name
-    - name: heartbeat
-      channel: internal:heartbeat
-      origin: heartbeat         # reminder (default) | heartbeat
-      every: 6h                 # required
+    - name: morning-checkin
+      channel: irc:#lex
+      every: 1d                 # required
       at: "08:00"               # optional anchor: HH:MM or ISO datetime
-      prompt: "..."             # or prompt_file: prompts/heartbeat.md
+      prompt: "..."             # or prompt_file: a path relative to agent.yaml
+
+heartbeat:
+  after: 3600                   # seconds of system quiet before a beat; absent = asleep
 
 funnel:
   default_budget: 512           # tokens per admission-funnel call
@@ -2685,6 +2693,7 @@ MemoryToolsPlugin   → "memory"      (MemoryPlugin)                            
 CritiquePlugin      → "task", "llm"; soft-uses "agent" for forks                  (cognition extra)
 OutcomeLogPlugin    → "persistence"                                               (cognition extra)
 AppraisalPlugin     → "persistence"; soft-uses "agent" for forks                  (cognition extra)
+HeartbeatPlugin     → "idle", "registry"; needs "memory" only when awake          (cognition extra)
 UsageLogPlugin      → "persistence"
 SchedulerPlugin     → "registry", "persistence", "clock"
 ```

@@ -520,6 +520,38 @@ What it doesn't protect against, so you know:
   `message_rowid` is NULL, the JSONL logs and the daemon log, and any
   copy taken out of `sessions.db` (a calibration export, a backup).
 
+### 11. The heartbeat acts on memory with nobody watching (opt-in)
+
+`HeartbeatPlugin` (#134; off unless `heartbeat.after` is set) starts a
+turn on `internal:heartbeat` after a quiet spell. The turn carries the
+agent's recent memory summaries and runs with the agent's normal tools.
+Memory summaries are distilled from conversation, so text an untrusted
+speaker wrote can reach a tool-using turn hours later, when no person is
+in the loop to notice. This is finding 3 and finding 7 again with the
+human removed. What bounds it:
+
+- **Reach.** No transport owns `internal:heartbeat`, so the beat's replies
+  go to `sessions.db` and the logs only. There is no cross-channel send
+  yet (PRD §3.5.9, #169), so a beat can't message anyone. Its tools are
+  another matter: `shell`, `web_fetch` and `write_file` are as available
+  to a beat as to any turn (finding 4). Drop them for the beat with
+  `channels.internal:heartbeat.tools.disabled`.
+- **Scope.** The beat reviews only the channels grouped with
+  `internal:heartbeat` in `memory.channel_groups`, never its own earlier
+  beats. With no group it sees nothing. Group membership works both ways:
+  what a beat's turn consolidates into memory, including anything its tools
+  fetched, becomes retrievable from every channel in the group. Keep
+  channels with untrusted participants out of the heartbeat's group, or
+  disable the beat's network tools.
+- **Framing.** The summaries are presented as the agent's own and as data
+  to review, not instructions. The framing is soft, as everywhere else.
+- **Rate.** At most one beat per `heartbeat.after` seconds of quiet, and
+  none during traffic. Each beat costs a main-model turn.
+- **Sleep.** Removing `heartbeat.after` and restarting stops it, and it
+  stays stopped. `agent.yaml` is the record, so finding 4's mitigation
+  applies: a model that can write `agent.yaml` can wake it at the next
+  restart. Keep the file unwritable by the daemon user.
+
 ## Privilege separation
 
 There isn't any. Transports, the LLM loop, tool execution, the SQLite

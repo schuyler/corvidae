@@ -1,4 +1,4 @@
-"""SchedulerPlugin — reminders, periodic jobs, and the heartbeat (#59).
+"""SchedulerPlugin — reminders and periodic jobs (#59).
 
 The clock-driven producer: one ``schedule`` table in the persistence
 database, one asyncio timer task, and three tools. A due row fires as a
@@ -20,12 +20,14 @@ Config:
       catch_up_window: 3600           # seconds a missed one-shot may be late and still fire
       max_reminders_per_channel: 50
       jobs:
-        - name: heartbeat             # unique; the sync key across reloads
-          channel: internal:heartbeat
-          origin: heartbeat           # 'reminder' (default) | 'heartbeat'
-          every: 6h                   # required
+        - name: morning-checkin       # unique; the sync key across reloads
+          channel: irc:#lex
+          origin: reminder            # the default; 'heartbeat' is still accepted
+                                      # for old configs (the heartbeat is now
+                                      # cognition's HeartbeatPlugin, #134)
+          every: 1d                   # required
           at: "08:00"                 # optional anchor: HH:MM or ISO datetime
-          prompt: "..."               # or prompt_file: prompts/heartbeat.md
+          prompt: "..."               # or prompt_file: a path relative to agent.yaml
 
 Logging:
     - INFO: row fired, config job inserted/updated/disabled, catch-up decisions
@@ -440,7 +442,7 @@ def parse_job(raw: object, base_dir: Path) -> JobSpec:
 
 
 class SchedulerPlugin(CorvidaePlugin):
-    """Clock-driven producer of reminder and heartbeat notifications.
+    """Clock-driven producer of reminder and operator-job notifications.
 
     Attributes:
         _clock: The kernel clock, resolved from the plugin manager in on_init.

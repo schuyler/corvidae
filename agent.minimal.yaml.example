@@ -1,5 +1,5 @@
 # Minimal profile — the cognition plugin set (long-term memory, appraisal,
-# critique, and the engagement/decide gates) disabled. A kernel-only install (`uv sync` without
+# critique, the engagement/decide gates, and the heartbeat) disabled. A kernel-only install (`uv sync` without
 # `--extra cognition`) doesn't have those plugins, so it needs no disable
 # list; the list below is for installs that have the extra.
 #
@@ -34,3 +34,4 @@ plugins:
     - critique
     - outcome_log
     - gates
+    - heartbeat

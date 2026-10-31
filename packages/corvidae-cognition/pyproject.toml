@@ -20,6 +20,7 @@ outcome_log = "corvidae_cognition.outcome_log:OutcomeLogPlugin"
 appraisal = "corvidae_cognition.appraisal:AppraisalPlugin"
 critique = "corvidae_cognition.critique:CritiquePlugin"
 gates = "corvidae_cognition.gates:GatePlugin"
+heartbeat = "corvidae_cognition.heartbeat:HeartbeatPlugin"
 
 [tool.uv.sources]
 corvidae = { workspace = true }

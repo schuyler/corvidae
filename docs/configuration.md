@@ -59,7 +59,7 @@ channels:
 |-----|------|---------|-------------|
 | `plugins.disabled` | list of strings | `[]` | Entry-point plugin names to block from loading. `Runtime.start()` calls `pm.set_blocked(name)` for each entry before entry points are loaded; blocked plugins are never instantiated. Names must match the entry-point name from `[project.entry-points.corvidae]` in `pyproject.toml` (e.g. `memory`, `funnel`, `appraisal`, `critique`, `outcome_log`, `memory_tools`, `subagent`, `mcp`, `cli`). Only entry-point plugins can be disabled this way — manually registered plugins cannot be blocked via config. A null `plugins:` or `disabled:` means nothing is disabled; any other non-list value (a bare string, say) or a non-string entry fails startup with a `Config error` naming the key and value. |
 
-`agent.minimal.yaml.example` disables `memory`, `memory_tools`, `funnel`, `appraisal`, `critique`, and `outcome_log` — the cognition plugin set — leaving the core agent loop, multi-turn tool calling, compaction, and persistence/restart recovery intact. See the [Plugin Guide](plugin-guide.md#plugin-disable) for the hook-level mechanics.
+`agent.minimal.yaml.example` disables `memory`, `memory_tools`, `funnel`, `appraisal`, `critique`, `outcome_log`, `gates` and `heartbeat` — the cognition plugin set — leaving the core agent loop, multi-turn tool calling, compaction, and persistence/restart recovery intact. See the [Plugin Guide](plugin-guide.md#plugin-disable) for the hook-level mechanics.
 
 A misspelled entry is not an error — `pm.set_blocked` on a name that matches nothing simply blocks nothing, and the daemon starts normally with the plugin still loaded. To confirm a disable took effect, check the `"plugins loaded"` line the daemon logs at startup: it carries `loaded` (the plugins that actually registered) and `blocked` (this list, verbatim). A name present in `blocked` but still showing up in `loaded` is a typo.
 
@@ -336,9 +336,9 @@ The retention score formula is `importance × (1 + 0.5 × log1p(retrieval_count)
 
 ---
 
-## `scheduler` — reminders, periodic jobs, heartbeat
+## `scheduler` — reminders and periodic jobs
 
-`SchedulerPlugin` fires due rows of its `schedule` table into their channels as notifications (see [design.md](design.md#schedulerplugin)). The agent creates one-shot reminders with the `remind_me` tool, always on the channel it is talking on; the operator declares recurring jobs, including the heartbeat, here. The block is optional: without it the tools still work, in UTC, with the defaults below.
+`SchedulerPlugin` fires due rows of its `schedule` table into their channels as notifications (see [design.md](design.md#schedulerplugin)). The agent creates one-shot reminders with the `remind_me` tool, always on the channel it is talking on; the operator declares recurring jobs here. The heartbeat is no longer a scheduler job: it is its own plugin, started on system idle (see [`heartbeat`](#heartbeat--a-turn-on-system-idle)). The block is optional: without it the tools still work, in UTC, with the defaults below.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
@@ -352,8 +352,8 @@ Each job:
 | Key | Required | Description |
 |-----|----------|-------------|
 | `name` | yes | Unique; the sync key. Renaming a job disables the old row and creates a new one. |
-| `channel` | yes | `transport:scope` to fire into. Any channel, including one no transport owns, such as `internal:heartbeat`, whose replies go to the log and `sessions.db` only. |
-| `origin` | no | `reminder` (default) or `heartbeat`; becomes the `[origin]` notification prefix and `meta["origin"]`. |
+| `channel` | yes | `transport:scope` to fire into. Any channel, including one no transport owns, such as `internal:notes`, whose replies go to the log and `sessions.db` only. |
+| `origin` | no | `reminder` (default); becomes the `[origin]` notification prefix and `meta["origin"]`. `heartbeat` is still accepted so old configs load, but a scheduler heartbeat is superseded by the [`heartbeat`](#heartbeat--a-turn-on-system-idle) plugin; delete the job when you enable the plugin, or both will run turns on `internal:heartbeat`. |
 | `every` | yes | Interval: `30s`, `20m`, `6h`, `1d`, `7d`, `1h30m`, or a number of seconds. |
 | `at` | no | Anchor. `HH:MM`: the first fire is the next such time, then every `every`. An ISO datetime: slots are that instant plus multiples of `every` (`every: 7d` with `at: "2026-10-16T09:00"`, a Friday, is every Friday at 09:00). Without it, the first fire is one interval after the job is first synced. |
 | `prompt` / `prompt_file` | one of them | The job's text. `prompt_file` is relative to the directory holding `agent.yaml`. |
@@ -364,15 +364,40 @@ The next fire time is computed from the scheduled time, not the fire time, so jo
 scheduler:
   timezone: America/Los_Angeles
   jobs:
-    - name: heartbeat
-      channel: internal:heartbeat
-      origin: heartbeat
-      every: 6h
-      at: "08:00"
-      prompt_file: prompts/heartbeat.md
+    - name: weekly-review
+      channel: irc:#lex
+      every: 7d
+      at: "2026-10-16T09:00"
+      prompt: "Post a short summary of what we worked on this week."
 ```
 
-A heartbeat costs a main-model turn per beat on the shared backend; keep the interval in hours. The firing text is framed as data for the model to judge ("Decide whether and how to act on it"), not as an order.
+A job costs a main-model turn per firing on the shared backend; keep intervals in hours. The firing text is framed as data for the model to judge ("Decide whether and how to act on it"), not as an order.
+
+---
+
+## `heartbeat` — a turn on system idle
+
+`HeartbeatPlugin` (cognition) starts a turn when the whole system has been quiet for a while: no channel has had inbound work for `heartbeat.after` seconds. The turn runs on `internal:heartbeat`, a channel no transport owns, so nothing it writes there reaches anyone. Its prompt asks the agent to review its recent memories and act only if something warrants it (see [cognition.md](cognition.md#heartbeatplugin)). The block is optional, and without it the heartbeat is asleep.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `heartbeat.after` | number (seconds) | none | Seconds of system-wide quiet before a beat, and the minimum gap between beats: each beat makes the system busy, so the next one comes `after` seconds after it settles. Traffic on any channel cancels the pending beat and starts the count again. Absent, `null`, or an empty `heartbeat:` block: the heartbeat is asleep. Zero, negative, non-finite, boolean or non-numeric values fail startup with a `ValueError` naming the key and the value. Read at startup only. |
+
+**Sleep.** The heartbeat sleeps whenever `heartbeat.after` is absent. To put it to sleep, delete or comment out the block and restart; it stays asleep across every restart after that, because `agent.yaml` is the record. `plugins.disabled: [heartbeat]` does the same. Reloading the config doesn't wake it or put it to sleep; restart.
+
+**Memory.** Setting `heartbeat.after` requires the `memory` plugin; with memory disabled, startup fails with a message saying so. The beat reviews the most recent memories (up to 20) of the *other* channels in its memory scope, newest first, never its own. Memory is compartmented per channel, so with no `memory.channel_groups` entry for `internal:heartbeat` it has nothing to review. Put it in a group with the channels it should look after:
+
+```yaml
+heartbeat:
+  after: 3600           # an hour of quiet
+memory:
+  channel_groups:
+    lex: [internal:heartbeat, "irc:#lex", "signal:*"]
+```
+
+Group membership works both ways, so the other channels in the group can retrieve the memories consolidated from beats too (see [threat-model.md](threat-model.md)).
+
+**Cost.** Each beat is a main-model turn on the shared backend. A beat waits for quiet, so it never competes with a conversation, but a short `after` keeps the system from staying quiet long enough for memory retention's 60-second quiet window; retention then runs on its `max_delay` instead.
 
 ---
 
@@ -730,6 +755,7 @@ No restart is required for the changes listed below. Changes that require restar
 | Existing exact entries in `channels:` | Channels already registered retain their original `ChannelConfig` until restart, except `tools.disabled` (above). Transport-wide entries are live (above). |
 | `llm.background` | Not updated on reload. |
 | `memory.*` (including `memory.consolidation_prompt` and `memory.consolidation_fork_prompt`) | `MemoryPlugin` reads its section at init only. That includes `memory.idle_consolidate_after` and `memory.retention.*`: the idle watch and retention timer are set when the plugin starts. |
+| `heartbeat.after` | `HeartbeatPlugin` reads it at init and registers its idle watch at start. Putting the heartbeat to sleep or waking it takes a restart. |
 | `tools.max_result_chars`, `tools.shell_timeout`, `tools.web_fetch_timeout` | Deferred; not currently implemented in hot-reload path. |
 
 ### Error handling

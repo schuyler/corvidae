@@ -15,6 +15,7 @@ _COGNITION_PLUGIN_CLASSES = [
     "corvidae_cognition.memory.MemoryPlugin",
     "corvidae_cognition.funnel.FunnelPlugin",
     "corvidae_cognition.gates.GatePlugin",
+    "corvidae_cognition.heartbeat.HeartbeatPlugin",
 ]
 
 

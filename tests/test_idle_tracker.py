@@ -364,3 +364,19 @@ def test_validate_daemon_config_rejects_removed_keys_with_remedy(key):
 
     # Config without the removed keys is accepted.
     validate_daemon_config({"session_db": "sessions.db"})
+
+
+async def test_system_quiet_reports_whether_any_channel_is_busy(kernel_clock):
+    """R3: system_quiet() is the system half of the idle signal, for a
+    watcher that awaits inside its callback and must re-check before acting."""
+    clock, idle = kernel_clock
+    # Quiet since start(), with nothing tracked yet.
+    assert idle.system_quiet()
+    idle.note_activity("irc:#a")
+    assert not idle.system_quiet()
+    idle.note_activity("irc:#b")
+    idle.note_settled("irc:#a")
+    # Channel b is still busy.
+    assert not idle.system_quiet()
+    idle.note_settled("irc:#b")
+    assert idle.system_quiet()

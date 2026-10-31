@@ -203,6 +203,19 @@ class IdleTracker:
         return watch
 
     # ------------------------------------------------------------------
+    # Queries
+    # ------------------------------------------------------------------
+
+    def system_quiet(self) -> bool:
+        """True when no tracked channel is busy.
+
+        For a system watcher that awaits inside its callback: the tracker
+        checks quiet only before calling it, so a callback that acts after
+        an await re-checks here first.
+        """
+        return not self._any_busy()
+
+    # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
 
