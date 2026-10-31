@@ -1922,10 +1922,16 @@ call also runs a retry round as a fast path. One `asyncio.Lock` serialises
 rounds, and a tool call that finds it held skips rather than wait out a
 handshake, so the loop and a tool call never connect a server twice. A
 successful retry rebuilds the cached tool list and the shared registry, and the
-running Agent re-reads it on its next turn (#109). Config
-errors (`McpHeaderEnvError`, `ValueError`, `KeyError` from
-`_parse_server_config`, which runs before any transport opens) are reported
-once and never queued. `on_stop` sets a stopping flag, cancels the loop, then
+running Agent re-reads it on its next turn (#109). Config errors (any exception
+from `_parse_server_config`, which runs before any transport opens:
+`McpHeaderEnvError`, `ValueError` for a wrong type or non-finite timeout,
+`KeyError` for a missing key) are reported once, naming
+`mcp.servers.<name>.<key>` and the value, and never queued. A malformed
+top-level block (`mcp` not a mapping, `mcp.servers` neither null nor a mapping)
+is caught by `validate_mcp_config`, which `Runtime.start()` runs with the other
+config checks (skipped when `mcp` is in `plugins.disabled`) and `on_init` runs
+again, so it exits with a `Config error` instead of an AttributeError.
+`on_stop` sets a stopping flag, cancels the loop, then
 stops the owners; a connect still in flight (loop or tool call) that finishes
 after the flag is set tears its owner down instead of registering it.
 
