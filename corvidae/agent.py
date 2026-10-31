@@ -1252,8 +1252,9 @@ class Agent(CorvidaePlugin):
         if task_queue is None:
             logger.error(
                 "Tool calls %s requested on %s but no task queue is available "
-                "— enable the `task` plugin (remove it from plugins.disabled "
-                "in agent.yaml)",
+                "— the `task` plugin is registered but has no task_queue: check "
+                "that TaskPlugin.on_start ran before dispatch, and that the "
+                "plugin registered as 'task' is TaskPlugin",
                 [call["function"]["name"] for call in tool_calls],
                 channel.id,
                 extra={"channel": channel.id},

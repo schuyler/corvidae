@@ -771,7 +771,8 @@ async def _no_queue_setup(
     persistence._registry = registry
     pm.register(persistence, name="persistence")
     if peer_first:
-        # Registered first, so pluggy calls it after the Agent's impl.
+        # Registration order does not matter: apluggy gathers hookimpls, so the
+        # Agent's on_notify queues the result before the peer's raise lands.
         pm.register(_RaisingNotifier(), name="raiser")
     plugin = Agent(pm)
     pm.register(plugin, name="agent")

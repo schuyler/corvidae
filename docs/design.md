@@ -889,7 +889,9 @@ TaskPlugin delivers it via `on_notify`.
 
 `TaskPlugin` is declared in `Agent.depends_on`. Without a task queue,
 tool dispatch logs an error naming the channel and the requested tools (with
-the remedy: enable the `task` plugin) and sends an error result for each call
+the remedy: the `task` plugin is registered, since startup requires it, but
+has no queue, so check that `TaskPlugin.on_start` ran and that the plugin
+registered as `task` is `TaskPlugin`) and sends an error result for each call
 through `on_notify`. If that broadcast raises for a call, dispatch logs a
 WARNING with the channel, tool call id and tool name, and falls back to
 `Agent.deliver_tool_error` (#110). One call's failure does not stop the rest
