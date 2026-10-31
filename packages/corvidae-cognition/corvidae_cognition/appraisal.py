@@ -31,13 +31,12 @@ import re
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
-import aiosqlite
-
 from corvidae.attribution import reset_attribution, set_attribution
 from corvidae.fork import fork_agent, quote, window_db_ids
 from corvidae.hooks import CorvidaePlugin, hookimpl
 from corvidae.task import Task
 from corvidae.tuning import config_value, resolve_tunable
+from corvidae_cognition.probe import ReadOnlyProbe
 
 # Named explicitly: corvidae/logging.py configures the "corvidae" logger,
 # and __name__ would be corvidae_cognition.appraisal.
@@ -501,7 +500,8 @@ class AppraisalPlugin(CorvidaePlugin):
         # Strong refs to fire-and-forget persist tasks — prevents a
         # GC-dropped write mid-flight (trap #10).
         self._persist_tasks: set[asyncio.Task] = set()
-        self._probe_db: aiosqlite.Connection | None = None
+        # Lazy memory_fts probe; built in on_start (None until then).
+        self._probe: ReadOnlyProbe | None = None
         # Last-completed stage-2 vector per channel — the synchronous
         # advisory reader (get_last_stage2). Consumers never wait for the
         # CURRENT exchange's stage-2 (WP2.5 point 2).
@@ -534,37 +534,22 @@ class AppraisalPlugin(CorvidaePlugin):
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
-        """Open the dedicated read-only probe connection.
+        """Build the lazy read-only memory_fts probe (it opens nothing here).
 
         The DB path comes from the same config key PersistencePlugin reads.
-        Missing DB or missing memory_fts degrades to no-probe with one
-        WARNING — the vector is then built from surface heuristics alone.
+        The connection opens on first use and retries at a bounded rate;
+        while the DB or memory_fts is missing each attempt logs a WARNING
+        and the vector is built from surface heuristics alone.
         """
         db_path = config.get("daemon", {}).get("session_db", "sessions.db")
         base_dir = config.get("_base_dir", Path("."))
         db_path = str(Path(base_dir) / db_path)
-        try:
-            self._probe_db = await aiosqlite.connect(
-                f"file:{db_path}?mode=ro", uri=True
-            )
-            # Verify the FTS table is queryable up front so per-message
-            # probes don't discover the miss one WARNING at a time.
-            async with self._probe_db.execute(
-                "SELECT name FROM sqlite_master WHERE name = 'memory_fts'"
-            ) as cursor:
-                row = await cursor.fetchone()
-            if row is None:
-                await self._probe_db.close()
-                self._probe_db = None
-                logger.warning(
-                    "appraisal probe disabled: memory_fts missing in %s", db_path
-                )
-        except Exception:
-            self._probe_db = None
-            logger.warning(
-                "appraisal probe disabled: cannot open %s read-only",
-                db_path, exc_info=True,
-            )
+        # The connection opens lazily on first use and retries at a bounded
+        # rate, so a memory_fts created after startup is picked up (#237).
+        self._probe = ReadOnlyProbe(
+            db_path, "memory_fts", "appraisal",
+            "stage-1 novelty uses no_probe_default until memory_fts exists",
+        )
 
         # Install the appraisal-driven importance prior over MemoryPlugin's
         # default (§3.2 consumer 3). Fail-soft when memory is absent — the
@@ -577,9 +562,9 @@ class AppraisalPlugin(CorvidaePlugin):
 
     @hookimpl
     async def on_stop(self) -> None:
-        if self._probe_db is not None:
-            await self._probe_db.close()
-            self._probe_db = None
+        # Close the probe connection; later get() calls open nothing.
+        if self._probe is not None:
+            await self._probe.close()
         # Let in-flight persists finish rather than abandoning writes. Loop
         # until the set drains: a compute finishing between snapshots can
         # spawn a persist task a single gather would miss (dropped write +
@@ -1056,7 +1041,7 @@ class AppraisalPlugin(CorvidaePlugin):
         db = getattr(persistence, "db", None)
         if db is not None:
             return db
-        return self._probe_db
+        return self._probe.connection if self._probe is not None else None
 
     # ------------------------------------------------------------------
     # Internals
@@ -1120,7 +1105,10 @@ class AppraisalPlugin(CorvidaePlugin):
         cfg = self.config
 
         familiarity: float | None = None
-        if self._probe_db is not None:
+        # The open (and its retry throttle) happens here, outside the
+        # probe.budget_ms timeout, which covers only the query.
+        probe_db = await self._probe.get() if self._probe is not None else None
+        if probe_db is not None:
             budget_ms = resolve_tunable(
                 channel, cfg, "appraisal.probe.budget_ms", PROBE_BUDGET_MS_DEFAULT
             )
@@ -1178,7 +1166,8 @@ class AppraisalPlugin(CorvidaePlugin):
         probe is FTS5-only by design: sqlite-vec is brute-force exact KNN,
         so a "coarse vector probe" would cost the same as full retrieval.
         """
-        if self._probe_db is None:
+        db = self._probe.connection if self._probe is not None else None
+        if db is None:
             return None
         max_tokens = resolve_tunable(
             channel, self.config, "appraisal.probe.max_tokens", PROBE_MAX_TOKENS_DEFAULT
@@ -1187,7 +1176,7 @@ class AppraisalPlugin(CorvidaePlugin):
         if not tokens:
             return None
         match_expr = " OR ".join(f'"{t}"' for t in tokens)
-        async with self._probe_db.execute(
+        async with db.execute(
             "SELECT rank FROM memory_fts WHERE memory_fts MATCH ? ORDER BY rank LIMIT 3",
             (match_expr,),
         ) as cursor:
@@ -1249,7 +1238,7 @@ class AppraisalPlugin(CorvidaePlugin):
             cached = self._cache.get((trace_id, direction))
             if cached is not None:
                 return cached
-        db = self._probe_db
+        db = self._probe.connection if self._probe is not None else None
         if db is None:
             # Fall back to the persistence connection for the read; the
             # pure readers are not latency-critical.

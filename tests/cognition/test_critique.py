@@ -265,7 +265,7 @@ class TestSessionDbBaseDirResolution:
         await plugin.on_start(config=cfg)
 
         try:
-            assert plugin._probe_db is not None, (
+            assert await plugin._probe.get() is not None, (
                 "message_fts probe failed to open -- the relative "
                 "session_db path did not resolve against _base_dir"
             )
@@ -864,8 +864,8 @@ class TestProvenanceEvidence:
         env = await _provenance_env(tmp_path)
         try:
             await _begin_exchange(env, "kpr", origin_rowid=50)
-            await env.plugin._probe_db.close()
-            env.plugin._probe_db = None
+            # A closed probe is the real disable: get() returns None.
+            await env.plugin._probe.close()
             with caplog.at_level("WARNING", logger="corvidae.critique"):
                 evidence = await env.plugin._gather_evidence(env.channel, "kpr", [CLAIM])
             assert evidence is None
@@ -1107,7 +1107,7 @@ async def _real_path_env(tmp_path, replies, past_claims):
     for p in plugins:
         await p.on_start(config=cfg)
     critique = plugins[1]
-    assert critique._probe_db is not None
+    assert await critique._probe.get() is not None
 
     gathered: dict[str, list] = {}
     real_gather = critique._gather_evidence
@@ -1299,3 +1299,77 @@ class TestNoReplyVeto:
 
     async def test_other_text_has_no_opinion(self):
         assert await self._verdict(text="The deadline is Thursday.") is None
+
+
+# ---------------------------------------------------------------------------
+# Lazy message_fts probe (#159)
+# ---------------------------------------------------------------------------
+
+
+async def _create_late_db(path, channel_id, content):
+    """Create the session DB at path with message_log, message_fts, and one
+    earlier row indexed under the same rowid (as MemoryPlugin's trigger would)."""
+    async with aiosqlite.connect(path) as late:
+        await init_db(late)
+        cursor = await late.execute(
+            "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
+            "VALUES (?, ?, ?, ?)",
+            (channel_id, json.dumps({"role": "user", "content": content}),
+             1.0, "message"),
+        )
+        await late.execute("CREATE VIRTUAL TABLE message_fts USING fts5(content_text)")
+        await late.execute(
+            "INSERT INTO message_fts(rowid, content_text) VALUES (?, ?)",
+            (cursor.lastrowid, content),
+        )
+        await late.commit()
+
+
+class TestLazyProbe:
+    async def test_provenance_starts_working_when_table_appears(self, tmp_path, caplog):
+        """#159 R1/R5: the plugin's own probe, built by on_start against a
+        DB file that doesn't exist yet, picks it up with no restart."""
+        from corvidae_cognition.probe import PROBE_RETRY_SECONDS
+
+        env = await _provenance_env(tmp_path)
+        try:
+            # Restart the plugin's probe against a path with no file at all.
+            await env.plugin._probe.close()
+            late = str(tmp_path / "late.db")
+            cfg = {"daemon": {"session_db": late}}
+            await env.plugin.on_start(config=cfg)
+            now = [0.0]
+            env.plugin._probe.clock = lambda: now[0]
+
+            await _begin_exchange(env, "klz", origin_rowid=50)
+            with caplog.at_level("WARNING", logger="corvidae"):
+                assert await env.plugin._gather_evidence(
+                    env.channel, "klz", [CLAIM]) is None
+            # The probe warning names the path; the per-trace skip stays.
+            assert late in caplog.text
+            assert "provenance check skipped for trace klz" in caplog.text
+
+            # The file appears with message_fts and a matching row; the
+            # retry interval elapses.
+            await _create_late_db(
+                late, env.channel.id, "the quarterly audit deadline is Thursday")
+            now[0] = PROBE_RETRY_SECONDS + 1
+            evidence = await env.plugin._gather_evidence(env.channel, "klz", [CLAIM])
+            assert evidence is not None
+            assert evidence[0]["candidates"]
+        finally:
+            await _teardown(env)
+
+    async def test_on_stop_closes_probe_connection(self, tmp_path):
+        """#159 R6: on_stop leaves no open connection."""
+        env = await _provenance_env(tmp_path)
+        try:
+            await _begin_exchange(env, "kst", origin_rowid=50)
+            await env.plugin._gather_evidence(env.channel, "kst", [CLAIM])
+            conn = env.plugin._probe.connection
+            assert conn is not None
+            await env.plugin.on_stop()
+            assert env.plugin._probe.connection is None
+            assert conn._connection is None
+        finally:
+            await _teardown(env)

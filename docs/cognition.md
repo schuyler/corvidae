@@ -601,6 +601,13 @@ never reach the judge as "nothing matched". A failed stage 2 (malformed
 model output) leaves that exchange unchecked; appraisal logs the failure.
 The candidate count and excerpt length are constants, not tunables: a
 lever that hid evidence would make the judge object to everything.
+The probe connection opens lazily, on the first provenance check, not at
+startup, and a missing `message_fts` (or an unopenable DB) is retried at
+most once every `PROBE_RETRY_SECONDS` (30 s, `corvidae_cognition/probe.py`),
+so a table that appears after startup is picked up without a restart. Each
+failed attempt logs a warning naming the path and the reason; recovery logs
+one INFO line; `on_stop` closes the connection. Appraisal's `memory_fts`
+probe uses the same helper (`ReadOnlyProbe`).
 `critique.provenance.enabled` is the one switch. A
 `critique.fork_prompt.provenance` override must ask for the verdicts format
 above; one written for an objections list fails parsing, and every run
