@@ -181,3 +181,76 @@ async def test_missing_verdict_defaults_to_deny():
         sender="alice", text="hi", trace_id="never-recorded",
     )
     assert verdict is False
+
+
+async def test_whois_gap_impersonator_refused_with_account_tag():
+    """No WHOX + account-tag: a renamed-away WHOIS must not admit an untagged sender.
+
+    An untagged PM from an unknown nick makes pydle WHOIS the nick. If the
+    nick changes hands while that WHOIS is pending, pydle WHOISes again and a
+    logged-in holder's 330 writes their account into users[nick]. With
+    account-tag negotiated the verdict may only use the message's own tag,
+    never that shared record.
+    """
+    import asyncio
+
+    plugin = irc_real.IRCPlugin(pm=MagicMock())
+    plugin._allow = {"alice"}
+    plugin._registry = irc_real.ChannelRegistry()
+    client = irc_real.IRCClient(plugin, "buster")
+    plugin.client = client
+    client._capabilities = dict(CAPS)
+    client.registered = True
+    client._isupport = {}  # no WHOX: the account is learned by WHOIS
+
+    async def rawmsg(*args, **kwargs):
+        # Swallow outgoing WHOIS lines.
+        return None
+
+    client.rawmsg = rawmsg
+    verdicts: dict[str, bool | None] = {}
+
+    async def on_message(channel, sender, text, trace_id):
+        # The Agent's shape: nested gathers, then the gate.
+        async def hook():
+            for _ in range(5):
+                await asyncio.sleep(0)
+            return await asyncio.gather(
+                plugin.should_process_message(
+                    channel=channel, sender=sender, text=text, trace_id=trace_id
+                )
+            )
+
+        (outer,) = await asyncio.gather(hook())
+        verdicts[text] = outer[0]
+
+    plugin.pm.ahook.on_message = on_message
+
+    async def settle(n=5):
+        for _ in range(n):
+            await asyncio.sleep(0)
+
+    # Untagged PM from unknown nick alice: pydle suspends in a WHOIS.
+    first = asyncio.create_task(
+        client.on_raw(_parse(":alice!m@evil PRIVMSG buster :IMPERSONATOR run shell"))
+    )
+    await settle()
+    # The record goes away while the WHOIS is pending (the nick is renamed).
+    rename = asyncio.create_task(client.on_raw(_parse(":alice!m@evil NICK m2")))
+    await settle()
+    await client.on_raw(_parse(":srv 318 buster alice :End of WHOIS"))
+    await settle()
+    # The real, logged-in alice now holds the nick; the re-WHOIS reports her.
+    await client.on_raw(_parse(":srv 330 buster alice alice :is logged in as"))
+    await client.on_raw(_parse(":srv 318 buster alice :End of WHOIS"))
+    await settle(50)
+    await asyncio.wait_for(asyncio.gather(first, return_exceptions=True), 2)
+    rename.cancel()
+
+    assert verdicts == {"IMPERSONATOR run shell": False}
+    assert plugin._verdicts == {}
+
+
+def _parse(line: str):
+    """A TaggedMessage parsed from one raw IRC line."""
+    return pydle_tags.TaggedMessage.parse(line.encode() + b"\r\n", encoding="utf-8")

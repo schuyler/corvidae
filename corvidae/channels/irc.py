@@ -2,6 +2,7 @@
 
 import asyncio
 import collections
+import contextvars
 import logging
 from typing import Optional
 
@@ -18,6 +19,17 @@ from corvidae.channels.split import split_message
 from corvidae.trace import mint_trace_id
 from corvidae.hooks import TransportPlugin, get_dependency, hookimpl
 from corvidae.outbound import OutboundMessage, OutboundProgress
+
+
+# The account named by the tag of the PRIVMSG being handled, set by
+# IRCClient.on_raw. Each on_raw runs in its own task, so the value is local to
+# that message and survives pydle's WHOIS suspensions, unlike pydle's shared
+# users[nick] record, which other lines and WHOIS replies rewrite. _UNSET
+# means no PRIVMSG is being handled; the gate treats it as not logged in.
+_UNSET = object()
+_message_account: contextvars.ContextVar = contextvars.ContextVar(
+    "irc_message_account", default=_UNSET
+)
 
 
 class IRCClient(pydle.Client):
@@ -51,23 +63,31 @@ class IRCClient(pydle.Client):
         )
 
     async def on_raw(self, message):
-        """Derive each message sender's account from that message's own tags.
+        """Capture each PRIVMSG's own account tag before anything can suspend.
 
-        pydle copies the `account` tag into its user record only when the
-        nick is already known and never clears it on an untagged message, so
-        a stale record would let a later unidentified user of the same nick
-        inherit the account (#77). With account-tag negotiated, every
-        PRIVMSG carries the tag iff the sender is logged in, so the record
-        is overwritten from the tag (absent => not logged in) before pydle
-        dispatches the message.
+        With account-tag negotiated every PRIVMSG carries the tag iff the
+        sender is logged in, so the tag (absent => not logged in) is the only
+        account the allowlist trusts (#77). It is held in a task-local
+        ContextVar, set before any await, and read by IRCPlugin._decide.
+        pydle's users[nick] is never consulted for the verdict: it is shared
+        across lines, is rewritten by WHOIS replies for whoever holds the
+        nick, and is not cleared on an untagged message. The record is still
+        overwritten from the tag so pydle's own state stays consistent.
         """
+        token = None
         if message.command == "PRIVMSG" and self._capabilities.get("account-tag"):
             nick, _ = self._parse_user(message.source)
             account = message.tags.get("account") or None
+            # Set before the first await: this is the message's identity.
+            token = _message_account.set(account)
             await self._sync_user(
                 nick, {"account": account, "identified": account is not None}
             )
-        await super().on_raw(message)
+        try:
+            await super().on_raw(message)
+        finally:
+            if token is not None:
+                _message_account.reset(token)
 
     async def on_connect(self):
         """Join configured channels after connecting."""
@@ -206,13 +226,25 @@ class IRCPlugin(TransportPlugin):
     # Capabilities that make pydle track services accounts for us.
     _ACCOUNT_CAPS = ("account-notify", "account-tag", "extended-join")
 
+    def _account_tag_negotiated(self) -> bool:
+        """Whether the server tags each PRIVMSG with the sender's account."""
+        caps = getattr(self.client, "_capabilities", None) or {}
+        return bool(caps.get("account-tag"))
+
     def _account_of(self, nick: str) -> tuple[bool, Optional[str]]:
         """(network reports accounts, the sender's account or None).
 
-        The account comes from pydle's user state. Account support is
-        inferred from the negotiated IRCv3 capabilities, or from the sender
-        already having an account (e.g. learned from WHOIS).
+        With account-tag negotiated the account is only the one in the
+        message's own tag (captured by IRCClient.on_raw); no tag, or no
+        message in flight, means not logged in. Otherwise it comes from
+        pydle's tracked user state, with account support inferred from the
+        negotiated IRCv3 capabilities or from the nick already having an
+        account (e.g. learned from WHOIS). That state is shared and can lag
+        the sender (a residual risk, docs/threat-model.md).
         """
+        if self._account_tag_negotiated():
+            account = _message_account.get()
+            return True, (None if account is _UNSET else account)
         users = getattr(self.client, "users", None) or {}
         info = users.get(nick) or {}
         account = info.get("account") or None
@@ -232,11 +264,10 @@ class IRCPlugin(TransportPlugin):
             return name.lower()
         return normalize(name)
 
-    def _is_allowed(self, nick: str) -> bool:
-        """Default-deny check. Where the network has accounts the account
+    def _match(self, supported: bool, account: Optional[str], nick: str) -> bool:
+        """Default-deny match. Where the network has accounts the account
         must match (an unidentified or unknown sender is refused); otherwise
         the nick does."""
-        supported, account = self._account_of(nick)
         identity = account if supported else nick
         if identity is None:
             return False
@@ -244,15 +275,20 @@ class IRCPlugin(TransportPlugin):
         allowed = {self._fold(entry) for entry in self._allow}
         return self._fold(identity) in allowed
 
+    def _is_allowed(self, nick: str) -> bool:
+        """Whether nick passes the allowlist right now."""
+        supported, account = self._account_of(nick)
+        return self._match(supported, account, nick)
+
     def _decide(self, nick: str) -> tuple[bool, Optional[str]]:
         """Decide once, synchronously: (allowed, account) for this sender.
 
-        Must run before any await on the message's path; later lines'
-        on_raw overwrite pydle's users[nick], so the result is recorded
-        and never recomputed.
+        One account lookup feeds both the verdict and the logged account.
+        Must run before any await on the message's path; the result is
+        recorded and never recomputed.
         """
-        _supported, account = self._account_of(nick)
-        return self._is_allowed(nick), account
+        supported, account = self._account_of(nick)
+        return self._match(supported, account, nick), account
 
     def _gate_channel(self, scope: str, allowed: bool) -> Channel:
         """The channel to gate a message on, given the recorded verdict.

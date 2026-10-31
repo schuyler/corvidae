@@ -2071,18 +2071,23 @@ match the nick. The allowlist is checked before the channel is resolved
 (as in Signal, #103): a refused sender gets an unregistered `Channel` (or
 an existing registry entry), so nothing is added to the registry and no
 `message_log` rows or memory follow. With `account-tag` negotiated,
-`IRCClient.on_raw` overwrites the sender's pydle user record from each
-PRIVMSG's own tags before dispatch (no `account` tag means not logged in),
-because pydle only copies the tag for already-known nicks and never clears
-it. The verdict is decided once per message, synchronously, in
-`IRCPlugin._dispatch` (before any `await`), from `users[nick]` and
-`_capabilities`, and recorded by the message's transport-minted `trace_id`.
+`IRCClient.on_raw` captures the PRIVMSG's own `account` tag (none means not
+logged in) into a task-local `ContextVar` before any `await`; each `on_raw`
+runs in its own task, so the value survives pydle's WHOIS suspensions.
+`IRCPlugin._decide` reads only that value and never `users[nick]`, which is
+shared across lines and which WHOIS replies rewrite for whoever holds the
+nick (on a network without WHOX, an unknown nick makes pydle WHOIS it
+mid-message). There is no nick fallback in that mode. `on_raw` also
+overwrites the pydle record from the tag, only to keep pydle consistent. The
+verdict is decided once per message, synchronously, in
+`IRCPlugin._dispatch` (before any `await`) with a single account lookup, and
+recorded by the message's transport-minted `trace_id`.
 `should_process_message` only reports that recorded verdict (no verdict
 means deny) and the entry is dropped when `on_message` returns, because
 pydle runs a task per line and a later line's `on_raw` can rewrite
 `users[nick]` while an earlier message is still in the hook pipeline.
-Without `account-tag`, the account is whatever pydle's record holds when the
-message arrives. Entries and senders are compared under the server's
+Without `account-tag`, the account is whatever `users[nick]` holds when the
+message arrives (pydle's tracked state; a residual risk). Entries and senders are compared under the server's
 CASEMAPPING via the client's `normalize`.
 
 While the client is disconnected (including the reconnect backoff, up to

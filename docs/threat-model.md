@@ -296,13 +296,17 @@ someone's nick is not enough. Residual risks:
   nicks are unauthenticated: anyone who takes an allowlisted nick is that
   user. Use a network with services and account tags for anything that
   matters.
-- **Account matching trusts the server and pydle's state.** With
-  `account-tag` the account is read from each message's own tag, which the
-  network sets; without it, matching relies on pydle's user-state tracking
-  (`account-notify`, `extended-join`, WHOIS), which only knows users it has
-  seen and can lag a logout. An ircd or services that mis-tags, or a
-  message delivered between a logout and its notification on a network
-  without `account-tag`, defeats it. Prefer networks that send `account-tag`.
+- **Account matching trusts the server, and without `account-tag` pydle's
+  state.** With `account-tag` the account comes only from that message's own
+  tag, which the network sets (no tag means not logged in, no nick fallback);
+  pydle's user record is never consulted. Without it, matching relies on
+  pydle's tracked state (`account-notify`, `extended-join`, WHOIS), which
+  only knows users it has seen, can lag a logout, is shared across lines, and
+  for a user who only ever sends PMs (no shared channel) is never cleared
+  once learned. An ircd or services that mis-tags, or a message delivered
+  between a logout and its notification or a nick change racing a WHOIS on a
+  network without `account-tag`, defeats it. Prefer networks that send
+  `account-tag`.
 - **Allowed users in a shared channel** are an injection path in the same
   sense as for Discord (below): the channel's history is one conversation,
   and what an allowed user pastes in is untrusted content.
