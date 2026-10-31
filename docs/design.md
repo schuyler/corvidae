@@ -2319,10 +2319,10 @@ there. `send_message` gives back the slot of an admitted message. Only an
 allowlisted sender ever took a slot, so a refused stranger @-mentioning the
 bot gives nothing back and cannot stop typing owed to an allowed user in
 the same channel; no `on_message_rejected` implementation is needed.
-A refresh loop still asleep from an
-earlier turn is reused rather than doubled, so a channel has at most one,
-and `on_stop` cancels it. Typing is only ever sent for an
-allowlisted sender, so an unauthorized user gets no sign the bot is live.
+A refresh loop still asleep from an earlier turn is reused rather than
+doubled, so a channel has at most one, and `on_stop` cancels it. Typing is
+only ever sent for an allowlisted sender, so an unauthorized user gets no
+sign the bot is live.
 A failed typing call is logged and never blocks the reply.
 
 **Outbound.** `send_message` and `send_progress` both split through

@@ -1043,6 +1043,36 @@ class TestTyping:
         await asyncio.sleep(TYPING_REFRESH_FOR_TESTS * 6)
         assert h.messageable.typing_count == settled
 
+    async def test_one_refresh_loop_per_channel_and_stop_cancels_it(self, fast_typing):
+        """Re-arming typing while the previous refresh loop is still asleep
+        reuses that loop rather than starting a second one, and on_stop
+        leaves no refresh loop running."""
+
+        def _live_loops() -> list[asyncio.Task]:
+            # Every not-yet-finished task running the refresh coroutine.
+            return [
+                t for t in asyncio.all_tasks()
+                if not t.done() and "_typing_refresh_loop" in repr(t.get_coro())
+            ]
+
+        h = await _start_plugin()
+        try:
+            h.plugin._enqueue(make_dm("one"), BOT_ID)
+            await _wait_until(lambda: h.messageable.typing_count >= 1)
+            ch = h.registry.get(f"discord:dm:{AUTH_ID}")
+            # Reply, then a new message before the loop's sleep ends.
+            h.plugin._decrement_outstanding(ch)
+            await h.plugin._begin_typing(ch)
+            assert len(_live_loops()) == 1
+            # Reply again, wait out the old loop, and re-arm once more.
+            h.plugin._decrement_outstanding(ch)
+            await asyncio.sleep(TYPING_REFRESH_FOR_TESTS * 3)
+            await h.plugin._begin_typing(ch)
+            assert len(_live_loops()) == 1
+        finally:
+            await h.plugin.on_stop()
+        assert _live_loops() == []
+
     async def test_send_progress_keeps_typing_alive(self, fast_typing):
         """R13: send_progress does not decrement outstanding."""
         h = await _start_plugin()
