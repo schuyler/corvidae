@@ -9,6 +9,7 @@ never enqueues and never starts a turn.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -260,11 +261,26 @@ class IdleTracker:
             # Timer callback: check quiet, call the watcher, maybe re-arm.
             await self._fire(watch, key)
 
-        watch._timers[key] = self._clock.call_later(
-            max(0.0, t - self._clock.monotonic()),
-            fire,
-            name=f"idle:{watch.name}:{label}",
-        )
+        name = f"idle:{watch.name}:{label}"
+        delay = max(0.0, t - self._clock.monotonic())
+        if delay > 0 or watch.period > 0:
+            watch._timers[key] = self._clock.call_later(delay, fire, name=name)
+            return
+        # A zero-period watch (e.g. web's settle watch) is due at settle: run on the
+        # next loop step rather than parking on the clock, so the callback
+        # fires at settle even when the clock only moves on advance().
+        timer = Timer(name)
+
+        async def run_now() -> None:
+            # Past this point cancel() is a no-op, as for a clock timer.
+            timer._started = True
+            try:
+                await fire()
+            except Exception:
+                logger.warning("idle watch %s failed", name, exc_info=True)
+
+        timer._task = asyncio.create_task(run_now(), name=f"idle-now:{name}")
+        watch._timers[key] = timer
 
     def _is_quiet(self, key: str | None) -> bool:
         """True if ``key`` (a channel id, or None for the system) is quiet now."""

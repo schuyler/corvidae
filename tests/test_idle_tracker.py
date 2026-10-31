@@ -8,6 +8,8 @@ fixture's clock start.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 import pytest_asyncio
 
@@ -380,3 +382,18 @@ async def test_system_quiet_reports_whether_any_channel_is_busy(kernel_clock):
     assert not idle.system_quiet()
     idle.note_settled("irc:#b")
     assert idle.system_quiet()
+
+
+async def test_zero_period_watch_fires_at_settle(kernel_clock):
+    """#172 R4: a period-0 channel watch fires when the channel settles,
+    without the test advancing the clock."""
+    clock, idle = kernel_clock
+    rec = Recorder(clock)
+    idle.watch_channels(0, rec.channel, name="w", repeat=3600)
+
+    idle.note_activity("a")
+    idle.note_settled("a")
+    for _ in range(3):
+        await asyncio.sleep(0)
+
+    assert rec.calls == [(0.0, "a")]
