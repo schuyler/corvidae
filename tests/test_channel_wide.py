@@ -380,6 +380,7 @@ async def _system_sent(plugin, channel) -> str:
     """Send one message on ``channel``; return the system prompt the LLM got."""
     client = _text_client()
     plugin._client = client
+    plugin._mark_started()
     await plugin.on_message(channel=channel, sender="u", text="hi", trace_id=mint_trace_id())
     await drain(plugin, channel)
     messages = client.chat.call_args.args[0]
@@ -479,6 +480,7 @@ class TestThroughTheAgent:
                 _make_text_response("done"),
             ])
             plugin._client = client
+            plugin._mark_started()
             with caplog.at_level(logging.WARNING, logger="corvidae.agent"):
                 await plugin.on_message(
                     channel=channel, sender="u", text="go", trace_id=mint_trace_id()

@@ -63,6 +63,7 @@ class TestBatchedToolResults:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(side_effect=counting_chat)
         plugin._client = mock_client
+        plugin._mark_started()
 
         await plugin.on_message(channel=channel, sender="user", text="use tools", trace_id=mint_trace_id())
         await drain(plugin, channel)
@@ -121,6 +122,7 @@ class TestBatchedToolResults:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(side_effect=counting_chat)
         plugin._client = mock_client
+        plugin._mark_started()
 
         await plugin.on_message(channel=channel, sender="user", text="go", trace_id=mint_trace_id())
         await drain(plugin, channel)
@@ -148,6 +150,7 @@ class TestBatchedToolResults:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("got it"))
         plugin._client = mock_client
+        plugin._mark_started()
 
         await plugin.on_message(channel=channel, sender="user", text="quick question", trace_id=mint_trace_id())
         await drain(plugin, channel)
@@ -179,6 +182,7 @@ class TestBatchedToolResults:
             ]
         )
         plugin._client = mock_client
+        plugin._mark_started()
 
         await plugin.on_message(channel=channel, sender="user", text="go", trace_id=mint_trace_id())
         await drain(plugin, channel)
@@ -223,6 +227,7 @@ class TestBatchedToolResults:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(side_effect=capture_chat)
         plugin._client = mock_client
+        plugin._mark_started()
 
         await plugin.on_message(channel=channel, sender="user", text="go", trace_id=mint_trace_id())
         await drain(plugin, channel)
@@ -266,6 +271,7 @@ class TestBatchedToolResults:
             ]
         )
         plugin._client = mock_client
+        plugin._mark_started()
 
         await plugin.on_message(channel=channel, sender="user", text="go", trace_id=mint_trace_id())
         await drain(plugin, channel)
@@ -322,6 +328,7 @@ class TestBatchedToolResults:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(side_effect=counting_chat)
         plugin._client = mock_client
+        plugin._mark_started()
 
         # Batch A dispatched, both calls gated open.
         await plugin.on_message(channel=channel, sender="user", text="go", trace_id=mint_trace_id())
@@ -394,6 +401,7 @@ class TestBatchedToolResults:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(side_effect=counting_chat)
         plugin._client = mock_client
+        plugin._mark_started()
 
         # First message: simple response
         await plugin.on_message(channel=channel, sender="user", text="hi", trace_id=mint_trace_id())

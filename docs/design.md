@@ -698,7 +698,8 @@ before calling `on_notify`; otherwise the queue consumer could run before
 Inbound messages are held, not dropped (#71). A transport can deliver from
 its own `on_start`, before step 12 starts the Agent; `Agent.on_message`
 checks the trace id first (an empty one raises at once), then awaits an
-internal started event while no LLM client exists. Once the Agent starts,
+internal started event until the Agent has started (the gate is `_started`, not
+the client: a config reload can set the client earlier). Once the Agent starts,
 the held call proceeds normally: the gate, `on_message_admitted` and the
 enqueue all happen before `on_message` returns, so a transport that frees
 resources in a `finally` around `on_message` (the Signal and Discord typing

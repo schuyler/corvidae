@@ -655,6 +655,7 @@ class TestWithAgent:
             client = MagicMock()
             client.chat = AsyncMock(return_value=_make_text_response("noted"))
             agent._client = client
+            agent._mark_started()
 
             clock = FakeClock(start=T0)
             agent.pm.register(clock, name="clock")

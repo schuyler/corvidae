@@ -84,6 +84,7 @@ class TestToolCallDispatchesTask:
             )
         )
         plugin._client = mock_client
+        plugin._mark_started()
 
         # Register a simple tool so the tool call doesn't fail on execution
         async def my_tool(x: str) -> str:
@@ -145,6 +146,7 @@ class TestToolCallResultTriggersContinuation:
             ]
         )
         plugin._client = mock_client
+        plugin._mark_started()
 
         await plugin.on_message(channel=channel, sender="user", text="do the thing", trace_id=mint_trace_id())
         await drain(plugin, channel)
@@ -197,6 +199,7 @@ class TestMultipleToolCallsDispatched:
             )
         )
         plugin._client = mock_client
+        plugin._mark_started()
 
         enqueued_tasks: list[Task] = []
         task_plugin = plugin.pm.get_plugin("task")
@@ -234,6 +237,7 @@ class TestMaxTurnsResetsOnUserMessage:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("hello"))
         plugin._client = mock_client
+        plugin._mark_started()
 
         await plugin.on_message(channel=channel, sender="user", text="reset me", trace_id=mint_trace_id())
         await drain(plugin, channel)
@@ -259,6 +263,7 @@ class TestMaxTurnsNotResetWhileToolsPending:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("ok"))
         plugin._client = mock_client
+        plugin._mark_started()
 
         channel.pending_tool_call_ids = {"x"}
         channel.turn_counter = 3
@@ -294,6 +299,7 @@ class TestMaxTurnsResetsOnOriginatingNotification:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("ok"))
         plugin._client = mock_client
+        plugin._mark_started()
 
         channel.turn_counter = 10
         await plugin.on_notify(
@@ -312,6 +318,7 @@ class TestMaxTurnsResetsOnOriginatingNotification:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("ok"))
         plugin._client = mock_client
+        plugin._mark_started()
 
         channel.pending_tool_call_ids = {"x"}
         channel.turn_counter = 3
@@ -329,6 +336,7 @@ class TestMaxTurnsResetsOnOriginatingNotification:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("ok"))
         plugin._client = mock_client
+        plugin._mark_started()
 
         channel.turn_counter = 3
         await plugin.on_notify(
@@ -367,6 +375,7 @@ class TestMaxTurnsIncrementsOnNotification:
             ]
         )
         plugin._client = mock_client
+        plugin._mark_started()
 
         await plugin.on_message(channel=channel, sender="user", text="go", trace_id=mint_trace_id())
         await drain(plugin, channel)
@@ -414,6 +423,7 @@ class TestMaxTurnsExceededSuppressesToolCalls:
             ]
         )
         plugin._client = mock_client
+        plugin._mark_started()
 
         enqueued_tasks: list[Task] = []
         task_plugin = plugin.pm.get_plugin("task")
@@ -479,6 +489,7 @@ class TestMaxTurnsExceededSendsFallbackText:
             ]
         )
         plugin._client = mock_client
+        plugin._mark_started()
 
         try:
             await plugin.on_message(channel=channel, sender="user", text="go", trace_id=mint_trace_id())
@@ -526,6 +537,7 @@ class TestToolDispatchWithToolContext:
             ]
         )
         plugin._client = mock_client
+        plugin._mark_started()
 
         await plugin.on_message(channel=channel, sender="user", text="use ctx tool", trace_id=mint_trace_id())
         await drain(plugin, channel)
@@ -562,6 +574,7 @@ class TestToolDispatchUnknownTool:
             ]
         )
         plugin._client = mock_client
+        plugin._mark_started()
 
         await plugin.on_message(channel=channel, sender="user", text="use missing tool", trace_id=mint_trace_id())
         await drain(plugin, channel)
@@ -603,6 +616,7 @@ class TestToolDispatchToolRaises:
             ]
         )
         plugin._client = mock_client
+        plugin._mark_started()
 
         # Should not raise
         await plugin.on_message(channel=channel, sender="user", text="use failing tool", trace_id=mint_trace_id())
@@ -660,6 +674,7 @@ class TestNoTaskQueueLogsError:
             )
         )
         plugin._client = mock_client
+        plugin._mark_started()
 
         channel = registry.get_or_create("test", "scope_notq")
 
@@ -721,6 +736,7 @@ class TestNoTaskQueueEmitsToolResult:
             _make_text_response("done"),
         ])
         plugin._client = mock_client
+        plugin._mark_started()
 
         channel = registry.get_or_create("test", "scope_notq")
 
@@ -794,6 +810,7 @@ async def _no_queue_setup(
         _make_text_response("done"),
     ])
     plugin._client = mock_client
+    plugin._mark_started()
     channel = registry.get_or_create("test", "scope_notq")
     return plugin, channel, db, mock_client
 
@@ -904,6 +921,7 @@ class TestAssistantMessageWithToolCallsPersisted:
             ]
         )
         plugin._client = mock_client
+        plugin._mark_started()
 
         await plugin.on_message(channel=channel, sender="user", text="persist test", trace_id=mint_trace_id())
         await drain(plugin, channel)
@@ -957,6 +975,7 @@ class TestNoSendMessageWhenToolCallsDispatched:
             ]
         )
         plugin._client = mock_client
+        plugin._mark_started()
 
         await plugin.on_message(channel=channel, sender="user", text="use tool", trace_id=mint_trace_id())
         await drain(plugin, channel)
@@ -998,6 +1017,7 @@ class TestCompactionFailureResilience:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("response after failed compaction"))
         plugin._client = mock_client
+        plugin._mark_started()
 
         class CrashingCompactionPlugin:
             @hookimpl

@@ -46,6 +46,7 @@ class TestRowidAttachment:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("hi there"))
         plugin._client = mock_client
+        plugin._mark_started()
 
         await plugin.on_message(channel=channel, sender="user", text="hello", trace_id=mint_trace_id())
         await drain(plugin, channel)

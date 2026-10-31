@@ -1,7 +1,7 @@
 """#71: a message that reaches Agent.on_message before the Agent has started
 is held until it has, not dropped (PRD 3.1.7).
 
-Unit tests drive Agent directly (the held state is "no LLM client yet");
+Unit tests drive Agent directly (the held state is "not started yet", gated on `_started`);
 the real-path test drives Runtime.start with a plugin that delivers a
 message during the on_start broadcast, before step 12 starts the Agent.
 """
@@ -61,7 +61,6 @@ class TestHold:
             client = _start(plugin, ["hi back"])
             await asyncio.wait_for(task, 2)
             await drain(plugin, channel)
-        assert "not initialized" not in caplog.text
         client.chat.assert_awaited()
         assert channel.conversation.messages[-1]["content"] == "hi back"
 
@@ -106,6 +105,26 @@ class TestHold:
         assert events == ["admitted", "returned"]
 
 
+class TestHoldGate:
+    async def test_client_set_before_start_does_not_skip_hold(self, env):
+        """ConfigWatcher can fire on_config_reload during the step-11 broadcast,
+        which sets _client before the Agent has started. The hold must gate on
+        _started, so the message waits and is processed in order after start."""
+        plugin, channel, _ = env
+        t1 = asyncio.create_task(plugin.on_message(channel, "u", "first", mint_trace_id()))
+        await _settle()
+        # Simulate a reload re-borrowing the client before start.
+        plugin._client = MagicMock()
+        t2 = asyncio.create_task(plugin.on_message(channel, "u", "second", mint_trace_id()))
+        await _settle()
+        assert not t1.done() and not t2.done(), "must stay held until _mark_started"
+        _start(plugin)
+        await asyncio.wait_for(asyncio.gather(t1, t2), 2)
+        await drain(plugin, channel)
+        users = [m["content"] for m in channel.conversation.messages if m["role"] == "user"]
+        assert users == ["first", "second"]
+
+
 class TestStopWhileHeld:
     async def test_stop_releases_held_callers_with_warning(self, env, caplog):
         """R4/R5: on_stop releases each held caller; one WARNING per message
@@ -135,7 +154,7 @@ class TestStopWhileHeld:
             matching = [w for w in warns if trace_id in w]
             assert len(matching) == 1, warns
             assert channel.id in matching[0]
-            assert "stopped before starting" in matching[0]
+            assert "stopping or never started" in matching[0]
             assert "not processed" in matching[0]
 
     async def test_message_after_stop_is_not_held_forever(self, env, caplog):
@@ -144,7 +163,7 @@ class TestStopWhileHeld:
         await plugin.on_stop()
         with caplog.at_level(logging.WARNING, logger="corvidae.agent"):
             await asyncio.wait_for(plugin.on_message(channel, "u", "late", mint_trace_id()), 1)
-        assert "stopped before starting" in caplog.text
+        assert "stopping or never started" in caplog.text
 
     async def test_cleanup_after_failed_start_releases_held(self, env):
         """R4: startup aborting (Runtime skips agent.on_stop) also releases."""
@@ -172,7 +191,7 @@ class TestRuntimeStartup:
             lg.handlers[:] = handlers
 
     async def test_message_delivered_during_on_start_broadcast(
-        self, tmp_path, monkeypatch, caplog
+        self, tmp_path, monkeypatch
     ):
         """Real path: a transport delivering from its on_start (step 11) is
         processed once the Agent starts (step 12); Runtime.stop stays in budget."""
@@ -203,7 +222,7 @@ class TestRuntimeStartup:
 
         monkeypatch.setattr(TaskPlugin, "on_start", delivering_on_start)
         rt = Runtime(config_path=_write_minimal_config(tmp_path, tmp_path / "s.db"))
-        with caplog.at_level(logging.ERROR, logger="corvidae.agent"):
+        if True:
             await rt.start()
             try:
                 assert delivered, "the delivering on_start never ran"
@@ -214,4 +233,60 @@ class TestRuntimeStartup:
                 assert channel.conversation.messages[-1]["content"] == "held reply"
             finally:
                 await asyncio.wait_for(rt.stop(), 5)
-        assert "not initialized" not in caplog.text
+
+    async def test_failed_start_cleanup_releases_held_message(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """Real path: step 12 raises after a transport delivered during step 11;
+        Runtime._cleanup_failed_start must release the held on_message, whose
+        WARNING names the channel and trace id."""
+        from corvidae.agent import Agent
+        from corvidae.runtime import Runtime
+        from corvidae.task import TaskPlugin
+        from test_minimal_profile import _write_minimal_config
+
+        delivered: list[asyncio.Task] = []
+        trace_id = mint_trace_id()
+        orig = TaskPlugin.on_start
+
+        @hookimpl
+        async def delivering_on_start(self, config):
+            # Deliver mid-broadcast, as a transport would on connect.
+            await orig(self, config)
+            channel = self.pm.get_plugin("registry").get_or_create("irc", "main")
+            delivered.append(asyncio.create_task(
+                self.pm.ahook.on_message(
+                    channel=channel, sender="u", text="early", trace_id=trace_id,
+                )
+            ))
+
+        async def boom(self, config):
+            raise RuntimeError("step 12 failed")
+
+        monkeypatch.setattr(TaskPlugin, "on_start", delivering_on_start)
+        monkeypatch.setattr(Agent, "_start_plugin", boom)
+        rt = Runtime(config_path=_write_minimal_config(tmp_path, tmp_path / "s.db"))
+        # Runtime.start sets propagate=False on the corvidae logger, so caplog
+        # sees nothing; capture with a handler attached after start.
+        records: list[logging.LogRecord] = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                records.append(record)
+
+        with pytest.raises(RuntimeError, match="step 12 failed"):
+            await rt.start()
+        handler = _Capture(level=logging.WARNING)
+        logging.getLogger("corvidae").addHandler(handler)
+        try:
+            assert delivered, "the delivering on_start never ran"
+            assert not delivered[0].done(), "message must be held before cleanup"
+            await asyncio.wait_for(rt._cleanup_failed_start(), 5)
+            await asyncio.wait_for(asyncio.gather(*delivered), 2)
+        finally:
+            logging.getLogger("corvidae").removeHandler(handler)
+        warns = [r.getMessage() for r in records if r.levelno == logging.WARNING]
+        matching = [w for w in warns if trace_id in w]
+        assert len(matching) == 1, warns
+        assert "irc:main" in matching[0]
+        assert "resend" in matching[0]

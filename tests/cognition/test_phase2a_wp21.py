@@ -222,6 +222,7 @@ class TestUserMessageAdmission:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("hi"))
         plugin._client = mock_client
+        plugin._mark_started()
 
         gate = _KeyCapturePlugin()
         plugin.pm.register(gate, name="key_capture")
@@ -242,6 +243,7 @@ class TestUserMessageAdmission:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("hi there"))
         plugin._client = mock_client
+        plugin._mark_started()
 
         gate = _KeyCapturePlugin()
         plugin.pm.register(gate, name="key_capture")
@@ -266,6 +268,7 @@ class TestUserMessageAdmission:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("hi there"))
         plugin._client = mock_client
+        plugin._mark_started()
 
         gate = _KeyCapturePlugin()
         plugin.pm.register(gate, name="key_capture")
@@ -304,6 +307,7 @@ class TestGateRejection:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("should not run"))
         plugin._client = mock_client
+        plugin._mark_started()
 
         gate = _KeyCapturePlugin(reject=True)
         plugin.pm.register(gate, name="key_capture")
@@ -328,6 +332,7 @@ class TestGateRejection:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("should not run"))
         plugin._client = mock_client
+        plugin._mark_started()
 
         gate = _KeyCapturePlugin(reject=True)
         plugin.pm.register(gate, name="key_capture")
@@ -399,6 +404,7 @@ class TestToolCyclePropagation:
             ]
         )
         plugin._client = mock_client
+        plugin._mark_started()
 
         gate = _KeyCapturePlugin()
         plugin.pm.register(gate, name="key_capture")
@@ -445,6 +451,7 @@ class TestToolCyclePropagation:
             ]
         )
         plugin._client = mock_client
+        plugin._mark_started()
 
         gate = _KeyCapturePlugin()
         plugin.pm.register(gate, name="key_capture")
@@ -498,6 +505,7 @@ class TestToolCyclePropagation:
             ]
         )
         plugin._client = mock_client
+        plugin._mark_started()
 
         await plugin.on_message(channel=channel, sender="user", text="the original user text", trace_id=mint_trace_id())
         await drain(plugin, channel)
@@ -532,6 +540,7 @@ class TestStandaloneNotificationAndPersistedFiring:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("notified"))
         plugin._client = mock_client
+        plugin._mark_started()
 
         await plugin.on_notify(
             channel=channel, source="task", text="standalone event",
@@ -554,6 +563,7 @@ class TestStandaloneNotificationAndPersistedFiring:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("notified"))
         plugin._client = mock_client
+        plugin._mark_started()
 
         await plugin.on_notify(
             channel=channel, source="task", text="standalone event",
@@ -575,6 +585,7 @@ class TestStandaloneNotificationAndPersistedFiring:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("notified"))
         plugin._client = mock_client
+        plugin._mark_started()
 
         await plugin.on_notify(
             channel=channel, source="task", text="standalone event",
@@ -623,6 +634,7 @@ class TestStandaloneNotificationAndPersistedFiring:
             ]
         )
         plugin._client = mock_client
+        plugin._mark_started()
 
         await plugin.on_message(channel=channel, sender="user", text="use two tools", trace_id=mint_trace_id())
         await drain(plugin, channel)
@@ -651,6 +663,7 @@ class TestBeforeAgentTurnEnrichment:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("hi"))
         plugin._client = mock_client
+        plugin._mark_started()
 
         gate = _KeyCapturePlugin()
         plugin.pm.register(gate, name="key_capture")
@@ -701,6 +714,7 @@ class TestBeforeAgentTurnEnrichment:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("hi"))
         plugin._client = mock_client
+        plugin._mark_started()
 
         await plugin.on_message(channel=channel, sender="user", text="hello", trace_id=mint_trace_id())
         await drain(plugin, channel)
@@ -745,6 +759,7 @@ class TestUsageLogAttributionWiring:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(side_effect=fake_chat)
         plugin._client = mock_client
+        plugin._mark_started()
 
         await plugin.on_message(channel=channel, sender="user", text="hello", trace_id=mint_trace_id())
         await drain(plugin, channel)
@@ -784,6 +799,7 @@ class TestUsageLogAttributionWiring:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(side_effect=fake_chat)
         plugin._client = mock_client
+        plugin._mark_started()
 
         await plugin.on_message(channel=channel, sender="user", text="hello", trace_id=mint_trace_id())
         await drain(plugin, channel)

@@ -67,6 +67,7 @@ class TestEndToEnd:
         """A turn failing with 'model is not loaded' sends LLMPlugin's message."""
         plugin, channel, db = await build_plugin_and_channel()
         plugin._client = MagicMock()
+        plugin._mark_started()
         plugin._client.chat = AsyncMock(side_effect=_http_error(NOT_LOADED_BODY))
         plugin.pm.register(LLMPlugin(), name="llm_for_error")
 
@@ -81,6 +82,7 @@ class TestEndToEnd:
         """LLMPlugin's handler is trylast: another plugin's message wins."""
         plugin, channel, db = await build_plugin_and_channel()
         plugin._client = MagicMock()
+        plugin._mark_started()
         plugin._client.chat = AsyncMock(side_effect=_http_error(NOT_LOADED_BODY))
         plugin.pm.register(LLMPlugin(), name="llm_for_error")
 

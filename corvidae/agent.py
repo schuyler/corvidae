@@ -313,13 +313,15 @@ class Agent(CorvidaePlugin):
         # transport is covered at one point and admission still fires before
         # on_message returns once the Agent starts (transports release their
         # typing slot in a finally if it hasn't).
-        if not self._client:
+        # Gate on _started, not _client: on_config_reload sets _client even
+        # before the Agent has started, while _registry/_tools are still unset.
+        if not self._started:
             await self._started_event.wait()
-            if self._stopping or not self._client:
-                # Agent stopped before it started: nothing will process this.
+            if self._stopping or not self._started:
+                # Agent is stopping or never started: nothing will process this.
                 logger.warning(
                     "message on channel %s (trace_id %s) was not processed: "
-                    "the agent stopped before starting; resend it after the "
+                    "the agent was stopping or never started; resend it after the "
                     "daemon is running",
                     channel.id, trace_id,
                     extra={"channel": channel.id, "trace_id": trace_id},

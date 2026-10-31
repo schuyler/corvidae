@@ -156,6 +156,7 @@ async def make_env(tmp_path):
         client = MagicMock()
         client.chat = AsyncMock(side_effect=list(responses))
         plugin._client = client
+        plugin._mark_started()
         env = Env(plugin, channel, db, cfg)
         env.recorder = TraceRecorder()
         pm.register(env.recorder, name="trace_recorder")

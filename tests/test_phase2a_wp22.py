@@ -283,6 +283,7 @@ class TestLogprobsThreadedIntoOnAgentResponse:
         is passing result.logprobs into that call."""
         plugin, channel, db = await build_plugin_and_channel()
         plugin._client = MagicMock()
+        plugin._mark_started()
 
         turn_result = AgentTurnResult(
             message={"role": "assistant", "content": "answer"},
@@ -310,6 +311,7 @@ class TestLogprobsThreadedIntoOnAgentResponse:
         called with logprobs=None (not omitted, not a faked substitute)."""
         plugin, channel, db = await build_plugin_and_channel()
         plugin._client = MagicMock()
+        plugin._mark_started()
 
         turn_result = AgentTurnResult(
             message={"role": "assistant", "content": "answer"},
@@ -424,6 +426,7 @@ class TestRequestLogprobsInRequestBody:
             },
         )
         plugin._client = MagicMock()
+        plugin._mark_started()
         await plugin.on_init(pm=plugin.pm, config={"agent": {"request_logprobs": True}})
 
         turn_result = AgentTurnResult(
@@ -459,6 +462,7 @@ class TestRequestLogprobsInRequestBody:
             },
         )
         plugin._client = MagicMock()
+        plugin._mark_started()
         await plugin.on_init(pm=plugin.pm, config={"agent": {"request_logprobs": False}})
 
         turn_result = AgentTurnResult(

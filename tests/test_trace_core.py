@@ -213,6 +213,7 @@ class TestDequeueTraceResolution:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("hi"))
         plugin._client = mock_client
+        plugin._mark_started()
 
         await plugin.on_notify(
             channel=channel, source="task", text="standalone",
@@ -229,6 +230,7 @@ class TestDequeueTraceResolution:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("hi"))
         plugin._client = mock_client
+        plugin._mark_started()
 
         await plugin.on_notify(
             channel=channel, source="task", text="standalone",
@@ -257,6 +259,7 @@ class TestAttributionCarriesTraceAndMeta:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(side_effect=fake_chat)
         plugin._client = mock_client
+        plugin._mark_started()
 
         await plugin.on_notify(
             channel=channel, source="task", text="hello",
@@ -321,6 +324,7 @@ class TestOnMessagePersistedFiringDiscipline:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("hi"))
         plugin._client = mock_client
+        plugin._mark_started()
 
         # The transport-minted id passed to on_message must reach the hook.
         tid = mint_trace_id()

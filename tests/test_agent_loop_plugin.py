@@ -313,6 +313,7 @@ class TestOnMessageConversationInit:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("hello"))
         plugin._client = mock_client
+        plugin._mark_started()
 
         assert channel.conversation is None
 
@@ -332,6 +333,7 @@ class TestOnMessageConversationInit:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("hello"))
         plugin._client = mock_client
+        plugin._mark_started()
 
         await plugin.on_message(channel=channel, sender="user", text="first", trace_id=mint_trace_id())
         await drain(plugin, channel)
@@ -360,6 +362,7 @@ class TestOnMessagePersistenceAndLoop:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("response"))
         plugin._client = mock_client
+        plugin._mark_started()
 
         await plugin.on_message(channel=channel, sender="alice", text="test message", trace_id=mint_trace_id())
         await drain(plugin, channel)
@@ -379,6 +382,7 @@ class TestOnMessagePersistenceAndLoop:
 
         mock_client = MagicMock()
         plugin._client = mock_client
+        plugin._mark_started()
 
         turn_result = AgentTurnResult(
             message={"role": "assistant", "content": "answer"},
@@ -415,6 +419,7 @@ class TestOnMessagePersistenceAndLoop:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("agent reply"))
         plugin._client = mock_client
+        plugin._mark_started()
 
         await plugin.on_message(channel=channel, sender="user", text="hello", trace_id=mint_trace_id())
         await drain(plugin, channel)
@@ -434,6 +439,7 @@ class TestOnMessagePersistenceAndLoop:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("my answer"))
         plugin._client = mock_client
+        plugin._mark_started()
 
         await plugin.on_message(channel=channel, sender="user", text="question", trace_id=mint_trace_id())
         await drain(plugin, channel)
@@ -634,6 +640,7 @@ class TestOnMessageThinkingTokens:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response(raw))
         plugin._client = mock_client
+        plugin._mark_started()
 
         await plugin.on_message(channel=channel, sender="user", text="hi", trace_id=mint_trace_id())
         await drain(plugin, channel)
@@ -671,6 +678,7 @@ class TestOnMessageThinkingTokens:
             return_value={"choices": [{"message": response_msg}]}
         )
         plugin._client = mock_client
+        plugin._mark_started()
 
         await plugin.on_message(channel=channel, sender="user", text="query", trace_id=mint_trace_id())
         await drain(plugin, channel)
@@ -707,6 +715,7 @@ class TestOnMessageThinkingTokens:
             return_value={"choices": [{"message": response_msg}]}
         )
         plugin._client = mock_client
+        plugin._mark_started()
 
         await plugin.on_message(channel=channel, sender="user", text="query", trace_id=mint_trace_id())
         await drain(plugin, channel)
@@ -737,6 +746,7 @@ class TestOnMessageThinkingTokens:
             return_value={"choices": [{"message": response_msg}]}
         )
         plugin._client = mock_client
+        plugin._mark_started()
 
         await plugin.on_message(channel=channel, sender="user", text="query", trace_id=mint_trace_id())
         await drain(plugin, channel)
@@ -776,6 +786,7 @@ class TestOnMessageCompactionAndConfig:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("answer"))
         plugin._client = mock_client
+        plugin._mark_started()
 
         await plugin.on_message(channel=channel, sender="user", text="hi", trace_id=mint_trace_id())
         await drain(plugin, channel)
@@ -850,6 +861,7 @@ class TestOnMessageCompactionAndConfig:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("ok"))
         plugin._client = mock_client
+        plugin._mark_started()
 
         await plugin.on_message(channel=channel_a, sender="user", text="hello", trace_id=mint_trace_id())
         await plugin.on_message(channel=channel_b, sender="user", text="hello", trace_id=mint_trace_id())
@@ -878,6 +890,7 @@ class TestOnStop:
 
         mock_client = MagicMock()
         plugin._client = mock_client
+        plugin._mark_started()
 
         await plugin.on_stop()
 
@@ -897,6 +910,7 @@ class TestOnStop:
         mock_client = MagicMock()
         mock_client.stop = AsyncMock()
         plugin._client = mock_client
+        plugin._mark_started()
 
         # Create a couple of channel queues on the plugin so we can verify they are stopped.
         from corvidae.queue import SerialQueue, QueueItem
@@ -956,6 +970,7 @@ class TestOnMessageToolCallRoundTrip:
             ]
         )
         plugin._client = mock_client
+        plugin._mark_started()
 
         import asyncio
 
@@ -1013,6 +1028,7 @@ class TestConversationInitPromptResolution:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("ok"))
         plugin._client = mock_client
+        plugin._mark_started()
 
         await plugin.on_message(channel=channel, sender="user", text="hello", trace_id=mint_trace_id())
         await drain(plugin, channel)
@@ -1033,6 +1049,7 @@ class TestConversationInitPromptResolution:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("ok"))
         plugin._client = mock_client
+        plugin._mark_started()
 
         await plugin.on_message(channel=channel, sender="user", text="hello", trace_id=mint_trace_id())
         await drain(plugin, channel)
@@ -1068,6 +1085,7 @@ class TestConversationInitPromptResolution:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("ok"))
         plugin._client = mock_client
+        plugin._mark_started()
 
         await plugin.on_message(channel=channel, sender="user", text="hello", trace_id=mint_trace_id())
         await drain(plugin, channel)
@@ -1101,6 +1119,7 @@ class TestConversationInitPromptResolution:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("ok"))
         plugin._client = mock_client
+        plugin._mark_started()
 
         await plugin.on_message(channel=channel, sender="user", text="hello", trace_id=mint_trace_id())
         await drain(plugin, channel)
@@ -1130,6 +1149,7 @@ class TestOnMessageErrorHandling:
         # chat raises to simulate run_agent_turn failure
         mock_client.chat = AsyncMock(side_effect=RuntimeError("LLM exploded"))
         plugin._client = mock_client
+        plugin._mark_started()
 
         # Should not raise
         await plugin.on_message(channel=channel, sender="user", text="trigger error", trace_id=mint_trace_id())
@@ -1167,6 +1187,7 @@ class TestOnNotify:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("notified response"))
         plugin._client = mock_client
+        plugin._mark_started()
 
         await plugin.pm.ahook.on_notify(
             channel=channel, source="test", text="background event happened",
@@ -1188,6 +1209,7 @@ class TestOnNotify:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("tool result acknowledged"))
         plugin._client = mock_client
+        plugin._mark_started()
 
         await plugin.pm.ahook.on_notify(
             channel=channel,
@@ -1252,6 +1274,7 @@ class TestShouldProcessMessage:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("should not reach"))
         plugin._client = mock_client
+        plugin._mark_started()
 
         class RejectPlugin:
             @hookimpl
@@ -1277,6 +1300,7 @@ class TestShouldProcessMessage:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("accepted response"))
         plugin._client = mock_client
+        plugin._mark_started()
 
         class AcceptPlugin:
             @hookimpl
@@ -1302,6 +1326,7 @@ class TestShouldProcessMessage:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("default accept"))
         plugin._client = mock_client
+        plugin._mark_started()
 
         class NeutralPlugin:
             @hookimpl
@@ -1325,6 +1350,7 @@ class TestShouldProcessMessage:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("no filter"))
         plugin._client = mock_client
+        plugin._mark_started()
 
         await plugin.on_message(channel=channel, sender="user", text="hi", trace_id=mint_trace_id())
         await drain(plugin, channel)
@@ -1343,6 +1369,7 @@ class TestShouldProcessMessage:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("not rejected"))
         plugin._client = mock_client
+        plugin._mark_started()
 
         class FalsyPlugin:
             @hookimpl
@@ -1375,6 +1402,7 @@ class TestResolveLlmError:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(side_effect=RuntimeError("LLM failed"))
         plugin._client = mock_client
+        plugin._mark_started()
 
         class ErrorPlugin:
             @hookimpl
@@ -1400,6 +1428,7 @@ class TestResolveLlmError:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(side_effect=RuntimeError("LLM failed"))
         plugin._client = mock_client
+        plugin._mark_started()
 
         class NullErrorPlugin:
             @hookimpl
@@ -1424,6 +1453,7 @@ class TestResolveLlmError:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(side_effect=RuntimeError("LLM failed"))
         plugin._client = mock_client
+        plugin._mark_started()
 
         await plugin.on_message(channel=channel, sender="user", text="trigger error", trace_id=mint_trace_id())
         await drain(plugin, channel)
@@ -1444,6 +1474,7 @@ class TestResolveLlmError:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(side_effect=original_exc)
         plugin._client = mock_client
+        plugin._mark_started()
 
         received_error = {}
 
@@ -1481,6 +1512,7 @@ class TestResolveCompaction:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("answer"))
         plugin._client = mock_client
+        plugin._mark_started()
 
         # Trigger conversation init
         await plugin.on_message(channel=channel, sender="user", text="hi", trace_id=mint_trace_id())
@@ -1524,6 +1556,7 @@ class TestResolveCompaction:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("answer"))
         plugin._client = mock_client
+        plugin._mark_started()
 
         # Register a plugin that returns None (defers)
         class DeferPlugin:
@@ -1561,6 +1594,7 @@ class TestResolveCompaction:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("answer"))
         plugin._client = mock_client
+        plugin._mark_started()
 
         # Trigger conversation init
         await plugin.on_message(channel=channel, sender="user", text="hi", trace_id=mint_trace_id())
@@ -1608,6 +1642,7 @@ class TestResolveCompaction:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("answer"))
         plugin._client = mock_client
+        plugin._mark_started()
 
         # Trigger conversation init
         await plugin.on_message(channel=channel, sender="user", text="hi", trace_id=mint_trace_id())
@@ -1831,6 +1866,7 @@ class TestBeforeAgentTurn:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("answer"))
         plugin._client = mock_client
+        plugin._mark_started()
 
         hook_calls = []
 
@@ -1891,6 +1927,7 @@ class TestBeforeAgentTurn:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(side_effect=capture_chat)
         plugin._client = mock_client
+        plugin._mark_started()
 
         await plugin.on_message(channel=channel, sender="user", text="hello", trace_id=mint_trace_id())
         await drain(plugin, channel)
@@ -1921,6 +1958,7 @@ class TestBeforeAgentTurn:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("tool result acknowledged"))
         plugin._client = mock_client
+        plugin._mark_started()
 
         hook_call_channels = []
 
