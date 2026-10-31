@@ -69,14 +69,19 @@ class StubClient:
         return self.embed_result
 
 
-async def build_consolidation_env(config=None):
-    """Full pm: persistence (in-memory DB) + stubbed llm clients + memory.
+async def build_consolidation_env(config=None, db_path=":memory:"):
+    """Full pm: persistence (in-memory DB by default; a file path gives a
+    WAL file DB, which memory's dedicated write connection needs) + stubbed
+    llm clients + memory.
 
     Returns (memory, persistence, llm_stub_background, channel, db).
     """
     config = config or EMBED_CONFIG
-    db = await aiosqlite.connect(":memory:")
+    db = await aiosqlite.connect(db_path)
     await init_db(db)
+    if db_path != ":memory:":
+        # Same journal mode the daemon runs the persistence connection in.
+        await db.execute("PRAGMA journal_mode=wal")
 
     pm = create_plugin_manager()
     persistence = PersistencePlugin()

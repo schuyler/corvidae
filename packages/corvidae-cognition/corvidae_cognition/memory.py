@@ -57,8 +57,10 @@ import json
 import logging
 import math
 import re
+import sqlite3
 import time
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
 from typing import TYPE_CHECKING, Protocol
@@ -108,6 +110,12 @@ FTS_SIMILARITY_PROXY = 0.6
 # Vec KNN over-fetch factor: candidates are filtered by channel scope and
 # indexed/redacted flags after the KNN scan, so fetch more than k.
 VEC_OVERFETCH = 4
+
+# How long (ms) the dedicated memory write connection waits for SQLite's
+# write lock before failing the write (the range is then retried).
+# shortcut: a module constant, not an agent.yaml key; make it config if a
+# deployment with slow disks or long retention runs needs a longer wait.
+WRITE_BUSY_TIMEOUT_MS = 5000
 
 # Default consolidation prompt. prompts/memory_consolidation.md is the
 # documented copy of this text; memory.consolidation_prompt in config
@@ -647,6 +655,14 @@ class MemoryPlugin(CorvidaePlugin):
         if pm is not None:
             self.pm = pm
         self._schema_ready = False
+        # Dedicated write connection (#221): opened in on_start once the
+        # schema exists (or lazily on first write), closed in on_stop.
+        # Only MemoryPlugin writes to it, so its transactions are atomic by
+        # construction.
+        self._write_db: aiosqlite.Connection | None = None
+        # True only when memory opened _write_db itself (not the shared fallback).
+        self._owns_write_db = False
+        self._write_path: str = "<unknown>"
         self._vec_available = False
         self._encoder_mismatch = False
         self._embedding_cfg: dict | None = None
@@ -689,9 +705,10 @@ class MemoryPlugin(CorvidaePlugin):
         self._retention_deadline: Timer | None = None
         # True from the due time until the run starts.
         self._retention_pending: bool = False
-        # Serializes the check-and-insert commit section of consolidation
-        # so the watermark compare-and-set is race-free on the shared
-        # persistence connection.
+        # Serializes MemoryPlugin's own writers (consolidation versus goal
+        # retirement) so the watermark compare-and-set is race-free within
+        # the process. It no longer carries cross-plugin atomicity: that is
+        # the write connection's BEGIN IMMEDIATE transaction (#221).
         self._db_lock = asyncio.Lock()
         # Pluggable importance prior; replaced by later phases (§3.1).
         self.importance_prior: ImportancePrior = RubricPrior(
@@ -768,6 +785,8 @@ class MemoryPlugin(CorvidaePlugin):
         try:
             db = await self._ensure_schema()
             if db is not None:
+                # Schema exists: open the dedicated write connection.
+                await self._write_conn()
                 self._spawn(self._backfill_message_fts())
                 # Run synchronously so it completes before on_start returns,
                 # preventing races with tests/callers that call run_retention_job
@@ -808,6 +827,18 @@ class MemoryPlugin(CorvidaePlugin):
         if self._tasks:
             await asyncio.gather(*list(self._tasks), return_exceptions=True)
         self._tasks.clear()
+        # No task is writing any more: close the dedicated write connection.
+        if self._write_db is not None:
+            write_db, self._write_db = self._write_db, None
+            try:
+                # The in-memory fallback is the persistence connection: not ours.
+                if self._owns_write_db:
+                    await write_db.close()
+            except Exception:
+                logger.warning(
+                    "memory write connection failed to close cleanly",
+                    exc_info=True,
+                )
 
     # ------------------------------------------------------------------
     # Consolidation triggers (bootstrap-mapping §3.1)
@@ -1166,6 +1197,8 @@ class MemoryPlugin(CorvidaePlugin):
         attribution_token = set_attribution(
             stage="consolidation", channel_id=channel_id, trigger=trigger
         )
+        # The message-id range, for the failure log; narrowed once rows load.
+        range_desc = f"up to {range_end}"
         try:
             db = await self._ensure_schema()
             if db is None:
@@ -1177,15 +1210,16 @@ class MemoryPlugin(CorvidaePlugin):
             # Fetch the working range and keep only real dialog.
             rows = await fetch_range_rows(db, channel_id, watermark, range_end)
             dialog = dialog_from_rows(rows)
+            if rows:
+                range_desc = f"{rows[0][0]}-{rows[-1][0]}"
 
             if not dialog:
                 # Pure CONTEXT/system segments advance the watermark
                 # without producing a record.
-                async with self._db_lock:
-                    current = await self._get_watermark(db, channel_id)
+                async with self._db_lock, self._write_txn() as wdb:
+                    current = await self._get_watermark(wdb, channel_id)
                     if current == watermark:
-                        await self._set_watermark(db, channel_id, range_end)
-                        await db.commit()
+                        await self._set_watermark(wdb, channel_id, range_end)
                 return
 
             # The first-person record: a fork of the live window when one
@@ -1240,9 +1274,12 @@ class MemoryPlugin(CorvidaePlugin):
                         "embedded=0 for backfill", exc_info=True,
                     )
 
-            # Atomic commit section: insert + watermark advance together.
-            async with self._db_lock:
-                current = await self._get_watermark(db, channel_id)
+            # Atomic commit section: insert, vec row, near-dup merge and
+            # watermark advance are one transaction on the write connection,
+            # so they land together or not at all (#221). The lock keeps
+            # memory's own writers (goal retirement) out meanwhile.
+            async with self._db_lock, self._write_txn() as wdb:
+                current = await self._get_watermark(wdb, channel_id)
                 if current != watermark:
                     # Design (OPT-1a-2): a concurrent consolidation task won
                     # the compare-and-set and advanced the watermark.  Discarding
@@ -1258,7 +1295,7 @@ class MemoryPlugin(CorvidaePlugin):
                     )
                     return
                 memory_id = await self._insert_record(
-                    db,
+                    wdb,
                     channel_id=channel_id,
                     summary=record["summary"],
                     created_at=created_at,
@@ -1270,8 +1307,7 @@ class MemoryPlugin(CorvidaePlugin):
                     msg_id_end=rows[-1][0],
                     embedding=embedding,
                 )
-                await self._set_watermark(db, channel_id, range_end)
-                await db.commit()
+                await self._set_watermark(wdb, channel_id, range_end)
             logger.info(
                 "memory consolidated",
                 extra={
@@ -1286,10 +1322,13 @@ class MemoryPlugin(CorvidaePlugin):
         except asyncio.CancelledError:
             raise
         except Exception:
-            # Fail-soft: the watermark did not advance, so a later trigger
-            # retries this range.
+            # Fail-soft: the write transaction rolled back and the watermark
+            # did not advance, so a later trigger retries this range.
             logger.warning(
-                "consolidation failed for %s", channel_id, exc_info=True
+                "consolidation failed for %s (trigger=%s, message ids %s); "
+                "nothing was stored and the range will be retried on the "
+                "next trigger",
+                channel_id, trigger, range_desc, exc_info=True,
             )
         finally:
             reset_attribution(attribution_token)
@@ -1300,7 +1339,11 @@ class MemoryPlugin(CorvidaePlugin):
         topic_tags: list[str], participants: list[str],
         msg_id_start: int, msg_id_end: int, embedding: list[float] | None,
     ) -> int:
-        """Insert + vec row + near-dup merge. Caller holds _db_lock and commits."""
+        """Insert + vec row + near-dup merge on ``db``, the write connection.
+
+        The caller holds ``_db_lock`` inside ``_write_txn`` and so owns the
+        commit or rollback.
+        """
         cursor = await db.execute(
             "INSERT INTO memory (channel_id, created_at, summary, "
             "importance, valence, topic_tags, participants, "
@@ -1446,10 +1489,10 @@ class MemoryPlugin(CorvidaePlugin):
         self, *, channel_id: str, summary: str, created_at: float,
         importance: float, msg_id_start: int, msg_id_end: int,
     ) -> int:
-        """Embed (fail soft to embedded=0), then _insert_record under _db_lock,
-        then commit. Raises if the DB isn't open or on DB failure; returns memory.id."""
-        db = await self._ensure_schema()
-        if db is None:
+        """Embed (fail soft to embedded=0), then _insert_record as one
+        transaction on the write connection under _db_lock. Raises (leaving
+        no row) if the DB isn't open or on DB failure; returns memory.id."""
+        if await self._ensure_schema() is None:
             raise RuntimeError("memory database is not open")
         # Embed the summary; failure stores embedded=0 for later backfill.
         embedding: list[float] | None = None
@@ -1462,15 +1505,14 @@ class MemoryPlugin(CorvidaePlugin):
                     "memory embedding failed; storing record with "
                     "embedded=0 for backfill", exc_info=True,
                 )
-        async with self._db_lock:
+        async with self._db_lock, self._write_txn() as wdb:
             memory_id = await self._insert_record(
-                db, channel_id=channel_id, summary=summary,
+                wdb, channel_id=channel_id, summary=summary,
                 created_at=created_at, importance=importance, valence=None,
                 topic_tags=[], participants=[],
                 msg_id_start=msg_id_start, msg_id_end=msg_id_end,
                 embedding=embedding,
             )
-            await db.commit()
         return memory_id
 
     async def _consolidation_record(
@@ -1884,6 +1926,124 @@ class MemoryPlugin(CorvidaePlugin):
     def _embedding_enabled(self) -> bool:
         """True when an embedding role is configured and encoders match."""
         return self._embedding_cfg is not None and not self._encoder_mismatch
+
+    async def _open_write_db(self, shared: aiosqlite.Connection) -> aiosqlite.Connection:
+        """Open the dedicated write connection on the persistence database file.
+
+        Set up like the persistence connection: same file, the journal mode
+        the persistence connection runs in (WAL by default), a bounded
+        busy_timeout, and sqlite-vec when memory uses vectors. Autocommit
+        (isolation_level=None) so transactions are exactly the explicit
+        BEGIN IMMEDIATE .. COMMIT of ``_write_txn``. Returns ``shared`` itself
+        for a database with no file (in-memory), which a second connection
+        cannot open.
+        """
+        async with shared.execute("PRAGMA database_list") as cursor:
+            files = [row[2] for row in await cursor.fetchall() if row[1] == "main"]
+        path = files[0] if files else ""
+        if not path:
+            # shortcut: an in-memory persistence DB (tests) keeps memory writes
+            # on the shared connection with no cross-plugin atomicity; a
+            # daemon always has a file, so upgrade only if one ever doesn't.
+            logger.warning(
+                "memory: persistence database has no file; memory writes "
+                "share the persistence connection (not atomic against "
+                "other plugins' commits)"
+            )
+            return shared
+        async with shared.execute("PRAGMA journal_mode") as cursor:
+            row = await cursor.fetchone()
+        journal_mode = str(row[0]) if row else "wal"
+        conn = await aiosqlite.connect(path, isolation_level=None)
+        try:
+            await conn.execute(f"PRAGMA journal_mode={journal_mode}")
+            await conn.execute(f"PRAGMA busy_timeout={int(WRITE_BUSY_TIMEOUT_MS)}")
+            if self._vec_available and not await self._load_vec_extension(conn):
+                logger.warning(
+                    "memory: sqlite-vec failed to load on the write connection "
+                    "for %s; vector inserts on it will fail until restart "
+                    "(check the sqlite-vec install)", path,
+                )
+        except BaseException:
+            # Don't leak the half-configured connection's worker thread.
+            await conn.close()
+            raise
+        self._write_path = path
+        return conn
+
+    async def _write_conn(self) -> aiosqlite.Connection | None:
+        """The connection memory record writes use; None when no DB is open yet.
+
+        Opened lazily after the schema exists, because on_start order is
+        LIFO and the persistence DB may not be open at memory's on_start.
+        """
+        if self._write_db is not None:
+            return self._write_db
+        shared = await self._ensure_schema()
+        if shared is None:
+            return None
+        # Re-check: another task may have opened it while the schema ran.
+        if self._write_db is None:
+            self._write_db = await self._open_write_db(shared)
+            self._owns_write_db = self._write_db is not shared
+        return self._write_db
+
+    @asynccontextmanager
+    async def _write_txn(self) -> AsyncIterator[aiosqlite.Connection]:
+        """One memory write as a real SQLite transaction on the write connection.
+
+        ``BEGIN IMMEDIATE`` .. ``COMMIT``; any exception (and cancellation)
+        rolls back, logs a failed rollback at WARNING, and propagates for the
+        caller to report. A write blocked past the busy timeout logs a
+        WARNING naming the database path and timeout, then propagates.
+        Callers hold ``_db_lock`` so memory's own writers don't contend.
+        """
+        conn = await self._write_conn()
+        if conn is None:
+            raise RuntimeError("memory database is not open")
+        shared = self._resolve_db()
+        # A fallback to the shared connection has no transaction of its own.
+        own_txn = conn is not shared
+        path = self._write_path
+        if own_txn:
+            try:
+                await conn.execute("BEGIN IMMEDIATE")
+            except sqlite3.OperationalError as exc:
+                if "locked" in str(exc) or "busy" in str(exc):
+                    logger.warning(
+                        "memory write blocked: database %s stayed locked past "
+                        "the %d ms busy timeout; the write will be retried "
+                        "on the next trigger",
+                        path, WRITE_BUSY_TIMEOUT_MS,
+                    )
+                raise
+        try:
+            yield conn
+            # COMMIT is inside the try: a failed commit (SQLITE_BUSY against a
+            # long reader) must roll back rather than leave the lock held.
+            await (conn.execute("COMMIT") if own_txn else conn.commit())
+        except BaseException:
+            # Undo every statement of the section, including cancellation.
+            try:
+                await (conn.execute("ROLLBACK") if own_txn else conn.rollback())
+            except Exception:
+                logger.warning(
+                    "memory write rollback failed on %s; closing the write "
+                    "connection so the next memory write reopens a clean one "
+                    "(restart the daemon if writes keep failing)",
+                    path, exc_info=True,
+                )
+                if own_txn:
+                    # Drop the wedged connection; closing releases its lock.
+                    self._write_db = None
+                    try:
+                        await conn.close()
+                    except Exception:
+                        logger.warning(
+                            "memory write connection on %s failed to close "
+                            "after a failed rollback", path, exc_info=True,
+                        )
+            raise
 
     def _resolve_db(self) -> aiosqlite.Connection | None:
         """Return the persistence plugin's DB connection, or None if not open yet."""

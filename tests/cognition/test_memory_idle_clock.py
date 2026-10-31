@@ -545,8 +545,11 @@ async def test_retention_meta_read_failure_keeps_traceback(make_env, caplog):
     finally:
         env.db.execute = real_execute
 
+    # The in-memory test DB has no file, so memory notes (once, at WARNING)
+    # that its writes share the persistence connection; not under test here.
     warnings = [r for r in caplog.records
-                if r.name == "corvidae.memory" and r.levelno >= logging.WARNING]
+                if r.name == "corvidae.memory" and r.levelno >= logging.WARNING
+                and "share the persistence connection" not in r.getMessage()]
     assert len(warnings) == 1, [r.getMessage() for r in warnings]
     assert warnings[0].levelno == logging.WARNING
     assert warnings[0].exc_info is not None

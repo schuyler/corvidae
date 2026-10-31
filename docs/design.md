@@ -669,6 +669,20 @@ friends ([MemoryPlugin](cognition.md#memoryplugin)), `exchange_log` (OutcomeLogP
 `usage_log` (UsageLogPlugin), and `schedule`
 ([SchedulerPlugin](#schedulerplugin)).
 
+**Connections to the database file.** Most plugins write on the one
+persistence connection (`PersistencePlugin.db`). The others:
+
+| Connection | Opened by | Writes |
+|---|---|---|
+| persistence (`PersistencePlugin.db`) | persistence `on_start` | `message_log`, and every other plugin's tables (scheduler, usage_log, retrieval_log, goals, ...) |
+| memory write (`MemoryPlugin._write_db`) | memory `on_start`, after its schema exists | memory records only: consolidation (`memory`, `memory_vec`, `memory_fts` via trigger, `consolidation_watermark`) and `write_record`, each one `BEGIN IMMEDIATE` transaction |
+| appraisal probe, critique probe | each plugin's `on_start` | read only (`message_fts` probes) |
+
+Only the memory write connection is isolated for atomicity: a commit on
+the persistence connection can't land inside a memory transaction, and a
+rollback there can't discard another plugin's pending row. WAL lets
+readers on the persistence connection see a committed record at once.
+
 ## Agent
 
 `agent.py` — the central plugin. Implements `on_start`, `on_message`,
