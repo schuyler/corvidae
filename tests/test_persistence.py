@@ -880,11 +880,20 @@ class TestPersistenceDegradation:
             expected = ["[summary]"] + expected
             assert result[0]["_message_type"] == MessageType.SUMMARY
         assert [m["content"] for m in result] == expected
-        warnings = self._warnings(caplog)
-        assert any(
-            re.search(rf"\b{corrupt_id}\b", w) and channel.id in w
-            for w in warnings
-        ), warnings
+        # Exactly WARNING (not ERROR) from this module, naming row and channel
+        skips = [
+            r.getMessage() for r in caplog.records
+            if r.levelno == logging.WARNING and r.name == "corvidae.persistence"
+            and re.search(rf"\b{corrupt_id}\b", r.getMessage())
+            and channel.id in r.getMessage()
+        ]
+        assert skips, self._warnings(caplog)
+        # The message says the load continued and what to do about the row
+        assert any("rest of the history still loads" in w for w in skips), skips
+        if message_type == "bogus":
+            # An unknown type names the rejected value and the accepted ones
+            accepted = "accepted: " + ", ".join(t.value for t in MessageType)
+            assert any("'bogus'" in w and accepted in w for w in skips), skips
 
     async def test_resolve_conversation_corrupt_summary_falls_back_to_older_summary(
         self, db, caplog

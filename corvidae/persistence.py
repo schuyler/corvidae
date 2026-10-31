@@ -102,7 +102,8 @@ def _parse_message_rows(rows: list[tuple], channel_id: str) -> list[dict]:
             msg = json.loads(row[1])
         except (ValueError, RecursionError):
             logger.warning(
-                "skipping unparseable message row %s for channel %s",
+                "skipping unparseable message row %s for channel %s; the rest "
+                "of the history still loads — inspect or redact the row",
                 row[0], channel_id, exc_info=True,
             )
             continue
@@ -110,7 +111,8 @@ def _parse_message_rows(rows: list[tuple], channel_id: str) -> list[dict]:
         if not isinstance(msg, dict):
             logger.warning(
                 "skipping message row %s for channel %s: decoded to %s, "
-                "not an object",
+                "not an object; the rest of the history still loads — "
+                "inspect or redact the row",
                 row[0], channel_id, type(msg).__name__,
             )
             continue
@@ -121,7 +123,8 @@ def _parse_message_rows(rows: list[tuple], channel_id: str) -> list[dict]:
             accepted = ", ".join(t.value for t in MessageType)
             logger.warning(
                 "skipping message row %s for channel %s: unknown message_type "
-                "%r (accepted: %s)",
+                "%r (accepted: %s); the rest of the history still loads — "
+                "inspect or correct the row",
                 row[0], channel_id, row[2], accepted,
             )
             continue
