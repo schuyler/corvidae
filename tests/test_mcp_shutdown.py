@@ -48,10 +48,26 @@ async def _wait_no_children(timeout: float = 5) -> list[int]:
     return _child_pids()
 
 
+# Plugins built by _make_plugin in the running test; the fixture below stops
+# them all so a failing assertion cannot leak server subprocesses.
+_made_plugins: list[McpClientPlugin] = []
+
+
 def _make_plugin(servers: dict) -> tuple[McpClientPlugin, dict]:
     """A plugin initialised with the given server configs."""
     plugin = McpClientPlugin(None)
+    _made_plugins.append(plugin)
     return plugin, {"mcp": {"servers": servers}}
+
+
+@pytest.fixture(autouse=True)
+async def _stop_made_plugins():
+    """Call on_stop on every plugin the test made, even if it failed."""
+    yield
+    plugins = list(_made_plugins)
+    _made_plugins.clear()
+    for plugin in plugins:
+        await plugin.on_stop()
 
 
 async def _start_in_own_task(plugin: McpClientPlugin, config: dict) -> None:
@@ -120,9 +136,10 @@ class TestDeadServer:
 
         await asyncio.wait_for(_stop_in_own_task(plugin), 3)
 
-        # No error escaped; any warning names a server; the survivor is gone.
+        # A SIGKILLed stdio server shuts down cleanly: no teardown warning,
+        # on_stop completed, and the survivor is gone.
         warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
-        assert len(warnings) <= 1
+        assert warnings == [], [r.getMessage() for r in warnings]
         assert await _wait_no_children() == []
 
     async def test_owner_failure_after_ready_logs_one_warning(self, caplog):
@@ -140,9 +157,13 @@ class TestDeadServer:
 
         warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
         assert len(warnings) == 1
-        assert "srv" in warnings[0].getMessage() or warnings[0].__dict__.get("server") == "srv"
+        assert "'srv'" in warnings[0].getMessage()
+        assert warnings[0].__dict__.get("server") == "srv"
         assert "ZeroDivisionError" in warnings[0].getMessage()
         assert warnings[0].exc_info is not None
+        # anyio wraps the error in (nested) exception groups.
+        assert "ZeroDivisionError" in mcp_client._exc_type_names(
+            warnings[0].exc_info[1])
         # The other server was still torn down.
         assert await _wait_no_children() == []
 
@@ -233,3 +254,89 @@ class TestOwnerLifecycle:
 
         assert await _wait_no_children() == []
         await plugin.on_stop()
+
+
+class TestConfigErrors:
+    """Config errors must skip the server, never hang on_start (#213 review)."""
+
+    @pytest.mark.parametrize("bad", [
+        {"command": sys.executable, "args": [ECHO_SERVER]},  # no transport
+        {**_stdio_cfg(), "timeout_seconds": "abc"},  # non-numeric timeout
+    ])
+    async def test_bad_config_is_skipped_and_logged(self, bad, caplog):
+        plugin, config = _make_plugin({"bad": bad})
+        caplog.set_level(logging.DEBUG)
+        await plugin.on_init(pm=MagicMock(), config=config)
+
+        async with asyncio.timeout(5):
+            await plugin.on_start(config=config)
+
+        # Logged skip names the server and carries the traceback; the server
+        # is queued for retry as on main; no subprocess was left behind.
+        skips = [r for r in caplog.records if r.levelno >= logging.WARNING
+                 and r.__dict__.get("server") == "bad" and r.exc_info]
+        assert len(skips) == 1
+        assert "skipping" in skips[0].getMessage()
+        assert list(plugin._pending_servers) == ["bad"]
+        assert plugin._servers == [] and plugin._owners == {}
+        assert await _wait_no_children() == []
+
+    async def test_bad_config_on_lazy_retry_does_not_hang(self):
+        good = _stdio_cfg()
+        plugin, config = _make_plugin({"up": good})
+        await _start_in_own_task(plugin, config)
+        plugin._pending_servers["bad"] = {"command": sys.executable}
+        tool = next(t for t in plugin._cached_tools if t.name == "up__echo")
+
+        async with asyncio.timeout(5):
+            assert await tool.fn(text="hi") == "hi"
+
+        assert list(plugin._pending_servers) == ["bad"]
+
+    async def test_owner_exception_before_ready_resolves_ready(self, monkeypatch):
+        # Any failure in the owner before ready resolves (here the SDK
+        # import) must resolve ready with it, not leave the caller waiting.
+        monkeypatch.setitem(sys.modules, "mcp.client.sse", None)
+        plugin, _ = _make_plugin({})
+        owner = mcp_client._ServerOwner(name="x")
+        ready: asyncio.Future = asyncio.get_running_loop().create_future()
+        task = asyncio.create_task(plugin._run_owner(
+            owner, {}, None, 5.0, ready,
+            transport="stdio", prefix="x", timeout=30.0))
+        async with asyncio.timeout(5):
+            with pytest.raises(ImportError):
+                await ready
+            await task
+
+
+class TestDuplicateConnect:
+    async def test_concurrent_retries_leave_one_owned_server(self):
+        # Two tool calls retrying the same pending server both connect; the
+        # loser must be stopped, not overwritten and leaked.
+        good = _stdio_cfg()
+        plugin, config = _make_plugin({
+            "up": good,
+            "late": {**good, "command": "definitely-not-a-real-binary-213"},
+        })
+        await _start_in_own_task(plugin, config)
+        plugin._pending_servers["late"] = good
+        tool = next(t for t in plugin._cached_tools if t.name == "up__echo")
+
+        async with asyncio.timeout(15):
+            await asyncio.gather(tool.fn(text="a"), tool.fn(text="b"))
+
+        assert sorted(s.name for s in plugin._servers) == ["late", "up"]
+        assert sorted(plugin._owners) == ["late", "up"]
+        # The duplicate's subprocess is already gone: only up + late remain.
+        assert len(await _wait_children_at_most(2)) == 2
+
+        await _stop_in_own_task(plugin)
+        assert await _wait_no_children() == []
+
+
+async def _wait_children_at_most(n: int, timeout: float = 5) -> list[int]:
+    """Poll until this process has at most n children; return them."""
+    deadline = time.monotonic() + timeout
+    while len(_child_pids()) > n and time.monotonic() < deadline:
+        await asyncio.sleep(0.05)
+    return _child_pids()

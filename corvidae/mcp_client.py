@@ -340,6 +340,13 @@ class McpClientPlugin(CorvidaePlugin):
         connect_timeout_seconds is logged by the owner and returns without
         registering the server.
         """
+        # Read every config value the owner needs here, before anything
+        # opens: a missing transport or non-numeric timeout raises in this
+        # task, where on_start logs it and queues the server, instead of
+        # killing the owner task with ``ready`` unresolved.
+        transport = cfg["transport"]
+        prefix = cfg.get("tool_prefix", name)
+        timeout = float(cfg.get("timeout_seconds", 30))
         connect_timeout = float(cfg.get("connect_timeout_seconds", 30))
         # A zero or negative bound would fail every handshake; reject it as
         # a config error (on_start logs it and skips the server).
@@ -357,7 +364,10 @@ class McpClientPlugin(CorvidaePlugin):
         owner = _ServerOwner(name=name)
         ready: asyncio.Future = asyncio.get_running_loop().create_future()
         owner.task = asyncio.create_task(
-            self._run_owner(owner, cfg, headers, connect_timeout, ready),
+            self._run_owner(
+                owner, cfg, headers, connect_timeout, ready,
+                transport=transport, prefix=prefix, timeout=timeout,
+            ),
             name=f"mcp-owner-{name}",
         )
         try:
@@ -374,12 +384,24 @@ class McpClientPlugin(CorvidaePlugin):
             await asyncio.wait([owner.task])
             return
 
+        if name in self._owners:
+            # A concurrent retry connected this server first. Keep that
+            # owner and close this duplicate, so no owner is orphaned.
+            logger.warning(
+                "MCP server %r connected twice (concurrent retry); closing "
+                "the duplicate connection",
+                name, extra={"server": name},
+            )
+            owner.stop.set()
+            await asyncio.wait([owner.task])
+            return
+
         # Connected: the owner stays alive until on_stop signals it.
         self._owners[name] = owner
         self._servers.append(state)
         logger.info(
             "MCP server connected",
-            extra={"server": name, "transport": cfg["transport"],
+            extra={"server": name, "transport": transport,
                    "tools": len(state.mcp_tools)},
         )
 
@@ -390,6 +412,10 @@ class McpClientPlugin(CorvidaePlugin):
         headers: dict[str, str] | None,
         connect_timeout: float,
         ready: asyncio.Future,
+        *,
+        transport: str,
+        prefix: str,
+        timeout: float,
     ) -> None:
         """Body of a server's owner task: connect, serve, close.
 
@@ -397,19 +423,20 @@ class McpClientPlugin(CorvidaePlugin):
         a connect timeout, or the connect exception), then waits for
         ``owner.stop`` and closes the server's resources in this same task.
         Teardown errors are logged here, not raised, so they cannot break
-        on_stop's other servers.
+        on_stop's other servers. Anything raised before ``ready`` resolves
+        (including the SDK imports) resolves it with that exception and
+        closes the stack, so _connect_server never waits forever.
         """
-        from mcp import ClientSession
-        from mcp.client.stdio import StdioServerParameters, stdio_client
-        from mcp.client.sse import sse_client
-        from mcp.client.streamable_http import streamable_http_client
-        from mcp.shared._httpx_utils import create_mcp_http_client
-
         name = owner.name
         stack = owner.stack
-        transport = cfg["transport"]
         deadline = asyncio.timeout(connect_timeout)
         try:
+            from mcp import ClientSession
+            from mcp.client.stdio import StdioServerParameters, stdio_client
+            from mcp.client.sse import sse_client
+            from mcp.client.streamable_http import streamable_http_client
+            from mcp.shared._httpx_utils import create_mcp_http_client
+
             # Bound the whole handshake inside this task: a server that never
             # answers initialize (or list_tools) would otherwise block the
             # on_start broadcast, and with it daemon startup, forever (#72).
@@ -479,8 +506,8 @@ class McpClientPlugin(CorvidaePlugin):
         ready.set_result(_McpServerState(
             name=name,
             session=session,
-            prefix=cfg.get("tool_prefix", name),
-            timeout_seconds=float(cfg.get("timeout_seconds", 30)),
+            prefix=prefix,
+            timeout_seconds=timeout,
             mcp_tools=result.tools,
         ))
         try:
