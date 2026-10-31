@@ -2449,9 +2449,13 @@ null id). Admission and rejection fire before `on_message` returns, so the
 send handler's `finally` removes any entry still un-admitted: dropped,
 raised or cancelled. Removal is idempotent.
 
-**Working indicator.** On at admission. After each `send_message`, off
-unless a reply is still owed: an admitted-but-unpersisted entry, a
-non-empty queue for the channel, or pending tool calls.
+**Working indicator.** On at admission. Off when the idle tracker reports
+the channel settled (a `watch_channels(0, ...)` watch, filtered to web's
+channels), unless a reply is still owed: an admitted-but-unpersisted entry
+or pending tool calls; the next settle re-checks. Web never reads the
+Agent's queues. A zero-period watch fires at settle, on the next loop step.
+Without an idle tracker (hand-built plugin managers) web logs a warning and
+clears on the final `send_message` instead.
 
 **Replay.** `subscribe` sets the subscription, starts buffering live
 frames and snapshots the unsent entries, all before its first `await`;

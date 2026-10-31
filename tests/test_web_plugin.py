@@ -401,7 +401,7 @@ async def make_env(db):
 
     async def make(web_block=None, *, ready: bool = True, persistence: bool = True,
                    start: bool = True, token: str | None = TOKEN,
-                   use_db: bool = True) -> Env:
+                   use_db: bool = True, idle: bool = False) -> Env:
         env = Env()
         env.pm = create_plugin_manager()
         env.registry = ChannelRegistry()
@@ -416,6 +416,12 @@ async def make_env(db):
         env.pm.register(env.agent, name="agent")
         env.plugin = WebPlugin(env.pm)
         env.pm.register(env.plugin, name="web")
+        # Optional kernel clock + idle tracker, as Runtime registers them.
+        env.clock = env.idle = None
+        if idle:
+            from fake_clock import install_kernel_clock
+
+            env.clock, env.idle = install_kernel_clock(env.pm)
         block = {"host": "127.0.0.1", "port": 0} if web_block is None else web_block
         if token is not None and isinstance(block, dict) and "token" not in block:
             block = {**block, "token": token}
@@ -434,6 +440,9 @@ async def make_env(db):
     # failed test left stuck), then close what's left client-side.
     for env in envs:
         await env.plugin.on_stop()
+        if env.idle is not None:
+            env.idle.stop()
+            await env.clock.close()
         for r in env.raws:
             r.close()
         for c in env.conns:
@@ -499,8 +508,10 @@ class TestConfig:
         await make_env({"host": "0.0.0.0", "port": 0,
                         "allowed_origins": ["http://box.example:8765"]})
         warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-        assert len(warnings) == 1, [r.getMessage() for r in warnings]
-        assert "not a loopback address" in warnings[0].getMessage()
+        # The missing idle tracker (no Runtime here) warns separately (#172).
+        loopback = [r for r in warnings if "loopback" in r.getMessage()]
+        assert len(loopback) == 1, [r.getMessage() for r in warnings]
+        assert "not a loopback address" in loopback[0].getMessage()
 
     async def test_bind_failure_raises(self, make_env):
         env = await make_env()
@@ -971,6 +982,109 @@ class TestWorking:
         await env.pm.ahook.send(channel=ch, event=OutboundMessage(text="r2"))
         await conn.wait_type("working", value=False)
         assert "web:main" not in env.plugin._working
+    # -- #172: the indicator follows the idle tracker's settle signal --------
+
+    async def _send(self, env, conn, text):
+        """Send ``text`` from the browser and wait until it is admitted."""
+        n = len(env.agent.calls)
+        await conn.send(type="send", conversation="main", text=text)
+        await wait_until(lambda: len(env.agent.calls) > n)
+
+    async def test_no_queue_reference_in_module(self):
+        # R1: web never reaches for another component's queues.
+        src = Path(web_mod.__file__).read_text()
+        assert "queues" not in src
+
+    async def test_clears_on_settle_after_final_reply(self, make_env):
+        # R2: working stays true through the reply, clears at settle, and
+        # the message frame precedes the working=false frame.
+        env = await make_env(idle=True)
+        conn = await env.connect("main")
+        ch = env.channel("main")
+        await self._send(env, conn, "one")
+        env.idle.note_activity(ch.id)
+        await _persist(env, _tid_of(env, "one"))
+        await env.pm.ahook.send(channel=ch, event=OutboundMessage(text="r1"))
+        await conn.wait_type("message", text="r1")
+        await conn.sync()
+        assert "web:main" in env.plugin._working
+        env.idle.note_settled(ch.id)
+        await env.clock.advance(0)
+        await conn.wait_type("working", value=False)
+        kinds = [(f["type"], f.get("value", f.get("text"))) for f in conn.frames]
+        assert kinds.index(("message", "r1")) < kinds.index(("working", False))
+        assert "web:main" not in env.plugin._working
+
+    async def test_stays_working_while_tool_calls_pending(self, make_env):
+        # R2: pending tool calls hold the indicator until a later settle.
+        env = await make_env(idle=True)
+        conn = await env.connect("main")
+        ch = env.channel("main")
+        await self._send(env, conn, "one")
+        env.idle.note_activity(ch.id)
+        await _persist(env, _tid_of(env, "one"))
+        ch.pending_tool_call_ids.add("call-1")
+        env.idle.note_settled(ch.id)
+        await env.clock.advance(0)
+        await conn.sync()
+        assert "web:main" in env.plugin._working
+        ch.pending_tool_call_ids.clear()
+        env.idle.note_activity(ch.id)
+        env.idle.note_settled(ch.id)
+        await env.clock.advance(0)
+        await conn.wait_type("working", value=False)
+
+    async def test_stays_working_between_two_queued_messages(self, make_env):
+        # R3: an admitted-but-unsent second message keeps the indicator on
+        # across the first turn's settle; it clears after the second.
+        env = await make_env(idle=True)
+        conn = await env.connect("main")
+        ch = env.channel("main")
+        await self._send(env, conn, "one")
+        await self._send(env, conn, "two")
+        env.idle.note_activity(ch.id)
+        await _persist(env, _tid_of(env, "one"))
+        await env.pm.ahook.send(channel=ch, event=OutboundMessage(text="r1"))
+        env.idle.note_settled(ch.id)
+        await env.clock.advance(0)
+        await conn.sync()
+        assert "web:main" in env.plugin._working
+        assert not any(f["type"] == "working" and f["value"] is False for f in conn.frames)
+        env.idle.note_activity(ch.id)
+        await _persist(env, _tid_of(env, "two"))
+        await env.pm.ahook.send(channel=ch, event=OutboundMessage(text="r2"))
+        env.idle.note_settled(ch.id)
+        await env.clock.advance(0)
+        await conn.wait_type("working", value=False)
+
+    async def test_other_transports_settle_ignored(self, make_env):
+        # Risk: the watch fires for every channel; only web's count.
+        env = await make_env(idle=True)
+        conn = await env.connect("main")
+        ch = env.channel("main")
+        await self._send(env, conn, "one")
+        await _persist(env, _tid_of(env, "one"))
+        env.idle.note_activity("irc:other")
+        env.idle.note_settled("irc:other")
+        await env.clock.advance(0)
+        await conn.sync()
+        assert "web:main" in env.plugin._working
+        assert ch.id == "web:main"
+
+    async def test_no_idle_tracker_warns_and_clears_on_reply(self, make_env, caplog):
+        # R5: no tracker -> one WARNING naming it, and the final reply clears.
+        caplog.set_level(logging.DEBUG)
+        env = await make_env()
+        warns = [r.getMessage() for r in caplog.records
+                 if r.levelno == logging.WARNING and "idle" in r.getMessage()]
+        assert len(warns) == 1, warns
+        assert "idle tracker" in warns[0] and "clear on reply" in warns[0]
+        conn = await env.connect("main")
+        ch = env.channel("main")
+        await self._send(env, conn, "one")
+        await _persist(env, _tid_of(env, "one"))
+        await env.pm.ahook.send(channel=ch, event=OutboundMessage(text="r1"))
+        await conn.wait_type("working", value=False)
 
     async def test_rejected_frame(self, make_env):
         env = await make_env()

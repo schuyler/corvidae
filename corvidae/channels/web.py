@@ -386,6 +386,8 @@ class WebPlugin(TransportPlugin):
         self._unsent: dict[str, list[_Unsent]] = {}
         self._working: set[str] = set()
         self._warned_no_db = False
+        # The idle tracker watch that clears "working"; None without one.
+        self._idle_watch = None
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -411,6 +413,22 @@ class WebPlugin(TransportPlugin):
             return
         self._registry = get_dependency(self.pm, "registry", ChannelRegistry)
         self._stopping = False
+
+        # Follow the idle tracker's settle signal for the working indicator.
+        # shortcut: without a tracker (hand-built plugin managers) "working"
+        # clears on the final reply only; Runtime always registers one.
+        idle = self.pm.get_plugin("idle")
+        if idle is None:
+            logger.warning(
+                "web: no idle tracker registered; the working indicator will "
+                "clear on reply only, so it may clear before queued work ends"
+            )
+        else:
+            # Period 0 fires at settle; the long repeat keeps a quiet channel
+            # from re-firing (the callback is idempotent anyway).
+            self._idle_watch = idle.watch_channels(
+                0, self._on_channel_settled, name="web.working", repeat=3600,
+            )
 
         # Bind; a failure raises out of startup. access_log=None keeps
         # `?token=` out of the log; the short shutdown timeout keeps
@@ -444,6 +462,10 @@ class WebPlugin(TransportPlugin):
         if not self._enabled:
             return
         self._stopping = True
+        # Stop following settle events.
+        if self._idle_watch is not None:
+            self._idle_watch.cancel()
+            self._idle_watch = None
 
         # 1. Close every fan-out socket and finish pending drop-path closes;
         #    each is bounded by _close_client, which logs and absorbs its own
@@ -1005,10 +1027,6 @@ class WebPlugin(TransportPlugin):
         """True while a reply is still owed on a channel."""
         if any(e.admitted for e in self._unsent.get(channel.id, [])):
             return True
-        agent = self.pm.get_plugin("agent")
-        queue = getattr(agent, "queues", {}).get(channel.id) if agent is not None else None
-        if queue is not None and not queue.is_empty:
-            return True
         return bool(channel.pending_tool_call_ids)
 
     async def send_message(self, channel: Channel, event: OutboundMessage) -> None:
@@ -1016,6 +1034,21 @@ class WebPlugin(TransportPlugin):
         once no more work is owed."""
         self._broadcast(channel.id, {"type": "message", "conversation": channel.scope,
                                      "text": event.text})
+        # With a tracker the settle callback clears "working" once the
+        # channel has drained; without one, clear here.
+        if self._idle_watch is None and not self._work_owed(channel):
+            self._set_working(channel, False)
+
+    async def _on_channel_settled(self, channel_id: str) -> None:
+        """Idle-tracker callback: a channel drained; clear "working" if no reply is owed."""
+        # The watch fires for every channel; only web's matter.
+        if not channel_id.startswith("web:") or self._registry is None:
+            return
+        channel = self._registry.get(channel_id)
+        if channel is None or not self.owns(channel):
+            return
+        # Tool calls still pending or unsent messages held: stay working;
+        # the next settle re-checks.
         if not self._work_owed(channel):
             self._set_working(channel, False)
 
