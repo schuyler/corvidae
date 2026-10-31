@@ -85,21 +85,23 @@ async def run_retention_job(memory: "MemoryPlugin", now: float | None = None) ->
             demoted_ids.append(mid)
 
     if demoted_ids:
-        async with memory._db_lock:
+        # One transaction on memory's write connection: the whole batch
+        # demotes or none of it does (#257). A failure rolls back and
+        # propagates; the job's caller logs it and the next run retries.
+        async with memory._db_lock, memory._write_txn() as wdb:
             for mid in demoted_ids:
-                await db.execute(
+                await wdb.execute(
                     "UPDATE memory SET indexed = 0, embedded = 0 WHERE id = ?", (mid,)
                 )
                 if memory._vec_available:
                     try:
-                        await db.execute(
+                        await wdb.execute(
                             "DELETE FROM memory_vec WHERE memory_id = ?", (mid,)
                         )
                     except Exception:
                         logger.debug(
                             "vec row delete failed for memory %d", mid, exc_info=True
                         )
-            await db.commit()
         logger.info("retention: demoted %d records", len(demoted_ids))
 
     # ------------------------------------------------------------------
@@ -123,12 +125,12 @@ async def run_retention_job(memory: "MemoryPlugin", now: float | None = None) ->
             repromoted_ids.append(mid)
 
     if repromoted_ids:
-        async with memory._db_lock:
+        # One transaction on memory's write connection (#257).
+        async with memory._db_lock, memory._write_txn() as wdb:
             for mid in repromoted_ids:
-                await db.execute(
+                await wdb.execute(
                     "UPDATE memory SET indexed = 1 WHERE id = ?", (mid,)
                 )
-            await db.commit()
         logger.info("retention: re-promoted %d records", len(repromoted_ids))
 
     # ------------------------------------------------------------------
@@ -164,22 +166,27 @@ async def run_retention_job(memory: "MemoryPlugin", now: float | None = None) ->
         client = memory._llm().get_client("embedding")
         texts = [row[1] for row in backfill_rows]
         embeddings = await client.embed(texts, kind="document")
-        async with memory._db_lock:
+        # Embeddings are computed above, so no network await runs inside the
+        # transaction; the batch commits whole or rolls back whole (#257).
+        async with memory._db_lock, memory._write_txn() as wdb:
             for (mid, _summary), embedding in zip(backfill_rows, embeddings):
                 # vec0 does not support INSERT OR REPLACE; clear any stale row.
-                await db.execute(
+                await wdb.execute(
                     "DELETE FROM memory_vec WHERE memory_id = ?", (mid,)
                 )
-                await db.execute(
+                await wdb.execute(
                     "INSERT INTO memory_vec (memory_id, embedding) VALUES (?, ?)",
                     (mid, sqlite_vec.serialize_float32(embedding)),
                 )
-                await db.execute(
+                await wdb.execute(
                     "UPDATE memory SET embedded = 1 WHERE id = ?", (mid,)
                 )
-            await db.commit()
         logger.info("retention: backfilled %d records", len(backfill_rows))
-    except Exception:
-        logger.warning("retention: backfill embedding failed", exc_info=True)
+    except Exception as exc:
+        logger.warning(
+            "retention: backfill of %d records failed and was rolled back "
+            "(%s); it will retry on the next retention run",
+            len(backfill_rows), type(exc).__name__, exc_info=True,
+        )
     finally:
         reset_attribution(attribution_token)

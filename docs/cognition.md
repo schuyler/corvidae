@@ -129,7 +129,10 @@ trigger and the message-id range, saying the range will be retried;
 the watermark hasn't moved, so the next trigger stores exactly one
 record. A failed rollback and a write blocked past the busy timeout (the
 WARNING names the database path and the timeout) are logged too.
-`write_record` (goal retirement) uses the same transaction. `_db_lock`
+`write_record` (goal retirement) uses the same transaction, as do retention's
+three passes (demotion, re-promotion, vec backfill): each batch commits whole
+or rolls back whole, and the backfill's embeddings are computed before the
+transaction opens. `_db_lock`
 stays, serializing memory's own writers (consolidation versus goals);
 it no longer carries cross-plugin atomicity. A persistence DB with no
 file (in-memory, tests only) can't be opened twice, so memory's writes
