@@ -129,6 +129,28 @@ DEFAULT_CONSOLIDATION_PROMPT = (
     "}"
 )
 
+# JSON schema for the consolidation record (#199). Mirrors what
+# _record_from_text reads: only ``summary`` is required, since the parser
+# tolerates missing tags and participants and a grammar that forced them
+# would add empty-array noise on small models. Sent as response_format so a
+# model that wants to continue the chat can only return a record; providers
+# that ignore it still get the prompt's JSON instruction.
+CONSOLIDATION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "summary": {"type": "string"},
+        "topic_tags": {"type": "array", "items": {"type": "string"}},
+        "participants": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["summary"],
+}
+CONSOLIDATION_EXTRA_BODY = {
+    "response_format": {
+        "type": "json_schema",
+        "json_schema": {"name": "memory_record", "schema": CONSOLIDATION_SCHEMA},
+    }
+}
+
 # Default fork instruction for consolidation (GitHub issue #51). With
 # agent.forks on, the record is written by a fork of the live window: this
 # text is appended to it as a user turn, followed by a sentence naming where
@@ -165,6 +187,21 @@ RUBRIC_PROMPT = (
     "decisions, or emotionally weighty events).\n\n"
     'Respond with a single JSON object, nothing else: {"importance": <float>}'
 )
+
+# JSON schema for the rubric prior (#199). Mirrors RubricPrior.score, which
+# reads a float ``importance``. Providers that ignore response_format still
+# get the prompt's JSON instruction.
+RUBRIC_SCHEMA = {
+    "type": "object",
+    "properties": {"importance": {"type": "number"}},
+    "required": ["importance"],
+}
+RUBRIC_EXTRA_BODY = {
+    "response_format": {
+        "type": "json_schema",
+        "json_schema": {"name": "importance_rating", "schema": RUBRIC_SCHEMA},
+    }
+}
 
 
 def _parse_json_block(text: str) -> dict:
@@ -459,7 +496,7 @@ class RubricPrior:
             response = await client.chat([
                 {"role": "system", "content": RUBRIC_PROMPT},
                 {"role": "user", "content": _dialog_transcript(messages)},
-            ])
+            ], extra_body=RUBRIC_EXTRA_BODY)
             text = response["choices"][0]["message"]["content"]
             importance = float(_parse_json_block(text)["importance"])
             return max(0.0, min(1.0, importance))
@@ -849,7 +886,9 @@ class MemoryPlugin(CorvidaePlugin):
             + _fork_range_sentence(prefix, dialog_ids)
         )
         try:
-            result = await agent.fork(channel, instruction, cut=cut)
+            result = await agent.fork(
+                channel, instruction, cut=cut, extra_body=CONSOLIDATION_EXTRA_BODY
+            )
             return _record_from_text(result.text)
         except Exception:
             logger.warning(
@@ -1478,7 +1517,9 @@ class MemoryPlugin(CorvidaePlugin):
             {"role": "user", "content": _dialog_transcript(dialog)},
         ]
         for attempt in range(2):
-            response = await client.chat(messages)
+            response = await client.chat(
+                messages, extra_body=CONSOLIDATION_EXTRA_BODY
+            )
             text = response["choices"][0]["message"]["content"]
             try:
                 return _record_from_text(text)

@@ -1371,7 +1371,7 @@ miss the cache from its first token.
 On top of that a fork sends `tool_choice: "none"` (tools stay in the
 render), `reasoning_budget_tokens` from `agent.forks.reasoning_budget_tokens`
 (a per-request sampler budget that never touches the template), and the
-stage's `extra_body` (`response_format`). Those keys are applied after the
+stage's `extra_body` (`response_format`; consolidation sends the memory-record schema). Those keys are applied after the
 runtime overrides, so `set_settings` can't re-enable tool calls on a fork.
 
 **Invariants.** A fork mutates nothing, persists nothing, fires no hooks,

@@ -57,6 +57,7 @@ class StubClient:
     async def chat(self, messages, tools=None, extra_body=None):
         self.chat_calls.append({
             "messages": messages,
+            "extra_body": extra_body,
             "attribution": dict(get_attribution()),
         })
         return {"choices": [{"message": {"role": "assistant", "content": self.chat_text}}]}
@@ -332,6 +333,33 @@ class TestRubricPrior:
         client = StubClient(chat_text=json.dumps({"importance": 3.5}))
         prior = RubricPrior(lambda: client)
         assert await prior.score([{"role": "user", "content": "x"}]) == 1.0
+
+
+class TestResponseFormat:
+    """#199: consolidation and the rubric constrain output with a schema."""
+
+    async def test_standalone_consolidation_sends_record_schema(self):
+        memory, persistence, stub, channel, db = await build_consolidation_env()
+        await memory._summarize_range([{"role": "user", "content": "hi"}])
+        fmt = stub.chat_calls[0]["extra_body"]["response_format"]
+        assert fmt["type"] == "json_schema"
+        schema = fmt["json_schema"]["schema"]
+        assert schema["type"] == "object"
+        assert schema["required"] == ["summary"]
+        props = schema["properties"]
+        assert props["summary"]["type"] == "string"
+        for name in ("topic_tags", "participants"):
+            assert props[name] == {"type": "array", "items": {"type": "string"}}
+        await db.close()
+
+    async def test_rubric_sends_importance_schema(self):
+        client = StubClient(chat_text=json.dumps({"importance": 0.4}))
+        await RubricPrior(lambda: client).score([{"role": "user", "content": "x"}])
+        fmt = client.chat_calls[0]["extra_body"]["response_format"]
+        assert fmt["type"] == "json_schema"
+        schema = fmt["json_schema"]["schema"]
+        assert schema["required"] == ["importance"]
+        assert schema["properties"]["importance"]["type"] == "number"
 
 
 # --- RED: design item 6 (consolidation call site) ---

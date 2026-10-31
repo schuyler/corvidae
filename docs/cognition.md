@@ -84,10 +84,13 @@ reads the per-channel **consolidation watermark**, fetches the working
 range, produces the record (first-person summary with epistemic framing,
 JSON out) — from a fork of the live window when one is available (see
 [Forks](design.md#forks)), else one standalone `llm.background` call
-(`prompts/memory_consolidation.md`) —
+(`prompts/memory_consolidation.md`); both are constrained by a
+`response_format` JSON schema (`summary` required, `topic_tags` and
+`participants` optional), like appraisal and critique, so a model can't
+answer the transcript instead of writing a record —
 scores an importance prior through the pluggable
 `MemoryPlugin.importance_prior` (default: cheap-model `RubricPrior`,
-0.5 on failure; `AppraisalPlugin` wraps it in `AppraisalPrior` when
+schema-constrained to `{"importance": number}`, 0.5 on failure; `AppraisalPlugin` wraps it in `AppraisalPrior` when
 appraisal is enabled), embeds the summary via
 `llm.embedding`, and commits the memory row together with the watermark
 advance in one compare-and-set section. The row's `created_at` is the
