@@ -90,3 +90,39 @@ jobs:
 
       - name: Run tests
         run: uv run --no-sync pytest -q
+
+  # The browser smoke test for the web console's DOMPurify options (#90, #254).
+  # tests/test_web_render_smoke.py skips itself without Playwright, so neither
+  # job above runs it; this one installs Playwright and Chromium and fails on a
+  # skip. Playwright is pinned and supplied with `--with`, so it stays out of
+  # pyproject.toml and uv.lock.
+  web-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.13"
+          enable-cache: true
+
+      # Same install as the kernel job: the test reuses the web plugin harness.
+      - name: Install dependencies (kernel)
+        run: uv sync --locked --extra dev --extra acp
+
+      # Chromium plus the system libraries it needs on the runner.
+      - name: Install Playwright Chromium
+        run: uv run --no-sync --with playwright==1.64.0 playwright install --with-deps chromium
+
+      # -rs lists skips; a skip means the guard did not run, so fail on one.
+      - name: Run web render smoke test
+        # shell: bash makes GitHub run with -eo pipefail, so a failing or
+        # erroring pytest fails the step instead of being masked by tee.
+        shell: bash
+        run: |
+          uv run --no-sync --with playwright==1.64.0 pytest -q -rs tests/test_web_render_smoke.py | tee smoke.log
+          if grep -q SKIPPED smoke.log; then
+            echo "web render smoke test was skipped; Playwright or its browser is unusable" >&2
+            exit 1
+          fi

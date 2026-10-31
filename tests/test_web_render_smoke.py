@@ -8,9 +8,10 @@ script, no ``on*``, safe links) still hold, and ordinary Markdown still
 renders.
 
 It needs Playwright and a browser, so the whole module is skipped when
-``playwright`` isn't importable. CI doesn't install it, which means CI does
-NOT guard the sanitize options in ``web_static/app.js``: after editing them,
-run this by hand::
+``playwright`` isn't importable. The ``web-smoke`` CI job
+(``.github/workflows/tests.yml``) installs a pinned Playwright and Chromium and
+fails if this module is skipped, so CI guards the sanitize options in
+``web_static/app.js``. To run it locally::
 
     uv run --with playwright pytest tests/test_web_render_smoke.py
 
@@ -22,7 +23,8 @@ from __future__ import annotations
 
 import pytest
 
-# Skip the module cleanly where Playwright isn't installed (CI, plain dev sync).
+# Skip the module cleanly where Playwright isn't installed (plain dev sync; the
+# web-smoke CI job treats a skip as a failure).
 pytest.importorskip("playwright.async_api")
 
 from playwright.async_api import async_playwright  # noqa: E402
@@ -108,9 +110,11 @@ async def test_rendered_model_output_is_sanitised(make_env):
         browser = await _launch(pw)
         try:
             page = await browser.new_page()
-            # Log in (the token trades for the session cookie), then load the app.
+            # Log in (the token trades for the session cookie). The login
+            # answer meta-refreshes to "/"; wait for that navigation instead
+            # of starting a second goto, which races it and flakes.
             await page.goto(f"{env.base}/?token={TOKEN}")
-            await page.goto(f"{env.base}/")
+            await page.wait_for_url(f"{env.base}/")
             # Wait until the server has finished the page's subscribe/history.
             for _ in range(200):
                 if any(c.conversation == "web:main" and c.buffer is None
