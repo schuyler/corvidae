@@ -17,6 +17,16 @@
     }
   });
 
+  // ---- Sanitiser options for model output ----
+  // style: no restyling the page. class/id: a reply can't borrow the app's
+  // own classes to pose as a user bubble or notice, or shadow an id lookup.
+  // data-*: same, and the user bubble keeps its server id in data-id.
+  const SANITIZE_OPTS = {
+    FORBID_ATTR: ["style", "class", "id"],
+    FORBID_TAGS: ["style"],
+    ALLOW_DATA_ATTR: false,
+  };
+
   // ---- Small DOM helper: element with class and textContent ----
   function el(tag, cls, text) {
     const e = document.createElement(tag);
@@ -40,7 +50,7 @@
     const box = el("div", "item " + cls);
     const body = el("div", "md");
     // The single HTML sink in this file: sanitised Markdown output.
-    body.innerHTML = DOMPurify.sanitize(marked.parse(String(text || "")), { FORBID_ATTR: ["style"], FORBID_TAGS: ["style"] });
+    body.innerHTML = DOMPurify.sanitize(marked.parse(String(text || "")), SANITIZE_OPTS);
     box.appendChild(body);
     return box;
   }

@@ -386,3 +386,156 @@ class TestResolveLlmErrorExplainsFailures:
         )
 
         assert message is None
+
+
+# ---------------------------------------------------------------------------
+# api_key from the environment via ${VAR} (#217)
+# ---------------------------------------------------------------------------
+
+_KEY_VAR = "CORVIDAE_TEST_KEY"
+_SECRET = "sk-secret-value-217"
+
+
+def _role_cfg(api_key: str | None) -> dict:
+    """Build a minimal role config carrying the given api_key."""
+    cfg = {
+        "base_url": "http://localhost:9",
+        "model": "m",
+        "dimensions": 8,
+    }
+    if api_key is not None:
+        cfg["api_key"] = api_key
+    return cfg
+
+
+async def _start_plugin(llm: dict):
+    """Run on_start for an LLMPlugin with the given llm: config."""
+    from corvidae.llm_plugin import LLMPlugin
+
+    plugin = LLMPlugin()
+    plugin._role_configs = dict(llm)
+    await plugin.on_start(config={"llm": llm})
+    return plugin
+
+
+class TestApiKeyFromEnvironment:
+    @pytest.mark.parametrize("role", ["main", "background", "embedding"])
+    async def test_env_ref_resolves_to_bearer_token(self, role, monkeypatch):
+        """K1: ${VAR} in api_key is sent as the Bearer token, for every role."""
+        monkeypatch.setenv(_KEY_VAR, _SECRET)
+        llm = {"main": _role_cfg("sk-main")}
+        llm[role] = _role_cfg("${" + _KEY_VAR + "}")
+        plugin = await _start_plugin(llm)
+        try:
+            client = plugin.get_client(role)
+            assert client.api_key == _SECRET
+            assert client.session.headers["Authorization"] == f"Bearer {_SECRET}"
+            # The raw config keeps the reference, never the resolved key.
+            assert plugin._role_configs[role]["api_key"] == "${" + _KEY_VAR + "}"
+        finally:
+            await plugin.on_stop()
+
+    @pytest.mark.parametrize("value", [None, "", "k\n"], ids=["unset", "empty", "newline"])
+    async def test_bad_variable_fails_startup_with_clear_message(
+        self, value, monkeypatch, caplog
+    ):
+        """K2/K3: unset, empty or multi-line variable is a startup error."""
+        if value is None:
+            monkeypatch.delenv(_KEY_VAR, raising=False)
+        else:
+            monkeypatch.setenv(_KEY_VAR, value)
+        llm = {
+            "main": _role_cfg("sk-main"),
+            "background": _role_cfg("${" + _KEY_VAR + "}"),
+        }
+        from corvidae.llm_plugin import LLMPlugin
+
+        # Build the plugin here (not via _start_plugin) so teardown can stop
+        # the main client that on_start started before background failed.
+        plugin = LLMPlugin()
+        plugin._role_configs = dict(llm)
+        try:
+            with caplog.at_level("DEBUG"):
+                with pytest.raises(ValueError) as excinfo:
+                    await plugin.on_start(config={"llm": llm})
+        finally:
+            await plugin.on_stop()
+        msg = str(excinfo.value)
+        assert "llm.background.api_key" in msg
+        assert _KEY_VAR in msg
+        if value == "k\n":
+            assert "newline" in msg
+        else:
+            assert "not set in the daemon's environment" in msg and "restart" in msg
+        # K3: the value never reaches the error or the logs.
+        if value:
+            assert value not in msg
+            for rec in caplog.records:
+                assert value not in rec.getMessage()
+                assert value not in (rec.exc_text or "")
+
+    async def test_secret_with_newline_absent_from_error_and_logs(
+        self, monkeypatch, caplog
+    ):
+        """K3: a multi-line secret is not echoed anywhere."""
+        secret = "topsecret217\nsecond"
+        monkeypatch.setenv(_KEY_VAR, secret)
+        llm = {"main": _role_cfg("${" + _KEY_VAR + "}")}
+        with caplog.at_level("DEBUG"):
+            with pytest.raises(ValueError) as excinfo:
+                await _start_plugin(llm)
+        assert "topsecret217" not in str(excinfo.value)
+        for rec in caplog.records:
+            assert "topsecret217" not in rec.getMessage()
+            assert "topsecret217" not in (rec.exc_text or "")
+
+    async def test_401_reply_does_not_contain_key(self, monkeypatch, caplog):
+        """K3: the 401 reply names the key but never its value."""
+        from corvidae.llm_plugin import LLMPlugin
+
+        monkeypatch.setenv(_KEY_VAR, _SECRET)
+        plugin = await _start_plugin({"main": _role_cfg("${" + _KEY_VAR + "}")})
+        try:
+            with caplog.at_level("DEBUG"):
+                reply = await plugin.resolve_llm_error(
+                    channel=None, error=_http_error(401, '{"error":"bad key"}')
+                )
+            assert reply is not None and "api_key" in reply
+            assert _SECRET not in reply
+            for rec in caplog.records:
+                assert _SECRET not in rec.getMessage()
+                assert _SECRET not in (rec.exc_text or "")
+        finally:
+            await plugin.on_stop()
+
+    async def test_literal_key_still_works(self):
+        """K4: a literal api_key behaves as before."""
+        plugin = await _start_plugin({"main": _role_cfg("sk-literal")})
+        try:
+            assert plugin.get_client("main").session.headers[
+                "Authorization"
+            ] == "Bearer sk-literal"
+        finally:
+            await plugin.on_stop()
+
+    def test_literal_with_dollar_but_no_ref_is_left_alone(self):
+        """K4: '$' without a ${NAME} is not an env reference."""
+        from corvidae.llm_plugin import LLMPlugin
+
+        client = LLMPlugin()._create_client(_role_cfg("pa$$word$"), role="main")
+        assert client.api_key == "pa$$word$"
+
+    async def test_reload_to_unset_variable_keeps_old_client(self, monkeypatch):
+        """Reload: an unset variable raises and the old main client stays."""
+        monkeypatch.delenv(_KEY_VAR, raising=False)
+        plugin = await _start_plugin({"main": _role_cfg("sk-old")})
+        try:
+            old = plugin.get_client("main")
+            with pytest.raises(ValueError) as excinfo:
+                await plugin.on_config_reload(
+                    config={"llm": {"main": _role_cfg("${" + _KEY_VAR + "}")}}
+                )
+            assert "llm.main.api_key" in str(excinfo.value)
+            assert plugin.get_client("main") is old
+        finally:
+            await plugin.on_stop()

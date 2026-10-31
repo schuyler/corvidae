@@ -1572,6 +1572,13 @@ history bound. Starts/stops the worker on lifecycle hooks. Registers the
   them.
 - `on_stop` — calls `stop()` on all clients.
 
+`_create_client` expands `${VAR}` in a role's `api_key` from the daemon's
+environment (`corvidae/envref.py::expand_env_refs`, shared with MCP
+`headers`). An unset, empty or multi-line variable raises a `ValueError`
+naming `llm.<role>.api_key` and the variable, never the value; `on_start` and
+`on_config_reload` both go through it. The resolved key lives only on the
+client, so `_role_configs` keeps the raw `${VAR}` text.
+
 ### Client access
 
 `LLMPlugin.get_client(role="main")` — returns the client for the given role.
@@ -2089,6 +2096,21 @@ Forwards both channel and private messages. `split_message` splits
 outgoing text into 400-byte chunks preserving paragraph/sentence
 boundaries.
 
+While the client is disconnected (including the reconnect backoff, up to
+300s), outbound text is not dropped: it goes into a bounded in-memory queue
+(`_OUTBOUND_QUEUE_MAX`, 50, a module constant, not configurable). Each queued
+message logs a WARNING with the channel id, length and queue depth. When the
+queue is full the oldest entry is dropped, with a WARNING naming its channel
+and the number dropped so far in the outage. After a successful connect,
+`on_connect` joins the configured channels and then flushes the queue in
+order, splitting each message exactly as a connected send does. A send made
+while the queue is non-empty queues behind it, so nothing overtakes older
+output. Limits: a connection that drops mid-flush leaves the unsent entries
+queued, and a partly sent multi-line message is resent whole (duplicates
+rather than losses); pydle's `join` does not await the server's JOIN, so a
+channel that refuses the join drops the flushed text server-side; and the
+queue is lost at shutdown (logged as a WARNING with the count).
+
 `split_message` itself lives in `channels/split.py`, not in the IRC
 plugin, so a transport can size its own chunks without importing IRC.
 
@@ -2355,15 +2377,19 @@ silence. The bot has no way to tell them it is configured to ignore them.
 outstanding message for a channel the transport sends the typing indicator
 immediately and starts a refresh loop that re-sends every 8s (Discord's
 indicator lasts about 10s) while the channel's outstanding count stays
-positive. The transport mints the message's trace id and passes it to
-`on_message`; the id keys nothing here, since the outstanding count needs no
-identity. `send_message` gives one slot back. `on_message_rejected` gives
-one back only for an allowlisted sender — the only kind that ever took one —
-so a refused stranger @-mentioning the bot cannot stop typing owed to an
-allowed user in the same channel. A refresh loop still asleep from an
-earlier turn is reused rather than doubled, so a channel has at most one,
-and `on_stop` cancels it. Typing is only ever sent for an
-allowlisted sender, so an unauthorized user gets no sign the bot is live.
+positive. The transport mints the message's trace id, takes the
+slot for an allowlisted sender, and passes the id to `on_message`; a
+`finally` around that call gives the slot back unless `on_message_admitted`
+fired for the id. Admission fires before `on_message` returns, so a gate
+veto, an agent that is not ready yet, or a raise or cancellation all land
+there. `send_message` gives back the slot of an admitted message. Only an
+allowlisted sender ever took a slot, so a refused stranger @-mentioning the
+bot gives nothing back and cannot stop typing owed to an allowed user in
+the same channel; no `on_message_rejected` implementation is needed.
+A refresh loop still asleep from an earlier turn is reused rather than
+doubled, so a channel has at most one, and `on_stop` cancels it. Typing is
+only ever sent for an allowlisted sender, so an unauthorized user gets no
+sign the bot is live.
 A failed typing call is logged and never blocks the reply.
 
 **Outbound.** `send_message` and `send_progress` both split through
@@ -2576,11 +2602,15 @@ block raises (the watcher logs it) and changes nothing.
 `app.css`, `app.js` (plain JS, no build) and vendored marked 15.0.12 and
 DOMPurify 3.2.6 (`vendor/README.md` records versions, hashes and
 licences). Model text reaches the DOM through one sink:
-`DOMPurify.sanitize(marked.parse(text))` with `style` attributes and tags
-forbidden; links get `target="_blank" rel="noopener noreferrer"`.
+`DOMPurify.sanitize(marked.parse(text))` with `style`, `class`, `id` and
+`data-*` attributes and `style` tags forbidden (so a reply can't borrow the
+app's classes or ids); links get `target="_blank" rel="noopener noreferrer"`.
 Everything else uses `textContent`. Thinking and dividers render in closed
 `<details>`. The page reconnects with backoff (1 s → 30 s) and, after
 three failed connects, checks `/` for a 401 to detect an expired session.
+`tests/test_web_render_smoke.py` checks the sanitising in headless Chrome;
+it skips without Playwright, so CI doesn't run it. Run it by hand with
+`uv run --with playwright pytest tests/test_web_render_smoke.py`.
 
 Known limitations:
 - a turn that ends in an exception without a `send_message` leaves the

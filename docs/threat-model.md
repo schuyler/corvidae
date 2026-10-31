@@ -452,8 +452,10 @@ stands in the way:
 - **Model output can't run script in the page.** That's the
   model-output → XSS path: a prompt-injected reply full of `<script>`,
   `onerror=` or a remote image. Markdown goes through vendored marked and
-  then DOMPurify (style attributes and tags forbidden too), and it's the
-  only HTML the page ever writes; everything else is `textContent`. A
+  then DOMPurify (`style`, `class`, `id` and `data-*` attributes and
+  `style` tags forbidden too, so a reply can't dress up as a user bubble or
+  app notice; what's left is spoofing with plain text or unstyled Markdown
+  inside the message box), and it's the only HTML the page ever writes; everything else is `textContent`. A
   strict CSP backs that up: scripts and styles from the page's own origin
   only, no inline script, images only from `'self'` or `data:` (so a
   reply can't beacon to a remote URL), no frames, no plugins, no form
@@ -578,6 +580,31 @@ human removed. What bounds it:
   stays stopped. `agent.yaml` is the record, so finding 4's mitigation
   applies: a model that can write `agent.yaml` can wake it at the next
   restart. Keep the file unwritable by the daemon user.
+
+### 12. A remote model endpoint receives that stage's inputs
+
+Every `llm:` role is an OpenAI-compatible client, so any role can point at a
+hosted provider. Doing so sends that role's requests, conversation content
+included, to the provider. Which stage uses which role:
+
+- `main`: agent turns, compaction summaries, and the forked appraisal and
+  critique stages (they fork the local window, so they cannot use a remote
+  role).
+- `background`: memory consolidation (conversation transcripts), the
+  importance prior, subagents (their task context and tool results) and,
+  when not forked, standalone appraisal and critique, which resolve
+  `appraisal`/`critic` then `background` then `main`.
+- `embedding`: memory embedding and retrieval queries, and retention.
+
+A role that isn't configured falls back to `main`, so the endpoint of
+`main` receives that stage instead. The provider also sees whatever
+untrusted text those stages carry. Treat a remote role as a disclosure
+decision per stage, not only a cost one.
+
+The key can live in the daemon's environment (`api_key: "${VAR}"`), which
+keeps it out of a tracked `agent.yaml`. As with MCP tokens (finding 6), that
+does not keep it from the model: `shell` can read the daemon's environment.
+The key is never logged or echoed in errors and replies.
 
 ## Privilege separation
 

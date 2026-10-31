@@ -32,6 +32,7 @@ import math
 import aiohttp
 
 from corvidae.attribution import get_attribution
+from corvidae.envref import EnvRefError, expand_env_refs
 from corvidae.hooks import CorvidaePlugin, hookimpl
 from corvidae.llm import LLMClient, LLMHTTPError, is_model_not_loaded
 
@@ -306,10 +307,31 @@ class LLMPlugin(CorvidaePlugin):
         LLMClient does not take (embedding's ``dimensions``) are consumed
         here, not passed through.
         """
+        # Resolve ${VAR} in api_key from the environment. The resolved key
+        # lives only on the client, never in _role_configs, so reload
+        # comparison and logs see the raw reference.
+        api_key = cfg.get("api_key")
+        if isinstance(api_key, str):
+            try:
+                api_key = expand_env_refs(api_key)
+            except EnvRefError as exc:
+                where = f"llm.{role}.api_key"
+                if exc.reason == "multiline":
+                    raise ValueError(
+                        f"{where} references ${{{exc.var}}}, whose value "
+                        f"contains a newline or NUL (often a trailing "
+                        f"newline); fix {exc.var} in the daemon's environment "
+                        "and restart."
+                    ) from None
+                raise ValueError(
+                    f"{where} references ${{{exc.var}}}, which is not set in "
+                    f"the daemon's environment; set {exc.var} in the "
+                    "environment corvidae runs in and restart."
+                ) from None
         client = LLMClient(
             base_url=cfg["base_url"],
             model=cfg["model"],
-            api_key=cfg.get("api_key"),
+            api_key=api_key,
             extra_body=cfg.get("extra_body"),
             max_retries=cfg.get("max_retries", 3),
             retry_base_delay=cfg.get("retry_base_delay", 2.0),

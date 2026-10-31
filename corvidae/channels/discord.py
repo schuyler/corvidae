@@ -248,6 +248,9 @@ class DiscordPlugin(TransportPlugin):
         # Liveness bookkeeping, per channel id (transport:scope).
         self._outstanding: dict[str, int] = {}
         self._typing_tasks: dict[str, asyncio.Task] = {}
+        # Trace ids admitted while their on_message call is still
+        # running; _handle_message's finally consumes them (#102).
+        self._admitted: set[str] = set()
 
     # -----------------------------------------------------------------
     # Lifecycle
@@ -474,14 +477,25 @@ class DiscordPlugin(TransportPlugin):
         # Typing only ever applies to an allowlisted sender -- others get no
         # sign the bot is live. on_message still fires so the real
         # should_process_message gate can veto and log the attempt.
-        if sender in self._allow:
-            await self._begin_typing(channel)
+        # Mint the trace id here; the Agent uses it verbatim (#95), and it
+        # keys whether this message was admitted.
+        trace_id = mint_trace_id()
+        took_slot = sender in self._allow
+        try:
+            if took_slot:
+                await self._begin_typing(channel)
 
-        # Mint the trace id here; the Agent uses it verbatim (#95).
-        await self.pm.ahook.on_message(
-            channel=channel, sender=sender, text=text,
-            trace_id=mint_trace_id(),
-        )
+            await self.pm.ahook.on_message(
+                channel=channel, sender=sender, text=text, trace_id=trace_id,
+            )
+        finally:
+            # Admission fires before on_message returns. Anything not
+            # admitted by then (gate veto, agent not ready, an exception,
+            # cancellation) gets no reply, so give its typing slot back --
+            # but only if it took one (a stranger did not).
+            if took_slot and trace_id not in self._admitted:
+                self._decrement_outstanding(channel)
+            self._admitted.discard(trace_id)
 
     # -----------------------------------------------------------------
     # Channel resolution
@@ -542,21 +556,16 @@ class DiscordPlugin(TransportPlugin):
         return False
 
     @hookimpl
-    async def on_message_rejected(
+    async def on_message_admitted(
         self, channel: Channel, trace_id: str, sender: str, text: str
     ) -> None:
-        """Give back the outstanding slot of a message another gate vetoed,
-        so the typing refresh loop still reaches zero.
-
-        Only an allowlisted sender ever took a slot (_handle_message counts
-        nobody else), so a refused stranger's rejection gives nothing back --
-        otherwise it would stop typing for an allowlisted user's turn that
-        is still running in the same channel."""
-        if not channel.matches_transport("discord"):
+        """Note that this message was admitted, so the inbound handler's
+        finally keeps its typing slot (send_message gives it back instead).
+        Admission fires before on_message returns."""
+        # Inbound hooks reach every transport; ignore other transports'.
+        if not self.owns(channel):
             return
-        if sender not in self._allow:
-            return
-        self._decrement_outstanding(channel)
+        self._admitted.add(trace_id)
 
     # -----------------------------------------------------------------
     # Liveness: typing indicator
@@ -579,7 +588,7 @@ class DiscordPlugin(TransportPlugin):
                 )
 
     def _decrement_outstanding(self, channel: Channel) -> None:
-        """Give back one outstanding slot (a reply sent or a rejection)."""
+        """Give back one outstanding slot (a reply sent, or a message that was never admitted)."""
         count = self._outstanding.get(channel.id, 0)
         if count > 0:
             self._outstanding[channel.id] = count - 1
