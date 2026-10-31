@@ -1218,145 +1218,19 @@ class MemoryPlugin(CorvidaePlugin):
                         extra={"channel_id": channel_id},
                     )
                     return
-                cursor = await db.execute(
-                    "INSERT INTO memory (channel_id, created_at, summary, "
-                    "importance, valence, topic_tags, participants, "
-                    "msg_id_start, msg_id_end, embedded) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        channel_id,
-                        created_at,
-                        record["summary"],
-                        importance,
-                        valence,
-                        json.dumps(record["topic_tags"]),
-                        json.dumps(record["participants"]),
-                        rows[0][0],
-                        rows[-1][0],
-                        1 if embedding is not None else 0,
-                    ),
+                memory_id = await self._insert_record(
+                    db,
+                    channel_id=channel_id,
+                    summary=record["summary"],
+                    created_at=created_at,
+                    importance=importance,
+                    valence=valence,
+                    topic_tags=record["topic_tags"],
+                    participants=record["participants"],
+                    msg_id_start=rows[0][0],
+                    msg_id_end=rows[-1][0],
+                    embedding=embedding,
                 )
-                memory_id = cursor.lastrowid
-
-                # WP1b.2 — near-dup check: query BEFORE inserting the new vec row
-                # so the new record is naturally excluded from the results.
-                # Candidates come from this channel's retrieval scope (GitHub
-                # issue #58), but a record on another channel merges only if
-                # that channel's scope reaches exactly the same channels:
-                # the survivor must stay visible to every channel that could
-                # see the superseded record, and groups are not transitive.
-                # Skip entirely when embedding is unavailable or the new record
-                # has no vector (embed failed — no vector to compare).
-                dup_old_id: int | None = None
-                dup_cross_channel = False
-                own_scope = self._channel_scope(channel_id)
-                if (
-                    embedding is not None
-                    and self._vec_available
-                    and not self._encoder_mismatch
-                ):
-                    try:
-                        import sqlite_vec as _sv
-                        scope_sql, scope_params = own_scope.sql("m.channel_id")
-                        async with db.execute(
-                            "SELECT v.memory_id, (1.0 - v.distance) as similarity, "
-                            "m.channel_id "
-                            "FROM (SELECT memory_id, distance FROM memory_vec "
-                            "      WHERE embedding MATCH ? AND k = ?) AS v "
-                            "JOIN memory m ON m.id = v.memory_id "
-                            f"WHERE {scope_sql} AND m.indexed = 1 "
-                            "ORDER BY v.distance",
-                            (
-                                _sv.serialize_float32(embedding),
-                                VEC_OVERFETCH * 2,
-                                *scope_params,
-                            ),
-                        ) as dup_cursor:
-                            dup_rows = await dup_cursor.fetchall()
-                        # Nearest first: take the first candidate over the
-                        # threshold whose owner has the same reach.
-                        for dup_candidate_id, dup_similarity, dup_channel in dup_rows:
-                            if dup_similarity < self._dup_threshold:
-                                break
-                            if dup_channel == channel_id or own_scope.same_reach(
-                                self._channel_scope(dup_channel)
-                            ):
-                                dup_old_id = dup_candidate_id
-                                dup_cross_channel = dup_channel != channel_id
-                                break
-                    except Exception:
-                        logger.debug(
-                            "dup detection query failed; skipping for this record",
-                            exc_info=True,
-                        )
-
-                if embedding is not None and self._vec_available:
-                    import sqlite_vec
-                    await db.execute(
-                        "INSERT INTO memory_vec (memory_id, embedding) VALUES (?, ?)",
-                        (memory_id, sqlite_vec.serialize_float32(embedding)),
-                    )
-
-                # If a near-dup was found, fold the old record into the new one.
-                if dup_old_id is not None:
-                    async with db.execute(
-                        "SELECT retrieval_count, last_retrieved_at, importance, "
-                        "msg_id_start, msg_id_end, created_at "
-                        "FROM memory WHERE id = ?",
-                        (dup_old_id,),
-                    ) as old_cursor:
-                        old_row = await old_cursor.fetchone()
-                    if old_row is not None:
-                        (old_rc, old_lra, old_importance,
-                         old_start, old_end, old_created) = old_row
-                        # Fold stats into the new record
-                        inherited_rc = (old_rc or 0)  # old record's count to fold in
-                        new_importance = max(importance, old_importance or 0.0)
-                        new_lra = old_lra  # new record has None; old may have a value
-                        # Fold the message range only within one channel:
-                        # message_log ids are global, and recall_raw and
-                        # /redact read a record's range on its own channel.
-                        # A superseded record keeps its own range.
-                        if dup_cross_channel:
-                            new_start, new_end = rows[0][0], rows[-1][0]
-                        else:
-                            new_start = min(old_start, rows[0][0])
-                            new_end = max(old_end, rows[-1][0])
-                        # The merged record spans both conversations; date it
-                        # from the later one. Imported history has newer ids
-                        # but older timestamps, so this is not new_end's date.
-                        new_created = max(created_at, old_created)
-                        await db.execute(
-                            "UPDATE memory SET "
-                            "retrieval_count = retrieval_count + ?, "
-                            "importance = ?, "
-                            "last_retrieved_at = CASE "
-                            "  WHEN last_retrieved_at IS NULL THEN ? "
-                            "  WHEN ? IS NULL THEN last_retrieved_at "
-                            "  ELSE MAX(last_retrieved_at, ?) "
-                            "END, "
-                            "msg_id_start = ?, msg_id_end = ?, created_at = ? "
-                            "WHERE id = ?",
-                            (inherited_rc, new_importance,
-                             new_lra, new_lra, new_lra,
-                             new_start, new_end, new_created, memory_id),
-                        )
-                        # Supersede the old record
-                        await db.execute(
-                            "UPDATE memory SET superseded_by = ?, indexed = 0, embedded = 0 "
-                            "WHERE id = ?",
-                            (memory_id, dup_old_id),
-                        )
-                        if self._vec_available:
-                            await db.execute(
-                                "DELETE FROM memory_vec WHERE memory_id = ?",
-                                (dup_old_id,),
-                            )
-                        logger.info(
-                            "memory dedup: superseded %d with %d (similarity=%.3f)",
-                            dup_old_id, memory_id, dup_similarity,
-                        )
-
                 await self._set_watermark(db, channel_id, range_end)
                 await db.commit()
             logger.info(
@@ -1380,6 +1254,185 @@ class MemoryPlugin(CorvidaePlugin):
             )
         finally:
             reset_attribution(attribution_token)
+
+    async def _insert_record(
+        self, db: aiosqlite.Connection, *, channel_id: str, summary: str,
+        created_at: float, importance: float, valence: float | None,
+        topic_tags: list[str], participants: list[str],
+        msg_id_start: int, msg_id_end: int, embedding: list[float] | None,
+    ) -> int:
+        """Insert + vec row + near-dup merge. Caller holds _db_lock and commits."""
+        cursor = await db.execute(
+            "INSERT INTO memory (channel_id, created_at, summary, "
+            "importance, valence, topic_tags, participants, "
+            "msg_id_start, msg_id_end, embedded) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                channel_id,
+                created_at,
+                summary,
+                importance,
+                valence,
+                json.dumps(topic_tags),
+                json.dumps(participants),
+                msg_id_start,
+                msg_id_end,
+                1 if embedding is not None else 0,
+            ),
+        )
+        memory_id = cursor.lastrowid
+
+        # WP1b.2 — near-dup check: query BEFORE inserting the new vec row
+        # so the new record is naturally excluded from the results.
+        # Candidates come from this channel's retrieval scope (GitHub
+        # issue #58), but a record on another channel merges only if
+        # that channel's scope reaches exactly the same channels:
+        # the survivor must stay visible to every channel that could
+        # see the superseded record, and groups are not transitive.
+        # Skip entirely when embedding is unavailable or the new record
+        # has no vector (embed failed — no vector to compare).
+        dup_old_id: int | None = None
+        dup_cross_channel = False
+        own_scope = self._channel_scope(channel_id)
+        if (
+            embedding is not None
+            and self._vec_available
+            and not self._encoder_mismatch
+        ):
+            try:
+                import sqlite_vec as _sv
+                scope_sql, scope_params = own_scope.sql("m.channel_id")
+                async with db.execute(
+                    "SELECT v.memory_id, (1.0 - v.distance) as similarity, "
+                    "m.channel_id "
+                    "FROM (SELECT memory_id, distance FROM memory_vec "
+                    "      WHERE embedding MATCH ? AND k = ?) AS v "
+                    "JOIN memory m ON m.id = v.memory_id "
+                    f"WHERE {scope_sql} AND m.indexed = 1 "
+                    "ORDER BY v.distance",
+                    (
+                        _sv.serialize_float32(embedding),
+                        VEC_OVERFETCH * 2,
+                        *scope_params,
+                    ),
+                ) as dup_cursor:
+                    dup_rows = await dup_cursor.fetchall()
+                # Nearest first: take the first candidate over the
+                # threshold whose owner has the same reach.
+                for dup_candidate_id, dup_similarity, dup_channel in dup_rows:
+                    if dup_similarity < self._dup_threshold:
+                        break
+                    if dup_channel == channel_id or own_scope.same_reach(
+                        self._channel_scope(dup_channel)
+                    ):
+                        dup_old_id = dup_candidate_id
+                        dup_cross_channel = dup_channel != channel_id
+                        break
+            except Exception:
+                logger.debug(
+                    "dup detection query failed; skipping for this record",
+                    exc_info=True,
+                )
+
+        if embedding is not None and self._vec_available:
+            import sqlite_vec
+            await db.execute(
+                "INSERT INTO memory_vec (memory_id, embedding) VALUES (?, ?)",
+                (memory_id, sqlite_vec.serialize_float32(embedding)),
+            )
+
+        # If a near-dup was found, fold the old record into the new one.
+        if dup_old_id is not None:
+            async with db.execute(
+                "SELECT retrieval_count, last_retrieved_at, importance, "
+                "msg_id_start, msg_id_end, created_at "
+                "FROM memory WHERE id = ?",
+                (dup_old_id,),
+            ) as old_cursor:
+                old_row = await old_cursor.fetchone()
+            if old_row is not None:
+                (old_rc, old_lra, old_importance,
+                 old_start, old_end, old_created) = old_row
+                # Fold stats into the new record
+                inherited_rc = (old_rc or 0)  # old record's count to fold in
+                new_importance = max(importance, old_importance or 0.0)
+                new_lra = old_lra  # new record has None; old may have a value
+                # Fold the message range only within one channel:
+                # message_log ids are global, and recall_raw and
+                # /redact read a record's range on its own channel.
+                # A superseded record keeps its own range.
+                if dup_cross_channel:
+                    new_start, new_end = msg_id_start, msg_id_end
+                else:
+                    new_start = min(old_start, msg_id_start)
+                    new_end = max(old_end, msg_id_end)
+                # The merged record spans both conversations; date it
+                # from the later one. Imported history has newer ids
+                # but older timestamps, so this is not new_end's date.
+                new_created = max(created_at, old_created)
+                await db.execute(
+                    "UPDATE memory SET "
+                    "retrieval_count = retrieval_count + ?, "
+                    "importance = ?, "
+                    "last_retrieved_at = CASE "
+                    "  WHEN last_retrieved_at IS NULL THEN ? "
+                    "  WHEN ? IS NULL THEN last_retrieved_at "
+                    "  ELSE MAX(last_retrieved_at, ?) "
+                    "END, "
+                    "msg_id_start = ?, msg_id_end = ?, created_at = ? "
+                    "WHERE id = ?",
+                    (inherited_rc, new_importance,
+                     new_lra, new_lra, new_lra,
+                     new_start, new_end, new_created, memory_id),
+                )
+                # Supersede the old record
+                await db.execute(
+                    "UPDATE memory SET superseded_by = ?, indexed = 0, embedded = 0 "
+                    "WHERE id = ?",
+                    (memory_id, dup_old_id),
+                )
+                if self._vec_available:
+                    await db.execute(
+                        "DELETE FROM memory_vec WHERE memory_id = ?",
+                        (dup_old_id,),
+                    )
+                logger.info(
+                    "memory dedup: superseded %d with %d (similarity=%.3f)",
+                    dup_old_id, memory_id, dup_similarity,
+                )
+
+        return memory_id
+
+    async def write_record(
+        self, *, channel_id: str, summary: str, created_at: float,
+        importance: float, msg_id_start: int, msg_id_end: int,
+    ) -> int:
+        """Embed (fail soft to embedded=0), then _insert_record under _db_lock,
+        then commit. Raises if the DB isn't open or on DB failure; returns memory.id."""
+        db = await self._ensure_schema()
+        if db is None:
+            raise RuntimeError("memory database is not open")
+        # Embed the summary; failure stores embedded=0 for later backfill.
+        embedding: list[float] | None = None
+        if self._embedding_enabled():
+            try:
+                client = self._llm().get_client("embedding")
+                embedding = (await client.embed([summary], kind="document"))[0]
+            except Exception:
+                logger.warning(
+                    "memory embedding failed; storing record with "
+                    "embedded=0 for backfill", exc_info=True,
+                )
+        async with self._db_lock:
+            memory_id = await self._insert_record(
+                db, channel_id=channel_id, summary=summary,
+                created_at=created_at, importance=importance, valence=None,
+                topic_tags=[], participants=[],
+                msg_id_start=msg_id_start, msg_id_end=msg_id_end,
+                embedding=embedding,
+            )
+            await db.commit()
+        return memory_id
 
     async def _consolidation_record(
         self, channel_id: str, rows: list[tuple], dialog: list[dict],

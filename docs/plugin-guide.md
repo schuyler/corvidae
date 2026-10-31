@@ -845,6 +845,7 @@ tools             (ToolCollectionPlugin) — entry point
 memory            (MemoryPlugin)        — entry point (cognition extra)
 memory_tools      (MemoryToolsPlugin)   — entry point (cognition extra)
 funnel            (FunnelPlugin)        — entry point (cognition extra)
+goals             (GoalsPlugin)         — entry point (cognition extra)
 agent             (Agent)               — entry point
 config_watcher    (ConfigWatcherPlugin) — entry point
 ```

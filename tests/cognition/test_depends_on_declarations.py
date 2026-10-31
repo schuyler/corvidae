@@ -16,6 +16,7 @@ _COGNITION_PLUGIN_CLASSES = [
     "corvidae_cognition.funnel.FunnelPlugin",
     "corvidae_cognition.gates.GatePlugin",
     "corvidae_cognition.heartbeat.HeartbeatPlugin",
+    "corvidae_cognition.goals.GoalsPlugin",
 ]
 
 
@@ -57,3 +58,9 @@ def test_memory_depends_on_kernel_clock_and_idle() -> None:
     """
     memory = _load("corvidae_cognition.memory.MemoryPlugin")
     assert memory.depends_on == frozenset({"persistence", "llm", "clock", "idle"})
+
+
+def test_goals_depends_on_persistence_memory_funnel_clock() -> None:
+    """GoalsPlugin needs memory (G3), the funnel (G2) and the clock."""
+    goals = _load("corvidae_cognition.goals.GoalsPlugin")
+    assert goals.depends_on == frozenset({"persistence", "memory", "funnel", "clock"})

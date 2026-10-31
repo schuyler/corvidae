@@ -1431,7 +1431,7 @@ class TestStartupPluginSetLogging:
 
 # The plugins the cognition extra provides, by entry-point name.
 _COGNITION_ENTRY_POINTS = {
-    "memory", "memory_tools", "funnel", "outcome_log", "appraisal", "critique",
+    "memory", "memory_tools", "funnel", "outcome_log", "appraisal", "critique", "goals",
     "gates",
 }
 
@@ -1479,7 +1479,7 @@ _SCHEDULER_TEST_DISABLED = [
     "cli", "irc", "signal", "discord", "web", "acp", "mcp",
     "metrics", "usage_log", "metrics_jsonl", "config_watcher", "jsonl_log",
     "memory", "memory_tools", "funnel", "outcome_log", "appraisal",
-    "critique", "gates",
+    "critique", "gates", "goals",
 ]
 
 
