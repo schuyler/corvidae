@@ -207,12 +207,13 @@ Chat apps have their own social norms: short turns, one thought at a time, and n
 | `prompts/chat.md` | any chat channel | Texting norms: match the other person's length, answer first, no headers or bold, gist before detail, plus example exchanges. |
 | `prompts/signal_dm.md` | Signal DMs | Plain text only: Signal shows Markdown as literal asterisks and pound signs. |
 | `prompts/discord_group.md` | Discord server channels | Group manners: short turns so the bot doesn't take over the channel; code blocks are fine. |
+| `prompts/memory_calibration.md` | channels on a deployment running `MemoryPlugin` | Epistemic calibration; see [Memory calibration fragment](#memory-calibration-fragment). |
 
 Pair them per transport with transport-wide entries (see the example under [Per-channel overrides](#per-channel-overrides)): `signal:*` gets `chat.md` + `signal_dm.md`, `discord:*` gets `chat.md` + `discord_group.md`, `discord:dm:*` gets `chat.md` alone. Leave them off the web UI, the CLI and ACP sessions, where longer answers are the point. The examples in `chat.md` avoid any reference to earlier conversation, because a model that copies that habit starts inventing shared history. In group channels the model can't yet see who is speaking (#204), so `discord_group.md` doesn't ask it to address people by name.
 
 ## Memory calibration fragment
 
-`prompts/memory_calibration.md` is a documented system-prompt fragment for deployments running `MemoryPlugin`: assert only strongly-banded memories, hedge moderate ones, frame unretrieved claims as inference, and treat "I have no memory of that" as a correct answer when retrieval comes back empty. It is **not** auto-injected — epistemic hedging vocabulary is persona, not architecture. Add it to a channel's `system_prompt` file list if you want the behavior.
+`prompts/memory_calibration.md` is a documented system-prompt fragment for deployments running `MemoryPlugin` (bootstrap-mapping §3.1): assert only strongly-banded memories, hedge moderate ones, frame unretrieved claims as inference, and treat "I have no memory of that" as a correct answer when retrieval comes back empty. It is **not** auto-injected — epistemic hedging vocabulary is persona, not architecture (bootstrap-mapping §5, divergence 9). To enable it, add the file to a channel's `system_prompt` file list, for example `system_prompt: [prompts/chat.md, prompts/memory_calibration.md]`, and let the behavioral suite judge it. The file holds only the instructions the model receives; this section is where its purpose and opt-in rule are documented, because `resolve_system_prompt` sends every listed file whole.
 
 Retrieval quality depends on `llm.embedding.document_prefix` and `llm.embedding.query_prefix` matching the embedding model's card — mismatched prefixes degrade cosine similarity and cause the system to fall back to FTS5 keyword search.
 

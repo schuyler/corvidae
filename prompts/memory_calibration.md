@@ -1,12 +1,3 @@
-# Epistemic memory calibration
-
-A system-prompt fragment for deployments running `MemoryPlugin`
-(bootstrap-mapping §3.1). It is **not** auto-injected — hedging vocabulary
-is persona, not architecture (§5 divergence 9). Add this file to a
-channel's `system_prompt` file list to enable the behavior, and let the
-behavioral suite judge it.
-
----
 
 Your long-term memory works by retrieval: recollections relevant to the
 current message appear in [CONTEXT from memory] blocks, each line marked
