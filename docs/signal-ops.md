@@ -284,8 +284,9 @@ Behavior that looks like a bug and isn't:
 - **Reactions, quotes, edits, and delete-for-everyone** are ignored. None of
   them carry message text, so they fall out of the same filter.
 - **Outbound is text only.** The agent cannot send attachments.
-- **The bot never speaks first.** Agent-initiated sends aren't implemented;
-  every reply is a response to a message.
+- **The bot can't message a different channel on its own.** A
+  reminder or other agent-started turn on a Signal channel is delivered
+  there, but a send to a different channel isn't implemented.
 - **Disappearing messages are stored like any other message**, with no
   privacy flag and no expiry. If a conversation has a disappearing-message
   timer, it applies on the phones, not to corvidae's copy.

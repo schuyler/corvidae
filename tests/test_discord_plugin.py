@@ -926,6 +926,20 @@ class TestTyping:
         finally:
             await h.plugin.on_stop()
 
+    async def test_reply_with_no_outstanding_message_is_delivered(self):
+        """An agent-started turn answers no inbound message: the reply is
+        still delivered and the outstanding count stays at zero (design.md,
+        Discord section)."""
+        h = await _start_plugin(discord_overrides={"allow": [AUTH_ID]})
+        try:
+            ch = h.registry.get_or_create("discord", f"dm:{AUTH_ID}")
+            assert h.plugin._outstanding.get(ch.id, 0) == 0
+            await h.plugin.send(channel=ch, event=OutboundMessage(text="reminder: stand up"))
+            assert h.messageable.contents == ["reminder: stand up"]
+            assert h.plugin._outstanding.get(ch.id, 0) == 0
+        finally:
+            await h.plugin.on_stop()
+
     async def test_refused_stranger_does_not_stop_owed_typing(self, fast_typing):
         """A refused sender never took an outstanding slot, so their
         rejection must not give one back: typing for an allowlisted user's
