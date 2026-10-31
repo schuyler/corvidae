@@ -72,18 +72,30 @@ class PanelAdder(CorvidaePlugin):
 
     optional_depends_on = frozenset({"web"})
 
-    def __init__(self) -> None:
-        self.calls = 0
-
     @hookimpl
     async def on_web_console_init(self, panels: list) -> None:
-        self.calls += 1
         panels.append("profiler")
 
 
 def _pm(*plugins: tuple[str, object]) -> pluggy.PluginManager:
     """A fresh corvidae plugin manager with ``(name, plugin)`` pairs registered."""
     pm = create_plugin_manager()
+    for name, plugin in plugins:
+        pm.register(plugin, name=name)
+    return pm
+
+
+# An owner can be absent two ways: disabled in plugins.disabled (blocked),
+# or never installed at all (neither blocked nor registered).
+ABSENT_WAYS = pytest.mark.parametrize("blocked", [True, False], ids=["blocked", "not-installed"])
+
+
+def _pm_without_web(blocked: bool, *plugins: tuple[str, object]) -> pluggy.PluginManager:
+    """A plugin manager where ``web`` is absent, either blocked or never installed."""
+    pm = create_plugin_manager()
+    if blocked:
+        pm.set_blocked("web")
+        pm.register(WebOwner(), name="web")  # blocked: silently not registered
     for name, plugin in plugins:
         pm.register(plugin, name=name)
     return pm
@@ -269,12 +281,10 @@ class TestHardDependency:
 class TestOptionalDependency:
     """R4."""
 
-    async def test_absent_blocked_owner_does_not_stop_startup(self) -> None:
+    @ABSENT_WAYS
+    async def test_absent_owner_does_not_stop_startup(self, blocked: bool) -> None:
         adder = PanelAdder()
-        pm = create_plugin_manager()
-        pm.set_blocked("web")
-        pm.register(WebOwner(), name="web")  # blocked: not registered
-        pm.register(adder, name="adder")
+        pm = _pm_without_web(blocked, ("adder", adder))
 
         install_plugin_hookspecs(pm)
         _check_hook_arg_binding(pm)
@@ -349,10 +359,9 @@ class TestOrphanReport:
         assert "onweb_console_init" in warnings[0].getMessage()
         assert "badprefix" in warnings[0].getMessage()
 
-    def test_absent_optional_owner_logs_debug_not_warning(self, caplog) -> None:
-        pm = create_plugin_manager()
-        pm.set_blocked("web")
-        pm.register(PanelAdder(), name="adder")
+    @ABSENT_WAYS
+    def test_absent_optional_owner_logs_debug_not_warning(self, caplog, blocked: bool) -> None:
+        pm = _pm_without_web(blocked, ("adder", PanelAdder()))
         install_plugin_hookspecs(pm)
 
         with caplog.at_level(logging.DEBUG, logger=_PM_LOGGER):
@@ -498,17 +507,18 @@ class TestDuplicateDeclaration:
 class TestOwnerSegment:
     """R7."""
 
-    def test_wrong_owner_segment_fails(self) -> None:
-        class OtherSpec:
-            @hookspec
-            async def on_other_thing(self) -> None:
-                pass
+    @pytest.mark.parametrize("name", ["on_other_thing", "on_webx_thing"])
+    def test_wrong_owner_segment_fails(self, name: str) -> None:
+        async def spec_method(self) -> None:
+            pass
 
-        message = _install_error(_pm(("web", _owner_with(OtherSpec))))
+        spec_cls = type("Spec", (), {name: hookspec(spec_method)})
 
-        assert "on_other_thing" in message
+        message = _install_error(_pm(("web", _owner_with(spec_cls))))
+
+        assert name in message
         assert "'web'" in message
-        assert "on_web_" in message  # the accepted form
+        assert "on_web_<name>" in message  # the accepted form
 
     def test_empty_remainder_after_owner_fails(self) -> None:
         class EmptySpec:
@@ -595,6 +605,44 @@ class TestGrammarCheck:
                 pass
 
         message = _install_error(_pm(("web", _owner_with(Spec))))
+
+        assert "transform_web_text" in message
+        assert "'web'" in message
+        assert "trylast" in message
+
+    def test_transform_owner_seed_without_trylast_fails(self) -> None:
+        class Spec:
+            @hookspec(firstresult=True)
+            async def transform_web_text(self, text: str) -> str:
+                pass
+
+        class UnseededOwner(CorvidaePlugin):
+            hookspecs = Spec
+
+            @hookimpl
+            async def transform_web_text(self, text: str) -> str:
+                return text
+
+        message = _install_error(_pm(("web", UnseededOwner())))
+
+        assert "transform_web_text" in message
+        assert "'web'" in message
+        assert "trylast" in message
+
+    def test_transform_seed_from_another_plugin_does_not_count(self) -> None:
+        class Spec:
+            @hookspec(firstresult=True)
+            async def transform_web_text(self, text: str) -> str:
+                pass
+
+        class Bystander(CorvidaePlugin):
+            @hookimpl(trylast=True)
+            async def transform_web_text(self, text: str) -> str:
+                return text
+
+        message = _install_error(
+            _pm(("web", _owner_with(Spec)), ("bystander", Bystander()))
+        )
 
         assert "transform_web_text" in message
         assert "'web'" in message
