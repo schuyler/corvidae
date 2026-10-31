@@ -103,6 +103,34 @@ def _parse_message_rows(rows: list[tuple]) -> list[dict]:
     return result
 
 
+def _parse_summary_row(row: tuple, channel_id: str) -> dict | None:
+    """Decode an (id, message_bytes, timestamp) summary row, or None if corrupt.
+
+    The message arrives as bytes (the query casts it to BLOB) so that invalid
+    UTF-8 fails here, where it can be caught, rather than inside the sqlite3
+    fetch. ValueError covers JSONDecodeError, UnicodeDecodeError and the int
+    digit limit; deeply nested arrays raise RecursionError. A value that
+    decodes to anything but a JSON object is corrupt too.
+    """
+    try:
+        msg = json.loads(row[1])
+    except (ValueError, RecursionError):
+        logger.warning(
+            "skipping unparseable summary row %s for channel %s; "
+            "falling back to an older summary or the full history",
+            row[0], channel_id, exc_info=True,
+        )
+        return None
+    if not isinstance(msg, dict):
+        logger.warning(
+            "skipping summary row %s for channel %s: decoded to %s, not an "
+            "object; falling back to an older summary or the full history",
+            row[0], channel_id, type(msg).__name__,
+        )
+        return None
+    return msg
+
+
 class PersistencePlugin(CorvidaePlugin):
     """Plugin that manages SQLite database lifecycle and conversation persistence.
 
@@ -178,20 +206,31 @@ class PersistencePlugin(CorvidaePlugin):
         If a summary row exists, returns that summary plus non-summary rows
         with timestamp > summary_ts. Otherwise returns all non-summary rows
         ordered by timestamp, id.
+
+        A summary row that fails to decode is skipped with a warning and the
+        next-newest summary is tried; message_log is append-only, so an older
+        summary plus the rows after its boundary still covers the whole
+        conversation. If no summary decodes, all non-summary rows load.
         """
+        # Find the newest summary that decodes. The message is cast to BLOB
+        # so invalid UTF-8 surfaces in _parse_summary_row instead of raising
+        # inside the fetch, where the cursor cannot step past it.
+        summary_id = summary_msg = summary_ts = None
         async with self.db.execute(
-            "SELECT id, message, timestamp FROM message_log "
+            "SELECT id, CAST(message AS BLOB), timestamp FROM message_log "
             "WHERE channel_id = ? AND message_type = 'summary' "
-            "ORDER BY id DESC LIMIT 1",
+            "ORDER BY id DESC",
             (channel.id,),
         ) as cursor:
-            summary_row = await cursor.fetchone()
+            async for row in cursor:
+                summary_msg = _parse_summary_row(row, channel.id)
+                if summary_msg is not None:
+                    summary_id, _, summary_ts = row
+                    break
 
         from corvidae.context import MessageType
 
-        if summary_row:
-            summary_id, summary_message, summary_ts = summary_row
-            summary_msg = json.loads(summary_message)
+        if summary_msg is not None:
             summary_msg["_message_type"] = MessageType.SUMMARY
             summary_msg["_db_id"] = summary_id
             # Load non-summary rows after the summary boundary
