@@ -91,6 +91,7 @@ async def _run_tool_cycle(plugin, channel, tool_name: str, final: str = "done") 
         _make_text_response(final),
     ])
     plugin._client = client
+    plugin._mark_started()
     await plugin.on_message(channel=channel, sender="u", text="go", trace_id=mint_trace_id())
     await drain(plugin, channel)
     await drain_task_queue(plugin)
@@ -196,6 +197,7 @@ class TestChannelSchemas:
             client = MagicMock()
             client.chat = AsyncMock(return_value=_make_text_response("hi"))
             plugin._client = client
+            plugin._mark_started()
 
             await plugin.on_message(channel=channel, sender="u", text="a", trace_id=mint_trace_id())
             await drain(plugin, channel)
@@ -217,6 +219,7 @@ class TestChannelSchemas:
             client = MagicMock()
             client.chat = AsyncMock(return_value=_make_text_response("ok"))
             plugin._client = client
+            plugin._mark_started()
             for text in ("one", "two", "three"):
                 await plugin.on_message(channel=channel, sender="u", text=text, trace_id=mint_trace_id())
                 await drain(plugin, channel)
@@ -236,6 +239,7 @@ class TestChannelSchemas:
             client = MagicMock()
             client.chat = AsyncMock(return_value=_make_text_response("ok"))
             plugin._client = client
+            plugin._mark_started()
             await plugin.on_message(channel=channel, sender="u", text="a", trace_id=mint_trace_id())
             await drain(plugin, channel)
             turn_tools = client.chat.call_args_list[0].kwargs["tools"]
@@ -312,6 +316,7 @@ class TestReload:
             client = MagicMock()
             client.chat = AsyncMock(return_value=_make_text_response("ok"))
             plugin._client = client
+            plugin._mark_started()
             await plugin.on_message(channel=channel, sender="u", text="a", trace_id=mint_trace_id())
             await drain(plugin, channel)
             before = client.chat.call_args_list[0].kwargs["tools"]
@@ -337,6 +342,7 @@ class TestReload:
             client = MagicMock()
             client.chat = AsyncMock(return_value=_make_text_response("ok"))
             plugin._client = client
+            plugin._mark_started()
             await plugin.on_message(channel=channel, sender="u", text="b", trace_id=mint_trace_id())
             await drain(plugin, channel)
             assert _schema_names(client.chat.call_args.kwargs["tools"]) == ["read_file"]
@@ -351,6 +357,7 @@ class TestReload:
             client = MagicMock()
             client.chat = AsyncMock(return_value=_make_text_response("ok"))
             plugin._client = client
+            plugin._mark_started()
             await plugin.on_message(channel=channel, sender="u", text="a", trace_id=mint_trace_id())
             await drain(plugin, channel)
 

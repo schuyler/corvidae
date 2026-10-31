@@ -228,6 +228,7 @@ class TestRunTurn:
 
         # Provide a mock client so the plugin doesn't blow up before the call
         plugin._client = MagicMock()
+        plugin._mark_started()
 
         with patch(
             "corvidae.agent.run_agent_turn",
@@ -246,6 +247,7 @@ class TestRunTurn:
         """run_agent_turn raises -> error message sent to channel via the send hook."""
         plugin, channel, db = plugin_and_channel
         plugin._client = MagicMock()
+        plugin._mark_started()
 
         with patch(
             "corvidae.agent.run_agent_turn",
@@ -269,6 +271,7 @@ class TestRunTurn:
         """run_agent_turn raises -> resolve_llm_error hook is called with channel and error."""
         plugin, channel, db = plugin_and_channel
         plugin._client = MagicMock()
+        plugin._mark_started()
         plugin.pm.ahook.resolve_llm_error = AsyncMock(return_value=None)
 
         exc = RuntimeError("bad model")
@@ -294,6 +297,7 @@ class TestRunTurn:
         """A raising resolve_llm_error hook must not silence the error reply."""
         plugin, channel, db = plugin_and_channel
         plugin._client = MagicMock()
+        plugin._mark_started()
         plugin.pm.ahook.resolve_llm_error = AsyncMock(
             side_effect=RuntimeError("error hook blew up")
         )
@@ -643,6 +647,7 @@ class TestQueueItemTimingPromptTokens:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=response)
         plugin._client = mock_client
+        plugin._mark_started()
 
         with caplog.at_level(logging.INFO, logger="corvidae.agent"):
             await plugin.on_message(channel=channel, sender="user", text="hi", trace_id=mint_trace_id())
@@ -684,6 +689,7 @@ class TestDefaultLlmErrorMessage:
         """A timeout produces a human 'timed out' cause plus a retry hint."""
         plugin, channel, db = plugin_and_channel
         plugin._client = MagicMock()
+        plugin._mark_started()
         plugin.pm.ahook.resolve_llm_error = AsyncMock(return_value=None)
 
         with patch(
@@ -708,6 +714,7 @@ class TestDefaultLlmErrorMessage:
         """An unclassified failure still names a cause and gives a retry hint."""
         plugin, channel, db = plugin_and_channel
         plugin._client = MagicMock()
+        plugin._mark_started()
         plugin.pm.ahook.resolve_llm_error = AsyncMock(return_value=None)
 
         with patch(

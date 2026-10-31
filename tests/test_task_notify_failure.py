@@ -64,6 +64,7 @@ async def _run_tool_cycle(plugin, channel, on_tool_run=None) -> MagicMock:
         side_effect=[_tool_call_response(), _make_text_response("tool done")]
     )
     plugin._client = client
+    plugin._mark_started()
 
     await plugin.on_message(
         channel=channel, sender="user", text="use tool", trace_id=mint_trace_id()

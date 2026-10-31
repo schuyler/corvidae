@@ -130,6 +130,7 @@ class TestAfterPersistAssistantHookSafety:
                 return_value=_make_text_response("hello from agent")
             )
             plugin._client = mock_client
+            plugin._mark_started()
 
             with caplog.at_level(logging.WARNING, logger="corvidae.agent"):
                 await plugin.on_message(channel=channel, sender="user", text="hi", trace_id=mint_trace_id())
@@ -206,6 +207,7 @@ class TestOnAgentResponseHookSafety:
                 return_value=_make_text_response("response text")
             )
             plugin._client = mock_client
+            plugin._mark_started()
 
             with caplog.at_level(logging.WARNING, logger="corvidae.agent"):
                 await plugin.on_message(channel=channel, sender="user", text="hello", trace_id=mint_trace_id())
@@ -271,6 +273,7 @@ class TestSendMessageNormalPathHookSafety:
                 return_value=_make_text_response("a response")
             )
             plugin._client = mock_client
+            plugin._mark_started()
 
             with caplog.at_level(logging.ERROR, logger="corvidae.agent"):
                 await plugin.on_message(channel=channel, sender="user", text="hi", trace_id=mint_trace_id())
@@ -341,6 +344,7 @@ class TestSendMessageErrorPathHookSafety:
             # Make run_agent_turn itself fail to trigger the error path
             mock_client.chat = AsyncMock(side_effect=RuntimeError("LLM unavailable"))
             plugin._client = mock_client
+            plugin._mark_started()
 
             with caplog.at_level(logging.WARNING, logger="corvidae.agent"):
                 await plugin.on_message(channel=channel, sender="user", text="hi", trace_id=mint_trace_id())
@@ -450,6 +454,7 @@ class TestOnNotifyInTaskCompleteSafety:
                 ]
             )
             plugin._client = mock_client
+            plugin._mark_started()
 
             with caplog.at_level(logging.WARNING, logger="corvidae"):
                 await plugin.on_message(channel=channel, sender="user", text="use tool", trace_id=mint_trace_id())

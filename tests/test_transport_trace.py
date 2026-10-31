@@ -63,6 +63,7 @@ async def agent_env():
     client = MagicMock()
     client.chat = AsyncMock(return_value=_make_text_response("hi"))
     plugin._client = client
+    plugin._mark_started()
     recorder = _Recorder()
     plugin.pm.register(recorder, name="recorder")
     yield plugin, channel, recorder

@@ -247,6 +247,7 @@ class TestStep7DottedKeyExclusion:
 
         mock_client = MagicMock()
         plugin._client = mock_client
+        plugin._mark_started()
 
         turn_result = AgentTurnResult(
             message={"role": "assistant", "content": "ok"},
@@ -278,6 +279,7 @@ class TestStep7DottedKeyExclusion:
 
         mock_client = MagicMock()
         plugin._client = mock_client
+        plugin._mark_started()
 
         turn_result = AgentTurnResult(
             message={"role": "assistant", "content": "ok"},
@@ -303,6 +305,7 @@ class TestStep7DottedKeyExclusion:
 
         mock_client = MagicMock()
         plugin._client = mock_client
+        plugin._mark_started()
 
         turn_result = AgentTurnResult(
             message={"role": "assistant", "content": "ok"},
@@ -382,6 +385,7 @@ class TestStep7LogprobsMerge:
 
         mock_client = MagicMock()
         plugin._client = mock_client
+        plugin._mark_started()
 
         turn_result = AgentTurnResult(
             message={"role": "assistant", "content": "ok"},
@@ -405,6 +409,7 @@ class TestStep7LogprobsMerge:
 
         mock_client = MagicMock()
         plugin._client = mock_client
+        plugin._mark_started()
 
         turn_result = AgentTurnResult(
             message={"role": "assistant", "content": "ok"},
@@ -431,6 +436,7 @@ class TestStep7LogprobsMerge:
 
         mock_client = MagicMock()
         plugin._client = mock_client
+        plugin._mark_started()
 
         turn_result = AgentTurnResult(
             message={"role": "assistant", "content": "ok"},
@@ -460,6 +466,7 @@ class TestStep7LogprobsMerge:
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("ok"))
         plugin._client = mock_client
+        plugin._mark_started()
 
         await plugin.on_message(channel=channel, sender="user", text="hi", trace_id=mint_trace_id())
         await drain(plugin, channel)

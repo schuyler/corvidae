@@ -897,6 +897,7 @@ class TestAgentLogging:
             return_value={"choices": [{"message": {"role": "assistant", "content": "hi"}}]}
         )
         plugin._client = mock_client
+        plugin._mark_started()
 
         channel = registry.get_or_create("test", "scope1")
         return plugin, channel

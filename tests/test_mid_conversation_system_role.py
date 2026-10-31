@@ -163,6 +163,7 @@ async def make_agent():
         mock_client = MagicMock()
         mock_client.chat = AsyncMock(return_value=_make_text_response("ok"))
         plugin._client = mock_client
+        plugin._mark_started()
         return plugin, channel, db, mock_client
 
     yield _make
@@ -224,6 +225,7 @@ class TestAgentWiring:
         plugin.pm.register(_ContextInjector(), name="injector")
         await plugin.on_config_reload(config={"agent": {"mid_conversation_system_role": "user"}})
         plugin._client = client  # reload re-borrows from the (absent) llm plugin
+        plugin._mark_started()
         await plugin.on_message(channel=channel, sender="u", text="hi", trace_id=mint_trace_id())
         await drain(plugin, channel)
         assert _sent_roles(client)[-1] == "user"

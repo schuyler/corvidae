@@ -55,6 +55,7 @@ class TestSendThinkingHook:
             return_value=_make_text_response("Here is my answer", reasoning=reasoning_text)
         )
         plugin._client = mock_client
+        plugin._mark_started()
         plugin._tools = {}
         plugin._tool_schemas = []
         plugin._max_tool_result_chars = 10000
@@ -76,6 +77,7 @@ class TestSendThinkingHook:
             return_value=_make_text_response("Just a plain answer")
         )
         plugin._client = mock_client
+        plugin._mark_started()
         plugin._tools = {}
         plugin._tool_schemas = []
         plugin._max_tool_result_chars = 10000
@@ -98,6 +100,7 @@ class TestSendThinkingHook:
             return_value=_make_text_response("My answer", reasoning="some thinking")
         )
         plugin._client = mock_client
+        plugin._mark_started()
         plugin._tools = {}
         plugin._tool_schemas = []
         plugin._max_tool_result_chars = 10000
@@ -125,6 +128,7 @@ class TestSendToolStatusHook:
         tool_call = _make_tool_call("tc1", "shell", {"command": "echo hi"})
 
         plugin._client = MagicMock()
+        plugin._mark_started()
         plugin._client.chat = AsyncMock(
             return_value=_make_tool_call_response([tool_call])
         )
@@ -174,6 +178,7 @@ class TestSendToolStatusHook:
         tool_call = _make_tool_call("tc1", "shell", {"command": "echo hi"})
 
         plugin._client = MagicMock()
+        plugin._mark_started()
         plugin._client.chat = AsyncMock(
             return_value=_make_tool_call_response([tool_call])
         )
@@ -213,6 +218,7 @@ class TestSendToolStatusHook:
 
         # First call: tool call. Second call: text response after tool result.
         plugin._client = MagicMock()
+        plugin._mark_started()
         plugin._client.chat = AsyncMock(
             side_effect=[
                 _make_tool_call_response([tool_call]),

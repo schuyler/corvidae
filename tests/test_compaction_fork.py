@@ -249,6 +249,7 @@ async def test_fork_through_real_agent_is_prefix_of_main_render():
         client = MagicMock()
         client.chat = AsyncMock(return_value=_make_text_response("real fork"))
         agent._client = client
+        agent._mark_started()
         conv = _straddling_window()
         channel.conversation = conv
         full = conv.build_prompt(frozenset())

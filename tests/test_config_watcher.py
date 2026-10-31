@@ -1121,6 +1121,7 @@ async def test_agent_on_config_reload_reborrow_llm_client():
 
     old_client = MagicMock(name="old_llm_client")
     plugin._client = old_client
+    plugin._mark_started()
 
     await plugin.on_config_reload(config={"agent": {}, "llm": {"main": {"base_url": "http://localhost", "model": "m"}}})
 
