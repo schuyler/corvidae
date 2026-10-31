@@ -48,6 +48,37 @@ _resolve_logger = logging.getLogger("corvidae.hooks")
 _transport_logger = logging.getLogger("corvidae.hooks")
 
 
+# Hook grammar (docs/plugin-guide.md, "Hook grammar"): prefix class ->
+# (prefixes, the pluggy spec options every member must have). Shared by
+# tests/test_hook_grammar.py (AgentSpec) and install_plugin_hookspecs
+# (plugin-declared specs).
+HOOK_GRAMMAR: dict[str, tuple[tuple[str, ...], dict[str, bool]]] = {
+    "observe": (("on_", "before_", "after_"), {"firstresult": False}),
+    "veto": (("should_",), {"firstresult": False}),
+    "resolve": (("resolve_",), {"firstresult": True}),
+    "transform": (("transform_",), {"firstresult": True}),
+}
+
+# Bare imperative names: broadcast, caller-defined use of the result list.
+# Kernel-only; plugin-declared hooks must use a prefixed class.
+IMPERATIVE_HOOKS = frozenset({"send", "register_tools", "persist_message"})
+
+
+def grammar_class(name: str) -> str | None:
+    """Return the grammar class whose prefix ``name`` starts with, or None."""
+    raise NotImplementedError
+
+
+def install_plugin_hookspecs(pm: pluggy.PluginManager) -> None:
+    """Validate and install every plugin's declared hookspecs (#229)."""
+    raise NotImplementedError
+
+
+def report_orphan_hookimpls(pm: pluggy.PluginManager) -> None:
+    """Log hookimpls that have no spec (#229)."""
+    raise NotImplementedError
+
+
 def resolve_reject_wins(results: list) -> bool | None:
     """Resolve a list of broadcast gate-hook results with reject-wins semantics.
 
