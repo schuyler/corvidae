@@ -22,6 +22,7 @@ import json
 import time
 
 import aiosqlite
+import pytest
 
 # The redact module's functions, called directly.
 from corvidae.commands.redact import (
@@ -33,6 +34,7 @@ from corvidae.commands.redact import (
 
 from corvidae_cognition.memory import MemoryPlugin
 from corvidae.persistence import PersistencePlugin, init_db
+from helpers import CORRUPT_MESSAGES, insert_raw_message
 from corvidae.hooks import create_plugin_manager
 from corvidae.llm_plugin import LLMPlugin
 
@@ -760,3 +762,28 @@ class TestCliWithMemoryVec:
         assert "kestrel" in message["message"]["content"]
         assert memory["redacted"] == 0
         assert has_vec
+
+
+@pytest.mark.parametrize(("value_sql", "params"), CORRUPT_MESSAGES)
+async def test_redact_memory_form_tombstones_corrupt_row(value_sql, params):
+    """redact memory <id> tombstones a corrupt row in the range as role 'unknown' (#232)."""
+    db = await make_full_db()
+    channel = "irc:#electronics"
+    first = await insert_message(db, channel, "user", "first secret words")
+    corrupt = await insert_raw_message(
+        db, channel, value_sql, params, drop_fts_trigger=True
+    )
+    last = await insert_message(db, channel, "assistant", "last secret words")
+    mem_id = await insert_memory(db, channel, "a memory summary", first, last)
+
+    result = await redact_memory_id(db, mem_id)
+
+    assert result["affected_memories"] >= 1
+    async with db.execute(
+        "SELECT CAST(message AS BLOB) FROM message_log WHERE id = ?", (corrupt,)
+    ) as cursor:
+        (raw,) = await cursor.fetchone()
+    stored = json.loads(raw.decode("utf-8"))
+    assert stored["role"] == "unknown"
+    assert stored["content"].startswith("[redacted by operator")
+    await db.close()

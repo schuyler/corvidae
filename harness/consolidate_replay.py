@@ -151,7 +151,7 @@ async def run_replay(
         rows = await fetch_range_rows(db, channel_id, after_id, through_id)
     finally:
         await db.close()
-    dialog = dialog_from_rows(rows)
+    dialog = dialog_from_rows(rows, channel_id)
     transcript = _dialog_transcript(dialog)
     messages = build_messages(prompt_text, dialog)
 
@@ -235,7 +235,7 @@ async def _main_async(args: argparse.Namespace) -> int:
             )
             return 1
         rows = await fetch_range_rows(db, args.channel, after_id, through_id)
-        dialog = dialog_from_rows(rows)
+        dialog = dialog_from_rows(rows, args.channel)
         if not dialog:
             print(
                 f"range {args.range} for {args.channel} yields no dialog: "

@@ -23,6 +23,7 @@ from corvidae.hooks import create_plugin_manager
 from corvidae.llm_plugin import LLMPlugin
 from corvidae_cognition.memory import MemoryPlugin, RubricPrior
 from corvidae.persistence import PersistencePlugin, init_db
+from helpers import CORRUPT_MESSAGES, insert_raw_message, skip_warnings
 
 
 CONSOLIDATION_JSON = json.dumps({
@@ -600,3 +601,75 @@ class TestMalformedConsolidationReply:
             assert client.call_count == 2
         finally:
             await db.close()
+
+
+# ---------------------------------------------------------------------------
+# Corrupt message_log rows (#232): a corrupt row is non-dialog, never a wedge
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(("value_sql", "params"), CORRUPT_MESSAGES)
+class TestCorruptRowsDoNotWedgeConsolidation:
+    async def test_range_with_corrupt_row_consolidates_and_advances(
+        self, caplog, value_sql, params
+    ):
+        """A record is built from the valid dialog and the watermark passes the range."""
+        memory, persistence, stub, channel, db = await build_consolidation_env()
+        first = await seed_dialog(persistence, channel, [("user", "the station drops wifi")])
+        corrupt = await insert_raw_message(
+            db, channel.id, value_sql, params, drop_fts_trigger=True
+        )
+        last = await seed_dialog(persistence, channel, [("assistant", "try WIFI_PS_NONE")])
+
+        with caplog.at_level(logging.WARNING):
+            await memory.on_compaction(
+                channel=channel, summary_msg={"role": "assistant", "content": "s"},
+                retain_count=0, compacted_ids=[first[0], corrupt, last[0]],
+            )
+            await memory.wait_for_background_tasks()
+
+        records = await fetch_memories(db)
+        assert len(records) == 1
+        assert records[0]["msg_id_end"] == last[0]
+        assert await fetch_watermark(db, channel.id) == last[0]
+        # The model saw the valid dialog only, in order
+        sent_text = json.dumps(stub.chat_calls[0]["messages"])
+        assert "the station drops wifi" in sent_text and "WIFI_PS_NONE" in sent_text
+        assert skip_warnings(caplog, corrupt, channel.id)
+        await db.close()
+
+    async def test_range_of_only_corrupt_rows_advances_without_record(
+        self, caplog, value_sql, params
+    ):
+        """An all-corrupt range advances the watermark with no record and no LLM call."""
+        memory, persistence, stub, channel, db = await build_consolidation_env()
+        corrupt = await insert_raw_message(
+            db, channel.id, value_sql, params, drop_fts_trigger=True
+        )
+
+        with caplog.at_level(logging.WARNING):
+            await memory.on_compaction(
+                channel=channel, summary_msg={"role": "assistant", "content": "s"},
+                retain_count=0, compacted_ids=[corrupt],
+            )
+            await memory.wait_for_background_tasks()
+
+        assert await fetch_memories(db) == []
+        assert await fetch_watermark(db, channel.id) == corrupt
+        assert stub.chat_calls == []
+        assert skip_warnings(caplog, corrupt, channel.id)
+        await db.close()
+
+
+async def test_unknown_message_type_is_non_dialog_for_consolidation(caplog):
+    """A row whose message_type is outside MessageType is skipped with a warning."""
+    from corvidae_cognition.memory import dialog_from_rows
+
+    rows = [
+        (1, json.dumps({"role": "user", "content": "kept words"}).encode(), "message"),
+        (2, json.dumps({"role": "user", "content": "dropped"}).encode(), "bogus"),
+    ]
+    with caplog.at_level(logging.WARNING):
+        dialog = dialog_from_rows(rows, "irc:#c")
+    assert [m["content"] for m in dialog] == ["kept words"]
+    assert any("'bogus'" in w for w in skip_warnings(caplog, 2, "irc:#c"))
