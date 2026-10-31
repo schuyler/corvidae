@@ -30,6 +30,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 # The import under test — will raise ImportError until the file exists.
+import corvidae.mcp_client as mcp_client_mod
 from corvidae.mcp_client import McpClientPlugin, _McpServerState, _ServerOwner, _call_mcp_tool, _make_tool, _mcp_tool_to_schema
 
 
@@ -1449,5 +1450,107 @@ class TestRetryLoop:
             sdk.attempts.clear()
             await clock.advance(10)
             assert {n for _, n in sdk.attempts} == {"down"}
+        finally:
+            await plugin.on_stop()
+
+
+class TestConfigTypeErrors:
+    """Wrongly typed config values skip that server only (#107 review)."""
+
+    @pytest.mark.parametrize("bad, key", [
+        (None, "mcp.servers.bad"),
+        ({"transport": "stdio", "command": "bad", "timeout_seconds": [1]},
+         "timeout_seconds"),
+        ({"transport": "stdio", "command": "bad",
+          "connect_timeout_seconds": {"x": 1}}, "connect_timeout_seconds"),
+        ({"transport": "sse", "url": "http://x", "headers": ["h"]},
+         "mcp.servers.bad.headers"),
+    ])
+    async def test_bad_type_is_skipped_and_later_server_connects(
+        self, pm, kernel_clock, sdk, caplog, bad, key
+    ):
+        sdk.up.add("good")
+        config = _servers("good")
+        config["mcp"]["servers"] = {"bad": bad, **config["mcp"]["servers"]}
+        caplog.set_level(logging.WARNING, logger="corvidae.mcp_client")
+        plugin, _ = await _start_plugin(pm, config)
+        try:
+            assert [s.name for s in plugin._servers] == ["good"]
+            assert plugin._pending_servers == {}
+            skips = [r for r in caplog.records if r.levelno == logging.WARNING
+                     and r.__dict__.get("server") == "bad"]
+            assert len(skips) == 1
+            msg = skips[0].getMessage()
+            assert "bad" in msg and key in msg
+        finally:
+            await plugin.on_stop()
+
+    async def test_unexpected_parse_exception_is_skipped(
+        self, pm, kernel_clock, sdk, caplog, monkeypatch
+    ):
+        sdk.up.add("good")
+        config = _servers("bad", "good")
+        real = mcp_client_mod._parse_server_config
+
+        def boom(name, cfg):
+            if name == "bad":
+                raise RuntimeError("surprise")
+            return real(name, cfg)
+
+        monkeypatch.setattr(mcp_client_mod, "_parse_server_config", boom)
+        caplog.set_level(logging.WARNING, logger="corvidae.mcp_client")
+        plugin, _ = await _start_plugin(pm, config)
+        try:
+            assert [s.name for s in plugin._servers] == ["good"]
+            assert plugin._pending_servers == {}
+            skips = [r for r in caplog.records if r.levelno == logging.WARNING
+                     and r.__dict__.get("server") == "bad"]
+            assert len(skips) == 1 and skips[0].exc_info is not None
+            assert "'bad'" in skips[0].getMessage()
+        finally:
+            await plugin.on_stop()
+
+
+class TestRetryLoopSurvivesRebuildError:
+    async def test_rebuild_registry_error_is_logged_and_loop_continues(
+        self, pm, kernel_clock, sdk, caplog
+    ):
+        clock, _ = kernel_clock
+        plugin, tools = await _start_plugin(pm, _servers("a", "b"))
+        try:
+            async def boom() -> None:
+                raise RuntimeError("rebuild broke")
+
+            tools.rebuild_registry = boom
+            sdk.up.add("a")
+            caplog.set_level(logging.WARNING, logger="corvidae.mcp_client")
+            await clock.advance(10)
+
+            assert not plugin._retry_task.done()
+            msgs = [r.getMessage() for r in caplog.records
+                    if r.levelno == logging.WARNING and "rebuild" in r.getMessage()]
+            assert len(msgs) == 1 and "'a'" in msgs[0]
+
+            # The loop keeps retrying: b recovers on the next round.
+            sdk.up.add("b")
+            await clock.advance(10)
+            assert sorted(s.name for s in plugin._servers) == ["a", "b"]
+        finally:
+            await plugin.on_stop()
+
+    async def test_tool_call_retry_message_promises_no_delay(
+        self, pm, kernel_clock, sdk, caplog
+    ):
+        sdk.up.add("good")
+        plugin, _ = await _start_plugin(pm, _servers("good", "late"))
+        try:
+            tool = next(t for t in plugin._cached_tools if t.name == "good__t")
+            caplog.set_level(logging.WARNING, logger="corvidae.mcp_client")
+            caplog.clear()
+            await tool.fn()
+            msgs = [r.getMessage() for r in caplog.records
+                    if "reconnect failed" in r.getMessage()]
+            assert msgs and all("retrying in" not in m for m in msgs)
+            assert all("background retry" in m for m in msgs)
         finally:
             await plugin.on_stop()

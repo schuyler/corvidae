@@ -114,6 +114,17 @@ class _ServerSettings:
     headers: dict[str, str] | None
 
 
+def _as_seconds(name: str, cfg: dict, key: str) -> float:
+    """Read a numeric seconds key (default 30), naming key and value on error."""
+    value = cfg.get(key, 30)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"mcp.servers.{name}.{key} must be a number, got {value!r}"
+        ) from None
+
+
 def _parse_server_config(name: str, cfg: dict) -> _ServerSettings:
     """Validate one server's config and resolve its ${VAR} headers.
 
@@ -123,6 +134,12 @@ def _parse_server_config(name: str, cfg: dict) -> _ServerSettings:
     distinguishable from a connect failure (which is retried). Messages name
     the server and the key to fix.
     """
+    # A non-mapping server entry (e.g. `a: null`) has no keys to read.
+    if not isinstance(cfg, dict):
+        raise ValueError(
+            f"mcp.servers.{name} must be a mapping, got {cfg!r}; "
+            f"give it transport and command/url keys"
+        )
     transport = cfg["transport"]
     # An unknown transport can never connect.
     if transport not in _TRANSPORTS:
@@ -133,13 +150,20 @@ def _parse_server_config(name: str, cfg: dict) -> _ServerSettings:
     # Each transport needs its endpoint key; KeyError names it.
     cfg["command" if transport == "stdio" else "url"]
     prefix = cfg.get("tool_prefix", name)
-    timeout = float(cfg.get("timeout_seconds", 30))
-    connect_timeout = float(cfg.get("connect_timeout_seconds", 30))
+    timeout = _as_seconds(name, cfg, "timeout_seconds")
+    connect_timeout = _as_seconds(name, cfg, "connect_timeout_seconds")
     # A zero or negative bound would fail every handshake.
     if connect_timeout <= 0:
         raise ValueError(
             f"connect_timeout_seconds must be positive for server {name!r}; "
             f"got {connect_timeout:g}, fix mcp.servers.{name}.connect_timeout_seconds"
+        )
+    # headers must be a mapping of names to values.
+    raw_headers = cfg.get("headers")
+    if raw_headers is not None and not isinstance(raw_headers, dict):
+        raise ValueError(
+            f"mcp.servers.{name}.headers must be a mapping of header names "
+            f"to values, got {raw_headers!r}"
         )
     # Resolve ${VAR} references: a missing variable raises McpHeaderEnvError.
     headers = _resolve_headers(name, cfg.get("headers"))
@@ -250,6 +274,18 @@ class McpClientPlugin(CorvidaePlugin):
                         "mcp.servers.%s in agent.yaml and restart",
                         server_name, detail, server_name,
                         extra={"server": server_name},
+                    )
+                    continue
+                except Exception:
+                    # Anything else is still a bad config: skip this server,
+                    # never abort the broadcast for the ones after it.
+                    logger.warning(
+                        "MCP server %r skipped: unexpected error reading "
+                        "its config; check mcp.servers.%s in agent.yaml "
+                        "and restart",
+                        server_name, server_name,
+                        extra={"server": server_name},
+                        exc_info=True,
                     )
                     continue
                 try:
@@ -388,7 +424,7 @@ class McpClientPlugin(CorvidaePlugin):
             if self._stopping:
                 return
             async with self._retry_lock:
-                reconnected = await self._retry_round()
+                reconnected = await self._retry_round(from_loop=True)
             if reconnected:
                 delay = _INITIAL_BACKOFF
             else:
@@ -406,13 +442,14 @@ class McpClientPlugin(CorvidaePlugin):
         async with self._retry_lock:
             await self._retry_round()
 
-    async def _retry_round(self) -> bool:
+    async def _retry_round(self, from_loop: bool = False) -> bool:
         """Try each pending server once; the caller holds the retry lock.
 
         Successful reconnects refresh the cached tool list and the shared
         registry. Returns True when at least one server reconnected.
         """
         reconnected = False
+        connected_names: list[str] = []
         for name, cfg in list(self._pending_servers.items()):
             # The other caller may have reconnected it, or on_stop begun.
             if name not in self._pending_servers or self._stopping:
@@ -420,9 +457,14 @@ class McpClientPlugin(CorvidaePlugin):
             try:
                 await self._connect_server(name, cfg)
             except Exception as exc:
+                # The loop knows its next delay; a tool-call retry does not.
+                when = (
+                    f"retrying in {self._next_delay:g}s" if from_loop
+                    else "the background retry will try again"
+                )
                 logger.warning(
-                    "MCP server %r reconnect failed (%s); retrying in %ss",
-                    name, _exc_type_names(exc), f"{self._next_delay:g}",
+                    "MCP server %r reconnect failed (%s); %s",
+                    name, _exc_type_names(exc), when,
                     extra={"server": name},
                     exc_info=True,
                 )
@@ -430,6 +472,7 @@ class McpClientPlugin(CorvidaePlugin):
             if any(server.name == name for server in self._servers):
                 self._pending_servers.pop(name, None)
                 reconnected = True
+                connected_names.append(name)
             # A timeout leaves the server pending for the next round.
 
         if reconnected:
@@ -439,7 +482,18 @@ class McpClientPlugin(CorvidaePlugin):
             tools_plugin = self.pm.get_plugin("tools") if self.pm is not None else None
             rebuild = getattr(tools_plugin, "rebuild_registry", None)
             if inspect.iscoroutinefunction(rebuild):
-                await rebuild()
+                try:
+                    await rebuild()
+                except Exception:
+                    # Servers are connected; only the shared registry is
+                    # stale. Keep the retry loop alive.
+                    logger.warning(
+                        "Tool registry rebuild failed after MCP server(s) "
+                        "%s reconnected; their tools reach the registry on "
+                        "the next successful rebuild",
+                        ", ".join(repr(n) for n in connected_names),
+                        exc_info=True,
+                    )
         return reconnected
 
     async def _connect_server(self, name: str, cfg: dict) -> None:

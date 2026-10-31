@@ -278,6 +278,9 @@ class TestConfigErrors:
                  and r.__dict__.get("server") == "bad"]
         assert len(skips) == 1
         assert "mcp.servers.bad" in skips[0].getMessage()
+        if bad.get("timeout_seconds") == "abc":
+            assert "timeout_seconds" in skips[0].getMessage()
+            assert "'abc'" in skips[0].getMessage()
         assert "skipped" in skips[0].getMessage()
         assert plugin._pending_servers == {}
         assert plugin._servers == [] and plugin._owners == {}
