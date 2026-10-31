@@ -97,8 +97,17 @@ class IRCClient(pydle.Client):
         await super().on_connect()
         for channel in self.plugin.channels:
             await self.join(channel)
+        # Joins are done: from here sends may go out directly (#251). Set
+        # before the flush; a send made mid-flush still queues behind the
+        # non-empty queue, so #106's ordering holds.
+        self.plugin._ready = True
         # Deliver output queued during the outage, after the joins.
         await self.plugin._flush_outbound()
+
+    async def on_disconnect(self, expected):
+        """Stop sending directly until the next on_connect finishes (#251)."""
+        self.plugin._ready = False
+        await super().on_disconnect(expected)
 
     async def on_channel_message(self, target, by, message):
         """Forward channel messages to plugin."""
@@ -174,6 +183,9 @@ class IRCPlugin(TransportPlugin):
         # True while _flush_outbound is delivering _outbound[0]; that entry
         # is in flight and must not be dropped by overflow handling.
         self._flushing = False
+        # True from the end of on_connect (joins done) until disconnect; TCP
+        # `connected` alone is true before the channels are joined (#251).
+        self._ready = False
         self._outbound: collections.deque[tuple[Channel, str]] = collections.deque()
         # Messages dropped from the queue in the current outage.
         self._dropped: int = 0
@@ -375,13 +387,14 @@ class IRCPlugin(TransportPlugin):
                 await self.client.message(channel.scope, line)
 
     async def send_message(self, channel: Channel, event: OutboundMessage) -> None:
-        """Deliver a reply, or queue it while disconnected or mid-flush."""
+        """Deliver a reply, or queue it until joined, or while disconnected or mid-flush."""
         text = event.text
-        # Queue when offline, or when older output is still waiting, so a new
+        # Queue when offline, not yet joined, or when older output is still waiting, so a new
         # message cannot overtake queued ones.
         if (
             self.client is None
             or not self.client.connected
+            or not self._ready
             or self._outbound
         ):
             # Bounded: drop the oldest entry rather than grow without limit.

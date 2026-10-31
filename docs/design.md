@@ -2199,7 +2199,9 @@ and the number dropped so far in the outage. After a successful connect,
 `on_connect` joins the configured channels and then flushes the queue in
 order, splitting each message exactly as a connected send does. A send made
 while the queue is non-empty queues behind it, so nothing overtakes older
-output. Limits: a connection that drops mid-flush leaves the unsent entries
+output. Sends also queue from TCP connect until `on_connect` has finished its
+joins: `IRCPlugin._ready` is set there and cleared in `on_disconnect`, so a
+reply in that window is not sent before the bot is in the channel (#251). Limits: a connection that drops mid-flush leaves the unsent entries
 queued, and a partly sent multi-line message is resent whole (duplicates
 rather than losses); pydle's `join` does not await the server's JOIN, so a
 channel that refuses the join drops the flushed text server-side; and the

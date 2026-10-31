@@ -25,6 +25,9 @@ class MockClient:
     async def on_connect(self):
         pass
 
+    async def on_disconnect(self, expected):
+        pass
+
     async def on_channel_message(self, target, by, message):
         pass
 
@@ -157,6 +160,7 @@ class TestIRCClientEvents:
             mock_client = MagicMock()
             mock_client_class.return_value = mock_client
             plugin.client = mock_client
+            plugin._ready = True
             plugin.client.nickname = "TestBot"
             plugin.client.users = {}
             plugin.client._capabilities = {}
@@ -190,6 +194,7 @@ class TestIRCClientEvents:
             mock_client = MagicMock()
             mock_client_class.return_value = mock_client
             plugin.client = mock_client
+            plugin._ready = True
             plugin.client.nickname = "TestBot"
             plugin.client.users = {}
             plugin.client._capabilities = {}
@@ -215,6 +220,7 @@ class TestIRCClientEvents:
             mock_client = MagicMock()
             mock_client_class.return_value = mock_client
             plugin.client = mock_client
+            plugin._ready = True
             plugin.client.nickname = "TestBot"
             plugin.client.users = {}
             plugin.client._capabilities = {}
@@ -252,6 +258,7 @@ class TestSendMessage:
             mock_client = MagicMock()
             mock_client_class.return_value = mock_client
             plugin.client = mock_client
+            plugin._ready = True
 
             plugin.client.message = AsyncMock()
 
@@ -270,6 +277,7 @@ class TestSendMessage:
             mock_client = MagicMock()
             mock_client_class.return_value = mock_client
             plugin.client = mock_client
+            plugin._ready = True
             plugin.client.message = AsyncMock()
 
             cli_channel = registry.get_or_create("cli", "local")
@@ -287,6 +295,7 @@ class TestSendMessage:
             mock_client = MagicMock()
             mock_client_class.return_value = mock_client
             plugin.client = mock_client
+            plugin._ready = True
             plugin.client.message = AsyncMock()
 
             channel = registry.get_or_create("irc", "#test")
@@ -307,6 +316,7 @@ class TestSendMessage:
             mock_client = MagicMock()
             mock_client_class.return_value = mock_client
             plugin.client = mock_client
+            plugin._ready = True
             plugin.client.message = AsyncMock()
 
             channel = registry.get_or_create("irc", "#test")
@@ -379,6 +389,7 @@ class TestSendMessage:
 
         plugin.client = MagicMock()
         plugin.client.connected = True
+        plugin._ready = True
         plugin.client.message = AsyncMock()
 
         channel = registry.get_or_create("irc", "#test")
@@ -410,7 +421,9 @@ class TestSendProgress:
             mock_client = MagicMock()
             mock_client_class.return_value = mock_client
             plugin.client = mock_client
+            plugin._ready = True
             plugin.client.connected = True
+            plugin._ready = True
             plugin.client.message = AsyncMock()
 
             channel = registry.get_or_create("irc", "#test")
@@ -428,7 +441,9 @@ class TestSendProgress:
             mock_client = MagicMock()
             mock_client_class.return_value = mock_client
             plugin.client = mock_client
+            plugin._ready = True
             plugin.client.connected = True
+            plugin._ready = True
             plugin.client.message = AsyncMock()
 
             cli_channel = registry.get_or_create("cli", "local")
@@ -498,6 +513,7 @@ class TestSendMessageLatencyMs:
             mock_client = MagicMock()
             mock_client_class.return_value = mock_client
             plugin.client = mock_client
+            plugin._ready = True
             plugin.client.message = AsyncMock()
 
             channel = registry.get_or_create("irc", "#test")
@@ -740,6 +756,7 @@ class TestOutboundQueue:
         text = "line one\n\nline two\n" + "y" * 500
         plugin, client, parent, channel = _make_queue_fixture()
         client.connected = True
+        plugin._ready = True  # joined: a connected send delivers directly
         await plugin.send(channel=channel, event=OutboundMessage(text=text))
         expected = [c.args for c in parent.message.await_args_list]
         assert len(expected) >= 3
@@ -773,6 +790,47 @@ class TestOutboundQueue:
         client.message = slow_message
         await plugin._flush_outbound()
         assert sent == ["old1", "old2", "new"]
+
+
+class TestReadyGate:
+    """#251: sends between TCP connect and the end of on_connect queue."""
+
+    async def test_send_after_tcp_connect_before_on_connect_queues(self):
+        """Connected but not yet joined: the send is held, not delivered."""
+        plugin, client, parent, channel = _make_queue_fixture()
+        client.connected = True  # TCP up; on_connect has not run
+        await plugin.send(channel=channel, event=OutboundMessage(text="early"))
+        parent.message.assert_not_awaited()
+        assert len(plugin._outbound) == 1
+
+    async def test_early_send_flushes_after_joins(self):
+        """The early send is delivered by on_connect, after the joins."""
+        plugin, client, parent, channel = _make_queue_fixture()
+        client.connected = True
+        await plugin.send(channel=channel, event=OutboundMessage(text="early"))
+        await client.on_connect()
+        assert [c[0] for c in parent.mock_calls] == ["join", "message"]
+        assert plugin._ready is True
+
+    async def test_send_delivers_directly_once_ready(self):
+        """After on_connect with an empty queue, sends go straight out."""
+        plugin, client, parent, channel = _make_queue_fixture()
+        client.connected = True
+        await client.on_connect()
+        await plugin.send(channel=channel, event=OutboundMessage(text="live"))
+        parent.message.assert_awaited_once_with("#test", "live")
+
+    async def test_disconnect_clears_ready(self):
+        """After a disconnect, sends queue again until the next on_connect."""
+        plugin, client, parent, channel = _make_queue_fixture()
+        client.connected = True
+        await client.on_connect()
+        await client.on_disconnect(expected=False)
+        client.connected = True  # next TCP connect, before on_connect
+        assert plugin._ready is False
+        await plugin.send(channel=channel, event=OutboundMessage(text="again"))
+        parent.message.assert_not_awaited()
+        assert len(plugin._outbound) == 1
 
 
 # ---------------------------------------------------------------------------
