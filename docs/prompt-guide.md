@@ -139,7 +139,10 @@ Each message injected during `before_agent_turn` is individually persisted by `A
 
 ### Avoiding duplicate injections
 
-`ContextWindow` provides `remove_by_type(MessageType.CONTEXT)` to clear all in-memory `CONTEXT` entries before re-injecting fresh ones. This prevents accumulation across turns. The method raises `ValueError` if called with `MESSAGE` or `SUMMARY` — those are managed by the agent and compaction system, not plugins.
+Nothing is removed from the middle of the window, so a plugin never clears its earlier `CONTEXT` entries before injecting fresh ones. Inject at the tail instead, and let two mechanisms keep the window from filling with repeats:
+
+- **Dedupe.** Route injections through the funnel (`admit()`, or `register()` / `register_and_wake()` for deferred payloads; see [cognition.md](cognition.md#funnelplugin)). It drops entries that already appear in `CONTEXT` still in the window.
+- **Aging.** Stale `CONTEXT` retires when it ages past the compaction boundary, so the window does not accumulate it indefinitely.
 
 ---
 
@@ -226,7 +229,6 @@ Retrieval quality depends on `llm.embedding.document_prefix` and `llm.embedding.
 | `ContextWindow.build_prompt()` | `corvidae/context.py` | Assembles final message list for LLM |
 | `count_tokens()` | `corvidae/context.py` | Tiktoken-based token count (cl100k_base); char-based fallback |
 | `ContextWindow.token_estimate()` | `corvidae/context.py` | Token count for all messages; delegates to `count_tokens()` |
-| `ContextWindow.remove_by_type()` | `corvidae/context.py` | Clears in-memory entries of a given type |
 | Lazy initialization | `corvidae/agent.py` (`_process_queue_item_attributed`) | First-message conversation setup |
 | `before_agent_turn` hook | `corvidae/agent.py` | Context injection point |
 | `resolve_compaction` hook | `corvidae/agent.py` | Compaction trigger |

@@ -294,38 +294,3 @@ class ContextWindow:
         for msg in self.messages:
             total += message_tokens(msg)
         return total
-
-    def remove_by_type(self, message_type: MessageType) -> int:
-        """Remove all in-memory entries of a given type.
-
-        Only allowed for non-MESSAGE, non-SUMMARY types (use compaction for those).
-
-        Args:
-            message_type: The type to remove. Must not be MESSAGE or SUMMARY.
-
-        Returns:
-            The number of in-memory entries removed.
-
-        Raises:
-            ValueError: If message_type is MESSAGE or SUMMARY.
-        """
-        if message_type in (MessageType.MESSAGE, MessageType.SUMMARY):
-            raise ValueError(
-                f"Cannot remove {message_type.value!r} entries — "
-                f"use compaction for MESSAGE and SUMMARY lifecycle"
-            )
-        before = len(self.messages)
-        self.messages = [
-            m for m in self.messages
-            if m.get("_message_type") != message_type
-        ]
-        removed = before - len(self.messages)
-        logger.debug(
-            "removed entries by type",
-            extra={
-                "channel_id": self.channel_id,
-                "message_type": message_type.value,
-                "count": removed,
-            },
-        )
-        return removed

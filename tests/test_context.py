@@ -634,59 +634,10 @@ class TestBuildPromptCallBlockInvariant:
         assert prompt[-1]["role"] == "tool"
 
 
-class TestContextWindowRemoveByType:
-    def test_remove_by_type_removes_context(self):
-        """remove_by_type(CONTEXT) removes CONTEXT entries from self.messages."""
-        cw = ContextWindow("test:scope")
-        cw.append({"role": "user", "content": "msg"})
-        cw.append({"role": "system", "content": "ctx1"}, message_type=MessageType.CONTEXT)
-        cw.append({"role": "system", "content": "ctx2"}, message_type=MessageType.CONTEXT)
+def test_context_window_has_no_mid_window_removal():
+    """The window only grows at the tail and truncates at the head (PRD principle 2).
 
-        removed = cw.remove_by_type(MessageType.CONTEXT)
-
-        assert removed == 2
-        assert len(cw.messages) == 1
-        assert cw.messages[0]["_message_type"] == MessageType.MESSAGE
-
-    def test_remove_by_type_returns_count(self):
-        """remove_by_type() returns the number of entries removed."""
-        cw = ContextWindow("test:scope")
-        cw.append({"role": "system", "content": "ctx"}, message_type=MessageType.CONTEXT)
-        removed = cw.remove_by_type(MessageType.CONTEXT)
-        assert removed == 1
-
-    def test_remove_by_type_returns_zero_when_none_match(self):
-        """remove_by_type() returns 0 when no entries of that type exist."""
-        cw = ContextWindow("test:scope")
-        cw.append({"role": "user", "content": "msg"})
-        removed = cw.remove_by_type(MessageType.CONTEXT)
-        assert removed == 0
-
-    def test_remove_by_type_is_synchronous(self):
-        """remove_by_type() must be a regular method, not a coroutine."""
-        import inspect
-        cw = ContextWindow("test:scope")
-        result = cw.remove_by_type(MessageType.CONTEXT)
-        assert not inspect.iscoroutine(result), (
-            "remove_by_type() must be synchronous — it returned a coroutine"
-        )
-
-    def test_remove_by_type_rejects_message(self):
-        """remove_by_type(MESSAGE) must raise ValueError."""
-        cw = ContextWindow("test:scope")
-        with pytest.raises(ValueError):
-            cw.remove_by_type(MessageType.MESSAGE)
-
-    def test_remove_by_type_rejects_summary(self):
-        """remove_by_type(SUMMARY) must raise ValueError."""
-        cw = ContextWindow("test:scope")
-        with pytest.raises(ValueError):
-            cw.remove_by_type(MessageType.SUMMARY)
-
-    def test_remove_by_type_in_memory_only(self):
-        """remove_by_type() only modifies self.messages, no DB required."""
-        # ContextWindow has no DB — this verifies it doesn't fail on missing DB.
-        cw = ContextWindow("test:scope")
-        cw.append({"role": "system", "content": "ctx"}, message_type=MessageType.CONTEXT)
-        cw.remove_by_type(MessageType.CONTEXT)
-        assert cw.messages == []
+    remove_by_type was the last method that removed entries from the middle of
+    the window; it must stay retired.
+    """
+    assert not hasattr(ContextWindow, "remove_by_type")
