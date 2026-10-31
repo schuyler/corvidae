@@ -16,7 +16,7 @@ Design assumptions (from plans/mcp-client-plugin.md):
 - result.is_error: prepends "Error: " to the joined text.
 - Duplicate tool names: first registration wins; warning logged, duplicate skipped.
 - Non-text content blocks: dropped (logged at DEBUG), text blocks only are joined.
-- on_stop: calls AsyncExitStack.aclose() to close all sessions.
+- on_stop: signals every server's owner task to close its session.
 - on_start with no config: returns early, no sessions connected.
 - Empty result: returns "(no output)" when no text blocks are present.
 """
@@ -29,7 +29,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 # The import under test — will raise ImportError until the file exists.
-from corvidae.mcp_client import McpClientPlugin, _McpServerState, _call_mcp_tool, _make_tool, _mcp_tool_to_schema
+from corvidae.mcp_client import McpClientPlugin, _McpServerState, _ServerOwner, _call_mcp_tool, _make_tool, _mcp_tool_to_schema
 
 
 # ---------------------------------------------------------------------------
@@ -98,7 +98,7 @@ class TestOnStartNoConfig:
         await plugin.on_start(config={})
         assert plugin._servers == []
         assert plugin._cached_tools == []
-        assert plugin._exit_stack is None
+        assert plugin._owners == {}
 
     async def test_empty_servers_dict(self):
         """Config with 'mcp.servers: {}': no servers connected, _cached_tools empty."""
@@ -106,7 +106,7 @@ class TestOnStartNoConfig:
         await plugin.on_start(config={"mcp": {"servers": {}}})
         assert plugin._servers == []
         assert plugin._cached_tools == []
-        assert plugin._exit_stack is None
+        assert plugin._owners == {}
 
     async def test_missing_servers_key(self):
         """Config with 'mcp: {}': no servers connected, _cached_tools empty."""
@@ -114,7 +114,7 @@ class TestOnStartNoConfig:
         await plugin.on_start(config={"mcp": {}})
         assert plugin._servers == []
         assert plugin._cached_tools == []
-        assert plugin._exit_stack is None
+        assert plugin._owners == {}
 
 
 # ---------------------------------------------------------------------------
@@ -433,57 +433,79 @@ class TestRegisterTools:
 
 
 class TestOnStop:
-    """on_stop closes the AsyncExitStack."""
+    """on_stop signals each server's owner task and clears plugin state."""
 
-    async def test_on_stop_closes_exit_stack(self):
-        """on_stop calls aclose() on the exit stack if one exists."""
+    @staticmethod
+    def _owner(name: str, body) -> "_ServerOwner":
+        """An owner whose task runs ``body(owner)`` once stop is signalled."""
+        owner = _ServerOwner(name=name)
+
+        async def run() -> None:
+            await owner.stop.wait()
+            await body(owner)
+
+        owner.task = asyncio.create_task(run())
+        return owner
+
+    async def test_on_stop_signals_owner_and_awaits_it(self):
+        """on_stop sets the owner's stop event and waits for its task."""
         plugin = McpClientPlugin(None)
-        mock_stack = AsyncMock()
-        mock_stack.aclose = AsyncMock()
-        plugin._exit_stack = mock_stack
+        closed = []
+
+        async def body(owner):
+            closed.append(owner.name)
+
+        plugin._owners["a"] = self._owner("a", body)
 
         await plugin.on_stop()
 
-        mock_stack.aclose.assert_called_once()
+        assert closed == ["a"]
+        assert plugin._owners == {}
 
-    async def test_on_stop_clears_exit_stack_reference(self):
-        """on_stop sets _exit_stack to None after closing."""
+    async def test_on_stop_clears_state(self):
+        """on_stop empties _owners, _servers and _cached_tools."""
         plugin = McpClientPlugin(None)
-        mock_stack = AsyncMock()
-        mock_stack.aclose = AsyncMock()
-        plugin._exit_stack = mock_stack
+
+        async def body(owner):
+            return None
+
+        plugin._owners["a"] = self._owner("a", body)
+        plugin._servers.append(_make_server_state(name="a"))
+        plugin._cached_tools = [object()]
 
         await plugin.on_stop()
 
-        assert plugin._exit_stack is None
+        assert plugin._owners == {}
+        assert plugin._servers == []
+        assert plugin._cached_tools == []
 
-    async def test_on_stop_no_exit_stack_is_safe(self):
-        """on_stop is a no-op when _exit_stack is None (no servers configured)."""
+    async def test_on_stop_no_owners_is_safe(self):
+        """on_stop is a no-op when no server connected."""
         plugin = McpClientPlugin(None)
-        assert plugin._exit_stack is None
+        assert plugin._owners == {}
         # Must not raise.
         await plugin.on_stop()
 
-    async def test_on_stop_exit_stack_raises_logs_and_clears(self, caplog):
-        """If aclose() raises, on_stop logs the exception and clears _exit_stack anyway."""
+    async def test_on_stop_owner_task_raises_logs_and_clears(self, caplog):
+        """An owner task that dies with an exception is logged by name and
+        type; on_stop still completes and clears state."""
         plugin = McpClientPlugin(None)
-        mock_stack = AsyncMock()
-        mock_stack.aclose = AsyncMock(side_effect=RuntimeError("transport closed unexpectedly"))
-        plugin._exit_stack = mock_stack
+
+        async def body(owner):
+            raise RuntimeError("transport closed unexpectedly")
+
+        plugin._owners["srv"] = self._owner("srv", body)
 
         with caplog.at_level(logging.WARNING, logger="corvidae.mcp_client"):
-            # Must NOT raise — exception should be caught and logged.
+            # Must NOT raise: the exception is logged, not swallowed.
             await plugin.on_stop()
 
-        # _exit_stack must be cleared even when aclose() raised.
-        assert plugin._exit_stack is None, (
-            "on_stop must clear _exit_stack even when aclose() raises"
-        )
-
-        # The exception must be logged (not silently swallowed).
-        assert any(
-            record.levelno >= logging.WARNING for record in caplog.records
-        ), "on_stop must log a warning when aclose() raises"
+        assert plugin._owners == {}
+        warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert len(warnings) == 1
+        assert "srv" in warnings[0].getMessage()
+        assert "RuntimeError" in warnings[0].getMessage()
+        assert warnings[0].exc_info is not None
 
 
 # ---------------------------------------------------------------------------

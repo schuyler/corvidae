@@ -1828,14 +1828,48 @@ their tool lists, and exposes them to the agent loop via `register_tools`.
 ### Lifecycle
 
 - `on_start` — reads the `mcp.servers` config block, iterates each server, and
-  calls `_connect_server` for each. Connections are entered into an
-  `AsyncExitStack` so sessions and transports stay alive for the daemon's
-  lifetime. After all connections, calls `_build_tool_list()` and caches the
+  calls `_connect_server` for each. Each server's transport and session are
+  owned by a long-lived task (see "Owner tasks") so they stay alive for the
+  daemon's lifetime. After all connections, calls `_build_tool_list()` and caches the
   result. Connection failures per server are caught, logged as warnings, and
   skipped; a failed server does not abort startup.
 - `register_tools` — extends `tool_registry` with the cached `Tool` instances
   (sync; called after `on_start` completes).
-- `on_stop` — closes all sessions and transports via `AsyncExitStack.aclose()`.
+- `on_stop` — signals every server's owner task to close its session and
+  transport, and awaits them all together (see "Owner tasks").
+
+### Transports and failure handling
+
+A server connects over stdio, SSE or streamable HTTP, chosen by its
+`transport` key. Each server has its own exit stack and a bounded handshake
+(see "Connect timeout"), so one server's failure never touches another.
+Servers that did not connect at startup are queued in `_pending_servers` and
+retried on the next MCP tool call; a successful retry rebuilds the cached
+tool list and the shared registry.
+
+### Owner tasks
+
+anyio requires a cancel scope to exit in the task that entered it, and
+apluggy's `gather` runs `on_start` and `on_stop` in different tasks (a shared
+`AsyncExitStack` closed from `on_stop` raised "Attempted to exit cancel scope
+in a different task", #213). So `_connect_server` starts one `_ServerOwner`
+task per server (`_run_owner`), which enters the transport, HTTP client and
+`ClientSession` on its own `AsyncExitStack`, runs the handshake under
+`asyncio.timeout`, and resolves a `ready` future with the server's state (or
+the exception). It then waits on its `stop` event and closes the stack in the
+same task. Owners live in `self._owners` (name to owner).
+
+`on_stop` sets every owner's `stop` event at once and awaits all the tasks
+together with `asyncio.wait`, bounded by `_STOP_BOUND_SECONDS` (2.5 s, inside
+Runtime's 3 s stop budget). The SDK's `stdio_client` can take about 2 s to
+terminate a process, so closing serially would blow the budget. An owner
+still running at the bound is cancelled and logged at WARNING with the server
+name and a "may need to be killed by hand" remedy. An exception while closing
+is logged by the owner at WARNING with the server, the exception type (the
+leaves of an exception group) and the traceback, and does not stop the other
+servers. A `CancelledError` delivered to `on_start` stops and awaits the
+owners already started before it propagates, and a cancelled or failed
+mid-connect owner is awaited before `_connect_server` returns.
 
 ### Tool naming
 
@@ -1875,22 +1909,25 @@ mcp:
 
 ### Connect timeout
 
-`_connect_server` opens each server's transport and session in its own
-`AsyncExitStack`, inside `asyncio.timeout(connect_timeout_seconds)`, so a
-server that never answers `initialize` cannot hold up the `on_start`
-broadcast (#72). On success the per-server stack is pushed onto the
-plugin's lifetime stack and closes with it in `on_stop`. On a timeout or any
-other failure it is closed immediately, which terminates a stdio subprocess.
-On a timeout `_connect_server` then logs it once and returns without
-registering the server; any other failure propagates to `on_start`, which
-logs and skips it. The close runs after the timeout has turned
-its cancellation into `TimeoutError`, so teardown is not itself cancelled.
+The owner task opens each server's transport and session on its own
+`AsyncExitStack`, inside `asyncio.timeout(connect_timeout_seconds)` (the
+timeout wraps the handshake inside the owner, not the `ready` wait, so
+expiry cancels the handshake itself and the subprocess dies with it). A
+server that never answers `initialize` therefore cannot hold up the
+`on_start` broadcast (#72). On success the owner keeps the stack open until
+`on_stop`. On a timeout or any other failure the owner closes it
+immediately, which terminates a stdio subprocess, and `_connect_server`
+awaits that teardown before returning. On a timeout the owner logs it once
+and `_connect_server` returns without registering the server; any other
+failure propagates to `on_start`, which logs and skips it. The close runs
+after the timeout has turned its cancellation into `TimeoutError`, so
+teardown is not itself cancelled.
 
 ### HTTP transports and headers
 
 `streamable_http` uses the SDK's `streamable_http_client` with an HTTP client
 built by `create_mcp_http_client(headers=...)`. The SDK closes only a client
-it created, so the plugin enters its client into the per-server stack, and it
+it created, so the plugin enters its client into the owner's stack, and it
 closes with the server. `sse` passes the same headers to `sse_client`.
 `_resolve_headers` replaces each `${VAR}` in a header value from
 `os.environ` before anything opens. An unset or empty variable, or one holding CR, LF or NUL (which httpx would reject with an error quoting the value), raises

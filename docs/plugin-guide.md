@@ -1132,7 +1132,8 @@ Implements three hooks:
   Runs in the broadcast; completes before `ToolCollectionPlugin.on_start`
   (trylast) calls `register_tools`.
 - `register_tools` — appends the cached tools to `tool_registry`.
-- `on_stop` — closes all MCP sessions and transports via `AsyncExitStack`.
+- `on_stop` — signals each server's owner task to close its session and
+  transport (enter and exit happen in the same task), all servers at once.
 
 **Config:**
 ```yaml
