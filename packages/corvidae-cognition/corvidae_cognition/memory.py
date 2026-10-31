@@ -71,7 +71,11 @@ from corvidae.attribution import reset_attribution, set_attribution
 from corvidae.context import MessageType
 from corvidae.fork import fork_agent, quote, window_db_ids
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
-from corvidae.persistence import add_column_if_missing
+from corvidae.persistence import (
+    add_column_if_missing,
+    decode_message_row,
+    parse_message_type,
+)
 
 if TYPE_CHECKING:
     from corvidae.clock import Clock, Timer
@@ -298,9 +302,13 @@ def _fork_range_sentence(prefix: list[dict], dialog_ids: set[int]) -> str:
 async def fetch_range_rows(
     db: aiosqlite.Connection, channel_id: str, after_id: int, through_id: int
 ) -> list[tuple]:
-    """Raw message_log rows for (after_id, through_id], id-ordered."""
+    """Raw message_log rows for (after_id, through_id], id-ordered.
+
+    The message column comes back as bytes (CAST AS BLOB) so a corrupt row
+    fails in ``decode_message_row`` instead of inside the fetch.
+    """
     async with db.execute(
-        "SELECT id, message, message_type FROM message_log "
+        "SELECT id, CAST(message AS BLOB), message_type FROM message_log "
         "WHERE channel_id = ? AND id > ? AND id <= ? ORDER BY id",
         (channel_id, after_id, through_id),
     ) as cursor:
@@ -318,13 +326,41 @@ async def source_timestamp(db: aiosqlite.Connection, message_id: int) -> float:
     return row[0] if row is not None and row[0] is not None else time.time()
 
 
-def dialog_from_rows(rows: list[tuple]) -> list[dict]:
-    """The consolidation working set: real user/assistant dialog only."""
+def _decodes_to_object(raw: bytes | str) -> bool:
+    """True when a message_log value is a JSON object (quiet: no warning)."""
+    try:
+        return isinstance(json.loads(raw), dict)
+    except (ValueError, RecursionError):
+        # Corrupt value: the caller treats it as absent; the warning is
+        # logged once by decode_message_row in dialog_from_rows.
+        return False
+
+
+def dialog_from_rows(rows: list[tuple], channel_id: str) -> list[dict]:
+    """The consolidation working set: real user/assistant dialog only.
+
+    A corrupt row, or one whose message_type is outside MessageType, counts
+    as non-dialog: it is skipped with a warning naming the row and channel,
+    so the watermark can still advance past it.
+    """
+    known = {t.value for t in MessageType}
     dialog = []
-    for _rowid, message_json, message_type in rows:
+    for rowid, message_json, message_type in rows:
+        # An unknown type is non-dialog, loudly
+        if message_type not in known:
+            parse_message_type(
+                rowid, message_type, channel_id,
+                consequence="consolidation treats it as non-dialog",
+            )
+            continue
         if message_type != "message":
             continue
-        message = json.loads(message_json)
+        message = decode_message_row(
+            rowid, message_json, channel_id,
+            consequence="consolidation treats it as non-dialog and moves on",
+        )
+        if message is None:
+            continue
         content = message.get("content")
         if message.get("role") in ("user", "assistant") and \
                 isinstance(content, str) and content.strip():
@@ -872,7 +908,7 @@ class MemoryPlugin(CorvidaePlugin):
             if range_end <= watermark:
                 return
             rows = await fetch_range_rows(db, channel.id, watermark, range_end)
-            if not dialog_from_rows(rows):
+            if not dialog_from_rows(rows, channel.id):
                 return
             record = await self._fork_record(agent, channel, rows, cut)
             if record is not None:
@@ -905,7 +941,12 @@ class MemoryPlugin(CorvidaePlugin):
         if conv is None:
             return None
         prefix = conv.messages if cut is None else conv.messages[:cut]
-        dialog_ids = {row_id for row_id, _msg, mtype in rows if mtype == "message"}
+        # A corrupt row never loaded into the window, so the fork must not
+        # be required to find it there (dialog_from_rows warned about it).
+        dialog_ids = {
+            row_id for row_id, raw, mtype in rows
+            if mtype == "message" and _decodes_to_object(raw)
+        }
         if not dialog_ids <= window_db_ids(prefix):
             logger.debug(
                 "consolidation range not in the window; using the standalone call",
@@ -1026,17 +1067,21 @@ class MemoryPlugin(CorvidaePlugin):
             if db is None:
                 return
             async with db.execute(
-                "SELECT id, message FROM message_log "
+                "SELECT id, CAST(message AS BLOB), channel_id FROM message_log "
                 "WHERE id NOT IN (SELECT rowid FROM message_fts)"
             ) as cursor:
                 rows = await cursor.fetchall()
             if not rows:
                 return
-            for row_id, msg_json in rows:
-                try:
-                    content = json.loads(msg_json).get("content") or ""
-                except Exception:
-                    content = ""
+            for row_id, msg_json, row_channel in rows:
+                # A corrupt row is indexed as empty text (with a warning) so
+                # it is not retried on every start and the rest still index.
+                msg = decode_message_row(
+                    row_id, msg_json, row_channel,
+                    consequence="it is indexed as empty text and the "
+                                "backfill continues",
+                )
+                content = (msg.get("content") if msg is not None else "") or ""
                 await db.execute(
                     "INSERT INTO message_fts(rowid, content_text) VALUES (?, ?)",
                     (row_id, content if isinstance(content, str) else ""),
@@ -1209,7 +1254,7 @@ class MemoryPlugin(CorvidaePlugin):
 
             # Fetch the working range and keep only real dialog.
             rows = await fetch_range_rows(db, channel_id, watermark, range_end)
-            dialog = dialog_from_rows(rows)
+            dialog = dialog_from_rows(rows, channel_id)
             if rows:
                 range_desc = f"{rows[0][0]}-{rows[-1][0]}"
 

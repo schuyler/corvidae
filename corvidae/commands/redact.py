@@ -38,6 +38,8 @@ from pathlib import Path
 import aiosqlite
 import click
 
+from corvidae.persistence import decode_message_row
+
 logger = logging.getLogger("corvidae.redact")
 
 _TOMBSTONE_TEXT = "[redacted by operator {date}]"
@@ -52,32 +54,52 @@ def _tombstone_content(iso_date: str) -> str:
     return _TOMBSTONE_TEXT.format(date=iso_date)
 
 
-def _make_tombstone_message(msg_json: str, iso_date: str) -> str:
-    """Replace content with tombstone; drop tool_calls and payload fields; keep role."""
-    try:
-        msg = json.loads(msg_json)
-    except Exception:
-        return json.dumps({"role": "unknown", "content": _tombstone_content(iso_date)})
-    result: dict = {"role": msg.get("role", "unknown")}
+def _make_tombstone_message(
+    msg_json: bytes | str, iso_date: str, row_id: int = 0, channel_id: str = "?"
+) -> str:
+    """Replace content with tombstone; drop tool_calls and payload fields; keep role.
+
+    A row that does not decode to a JSON object (invalid JSON or UTF-8, null,
+    an array, an oversized int) is tombstoned as ``role: "unknown"`` — the
+    operator is redacting it precisely because it is corrupt, so it must not
+    crash the tool. The result is always valid UTF-8 JSON.
+    """
+    msg = decode_message_row(
+        row_id, msg_json, channel_id,
+        redacting=True,
+    )
+    role = msg.get("role", "unknown") if msg is not None else "unknown"
+    result: dict = {"role": role}
     result["content"] = _tombstone_content(iso_date)
     # tool_calls and other payload fields are intentionally omitted
     return json.dumps(result)
 
 
-def _extract_sample_token(text: str) -> str | None:
+def _extract_sample_token(text: bytes | str) -> str | None:
     """Extract the first non-trivial word from text for FTS verification.
 
-    If text looks like JSON (message_log content), uses the content field.
+    Bytes are a message_log row (selected CAST AS BLOB): any decode failure
+    or non-object value returns None, so redact reports the FTS check as
+    skipped. A str that looks like JSON uses its content field; any other str
+    is a plain-text memory summary and is used as is.
     Returns None if no suitable token is found.
     """
     content = text
     try:
         msg = json.loads(text)
+        if not isinstance(msg, dict):
+            raise TypeError(f"decoded to {type(msg).__name__}, not an object")
         content = msg.get("content", "") or ""
-    except (json.JSONDecodeError, AttributeError) as exc:
+    except (json.JSONDecodeError, TypeError, ValueError, RecursionError) as exc:
         # Plain-text memory summaries are expected; log at DEBUG so a genuine
         # parse failure is visible when diagnosing redaction, then continue.
-        logger.debug("sample token: message is not JSON, using raw text: %s", exc)
+        logger.debug("sample token: message is not JSON (or not an object): %s", exc)
+        # A message_log row (bytes) or a JSON value that is not an object has
+        # no content to sample; only a str that failed to parse is plain text.
+        if isinstance(text, bytes) or not isinstance(exc, json.JSONDecodeError):
+            return None
+    if not isinstance(content, str):
+        return None
     # Find words of 4+ alpha characters; skip tombstone text
     words = [w for w in re.findall(r"[a-zA-Z]{4,}", content)
              if w.lower() not in {"redacted", "operator", "that", "this", "with"}]
@@ -305,13 +327,13 @@ async def redact_messages(
     by_channel: dict[str, list[int]] = {}
     for msg_id in message_ids:
         async with db.execute(
-            "SELECT message, channel_id FROM message_log WHERE id = ?", (msg_id,)
+            "SELECT CAST(message AS BLOB), channel_id FROM message_log WHERE id = ?", (msg_id,)
         ) as cursor:
             row = await cursor.fetchone()
         if row is None:
             continue
         by_channel.setdefault(row[1], []).append(msg_id)
-        tombstone = _make_tombstone_message(row[0], iso_date)
+        tombstone = _make_tombstone_message(row[0], iso_date, msg_id, row[1])
         await db.execute(
             "UPDATE message_log SET message = ? WHERE id = ?", (tombstone, msg_id)
         )
@@ -420,14 +442,14 @@ async def redact_memory_id(
     # Step 1: tombstone own-channel message rows only.
     # channel_id predicate prevents over-redaction of interleaved foreign-channel rows.
     async with db.execute(
-        "SELECT id, message FROM message_log "
+        "SELECT id, CAST(message AS BLOB) FROM message_log "
         "WHERE channel_id = ? AND id BETWEEN ? AND ? ORDER BY id",
         (channel_id, msg_id_start, msg_id_end),
     ) as cursor:
         msg_rows = await cursor.fetchall()
 
     for row_id, msg_json in msg_rows:
-        tombstone = _make_tombstone_message(msg_json, iso_date)
+        tombstone = _make_tombstone_message(msg_json, iso_date, row_id, channel_id)
         await db.execute(
             "UPDATE message_log SET message = ? WHERE id = ?", (tombstone, row_id)
         )
@@ -550,7 +572,7 @@ def _message_cmd(ctx, ids):
             sample_token = None
             if not dry_run and ids:
                 async with conn.execute(
-                    "SELECT message FROM message_log WHERE id = ? LIMIT 1",
+                    "SELECT CAST(message AS BLOB) FROM message_log WHERE id = ? LIMIT 1",
                     (ids[0],),
                 ) as c:
                     msg_row = await c.fetchone()
@@ -577,7 +599,7 @@ def _message_cmd(ctx, ids):
                 if sample_token:
                     click.echo(await _verify_fts_clean(conn, sample_token))
                 else:
-                    click.echo("verified: no sample token extracted (short/empty content)")
+                    click.echo("FTS check skipped: no sample token (row empty or corrupt)")
         finally:
             await conn.close()
 
@@ -631,7 +653,7 @@ def _memory_cmd(ctx, memory_id):
                 if sample_token:
                     click.echo(await _verify_fts_clean(conn, sample_token))
                 else:
-                    click.echo("verified: no sample token extracted (short/empty content)")
+                    click.echo("FTS check skipped: no sample token (row empty or corrupt)")
         finally:
             await conn.close()
 
@@ -657,7 +679,7 @@ def _range_cmd(ctx, start_id, end_id):
             sample_token = None
             if not dry_run:
                 async with conn.execute(
-                    "SELECT message FROM message_log "
+                    "SELECT CAST(message AS BLOB) FROM message_log "
                     "WHERE id BETWEEN ? AND ? ORDER BY id LIMIT 1",
                     (start_id, end_id),
                 ) as c:
@@ -686,7 +708,7 @@ def _range_cmd(ctx, start_id, end_id):
                 if sample_token:
                     click.echo(await _verify_fts_clean(conn, sample_token))
                 else:
-                    click.echo("verified: no sample token extracted (short/empty content)")
+                    click.echo("FTS check skipped: no sample token (row empty or corrupt)")
         finally:
             await conn.close()
 

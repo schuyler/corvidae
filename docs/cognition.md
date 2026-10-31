@@ -96,6 +96,24 @@ appraisal is enabled), embeds the summary via
 merge) together with the watermark advance in one compare-and-set
 section.
 
+### Corrupt `message_log` rows
+
+A corrupt row (invalid JSON, invalid UTF-8, JSON that is not an object, an
+oversized integer, or a `message_type` outside `MessageType`) never wedges
+memory (#232). Each reader selects the column as `CAST(message AS BLOB)` and
+decodes it with the kernel's `decode_message_row`, then skips the row with a
+WARNING naming the row id, the channel and the next step (inspect or redact
+the row):
+
+- **Consolidation** counts the row as non-dialog. The record is built from
+  the valid dialog, and the watermark advances past the whole range, corrupt
+  row included. A range whose only rows are corrupt advances the watermark
+  with no record and no LLM call.
+- **`recall_raw`** returns the valid rows of the range in order and omits the
+  corrupt one.
+- **The `message_fts` backfill** indexes every valid row and indexes a corrupt
+  row as empty text, so it is not retried on every start.
+
 **Write connection and atomicity (#221).** That section is one SQLite
 transaction (`BEGIN IMMEDIATE` ... `COMMIT`) on a dedicated connection
 only `MemoryPlugin` writes to, opened in `on_start` once the schema

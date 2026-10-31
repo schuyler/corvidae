@@ -21,6 +21,7 @@ through the Click runner, except where the CLI's own output is the subject.
 
 import asyncio
 import json
+import logging
 import time
 
 import aiosqlite
@@ -35,6 +36,7 @@ from corvidae.commands.redact import (
 )
 
 from corvidae.persistence import init_db
+from helpers import CORRUPT_MESSAGES, insert_raw_message, skip_warnings
 
 
 # ---------------------------------------------------------------------------
@@ -435,3 +437,103 @@ class TestScrubberExtensionPoint:
         result = CliRunner().invoke(redact_command, ["--db", path, "message", str(msg_id)])
         assert result.exit_code == 0, result.output
         assert "2 fake rows" in result.output, result.output
+
+
+# ---------------------------------------------------------------------------
+# Corrupt message_log rows (#232): redact is the fix, so it must not crash
+# ---------------------------------------------------------------------------
+
+
+async def _corrupt_db(tmp_path, value_sql: str, params: tuple):
+    """A WAL kernel DB: valid row, one corrupt row, valid row, on irc:#a.
+
+    Returns (db, [before_id, corrupt_id, after_id]).
+    """
+    db = await aiosqlite.connect(str(tmp_path / "c.db"))
+    await db.execute("PRAGMA journal_mode = WAL")
+    await init_db(db)
+    before = await insert_message(db, "irc:#a", "user", "before secret")
+    corrupt = await insert_raw_message(db, "irc:#a", value_sql, params)
+    after = await insert_message(db, "irc:#a", "assistant", "after secret")
+    return db, [before, corrupt, after]
+
+
+async def _raw_message_text(db, row_id: int) -> str:
+    """The stored message as text, which must be valid UTF-8 JSON."""
+    async with db.execute(
+        "SELECT CAST(message AS BLOB) FROM message_log WHERE id = ?", (row_id,)
+    ) as cursor:
+        (raw,) = await cursor.fetchone()
+    return raw.decode("utf-8")
+
+
+@pytest.mark.parametrize(("value_sql", "params"), CORRUPT_MESSAGES)
+class TestRedactCorruptRows:
+
+    async def test_redact_messages_tombstones_corrupt_row(
+        self, tmp_path, caplog, value_sql, params
+    ):
+        """redact_messages tombstones a corrupt row as role 'unknown', valid JSON."""
+        db, (before, corrupt, after) = await _corrupt_db(tmp_path, value_sql, params)
+        with caplog.at_level(logging.WARNING):
+            result = await redact_messages(db, [before, corrupt, after])
+        assert result["affected_messages"] == 3
+        stored = json.loads(await _raw_message_text(db, corrupt))
+        assert stored["role"] == "unknown"
+        assert stored["content"].startswith("[redacted by operator")
+        # Valid neighbours keep their role
+        assert json.loads(await _raw_message_text(db, before))["role"] == "user"
+        assert json.loads(await _raw_message_text(db, after))["role"] == "assistant"
+        assert skip_warnings(caplog, corrupt, "irc:#a")
+        await db.close()
+
+    async def test_redact_range_tombstones_corrupt_row(
+        self, tmp_path, value_sql, params
+    ):
+        """redact_range over a range holding a corrupt row succeeds."""
+        from corvidae.commands.redact import redact_range
+
+        db, (before, corrupt, after) = await _corrupt_db(tmp_path, value_sql, params)
+        result = await redact_range(db, before, after)
+        assert result["affected_messages"] == 3
+        assert json.loads(await _raw_message_text(db, corrupt))["role"] == "unknown"
+        await db.close()
+
+    async def test_cli_message_form_succeeds_and_skips_fts_check(
+        self, tmp_path, caplog, value_sql, params
+    ):
+        """`redact message <corrupt id>` exits 0 and reports the FTS check skipped."""
+        from click.testing import CliRunner
+
+        db, (_before, corrupt, _after) = await _corrupt_db(tmp_path, value_sql, params)
+        await db.close()
+        with caplog.at_level(logging.WARNING):
+            result = await asyncio.to_thread(
+                CliRunner().invoke, redact_command,
+                ["--db", str(tmp_path / "c.db"), "message", str(corrupt)],
+            )
+        assert result.exit_code == 0, result.output
+        assert "Redacted 1 of 1" in result.output
+        assert (
+            "FTS check skipped: no sample token (row empty or corrupt)"
+            in result.output
+        )
+        # Redact wording names the row and channel and says it is tombstoned,
+        # without the daemon's "inspect or redact" advice or a traceback
+        warnings = skip_warnings(caplog, corrupt, "irc:#a")
+        assert warnings
+        assert all("tombstoning it as role 'unknown'" in w for w in warnings)
+        assert not any("inspect or redact" in w for w in warnings)
+        assert all(r.exc_info is None for r in caplog.records)
+        assert "Traceback" not in caplog.text
+
+    def test_extract_sample_token_is_none_for_corrupt_row(
+        self, value_sql, params
+    ):
+        """_extract_sample_token returns None for a corrupt row's bytes."""
+        import sqlite3
+
+        raw = sqlite3.connect(":memory:").execute(
+            f"SELECT CAST({value_sql} AS BLOB)", params
+        ).fetchone()[0]
+        assert _extract_sample_token(raw) is None

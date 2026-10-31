@@ -1017,6 +1017,19 @@ query selects `CAST(message AS BLOB)`, so invalid UTF-8 is caught while
 decoding in Python instead of raising inside the sqlite3 fetch, where the cursor
 cannot step past the row.
 
+Every other reader of `message_log.message` shares this decoder
+(`decode_message_row` and `parse_message_type` in `corvidae/persistence.py`)
+and the same `CAST(message AS BLOB)` select, and skips a corrupt row with a
+WARNING naming its row id and channel (never its bytes) and saying to inspect
+or redact the row (#232):
+
+- **Web history replay** (`_fetch_history_rows` / `_rows_to_frames`): a corrupt
+  row, or one with an unknown `message_type`, among the newest rows is skipped
+  and the other rows still replay; it no longer blanks the channel's history.
+- **Memory** (consolidation, `recall_raw`, the `message_fts` backfill): see
+  [cognition.md](cognition.md#corrupt-message_log-rows).
+- **Redact** (below): the tool that fixes a corrupt row works on it.
+
 ### persist_message
 
 Implements `persist_message` (broadcast). Called after every `conv.append()`.
@@ -1044,6 +1057,15 @@ corvidae redact --db sessions.db message <id> [<id2>...]   # specific message_lo
 corvidae redact --db sessions.db memory <memory_id>        # a record + its raw range
 corvidae redact --db sessions.db range <start_id> <end_id> # message_log id range (inclusive)
 ```
+
+A corrupt row (invalid JSON or UTF-8, JSON that is not an object, an
+oversized integer) is tombstoned like any other. Every read casts the column
+to BLOB and decodes through `decode_message_row`, so the row becomes
+`{"role": "unknown", "content": "[redacted by operator <date>]"}` (valid
+UTF-8 JSON) with a WARNING naming the row and channel, and a row that did
+decode keeps its `role`. The sample token for the verification step comes
+back `None` for a corrupt row, so the CLI reports the FTS check as skipped
+for it instead of crashing.
 
 `--dry-run` prints affected row counts without writing. Both dry-run and
 real runs count only rows that exist and were actually touched, and the

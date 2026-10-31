@@ -569,7 +569,7 @@ class TestReplay:
             (2, json.dumps({"role": "assistant", "content": "secret"}), "unsent"),
             (3, json.dumps({"role": "system", "content": "marker"}), "context"),
         ]
-        frames = WebPlugin()._rows_to_frames(rows)
+        frames = WebPlugin()._rows_to_frames(rows, "web:t")
         assert [f.get("text") for f in frames] == ["hi"]
 
     def test_web_history_holds_back_suppressed_progress_and_thinking(self):
@@ -587,7 +587,7 @@ class TestReplay:
             (5, json.dumps({"role": "tool", "tool_call_id": "call-1", "content": "r"}), "message"),
             (6, json.dumps({"role": "assistant", "content": "Found it"}), "message"),
         ]
-        frames = WebPlugin()._rows_to_frames(rows)
+        frames = WebPlugin()._rows_to_frames(rows, "web:t")
         types = [f["type"] for f in frames]
         assert "thinking" not in types
         assert "progress" not in types

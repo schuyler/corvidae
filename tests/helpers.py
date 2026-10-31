@@ -3,6 +3,11 @@
 import asyncio
 import contextlib
 
+import logging
+import re
+import time
+
+import pytest
 import aiosqlite
 
 
@@ -209,3 +214,52 @@ async def acp_agent_env(agent_defaults: dict):
         yield SimpleNamespace(pm=pm, registry=registry, db=db, plugin=plugin, agent=agent, conn=conn)
     finally:
         await db.close()
+
+
+# ---------------------------------------------------------------------------
+# Corrupt message_log rows (#226 set, shared by every reader's tests, #232)
+# ---------------------------------------------------------------------------
+
+# (id, SQL expression for the message value, bound params). The expression
+# lets a test store bytes no Python str can carry (invalid UTF-8 as TEXT).
+CORRUPT_MESSAGES = [
+    pytest.param("?", ("{not valid json",), id="invalid-json"),
+    pytest.param("CAST(X'FF7B' AS TEXT)", (), id="invalid-utf8-text"),
+    pytest.param("X'FF7B'", (), id="invalid-utf8-blob"),
+    pytest.param("?", ("null",), id="json-null"),
+    pytest.param("?", ("[1]",), id="json-array"),
+    pytest.param("?", ("1" * 5000,), id="int-digit-limit"),
+]
+
+
+async def insert_raw_message(
+    db, channel_id: str, value_sql: str, params: tuple = (),
+    message_type: str = "message", ts: float | None = None,
+    drop_fts_trigger: bool = False,
+) -> int:
+    """Insert a message_log row whose message is the SQL expression value_sql.
+
+    The memory plugin's message_log_ai trigger runs json_extract on the new
+    message, which rejects invalid JSON at INSERT time. A corrupt row can only
+    reach such a database from outside (hand edits, an older version), so
+    drop_fts_trigger=True removes that trigger first to simulate it.
+    """
+    if drop_fts_trigger:
+        await db.execute("DROP TRIGGER IF EXISTS message_log_ai")
+    cursor = await db.execute(
+        "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
+        f"VALUES (?, {value_sql}, ?, ?)",
+        (channel_id, *params, ts if ts is not None else time.time(), message_type),
+    )
+    await db.commit()
+    return cursor.lastrowid
+
+
+def skip_warnings(caplog, row_id: int, channel_id: str) -> list[str]:
+    """WARNING texts that name both this row id and this channel."""
+    return [
+        r.getMessage() for r in caplog.records
+        if r.levelno == logging.WARNING
+        and re.search(rf"\b{row_id}\b", r.getMessage())
+        and channel_id in r.getMessage()
+    ]

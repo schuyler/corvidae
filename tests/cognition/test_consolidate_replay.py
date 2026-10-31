@@ -141,7 +141,7 @@ class _FakeClient:
 def test_dialog_from_rows_keeps_only_real_user_and_assistant_dialog():
     from corvidae_cognition.memory import dialog_from_rows
 
-    dialog = dialog_from_rows(MIXED_ROWS)
+    dialog = dialog_from_rows(MIXED_ROWS, "c")
 
     assert [m["role"] for m in dialog] == ["user", "assistant"]
     assert [m["content"] for m in dialog] == [
@@ -155,7 +155,7 @@ def test_dialog_from_rows_drops_summary_rows():
     from corvidae_cognition.memory import dialog_from_rows
 
     only_summaries = [_row(1, "assistant", "recap", message_type="summary")]
-    assert dialog_from_rows(only_summaries) == []
+    assert dialog_from_rows(only_summaries, "c") == []
 
 
 def test_dialog_from_rows_preserves_input_order():
@@ -166,7 +166,7 @@ def test_dialog_from_rows_preserves_input_order():
         _row(1, "user", "first"),
         _row(2, "assistant", "second"),
     ]
-    assert [m["content"] for m in dialog_from_rows(rows)] == [
+    assert [m["content"] for m in dialog_from_rows(rows, "c")] == [
         "third",
         "first",
         "second",

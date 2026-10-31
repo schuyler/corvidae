@@ -1058,3 +1058,38 @@ async def test_on_start_restores_channels_into_idle_tracker():
         tracker.stop()
         await clock.close()
         await db.close()
+
+
+# ---------------------------------------------------------------------------
+# decode_message_row: the one decoder every message_log reader shares (#232)
+# ---------------------------------------------------------------------------
+
+from helpers import CORRUPT_MESSAGES  # noqa: E402
+
+
+@pytest.mark.parametrize(("value_sql", "params"), CORRUPT_MESSAGES)
+async def test_decode_message_row_returns_none_for_corrupt_input(
+    db, caplog, value_sql, params
+):
+    """Every corrupt input decodes to None with one WARNING naming row and channel."""
+    from corvidae.persistence import decode_message_row
+
+    async with db.execute(
+        f"SELECT CAST({value_sql} AS BLOB)", params
+    ) as cursor:
+        (raw,) = await cursor.fetchone()
+    with caplog.at_level(logging.WARNING, logger="corvidae.persistence"):
+        assert decode_message_row(42, raw, "irc:#c") is None
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1, warnings
+    assert "42" in warnings[0] and "irc:#c" in warnings[0]
+    assert "inspect or redact the row" in warnings[0]
+
+
+def test_decode_message_row_returns_dict_for_valid_input():
+    """A JSON object decodes to its dict, from bytes or str, without a warning."""
+    from corvidae.persistence import decode_message_row
+
+    raw = json.dumps({"role": "user", "content": "hi"})
+    assert decode_message_row(1, raw.encode(), "c") == {"role": "user", "content": "hi"}
+    assert decode_message_row(1, raw, "c") == {"role": "user", "content": "hi"}
