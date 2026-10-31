@@ -177,6 +177,20 @@ stage, the exchange has left the window, a refused or unparseable fork)
 falls back to the standalone prompts above, which are still runtime
 tunables. Keep them in `immutable_settings` with forks on too.
 
+None of this is a defect to engineer away. Self-modification is a design
+goal (PRD principle 15): the framework must be able to let the agent
+rewrite its own prompts, gates and caps, and each deployment decides how
+far. This finding records what that capacity costs on a channel with
+untrusted participants. The defence is the operator's lock list, not a
+fixed prohibition. In the tree today `system_prompt` and the static keys
+can't be unlocked at all; the PRD now requires that operator config can
+unlock them (#ISSUE). Unlocking `system_prompt` has the same cost as the
+prompt tunables above, applied to the agent's own instructions: a prompt
+injection that talks the model into an edit rewrites the persona on that
+channel until the override is cleared or the daemon restarts. Request-body keys (`messages`,
+`model`, `tools`) are not self-modification and stay out of reach
+whatever the config (finding 1).
+
 ### 3. Untrusted text is promoted to the `system` role
 
 Four places:

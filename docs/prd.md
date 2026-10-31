@@ -145,9 +145,12 @@ one is a bug even if its tests pass.
    falls, and safety features are added as plugins over time, as with
    sandboxing. Fixed floors protect the operator's own control surface
    rather than draw a trust boundary, and stay fixed, among them: web auth
-   cannot be turned off (§3.2 Web), `system_prompt` is never model-settable
-   (§3.5.6), `redact` is never a tool (§3.7 Memory 8), and static keys are
-   operator-only (§3.11.4). The model's authority is unbounded and
+   cannot be turned off (§3.2 Web), `redact` is never a tool (§3.7
+   Memory 8), and `set_settings` can't lift a lock the operator set
+   (§3.5.6). What the agent may change about itself is not a floor: the
+   system prompt and the static keys (fork instructions and caps among
+   them) are locked by default, and operator config can unlock each one
+   (principle 15). The model's authority is unbounded and
    unsandboxed by decision; `docs/threat-model.md` is the standing record
    of what that costs and is updated whenever untrusted text can reach
    somewhere new or a tool can do something new.
@@ -200,6 +203,23 @@ one is a bug even if its tests pass.
     (principle 9). The whole-memory default has an entry in
     `docs/threat-model.md` (principle 9), since it lets text distilled on
     one channel reach prompts on every other.
+
+15. **The agent can modify itself; the operator decides how far.** The
+    capacity to self-modify and self-improve is a design goal. The
+    framework can let the agent change, at runtime and through its own
+    tools, its prompts (the system prompt, background-stage and fork
+    instructions, the critic's and appraiser's prompts), its tunables and
+    caps, and its workspace. No deployment is required to allow any of it.
+    A restriction on self-modification is a mechanism the framework
+    supports and a deployment configures, never a prohibition in the
+    architecture: the shipped defaults lock some keys (§3.5.6, §3.8.4,
+    §3.11.4), the operator can lock more, and operator config can unlock
+    any of them. Unlocking widens what the agent may change about itself;
+    it never opens the request body (§3.5.6) or the floors of principle 9.
+    A change to the head of the window (the system prompt) takes effect
+    when the window is next rebuilt, not mid-window (principle 2). What
+    unlocking each key costs is recorded in `docs/threat-model.md`
+    (principle 9).
 
 ## 3. Requirements
 
@@ -574,10 +594,15 @@ Per transport:
    inference keys from an allowlist (`temperature`, `top_p`, `top_k`, the
    penalties, `max_tokens`, `seed`), the framework keys (`max_turns`,
    `max_context_tokens`, `reasoning_history`, validated), and dotted plugin
-   tunables. Nothing else reaches the request body. `system_prompt` is
-   always blocked; `agent.immutable_settings` blocks more. The persona may
-   tune its own gates by default, with the documented recommended
-   blocklist for channels with untrusted participants.
+   tunables. Nothing else reaches the request body, whatever the config:
+   `messages`, `model`, `tools` and the other non-inference keys stay out.
+   The persona may tune its own gates by default, with the documented
+   recommended blocklist for channels with untrusted participants;
+   `agent.immutable_settings` locks more. `system_prompt` and the static
+   keys (§3.8.4, §3.11.4) are locked by default, and operator config can
+   unlock each one (principle 15). An unlocked `system_prompt` change
+   takes effect at the channel's next window rebuild, not mid-window
+   (principle 2). `set_settings` can't change the lock list itself.
 7. `subagent` launches a background agent on the shared `background`
    client with the calling channel's tool set minus itself and a persona-neutral
    prompt; it returns a task id at once and its result arrives as a
@@ -933,10 +958,12 @@ design: `docs/design.md`, Forks. The requirements are outcomes:
    intact, and keeps its slot time short (principles 2 and 3).
 4. Each background stage's reasoning and reply are capped, per stage, by
    operator config applied after runtime overrides, and its instructions
-   are static config, so `set_settings` can neither lift the caps nor
-   rewrite the instructions (principle 9). The window at the compaction
-   threshold, plus a stage's instruction and both caps, fits the context,
-   so a stage just short of compaction still runs. Each call is
+   are static config. By default `set_settings` can neither lift the caps
+   nor rewrite the instructions; operator config can unlock either
+   (principle 15), and the threat model records the cost (principle 9).
+   The window at the compaction threshold, plus a stage's instruction and
+   both caps, fits the context whichever layer set them, so a stage just
+   short of compaction still runs. Each call is
    attributed in `usage_log` by stage and `mode = fork | standalone`
    (principle 11).
 5. A background stage that can't run skips and logs a warning naming the
@@ -1015,7 +1042,9 @@ design: `docs/design.md`, Forks. The requirements are outcomes:
 4. Dotted tunables resolve at decision time through override, then live
    config, then default; they never reach the request body. Static keys
    (fork prompts, fork output caps, `request_logprobs`,
-   `mid_conversation_system_role`) are operator-only.
+   `mid_conversation_system_role`) are set by the operator and locked
+   against the agent by default; operator config can unlock each one
+   (principle 15).
 5. Prompts under `prompts/` are documentation copies cited by path; no
    code loads them. Persona is prompt material, never architecture.
 6. Subcommands: `serve`, `cli`, `acp`, `scaffold`, `redact`, `calibrate`,
@@ -1111,6 +1140,7 @@ record that holds the reasoning.
 | Origin is stamped and propagated, never inferred; critique eligibility by origin | §3.3 |
 | Silent tasks require no `tool_call_id` | §2.3 |
 | Persona may tune its own gates; `immutable_settings` is the valve | operator directive 2, 2026-07-06 |
+| Self-modification is a design goal: the framework supports every lock, defaults lock some, and the operator can unlock any of them; locks are never architecture | principle 15; operator directive, 2026-10-31 |
 | Best-guess defaults first; thresholds fit from experience; no closed-loop auto-fit | operator directives 1, 3 |
 | Engagement gate calibrates offline only | §3.2 |
 | Hedging vocabulary is persona, not architecture | §5.9 |
