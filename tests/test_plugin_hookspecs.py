@@ -190,9 +190,9 @@ class TestSpecsBeforeGuardAndInit:
         with pytest.raises(pluggy.PluginValidationError) as excinfo:
             _check_hook_arg_binding(pm)
         message = str(excinfo.value)
-        assert "bad" in message
+        assert "'bad'" in message
         assert "resolve_web_answer" in message
-        assert "value" in message
+        assert "['value']" in message
 
     async def test_on_init_can_call_another_plugins_hook(self) -> None:
         seen: list = []
@@ -338,7 +338,7 @@ class TestOrphanReport:
         warnings = _orphan_records(caplog, logging.WARNING)
         assert len(warnings) == 1
         message = warnings[0].getMessage()
-        assert "typo" in message
+        assert "'typo'" in message
         assert "on_web_console_inti" in message
         assert "depends_on" in message  # remedy names the dependency fix
 

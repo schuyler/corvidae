@@ -66,17 +66,202 @@ IMPERATIVE_HOOKS = frozenset({"send", "register_tools", "persist_message"})
 
 def grammar_class(name: str) -> str | None:
     """Return the grammar class whose prefix ``name`` starts with, or None."""
-    raise NotImplementedError
+    for klass, (prefixes, _opts) in HOOK_GRAMMAR.items():
+        if name.startswith(prefixes):
+            return klass
+    return None
+
+
+def _split_grammar_prefix(name: str) -> tuple[str | None, str]:
+    """Split a hook name into (grammar prefix, rest); (None, name) if unprefixed."""
+    for prefixes, _opts in HOOK_GRAMMAR.values():
+        for prefix in prefixes:
+            if name.startswith(prefix):
+                return prefix, name[len(prefix):]
+    return None, name
+
+
+def _accepted_prefixes() -> str:
+    """Every grammar prefix, comma-separated, for error messages."""
+    return ", ".join(p for prefixes, _ in HOOK_GRAMMAR.values() for p in prefixes)
 
 
 def install_plugin_hookspecs(pm: pluggy.PluginManager) -> None:
-    """Validate and install every plugin's declared hookspecs (#229)."""
-    raise NotImplementedError
+    """Validate and install every plugin's declared hookspecs (#229).
+
+    A plugin owns hooks by setting ``hookspecs`` on its class to a class of
+    ``@hookspec`` methods. Called once at startup, after every plugin is
+    registered and before the arg-binding guard and ``on_init``.
+
+    Two passes, so no outcome depends on registration order (entry-point
+    order is not deterministic):
+
+    1. Collect every declaration and fail on any hook name with more than
+       one owner, counting hooks that already have a spec (``AgentSpec``).
+    2. Per plugin: check the hook grammar, the owner segment
+       (``<prefix><plugin>_<name>``) and the pluggy options, install the
+       specs, then check each ``transform_`` hook has the owner's own
+       ``trylast`` seed.
+
+    Raises:
+        PluginValidationError: naming the hook, the plugin and the fix.
+    """
+    # Pass 1a: owners of every hook that already has a spec, so a plugin
+    # redeclaring an AgentSpec name is reported as a duplicate.
+    owners: dict[str, list[str]] = {}
+    for hook_name, caller in vars(pm.hook).items():
+        spec = getattr(caller, "spec", None)
+        if spec is None:
+            continue
+        namespace = getattr(spec, "namespace", None)
+        label = "AgentSpec" if namespace is AgentSpec else getattr(namespace, "__name__", repr(namespace))
+        owners[hook_name] = [label]
+
+    # Pass 1b: collect each plugin's declaration. Blocked plugins are
+    # (name, None) and declare nothing; getattr on the class lets a base
+    # class declare for its subclasses.
+    declared: list[tuple[str, object, type, list[str]]] = []
+    first_owner: dict[str, object] = {}
+    for plugin_name, plugin in pm.list_name_plugin():
+        if plugin is None:
+            continue
+        spec_cls = getattr(type(plugin), "hookspecs", None)
+        if spec_cls is None:
+            continue
+        names = sorted(
+            attr for attr in dir(spec_cls)
+            if pm.parse_hookspec_opts(spec_cls, attr) is not None
+        )
+        if not names:
+            raise pluggy.PluginValidationError(
+                plugin,
+                f"Plugin {plugin_name!r} sets hookspecs = {spec_cls.__name__}, "
+                f"which has no @hookspec methods. Decorate its hook methods "
+                f"with corvidae.hooks.hookspec, or remove the hookspecs attribute.",
+            )
+        declared.append((plugin_name, plugin, spec_cls, names))
+        for hook_name in names:
+            owners.setdefault(hook_name, []).append(f"plugin {plugin_name!r}")
+            first_owner.setdefault(hook_name, plugin)
+
+    # Pass 1c: a hook has exactly one owner.
+    for hook_name in sorted(owners):
+        if len(owners[hook_name]) > 1:
+            raise pluggy.PluginValidationError(
+                first_owner[hook_name],
+                f"Hook {hook_name!r} is declared by more than one owner: "
+                f"{', '.join(owners[hook_name])}. A hook has one owner: "
+                f"depend on the existing owner and call its hook, or rename "
+                f"the new declaration (plugin hooks are named "
+                f"<prefix><plugin>_<name>).",
+            )
+
+    # Pass 2: per-plugin grammar, owner segment and options; then install
+    # and check transform seeds.
+    for plugin_name, plugin, spec_cls, names in declared:
+        for hook_name in names:
+            _check_plugin_hook_name(pm, plugin_name, plugin, spec_cls, hook_name)
+        pm.add_hookspecs(spec_cls)
+        for hook_name in names:
+            if grammar_class(hook_name) == "transform":
+                _check_transform_seed(pm, plugin_name, plugin, hook_name)
+
+
+def _check_plugin_hook_name(
+    pm: pluggy.PluginManager, plugin_name: str, plugin: object, spec_cls: type, hook_name: str
+) -> None:
+    """Check one declared hook's grammar prefix, owner segment and options."""
+    # Grammar prefix: bare imperatives and unprefixed names are kernel-only.
+    klass = grammar_class(hook_name)
+    if klass is None:
+        raise pluggy.PluginValidationError(
+            plugin,
+            f"Plugin {plugin_name!r} declares hook {hook_name!r}, which has no "
+            f"grammar prefix. Plugin hooks start with one of {_accepted_prefixes()} "
+            f"followed by the plugin name, e.g. on_{plugin_name}_<name>; bare "
+            f"imperatives ({', '.join(sorted(IMPERATIVE_HOOKS))}) are kernel-only.",
+        )
+
+    # Owner segment: "<plugin>_" right after the prefix, then a non-empty name.
+    prefix, rest = _split_grammar_prefix(hook_name)
+    segment = f"{plugin_name}_"
+    if not rest.startswith(segment) or len(rest) == len(segment):
+        raise pluggy.PluginValidationError(
+            plugin,
+            f"Plugin {plugin_name!r} declares hook {hook_name!r}, which doesn't "
+            f"name its owner. Plugin hooks put the plugin name right after the "
+            f"grammar prefix: {prefix}{plugin_name}_<name>.",
+        )
+
+    # Options: the prefix fixes the pluggy spec options.
+    opts = pm.parse_hookspec_opts(spec_cls, hook_name) or {}
+    for option, required in HOOK_GRAMMAR[klass][1].items():
+        if bool(opts.get(option)) is not required:
+            raise pluggy.PluginValidationError(
+                plugin,
+                f"Plugin {plugin_name!r} declares hook {hook_name!r} with "
+                f"{option}={bool(opts.get(option))}, but {prefix} hooks ({klass}) "
+                f"require {option}={required}. Fix the @hookspec options or use "
+                f"the prefix that matches them (docs/plugin-guide.md, Hook grammar).",
+            )
+
+
+def _check_transform_seed(
+    pm: pluggy.PluginManager, plugin_name: str, plugin: object, hook_name: str
+) -> None:
+    """Check the owner registers its own trylast seed for a transform hook."""
+    seeds = [
+        impl for impl in getattr(pm.hook, hook_name).get_hookimpls()
+        if impl.plugin is plugin and impl.trylast
+    ]
+    if not seeds:
+        raise pluggy.PluginValidationError(
+            plugin,
+            f"Plugin {plugin_name!r} declares transform hook {hook_name!r} but "
+            f"registers no seed for it. Add an @hookimpl(trylast=True) "
+            f"{hook_name} to {type(plugin).__name__} that returns its input "
+            f"unchanged, as _SeedHooksPlugin does for kernel transforms.",
+        )
 
 
 def report_orphan_hookimpls(pm: pluggy.PluginManager) -> None:
-    """Log hookimpls that have no spec (#229)."""
-    raise NotImplementedError
+    """Log hookimpls that have no spec (#229).
+
+    An impl with no spec is never verified and usually never called: a typo
+    in the hook name, or a hook whose owning plugin isn't loaded. Logged at
+    WARNING naming the plugin and hook, except when the hook's owner segment
+    names one of the implementer's ``optional_depends_on`` plugins and that
+    plugin isn't loaded (blocked or not installed): that's expected, so DEBUG.
+    """
+    for hook_name, caller in list(vars(pm.hook).items()):
+        # Only real hook callers without a spec; skips anything else on
+        # pm.hook (and mocks, whose spec attribute is never None).
+        if getattr(caller, "spec", None) is not None or not hasattr(caller, "get_hookimpls"):
+            continue
+        _prefix, rest = _split_grammar_prefix(hook_name)
+        for impl in caller.get_hookimpls():
+            plugin_name = pm.get_name(impl.plugin)
+            # The absent optional owner whose segment this hook carries, if any.
+            absent_owner = next(
+                (
+                    dep for dep in sorted(getattr(impl.plugin, "optional_depends_on", ()))
+                    if rest.startswith(f"{dep}_") and pm.get_plugin(dep) is None
+                ),
+                None,
+            )
+            if absent_owner is not None:
+                _pm_logger.debug(
+                    "plugin %r implements %r, whose owner %r is not loaded "
+                    "(optional dependency); the hookimpl is inactive",
+                    plugin_name, hook_name, absent_owner,
+                )
+            else:
+                _pm_logger.warning(
+                    "plugin %r implements hook %r, which no loaded plugin "
+                    "declares; check the hook name for a typo, or add its "
+                    "owner to depends_on or optional_depends_on",
+                    plugin_name, hook_name,
+                )
 
 
 def resolve_reject_wins(results: list) -> bool | None:
@@ -330,13 +515,23 @@ class CorvidaePlugin:
     should override on_init and call ``await super().on_init(pm, config)``
     first.
 
-    Class attribute:
+    Class attributes (override as class-level assignments, not by mutation):
         depends_on: frozenset of plugin names this plugin requires to be
             registered. Checked by validate_dependencies at startup.
-            Override as a class-level assignment, not by mutation.
+        optional_depends_on: frozenset of plugin names this plugin uses
+            when they are loaded and works without. Not checked; resolve
+            with ``pm.get_plugin(name)`` and treat None as absent. Impls of
+            an absent optional owner's hooks stay inactive and are logged at
+            DEBUG by report_orphan_hookimpls.
+        hookspecs: a class of ``@hookspec`` methods this plugin owns, or
+            None. Installed by install_plugin_hookspecs at startup; names
+            follow the hook grammar with the plugin name after the prefix
+            (``on_<plugin>_<name>``).
     """
 
     depends_on: frozenset[str] = frozenset()
+    optional_depends_on: frozenset[str] = frozenset()
+    hookspecs: ClassVar[type | None] = None
 
     @hookimpl
     async def on_init(self, pm, config: dict) -> None:
