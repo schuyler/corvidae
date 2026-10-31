@@ -66,6 +66,70 @@ def test_fork_prompt_is_prefix_of_main_render(cut, mid_role):
     assert prompt[-1] == {"role": "user", "content": INSTRUCTION}
 
 
+def _straddle_window(with_result: bool = True) -> ContextWindow:
+    """user, call c1, final reply, and (optionally) c1's result after the reply (#185)."""
+    from corvidae.context import MessageType
+
+    conv = ContextWindow("test:chan")
+    conv.system_prompt = "system"
+    rows = [
+        {"role": "user", "content": "go"},
+        {"role": "assistant", "content": "", "tool_calls": [_call("c1")]},
+        {"role": "assistant", "content": "working on it"},
+    ]
+    if with_result:
+        rows.append({"role": "tool", "tool_call_id": "c1", "content": "late"})
+    conv.messages = [{**m, "_db_id": i, "_message_type": MessageType.MESSAGE} for i, m in enumerate(rows)]
+    return conv
+
+
+def _tool_content(prompt: list[dict], call_id: str) -> str:
+    """Content of the rendered tool message answering ``call_id``."""
+    return next(m["content"] for m in prompt if m.get("tool_call_id") == call_id)
+
+
+def test_fork_cut_renders_call_pending_at_cut():
+    """A result landing after the reply must not turn the call into 'abandoned' (#185, R1, R2)."""
+    from corvidae.context import TOOL_RESULT_PENDING
+
+    conv = _straddle_window()
+    prompt = build_fork_prompt(conv, 3, INSTRUCTION, frozenset(), "system")
+    assert _tool_content(prompt, "c1") == TOOL_RESULT_PENDING
+    # Equal to what the main turn rendered at reply time.
+    main = conv.build_prompt(frozenset({"c1"}))
+    reply_render = ContextWindow("test:chan")
+    reply_render.system_prompt = "system"
+    reply_render.messages = conv.messages[:3]
+    assert prompt[:-1] == reply_render.build_prompt(frozenset({"c1"}), mid_conversation_system_role="system")
+    assert main  # full render still works
+
+
+def test_fork_cut_leaves_unanswered_call_abandoned():
+    """No result anywhere and not live-pending stays 'abandoned' (R3)."""
+    from corvidae.context import TOOL_RESULT_ABANDONED
+
+    conv = _straddle_window(with_result=False)
+    prompt = build_fork_prompt(conv, 3, INSTRUCTION, frozenset(), "system")
+    assert _tool_content(prompt, "c1") == TOOL_RESULT_ABANDONED
+
+
+def test_fork_cut_after_result_renders_the_result():
+    """A call whose result is before the cut renders that result (R3)."""
+    conv = _straddle_window()
+    prompt = build_fork_prompt(conv, 4, INSTRUCTION, frozenset(), "system")
+    assert _tool_content(prompt, "c1") == "late"
+
+
+def test_fork_without_cut_unchanged_and_pure():
+    """cut=None renders as before and the window is untouched (R3, R4)."""
+    conv = _straddle_window()
+    before = [dict(m) for m in conv.messages]
+    prompt = build_fork_prompt(conv, None, INSTRUCTION, frozenset(), "system")
+    assert prompt[:-1] == conv.build_prompt(frozenset(), mid_conversation_system_role="system")
+    build_fork_prompt(conv, 3, INSTRUCTION, frozenset(), "system")
+    assert conv.messages == before
+
+
 @pytest.mark.parametrize("cut", [-1, 10])
 def test_fork_prompt_rejects_out_of_range_cut(cut):
     with pytest.raises(ValueError):
