@@ -253,15 +253,17 @@ async def test_memory_read_failure_retries_next_period(make_env, caplog):
     assert len(env.beats) == 1
 
 
-async def test_rejects_a_zero_after(make_env):
-    """H1's bounded rate needs a positive period: zero (back-to-back beats)
-    fails startup naming the key, the value and what is accepted."""
+@pytest.mark.parametrize("bad", [0, float("nan")])
+async def test_rejects_an_after_that_would_beat_back_to_back(make_env, bad):
+    """H1's bounded rate needs a positive finite period: zero, or NaN (which
+    arms at zero delay), fails startup naming the key, the value and what is
+    accepted."""
     with pytest.raises(ValueError) as exc:
-        await make_env({"heartbeat": {"after": 0}})
+        await make_env({"heartbeat": {"after": bad}})
     message = str(exc.value)
     assert "heartbeat.after" in message
-    assert "got 0" in message
-    assert "positive number of seconds" in message
+    assert f"got {bad!r}" in message
+    assert "positive finite number of seconds" in message
 
 
 # ---------------------------------------------------------------------------

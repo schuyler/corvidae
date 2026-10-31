@@ -91,7 +91,7 @@ def parse_after(config: dict) -> float | None:
         or value <= 0
     ):
         raise ValueError(
-            f"heartbeat.after: got {value!r}; expected a positive number of "
+            f"heartbeat.after: got {value!r}; expected a positive finite number of "
             "seconds — check agent.yaml, or remove the key to keep the "
             "heartbeat asleep"
         )
