@@ -1902,8 +1902,19 @@ A server connects over stdio, SSE or streamable HTTP, chosen by its
 `transport` key. Each server has its own exit stack and a bounded handshake
 (see "Connect timeout"), so one server's failure never touches another.
 Servers that did not connect at startup are queued in `_pending_servers` and
-retried on the next MCP tool call; a successful retry rebuilds the cached
-tool list and the shared registry.
+retried by a background `_retry_loop` task (started in `on_start` only when
+something is pending) that sleeps on the kernel clock (`depends_on` "clock")
+through the transports' ladder: 10 s, doubling, capped at 300 s, reset after a
+round that reconnects something, exit when nothing is pending. Every MCP tool
+call also runs a retry round as a fast path. One `asyncio.Lock` serialises
+rounds, and a tool call that finds it held skips rather than wait out a
+handshake, so the loop and a tool call never connect a server twice. A
+successful retry rebuilds the cached tool list and the shared registry. Config
+errors (`McpHeaderEnvError`, `ValueError`, `KeyError` from
+`_parse_server_config`, which runs before any transport opens) are reported
+once and never queued. `on_stop` sets a stopping flag, cancels the loop, then
+stops the owners; a connect still in flight (loop or tool call) that finishes
+after the flag is set tears its owner down instead of registering it.
 
 ### Owner tasks
 
@@ -2922,6 +2933,7 @@ IRCPlugin           → "registry"    (ChannelRegistry)
 WebPlugin           → "registry"    (ChannelRegistry); looks up "agent" and "persistence" lazily
 AcpPlugin           → "registry"    (ChannelRegistry)
 SubagentPlugin      → "llm", "tools"
+McpClientPlugin     → "clock"       (background reconnect loop)
 CompactionPlugin    → "llm"         (LLMPlugin); soft-uses "agent" for forks
 ThinkingPlugin      → "registry"    (ChannelRegistry)
 MemoryPlugin        → "persistence", "llm", "clock", "idle"; soft-uses "agent", "registry" for forks  (cognition extra)
