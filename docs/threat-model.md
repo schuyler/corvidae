@@ -452,10 +452,10 @@ stands in the way:
 - **Model output can't run script in the page.** That's the
   model-output → XSS path: a prompt-injected reply full of `<script>`,
   `onerror=` or a remote image. Markdown goes through vendored marked and
-  then DOMPurify (`style`, `class`, `id` and `data-*` attributes and `style` tags forbidden
-too, so a reply can't dress up as a user bubble or app notice; what's left is
-spoofing by plain text inside the message box), and it's the
-  only HTML the page ever writes; everything else is `textContent`. A
+  then DOMPurify (`style`, `class`, `id` and `data-*` attributes and
+  `style` tags forbidden too, so a reply can't dress up as a user bubble or
+  app notice; what's left is spoofing with plain text or unstyled Markdown
+  inside the message box), and it's the only HTML the page ever writes; everything else is `textContent`. A
   strict CSP backs that up: scripts and styles from the page's own origin
   only, no inline script, images only from `'self'` or `data:` (so a
   reply can't beacon to a remote URL), no frames, no plugins, no form
