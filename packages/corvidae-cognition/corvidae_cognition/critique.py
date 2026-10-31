@@ -51,6 +51,7 @@ from pathlib import Path
 from corvidae.attribution import reset_attribution, set_attribution
 from corvidae.fork import fork_agent, quote, window_db_ids
 from corvidae.hooks import CorvidaePlugin, hookimpl
+from corvidae.persistence import decode_message_row
 from corvidae.task import Task
 from corvidae.tuning import config_value, resolve_tunable
 from corvidae_cognition.memory import ChannelScope
@@ -399,16 +400,13 @@ def _excerpt(highlighted: str, limit: int) -> str | None:
 def _candidate(row) -> dict:
     """One message_log row as candidate evidence: who said what, where, when.
 
+    ``message`` is the row's already-decoded JSON object (from
+    ``decode_message_row``), never raw column text.
+
     A sixth column, the text with FTS5 match markers, shows a long hit
     around its matched terms (``_excerpt``) instead of from its start.
     """
-    rowid, channel_id, message, message_type, timestamp, *rest = row
-    try:
-        parsed = json.loads(message)
-    except (json.JSONDecodeError, TypeError):
-        parsed = {}
-    if not isinstance(parsed, dict):
-        parsed = {}
+    rowid, channel_id, parsed, message_type, timestamp, *rest = row
     content = parsed.get("content")
     try:
         when = datetime.fromtimestamp(float(timestamp), tz=timezone.utc).strftime(
@@ -940,7 +938,8 @@ class CritiquePlugin(CorvidaePlugin):
         scope_sql, scope_params = self._scope(channel).sql("m.channel_id")
         types = ",".join("?" for _ in RECORD_MESSAGE_TYPES)
         sql = (
-            "SELECT m.id, m.channel_id, m.message, m.message_type, m.timestamp, "
+            "SELECT m.id, m.channel_id, CAST(m.message AS BLOB), m.message_type, "
+            "m.timestamp, "
             "highlight(message_fts, 0, char(2), char(3)) "
             "FROM message_fts JOIN message_log m ON m.id = message_fts.rowid "
             f"WHERE message_fts MATCH ? AND m.id < ? AND m.message_type IN ({types}) "
@@ -960,9 +959,19 @@ class CritiquePlugin(CorvidaePlugin):
                          *scope_params, PROVENANCE_CANDIDATES),
                     ) as cursor:
                         rows = await cursor.fetchall()
+                candidates = []
+                for row in rows:
+                    # Decode the BLOB; a corrupt row is skipped with the
+                    # standard warning and the other candidates still count.
+                    message = decode_message_row(
+                        row[0], row[2], row[1],
+                        consequence="it is left out of the provenance evidence",
+                    )
+                    if message is not None:
+                        candidates.append(_candidate((row[0], row[1], message, *row[3:])))
                 evidence.append({
                     "claim": claim.get("claim", ""),
-                    "candidates": [_candidate(row) for row in rows],
+                    "candidates": candidates,
                 })
         except Exception:
             # A search that raised looked at nothing, so its claim must not

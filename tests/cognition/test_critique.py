@@ -35,7 +35,7 @@ from corvidae_cognition.outcome_log import OutcomeLogPlugin
 from corvidae.persistence import PersistencePlugin, init_db
 from corvidae.task import TaskPlugin, TaskQueue
 
-from helpers import FakeForkAgent
+from helpers import CORRUPT_MESSAGES, FakeForkAgent, insert_raw_message, skip_warnings
 
 
 EMPTY_VERDICT = json.dumps({"objections": []})
@@ -760,6 +760,31 @@ class TestProvenanceEvidence:
         finally:
             await _teardown(env)
 
+    @pytest.mark.parametrize(("value_sql", "params"), CORRUPT_MESSAGES)
+    async def test_corrupt_row_is_skipped_with_a_warning(
+        self, tmp_path, caplog, value_sql, params
+    ):
+        # A corrupt matching row (#260) is skipped, not fatal: the valid
+        # candidate survives and the warning names the row and channel.
+        env = await _provenance_env(tmp_path)
+        try:
+            text = "the quarterly audit deadline is Thursday"
+            good = await _log(env, text)
+            bad = await insert_raw_message(
+                env.db, env.channel.id, value_sql, params, drop_fts_trigger=True)
+            await env.db.execute(
+                "INSERT INTO message_fts(rowid, content_text) VALUES (?, ?)", (bad, text))
+            await env.db.commit()
+            origin = await _log(env, "when is it due?")
+            await _begin_exchange(env, "kc", origin_rowid=origin)
+            with caplog.at_level("WARNING"):
+                evidence = await env.plugin._gather_evidence(env.channel, "kc", [CLAIM])
+            assert evidence is not None
+            assert _candidate_rowids(evidence) == [[good]]
+            assert skip_warnings(caplog, bad, env.channel.id)
+        finally:
+            await _teardown(env)
+
     async def test_unsent_and_context_rows_are_not_candidates(self, tmp_path):
         env = await _provenance_env(tmp_path)
         try:
@@ -1237,9 +1262,9 @@ class TestProvenancePrompts:
         # critic under that role it would read as the agent's own word.
         from corvidae_cognition.critique import CritiquePlugin, _candidate
 
-        row = (9, "test:x", json.dumps({
+        row = (9, "test:x", {
             "role": "assistant", "content": "[Summary of earlier conversation]\naudit Thursday",
-        }), "summary", 1.0)
+        }, "summary", 1.0)
         candidate = _candidate(row)
         assert candidate["role"] == "summary"
         rendered = CritiquePlugin._render_evidence([{"claim": "c", "candidates": [candidate]}])
