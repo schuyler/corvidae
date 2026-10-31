@@ -265,7 +265,7 @@ class TestSessionDbBaseDirResolution:
         await plugin.on_start(config=cfg)
 
         try:
-            assert plugin._probe_db is not None, (
+            assert await plugin._probe.get() is not None, (
                 "message_fts probe failed to open -- the relative "
                 "session_db path did not resolve against _base_dir"
             )
@@ -864,8 +864,8 @@ class TestProvenanceEvidence:
         env = await _provenance_env(tmp_path)
         try:
             await _begin_exchange(env, "kpr", origin_rowid=50)
-            await env.plugin._probe_db.close()
-            env.plugin._probe_db = None
+            # A closed probe is the real disable: get() returns None.
+            await env.plugin._probe.close()
             with caplog.at_level("WARNING", logger="corvidae.critique"):
                 evidence = await env.plugin._gather_evidence(env.channel, "kpr", [CLAIM])
             assert evidence is None
@@ -1107,7 +1107,7 @@ async def _real_path_env(tmp_path, replies, past_claims):
     for p in plugins:
         await p.on_start(config=cfg)
     critique = plugins[1]
-    assert critique._probe_db is not None
+    assert await critique._probe.get() is not None
 
     gathered: dict[str, list] = {}
     real_gather = critique._gather_evidence
@@ -1299,3 +1299,65 @@ class TestNoReplyVeto:
 
     async def test_other_text_has_no_opinion(self):
         assert await self._verdict(text="The deadline is Thursday.") is None
+
+
+# ---------------------------------------------------------------------------
+# Lazy message_fts probe (#159)
+# ---------------------------------------------------------------------------
+
+
+async def _swap_in_empty_probe(env, tmp_path, clock):
+    """Point the plugin's probe at a DB with no message_fts, with a fake clock."""
+    from corvidae_cognition.probe import ReadOnlyProbe
+
+    await env.plugin._probe.close()
+    path = str(tmp_path / "late.db")
+    async with aiosqlite.connect(path) as late:
+        # message_log exists (kernel schema) but message_fts does not yet.
+        await init_db(late)
+    env.plugin._probe = ReadOnlyProbe(
+        path, "message_fts", "critique provenance",
+        "the provenance check stays off until message_fts exists",
+        clock=clock,
+    )
+    return path
+
+
+class TestLazyProbe:
+    async def test_provenance_starts_working_when_table_appears(self, tmp_path, caplog):
+        """#159 R1/R5: no restart; skip warning kept while absent; recovers."""
+        from corvidae_cognition.probe import PROBE_RETRY_SECONDS
+
+        env = await _provenance_env(tmp_path)
+        try:
+            now = [0.0]
+            path = await _swap_in_empty_probe(env, tmp_path, lambda: now[0])
+            await _begin_exchange(env, "klz", origin_rowid=50)
+            with caplog.at_level("WARNING", logger="corvidae"):
+                assert await env.plugin._gather_evidence(
+                    env.channel, "klz", [CLAIM]) is None
+            # The probe warning names the path; the per-trace skip stays.
+            assert path in caplog.text
+            assert "provenance check skipped for trace klz" in caplog.text
+
+            # message_fts appears later; the interval elapses.
+            await _seed_fts(path, ["the quarterly audit deadline is Thursday"])
+            now[0] = PROBE_RETRY_SECONDS + 1
+            evidence = await env.plugin._gather_evidence(env.channel, "klz", [CLAIM])
+            assert evidence is not None
+        finally:
+            await _teardown(env)
+
+    async def test_on_stop_closes_probe_connection(self, tmp_path):
+        """#159 R6: on_stop leaves no open connection."""
+        env = await _provenance_env(tmp_path)
+        try:
+            await _begin_exchange(env, "kst", origin_rowid=50)
+            await env.plugin._gather_evidence(env.channel, "kst", [CLAIM])
+            conn = env.plugin._probe.connection
+            assert conn is not None
+            await env.plugin.on_stop()
+            assert env.plugin._probe.connection is None
+            assert conn._connection is None
+        finally:
+            await _teardown(env)

@@ -249,11 +249,11 @@ Any *dotted* key not on that list is operator-only: it is read once at init or r
 
 Requires the cognition extra (`--extra cognition` on your `uv sync` line; see [cognition.md](cognition.md)). Without it these keys are ignored.
 
-`AppraisalPlugin` scores every inbound message at the gate: surface heuristics plus an FTS5 familiarity probe on a dedicated read-only connection, under a hard latency budget, failing open. All keys resolve per-decision.
+`AppraisalPlugin` scores every inbound message at the gate: surface heuristics plus an FTS5 familiarity probe on a dedicated read-only connection, under a hard latency budget, failing open. The probe connection opens lazily on first use; if `memory_fts` doesn't exist yet, novelty uses `appraisal.novelty.no_probe_default` and the open is retried at most every 30 s (a warning per failed attempt naming the path and reason, one INFO on recovery), so no restart is needed. All keys resolve per-decision.
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `appraisal.probe.budget_ms` | `50` | Hard latency budget for the FTS5 probe. Timeout ⇒ no probe result ⇒ the vector is built from surface heuristics alone (never blocks the gate). |
+| `appraisal.probe.budget_ms` | `50` | Hard latency budget for the FTS5 probe query (not the once-per-interval connection open). Timeout ⇒ no probe result ⇒ the vector is built from surface heuristics alone (never blocks the gate). |
 | `appraisal.probe.max_tokens` | `12` | Cap on sanitized tokens in the FTS5 MATCH query. |
 | `appraisal.probe.rank_scale` | `10.0` | bm25 rank normalization: familiarity scales with `min(1, −rank/rank_scale)` (bm25 ranks are negative; more-negative = stronger match). |
 | `appraisal.novelty.no_probe_default` | `0.5` | Novelty when no probe result arrived in budget — a value, never a null. |

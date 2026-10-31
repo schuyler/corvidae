@@ -48,14 +48,13 @@ import random
 from datetime import datetime, timezone
 from pathlib import Path
 
-import aiosqlite
-
 from corvidae.attribution import reset_attribution, set_attribution
 from corvidae.fork import fork_agent, quote, window_db_ids
 from corvidae.hooks import CorvidaePlugin, hookimpl
 from corvidae.task import Task
 from corvidae.tuning import config_value, resolve_tunable
 from corvidae_cognition.memory import ChannelScope
+from corvidae_cognition.probe import ReadOnlyProbe
 
 # Named explicitly: corvidae/logging.py configures the "corvidae" logger,
 # and __name__ would be corvidae_cognition.critique.
@@ -440,7 +439,8 @@ class CritiquePlugin(CorvidaePlugin):
         if pm is not None:
             self.pm = pm
         self.config: dict = {}
-        self._probe_db: aiosqlite.Connection | None = None
+        # Lazy message_fts probe; built in on_start (None until then).
+        self._probe: ReadOnlyProbe | None = None
         # Injectable RNG for the below-threshold sampling draw — tests seed a
         # random.Random; never the module-level random functions (WP2.7 p3).
         self._rng = random.Random()
@@ -489,27 +489,12 @@ class CritiquePlugin(CorvidaePlugin):
         db_path = config.get("daemon", {}).get("session_db", "sessions.db")
         base_dir = config.get("_base_dir", Path("."))
         db_path = str(Path(base_dir) / db_path)
-        try:
-            self._probe_db = await aiosqlite.connect(
-                f"file:{db_path}?mode=ro", uri=True
-            )
-            async with self._probe_db.execute(
-                "SELECT name FROM sqlite_master WHERE name = 'message_fts'"
-            ) as cursor:
-                row = await cursor.fetchone()
-            if row is None:
-                await self._probe_db.close()
-                self._probe_db = None
-                logger.warning(
-                    "critique provenance probe disabled: message_fts missing in %s",
-                    db_path,
-                )
-        except Exception:
-            self._probe_db = None
-            logger.warning(
-                "critique provenance probe disabled: cannot open %s read-only",
-                db_path, exc_info=True,
-            )
+        # The connection opens lazily on first use and retries at a bounded
+        # rate, so a message_fts created after startup is picked up (#159).
+        self._probe = ReadOnlyProbe(
+            db_path, "message_fts", "critique provenance",
+            "the provenance check stays off until message_fts exists",
+        )
 
     def _listen_for_stage2(self) -> None:
         """Register handle_stage2 with AppraisalPlugin, or warn that the
@@ -526,9 +511,9 @@ class CritiquePlugin(CorvidaePlugin):
 
     @hookimpl
     async def on_stop(self) -> None:
-        if self._probe_db is not None:
-            await self._probe_db.close()
-            self._probe_db = None
+        # Close the probe connection; later get() calls open nothing.
+        if self._probe is not None:
+            await self._probe.close()
 
     # ------------------------------------------------------------------
     # "user" origin recognition (R1 — plugin-side convention)
@@ -932,7 +917,9 @@ class CritiquePlugin(CorvidaePlugin):
         originating rowid, or a search fails: an absence that wasn't
         checked must never reach the critic as "nothing matched".
         """
-        if self._probe_db is None:
+        # Opens (or retries) the probe when due; None while unavailable.
+        db = await self._probe.get() if self._probe is not None else None
+        if db is None:
             logger.warning(
                 "provenance check skipped for trace %s: no read-only probe of "
                 "message_fts, so the earlier messages can't be fetched",
@@ -965,7 +952,7 @@ class CritiquePlugin(CorvidaePlugin):
                     claim.get("queries") or [claim.get("claim", "")])
                 rows = []
                 if match_expr:
-                    async with self._probe_db.execute(
+                    async with db.execute(
                         sql,
                         (match_expr, before_rowid, *RECORD_MESSAGE_TYPES,
                          *scope_params, PROVENANCE_CANDIDATES),

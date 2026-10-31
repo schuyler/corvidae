@@ -605,7 +605,7 @@ class TestPersistSpyGaps:
         cfg = {"daemon": {"session_db": db_path}}
         await plugin.on_init(pm=pm, config=cfg)
         await plugin.on_start(config=cfg)
-        assert plugin._probe_db is None  # probe degraded (no memory_fts)
+        assert await plugin._probe.get() is None  # probe degraded (no memory_fts)
 
         channel = _make_channel(scope="no-probe-score")
         vector = await plugin.get_or_compute(channel, "k-noprobe", "hello")
@@ -627,3 +627,65 @@ class TestPersistSpyGaps:
 
         await plugin.on_stop()
         await db.close()
+
+
+# ---------------------------------------------------------------------------
+# Lazy memory_fts probe (#237)
+# ---------------------------------------------------------------------------
+
+
+class TestLazyProbe:
+    async def test_probe_starts_working_when_table_appears(self, tmp_path, caplog):
+        """#237 R1/R5: fails open to no_probe_default, then picks up the table."""
+        from corvidae_cognition.probe import PROBE_RETRY_SECONDS, ReadOnlyProbe
+
+        plugin, channel, _db_path, pm = await build_appraisal(tmp_path)
+        try:
+            await plugin._probe.close()
+            now = [0.0]
+            late = str(tmp_path / "late.db")
+            async with aiosqlite.connect(late) as db:
+                await db.execute("CREATE TABLE unrelated (x)")
+                await db.commit()
+            plugin._probe = ReadOnlyProbe(
+                late, "memory_fts", "appraisal",
+                "stage-1 novelty uses no_probe_default until memory_fts exists",
+                clock=lambda: now[0],
+            )
+            with caplog.at_level("WARNING", logger="corvidae"):
+                vec, score = await plugin._compute(channel, "corvidae funnel budget", "in")
+            assert score is None
+            assert vec["novelty"] == 0.5  # no_probe_default
+            assert late in caplog.text
+
+            await _seed_probe_db(late, ["I helped debug the corvidae funnel budget"])
+            now[0] = PROBE_RETRY_SECONDS + 1
+            vec, score = await plugin._compute(channel, "corvidae funnel budget", "in")
+            assert score is not None
+            assert vec["novelty"] != 0.5  # probe-derived, not the default
+        finally:
+            await _teardown(plugin, pm)
+
+    async def test_on_stop_closes_probe_connection(self, tmp_path):
+        """#237 R6: on_stop leaves no open connection."""
+        plugin, channel, _db_path, pm = await build_appraisal(
+            tmp_path, summaries=["corvidae funnel budget notes"])
+        try:
+            await plugin._compute(channel, "corvidae funnel budget", "in")
+            conn = plugin._probe.connection
+            assert conn is not None
+            await plugin.on_stop()
+            assert plugin._probe.connection is None
+            assert conn._connection is None
+        finally:
+            await _teardown(plugin, pm)
+
+    async def test_exchange_db_never_opens_probe(self, tmp_path):
+        """#237: _exchange_db only reads the cached connection."""
+        plugin, _channel, _db_path, pm = await build_appraisal(
+            tmp_path, summaries=["x"])
+        try:
+            assert plugin._exchange_db() is None
+            assert plugin._probe.connection is None
+        finally:
+            await _teardown(plugin, pm)
