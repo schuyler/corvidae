@@ -549,3 +549,55 @@ class TestResolveSystemPromptInChannel:
             "channel.py must define _prompt_logger"
         )
         assert mod._prompt_logger.name == "corvidae.prompt"
+
+
+class TestChannelsShapeAndScalarTypes:
+    """#242: channels: section shape and scalar types fail as ValueError at parse time."""
+
+    @pytest.mark.parametrize("section", [[{"irc:#x": {}}], "irc:#x", 5])
+    def test_non_mapping_section_rejected(self, section):
+        """A list/scalar channels: section names the section and expected type."""
+        from corvidae.channel import parse_channel_config
+
+        with pytest.raises(ValueError) as exc:
+            parse_channel_config({"channels": section})
+        assert "channels" in str(exc.value)
+        assert "mapping" in str(exc.value)
+
+    def test_null_section_is_empty(self):
+        """An empty (null) channels: section means no channels."""
+        from corvidae.channel import parse_channel_config
+
+        parsed = parse_channel_config({"channels": None})
+        assert parsed.exact == () and parsed.wide == ()
+
+    def test_non_string_key_rejected(self):
+        """A non-string YAML key is named with its type and the fix."""
+        from corvidae.channel import parse_channel_config
+
+        with pytest.raises(ValueError) as exc:
+            parse_channel_config({"channels": {123: {}}})
+        msg = str(exc.value)
+        assert "channels.123" in msg and "int" in msg and "string" in msg
+
+    @pytest.mark.parametrize("key", ["max_turns", "max_context_tokens"])
+    @pytest.mark.parametrize("bad", ["five", 1.5, True, [1]])
+    def test_scalar_must_be_integer(self, key, bad):
+        """A non-integer scalar names channels.<id>.<key>, the value and 'integer'."""
+        from corvidae.channel import parse_channel_config
+
+        with pytest.raises(ValueError) as exc:
+            parse_channel_config({"channels": {"irc:#x": {key: bad}}})
+        msg = str(exc.value)
+        assert f"channels.irc:#x.{key}" in msg
+        assert repr(bad) in msg
+        assert "integer" in msg
+
+    def test_integer_and_null_scalars_accepted(self):
+        """Integers and null (inherit) still parse."""
+        from corvidae.channel import parse_channel_config
+
+        parsed = parse_channel_config(
+            {"channels": {"irc:#x": {"max_turns": 5, "max_context_tokens": None}}}
+        )
+        assert parsed.exact[0][3].max_turns == 5

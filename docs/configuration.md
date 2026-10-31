@@ -599,7 +599,7 @@ Keys are `transport:scope` identifiers (e.g., `irc:#general`, `cli:local`), or t
 |-----|------|---------|-------------|
 | `system_prompt` | string or list of strings | `agent.system_prompt` | System prompt for this channel. Same format as `agent.system_prompt`. |
 | `max_context_tokens` | integer | `agent.max_context_tokens` | Token budget for this channel's conversation history. |
-| `max_turns` | integer | `agent.max_turns` | Maximum consecutive tool-calling turns for this channel. |
+| `max_turns` | integer | `agent.max_turns` | Maximum consecutive tool-calling turns for this channel. Must be an integer; a wrong type is rejected when the file is parsed (a `Config error` at startup, a logged reload error on reload), not at turn time. |
 | `reasoning_history` | `drop` \| `exchange` \| `keep` | `agent.reasoning_history` | Controls `reasoning_content` retention for this channel. |
 | `tools.disabled` | list of strings | `[]` | Tools this channel cannot use, on top of the global `tools.disabled`. The channel can only narrow; it can't re-enable a globally disabled tool, and `set_settings` can't change the list. `shell` and `task_pipeline` disable together. See [Per-channel tool sets](#per-channel-tool-sets). |
 
