@@ -1364,7 +1364,7 @@ e.g. `id_slot`), the channel's
 conversation tool schemas (`conv.tool_view.schemas`, per-channel since #149),
 `build_prompt(pending_ids, mid_conversation_system_role)`, and the same
 runtime-override filter (`_llm_overrides`). Any difference in what reaches
-the template breaks the prefix and the cache with it. `reasoning_effort`
+the template breaks the prefix and the cache with it. With a `cut`, calls before the cut whose first result falls at or after it render as pending, not abandoned, because they were pending as of the cut (#185). `reasoning_effort`
 is left alone, because Qwen 3.8/Swift's template renders the effort
 sentence first in the system block: a fork at a different effort would
 miss the cache from its first token.
