@@ -794,6 +794,7 @@ def _fake_client(
     client.connected = True
     client.users = users or {}
     client._capabilities = capabilities or {}
+    client.normalize = str.lower  # ascii casemapping, as pydle's default
     return client
 
 

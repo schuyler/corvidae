@@ -29,7 +29,9 @@ fi
 
 cat <<EOF
 
-Join Buster: any IRC client -> ${BUSTER_HOST:-this host}:6667 (no password), then /join #chat
+Join Buster: IRC client -> ${BUSTER_HOST:-this host}:6667 (no password), then /join #chat
+Buster ignores nicks not in irc.allow (harness/buster.yaml.in or state/agent.yaml):
+add yours and restart the daemon first.
 
 Stop the daemon:
   screen -S buster-daemon -X quit

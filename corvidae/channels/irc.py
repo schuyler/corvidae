@@ -50,6 +50,25 @@ class IRCClient(pydle.Client):
             message.params,
         )
 
+    async def on_raw(self, message):
+        """Derive each message sender's account from that message's own tags.
+
+        pydle copies the `account` tag into its user record only when the
+        nick is already known and never clears it on an untagged message, so
+        a stale record would let a later unidentified user of the same nick
+        inherit the account (#77). With account-tag negotiated, every
+        PRIVMSG carries the tag iff the sender is logged in, so the record
+        is overwritten from the tag (absent => not logged in) before pydle
+        dispatches the message.
+        """
+        if message.command == "PRIVMSG" and self._capabilities.get("account-tag"):
+            nick, _ = self._parse_user(message.source)
+            account = message.tags.get("account") or None
+            await self._sync_user(
+                nick, {"account": account, "identified": account is not None}
+            )
+        await super().on_raw(message)
+
     async def on_connect(self):
         """Join configured channels after connecting."""
         await super().on_connect()
@@ -119,8 +138,8 @@ class IRCPlugin(TransportPlugin):
         self._irc_port: int = 6667
         self._irc_nick: str = "corvidae"
         self._irc_tls: bool = False
-        # Casefolded nicks / services account names allowed to drive the
-        # agent. Empty means nobody: IRC is default-deny (#77).
+        # Nicks / services account names allowed to drive the agent, as
+        # configured; compared under the server's casemapping at match time. Empty means nobody: IRC is default-deny (#77).
         self._allow: set[str] = set()
         # Output held while disconnected, oldest first (#106).
         # True while _flush_outbound is delivering _outbound[0]; that entry
@@ -155,8 +174,8 @@ class IRCPlugin(TransportPlugin):
                     f"account names (got {allow!r}) — fix the irc.allow key "
                     "in agent.yaml"
                 )
-            # IRC nicks and account names are case-insensitive.
-            self._allow = {entry.casefold() for entry in allow}
+            # Stored raw; _fold applies the server's casemapping at match time.
+            self._allow = set(allow)
         else:
             # Upgrade notice: IRC used to accept everyone.
             logger.warning(
@@ -195,13 +214,29 @@ class IRCPlugin(TransportPlugin):
         supported = bool(account) or any(caps.get(c) for c in self._ACCOUNT_CAPS)
         return supported, account
 
+    def _fold(self, name: str) -> str:
+        """Normalize a nick/account under the server's CASEMAPPING.
+
+        Uses the client's normalizer (ascii / rfc1459 / strict-rfc1459), not
+        str.casefold, which is broader than any server (``straße`` vs
+        ``strasse``). Before a client exists, falls back to ASCII lowering.
+        """
+        normalize = getattr(self.client, "normalize", None)
+        if normalize is None:
+            return name.lower()
+        return normalize(name)
+
     def _is_allowed(self, nick: str) -> bool:
         """Default-deny check. Where the network has accounts the account
         must match (an unidentified or unknown sender is refused); otherwise
         the nick does."""
         supported, account = self._account_of(nick)
         identity = account if supported else nick
-        return identity is not None and identity.casefold() in self._allow
+        if identity is None:
+            return False
+        # Normalize both sides at match time.
+        allowed = {self._fold(entry) for entry in self._allow}
+        return self._fold(identity) in allowed
 
     def _gate_channel(self, scope: str, nick: str) -> Channel:
         """The channel to gate a message on.

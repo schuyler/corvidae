@@ -2070,8 +2070,13 @@ unidentified or unknown sender is refused; with no account support they
 match the nick. The allowlist is checked before the channel is resolved
 (as in Signal, #103): a refused sender gets an unregistered `Channel` (or
 an existing registry entry), so nothing is added to the registry and no
-`message_log` rows or memory follow. Account lookup reads pydle's
-`users[nick]` and `_capabilities`.
+`message_log` rows or memory follow. With `account-tag` negotiated,
+`IRCClient.on_raw` overwrites the sender's pydle user record from each
+PRIVMSG's own tags before dispatch (no `account` tag means not logged in),
+because pydle only copies the tag for already-known nicks and never clears
+it. Without that cap, account lookup reads pydle's `users[nick]` and
+`_capabilities`. Entries and senders are compared under the server's
+CASEMAPPING via the client's `normalize`.
 
 While the client is disconnected (including the reconnect backoff, up to
 300s), outbound text is not dropped: it goes into a bounded in-memory queue
