@@ -80,24 +80,52 @@ def _strip_internal_keys(message: dict) -> dict:
     return {k: v for k, v in message.items() if not k.startswith("_")}
 
 
-def _parse_message_rows(rows: list[tuple]) -> list[dict]:
-    """Parse (id, message_json, message_type) rows into tagged message dicts.
+def _parse_message_rows(rows: list[tuple], channel_id: str) -> list[dict]:
+    """Parse (id, message_bytes, message_type) rows into tagged message dicts.
 
     Re-attaches the rowid as _db_id so the reload path restores the rowid
     threading that consolidation depends on (bootstrap-mapping §4.8).
+
+    One corrupt record must not abort the whole conversation load, so a row
+    that fails to decode is skipped with a warning naming it and the channel.
+    The message arrives as bytes (the queries cast it to BLOB) so invalid
+    UTF-8 fails here rather than inside the sqlite3 fetch. ValueError covers
+    JSONDecodeError, UnicodeDecodeError and the int digit limit; deeply nested
+    arrays raise RecursionError. A value that is not a JSON object, or a
+    message_type outside MessageType, is corrupt too.
     """
     from corvidae.context import MessageType
     result = []
     for row in rows:
+        # Decode the JSON payload
         try:
             msg = json.loads(row[1])
-        except json.JSONDecodeError:
-            # One corrupt record must not abort the whole conversation load.
+        except (ValueError, RecursionError):
             logger.warning(
-                "skipping unparseable message row %s", row[0], exc_info=True
+                "skipping unparseable message row %s for channel %s",
+                row[0], channel_id, exc_info=True,
             )
             continue
-        msg["_message_type"] = MessageType(row[2])
+        # Only a JSON object can carry the role/content keys and window tags
+        if not isinstance(msg, dict):
+            logger.warning(
+                "skipping message row %s for channel %s: decoded to %s, "
+                "not an object",
+                row[0], channel_id, type(msg).__name__,
+            )
+            continue
+        # Map the stored type string back onto the enum
+        try:
+            message_type = MessageType(row[2])
+        except ValueError:
+            accepted = ", ".join(t.value for t in MessageType)
+            logger.warning(
+                "skipping message row %s for channel %s: unknown message_type "
+                "%r (accepted: %s)",
+                row[0], channel_id, row[2], accepted,
+            )
+            continue
+        msg["_message_type"] = message_type
         msg["_db_id"] = row[0]
         result.append(msg)
     return result
@@ -211,6 +239,10 @@ class PersistencePlugin(CorvidaePlugin):
         next-newest summary is tried; message_log is append-only, so an older
         summary plus the rows after its boundary still covers the whole
         conversation. If no summary decodes, all non-summary rows load.
+
+        A corrupt ordinary row is skipped with a warning; the rows around it
+        still load. Every query casts the message to BLOB so invalid UTF-8
+        is caught while decoding instead of raising inside the fetch.
         """
         # Find the newest summary that decodes. The message is cast to BLOB
         # so invalid UTF-8 surfaces in _parse_summary_row instead of raising
@@ -235,23 +267,23 @@ class PersistencePlugin(CorvidaePlugin):
             summary_msg["_db_id"] = summary_id
             # Load non-summary rows after the summary boundary
             async with self.db.execute(
-                "SELECT id, message, message_type FROM message_log "
+                "SELECT id, CAST(message AS BLOB), message_type FROM message_log "
                 "WHERE channel_id = ? AND message_type != 'summary' "
                 "AND timestamp > ? ORDER BY id",
                 (channel.id, summary_ts),
             ) as cursor:
                 rows = await cursor.fetchall()
-            loaded = _parse_message_rows(rows)
+            loaded = _parse_message_rows(rows, channel.id)
             result = [summary_msg] + loaded
         else:
             async with self.db.execute(
-                "SELECT id, message, message_type FROM message_log "
+                "SELECT id, CAST(message AS BLOB), message_type FROM message_log "
                 "WHERE channel_id = ? AND message_type != 'summary' "
                 "ORDER BY timestamp, id",
                 (channel.id,),
             ) as cursor:
                 rows = await cursor.fetchall()
-            result = _parse_message_rows(rows)
+            result = _parse_message_rows(rows, channel.id)
 
         if not result:
             return None

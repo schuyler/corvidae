@@ -795,40 +795,6 @@ async def test_on_start_invalid_journal_mode_lists_allowed_values(tmp_path):
 
 
 class TestPersistenceDegradation:
-    async def test_resolve_conversation_skips_corrupt_row(self, db, caplog):
-        """One unparseable row is skipped; the rest of the history loads."""
-        from corvidae.context import MessageType  # noqa: F401  (row types)
-        from corvidae.persistence import PersistencePlugin
-
-        plugin, registry, _ = await _make_plugin_with_db(db)
-        channel = _make_channel(registry)
-
-        valid_one = json.dumps({"role": "user", "content": "one"})
-        corrupt = "{not valid json"
-        valid_three = json.dumps({"role": "assistant", "content": "three"})
-
-        async def insert(ts: float, payload: str) -> int:
-            cursor = await db.execute(
-                "INSERT INTO message_log "
-                "(channel_id, message, timestamp, message_type) VALUES (?, ?, ?, ?)",
-                (channel.id, payload, ts, "message"),
-            )
-            return cursor.lastrowid
-
-        await insert(1.0, valid_one)
-        corrupt_id = await insert(2.0, corrupt)
-        await insert(3.0, valid_three)
-        await db.commit()
-
-        with caplog.at_level(logging.WARNING, logger="corvidae.persistence"):
-            result = await plugin.resolve_conversation(channel=channel)
-
-        assert [m["content"] for m in result] == ["one", "three"]
-        warnings = [
-            r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
-        ]
-        assert any(str(corrupt_id) in message for message in warnings), warnings
-
     # Summary-row degradation (#108): a corrupt summary must not abort the
     # load. Loading falls back to the newest summary that decodes, or to the
     # full non-summary history when none does.
@@ -856,6 +822,69 @@ class TestPersistenceDegradation:
         return [
             r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
         ]
+
+    # Ordinary-row degradation (#226): a corrupt non-summary row is skipped
+    # and logged with its row id and channel; the rows around it still load,
+    # on both the summary-boundary branch and the no-summary branch.
+
+    @pytest.mark.parametrize("with_summary", [False, True], ids=["no-summary", "summary"])
+    @pytest.mark.parametrize(
+        ("value_sql", "params", "message_type"),
+        [
+            pytest.param("?", ("{not valid json",), "message", id="invalid-json"),
+            pytest.param("CAST(X'FF7B' AS TEXT)", (), "message", id="invalid-utf8-text"),
+            pytest.param("X'FF7B'", (), "message", id="blob"),
+            pytest.param("?", ("null",), "message", id="json-null"),
+            pytest.param("?", ("[1, 2]",), "message", id="json-array"),
+            pytest.param("?", ("1" * 5000,), "message", id="int-digit-limit"),
+            pytest.param("?", ("[" * 100000,), "message", id="deep-nesting"),
+            pytest.param(
+                "?", (json.dumps({"role": "user", "content": "x"}),), "bogus",
+                id="unknown-message-type",
+            ),
+        ],
+    )
+    async def test_resolve_conversation_skips_corrupt_row(
+        self, db, caplog, value_sql, params, message_type, with_summary
+    ):
+        """One corrupt ordinary row is skipped; the rest of the history loads."""
+        from corvidae.context import MessageType
+
+        plugin, registry, _ = await _make_plugin_with_db(db)
+        channel = _make_channel(registry)
+
+        def msg(role: str, content: str) -> tuple:
+            return ("?", (json.dumps({"role": role, "content": content}),))
+
+        # Timeline: [summary @0.5] | one @1.0 | corrupt @2.0 | three @3.0.
+        # The summary's boundary falls before every ordinary row, so the
+        # summary branch loads the same rows as the no-summary branch.
+        if with_summary:
+            await self._insert_row(
+                db, channel.id, 0.5, "summary", *msg("assistant", "[summary]")
+            )
+        await self._insert_row(db, channel.id, 1.0, "message", *msg("user", "one"))
+        corrupt_id = await self._insert_row(
+            db, channel.id, 2.0, message_type, value_sql, params
+        )
+        await self._insert_row(
+            db, channel.id, 3.0, "message", *msg("assistant", "three")
+        )
+        await db.commit()
+
+        with caplog.at_level(logging.WARNING, logger="corvidae.persistence"):
+            result = await plugin.resolve_conversation(channel=channel)
+
+        expected = ["one", "three"]
+        if with_summary:
+            expected = ["[summary]"] + expected
+            assert result[0]["_message_type"] == MessageType.SUMMARY
+        assert [m["content"] for m in result] == expected
+        warnings = self._warnings(caplog)
+        assert any(
+            re.search(rf"\b{corrupt_id}\b", w) and channel.id in w
+            for w in warnings
+        ), warnings
 
     async def test_resolve_conversation_corrupt_summary_falls_back_to_older_summary(
         self, db, caplog

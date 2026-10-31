@@ -925,9 +925,16 @@ next-newest summary is tried with its own timestamp boundary. Because
 covers the whole conversation, only less compressed. If no summary decodes, the
 query widens to the full non-summary history. Either fallback can return more
 history than the last compaction kept; the `resolve_compaction` pass before each
-LLM call can compact it again once it crosses the compaction threshold. An
-ordinary row with invalid JSON is likewise skipped with a WARNING naming its row
-id.
+LLM call can compact it again once it crosses the compaction threshold.
+
+A corrupt ordinary row is skipped the same way, on both the summary-boundary
+branch and the no-summary branch: a non-summary row whose message is invalid
+JSON or invalid UTF-8, decodes to something other than a JSON object, or carries
+a `message_type` outside `MessageType` is dropped with a WARNING naming its row
+id and channel, and the rows on either side of it still load in order. Every
+query selects `CAST(message AS BLOB)`, so invalid UTF-8 is caught while
+decoding in Python instead of raising inside the sqlite3 fetch, where the cursor
+cannot step past the row.
 
 ### persist_message
 
