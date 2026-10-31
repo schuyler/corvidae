@@ -2703,7 +2703,8 @@ Everything else uses `textContent`. Thinking and dividers render in closed
 `<details>`. The page reconnects with backoff (1 s → 30 s) and, after
 three failed connects, checks `/` for a 401 to detect an expired session.
 `tests/test_web_render_smoke.py` checks the sanitising in headless Chrome;
-it skips without Playwright, so CI doesn't run it. Run it by hand with
+it skips without Playwright, so the `web-smoke` CI job installs a pinned
+Playwright and Chromium and fails if the test is skipped. Run it locally with
 `uv run --with playwright pytest tests/test_web_render_smoke.py`.
 
 Known limitations:
