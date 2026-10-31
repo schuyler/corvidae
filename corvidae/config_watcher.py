@@ -27,7 +27,12 @@ from pathlib import Path
 
 import yaml
 
-from corvidae.channel import ChannelRegistry, load_channel_config, validate_agent_config
+from corvidae.channel import (
+    ChannelRegistry,
+    apply_channel_config,
+    parse_channel_config,
+    validate_agent_config,
+)
 from corvidae.hooks import CorvidaePlugin, hookimpl
 from corvidae.idle import validate_daemon_config
 from corvidae.runtime import deep_merge
@@ -136,8 +141,10 @@ class ConfigWatcherPlugin(CorvidaePlugin):
         1. Parse YAML from disk. On failure: log ERROR, skip.
         2. Deep-merge CLI overrides on top of the new YAML.
         3. Validate (must be a dict with llm.main). On failure: log ERROR, skip.
+        3b-3d. Validate agent, daemon and channels sections. On failure: log
+           ERROR, skip the whole reload (nothing is applied, #208).
         4. Update ChannelRegistry.agent_defaults from the new agent config.
-        5. Re-run load_channel_config for new channel entries.
+        5. Apply the parsed channel entries (cannot fail validation now).
         6. Dispatch on_config_reload to each plugin with per-plugin error isolation.
         """
         # Step 1: Parse YAML from disk.
@@ -194,6 +201,18 @@ class ConfigWatcherPlugin(CorvidaePlugin):
             logger.exception("config reload failed: invalid daemon config in %s", self._config_path)
             return
 
+        # Step 3d: Validate the channels section without applying it, so a
+        # rejected entry leaves agent_defaults and everything else untouched
+        # ("a malformed reload changes nothing", #208).
+        try:
+            parsed_channels = parse_channel_config(new_config)
+        except ValueError as exc:
+            logger.error(
+                "config reload failed: %s in %s; reload skipped, running config unchanged",
+                exc, self._config_path, exc_info=True,
+            )
+            return
+
         # Step 4: Update agent_defaults on both the class and the registered instance.
         # The class-level attribute is updated so that test code and any references
         # to ChannelRegistry.agent_defaults (class-level) see the new value.
@@ -205,18 +224,11 @@ class ConfigWatcherPlugin(CorvidaePlugin):
         if registry is not None:
             registry.agent_defaults = new_agent_defaults
 
-        # Step 5: Re-run load_channel_config to pick up new channel entries.
-        # Existing channels keep their own ChannelConfig until restart, except
+        # Step 5: Apply the already-validated channel entries. Existing
+        # channels keep their own ChannelConfig until restart, except
         # tools.disabled; transport-wide entries ("signal:*") are replaced and
         # re-matched against every live channel, like agent defaults above.
-        try:
-            load_channel_config(new_config, registry)
-        except ValueError:
-            logger.error(
-                "config reload: load_channel_config raised ValueError; "
-                "channel config update skipped (agent defaults still applied)",
-                exc_info=True,
-            )
+        apply_channel_config(parsed_channels, registry)
 
         # Step 6: Dispatch on_config_reload to each plugin individually.
         await self._dispatch_config_reload(new_config)

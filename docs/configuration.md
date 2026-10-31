@@ -599,6 +599,8 @@ Keys are `transport:scope` identifiers (e.g., `irc:#general`, `cli:local`), or t
 | `reasoning_history` | `drop` \| `exchange` \| `keep` | `agent.reasoning_history` | Controls `reasoning_content` retention for this channel. |
 | `tools.disabled` | list of strings | `[]` | Tools this channel cannot use, on top of the global `tools.disabled`. The channel can only narrow; it can't re-enable a globally disabled tool, and `set_settings` can't change the list. `shell` and `task_pipeline` disable together. See [Per-channel tool sets](#per-channel-tool-sets). |
 
+Any other key in an entry, exact or transport-wide, is rejected: at startup as `Config error: ... — check <path>`, on reload by refusing the whole reload (see [Error handling](#error-handling)). The message names `channels.<id>.<key>`, the rejected value and the accepted keys above. In particular `max_tokens` is not a channel key; it exists only as a `set_settings` runtime override. An operator `agent.yaml` that carries a stray key will fail to start after upgrading until the key is removed.
+
 Channels not listed here are created on-demand when a message arrives and use matching transport-wide entries, then `agent` defaults.
 
 ```yaml
@@ -762,11 +764,13 @@ No restart is required for the changes listed below. Changes that require restar
 
 At startup (not reload), a missing or malformed config file, or a rejected
 value in the `agent` or `channels` sections (e.g. a `channels.<id>.tools`
-block that is not `{disabled: [names]}`), prints
+block that is not `{disabled: [names]}`, or an unknown key such as
+`channels.<id>.max_turn`), prints
 `Config error: <detail> — check <path>` to stderr and exits non-zero. The
 detail names the key, the rejected value and what is accepted.
 
 - **Invalid YAML**: logged at `ERROR`; reload is skipped and the running config is unchanged.
+- **Rejected value in `agent:`, `daemon:` or `channels:`** (e.g. a malformed `channels.<id>.tools`): logged at `ERROR` naming the file. For `channels:` the message also names the key and the value and says "reload skipped"; for `agent:` and `daemon:` the key is in the logged traceback. The reload is skipped whole: no section is applied and no plugin receives `on_config_reload`, so a typo in one `channels:` entry cannot change `agent:` values.
 - **Missing `llm.main` after merge**: logged at `ERROR`; reload is skipped.
 - **Config file deleted**: logged at `WARNING`; polling continues. The file may reappear.
 - **Per-plugin failure in `on_config_reload`**: logged at `ERROR`; other plugins still receive the reload.

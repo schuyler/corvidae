@@ -271,8 +271,11 @@ replaces the wide set and re-matches every registered channel, logging at
 INFO each channel whose matches change.
 
 `load_channel_config(config, registry)` pre-registers channels from
-YAML before `on_start`, and runs again on reload. It validates every entry,
-exact and wide, before applying any; it sets the wide entries first, so
+YAML before `on_start`. It is `parse_channel_config(config)` (pure: validates
+every entry, exact and wide, and rejects keys outside `CHANNEL_ENTRY_KEYS`, touching no registry) followed by
+`apply_channel_config(parsed, registry)`. Reload calls the two itself:
+`ConfigWatcherPlugin` parses before it updates `agent_defaults`, so a rejected
+`channels:` entry skips the whole reload. Applying sets the wide entries first, so
 exact channels it then registers are matched at creation, and it never
 registers a wide key as a channel. Wide entries therefore reload like
 `agent:`: scalar keys apply to running channels from the next turn. A
@@ -526,8 +529,8 @@ go together (PRD §3.5.3), for the global list too.
   is a config list, not the `should_execute_tool` hook (#148).
 - **Subagents inherit.** `SubagentPlugin` excludes `disabled_on(channel)`
   as well as itself from the registry it hands the subagent.
-- **Hot reload.** `load_channel_config` validates every entry before it
-  applies any. For channels already registered it updates only
+- **Hot reload.** `parse_channel_config` validates every entry before
+  `apply_channel_config` applies any (and before `agent:` defaults change). For channels already registered it updates only
   `disabled_tools`, in place, so a Signal ACI channel that shares its
   alias's `ChannelConfig` follows. Transport-wide entries are replaced
   and re-matched on every live channel (`set_wide_entries`). Because
