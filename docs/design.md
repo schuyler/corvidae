@@ -517,7 +517,19 @@ go together (PRD §3.5.3), for the global list too.
   (principle 2) and forks keep prefix parity (see [Forks](#forks)).
   `Agent` also implements `on_compaction` and re-resolves the view there.
   Compaction already rebuilds the KV cache, so this is the only point where
-  a running conversation's schemas can change.
+  a running conversation's schemas can change, with one exception: a
+  registry change.
+- **Registry changes reach the next turn.** `ToolCollectionPlugin.generation`
+  goes up whenever `rebuild_registry` yields different tool names or schemas
+  (an MCP server reconnecting, #107/#109). `Agent` records the generation
+  beside its `get_tools()` snapshot and, at the top of each queue item,
+  re-reads the snapshot when the generation has moved, logging one INFO line
+  naming the tools added and removed. Each conversation's view is then
+  rebuilt lazily from the new set and the view's own `disabled` set (a
+  reloaded `channels.<id>.tools.disabled` still waits for compaction). With
+  no change nothing is rebuilt and the schema list stays the same object.
+  The change costs one prefix-cache miss on that channel. Dispatch reads the
+  refreshed dict, so a removed tool is refused as unknown.
 - **Dispatch enforces.** Each tool task checks the name against
   `disabled_on(channel)` when it runs. That is the conversation view's set
   plus the live `Channel.disabled_tools`. A disabled call returns
@@ -1909,7 +1921,8 @@ round that reconnects something, exit when nothing is pending. Every MCP tool
 call also runs a retry round as a fast path. One `asyncio.Lock` serialises
 rounds, and a tool call that finds it held skips rather than wait out a
 handshake, so the loop and a tool call never connect a server twice. A
-successful retry rebuilds the cached tool list and the shared registry. Config
+successful retry rebuilds the cached tool list and the shared registry, and the
+running Agent re-reads it on its next turn (#109). Config
 errors (`McpHeaderEnvError`, `ValueError`, `KeyError` from
 `_parse_server_config`, which runs before any transport opens) are reported
 once and never queued. `on_stop` sets a stopping flag, cancels the loop, then

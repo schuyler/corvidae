@@ -666,6 +666,7 @@ Hiding a tool isn't access control. A model can still call a tool it saw earlier
 
 - **Narrowing** (adding a tool to the list) is enforced at dispatch on the next call. The schemas keep listing the tool until the next compaction or conversation start, so the model may try it and be refused.
 - **Widening** (removing a tool from the list) takes effect at the next compaction or conversation start. Until then the tool stays hidden and refused, so the head of the prompt never changes mid-conversation.
+- A registry change is the exception to "schemas change only at compaction or conversation start": when a plugin rebuilds the registry (an MCP server reconnecting) the new tool set applies at the next turn, narrowed by the conversation's existing disabled set.
 - A call that was already dispatched runs to completion.
 - Removing a channel's whole exact entry from `channels:` keeps its last list until restart. To re-enable everything on a running channel, set `disabled: []`. Removing a transport-wide entry takes effect live.
 
