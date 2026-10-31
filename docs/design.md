@@ -914,16 +914,16 @@ the timestamp filter so only the compaction boundary and newer rows are returned
 Returns a list of tagged message dicts (with `_message_type` set). Logs an INFO
 event when history is loaded.
 
-A corrupt row degrades the load instead of aborting it. A summary row that fails
-to decode (invalid JSON, invalid UTF-8, or JSON that is not an object) is skipped
-with a WARNING naming its row id and channel, and the next-newest summary is
-tried with its own timestamp boundary. Because `message_log` is append-only, an
-older summary plus the rows after it still covers the whole conversation, only
-less compressed. If no summary decodes, every non-summary row loads. Either
-fallback can return more history than the last compaction kept; the
-`resolve_compaction` pass before the next LLM call compacts it again. An
-ordinary row with invalid JSON is likewise skipped with a WARNING naming its row
-id.
+A corrupt summary row degrades the load instead of aborting it. A summary row
+that fails to decode (invalid JSON, invalid UTF-8, or JSON that is not an
+object) is skipped with a WARNING naming its row id and channel, and the
+next-newest summary is tried with its own timestamp boundary. Because
+`message_log` is append-only, an older summary plus the rows after it still
+covers the whole conversation, only less compressed. If no summary decodes,
+every non-summary row loads. Either fallback can return more history than the
+last compaction kept; the `resolve_compaction` pass before each LLM call
+compacts it again once it crosses the compaction threshold. An ordinary row with
+invalid JSON is likewise skipped with a WARNING naming its row id.
 
 ### persist_message
 
