@@ -30,8 +30,9 @@ import logging
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 
+from corvidae.clock import Clock
 from corvidae.envref import EnvRefError, expand_env_refs
-from corvidae.hooks import CorvidaePlugin, hookimpl
+from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 from corvidae.tool import Tool
 
 logger = logging.getLogger(__name__)
@@ -93,6 +94,58 @@ _STOP_BOUND_SECONDS = 2.5
 _CANCEL_GRACE_SECONDS = 0.3
 
 
+# Transports a server config may name.
+_TRANSPORTS = ("stdio", "sse", "streamable_http")
+# Reconnect backoff ladder for servers that failed at startup; the same
+# 10 s doubling to 300 s as the IRC, Signal and Discord transports.
+_INITIAL_BACKOFF = 10
+_BACKOFF_MULTIPLIER = 2
+_BACKOFF_CAP = 300
+
+
+@dataclass
+class _ServerSettings:
+    """A server's validated config values, read before anything opens."""
+
+    transport: str
+    prefix: str
+    timeout: float
+    connect_timeout: float
+    headers: dict[str, str] | None
+
+
+def _parse_server_config(name: str, cfg: dict) -> _ServerSettings:
+    """Validate one server's config and resolve its ${VAR} headers.
+
+    Raises McpHeaderEnvError, ValueError or KeyError for a config error:
+    the daemon cannot fix these by retrying, so callers skip the server for
+    good. Raised before any transport opens, which keeps a config error
+    distinguishable from a connect failure (which is retried). Messages name
+    the server and the key to fix.
+    """
+    transport = cfg["transport"]
+    # An unknown transport can never connect.
+    if transport not in _TRANSPORTS:
+        raise ValueError(
+            f"unknown transport {transport!r} for MCP server {name!r}; "
+            f"set mcp.servers.{name}.transport to one of {', '.join(_TRANSPORTS)}"
+        )
+    # Each transport needs its endpoint key; KeyError names it.
+    cfg["command" if transport == "stdio" else "url"]
+    prefix = cfg.get("tool_prefix", name)
+    timeout = float(cfg.get("timeout_seconds", 30))
+    connect_timeout = float(cfg.get("connect_timeout_seconds", 30))
+    # A zero or negative bound would fail every handshake.
+    if connect_timeout <= 0:
+        raise ValueError(
+            f"connect_timeout_seconds must be positive for server {name!r}; "
+            f"got {connect_timeout:g}, fix mcp.servers.{name}.connect_timeout_seconds"
+        )
+    # Resolve ${VAR} references: a missing variable raises McpHeaderEnvError.
+    headers = _resolve_headers(name, cfg.get("headers"))
+    return _ServerSettings(transport, prefix, timeout, connect_timeout, headers)
+
+
 @dataclass
 class _ServerOwner:
     """The long-lived task that owns one server's transport and session.
@@ -134,7 +187,7 @@ class McpClientPlugin(CorvidaePlugin):
     register_tools fires.
     """
 
-    depends_on = frozenset()
+    depends_on = frozenset({"clock"})
 
     def __init__(self, pm=None) -> None:
         if pm is not None:
@@ -144,9 +197,21 @@ class McpClientPlugin(CorvidaePlugin):
         # One owner task per connected server (name -> owner).
         self._owners: dict[str, _ServerOwner] = {}
         self._servers_config: dict = {}
-        # Configs for servers that did not connect at startup, retried on the
-        # next MCP tool call (name -> config).
+        # Configs for servers that did not connect at startup, retried by the
+        # background loop and on MCP tool calls (name -> config).
         self._pending_servers: dict[str, dict] = {}
+        # Kernel clock (resolved in on_start) and the background retry task.
+        self._clock: Clock | None = None
+        self._retry_task: asyncio.Task | None = None
+        # Serialises retry rounds so the loop and a tool call never connect
+        # the same server twice.
+        self._retry_lock = asyncio.Lock()
+        # Set by on_stop: wakes the loop, and makes a connect that finishes
+        # afterwards tear itself down instead of registering an owner.
+        self._stop_event = asyncio.Event()
+        self._stopping = False
+        # Delay the next failed round will be followed by (for the log line).
+        self._next_delay: float = _INITIAL_BACKOFF
 
     @hookimpl
     async def on_init(self, pm, config: dict) -> None:
@@ -162,25 +227,42 @@ class McpClientPlugin(CorvidaePlugin):
             return
 
         self._pending_servers = {}
+        self._stopping = False
+        self._stop_event = asyncio.Event()
+        self._clock = get_dependency(self.pm, "clock", Clock)
 
         try:
             for server_name, server_cfg in servers_config.items():
+                # A config error is reported once, with the remedy, and the
+                # server is skipped for good: retrying cannot fix it.
                 try:
-                    await self._connect_server(server_name, server_cfg)
+                    _parse_server_config(server_name, server_cfg)
                 except McpHeaderEnvError as exc:
-                    # A config error: report it once, with the remedy, and skip
-                    # the server for good (no lazy retry; see McpHeaderEnvError).
                     logger.warning("%s", exc, extra={"server": server_name})
                     continue
+                except (ValueError, KeyError) as exc:
+                    detail = (
+                        f"missing key {exc.args[0]!r}" if isinstance(exc, KeyError)
+                        else str(exc)
+                    )
+                    logger.warning(
+                        "MCP server %r skipped: config error (%s); fix "
+                        "mcp.servers.%s in agent.yaml and restart",
+                        server_name, detail, server_name,
+                        extra={"server": server_name},
+                    )
+                    continue
+                try:
+                    await self._connect_server(server_name, server_cfg)
                 except Exception:
                     logger.warning(
                         "MCP server failed to connect, skipping",
                         extra={"server": server_name},
                         exc_info=True,
                     )
-                # A server that did not register (exception or timeout) is kept
-                # for a lazy reconnect rather than skipped for the process
-                # lifetime.
+                # A server that did not register (exception or timeout) is
+                # kept for the retry loop rather than skipped for the
+                # process lifetime.
                 if not any(server.name == server_name for server in self._servers):
                     self._pending_servers[server_name] = server_cfg
         except asyncio.CancelledError:
@@ -195,10 +277,35 @@ class McpClientPlugin(CorvidaePlugin):
             "McpClientPlugin started",
             extra={"servers": len(self._servers), "tools": len(self._cached_tools)},
         )
+        # Retry what failed in the background, so a daemon whose servers all
+        # failed recovers without waiting for an MCP tool call.
+        if self._pending_servers:
+            self._retry_task = asyncio.create_task(
+                self._retry_loop(), name="mcp-retry-loop"
+            )
 
     @hookimpl
     async def on_stop(self) -> None:
-        """Close every MCP session and transport via its owner task."""
+        """Stop the retry loop, then close every MCP session and transport."""
+        # From here a connect that finishes late tears itself down.
+        self._stopping = True
+        self._stop_event.set()
+        task, self._retry_task = self._retry_task, None
+        if task is not None:
+            # Cancel the loop (it may be mid-connect) and wait for it to unwind.
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                # Expected: we just cancelled it. Re-raise only if on_stop
+                # itself is being cancelled.
+                if asyncio.current_task().cancelling():
+                    raise
+            except Exception:
+                logger.warning(
+                    "MCP retry loop ended with an error during shutdown",
+                    exc_info=True,
+                )
         await self._stop_owners()
         logger.debug("McpClientPlugin stopped")
 
@@ -264,26 +371,58 @@ class McpClientPlugin(CorvidaePlugin):
         """Append cached Tool instances to tool_registry (sync delivery)."""
         tool_registry.extend(self._cached_tools)
 
-    async def _retry_pending_servers(self) -> None:
-        """Reconnect servers that failed at startup, on demand.
+    async def _retry_loop(self) -> None:
+        """Reconnect pending servers on the 10 s doubling, 300 s capped ladder.
 
-        Called from every MCP tool call. Successful reconnects refresh the
-        cached tool list and the shared registry.
-
-        shortcut: retries need a working MCP tool to trigger them, so a
-        daemon whose servers all failed at startup never retries; upgrade to
-        a background retry loop if all-server outage recovery matters.
+        Sleeps on the kernel clock, so a fake clock drives it in tests and
+        on_stop's stop event wakes it. The delay doubles after a round that
+        reconnects nothing and resets after one that does. Exits once
+        nothing is pending.
         """
-        if not self._pending_servers:
-            return
+        assert self._clock is not None
+        delay: float = _INITIAL_BACKOFF
+        while self._pending_servers and not self._stopping:
+            # What the log line should promise if this round fails.
+            self._next_delay = min(delay * _BACKOFF_MULTIPLIER, _BACKOFF_CAP)
+            await self._clock.sleep(delay, wake=self._stop_event)
+            if self._stopping:
+                return
+            async with self._retry_lock:
+                reconnected = await self._retry_round()
+            if reconnected:
+                delay = _INITIAL_BACKOFF
+            else:
+                delay = min(delay * _BACKOFF_MULTIPLIER, _BACKOFF_CAP)
 
+    async def _retry_pending_servers(self) -> None:
+        """Fast-path retry, called from every MCP tool call.
+
+        Skips when nothing is pending, or when the loop (or another tool
+        call) already holds a retry round: the tool call must not wait out
+        a connect handshake of up to 30 s.
+        """
+        if not self._pending_servers or self._stopping or self._retry_lock.locked():
+            return
+        async with self._retry_lock:
+            await self._retry_round()
+
+    async def _retry_round(self) -> bool:
+        """Try each pending server once; the caller holds the retry lock.
+
+        Successful reconnects refresh the cached tool list and the shared
+        registry. Returns True when at least one server reconnected.
+        """
         reconnected = False
         for name, cfg in list(self._pending_servers.items()):
+            # The other caller may have reconnected it, or on_stop begun.
+            if name not in self._pending_servers or self._stopping:
+                continue
             try:
                 await self._connect_server(name, cfg)
-            except Exception:
+            except Exception as exc:
                 logger.warning(
-                    "MCP server lazy reconnect failed",
+                    "MCP server %r reconnect failed (%s); retrying in %ss",
+                    name, _exc_type_names(exc), f"{self._next_delay:g}",
                     extra={"server": name},
                     exc_info=True,
                 )
@@ -291,7 +430,7 @@ class McpClientPlugin(CorvidaePlugin):
             if any(server.name == name for server in self._servers):
                 self._pending_servers.pop(name, None)
                 reconnected = True
-            # A timeout leaves the server pending for the next tool call.
+            # A timeout leaves the server pending for the next round.
 
         if reconnected:
             self._cached_tools = self._build_tool_list()
@@ -301,6 +440,7 @@ class McpClientPlugin(CorvidaePlugin):
             rebuild = getattr(tools_plugin, "rebuild_registry", None)
             if inspect.iscoroutinefunction(rebuild):
                 await rebuild()
+        return reconnected
 
     async def _connect_server(self, name: str, cfg: dict) -> None:
         """Connect to one MCP server and register its tools.
@@ -320,34 +460,22 @@ class McpClientPlugin(CorvidaePlugin):
                  and optional headers (HTTP transports), tool_prefix,
                  timeout_seconds and connect_timeout_seconds keys.
 
-        Note: The caller (on_start) catches all exceptions from
-        this method, logs them as warnings, and skips the server. Exceptions
-        that may arise include ValueError (unknown transport, or a
-        non-positive connect_timeout_seconds) and KeyError (missing required
-        config keys like 'command' or 'url'). McpHeaderEnvError (a ${VAR}
-        in headers that is unset, empty, or holds a newline) is caught
-        separately and not retried. A handshake that exceeds
-        connect_timeout_seconds is logged by the owner and returns without
-        registering the server.
+        Note: config errors (ValueError, KeyError, McpHeaderEnvError) are
+        raised by _parse_server_config before anything opens; on_start
+        reports them and never queues the server for retry. Any other
+        exception is a connect failure, logged by the caller and retried. A
+        handshake that exceeds connect_timeout_seconds is logged by the
+        owner and returns without registering the server.
         """
-        # Read every config value the owner needs here, before anything
-        # opens: a missing transport or non-numeric timeout raises in this
-        # task, where on_start logs it and queues the server, instead of
-        # killing the owner task with ``ready`` unresolved.
-        transport = cfg["transport"]
-        prefix = cfg.get("tool_prefix", name)
-        timeout = float(cfg.get("timeout_seconds", 30))
-        connect_timeout = float(cfg.get("connect_timeout_seconds", 30))
-        # A zero or negative bound would fail every handshake; reject it as
-        # a config error (on_start logs it and skips the server).
-        if connect_timeout <= 0:
-            raise ValueError(
-                f"connect_timeout_seconds must be positive for server {name!r}"
-            )
-
-        # Resolve ${VAR} references before anything opens: a missing variable
-        # raises McpHeaderEnvError, which on_start reports without retrying.
-        headers = _resolve_headers(name, cfg.get("headers"))
+        # Validate config before anything opens, so a config error raises
+        # here, in this task, rather than killing the owner with ``ready``
+        # unresolved. McpHeaderEnvError/ValueError/KeyError mean "config".
+        settings = _parse_server_config(name, cfg)
+        transport = settings.transport
+        prefix = settings.prefix
+        timeout = settings.timeout
+        connect_timeout = settings.connect_timeout
+        headers = settings.headers
 
         # The owner task opens and (later) closes everything this server
         # needs; `ready` carries its handshake result back to this task.
@@ -371,6 +499,17 @@ class McpClientPlugin(CorvidaePlugin):
             raise
         if state is None:
             # Timed out; the owner logged it and closed everything.
+            await asyncio.wait([owner.task])
+            return
+
+        if self._stopping:
+            # on_stop ran while this connect was in flight and has already
+            # cleared _owners; registering now would leak the owner.
+            logger.warning(
+                "MCP server %r connected after shutdown began; closing it",
+                name, extra={"server": name},
+            )
+            owner.stop.set()
             await asyncio.wait([owner.task])
             return
 

@@ -17,6 +17,7 @@ import sys
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
+from fake_clock import clock_pm
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -73,7 +74,7 @@ async def _stop_made_plugins():
 async def _start_in_own_task(plugin: McpClientPlugin, config: dict) -> None:
     """Run init and on_start in one fresh task, as the broadcast does."""
     async def run() -> None:
-        await plugin.on_init(pm=MagicMock(), config=config)
+        await plugin.on_init(pm=clock_pm(), config=config)
         await plugin.on_start(config=config)
     await asyncio.create_task(run())
 
@@ -242,7 +243,7 @@ class TestOwnerLifecycle:
                 "args": ["-c", "import time; time.sleep(60)"],
                 "connect_timeout_seconds": 30}
         plugin, config = _make_plugin({"up": _stdio_cfg(), "hang": hang})
-        await plugin.on_init(pm=MagicMock(), config=config)
+        await plugin.on_init(pm=clock_pm(), config=config)
         task = asyncio.create_task(plugin.on_start(config=config))
         # Wait until the first server is up and the second is mid-handshake.
         async with asyncio.timeout(10):
@@ -266,18 +267,19 @@ class TestConfigErrors:
     async def test_bad_config_is_skipped_and_logged(self, bad, caplog):
         plugin, config = _make_plugin({"bad": bad})
         caplog.set_level(logging.DEBUG)
-        await plugin.on_init(pm=MagicMock(), config=config)
+        await plugin.on_init(pm=clock_pm(), config=config)
 
         async with asyncio.timeout(5):
             await plugin.on_start(config=config)
 
-        # Logged skip names the server and carries the traceback; the server
-        # is queued for retry as on main; no subprocess was left behind.
+        # One WARNING names the server and the config to fix; a config error
+        # is not queued for retry (#107); no subprocess was left behind.
         skips = [r for r in caplog.records if r.levelno >= logging.WARNING
-                 and r.__dict__.get("server") == "bad" and r.exc_info]
+                 and r.__dict__.get("server") == "bad"]
         assert len(skips) == 1
-        assert "skipping" in skips[0].getMessage()
-        assert list(plugin._pending_servers) == ["bad"]
+        assert "mcp.servers.bad" in skips[0].getMessage()
+        assert "skipped" in skips[0].getMessage()
+        assert plugin._pending_servers == {}
         assert plugin._servers == [] and plugin._owners == {}
         assert await _wait_no_children() == []
 

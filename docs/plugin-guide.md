@@ -1166,8 +1166,10 @@ Both take an optional `headers` map, sent on every request. `${VAR}` in a
 header value is replaced from the daemon's environment at connect time, so
 a token never has to sit in `agent.yaml`. A variable that is unset, empty, or holds a newline or NUL
 skips that server with one WARNING naming the server, header and variable,
-and the server is not queued for the lazy retry below (the environment
-can't change without a restart). Header values never reach the log. The
+and the server is not queued for the retry below (the environment
+can't change without a restart). The same holds for every config error:
+unknown `transport`, missing `command`/`url`, non-positive
+`connect_timeout_seconds`. Header values never reach the log. The
 plugin builds the HTTP client itself (`create_mcp_http_client`) and closes
 it with the server.
 
@@ -1177,10 +1179,14 @@ disable prefixing. If two servers produce the same tool name, the first
 wins and the duplicate is skipped with a WARNING. A server that does not
 complete its handshake within `connect_timeout_seconds` is skipped with a
 WARNING and its subprocess terminated; startup continues without it. A
-server that fails to connect at startup is kept and retried lazily on the
-next MCP tool call; a successful retry adds its tools to the cached list and
-the shared registry, while a failed retry logs a WARNING and leaves the
-current tool call untouched.
+server that fails to connect at startup is kept and retried by a background
+loop on the kernel clock (the plugin declares `depends_on = {"clock"}`): 10 s,
+doubling to 300 s, reset on success, stopped in `on_stop`. An MCP tool call
+also triggers a retry unless one is already running. A successful retry adds
+its tools to the cached list and the shared registry; a failed retry logs a
+WARNING naming the server, the exception type and the next delay, and leaves
+the current tool call untouched. Until a running Agent re-reads the registry
+(#109), reconnected tools are not visible to a conversation already started.
 
 **Without this plugin:** MCP servers cannot be used. No tools are affected
 if the `mcp:` config key is absent — the plugin no-ops.

@@ -24,6 +24,7 @@ Design assumptions (from plans/mcp-client-plugin.md):
 import asyncio
 import logging
 from contextlib import AsyncExitStack
+from fake_clock import clock_pm
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -161,7 +162,7 @@ class TestOnStartWithStdioServer:
             }
         }
 
-        await plugin.on_init(pm=MagicMock(), config=config)
+        await plugin.on_init(pm=clock_pm(), config=config)
         with (
             patch("mcp.client.stdio.stdio_client", return_value=mock_stdio_cm),
             patch("mcp.client.stdio.StdioServerParameters"),
@@ -202,7 +203,7 @@ class TestOnStartWithStdioServer:
             }
         }
 
-        await plugin.on_init(pm=MagicMock(), config=config)
+        await plugin.on_init(pm=clock_pm(), config=config)
         with (
             patch("mcp.client.stdio.stdio_client", return_value=mock_stdio_cm),
             patch("mcp.client.stdio.StdioServerParameters"),
@@ -245,7 +246,7 @@ class TestOnStartWithStdioServer:
             }
         }
 
-        await plugin.on_init(pm=MagicMock(), config=config)
+        await plugin.on_init(pm=clock_pm(), config=config)
         with (
             patch("mcp.client.stdio.stdio_client", return_value=mock_stdio_cm),
             patch("mcp.client.stdio.StdioServerParameters"),
@@ -325,7 +326,7 @@ class TestOnStartWithSseServer:
             }
         }
 
-        await plugin.on_init(pm=MagicMock(), config=config)
+        await plugin.on_init(pm=clock_pm(), config=config)
         with (
             patch("mcp.client.sse.sse_client", return_value=mock_sse_cm),
             patch("mcp.ClientSession", return_value=mock_client_session_cm),
@@ -360,7 +361,7 @@ class TestOnStartUnknownTransport:
             }
         }
 
-        await plugin.on_init(pm=MagicMock(), config=config)
+        await plugin.on_init(pm=clock_pm(), config=config)
         with caplog.at_level(logging.WARNING, logger="corvidae.mcp_client"):
             # Should not raise.
             await plugin.on_start(config=config)
@@ -1073,7 +1074,7 @@ class TestLazyReconnect:
     async def test_failed_server_reconnects_on_next_tool_call(self):
         """A server skipped at startup is retried when an MCP tool is called."""
         plugin = McpClientPlugin(None)
-        await plugin.on_init(pm=MagicMock(), config=_MCP_CONFIG)
+        await plugin.on_init(pm=clock_pm(), config=_MCP_CONFIG)
 
         good_session, good_session_cm = _working_session(["ok"])
         with (
@@ -1112,7 +1113,7 @@ class TestLazyReconnect:
     async def test_failed_reconnect_does_not_break_the_tool_call(self, caplog):
         """A still-broken server logs and leaves the current call working."""
         plugin = McpClientPlugin(None)
-        await plugin.on_init(pm=MagicMock(), config=_MCP_CONFIG)
+        await plugin.on_init(pm=clock_pm(), config=_MCP_CONFIG)
 
         good_session, good_session_cm = _working_session(["ok"])
         with (
@@ -1139,6 +1140,314 @@ class TestLazyReconnect:
 
         assert result == "ok"
         assert any(
-            "lazy reconnect failed" in r.getMessage()
+            "reconnect failed" in r.getMessage()
             for r in caplog.records if r.levelno >= logging.WARNING
         ), [r.getMessage() for r in caplog.records]
+
+
+# ---------------------------------------------------------------------------
+# Background retry loop for servers that failed at startup (#107)
+# ---------------------------------------------------------------------------
+
+
+class _Sdk:
+    """A scripted MCP SDK: which servers answer, plus a log of every attempt.
+
+    ``up`` names the servers that currently connect; ``gate`` (when set)
+    holds every connect open until the test sets it; ``attempts`` records
+    (monotonic time, server) per connect attempt.
+    """
+
+    def __init__(self, clock) -> None:
+        self.clock = clock
+        self.up: set[str] = set()
+        self.gate: asyncio.Event | None = None
+        self.entered = asyncio.Event()
+        self.attempts: list[tuple[float, str]] = []
+
+    def stdio_client(self, command: str):
+        """Return a transport cm that connects only when ``command`` is up."""
+        self.attempts.append((self.clock.monotonic(), command))
+        sdk = self
+
+        async def _enter(*_a):
+            sdk.entered.set()
+            if sdk.gate is not None:
+                await sdk.gate.wait()
+            if command not in sdk.up:
+                raise ConnectionRefusedError(f"{command} is down")
+            return (MagicMock(), MagicMock())
+
+        cm = AsyncMock()
+        cm.__aenter__ = AsyncMock(side_effect=_enter)
+        cm.__aexit__ = AsyncMock(return_value=False)
+        return cm
+
+    def client_session(self, *_a, **_k):
+        """Return a session cm exposing one tool named ``t``."""
+        _, cm = _working_session(["t"])
+        return cm
+
+    def attempts_for(self, name: str) -> list[float]:
+        """Seconds (from the first recorded monotonic) of each attempt on ``name``."""
+        return [t for t, n in self.attempts if n == name]
+
+
+def _servers(*names: str) -> dict:
+    """Config for stdio servers whose command is their own name."""
+    return {
+        "mcp": {
+            "servers": {
+                n: {"transport": "stdio", "command": n, "args": []} for n in names
+            }
+        }
+    }
+
+
+@pytest.fixture
+def sdk(kernel_clock):
+    """Patch the MCP SDK entry points with a scripted _Sdk for the test."""
+    clock, _ = kernel_clock
+    fake = _Sdk(clock)
+    with (
+        patch("mcp.client.stdio.stdio_client", side_effect=fake.stdio_client),
+        patch(
+            "mcp.client.stdio.StdioServerParameters",
+            side_effect=lambda command, args, env: command,
+        ),
+        patch("mcp.ClientSession", side_effect=fake.client_session),
+    ):
+        yield fake
+
+
+class _FakeTools:
+    """Stand-in for ToolCollectionPlugin that counts registry rebuilds."""
+
+    def __init__(self) -> None:
+        self.rebuilds = 0
+
+    async def rebuild_registry(self) -> None:
+        self.rebuilds += 1
+
+
+async def _start_plugin(pm, config: dict) -> tuple[McpClientPlugin, _FakeTools]:
+    """Register a fake tools plugin, then init and start an McpClientPlugin."""
+    tools = _FakeTools()
+    pm.register(tools, name="tools")
+    plugin = McpClientPlugin(None)
+    await plugin.on_init(pm=pm, config=config)
+    await plugin.on_start(config=config)
+    return plugin, tools
+
+
+def _owner_tasks() -> list[asyncio.Task]:
+    """Live mcp-owner tasks in the running loop."""
+    return [
+        t for t in asyncio.all_tasks()
+        if t.get_name().startswith("mcp-owner-") and not t.done()
+    ]
+
+
+class TestRetryLoop:
+    async def test_all_down_server_recovers_without_a_tool_call(
+        self, pm, kernel_clock, sdk
+    ):
+        """R1: with every server down, the loop reconnects past the first delay."""
+        clock, _ = kernel_clock
+        plugin, tools = await _start_plugin(pm, _servers("a", "b"))
+        try:
+            assert plugin._servers == []
+            assert plugin._retry_task is not None
+            sdk.up.add("a")
+
+            await clock.advance(10)
+
+            assert [s.name for s in plugin._servers] == ["a"]
+            assert [t.name for t in plugin._cached_tools] == ["a__t"]
+            assert tools.rebuilds == 1
+            assert list(plugin._pending_servers) == ["b"]
+
+            # b recovers later; once nothing is pending the loop exits.
+            sdk.up.add("b")
+            await clock.advance(20)
+            assert plugin._pending_servers == {}
+            assert plugin._retry_task.done()
+            assert sorted(t.name for t in plugin._cached_tools) == ["a__t", "b__t"]
+        finally:
+            await plugin.on_stop()
+
+    async def test_loop_not_started_when_nothing_is_pending(
+        self, pm, kernel_clock, sdk
+    ):
+        """R2: a clean startup starts no retry task."""
+        sdk.up.add("a")
+        plugin, _ = await _start_plugin(pm, _servers("a"))
+        try:
+            assert plugin._retry_task is None
+        finally:
+            await plugin.on_stop()
+
+    async def test_backoff_ladder(self, pm, kernel_clock, sdk):
+        """R2: attempts land at 10, 30, 70, 150, 310, 610, 910 s."""
+        clock, _ = kernel_clock
+        plugin, _ = await _start_plugin(pm, _servers("a"))
+        try:
+            start = clock.monotonic()
+            sdk.attempts.clear()
+            await clock.advance(910)
+            offsets = [t - start for t in sdk.attempts_for("a")]
+            assert offsets == [10, 30, 70, 150, 310, 610, 910]
+        finally:
+            await plugin.on_stop()
+
+    async def test_backoff_resets_after_a_reconnect(self, pm, kernel_clock, sdk):
+        """R2: a round that reconnects something resets the delay to 10 s."""
+        clock, _ = kernel_clock
+        plugin, _ = await _start_plugin(pm, _servers("a", "b"))
+        try:
+            await clock.advance(10)  # both fail; next delay 20
+            sdk.up.add("a")
+            await clock.advance(20)  # a reconnects; b still pending
+            start = clock.monotonic()
+            sdk.attempts.clear()
+            await clock.advance(10)
+            assert [t - start for t in sdk.attempts_for("b")] == [10]
+        finally:
+            await plugin.on_stop()
+
+    async def test_failed_retry_logs_warning_with_server_type_and_delay(
+        self, pm, kernel_clock, sdk, caplog
+    ):
+        """R3: the WARNING text names server, exception type and next delay."""
+        clock, _ = kernel_clock
+        plugin, _ = await _start_plugin(pm, _servers("a"))
+        try:
+            caplog.clear()
+            with caplog.at_level(logging.WARNING, logger="corvidae.mcp_client"):
+                await clock.advance(10)
+            records = [
+                r for r in caplog.records
+                if r.levelno == logging.WARNING and "retrying in" in r.getMessage()
+            ]
+            assert len(records) == 1, [r.getMessage() for r in caplog.records]
+            msg = records[0].getMessage()
+            assert "'a'" in msg
+            assert "ConnectionRefusedError" in msg
+            assert "retrying in 20s" in msg
+            assert records[0].exc_info is not None
+        finally:
+            await plugin.on_stop()
+
+    async def test_tool_call_retry_does_not_race_the_loop(
+        self, pm, kernel_clock, sdk
+    ):
+        """R4: a tool call during an in-flight loop reconnect starts no second connect."""
+        clock, _ = kernel_clock
+        sdk.up.add("good")
+        plugin, _ = await _start_plugin(pm, _servers("good", "a"))
+        try:
+            (good_tool,) = plugin._cached_tools
+            sdk.up.add("a")
+            sdk.gate = asyncio.Event()
+            sdk.entered.clear()
+            sdk.attempts.clear()
+            advancing = asyncio.create_task(clock.advance(10))
+            await asyncio.wait_for(sdk.entered.wait(), 2)
+
+            # The loop's connect for "a" is held open; the tool call must skip.
+            assert await good_tool.fn() == "ok"
+            assert len(sdk.attempts_for("a")) == 1
+
+            sdk.gate.set()
+            await advancing
+            assert len(sdk.attempts_for("a")) == 1
+            assert [s.name for s in plugin._servers].count("a") == 1
+            assert len(plugin._owners) == 2
+            assert sorted(t.name for t in plugin._cached_tools) == ["a__t", "good__t"]
+        finally:
+            await plugin.on_stop()
+
+    async def test_on_stop_while_loop_is_sleeping(self, pm, kernel_clock, sdk):
+        """R5: on_stop wakes and finishes a sleeping loop."""
+        plugin, _ = await _start_plugin(pm, _servers("a"))
+        task = plugin._retry_task
+        await plugin.on_stop()
+        assert task.done()
+        assert _owner_tasks() == []
+
+    async def test_on_stop_while_loop_is_connecting(self, pm, kernel_clock, sdk):
+        """R5: on_stop cancels a loop that is mid-connect, leaving no owner."""
+        clock, _ = kernel_clock
+        plugin, _ = await _start_plugin(pm, _servers("a"))
+        task = plugin._retry_task
+        sdk.gate = asyncio.Event()  # never set: the connect hangs
+        sdk.entered.clear()
+        advancing = asyncio.create_task(clock.advance(10))
+        await asyncio.wait_for(sdk.entered.wait(), 2)
+
+        await plugin.on_stop()
+
+        assert task.done()
+        assert _owner_tasks() == []
+        advancing.cancel()
+        await asyncio.gather(advancing, return_exceptions=True)
+
+    async def test_connect_finishing_after_stop_is_torn_down(
+        self, pm, kernel_clock, sdk
+    ):
+        """A tool-call retry still connecting when on_stop runs registers no owner."""
+        sdk.up.update({"good", "a"})
+        plugin, _ = await _start_plugin(pm, _servers("good"))
+        # Queue "a" as pending without the loop, and call a tool to retry it.
+        plugin._pending_servers["a"] = _servers("a")["mcp"]["servers"]["a"]
+        plugin._servers_config = {}
+        plugin._cached_tools = plugin._build_tool_list()
+        sdk.gate = asyncio.Event()
+        sdk.entered.clear()
+        (good_tool,) = plugin._cached_tools
+        call = asyncio.create_task(good_tool.fn())
+        await asyncio.wait_for(sdk.entered.wait(), 2)
+
+        await plugin.on_stop()
+        sdk.gate.set()
+        await asyncio.wait_for(call, 2)
+
+        assert plugin._owners == {}
+        assert plugin._servers == []
+        assert _owner_tasks() == []
+
+    async def test_config_errors_are_not_retried(
+        self, pm, kernel_clock, sdk, caplog, monkeypatch
+    ):
+        """R6: config-error servers are skipped once, naming the key to fix."""
+        clock, _ = kernel_clock
+        monkeypatch.delenv("NOPE_TOKEN", raising=False)
+        config = {"mcp": {"servers": {
+            "down": {"transport": "stdio", "command": "down"},
+            "hdr": {"transport": "sse", "url": "http://x",
+                    "headers": {"Authorization": "Bearer ${NOPE_TOKEN}"}},
+            "badtransport": {"transport": "carrier-pigeon", "command": "badtransport"},
+            "nocommand": {"transport": "stdio"},
+            "badtimeout": {"transport": "stdio", "command": "badtimeout",
+                           "connect_timeout_seconds": -1},
+        }}}
+        with caplog.at_level(logging.WARNING, logger="corvidae.mcp_client"):
+            plugin, _ = await _start_plugin(pm, config)
+        try:
+            assert list(plugin._pending_servers) == ["down"]
+            texts = [r.getMessage() for r in caplog.records
+                     if r.levelno == logging.WARNING]
+            for server, key in [
+                ("hdr", "NOPE_TOKEN"),
+                ("badtransport", "transport"),
+                ("nocommand", "command"),
+                ("badtimeout", "connect_timeout_seconds"),
+            ]:
+                hits = [t for t in texts if server in t and key in t]
+                assert len(hits) == 1, (server, key, texts)
+
+            sdk.attempts.clear()
+            await clock.advance(10)
+            assert {n for _, n in sdk.attempts} == {"down"}
+        finally:
+            await plugin.on_stop()

@@ -15,6 +15,7 @@ import shutil
 import sys
 import time
 from pathlib import Path
+from fake_clock import clock_pm
 from unittest.mock import MagicMock
 
 import pytest
@@ -45,7 +46,7 @@ async def _start(servers: dict) -> McpClientPlugin:
     """Init and start a plugin with the given server configs."""
     plugin = McpClientPlugin(None)
     config = {"mcp": {"servers": servers}}
-    await plugin.on_init(pm=MagicMock(), config=config)
+    await plugin.on_init(pm=clock_pm(), config=config)
     try:
         await plugin.on_start(config=config)
     except BaseException:
@@ -130,16 +131,17 @@ class TestConnectTimeout:
 class TestConnectTimeoutValidation:
     async def test_non_positive_connect_timeout_skips_server(self, caplog):
         """connect_timeout_seconds must be positive: 0 is a config error, so
-        the server is skipped with the usual failed-to-connect warning."""
+        the server is skipped once, naming the key to fix, and never retried."""
         caplog.set_level(logging.WARNING, logger="corvidae.mcp_client")
         plugin = await _start({"bad": _hung_server(0)})
         try:
             assert plugin._servers == []
             assert any(
-                "failed to connect" in r.getMessage() and r.exc_info
-                and "must be positive" in str(r.exc_info[1])
+                "must be positive" in r.getMessage()
+                and "connect_timeout_seconds" in r.getMessage()
                 for r in caplog.records
             )
+            assert plugin._pending_servers == {}
         finally:
             await plugin.on_stop()
 
@@ -156,3 +158,25 @@ class TestRealServer:
             assert await tool.fn(text="hi there") == "hi there"
         finally:
             await plugin.on_stop()
+
+
+async def test_all_down_stdio_server_recovers_in_background(pm, kernel_clock, tmp_path):
+    """#107 end to end: a real stdio server whose script appears after
+    startup is connected by the retry loop, with no tool call."""
+    clock, _ = kernel_clock
+    cfg = {"transport": "stdio", "command": sys.executable,
+           "args": [str(tmp_path / "missing_server.py")]}
+    config = {"mcp": {"servers": {"echo": cfg}}}
+    plugin = McpClientPlugin(None)
+    await plugin.on_init(pm=pm, config=config)
+    await plugin.on_start(config=config)
+    try:
+        assert plugin._servers == []
+        assert "echo" in plugin._pending_servers
+        # The script now exists: the pending config points at the real server.
+        cfg["args"] = [str(ECHO_SERVER)]
+        await clock.advance(10)
+        assert [s.name for s in plugin._servers] == ["echo"]
+        assert [t.name for t in plugin._cached_tools] == ["echo__echo"]
+    finally:
+        await plugin.on_stop()

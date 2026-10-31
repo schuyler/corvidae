@@ -10,6 +10,7 @@ mocks.
 
 import asyncio
 import logging
+from fake_clock import clock_pm
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -22,7 +23,7 @@ async def _start(servers: dict) -> McpClientPlugin:
     """Init and start a plugin with the given server configs."""
     plugin = McpClientPlugin(None)
     config = {"mcp": {"servers": servers}}
-    await plugin.on_init(pm=MagicMock(), config=config)
+    await plugin.on_init(pm=clock_pm(), config=config)
     await plugin.on_start(config=config)
     return plugin
 
