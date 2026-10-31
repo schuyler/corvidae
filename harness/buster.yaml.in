@@ -58,6 +58,15 @@ irc:
   port: 6667
   nick: buster
   tls: false
+  # IRC is default-deny (#77): only these nicks may drive Buster. ngircd has no
+  # services, so entries match the nick. busterd is the probe driver
+  # (harness/driver.py derive_driver_nick); chat and s-compact are the nicks
+  # session_driver.py derives from those channels. Add your own nick here to
+  # talk to Buster in #chat from an IRC client.
+  allow:
+    - busterd
+    - chat
+    - s-compact
   channels:
     - "#p-smoke"
     - "#p-toolloop"

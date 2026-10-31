@@ -131,6 +131,9 @@ agent:
 #   nick: sherman                      # bot nickname
 #   tls: false                         # use TLS (set port to 6697 with tls: true)
 #   message_chunk_size: 400            # max UTF-8 bytes per outbound message
+#   allow: ["alice"]                   # REQUIRED: senders who may drive the agent (default-deny).
+#                                      # Where the network reports services accounts this matches
+#                                      # the account, not the nick; otherwise the nick.
 #   channels:                          # channels to auto-join
 #     - "#general"
 #     - "#random"
