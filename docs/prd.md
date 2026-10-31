@@ -121,8 +121,11 @@ one is a bug even if its tests pass.
    consolidation strength. Epistemic checks stay independent of the
    appraisal scores: the provenance check fires on any claim about the past
    and is judged against records, never on generator confidence. Thresholds
-   ship as commented best guesses, are tuned from the outcome log, and are
-   never auto-fitted in a closed loop.
+   ship as commented best guesses and are tuned from the outcome log.
+   Fitting them in a closed loop, with the agent applying what the
+   outcome log suggests, is a capability the framework can permit
+   (principle 15); building it waits until the harness can measure
+   whether it helps.
 
 8. **Local-first: one process, one machine, one SQLite file.** No message
    broker, no worker pool, no workflow engine. The database runs in WAL
@@ -147,13 +150,12 @@ one is a bug even if its tests pass.
    rather than draw a trust boundary, and stay fixed, among them: web auth
    cannot be turned off (§3.2 Web), `redact` is never a tool (§3.7
    Memory 8), and `set_settings` can't lift a lock or change the lock
-   list (§3.5.6). What the agent may change about itself is not a floor: the
-   system prompt and the static keys of §3.8.4 and §3.11.4 (fork
-   instructions and caps among them) are locked by default, and operator
-   config can unlock each one (principle 15). The model's authority is unbounded and
-   unsandboxed by decision; `docs/threat-model.md` is the standing record
-   of what that costs and is updated whenever untrusted text can reach
-   somewhere new or a tool can do something new.
+   list (§3.5.6). What the agent may change about itself is not a floor:
+   every restriction on it is a lock the operator can lift (principle
+   15). The model's authority is unbounded and unsandboxed by decision;
+   `docs/threat-model.md` is the standing record of what that costs and
+   is updated whenever untrusted text can reach somewhere new or a tool
+   can do something new.
 
 10. **Channel ids are persistence keys and never derive from names.**
     `transport:scope` keys `sessions.db`, the JSONL logs, memory
@@ -207,19 +209,27 @@ one is a bug even if its tests pass.
 15. **The agent can modify itself; the operator decides how far.** The
     capacity to self-modify and self-improve is a design goal. The
     framework can let the agent change, at runtime and through its own
-    tools, its prompts (the system prompt, background-stage and fork
-    instructions, the critic's and appraiser's prompts), its tunables and
-    its caps. No deployment is required to allow any of it.
-    A restriction on self-modification is a mechanism the framework
-    supports and a deployment configures, never a prohibition in the
-    architecture: the shipped defaults lock some keys (§3.5.6, §3.8.4,
-    §3.11.4), the operator can lock more, and operator config can unlock
-    any of them. Unlocking widens what the agent may change about itself;
-    it never opens the request body (§3.5.6) or the floors of principle 9.
-    A change to the head of the window (the system prompt) takes effect
-    at the channel's next compaction boundary or conversation start, not
-    mid-window (§3.3 8; principle 2). What
-    unlocking each key costs is recorded in `docs/threat-model.md`
+    tools:
+    - its prompts: the system prompt, every background stage's fork and
+      standalone instructions, and the critic's and appraiser's prompts;
+    - its skills (§3.7 Trust);
+    - its model and inference parameters, `model` included (§3.5.6);
+    - its tunables, caps and thresholds, including fitting thresholds
+      from the outcome log in a closed loop (principle 7);
+    - its tool set (§3.5.2).
+
+    No deployment is required to allow any of it. Every restriction on
+    self-modification is a lock: a mechanism the framework supports and
+    the operator configures, never a prohibition in the architecture.
+    Operator config can lift any lock. The floors of principle 9 are not
+    self-modification and stay fixed, and the conversation log stays
+    append-only (principle 4). Each capability has a route that keeps the
+    agent loop consistent. A request-body override carries model
+    parameters, never the loop's own `messages`, `tools`, `tool_choice`
+    or `stream` (§3.5.6). A change to the head of the window (the system
+    prompt, the tool set) takes effect at the channel's next compaction
+    boundary or conversation start, not mid-window (§3.3 8; principle 2).
+    What each unlock costs is recorded in `docs/threat-model.md`
     (principle 9).
 
 ## 3. Requirements
@@ -509,8 +519,8 @@ Per transport:
 8. The system prompt is a string or a list of file paths concatenated
    with blank lines, resolved against the config directory once per
    conversation, and again at a compaction boundary when an unlocked
-   runtime override changed it (principle 15). It is the head of the window, so principle 2 governs it:
-   nothing mutates it per turn. Plugin-contributed sections (the skills
+   runtime override changed it (principle 15). It is the head of the
+   window, so principle 2 governs it: nothing mutates it per turn. Plugin-contributed sections (the skills
    index, the self-model) are re-resolved only at a compaction boundary or
    when a conversation starts, because compaction already rebuilds the KV
    cache for everything after the system prompt; or appended to the
@@ -574,9 +584,12 @@ Per transport:
    `channels.<id>.tools.disabled` narrows one channel further: its
    schemas are resolved at conversation start and compaction (principle
    2), forks share them, dispatch refuses the disabled tools, and
-   subagents inherit the narrowed set. The
-   running Agent picks up registry changes (a reconnected MCP server) on
-   its next turn without rebuilding schemas when nothing changed.
+   subagents inherit the narrowed set. Where the operator allows it,
+   the agent can change its own tool set (principle 15); the change takes
+   effect at the same boundaries, and dispatch follows the same resolved
+   set. The running Agent picks up registry changes (a reconnected MCP
+   server) on its next turn without rebuilding schemas when nothing
+   changed.
 3. Tools run unsandboxed as the daemon user. The dangerous ones (`shell`,
    `read_file`, `write_file`, `task_pipeline`, `subagent`) are opt-in;
    the file tools are rooted in a configured directory when on;
@@ -593,18 +606,21 @@ Per transport:
    on a machine the operator does not own; the ACP `ToolBackend` seam is
    where it attaches.
 6. `set_settings` lets the model adjust, per channel and in memory only:
-   inference keys from an allowlist (`temperature`, `top_p`, `top_k`, the
-   penalties, `max_tokens`, `seed`), the framework keys (`max_turns`,
-   `max_context_tokens`, `reasoning_history`, validated), and dotted plugin
-   tunables. Nothing else reaches the request body, whatever the config:
-   `messages`, `model`, `tools` and the other non-inference keys stay out.
-   The persona may tune its own gates by default, with the documented
-   recommended blocklist for channels with untrusted participants;
-   `agent.immutable_settings` locks more. `system_prompt` and the
-   unlockable static keys (§3.8.4, §3.11.4) are locked by default, and operator config can
-   unlock each one (principle 15). An unlocked `system_prompt` change
-   takes effect at the channel's next compaction boundary or conversation
-   start, as plugin sections do (§3.3 8; principle 2). `set_settings` can't change the lock list itself.
+   model and inference parameters (`model` and `logprobs` among them),
+   which go into the request body; the framework keys (`max_turns`,
+   `max_context_tokens`, `reasoning_history`, validated); and dotted
+   plugin tunables. The request-body keys the agent loop builds itself
+   (`messages`, `tools`, `tool_choice`, `stream`) are never overridden:
+   an override there would replace the loop's work on every turn rather
+   than change the agent. The agent changes its tool set through §3.5.2
+   instead. The persona may tune its own gates by default, with the
+   documented recommended locks for channels with untrusted
+   participants. `agent.immutable_settings` and the other locks narrow
+   what the agent may set, and operator config can lift any of them,
+   `system_prompt` included (principle 15). An unlocked `system_prompt`
+   change takes effect at the channel's next compaction boundary or
+   conversation start, as plugin sections do (§3.3 8; principle 2).
+   `set_settings` can't lift a lock or change the lock list itself.
 7. `subagent` launches a background agent on the shared `background`
    client with the calling channel's tool set minus itself and a persona-neutral
    prompt; it returns a task id at once and its result arrives as a
@@ -644,9 +660,10 @@ Per transport:
 3. `resolve_llm_error` turns a failure into a reply that names the status,
    an actionable hint, and the endpoint, and defers to the generic message
    otherwise.
-4. Logprobs are requested when `agent.request_logprobs` is on (operator
-   only), surfaced on the turn result and to `on_agent_response`, and
-   never faked for providers that return none.
+4. Logprobs are requested when `agent.request_logprobs` is on (an
+   operator key the operator can unlock, §3.11.4), surfaced on the turn
+   result and to `on_agent_response`, and never faked for providers that
+   return none.
 5. No streaming until a core change is planned for it; the web transport
    states the reason.
 
@@ -809,7 +826,8 @@ deciding only what to newly append and in what order.
 4. The engagement gate runs in shadow mode (compute, record, pass
    everything) unless `gate.engagement.enforce` is set; enforcing is the
    operator's choice, made after calibrating offline against logged
-   traffic, never by live exploration. The decide gate withholds a
+   traffic; fitting it live is the closed-loop capability of principle 7,
+   which the operator can permit (principle 15). The decide gate withholds a
    task-origin final that adds nothing; no gate withholds a direct user
    reply by default.
 5. The agent itself may decline any turn, a direct user turn included,
@@ -829,8 +847,10 @@ by every writer with a single-statement atomic merge. Rejected messages
 keep their row with a null rowid.
 
 **Calibration and corrections.** `corvidae calibrate` reports rates per
-gate from the outcome log and suggests threshold changes; it never writes
-them. A user correction in conversation ("no, I told you X") produces a
+gate from the outcome log and suggests threshold changes; the command
+itself never writes them. Closed-loop fitting, where the agent applies
+the changes, is a capability the framework can permit (principles 7 and
+15). A user correction in conversation ("no, I told you X") produces a
 `correction_log` row, and `corvidae corrections export` emits a curatable
 fixture for the retrieval eval set.
 
@@ -892,8 +912,9 @@ on one theme, and skill-directory writes, and acts through the gates plus
 operator notification. Skills are a
 directory of name, description, instructions and resources, indexed in the
 stable prompt region, loaded by a `use_skill` tool, protected by bundled
-copies, and writable by the agent only behind operator confirmation or a
-trust gate.
+copies, and writable by the agent. Operator confirmation or a trust gate
+on skill writes is a lock the operator can apply (principle 15); the idle
+scan watches skill-directory writes either way.
 
 **Interoception and the self-model.** The system computes rich state about
 itself (retrieval profile, appraisal vector, output entropy, window fill)
@@ -959,13 +980,13 @@ design: `docs/design.md`, Forks. The requirements are outcomes:
    window rather than rebuilding it, leaves the main window's cached prefix
    intact, and keeps its slot time short (principles 2 and 3).
 4. Each background stage's reasoning and reply are capped per stage, and
-   its instructions are static config. By default operator config is
-   applied after runtime overrides, so `set_settings` can neither lift the
-   caps nor rewrite the instructions; operator config can unlock either
-   (principle 15), and the threat model records the cost (principle 9).
-   The window at the compaction threshold, plus a stage's instruction and
-   both caps, fits the context whichever layer set them, so a stage just
-   short of compaction still runs. Each call is
+   its instructions are static config. Operator config is applied after
+   runtime overrides, so `set_settings` can neither lift the caps nor
+   rewrite the instructions unless operator config unlocks them
+   (principle 15); the threat model records the cost (principle 9). The
+   window at the compaction threshold, plus a stage's instruction and both
+   caps, fits the context whichever layer set them, so a stage just short
+   of compaction still runs. Each call is
    attributed in `usage_log` by stage and `mode = fork | standalone`
    (principle 11).
 5. A background stage that can't run skips and logs a warning naming the
@@ -1036,18 +1057,18 @@ design: `docs/design.md`, Forks. The requirements are outcomes:
 2. Resolution order for channel settings: built-in defaults, agent-level
    YAML, transport-wide YAML (an entry covering every channel whose id
    starts with a given prefix; less specific before more specific),
-   per-channel YAML keyed by channel id, runtime overrides. A channel's disabled tools are the
-   union of every layer, so a layer can narrow but never re-enable.
+   per-channel YAML keyed by channel id, runtime overrides. A channel's
+   disabled tools are the union of every config layer, so a config layer
+   can narrow but never re-enable. The agent widens its own tool set only
+   as far as the operator has unlocked it (§3.5.2, principle 15).
 3. `agent.yaml` is hot-reloaded on mtime change with per-plugin error
    isolation; the configuration doc states which keys apply live and which
    need a restart; a malformed reload changes nothing.
 4. Dotted tunables resolve at decision time through override, then live
    config, then default; they never reach the request body. Static keys
-   (fork prompts, fork output caps, `mid_conversation_system_role`) are
-   set by the operator and locked against the agent by default; operator
-   config can unlock each one (principle 15). `request_logprobs` stays
-   operator-only: it adds `logprobs` to the request body (§3.5.6), and it
-   is a calibration switch, not self-modification.
+   (fork prompts, fork output caps, `request_logprobs`,
+   `mid_conversation_system_role`) are set by the operator and locked
+   against the agent unless operator config unlocks them (principle 15).
 5. Prompts under `prompts/` are documentation copies cited by path; no
    code loads them. Persona is prompt material, never architecture.
 6. Subcommands: `serve`, `cli`, `acp`, `scaffold`, `redact`, `calibrate`,
@@ -1143,9 +1164,9 @@ record that holds the reasoning.
 | Origin is stamped and propagated, never inferred; critique eligibility by origin | §3.3 |
 | Silent tasks require no `tool_call_id` | §2.3 |
 | Persona may tune its own gates; `immutable_settings` is the valve | operator directive 2, 2026-07-06 |
-| Self-modification is a design goal: the framework supports every lock, defaults lock some, and the operator can unlock any of them; locks are never architecture | principle 15; operator directive, 2026-10-31 |
-| Best-guess defaults first; thresholds fit from experience; no closed-loop auto-fit | operator directives 1, 3 |
-| Engagement gate calibrates offline only | §3.2 |
+| Self-modification is a design goal: every restriction on it is a lock the framework supports and the operator can lift, never architecture; the principle 9 floors and the append-only log stay fixed | principle 15; operator directive, 2026-10-31 |
+| Best-guess defaults first; thresholds fit from experience; closed-loop fitting is a capability the operator can permit, built once the harness can measure it | principle 7; operator directives 1, 3 |
+| Engagement gate calibrates offline unless the operator permits live fitting | §3.7; principle 15 |
 | Hedging vocabulary is persona, not architecture | §5.9 |
 | The heartbeat starts on system idle, not on a schedule, and acts only when warranted; sleep is durable | §5.8; #134 |
 | Idle-triggered work may carry a latency bound: the quiet it needs decays with waiting, so traffic can't starve it | #214 |
