@@ -500,20 +500,32 @@ class TestRedactCorruptRows:
         await db.close()
 
     async def test_cli_message_form_succeeds_and_skips_fts_check(
-        self, tmp_path, value_sql, params
+        self, tmp_path, caplog, value_sql, params
     ):
         """`redact message <corrupt id>` exits 0 and reports the FTS check skipped."""
         from click.testing import CliRunner
 
         db, (_before, corrupt, _after) = await _corrupt_db(tmp_path, value_sql, params)
         await db.close()
-        result = await asyncio.to_thread(
-            CliRunner().invoke, redact_command,
-            ["--db", str(tmp_path / "c.db"), "message", str(corrupt)],
-        )
+        with caplog.at_level(logging.WARNING):
+            result = await asyncio.to_thread(
+                CliRunner().invoke, redact_command,
+                ["--db", str(tmp_path / "c.db"), "message", str(corrupt)],
+            )
         assert result.exit_code == 0, result.output
         assert "Redacted 1 of 1" in result.output
-        assert "no sample token" in result.output
+        assert (
+            "FTS check skipped: no sample token (row empty or corrupt)"
+            in result.output
+        )
+        # Redact wording names the row and channel and says it is tombstoned,
+        # without the daemon's "inspect or redact" advice or a traceback
+        warnings = skip_warnings(caplog, corrupt, "irc:#a")
+        assert warnings
+        assert all("tombstoning it as role 'unknown'" in w for w in warnings)
+        assert not any("inspect or redact" in w for w in warnings)
+        assert all(r.exc_info is None for r in caplog.records)
+        assert "Traceback" not in caplog.text
 
     def test_extract_sample_token_is_none_for_corrupt_row(
         self, value_sql, params

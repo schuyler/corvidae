@@ -86,6 +86,7 @@ def decode_message_row(
     channel_id: str,
     *,
     consequence: str = "the rest of the history still loads",
+    redacting: bool = False,
 ) -> dict | None:
     """Decode one ``message_log.message`` value, or None if it is corrupt.
 
@@ -96,11 +97,21 @@ def decode_message_row(
     arrays raise RecursionError. A value that is not a JSON object is corrupt
     too. A corrupt row logs one WARNING naming the row id and channel (never
     the row's bytes) and says what happens next via ``consequence``.
+    ``redacting=True`` is for the redact tool, where corruption is expected and
+    handled: the warning says the row is being tombstoned and carries no
+    traceback or "inspect or redact" advice.
     """
     # Decode the JSON payload
     try:
         msg = json.loads(raw)
     except (ValueError, RecursionError):
+        # Redact path: plain wording, no traceback
+        if redacting:
+            logger.warning(
+                "row %s for channel %s is corrupt; tombstoning it as role "
+                "'unknown'", row_id, channel_id,
+            )
+            return None
         logger.warning(
             "skipping unparseable message row %s for channel %s; %s — "
             "inspect or redact the row",
@@ -109,6 +120,14 @@ def decode_message_row(
         return None
     # Only a JSON object can carry the role/content keys and window tags
     if not isinstance(msg, dict):
+        # Redact path: plain wording
+        if redacting:
+            logger.warning(
+                "row %s for channel %s is corrupt (decoded to %s, not an "
+                "object); tombstoning it as role 'unknown'",
+                row_id, channel_id, type(msg).__name__,
+            )
+            return None
         logger.warning(
             "skipping message row %s for channel %s: decoded to %s, "
             "not an object; %s — inspect or redact the row",

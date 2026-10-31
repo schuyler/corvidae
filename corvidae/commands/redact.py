@@ -66,7 +66,7 @@ def _make_tombstone_message(
     """
     msg = decode_message_row(
         row_id, msg_json, channel_id,
-        consequence="redact tombstones it as role 'unknown'",
+        redacting=True,
     )
     role = msg.get("role", "unknown") if msg is not None else "unknown"
     result: dict = {"role": role}
@@ -599,7 +599,7 @@ def _message_cmd(ctx, ids):
                 if sample_token:
                     click.echo(await _verify_fts_clean(conn, sample_token))
                 else:
-                    click.echo("verified: no sample token extracted (short/empty content)")
+                    click.echo("FTS check skipped: no sample token (row empty or corrupt)")
         finally:
             await conn.close()
 
@@ -653,7 +653,7 @@ def _memory_cmd(ctx, memory_id):
                 if sample_token:
                     click.echo(await _verify_fts_clean(conn, sample_token))
                 else:
-                    click.echo("verified: no sample token extracted (short/empty content)")
+                    click.echo("FTS check skipped: no sample token (row empty or corrupt)")
         finally:
             await conn.close()
 
@@ -708,7 +708,7 @@ def _range_cmd(ctx, start_id, end_id):
                 if sample_token:
                     click.echo(await _verify_fts_clean(conn, sample_token))
                 else:
-                    click.echo("verified: no sample token extracted (short/empty content)")
+                    click.echo("FTS check skipped: no sample token (row empty or corrupt)")
         finally:
             await conn.close()
 
