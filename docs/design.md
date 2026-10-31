@@ -549,8 +549,11 @@ update the DB boundary.
 ### Append-only log
 
 Conversation history is irreplaceable and must never be deleted. The
-`message_log` table in `PersistencePlugin` is strictly append-only — no
-rows are ever deleted or updated. The DB is a complete audit log
+`message_log` table in `PersistencePlugin` is append-only — no rows are
+ever deleted, and their order is never rewritten. The one sanctioned
+mutation is the operator-only `corvidae redact` tombstone (see
+[Operator redaction](#operator-redaction-corvidae-redact)), which rewrites a
+row's `message` in place but keeps the row. The DB is a complete audit log
 including `reasoning_content`. This invariant applies to all persistence
 paths: SQLite, JSONL, and any future storage backends.
 
