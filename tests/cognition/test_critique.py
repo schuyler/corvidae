@@ -1138,6 +1138,7 @@ async def _real_path_env(tmp_path, replies, past_claims):
     client = MagicMock()
     client.chat = AsyncMock(side_effect=[_make_text_response(r) for r in replies])
     agent._client = client
+    agent._mark_started()
     return SimpleNamespace(
         agent=agent, channel=channel, db=db, critic=critic, gathered=gathered,
         plugins=plugins, forks=forks,

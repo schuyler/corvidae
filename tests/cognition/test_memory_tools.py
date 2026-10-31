@@ -42,6 +42,7 @@ from corvidae.hooks import create_plugin_manager
 from corvidae.llm_plugin import LLMPlugin
 from corvidae_cognition.memory import MemoryPlugin
 from corvidae.persistence import PersistencePlugin, init_db
+from helpers import CORRUPT_MESSAGES, insert_raw_message, skip_warnings
 
 
 DIMS = 32
@@ -1292,4 +1293,68 @@ class TestRecallRawUnsent:
 
         assert "assistant (withheld, not sent): kept quiet" in result
         assert "\nassistant: kept quiet" not in result
+        await db.close()
+
+
+# ---------------------------------------------------------------------------
+# Corrupt message_log rows (#232)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(("value_sql", "params"), CORRUPT_MESSAGES)
+class TestCorruptRows:
+
+    async def test_recall_raw_skips_corrupt_row_with_warning(
+        self, caplog, value_sql, params
+    ):
+        """recall_raw returns the valid rows in order and warns about the corrupt one."""
+        memory, memory_tools, db = await build_tools_env()
+        channel = Channel(transport="irc", scope="#electronics")
+        first = await seed_message_log_row(db, channel.id, "user", "alpha question")
+        corrupt = await insert_raw_message(
+            db, channel.id, value_sql, params, drop_fts_trigger=True
+        )
+        last = await seed_message_log_row(db, channel.id, "assistant", "omega answer")
+        mid = await seed_memory(
+            db, channel.id, "kestrel summary", msg_id_start=first, msg_id_end=last
+        )
+
+        with caplog.at_level(logging.WARNING):
+            result = await get_tools(memory_tools)["recall_raw"](
+                mid, _ctx=make_ctx(channel)
+            )
+
+        assert result.index("user: alpha question") < result.index(
+            "assistant: omega answer"
+        )
+        skips = skip_warnings(caplog, corrupt, channel.id)
+        assert skips, [r.getMessage() for r in caplog.records]
+        assert any("inspect or redact the row" in w for w in skips), skips
+        await db.close()
+
+    async def test_fts_backfill_indexes_valid_rows_and_corrupt_as_empty(
+        self, caplog, value_sql, params
+    ):
+        """A corrupt row doesn't abandon the backfill; it is indexed as empty text."""
+        memory, _tools, db = await build_tools_env()
+        channel_id = "irc:#electronics"
+        first = await seed_message_log_row(db, channel_id, "user", "zebra unique")
+        corrupt = await insert_raw_message(
+            db, channel_id, value_sql, params, drop_fts_trigger=True
+        )
+        last = await seed_message_log_row(db, channel_id, "user", "quokka unique")
+        # Forget the index so the backfill has all three rows to do
+        await db.execute("DELETE FROM message_fts")
+        await db.commit()
+
+        with caplog.at_level(logging.WARNING):
+            await memory._backfill_message_fts()
+
+        async with db.execute(
+            "SELECT rowid, content_text FROM message_fts ORDER BY rowid"
+        ) as cursor:
+            indexed = await cursor.fetchall()
+        assert indexed == [(first, "zebra unique"), (corrupt, ""), (last, "quokka unique")]
+        assert skip_warnings(caplog, corrupt, channel_id)
+        assert not [r for r in caplog.records if "backfill failed" in r.getMessage()]
         await db.close()

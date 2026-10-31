@@ -722,8 +722,15 @@ finish in time is logged as unavailable (`MCP server connect timed out`), its
 subprocess is terminated at once, and the daemon starts with the remaining
 servers. MCP servers connect one after another during startup, so the worst
 case adds the sum of the configured bounds to startup time. A server that
-failed at startup is retried lazily on the next MCP tool call. The `mcp`
-section itself is not hot-reloaded.
+failed to connect at startup is retried in the background on the transports'
+backoff ladder (10 s, doubling to 300 s, reset when a retry succeeds), with no
+tool call needed, so a daemon whose servers were all down recovers without a
+restart; each failed retry logs a WARNING naming the server, the error and the
+next delay. An MCP tool call also retries pending servers as a fast path,
+unless a retry is already running. A server skipped for a config error (unknown
+`transport`, missing `command`/`url`, non-positive `connect_timeout_seconds`,
+unset `${VAR}` in `headers`) is never retried: fix the config and restart. The
+`mcp` section itself is not hot-reloaded.
 
 ---
 

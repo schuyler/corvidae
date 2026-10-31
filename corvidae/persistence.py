@@ -80,6 +80,89 @@ def _strip_internal_keys(message: dict) -> dict:
     return {k: v for k, v in message.items() if not k.startswith("_")}
 
 
+def decode_message_row(
+    row_id: int,
+    raw: bytes | str,
+    channel_id: str,
+    *,
+    consequence: str = "the rest of the history still loads",
+    redacting: bool = False,
+) -> dict | None:
+    """Decode one ``message_log.message`` value, or None if it is corrupt.
+
+    The single decoder every reader of the column shares. ``raw`` is the value
+    selected as ``CAST(message AS BLOB)`` so invalid UTF-8 fails here, where it
+    can be caught, rather than inside the sqlite3 fetch. ValueError covers
+    JSONDecodeError, UnicodeDecodeError and the int digit limit; deeply nested
+    arrays raise RecursionError. A value that is not a JSON object is corrupt
+    too. A corrupt row logs one WARNING naming the row id and channel (never
+    the row's bytes) and says what happens next via ``consequence``.
+    ``redacting=True`` is for the redact tool, where corruption is expected and
+    handled: the warning says the row is being tombstoned and carries no
+    traceback or "inspect or redact" advice.
+    """
+    # Decode the JSON payload
+    try:
+        msg = json.loads(raw)
+    except (ValueError, RecursionError):
+        # Redact path: plain wording, no traceback
+        if redacting:
+            logger.warning(
+                "row %s for channel %s is corrupt; tombstoning it as role "
+                "'unknown'", row_id, channel_id,
+            )
+            return None
+        logger.warning(
+            "skipping unparseable message row %s for channel %s; %s — "
+            "inspect or redact the row",
+            row_id, channel_id, consequence, exc_info=True,
+        )
+        return None
+    # Only a JSON object can carry the role/content keys and window tags
+    if not isinstance(msg, dict):
+        # Redact path: plain wording
+        if redacting:
+            logger.warning(
+                "row %s for channel %s is corrupt (decoded to %s, not an "
+                "object); tombstoning it as role 'unknown'",
+                row_id, channel_id, type(msg).__name__,
+            )
+            return None
+        logger.warning(
+            "skipping message row %s for channel %s: decoded to %s, "
+            "not an object; %s — inspect or redact the row",
+            row_id, channel_id, type(msg).__name__, consequence,
+        )
+        return None
+    return msg
+
+
+def parse_message_type(
+    row_id: int,
+    value: str,
+    channel_id: str,
+    *,
+    consequence: str = "the rest of the history still loads",
+):
+    """Map a stored message_type string onto MessageType, or None if unknown.
+
+    An unknown value logs one WARNING naming the row, channel, the rejected
+    value and the accepted ones; the caller skips (or treats as non-dialog)
+    the row.
+    """
+    from corvidae.context import MessageType
+    try:
+        return MessageType(value)
+    except ValueError:
+        accepted = ", ".join(t.value for t in MessageType)
+        logger.warning(
+            "skipping message row %s for channel %s: unknown message_type "
+            "%r (accepted: %s); %s — inspect or correct the row",
+            row_id, channel_id, value, accepted, consequence,
+        )
+        return None
+
+
 def _parse_message_rows(rows: list[tuple], channel_id: str) -> list[dict]:
     """Parse (id, message_bytes, message_type) rows into tagged message dicts.
 
@@ -87,46 +170,17 @@ def _parse_message_rows(rows: list[tuple], channel_id: str) -> list[dict]:
     threading that consolidation depends on (bootstrap-mapping §4.8).
 
     One corrupt record must not abort the whole conversation load, so a row
-    that fails to decode is skipped with a warning naming it and the channel.
-    The message arrives as bytes (the queries cast it to BLOB) so invalid
-    UTF-8 fails here rather than inside the sqlite3 fetch. ValueError covers
-    JSONDecodeError, UnicodeDecodeError and the int digit limit; deeply nested
-    arrays raise RecursionError. A value that is not a JSON object, or a
-    message_type outside MessageType, is corrupt too.
+    that fails to decode, or has a message_type outside MessageType, is
+    skipped with a warning naming it and the channel.
     """
-    from corvidae.context import MessageType
     result = []
     for row in rows:
-        # Decode the JSON payload
-        try:
-            msg = json.loads(row[1])
-        except (ValueError, RecursionError):
-            logger.warning(
-                "skipping unparseable message row %s for channel %s; the rest "
-                "of the history still loads — inspect or redact the row",
-                row[0], channel_id, exc_info=True,
-            )
-            continue
-        # Only a JSON object can carry the role/content keys and window tags
-        if not isinstance(msg, dict):
-            logger.warning(
-                "skipping message row %s for channel %s: decoded to %s, "
-                "not an object; the rest of the history still loads — "
-                "inspect or redact the row",
-                row[0], channel_id, type(msg).__name__,
-            )
+        msg = decode_message_row(row[0], row[1], channel_id)
+        if msg is None:
             continue
         # Map the stored type string back onto the enum
-        try:
-            message_type = MessageType(row[2])
-        except ValueError:
-            accepted = ", ".join(t.value for t in MessageType)
-            logger.warning(
-                "skipping message row %s for channel %s: unknown message_type "
-                "%r (accepted: %s); the rest of the history still loads — "
-                "inspect or correct the row",
-                row[0], channel_id, row[2], accepted,
-            )
+        message_type = parse_message_type(row[0], row[2], channel_id)
+        if message_type is None:
             continue
         msg["_message_type"] = message_type
         msg["_db_id"] = row[0]

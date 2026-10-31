@@ -75,6 +75,7 @@ async def _build_stack():
     await usage_log.on_start({})
 
     plugin._client = llm.main_client
+    plugin._mark_started()
     return plugin, channel, db, llm
 
 

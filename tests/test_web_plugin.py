@@ -41,6 +41,7 @@ from unittest.mock import MagicMock
 
 import aiohttp
 import pytest
+from helpers import CORRUPT_MESSAGES, insert_raw_message, skip_warnings
 from aiohttp import web
 
 from corvidae.channel import Channel, ChannelRegistry
@@ -1255,7 +1256,7 @@ class TestOrdering:
     async def test_subscribe_survives_bad_rows(self, make_env):
         env = await make_env()
 
-        def broken(rows):
+        def broken(rows, channel_id):
             raise ValueError("odd row")
 
         env.plugin._rows_to_frames = broken
@@ -1496,6 +1497,45 @@ class TestReplay:
              "summary": "orphan"},
             {"type": "message", "text": "Final answer"},
         ]
+
+    @pytest.mark.parametrize(("value_sql", "params"), CORRUPT_MESSAGES)
+    async def test_corrupt_row_is_skipped_with_warning(
+        self, make_env, db, caplog, value_sql, params
+    ):
+        """A corrupt row among the newest rows is skipped; the rest replay (#232)."""
+        env = await make_env()
+        await _seed(db, "web:main", [
+            ({"role": "user", "content": "before"}, "message", 1.0),
+        ])
+        corrupt_id = await insert_raw_message(
+            db, "web:main", value_sql, params, ts=2.0
+        )
+        await _seed(db, "web:main", [
+            ({"role": "assistant", "content": "after"}, "message", 3.0),
+        ])
+        with caplog.at_level(logging.WARNING, logger="corvidae.persistence"):
+            items = await _history(env)
+        assert [i["text"] for i in items] == ["before", "after"]
+        skips = skip_warnings(caplog, corrupt_id, "web:main")
+        assert skips, [r.getMessage() for r in caplog.records]
+        assert any("inspect or redact the row" in w for w in skips), skips
+
+    async def test_unknown_message_type_is_skipped_with_warning(
+        self, make_env, db, caplog
+    ):
+        """A row with a message_type outside MessageType is skipped, not shown."""
+        env = await make_env()
+        await _seed(db, "web:main", [
+            ({"role": "user", "content": "before"}, "message", 1.0),
+        ])
+        bad_id = await insert_raw_message(
+            db, "web:main", "?", (json.dumps({"role": "user", "content": "x"}),),
+            message_type="bogus", ts=2.0,
+        )
+        with caplog.at_level(logging.WARNING, logger="corvidae.persistence"):
+            items = await _history(env)
+        assert [i["text"] for i in items] == ["before"]
+        assert any("'bogus'" in w for w in skip_warnings(caplog, bad_id, "web:main"))
 
     async def test_summary_divider_placed_by_timestamp(self, make_env, db):
         env = await make_env()

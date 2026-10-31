@@ -19,6 +19,7 @@ import aiohttp
 import pytest
 
 from corvidae.trace import mint_trace_id
+from corvidae.clock import Clock
 from corvidae.agent import Agent
 from corvidae.channel import Channel, ChannelConfig, ChannelRegistry
 from corvidae.compaction import CompactionPlugin
@@ -193,6 +194,7 @@ class IntegrationHarness:
 async def _build_harness(config: dict) -> IntegrationHarness:
     """Assemble the full plugin graph mirroring main.py registration order."""
     pm = create_plugin_manager()
+    pm.register(Clock(), name="clock")
 
     agent_defaults = config.get("agent", {})
     registry = ChannelRegistry(agent_defaults)
@@ -272,6 +274,7 @@ class TestGroupALifecycle:
     async def test_a1_plugin_graph_assembly_and_dependency_validation(self):
         """A1. Assemble plugin graph and validate dependencies — no RuntimeError."""
         pm = create_plugin_manager()
+        pm.register(Clock(), name="clock")
         agent_defaults = {"system_prompt": "test", "max_context_tokens": 4096}
         registry = ChannelRegistry(agent_defaults)
         pm.register(registry, name="registry")
@@ -1329,6 +1332,7 @@ class TestGroupEErrorHandling:
     async def test_e3_missing_task_plugin_degrades_gracefully(self, caplog):
         """E3. No TaskPlugin → error logged, no crash, subsequent text messages work."""
         pm = create_plugin_manager()
+        pm.register(Clock(), name="clock")
         agent_defaults = {"system_prompt": "test", "max_context_tokens": 4096}
         registry = ChannelRegistry(agent_defaults)
         pm.register(registry, name="registry")

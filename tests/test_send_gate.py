@@ -160,6 +160,7 @@ class TestFinalVeto:
         gate = SpyGate(veto={"final"})
         plugin.pm.register(gate, name="spy_gate")
         plugin._client = _client(_make_text_response("the secret answer", reasoning="the answer is 42"))
+        plugin._mark_started()
 
         await _say(plugin, channel)
 
@@ -191,6 +192,7 @@ class TestFinalVeto:
         plugin, channel, db = env
         plugin.pm.register(SpyGate(veto={"final"}), name="spy_gate")
         plugin._client = _client(_make_text_response("kept to myself"))
+        plugin._mark_started()
 
         await _say(plugin, channel)
 
@@ -209,6 +211,7 @@ class TestFinalVeto:
 
         plugin.pm.register(Accepting(), name="accepting_gate")
         plugin._client = _client(_make_text_response("the secret answer"))
+        plugin._mark_started()
 
         await _say(plugin, channel)
 
@@ -220,6 +223,7 @@ class TestFinalVeto:
         gate = SpyGate()
         plugin.pm.register(gate, name="spy_gate")
         plugin._client = _client(_make_text_response("reminder done"))
+        plugin._mark_started()
 
         await plugin.on_notify(
             channel=channel, source="scheduler", text="time to stretch",
@@ -243,6 +247,7 @@ class TestFinalVeto:
             _make_mixed_response("Let me look that up", [_make_tool_call("call-1", "my_tool", {"x": "a"})]),
             _make_text_response("Found it"),
         )
+        plugin._mark_started()
 
         await _say(plugin, channel)
         await drain_task_queue(plugin)
@@ -261,6 +266,7 @@ class TestRestart:
         plugin, channel, db = env
         plugin.pm.register(SpyGate(veto={"final"}), name="spy_gate")
         plugin._client = _client(_make_text_response("the secret answer"))
+        plugin._mark_started()
         await _say(plugin, channel)
 
         live = [{k: v for k, v in m.items() if k != "_db_id"} for m in channel.conversation.messages]
@@ -277,6 +283,7 @@ class TestRestart:
         plugin, channel, db = env
         plugin.pm.register(SpyGate(veto={"final"}), name="spy_gate")
         plugin._client = _client(_make_text_response("the secret answer"))
+        plugin._mark_started()
         await _say(plugin, channel)
 
         pm = plugin.pm
@@ -291,6 +298,7 @@ class TestRestart:
         fresh._registry = registry
         client = _client(_make_text_response("I kept it to myself."))
         fresh._client = client
+        fresh._mark_started()
         reborn = registry.get_or_create(channel.transport, channel.scope, config=ChannelConfig())
         assert reborn is not channel and reborn.conversation is None
 
@@ -324,6 +332,7 @@ class TestMaxTurns:
         plugin._client = _client(
             _make_tool_call_response([_make_tool_call("call-1", "my_tool", {"x": "a"})]),
         )
+        plugin._mark_started()
 
         await _say(plugin, channel)
         await drain_task_queue(plugin)
@@ -346,6 +355,7 @@ class TestMaxTurns:
         plugin._client = _client(
             _make_tool_call_response([_make_tool_call("call-1", "my_tool", {"x": "a"})]),
         )
+        plugin._mark_started()
 
         await _say(plugin, channel)
 
@@ -364,6 +374,7 @@ class TestMaxTurns:
         plugin._client = _client(
             _make_tool_call_response([_make_tool_call("call-1", "my_tool", {"x": "a"})]),
         )
+        plugin._mark_started()
 
         await _say(plugin, channel)
 
@@ -401,6 +412,7 @@ class TestProgressAndThinkingVetoes:
         tool_calls: list[str] = []
         _install_tool(plugin, tool_calls)
         plugin._client = _tool_turn_client()
+        plugin._mark_started()
 
         await _run_tool_turn(plugin, channel)
 
@@ -425,6 +437,7 @@ class TestProgressAndThinkingVetoes:
         plugin, channel, db = env
         plugin.pm.register(SpyGate(veto={"thinking"}), name="spy_gate")
         plugin._client = _client(_make_text_response("answer", reasoning="pondering deeply"))
+        plugin._mark_started()
 
         await _say(plugin, channel)
 
@@ -442,6 +455,7 @@ class TestProgressAndThinkingVetoes:
         plugin.pm.register(SpyGate(veto={"progress", "thinking"}), name="spy_gate")
         _install_tool(plugin, [])
         plugin._client = _tool_turn_client()
+        plugin._mark_started()
         await _run_tool_turn(plugin, channel)
 
         live = [{k: v for k, v in m.items() if k != "_db_id"} for m in channel.conversation.messages]
@@ -463,6 +477,7 @@ class TestErrorVeto:
         client = MagicMock()
         client.chat = AsyncMock(side_effect=RuntimeError("llm down"))
         plugin._client = client
+        plugin._mark_started()
 
         await _say(plugin, channel)
 
@@ -489,8 +504,10 @@ class TestFailOpen:
             client = MagicMock()
             client.chat = AsyncMock(side_effect=RuntimeError("llm down"))
             plugin._client = client
+            plugin._mark_started()
         else:
             plugin._client = _tool_turn_client()
+            plugin._mark_started()
 
         await _run_tool_turn(plugin, channel)
 
@@ -524,6 +541,7 @@ class TestNoOpinion:
             plugin.pm.register(gate, name="spy_gate")
         _install_tool(plugin, [])
         plugin._client = _tool_turn_client()
+        plugin._mark_started()
 
         await _run_tool_turn(plugin, channel)
 
@@ -551,7 +569,7 @@ class TestReplay:
             (2, json.dumps({"role": "assistant", "content": "secret"}), "unsent"),
             (3, json.dumps({"role": "system", "content": "marker"}), "context"),
         ]
-        frames = WebPlugin()._rows_to_frames(rows)
+        frames = WebPlugin()._rows_to_frames(rows, "web:t")
         assert [f.get("text") for f in frames] == ["hi"]
 
     def test_web_history_holds_back_suppressed_progress_and_thinking(self):
@@ -569,7 +587,7 @@ class TestReplay:
             (5, json.dumps({"role": "tool", "tool_call_id": "call-1", "content": "r"}), "message"),
             (6, json.dumps({"role": "assistant", "content": "Found it"}), "message"),
         ]
-        frames = WebPlugin()._rows_to_frames(rows)
+        frames = WebPlugin()._rows_to_frames(rows, "web:t")
         types = [f["type"] for f in frames]
         assert "thinking" not in types
         assert "progress" not in types

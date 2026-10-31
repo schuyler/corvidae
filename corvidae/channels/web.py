@@ -42,7 +42,8 @@ from urllib.parse import urlsplit
 from aiohttp import WSMsgType, web
 
 from corvidae.channel import Channel, ChannelRegistry
-from corvidae.context import unsent_marker_emission
+from corvidae.context import MessageType, unsent_marker_emission
+from corvidae.persistence import decode_message_row, parse_message_type
 from corvidae.trace import mint_trace_id
 from corvidae.hooks import TransportPlugin, get_dependency, hookimpl
 from corvidae.outbound import (
@@ -68,6 +69,8 @@ _COOKIE_MAX_AGE = 34_560_000  # 400 days, Chrome's cap
 _QUEUE_MAX = 1024
 _BUFFER_MAX = 512
 _HISTORY_ROWS = 200
+# The stored message_type values a history row may carry (anything else is corrupt).
+_MESSAGE_TYPES = frozenset(t.value for t in MessageType)
 _SUMMARY_CHARS = 200
 _CLOSE_TIMEOUT = 1.0
 _HANDLER_WAIT = 0.5
@@ -811,7 +814,7 @@ class WebPlugin(TransportPlugin):
         snapshot = list(self._unsent.get(channel_id, []))
         try:
             rows = await self._fetch_history_rows(channel_id)
-            items = self._rows_to_frames(rows)
+            items = self._rows_to_frames(rows, channel_id)
             items += [{"type": "user", "text": e.text, "id": e.id} for e in snapshot]
             self._enqueue(client, {
                 "type": "history", "conversation": name, "items": items,
@@ -889,7 +892,7 @@ class WebPlugin(TransportPlugin):
             return []
         try:
             async with db.execute(
-                "SELECT id, message, message_type FROM message_log "
+                "SELECT id, CAST(message AS BLOB), message_type FROM message_log "
                 "WHERE channel_id = ? ORDER BY timestamp DESC, id DESC LIMIT ?",
                 (channel_id, _HISTORY_ROWS),
             ) as cursor:
@@ -899,22 +902,31 @@ class WebPlugin(TransportPlugin):
             return []
         return list(reversed(rows))
 
-    def _rows_to_frames(self, rows: list[tuple]) -> list[dict]:
-        """Map message_log rows to the frames the live path would have sent."""
+    def _rows_to_frames(self, rows: list[tuple], channel_id: str) -> list[dict]:
+        """Map message_log rows to the frames the live path would have sent.
+
+        A corrupt row (or one with an unknown message_type) is skipped with a
+        WARNING naming the row and channel; the other rows still replay.
+        """
         frames: list[dict] = []
         tool_names: dict[str, str] = {}
         # Frames the most recent assistant row produced, so a not-sent
         # marker right after it can hold back what a gate suppressed live.
         last_assistant_frames: list[dict] = []
         for row in rows:
-            # Unparseable rows are skipped, not fatal.
-            try:
-                _rowid, raw, message_type = row
-                msg = json.loads(raw)
-            except (ValueError, TypeError):
-                logger.debug("web: skipping an unreadable history row")
+            # Corrupt rows are skipped with a warning, not fatal.
+            rowid, raw, message_type = row
+            msg = decode_message_row(
+                rowid, raw, channel_id,
+                consequence="the rest of the history still replays",
+            )
+            if msg is None:
                 continue
-            if not isinstance(msg, dict):
+            if message_type not in _MESSAGE_TYPES:
+                parse_message_type(
+                    rowid, message_type, channel_id,
+                    consequence="the rest of the history still replays",
+                )
                 continue
 
             # Summaries become dividers; injected context is never shown,

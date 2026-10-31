@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 
 from corvidae.context import MessageType
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
+from corvidae.persistence import decode_message_row, parse_message_type
 from corvidae_cognition.memory import ChannelScope, _format_age, _fts_match_query
 from corvidae.tool import Tool, tool_to_schema
 
@@ -284,7 +285,7 @@ class MemoryToolsPlugin(CorvidaePlugin):
             # the numeric range [msg_id_start, msg_id_end] contains interleaved
             # foreign-channel rows. The channel_id predicate is load-bearing.
             async with db.execute(
-                "SELECT id, message, message_type FROM message_log "
+                "SELECT id, CAST(message AS BLOB), message_type FROM message_log "
                 "WHERE channel_id = ? AND id BETWEEN ? AND ? ORDER BY id",
                 (channel_id, msg_id_start, msg_id_end),
             ) as cursor:
@@ -311,10 +312,20 @@ class MemoryToolsPlugin(CorvidaePlugin):
             used_chars = len(header)
             truncated = False
 
-            for _row_id, msg_json, message_type in msg_rows:
-                try:
-                    msg = json.loads(msg_json)
-                except Exception:
+            for row_id, msg_json, message_type in msg_rows:
+                # Skip a corrupt row or unknown type with a warning; the
+                # rest of the range still reads back.
+                msg = decode_message_row(
+                    row_id, msg_json, channel_id,
+                    consequence="the rest of the range is still returned",
+                )
+                if msg is None:
+                    continue
+                if message_type not in {t.value for t in MessageType}:
+                    parse_message_type(
+                        row_id, message_type, channel_id,
+                        consequence="the rest of the range is still returned",
+                    )
                     continue
                 role = msg.get("role", "?")
                 # A withheld response was never said; label it so the

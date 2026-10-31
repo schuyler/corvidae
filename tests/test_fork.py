@@ -221,6 +221,7 @@ async def forking_agent():
     client = MagicMock()
     client.chat = AsyncMock(return_value=_make_text_response("fork says hi"))
     plugin._client = client
+    plugin._mark_started()
     channel.conversation = _tool_window()
     yield plugin, channel, client
     await db.close()

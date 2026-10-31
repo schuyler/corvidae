@@ -669,6 +669,20 @@ friends ([MemoryPlugin](cognition.md#memoryplugin)), `exchange_log` (OutcomeLogP
 `usage_log` (UsageLogPlugin), and `schedule`
 ([SchedulerPlugin](#schedulerplugin)).
 
+**Connections to the database file.** Most plugins write on the one
+persistence connection (`PersistencePlugin.db`). The others:
+
+| Connection | Opened by | Writes |
+|---|---|---|
+| persistence (`PersistencePlugin.db`) | persistence `on_start` | `message_log`, and every other plugin's tables (scheduler, usage_log, retrieval_log, goals, ...) |
+| memory write (`MemoryPlugin._write_db`) | memory `on_start`, after its schema exists | memory records only: consolidation (`memory`, `memory_vec`, `memory_fts` via trigger, `consolidation_watermark`) and `write_record`, each one `BEGIN IMMEDIATE` transaction |
+| appraisal probe, critique probe | each plugin's `on_start` | read only (`message_fts` probes) |
+
+Only the memory write connection is isolated for atomicity: a commit on
+the persistence connection can't land inside a memory transaction, and a
+rollback there can't discard another plugin's pending row. WAL lets
+readers on the persistence connection see a committed record at once.
+
 ## Agent
 
 `agent.py` — the central plugin. Implements `on_start`, `on_message`,
@@ -694,6 +708,21 @@ calls `Agent.on_start` only afterwards, so a producer whose background
 task begins in its own `on_start` (`SchedulerPlugin`) waits for this flag
 before calling `on_notify`; otherwise the queue consumer could run before
 `Agent` has a registry and client.
+
+Inbound messages are held, not dropped (#71). A transport can deliver from
+its own `on_start`, before step 12 starts the Agent; `Agent.on_message`
+checks the trace id first (an empty one raises at once), then awaits an
+internal started event until the Agent has started (the gate is `_started`, not
+the client: a config reload can set the client earlier). Once the Agent starts,
+the held call proceeds normally: the gate, `on_message_admitted` and the
+enqueue all happen before `on_message` returns, so a transport that frees
+resources in a `finally` around `on_message` (the Signal and Discord typing
+slots) is unaffected. Held calls from one channel resume in arrival order.
+If the Agent stops before it starts (`Agent.on_stop`, or
+`Runtime._cleanup_failed_start` through `Agent.release_held_messages`),
+every held call returns without admission and logs one WARNING naming the
+channel and trace id. There is no cap on held messages: the window is
+bounded by startup.
 
 `Agent.queues` is a public `dict[str, SerialQueue]` (keyed by channel ID).
 Queues added after startup are visible to other plugins that hold a reference
@@ -988,6 +1017,19 @@ query selects `CAST(message AS BLOB)`, so invalid UTF-8 is caught while
 decoding in Python instead of raising inside the sqlite3 fetch, where the cursor
 cannot step past the row.
 
+Every other reader of `message_log.message` shares this decoder
+(`decode_message_row` and `parse_message_type` in `corvidae/persistence.py`)
+and the same `CAST(message AS BLOB)` select, and skips a corrupt row with a
+WARNING naming its row id and channel (never its bytes) and saying to inspect
+or redact the row (#232):
+
+- **Web history replay** (`_fetch_history_rows` / `_rows_to_frames`): a corrupt
+  row, or one with an unknown `message_type`, among the newest rows is skipped
+  and the other rows still replay; it no longer blanks the channel's history.
+- **Memory** (consolidation, `recall_raw`, the `message_fts` backfill): see
+  [cognition.md](cognition.md#corrupt-message_log-rows).
+- **Redact** (below): the tool that fixes a corrupt row works on it.
+
 ### persist_message
 
 Implements `persist_message` (broadcast). Called after every `conv.append()`.
@@ -1015,6 +1057,15 @@ corvidae redact --db sessions.db message <id> [<id2>...]   # specific message_lo
 corvidae redact --db sessions.db memory <memory_id>        # a record + its raw range
 corvidae redact --db sessions.db range <start_id> <end_id> # message_log id range (inclusive)
 ```
+
+A corrupt row (invalid JSON or UTF-8, JSON that is not an object, an
+oversized integer) is tombstoned like any other. Every read casts the column
+to BLOB and decodes through `decode_message_row`, so the row becomes
+`{"role": "unknown", "content": "[redacted by operator <date>]"}` (valid
+UTF-8 JSON) with a WARNING naming the row and channel, and a row that did
+decode keeps its `role`. The sample token for the verification step comes
+back `None` for a corrupt row, so the CLI reports the FTS check as skipped
+for it instead of crashing.
 
 `--dry-run` prints affected row counts without writing. Both dry-run and
 real runs count only rows that exist and were actually touched, and the
@@ -1835,14 +1886,59 @@ their tool lists, and exposes them to the agent loop via `register_tools`.
 ### Lifecycle
 
 - `on_start` — reads the `mcp.servers` config block, iterates each server, and
-  calls `_connect_server` for each. Connections are entered into an
-  `AsyncExitStack` so sessions and transports stay alive for the daemon's
-  lifetime. After all connections, calls `_build_tool_list()` and caches the
+  calls `_connect_server` for each. Each server's transport and session are
+  owned by a long-lived task (see "Owner tasks") so they stay alive for the
+  daemon's lifetime. After all connections, calls `_build_tool_list()` and caches the
   result. Connection failures per server are caught, logged as warnings, and
   skipped; a failed server does not abort startup.
 - `register_tools` — extends `tool_registry` with the cached `Tool` instances
   (sync; called after `on_start` completes).
-- `on_stop` — closes all sessions and transports via `AsyncExitStack.aclose()`.
+- `on_stop` — signals every server's owner task to close its session and
+  transport, and awaits them all together (see "Owner tasks").
+
+### Transports and failure handling
+
+A server connects over stdio, SSE or streamable HTTP, chosen by its
+`transport` key. Each server has its own exit stack and a bounded handshake
+(see "Connect timeout"), so one server's failure never touches another.
+Servers that did not connect at startup are queued in `_pending_servers` and
+retried by a background `_retry_loop` task (started in `on_start` only when
+something is pending) that sleeps on the kernel clock (`depends_on` "clock")
+through the transports' ladder: 10 s, doubling, capped at 300 s, reset after a
+round that reconnects something, exit when nothing is pending. Every MCP tool
+call also runs a retry round as a fast path. One `asyncio.Lock` serialises
+rounds, and a tool call that finds it held skips rather than wait out a
+handshake, so the loop and a tool call never connect a server twice. A
+successful retry rebuilds the cached tool list and the shared registry. Config
+errors (`McpHeaderEnvError`, `ValueError`, `KeyError` from
+`_parse_server_config`, which runs before any transport opens) are reported
+once and never queued. `on_stop` sets a stopping flag, cancels the loop, then
+stops the owners; a connect still in flight (loop or tool call) that finishes
+after the flag is set tears its owner down instead of registering it.
+
+### Owner tasks
+
+anyio requires a cancel scope to exit in the task that entered it, and
+apluggy's `gather` runs `on_start` and `on_stop` in different tasks (a shared
+`AsyncExitStack` closed from `on_stop` raised "Attempted to exit cancel scope
+in a different task", #213). So `_connect_server` starts one `_ServerOwner`
+task per server (`_run_owner`), which enters the transport, HTTP client and
+`ClientSession` on its own `AsyncExitStack`, runs the handshake under
+`asyncio.timeout`, and resolves a `ready` future with the server's state (or
+the exception). It then waits on its `stop` event and closes the stack in the
+same task. Owners live in `self._owners` (name to owner).
+
+`on_stop` sets every owner's `stop` event at once and awaits all the tasks
+together with `asyncio.wait`, bounded by `_STOP_BOUND_SECONDS` (2.5 s, inside
+Runtime's 3 s stop budget). The SDK's `stdio_client` can take about 2 s to
+terminate a process, so closing serially would blow the budget. An owner
+still running at the bound is cancelled and logged at WARNING with the server
+name and a "may need to be killed by hand" remedy. An exception while closing
+is logged by the owner at WARNING with the server, the exception type (the
+leaves of an exception group) and the traceback, and does not stop the other
+servers. A `CancelledError` delivered to `on_start` stops and awaits the
+owners already started before it propagates, and a cancelled or failed
+mid-connect owner is awaited before `_connect_server` returns.
 
 ### Tool naming
 
@@ -1882,22 +1978,25 @@ mcp:
 
 ### Connect timeout
 
-`_connect_server` opens each server's transport and session in its own
-`AsyncExitStack`, inside `asyncio.timeout(connect_timeout_seconds)`, so a
-server that never answers `initialize` cannot hold up the `on_start`
-broadcast (#72). On success the per-server stack is pushed onto the
-plugin's lifetime stack and closes with it in `on_stop`. On a timeout or any
-other failure it is closed immediately, which terminates a stdio subprocess.
-On a timeout `_connect_server` then logs it once and returns without
-registering the server; any other failure propagates to `on_start`, which
-logs and skips it. The close runs after the timeout has turned
-its cancellation into `TimeoutError`, so teardown is not itself cancelled.
+The owner task opens each server's transport and session on its own
+`AsyncExitStack`, inside `asyncio.timeout(connect_timeout_seconds)` (the
+timeout wraps the handshake inside the owner, not the `ready` wait, so
+expiry cancels the handshake itself and the subprocess dies with it). A
+server that never answers `initialize` therefore cannot hold up the
+`on_start` broadcast (#72). On success the owner keeps the stack open until
+`on_stop`. On a timeout or any other failure the owner closes it
+immediately, which terminates a stdio subprocess, and `_connect_server`
+awaits that teardown before returning. On a timeout the owner logs it once
+and `_connect_server` returns without registering the server; any other
+failure propagates to `on_start`, which logs and skips it. The close runs
+after the timeout has turned its cancellation into `TimeoutError`, so
+teardown is not itself cancelled.
 
 ### HTTP transports and headers
 
 `streamable_http` uses the SDK's `streamable_http_client` with an HTTP client
 built by `create_mcp_http_client(headers=...)`. The SDK closes only a client
-it created, so the plugin enters its client into the per-server stack, and it
+it created, so the plugin enters its client into the owner's stack, and it
 closes with the server. `sse` passes the same headers to `sse_client`.
 `_resolve_headers` replaces each `${VAR}` in a header value from
 `os.environ` before anything opens. An unset or empty variable, or one holding CR, LF or NUL (which httpx would reject with an error quoting the value), raises
@@ -2867,6 +2966,7 @@ IRCPlugin           → "registry"    (ChannelRegistry)
 WebPlugin           → "registry"    (ChannelRegistry); looks up "agent" and "persistence" lazily
 AcpPlugin           → "registry"    (ChannelRegistry)
 SubagentPlugin      → "llm", "tools"
+McpClientPlugin     → "clock"       (background reconnect loop)
 CompactionPlugin    → "llm"         (LLMPlugin); soft-uses "agent" for forks
 ThinkingPlugin      → "registry"    (ChannelRegistry)
 MemoryPlugin        → "persistence", "llm", "clock", "idle"; soft-uses "agent", "registry" for forks  (cognition extra)

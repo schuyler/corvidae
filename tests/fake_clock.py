@@ -234,3 +234,16 @@ def install_kernel_clock(
     if started:
         idle.start()
     return clock, idle
+
+
+def clock_pm():
+    """A stand-in plugin manager whose "clock" is a real Clock.
+
+    For tests that start McpClientPlugin and don't drive time; every other
+    plugin lookup returns None.
+    """
+    from unittest.mock import MagicMock
+
+    pm = MagicMock()
+    pm.get_plugin.side_effect = lambda n: Clock() if n == "clock" else None
+    return pm

@@ -92,8 +92,48 @@ scores an importance prior through the pluggable
 `MemoryPlugin.importance_prior` (default: cheap-model `RubricPrior`,
 schema-constrained to `{"importance": number}`, 0.5 on failure; `AppraisalPlugin` wraps it in `AppraisalPrior` when
 appraisal is enabled), embeds the summary via
-`llm.embedding`, and commits the memory row together with the watermark
-advance in one compare-and-set section. The row's `created_at` is the
+`llm.embedding`, and commits the memory row (with its vec row and any near-duplicate
+merge) together with the watermark advance in one compare-and-set
+section.
+
+### Corrupt `message_log` rows
+
+A corrupt row (invalid JSON, invalid UTF-8, JSON that is not an object, an
+oversized integer, or a `message_type` outside `MessageType`) never wedges
+memory (#232). Each reader selects the column as `CAST(message AS BLOB)` and
+decodes it with the kernel's `decode_message_row`, then skips the row with a
+WARNING naming the row id, the channel and the next step (inspect or redact
+the row):
+
+- **Consolidation** counts the row as non-dialog. The record is built from
+  the valid dialog, and the watermark advances past the whole range, corrupt
+  row included. A range whose only rows are corrupt advances the watermark
+  with no record and no LLM call.
+- **`recall_raw`** returns the valid rows of the range in order and omits the
+  corrupt one.
+- **The `message_fts` backfill** indexes every valid row and indexes a corrupt
+  row as empty text, so it is not retried on every start.
+
+**Write connection and atomicity (#221).** That section is one SQLite
+transaction (`BEGIN IMMEDIATE` ... `COMMIT`) on a dedicated connection
+only `MemoryPlugin` writes to, opened in `on_start` once the schema
+exists (lazily on first write when the persistence DB wasn't open yet)
+and closed in `on_stop`. It opens the same file as persistence, in the
+journal mode persistence runs in (WAL by default), with sqlite-vec loaded
+when memory uses vectors and `busy_timeout` set to
+`WRITE_BUSY_TIMEOUT_MS` (5000, a module constant). So no other plugin's
+commit can land mid-section and a rollback cannot discard another
+plugin's pending row; a consolidation's effects are all visible or none
+are. Any failure rolls back, then logs a WARNING naming the channel, the
+trigger and the message-id range, saying the range will be retried;
+the watermark hasn't moved, so the next trigger stores exactly one
+record. A failed rollback and a write blocked past the busy timeout (the
+WARNING names the database path and the timeout) are logged too.
+`write_record` (goal retirement) uses the same transaction. `_db_lock`
+stays, serializing memory's own writers (consolidation versus goals);
+it no longer carries cross-plugin atomicity. A persistence DB with no
+file (in-memory, tests only) can't be opened twice, so memory's writes
+share the persistence connection there, with a one-time WARNING. The row's `created_at` is the
 `message_log.timestamp` of the last row in the source range, i.e. when
 the conversation happened, not when consolidation ran, so history
 consolidated long after the fact is aged correctly by retrieval and

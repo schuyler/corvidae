@@ -51,6 +51,7 @@ async def env():
     client = MagicMock()
     client.chat = AsyncMock(return_value=_make_text_response("ok"))
     plugin._client = client
+    plugin._mark_started()
     plugin._tools = {}
     recorder = _Recorder()
     plugin._idle = recorder
@@ -227,6 +228,7 @@ async def test_idle_signals_enqueue_no_turn():
     client = MagicMock()
     client.chat = AsyncMock(return_value=_make_text_response("ok"))
     plugin._client = client
+    plugin._mark_started()
     plugin._tools = {}
     calls = {"channel": 0, "system": 0}
 

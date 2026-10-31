@@ -16,7 +16,7 @@ Design assumptions (from plans/mcp-client-plugin.md):
 - result.is_error: prepends "Error: " to the joined text.
 - Duplicate tool names: first registration wins; warning logged, duplicate skipped.
 - Non-text content blocks: dropped (logged at DEBUG), text blocks only are joined.
-- on_stop: calls AsyncExitStack.aclose() to close all sessions.
+- on_stop: signals every server's owner task to close its session.
 - on_start with no config: returns early, no sessions connected.
 - Empty result: returns "(no output)" when no text blocks are present.
 """
@@ -24,12 +24,14 @@ Design assumptions (from plans/mcp-client-plugin.md):
 import asyncio
 import logging
 from contextlib import AsyncExitStack
+from fake_clock import clock_pm
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 # The import under test — will raise ImportError until the file exists.
-from corvidae.mcp_client import McpClientPlugin, _McpServerState, _call_mcp_tool, _make_tool, _mcp_tool_to_schema
+import corvidae.mcp_client as mcp_client_mod
+from corvidae.mcp_client import McpClientPlugin, _McpServerState, _ServerOwner, _call_mcp_tool, _make_tool, _mcp_tool_to_schema
 
 
 # ---------------------------------------------------------------------------
@@ -98,7 +100,7 @@ class TestOnStartNoConfig:
         await plugin.on_start(config={})
         assert plugin._servers == []
         assert plugin._cached_tools == []
-        assert plugin._exit_stack is None
+        assert plugin._owners == {}
 
     async def test_empty_servers_dict(self):
         """Config with 'mcp.servers: {}': no servers connected, _cached_tools empty."""
@@ -106,7 +108,7 @@ class TestOnStartNoConfig:
         await plugin.on_start(config={"mcp": {"servers": {}}})
         assert plugin._servers == []
         assert plugin._cached_tools == []
-        assert plugin._exit_stack is None
+        assert plugin._owners == {}
 
     async def test_missing_servers_key(self):
         """Config with 'mcp: {}': no servers connected, _cached_tools empty."""
@@ -114,7 +116,7 @@ class TestOnStartNoConfig:
         await plugin.on_start(config={"mcp": {}})
         assert plugin._servers == []
         assert plugin._cached_tools == []
-        assert plugin._exit_stack is None
+        assert plugin._owners == {}
 
 
 # ---------------------------------------------------------------------------
@@ -161,7 +163,7 @@ class TestOnStartWithStdioServer:
             }
         }
 
-        await plugin.on_init(pm=MagicMock(), config=config)
+        await plugin.on_init(pm=clock_pm(), config=config)
         with (
             patch("mcp.client.stdio.stdio_client", return_value=mock_stdio_cm),
             patch("mcp.client.stdio.StdioServerParameters"),
@@ -202,7 +204,7 @@ class TestOnStartWithStdioServer:
             }
         }
 
-        await plugin.on_init(pm=MagicMock(), config=config)
+        await plugin.on_init(pm=clock_pm(), config=config)
         with (
             patch("mcp.client.stdio.stdio_client", return_value=mock_stdio_cm),
             patch("mcp.client.stdio.StdioServerParameters"),
@@ -245,7 +247,7 @@ class TestOnStartWithStdioServer:
             }
         }
 
-        await plugin.on_init(pm=MagicMock(), config=config)
+        await plugin.on_init(pm=clock_pm(), config=config)
         with (
             patch("mcp.client.stdio.stdio_client", return_value=mock_stdio_cm),
             patch("mcp.client.stdio.StdioServerParameters"),
@@ -325,7 +327,7 @@ class TestOnStartWithSseServer:
             }
         }
 
-        await plugin.on_init(pm=MagicMock(), config=config)
+        await plugin.on_init(pm=clock_pm(), config=config)
         with (
             patch("mcp.client.sse.sse_client", return_value=mock_sse_cm),
             patch("mcp.ClientSession", return_value=mock_client_session_cm),
@@ -360,7 +362,7 @@ class TestOnStartUnknownTransport:
             }
         }
 
-        await plugin.on_init(pm=MagicMock(), config=config)
+        await plugin.on_init(pm=clock_pm(), config=config)
         with caplog.at_level(logging.WARNING, logger="corvidae.mcp_client"):
             # Should not raise.
             await plugin.on_start(config=config)
@@ -433,57 +435,79 @@ class TestRegisterTools:
 
 
 class TestOnStop:
-    """on_stop closes the AsyncExitStack."""
+    """on_stop signals each server's owner task and clears plugin state."""
 
-    async def test_on_stop_closes_exit_stack(self):
-        """on_stop calls aclose() on the exit stack if one exists."""
+    @staticmethod
+    def _owner(name: str, body) -> "_ServerOwner":
+        """An owner whose task runs ``body(owner)`` once stop is signalled."""
+        owner = _ServerOwner(name=name)
+
+        async def run() -> None:
+            await owner.stop.wait()
+            await body(owner)
+
+        owner.task = asyncio.create_task(run())
+        return owner
+
+    async def test_on_stop_signals_owner_and_awaits_it(self):
+        """on_stop sets the owner's stop event and waits for its task."""
         plugin = McpClientPlugin(None)
-        mock_stack = AsyncMock()
-        mock_stack.aclose = AsyncMock()
-        plugin._exit_stack = mock_stack
+        closed = []
+
+        async def body(owner):
+            closed.append(owner.name)
+
+        plugin._owners["a"] = self._owner("a", body)
 
         await plugin.on_stop()
 
-        mock_stack.aclose.assert_called_once()
+        assert closed == ["a"]
+        assert plugin._owners == {}
 
-    async def test_on_stop_clears_exit_stack_reference(self):
-        """on_stop sets _exit_stack to None after closing."""
+    async def test_on_stop_clears_state(self):
+        """on_stop empties _owners, _servers and _cached_tools."""
         plugin = McpClientPlugin(None)
-        mock_stack = AsyncMock()
-        mock_stack.aclose = AsyncMock()
-        plugin._exit_stack = mock_stack
+
+        async def body(owner):
+            return None
+
+        plugin._owners["a"] = self._owner("a", body)
+        plugin._servers.append(_make_server_state(name="a"))
+        plugin._cached_tools = [object()]
 
         await plugin.on_stop()
 
-        assert plugin._exit_stack is None
+        assert plugin._owners == {}
+        assert plugin._servers == []
+        assert plugin._cached_tools == []
 
-    async def test_on_stop_no_exit_stack_is_safe(self):
-        """on_stop is a no-op when _exit_stack is None (no servers configured)."""
+    async def test_on_stop_no_owners_is_safe(self):
+        """on_stop is a no-op when no server connected."""
         plugin = McpClientPlugin(None)
-        assert plugin._exit_stack is None
+        assert plugin._owners == {}
         # Must not raise.
         await plugin.on_stop()
 
-    async def test_on_stop_exit_stack_raises_logs_and_clears(self, caplog):
-        """If aclose() raises, on_stop logs the exception and clears _exit_stack anyway."""
+    async def test_on_stop_owner_task_raises_logs_and_clears(self, caplog):
+        """An owner task that dies with an exception is logged by name and
+        type; on_stop still completes and clears state."""
         plugin = McpClientPlugin(None)
-        mock_stack = AsyncMock()
-        mock_stack.aclose = AsyncMock(side_effect=RuntimeError("transport closed unexpectedly"))
-        plugin._exit_stack = mock_stack
+
+        async def body(owner):
+            raise RuntimeError("transport closed unexpectedly")
+
+        plugin._owners["srv"] = self._owner("srv", body)
 
         with caplog.at_level(logging.WARNING, logger="corvidae.mcp_client"):
-            # Must NOT raise — exception should be caught and logged.
+            # Must NOT raise: the exception is logged, not swallowed.
             await plugin.on_stop()
 
-        # _exit_stack must be cleared even when aclose() raised.
-        assert plugin._exit_stack is None, (
-            "on_stop must clear _exit_stack even when aclose() raises"
-        )
-
-        # The exception must be logged (not silently swallowed).
-        assert any(
-            record.levelno >= logging.WARNING for record in caplog.records
-        ), "on_stop must log a warning when aclose() raises"
+        assert plugin._owners == {}
+        warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert len(warnings) == 1
+        assert "srv" in warnings[0].getMessage()
+        assert "RuntimeError" in warnings[0].getMessage()
+        assert warnings[0].exc_info is not None
 
 
 # ---------------------------------------------------------------------------
@@ -1051,7 +1075,7 @@ class TestLazyReconnect:
     async def test_failed_server_reconnects_on_next_tool_call(self):
         """A server skipped at startup is retried when an MCP tool is called."""
         plugin = McpClientPlugin(None)
-        await plugin.on_init(pm=MagicMock(), config=_MCP_CONFIG)
+        await plugin.on_init(pm=clock_pm(), config=_MCP_CONFIG)
 
         good_session, good_session_cm = _working_session(["ok"])
         with (
@@ -1090,7 +1114,7 @@ class TestLazyReconnect:
     async def test_failed_reconnect_does_not_break_the_tool_call(self, caplog):
         """A still-broken server logs and leaves the current call working."""
         plugin = McpClientPlugin(None)
-        await plugin.on_init(pm=MagicMock(), config=_MCP_CONFIG)
+        await plugin.on_init(pm=clock_pm(), config=_MCP_CONFIG)
 
         good_session, good_session_cm = _working_session(["ok"])
         with (
@@ -1117,6 +1141,416 @@ class TestLazyReconnect:
 
         assert result == "ok"
         assert any(
-            "lazy reconnect failed" in r.getMessage()
+            "reconnect failed" in r.getMessage()
             for r in caplog.records if r.levelno >= logging.WARNING
         ), [r.getMessage() for r in caplog.records]
+
+
+# ---------------------------------------------------------------------------
+# Background retry loop for servers that failed at startup (#107)
+# ---------------------------------------------------------------------------
+
+
+class _Sdk:
+    """A scripted MCP SDK: which servers answer, plus a log of every attempt.
+
+    ``up`` names the servers that currently connect; ``gate`` (when set)
+    holds every connect open until the test sets it; ``attempts`` records
+    (monotonic time, server) per connect attempt.
+    """
+
+    def __init__(self, clock) -> None:
+        self.clock = clock
+        self.up: set[str] = set()
+        self.gate: asyncio.Event | None = None
+        self.entered = asyncio.Event()
+        self.attempts: list[tuple[float, str]] = []
+
+    def stdio_client(self, command: str):
+        """Return a transport cm that connects only when ``command`` is up."""
+        self.attempts.append((self.clock.monotonic(), command))
+        sdk = self
+
+        async def _enter(*_a):
+            sdk.entered.set()
+            if sdk.gate is not None:
+                await sdk.gate.wait()
+            if command not in sdk.up:
+                raise ConnectionRefusedError(f"{command} is down")
+            return (MagicMock(), MagicMock())
+
+        cm = AsyncMock()
+        cm.__aenter__ = AsyncMock(side_effect=_enter)
+        cm.__aexit__ = AsyncMock(return_value=False)
+        return cm
+
+    def client_session(self, *_a, **_k):
+        """Return a session cm exposing one tool named ``t``."""
+        _, cm = _working_session(["t"])
+        return cm
+
+    def attempts_for(self, name: str) -> list[float]:
+        """Seconds (from the first recorded monotonic) of each attempt on ``name``."""
+        return [t for t, n in self.attempts if n == name]
+
+
+def _servers(*names: str) -> dict:
+    """Config for stdio servers whose command is their own name."""
+    return {
+        "mcp": {
+            "servers": {
+                n: {"transport": "stdio", "command": n, "args": []} for n in names
+            }
+        }
+    }
+
+
+@pytest.fixture
+def sdk(kernel_clock):
+    """Patch the MCP SDK entry points with a scripted _Sdk for the test."""
+    clock, _ = kernel_clock
+    fake = _Sdk(clock)
+    with (
+        patch("mcp.client.stdio.stdio_client", side_effect=fake.stdio_client),
+        patch(
+            "mcp.client.stdio.StdioServerParameters",
+            side_effect=lambda command, args, env: command,
+        ),
+        patch("mcp.ClientSession", side_effect=fake.client_session),
+    ):
+        yield fake
+
+
+class _FakeTools:
+    """Stand-in for ToolCollectionPlugin that counts registry rebuilds."""
+
+    def __init__(self) -> None:
+        self.rebuilds = 0
+
+    async def rebuild_registry(self) -> None:
+        self.rebuilds += 1
+
+
+async def _start_plugin(pm, config: dict) -> tuple[McpClientPlugin, _FakeTools]:
+    """Register a fake tools plugin, then init and start an McpClientPlugin."""
+    tools = _FakeTools()
+    pm.register(tools, name="tools")
+    plugin = McpClientPlugin(None)
+    await plugin.on_init(pm=pm, config=config)
+    await plugin.on_start(config=config)
+    return plugin, tools
+
+
+def _owner_tasks() -> list[asyncio.Task]:
+    """Live mcp-owner tasks in the running loop."""
+    return [
+        t for t in asyncio.all_tasks()
+        if t.get_name().startswith("mcp-owner-") and not t.done()
+    ]
+
+
+class TestRetryLoop:
+    async def test_all_down_server_recovers_without_a_tool_call(
+        self, pm, kernel_clock, sdk
+    ):
+        """R1: with every server down, the loop reconnects past the first delay."""
+        clock, _ = kernel_clock
+        plugin, tools = await _start_plugin(pm, _servers("a", "b"))
+        try:
+            assert plugin._servers == []
+            assert plugin._retry_task is not None
+            sdk.up.add("a")
+
+            await clock.advance(10)
+
+            assert [s.name for s in plugin._servers] == ["a"]
+            assert [t.name for t in plugin._cached_tools] == ["a__t"]
+            assert tools.rebuilds == 1
+            assert list(plugin._pending_servers) == ["b"]
+
+            # b recovers later; once nothing is pending the loop exits.
+            sdk.up.add("b")
+            await clock.advance(20)
+            assert plugin._pending_servers == {}
+            assert plugin._retry_task.done()
+            assert sorted(t.name for t in plugin._cached_tools) == ["a__t", "b__t"]
+        finally:
+            await plugin.on_stop()
+
+    async def test_loop_not_started_when_nothing_is_pending(
+        self, pm, kernel_clock, sdk
+    ):
+        """R2: a clean startup starts no retry task."""
+        sdk.up.add("a")
+        plugin, _ = await _start_plugin(pm, _servers("a"))
+        try:
+            assert plugin._retry_task is None
+        finally:
+            await plugin.on_stop()
+
+    async def test_backoff_ladder(self, pm, kernel_clock, sdk):
+        """R2: attempts land at 10, 30, 70, 150, 310, 610, 910 s."""
+        clock, _ = kernel_clock
+        plugin, _ = await _start_plugin(pm, _servers("a"))
+        try:
+            start = clock.monotonic()
+            sdk.attempts.clear()
+            await clock.advance(910)
+            offsets = [t - start for t in sdk.attempts_for("a")]
+            assert offsets == [10, 30, 70, 150, 310, 610, 910]
+        finally:
+            await plugin.on_stop()
+
+    async def test_backoff_resets_after_a_reconnect(self, pm, kernel_clock, sdk):
+        """R2: a round that reconnects something resets the delay to 10 s."""
+        clock, _ = kernel_clock
+        plugin, _ = await _start_plugin(pm, _servers("a", "b"))
+        try:
+            await clock.advance(10)  # both fail; next delay 20
+            sdk.up.add("a")
+            await clock.advance(20)  # a reconnects; b still pending
+            start = clock.monotonic()
+            sdk.attempts.clear()
+            await clock.advance(10)
+            assert [t - start for t in sdk.attempts_for("b")] == [10]
+        finally:
+            await plugin.on_stop()
+
+    async def test_failed_retry_logs_warning_with_server_type_and_delay(
+        self, pm, kernel_clock, sdk, caplog
+    ):
+        """R3: the WARNING text names server, exception type and next delay."""
+        clock, _ = kernel_clock
+        plugin, _ = await _start_plugin(pm, _servers("a"))
+        try:
+            caplog.clear()
+            with caplog.at_level(logging.WARNING, logger="corvidae.mcp_client"):
+                await clock.advance(10)
+            records = [
+                r for r in caplog.records
+                if r.levelno == logging.WARNING and "retrying in" in r.getMessage()
+            ]
+            assert len(records) == 1, [r.getMessage() for r in caplog.records]
+            msg = records[0].getMessage()
+            assert "'a'" in msg
+            assert "ConnectionRefusedError" in msg
+            assert "retrying in 20s" in msg
+            assert records[0].exc_info is not None
+        finally:
+            await plugin.on_stop()
+
+    async def test_tool_call_retry_does_not_race_the_loop(
+        self, pm, kernel_clock, sdk
+    ):
+        """R4: a tool call during an in-flight loop reconnect starts no second connect."""
+        clock, _ = kernel_clock
+        sdk.up.add("good")
+        plugin, _ = await _start_plugin(pm, _servers("good", "a"))
+        try:
+            (good_tool,) = plugin._cached_tools
+            sdk.up.add("a")
+            sdk.gate = asyncio.Event()
+            sdk.entered.clear()
+            sdk.attempts.clear()
+            advancing = asyncio.create_task(clock.advance(10))
+            await asyncio.wait_for(sdk.entered.wait(), 2)
+
+            # The loop's connect for "a" is held open; the tool call must skip.
+            assert await good_tool.fn() == "ok"
+            assert len(sdk.attempts_for("a")) == 1
+
+            sdk.gate.set()
+            await advancing
+            assert len(sdk.attempts_for("a")) == 1
+            assert [s.name for s in plugin._servers].count("a") == 1
+            assert len(plugin._owners) == 2
+            assert sorted(t.name for t in plugin._cached_tools) == ["a__t", "good__t"]
+        finally:
+            await plugin.on_stop()
+
+    async def test_on_stop_while_loop_is_sleeping(self, pm, kernel_clock, sdk):
+        """R5: on_stop wakes and finishes a sleeping loop."""
+        plugin, _ = await _start_plugin(pm, _servers("a"))
+        task = plugin._retry_task
+        await plugin.on_stop()
+        assert task.done()
+        assert _owner_tasks() == []
+
+    async def test_on_stop_while_loop_is_connecting(self, pm, kernel_clock, sdk):
+        """R5: on_stop cancels a loop that is mid-connect, leaving no owner."""
+        clock, _ = kernel_clock
+        plugin, _ = await _start_plugin(pm, _servers("a"))
+        task = plugin._retry_task
+        sdk.gate = asyncio.Event()  # never set: the connect hangs
+        sdk.entered.clear()
+        advancing = asyncio.create_task(clock.advance(10))
+        await asyncio.wait_for(sdk.entered.wait(), 2)
+
+        await plugin.on_stop()
+
+        assert task.done()
+        assert _owner_tasks() == []
+        advancing.cancel()
+        await asyncio.gather(advancing, return_exceptions=True)
+
+    async def test_connect_finishing_after_stop_is_torn_down(
+        self, pm, kernel_clock, sdk
+    ):
+        """A tool-call retry still connecting when on_stop runs registers no owner."""
+        sdk.up.update({"good", "a"})
+        plugin, _ = await _start_plugin(pm, _servers("good"))
+        # Queue "a" as pending without the loop, and call a tool to retry it.
+        plugin._pending_servers["a"] = _servers("a")["mcp"]["servers"]["a"]
+        plugin._servers_config = {}
+        plugin._cached_tools = plugin._build_tool_list()
+        sdk.gate = asyncio.Event()
+        sdk.entered.clear()
+        (good_tool,) = plugin._cached_tools
+        call = asyncio.create_task(good_tool.fn())
+        await asyncio.wait_for(sdk.entered.wait(), 2)
+
+        await plugin.on_stop()
+        sdk.gate.set()
+        await asyncio.wait_for(call, 2)
+
+        assert plugin._owners == {}
+        assert plugin._servers == []
+        assert _owner_tasks() == []
+
+    async def test_config_errors_are_not_retried(
+        self, pm, kernel_clock, sdk, caplog, monkeypatch
+    ):
+        """R6: config-error servers are skipped once, naming the key to fix."""
+        clock, _ = kernel_clock
+        monkeypatch.delenv("NOPE_TOKEN", raising=False)
+        config = {"mcp": {"servers": {
+            "down": {"transport": "stdio", "command": "down"},
+            "hdr": {"transport": "sse", "url": "http://x",
+                    "headers": {"Authorization": "Bearer ${NOPE_TOKEN}"}},
+            "badtransport": {"transport": "carrier-pigeon", "command": "badtransport"},
+            "nocommand": {"transport": "stdio"},
+            "badtimeout": {"transport": "stdio", "command": "badtimeout",
+                           "connect_timeout_seconds": -1},
+        }}}
+        with caplog.at_level(logging.WARNING, logger="corvidae.mcp_client"):
+            plugin, _ = await _start_plugin(pm, config)
+        try:
+            assert list(plugin._pending_servers) == ["down"]
+            texts = [r.getMessage() for r in caplog.records
+                     if r.levelno == logging.WARNING]
+            for server, key in [
+                ("hdr", "NOPE_TOKEN"),
+                ("badtransport", "transport"),
+                ("nocommand", "command"),
+                ("badtimeout", "connect_timeout_seconds"),
+            ]:
+                hits = [t for t in texts if server in t and key in t]
+                assert len(hits) == 1, (server, key, texts)
+
+            sdk.attempts.clear()
+            await clock.advance(10)
+            assert {n for _, n in sdk.attempts} == {"down"}
+        finally:
+            await plugin.on_stop()
+
+
+class TestConfigTypeErrors:
+    """Wrongly typed config values skip that server only (#107 review)."""
+
+    @pytest.mark.parametrize("bad, key", [
+        (None, "mcp.servers.bad"),
+        ({"transport": "stdio", "command": "bad", "timeout_seconds": [1]},
+         "timeout_seconds"),
+        ({"transport": "stdio", "command": "bad",
+          "connect_timeout_seconds": {"x": 1}}, "connect_timeout_seconds"),
+        ({"transport": "sse", "url": "http://x", "headers": ["h"]},
+         "mcp.servers.bad.headers"),
+    ])
+    async def test_bad_type_is_skipped_and_later_server_connects(
+        self, pm, kernel_clock, sdk, caplog, bad, key
+    ):
+        sdk.up.add("good")
+        config = _servers("good")
+        config["mcp"]["servers"] = {"bad": bad, **config["mcp"]["servers"]}
+        caplog.set_level(logging.WARNING, logger="corvidae.mcp_client")
+        plugin, _ = await _start_plugin(pm, config)
+        try:
+            assert [s.name for s in plugin._servers] == ["good"]
+            assert plugin._pending_servers == {}
+            skips = [r for r in caplog.records if r.levelno == logging.WARNING
+                     and r.__dict__.get("server") == "bad"]
+            assert len(skips) == 1
+            msg = skips[0].getMessage()
+            assert "bad" in msg and key in msg
+        finally:
+            await plugin.on_stop()
+
+    async def test_unexpected_parse_exception_is_skipped(
+        self, pm, kernel_clock, sdk, caplog, monkeypatch
+    ):
+        sdk.up.add("good")
+        config = _servers("bad", "good")
+        real = mcp_client_mod._parse_server_config
+
+        def boom(name, cfg):
+            if name == "bad":
+                raise RuntimeError("surprise")
+            return real(name, cfg)
+
+        monkeypatch.setattr(mcp_client_mod, "_parse_server_config", boom)
+        caplog.set_level(logging.WARNING, logger="corvidae.mcp_client")
+        plugin, _ = await _start_plugin(pm, config)
+        try:
+            assert [s.name for s in plugin._servers] == ["good"]
+            assert plugin._pending_servers == {}
+            skips = [r for r in caplog.records if r.levelno == logging.WARNING
+                     and r.__dict__.get("server") == "bad"]
+            assert len(skips) == 1 and skips[0].exc_info is not None
+            assert "'bad'" in skips[0].getMessage()
+        finally:
+            await plugin.on_stop()
+
+
+class TestRetryLoopSurvivesRebuildError:
+    async def test_rebuild_registry_error_is_logged_and_loop_continues(
+        self, pm, kernel_clock, sdk, caplog
+    ):
+        clock, _ = kernel_clock
+        plugin, tools = await _start_plugin(pm, _servers("a", "b"))
+        try:
+            async def boom() -> None:
+                raise RuntimeError("rebuild broke")
+
+            tools.rebuild_registry = boom
+            sdk.up.add("a")
+            caplog.set_level(logging.WARNING, logger="corvidae.mcp_client")
+            await clock.advance(10)
+
+            assert not plugin._retry_task.done()
+            msgs = [r.getMessage() for r in caplog.records
+                    if r.levelno == logging.WARNING and "rebuild" in r.getMessage()]
+            assert len(msgs) == 1 and "'a'" in msgs[0]
+
+            # The loop keeps retrying: b recovers on the next round.
+            sdk.up.add("b")
+            await clock.advance(10)
+            assert sorted(s.name for s in plugin._servers) == ["a", "b"]
+        finally:
+            await plugin.on_stop()
+
+    async def test_tool_call_retry_message_promises_no_delay(
+        self, pm, kernel_clock, sdk, caplog
+    ):
+        sdk.up.add("good")
+        plugin, _ = await _start_plugin(pm, _servers("good", "late"))
+        try:
+            tool = next(t for t in plugin._cached_tools if t.name == "good__t")
+            caplog.set_level(logging.WARNING, logger="corvidae.mcp_client")
+            caplog.clear()
+            await tool.fn()
+            msgs = [r.getMessage() for r in caplog.records
+                    if "reconnect failed" in r.getMessage()]
+            assert msgs and all("retrying in" not in m for m in msgs)
+            assert all("background retry" in m for m in msgs)
+        finally:
+            await plugin.on_stop()
