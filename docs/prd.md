@@ -606,7 +606,9 @@ Per transport:
    critic) on their windowless paths. The embedding role has its own
    endpoint, a required `dimensions`, and document/query prefixes
    matching the model card. Any role may point at a remote endpoint. Its
-   credentials come from the environment, never from config. Whatever a
+   credentials should be storable outside config, in the daemon's
+   environment, so a tracked `agent.yaml` never has to hold a secret; a
+   literal key in config remains allowed. Whatever a
    role is sent leaves the host, and `docs/threat-model.md` says which
    stages send what (principle 9).
 2. Retries transient status codes and connection errors with capped
@@ -1117,7 +1119,7 @@ record that holds the reasoning.
 | The heartbeat starts on system idle, not on a schedule, and acts only when warranted; sleep is durable | §5.8; #134 |
 | Idle-triggered work may carry a latency bound: the quiet it needs decays with waiting, so traffic can't starve it | #214 |
 | The agent may decline any turn when it has nothing to add (Grice's maxims, by register); gates still never withhold a direct reply by default | #215 |
-| Model endpoints may be remote; a role's credentials come from the environment, and the threat model names what each role sends | #217 |
+| Model endpoints may be remote; a role's credentials should be storable in the environment rather than config (not required to be), and the threat model names what each role sends | #217 |
 | Cross-channel sends are a requirement, gated by an operator allowlist that starts empty, a budget, a threat-model entry, and trust and sensitivity when those plugins are loaded | #167 |
 | Operator-seeded goals allowed | §5.14 |
 | Memory poisoning answered on the write side with trust tagging (trust plugin) | §3.9, §5.10 |
