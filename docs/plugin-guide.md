@@ -237,7 +237,12 @@ its hooks. A plugin registered without a name, or under a name that can't
 appear in a Python identifier (`web-console`), can't own hooks. The
 declaration is read from the class, so a base class can declare for a
 subclass, but only one plugin registered from that class hierarchy can
-own the hooks.
+own the hooks. A plugin that is a module rather than a class instance
+can't declare hooks.
+
+A plugin hook still has to earn its name under the admission rule in
+[Adding a hook](#adding-a-hook). Owning it yourself changes where the spec
+lives, not whether it should exist.
 
 Implementing a plugin's hook is the same as implementing a kernel hook:
 write a `@hookimpl` with the same name, and declare the dependency (see

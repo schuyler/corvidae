@@ -50,7 +50,8 @@ one is a bug even if its tests pass.
    loop, the queues, the context window, channels, hooks, tools, the LLM
    client, the task queue, the clock, and persistence. Everything else loads
    from an entry point, can be disabled by name in `plugins.disabled`,
-   declares its dependencies in `depends_on`, and documents what the system
+   declares its dependencies in `depends_on` (or `optional_depends_on`
+   for one it works without), and documents what the system
    does without it. The cognition plugins (memory, retention, funnel,
    appraisal, critique, outcome log, memory tools, trust, sensitivity) are
    a second distribution behind a `cognition` extra; the kernel installs,
@@ -248,8 +249,14 @@ one is a bug even if its tests pass.
     non-None result, `transform_` is a wrapper chain over a seed, and a
     short allowlist of bare imperatives (`send`, `register_tools`,
     `persist_message`) documents what the caller does with results. A test
-    enforces the prefixes against pluggy options.
-11. A new hookspec is admitted only when it is a decision point, an
+    enforces the prefixes against pluggy options for the kernel's
+    `AgentSpec`. A hook only one plugin calls is owned by that plugin
+    (`hookspecs` on its class), not added to `AgentSpec`. Its name carries
+    the owner's plugin name right after the prefix
+    (`on_<plugin>_<name>`), it uses a prefixed class (bare imperatives are
+    kernel-only), and it has exactly one owner. Startup checks all of this
+    and fails naming the hook, the plugin and the fix.
+11. A new hookspec, kernel or plugin-owned, is admitted only when it is a decision point, an
     observation with at least two plausible implementers, or the pair of
     an existing observability hook. A single-consumer observation gets a
     `meta` entry or a return value on an existing hook instead.
@@ -258,7 +265,11 @@ one is a bug even if its tests pass.
     parameter with a default.
 13. Plugin dependencies are declared in `depends_on` and validated before
     `on_start`; plugins resolve each other with `get_dependency`, never by
-    registration order. `on_start` is broadcast concurrently; the Agent
+    registration order. A plugin that works without another declares it in
+    `optional_depends_on`: its absence is not an error, and impls of the
+    absent plugin's hooks stay inactive. A hookimpl with no spec is logged
+    at startup, at WARNING unless its owner is an absent optional
+    dependency. `on_start` is broadcast concurrently; the Agent
     starts after the broadcast, and producers that inject notifications
     wait on `Agent.started`.
 14. A plugin that fails to import or instantiate is logged and skipped; a
@@ -1122,6 +1133,7 @@ record that holds the reasoning.
 | Same repository, second distribution for cognition; no compatibility aliases on renamed hooks | `kernel-split.md` R5, R6 |
 | Typed event bus deferred with a go criterion (observe class past 20 hooks, or a third `send`-shaped consolidation) | `kernel-split.md` Part 1 §5 |
 | `thinking.py` is kernel | `kernel-split.md` R9 |
+| A hook only one plugin calls is owned by that plugin, not `AgentSpec`; names are `<prefix><owner>_<name>`, one owner per hook, checked at startup; the admission criterion (§3.1.11) still applies | #229 |
 | Review findings gate on consequence, not reachability; tests derive from acceptance criteria, not the design's test list; new capability goes through requirements | `retro-web-transport-session.md` |
 | `discord-py` is a `discord` extra, like `acp` | #117 (R10) |
 | ACP keeps rejecting a concurrent prompt unless a real client is shown to steer with a bare prompt; a failed final delivery is `end_turn` | #93, #99 |
