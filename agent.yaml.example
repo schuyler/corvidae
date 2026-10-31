@@ -6,6 +6,7 @@ llm:
     base_url: http://localhost:8080/v1   # llama-server, vLLM, OpenAI, etc.
     model: llama3                     # model name as the backend expects it
     # api_key: sk-...                 # omit for local servers
+    # api_key: "${OPENAI_API_KEY}"    # or read it from the daemon's environment (quote it)
     # extra_body:                      # optional: provider-specific request payload extensions
     #   id_slot: 0                      # example: llama.cpp KV cache slot for parallelism
     # max_retries: 3                   # max retry attempts on transient errors (429, 500, 502, 503, 504)
@@ -17,6 +18,7 @@ llm:
   #   base_url: http://localhost:8080   # all fields must be specified; no inheritance from llm.main
   #   model: llama3
   #   # api_key: sk-...                 # omit for local servers
+  #   # api_key: "${OPENAI_API_KEY}"    # or from the environment; a remote role sends its inputs off-host
   #   # extra_body:
   #   #   id_slot: 1
   #   # max_retries: 3
@@ -29,6 +31,7 @@ llm:
   #   model: nomic-embed-text
   #   dimensions: 768                  # REQUIRED: fixed vector dimension of the model
   #   # api_key: sk-...                # omit for local servers
+  #   # api_key: "${OPENAI_API_KEY}"   # or from the environment
 
 # Daemon settings (optional)
 daemon:

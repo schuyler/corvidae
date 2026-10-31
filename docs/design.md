@@ -1572,6 +1572,13 @@ history bound. Starts/stops the worker on lifecycle hooks. Registers the
   them.
 - `on_stop` — calls `stop()` on all clients.
 
+`_create_client` expands `${VAR}` in a role's `api_key` from the daemon's
+environment (`corvidae/envref.py::expand_env_refs`, shared with MCP
+`headers`). An unset, empty or multi-line variable raises a `ValueError`
+naming `llm.<role>.api_key` and the variable, never the value; `on_start` and
+`on_config_reload` both go through it. The resolved key lives only on the
+client, so `_role_configs` keeps the raw `${VAR}` text.
+
 ### Client access
 
 `LLMPlugin.get_client(role="main")` — returns the client for the given role.

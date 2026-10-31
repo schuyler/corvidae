@@ -73,7 +73,7 @@ The `llm.main` block is required. Every other key under `llm:` is an optional **
 |-----|------|---------|-------------|
 | `llm.main.base_url` | string | — | Base URL for an OpenAI-compatible Chat Completions endpoint. **Required.** |
 | `llm.main.model` | string | — | Model identifier sent in each request. **Required.** |
-| `llm.main.api_key` | string | `null` | API key for authentication. Omit if the backend does not require one. |
+| `llm.main.api_key` | string | `null` | API key for authentication, sent as `Authorization: Bearer <key>`. Omit if the backend does not require one. Either a literal key or a quoted `"${VAR}"` reference to an environment variable (see below). Give the bare key: a value such as `Bearer ${X}` would send "Bearer Bearer ...". |
 | `llm.main.extra_body` | mapping | `null` | Provider-specific fields merged into the request body (e.g., `id_slot` for llama.cpp). |
 | `llm.main.max_retries` | integer | `3` | Maximum retry attempts on transient HTTP errors (429, 500, 502, 503, 504) and connection failures. Set to 0 to disable retries. |
 | `llm.main.retry_base_delay` | float | `2.0` | Base delay in seconds for exponential backoff between retry attempts. |
@@ -82,7 +82,7 @@ The `llm.main` block is required. Every other key under `llm:` is an optional **
 | `llm.main.timeout` | float | `null` | Total HTTP timeout in seconds per LLM request. `null` uses aiohttp's 300-second default. |
 | `llm.background.base_url` | string | — | Base URL for the background (subagent) LLM endpoint. Optional. |
 | `llm.background.model` | string | — | Model identifier for subagent calls. Optional. |
-| `llm.background.api_key` | string | `null` | API key for the background endpoint. |
+| `llm.background.api_key` | string | `null` | API key for the background endpoint. Same forms as `llm.main.api_key`, including `"${VAR}"`. |
 | `llm.background.extra_body` | mapping | `null` | Provider-specific fields for background LLM requests. |
 | `llm.background.max_retries` | integer | `3` | Maximum retry attempts for background LLM calls. |
 | `llm.background.retry_base_delay` | float | `2.0` | Base delay in seconds for background LLM retry backoff. |
@@ -94,7 +94,11 @@ The `llm.main` block is required. Every other key under `llm:` is an optional **
 | `llm.embedding.dimensions` | integer | — | **Required when `llm.embedding` is present.** Fixed vector dimension of the embedding model; the `memory_vec` table schema depends on it. Validated at startup. |
 | `llm.embedding.document_prefix` | string | `""` | String prepended to every text when embedding stored content (`kind="document"`). Recorded in `embedding_meta`; changing it against an existing store logs an ERROR and disables embedding. Config revert is the only remediation. Trailing space is the operator's responsibility (match the model card). |
 | `llm.embedding.query_prefix` | string | `""` | String prepended to every text when embedding a retrieval query (`kind="query"`). See `document_prefix` for mismatch semantics. |
-| `llm.embedding.*` | — | — | The remaining keys (`api_key`, `max_retries`, ...) match `llm.main`. `document_prefix` and `query_prefix` are embedding-only — they do not exist on `llm.main` or `llm.background`. |
+| `llm.embedding.*` | — | — | The remaining keys (`api_key`, which also takes `"${VAR}"`, `max_retries`, ...) match `llm.main`. `document_prefix` and `query_prefix` are embedding-only — they do not exist on `llm.main` or `llm.background`. |
+
+**API key from the environment.** Quote the reference so YAML keeps it as text: `api_key: "${OPENAI_API_KEY}"`. The variable is read from the environment the daemon runs in, so a tracked `agent.yaml` holds no secret. This works for every role, `main` included, and uses the same `${VAR}` expansion as MCP `headers`. A literal key still works; a value with no `${NAME}` (including one containing a bare `$`) is used as is. If the variable is unset, empty or contains a newline or NUL (often a trailing newline), startup fails with an error naming `llm.<role>.api_key` and the variable; set it in the environment corvidae runs in and restart. The key's value is never logged or put in an error or a reply. A config reload re-reads the same variable; to pick up a changed environment, restart. A reload that newly references an unset variable fails, is logged, and keeps the old `llm.main` client.
+
+**Remote roles.** Every role is an OpenAI-compatible client, so any of them can point at a hosted endpoint. Whatever that role is sent then leaves the host: `main` serves turns and compaction summaries (and the forked appraisal and critique stages, which need the local window and so cannot move); `background` serves memory consolidation, the importance prior, subagents and, when not forked, standalone appraisal and critique; `embedding` serves memory embedding, retrieval and retention. An unconfigured role falls back to `main`. Conversation content is in all of these inputs. See `threat-model.md` finding 12. Hosted endpoints give no latency guarantee, so set `llm.<role>.timeout` generously.
 
 `llm.background` is parsed by `LLMPlugin`. If the key is absent, `LLMPlugin.get_client("background")` returns the main client, so all callers (including `SubagentPlugin`) fall back to `llm.main`. When `llm.embedding` is absent, `MemoryPlugin` stores records with `embedded=0` and retrieval degrades to FTS5 keyword search.
 
