@@ -534,11 +534,12 @@ class AppraisalPlugin(CorvidaePlugin):
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
-        """Open the dedicated read-only probe connection.
+        """Build the lazy read-only memory_fts probe (it opens nothing here).
 
         The DB path comes from the same config key PersistencePlugin reads.
-        Missing DB or missing memory_fts degrades to no-probe with one
-        WARNING — the vector is then built from surface heuristics alone.
+        The connection opens on first use and retries at a bounded rate;
+        while the DB or memory_fts is missing each attempt logs a WARNING
+        and the vector is built from surface heuristics alone.
         """
         db_path = config.get("daemon", {}).get("session_db", "sessions.db")
         base_dir = config.get("_base_dir", Path("."))

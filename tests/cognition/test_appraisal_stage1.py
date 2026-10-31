@@ -586,7 +586,7 @@ class TestPersistSpyGaps:
         from corvidae_cognition.outcome_log import OutcomeLogPlugin
 
         # Session DB exists (for outcome_log/persistence) but has NO
-        # memory_fts — the probe degrades at on_start.
+        # memory_fts — the probe finds no table and stays off.
         db_path = str(tmp_path / "sessions.db")
         db = await aiosqlite.connect(db_path)
         await init_db(db)
@@ -636,34 +636,65 @@ class TestPersistSpyGaps:
 
 class TestLazyProbe:
     async def test_probe_starts_working_when_table_appears(self, tmp_path, caplog):
-        """#237 R1/R5: fails open to no_probe_default, then picks up the table."""
-        from corvidae_cognition.probe import PROBE_RETRY_SECONDS, ReadOnlyProbe
+        """#237 R1/R5: the plugin's own probe, built by on_start against a
+        DB file that doesn't exist yet, fails open then picks the table up."""
+        from corvidae_cognition.appraisal import AppraisalPlugin
+        from corvidae_cognition.probe import PROBE_RETRY_SECONDS
 
-        plugin, channel, _db_path, pm = await build_appraisal(tmp_path)
+        late = str(tmp_path / "late.db")
+        pm = create_plugin_manager()
+        plugin = AppraisalPlugin()
+        pm.register(plugin, name="appraisal")
+        cfg = {"daemon": {"session_db": late}}
+        await plugin.on_init(pm=pm, config=cfg)
+        await plugin.on_start(config=cfg)
         try:
-            await plugin._probe.close()
             now = [0.0]
-            late = str(tmp_path / "late.db")
-            async with aiosqlite.connect(late) as db:
-                await db.execute("CREATE TABLE unrelated (x)")
-                await db.commit()
-            plugin._probe = ReadOnlyProbe(
-                late, "memory_fts", "appraisal",
-                "stage-1 novelty uses no_probe_default until memory_fts exists",
-                clock=lambda: now[0],
-            )
+            plugin._probe.clock = lambda: now[0]
+            channel = _make_channel()
             with caplog.at_level("WARNING", logger="corvidae"):
                 vec, score = await plugin._compute(channel, "corvidae funnel budget", "in")
             assert score is None
             assert vec["novelty"] == 0.5  # no_probe_default
             assert late in caplog.text
 
+            # The file appears with memory_fts and a matching row; the
+            # retry interval elapses.
             await _seed_probe_db(late, ["I helped debug the corvidae funnel budget"])
             now[0] = PROBE_RETRY_SECONDS + 1
             vec, score = await plugin._compute(channel, "corvidae funnel budget", "in")
             assert score is not None
             assert vec["novelty"] != 0.5  # probe-derived, not the default
         finally:
+            await _teardown(plugin, pm)
+
+    async def test_probe_open_is_outside_budget(self, tmp_path):
+        """#237 R7: the probe open runs outside appraisal.probe.budget_ms; a
+        slow open doesn't turn the query into a timeout."""
+        plugin, channel, db_path, pm = await build_appraisal(
+            tmp_path, summaries=["corvidae funnel budget notes"],
+            config={"appraisal": {"probe": {"budget_ms": 20}}},
+        )
+        conn = await aiosqlite.connect(db_path)
+
+        class SlowOpenProbe:
+            """A probe whose open takes far longer than the budget."""
+            connection = conn
+
+            async def get(self):
+                await asyncio.sleep(0.5)
+                return conn
+
+            async def close(self):
+                return None
+
+        try:
+            await plugin._probe.close()
+            plugin._probe = SlowOpenProbe()
+            _vec, score = await plugin._compute(channel, "corvidae funnel budget", "in")
+            assert score is not None
+        finally:
+            await conn.close()
             await _teardown(plugin, pm)
 
     async def test_on_stop_closes_probe_connection(self, tmp_path):
@@ -680,8 +711,9 @@ class TestLazyProbe:
         finally:
             await _teardown(plugin, pm)
 
-    async def test_exchange_db_never_opens_probe(self, tmp_path):
-        """#237: _exchange_db only reads the cached connection."""
+    async def test_on_start_does_not_open_probe_and_exchange_db_reads_cache_only(self, tmp_path):
+        """#237: on_start doesn't open the probe, and _exchange_db only reads the
+        cached connection (it never triggers an open)."""
         plugin, _channel, _db_path, pm = await build_appraisal(
             tmp_path, summaries=["x"])
         try:

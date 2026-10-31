@@ -1306,45 +1306,57 @@ class TestNoReplyVeto:
 # ---------------------------------------------------------------------------
 
 
-async def _swap_in_empty_probe(env, tmp_path, clock):
-    """Point the plugin's probe at a DB with no message_fts, with a fake clock."""
-    from corvidae_cognition.probe import ReadOnlyProbe
-
-    await env.plugin._probe.close()
-    path = str(tmp_path / "late.db")
+async def _create_late_db(path, channel_id, content):
+    """Create the session DB at path with message_log, message_fts, and one
+    earlier row indexed under the same rowid (as MemoryPlugin's trigger would)."""
     async with aiosqlite.connect(path) as late:
-        # message_log exists (kernel schema) but message_fts does not yet.
         await init_db(late)
-    env.plugin._probe = ReadOnlyProbe(
-        path, "message_fts", "critique provenance",
-        "the provenance check stays off until message_fts exists",
-        clock=clock,
-    )
-    return path
+        cursor = await late.execute(
+            "INSERT INTO message_log (channel_id, message, timestamp, message_type) "
+            "VALUES (?, ?, ?, ?)",
+            (channel_id, json.dumps({"role": "user", "content": content}),
+             1.0, "message"),
+        )
+        await late.execute("CREATE VIRTUAL TABLE message_fts USING fts5(content_text)")
+        await late.execute(
+            "INSERT INTO message_fts(rowid, content_text) VALUES (?, ?)",
+            (cursor.lastrowid, content),
+        )
+        await late.commit()
 
 
 class TestLazyProbe:
     async def test_provenance_starts_working_when_table_appears(self, tmp_path, caplog):
-        """#159 R1/R5: no restart; skip warning kept while absent; recovers."""
+        """#159 R1/R5: the plugin's own probe, built by on_start against a
+        DB file that doesn't exist yet, picks it up with no restart."""
         from corvidae_cognition.probe import PROBE_RETRY_SECONDS
 
         env = await _provenance_env(tmp_path)
         try:
+            # Restart the plugin's probe against a path with no file at all.
+            await env.plugin._probe.close()
+            late = str(tmp_path / "late.db")
+            cfg = {"daemon": {"session_db": late}}
+            await env.plugin.on_start(config=cfg)
             now = [0.0]
-            path = await _swap_in_empty_probe(env, tmp_path, lambda: now[0])
+            env.plugin._probe.clock = lambda: now[0]
+
             await _begin_exchange(env, "klz", origin_rowid=50)
             with caplog.at_level("WARNING", logger="corvidae"):
                 assert await env.plugin._gather_evidence(
                     env.channel, "klz", [CLAIM]) is None
             # The probe warning names the path; the per-trace skip stays.
-            assert path in caplog.text
+            assert late in caplog.text
             assert "provenance check skipped for trace klz" in caplog.text
 
-            # message_fts appears later; the interval elapses.
-            await _seed_fts(path, ["the quarterly audit deadline is Thursday"])
+            # The file appears with message_fts and a matching row; the
+            # retry interval elapses.
+            await _create_late_db(
+                late, env.channel.id, "the quarterly audit deadline is Thursday")
             now[0] = PROBE_RETRY_SECONDS + 1
             evidence = await env.plugin._gather_evidence(env.channel, "klz", [CLAIM])
             assert evidence is not None
+            assert evidence[0]["candidates"]
         finally:
             await _teardown(env)
 

@@ -474,10 +474,12 @@ class CritiquePlugin(CorvidaePlugin):
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
-        """Open the read-only evidence probe and listen for stage 2.
+        """Build the lazy read-only evidence probe and listen for stage 2.
 
-        The raw-dialog FTS table is 1b's; missing DB or missing message_fts
-        degrades to no-probe (one WARNING). Without the probe the provenance
+        The raw-dialog FTS table is 1b's. The probe opens nothing here: it
+        connects on first use and retries at a bounded rate, so a missing DB
+        or message_fts logs a WARNING per attempt and the check is off until
+        the table exists. Without the probe the provenance
         check can't fetch the earlier messages, so it doesn't run: telling
         the critic "nothing matched" without having looked would turn every
         true recollection into an objection.
