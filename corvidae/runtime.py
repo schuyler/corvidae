@@ -303,6 +303,11 @@ class Runtime:
         # Same steps and bound as stop(), minus agent.on_stop. clock and idle
         # exist whenever pm does (start() creates all three together).
         try:
+            # Wake any message a transport delivered before the Agent
+            # started, so its on_message returns instead of hanging (#71).
+            agent = self.pm.get_plugin("agent")
+            if agent is not None:
+                agent.release_held_messages()
             async with asyncio.timeout(3.0):
                 await self.pm.ahook.on_stop()
                 self.idle.stop()

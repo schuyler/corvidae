@@ -231,6 +231,10 @@ class Agent(CorvidaePlugin):
         self._idle: IdleTracker | None = None
         # True between a completed on_start and on_stop; see `started`.
         self._started: bool = False
+        # Set when the Agent has started or has stopped; on_message awaits it
+        # while no client exists yet (#71). _stopping tells a waiter which.
+        self._started_event: asyncio.Event = asyncio.Event()
+        self._stopping: bool = False
 
     @property
     def tools(self) -> dict[str, Callable]:
@@ -304,9 +308,23 @@ class Agent(CorvidaePlugin):
         if not trace_id:
             raise ValueError("on_message requires a non-empty trace_id from the transport")
 
+        # A transport can deliver from its own on_start (step 11), before the
+        # Agent starts (step 12). Hold here, inside on_message, so every
+        # transport is covered at one point and admission still fires before
+        # on_message returns once the Agent starts (transports release their
+        # typing slot in a finally if it hasn't).
         if not self._client:
-            logger.error("on_message: LLM client not initialized")
-            return
+            await self._started_event.wait()
+            if self._stopping or not self._client:
+                # Agent stopped before it started: nothing will process this.
+                logger.warning(
+                    "message on channel %s (trace_id %s) was not processed: "
+                    "the agent stopped before starting; resend it after the "
+                    "daemon is running",
+                    channel.id, trace_id,
+                    extra={"channel": channel.id, "trace_id": trace_id},
+                )
+                return
 
         logger.info(
             "on_message received",
@@ -1348,11 +1366,28 @@ class Agent(CorvidaePlugin):
         # Stop advertising readiness first, so producers stop injecting
         # notifications into queues that are about to be cancelled.
         self._started = False
+        # Release any message still held waiting for a start that won't come.
+        self.release_held_messages()
         # Cancel all channel queue consumers.
         for queue in self.queues.values():
             await queue.stop()
 
         await self._stop_plugin()
+
+    def release_held_messages(self) -> None:
+        """Wake every on_message held for startup so it returns unprocessed.
+
+        Called by on_stop and by Runtime when startup aborts (#71); each
+        held caller logs one warning naming its channel and trace id.
+        """
+        self._stopping = True
+        self._started_event.set()
+
+    def _mark_started(self) -> None:
+        """Record that the Agent can take work and wake held on_message calls."""
+        self._started = True
+        self._stopping = False
+        self._started_event.set()
 
     async def _start_plugin(self, config: dict) -> None:
         """Initialize LLM client and tools."""
@@ -1385,7 +1420,7 @@ class Agent(CorvidaePlugin):
         self._warn_if_forks_change_model()
 
         # Everything _process_queue_item needs is in place.
-        self._started = True
+        self._mark_started()
 
         logger.info(
             "on_start complete",

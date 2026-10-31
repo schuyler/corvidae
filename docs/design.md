@@ -695,6 +695,20 @@ task begins in its own `on_start` (`SchedulerPlugin`) waits for this flag
 before calling `on_notify`; otherwise the queue consumer could run before
 `Agent` has a registry and client.
 
+Inbound messages are held, not dropped (#71). A transport can deliver from
+its own `on_start`, before step 12 starts the Agent; `Agent.on_message`
+checks the trace id first (an empty one raises at once), then awaits an
+internal started event while no LLM client exists. Once the Agent starts,
+the held call proceeds normally: the gate, `on_message_admitted` and the
+enqueue all happen before `on_message` returns, so a transport that frees
+resources in a `finally` around `on_message` (the Signal and Discord typing
+slots) is unaffected. Held calls from one channel resume in arrival order.
+If the Agent stops before it starts (`Agent.on_stop`, or
+`Runtime._cleanup_failed_start` through `Agent.release_held_messages`),
+every held call returns without admission and logs one WARNING naming the
+channel and trace id. There is no cap on held messages: the window is
+bounded by startup.
+
 `Agent.queues` is a public `dict[str, SerialQueue]` (keyed by channel ID).
 Queues added after startup are visible to other plugins that hold a reference
 to this dict because the reference is live.
