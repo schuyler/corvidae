@@ -2052,6 +2052,21 @@ Forwards both channel and private messages. `split_message` splits
 outgoing text into 400-byte chunks preserving paragraph/sentence
 boundaries.
 
+While the client is disconnected (including the reconnect backoff, up to
+300s), outbound text is not dropped: it goes into a bounded in-memory queue
+(`_OUTBOUND_QUEUE_MAX`, 50, a module constant, not configurable). Each queued
+message logs a WARNING with the channel id, length and queue depth. When the
+queue is full the oldest entry is dropped, with a WARNING naming its channel
+and the number dropped so far in the outage. After a successful connect,
+`on_connect` joins the configured channels and then flushes the queue in
+order, splitting each message exactly as a connected send does. A send made
+while the queue is non-empty queues behind it, so nothing overtakes older
+output. Limits: a connection that drops mid-flush leaves the unsent entries
+queued, and a partly sent multi-line message is resent whole (duplicates
+rather than losses); pydle's `join` does not await the server's JOIN, so a
+channel that refuses the join drops the flushed text server-side; and the
+queue is lost at shutdown (logged as a WARNING with the count).
+
 `split_message` itself lives in `channels/split.py`, not in the IRC
 plugin, so a transport can size its own chunks without importing IRC.
 
