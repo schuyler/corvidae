@@ -228,3 +228,74 @@ async def test_tools_disabled_absent_key_is_noop():
     tools = plugin.registry.as_dict()
     assert "tool_a" in tools
     assert "tool_b" in tools
+
+
+# ---------------------------------------------------------------------------
+# Registry generation counter (issue #109, R1)
+# ---------------------------------------------------------------------------
+
+
+async def _generation_plugin(tool_fns: list):
+    """A started ToolCollectionPlugin whose register_tools yields the live
+    contents of ``tool_fns``; mutate the list, then ``rebuild_registry``."""
+    from corvidae.hooks import create_plugin_manager, hookimpl
+    from corvidae.tool_collection import ToolCollectionPlugin
+
+    pm = create_plugin_manager()
+
+    class Source:
+        @hookimpl
+        def register_tools(self, tool_registry):
+            # Offer whatever the test currently has in the list.
+            tool_registry.extend(tool_fns)
+
+    pm.register(Source(), name="source")
+    plugin = ToolCollectionPlugin(pm)
+    pm.register(plugin, name="tools")
+    await plugin.on_init(pm=pm, config={})
+    await plugin.on_start(config={})
+    return plugin
+
+
+def _make_fn(name: str, doc: str = "Do a thing."):
+    async def fn(x: str) -> str:
+        return x
+
+    fn.__name__ = name
+    fn.__doc__ = doc
+    return fn
+
+
+class TestRegistryGeneration:
+    async def test_added_tool_bumps_generation_by_one(self):
+        fns = [_make_fn("alpha")]
+        plugin = await _generation_plugin(fns)
+        before = plugin.generation
+        fns.append(_make_fn("beta"))
+        await plugin.rebuild_registry()
+        assert plugin.generation == before + 1
+
+    async def test_removed_tool_bumps_generation_by_one(self):
+        fns = [_make_fn("alpha"), _make_fn("beta")]
+        plugin = await _generation_plugin(fns)
+        before = plugin.generation
+        fns.pop()
+        await plugin.rebuild_registry()
+        assert plugin.generation == before + 1
+
+    async def test_changed_schema_bumps_generation_by_one(self):
+        fns = [_make_fn("alpha", "Old description.")]
+        plugin = await _generation_plugin(fns)
+        before = plugin.generation
+        fns[0] = _make_fn("alpha", "New description.")
+        await plugin.rebuild_registry()
+        assert plugin.generation == before + 1
+
+    async def test_identical_rebuild_keeps_generation(self):
+        fns = [_make_fn("alpha")]
+        plugin = await _generation_plugin(fns)
+        before = plugin.generation
+        # A rebuild from fresh-but-equal tool objects is not a change.
+        fns[0] = _make_fn("alpha")
+        await plugin.rebuild_registry()
+        assert plugin.generation == before

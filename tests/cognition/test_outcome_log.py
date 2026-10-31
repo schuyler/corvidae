@@ -298,3 +298,121 @@ class TestStartupDeferralLog:
         assert len(records) == 1, [r.getMessage() for r in records]
         assert records[0].levelno == logging.WARNING
         assert records[0].exc_info is not None
+
+
+class TestRejectedRefusals:
+    """#261: a transport-gate refusal of an unknown channel leaves no row."""
+
+    async def _count(self, db, trace_id: str) -> int:
+        # Count exchange_log rows for one trace id.
+        async with db.execute(
+            "SELECT COUNT(*) FROM exchange_log WHERE trace_id = ?", (trace_id,)
+        ) as cursor:
+            return (await cursor.fetchone())[0]
+
+    async def _env(self, db, with_registry: bool = True):
+        # Build the plugin, optionally with a ChannelRegistry registered.
+        from corvidae.channel import ChannelRegistry
+
+        plugin = await _setup(db)
+        registry = None
+        if with_registry:
+            registry = ChannelRegistry({})
+            plugin.pm.register(registry, name="registry")
+        return plugin, registry
+
+    async def test_refused_stranger_writes_no_row(self, db):
+        from corvidae.channel import Channel
+
+        plugin, _ = await self._env(db)
+        # A transient channel the registry never held, as a refused sender gets.
+        stranger = Channel(transport="irc", scope="mallory")
+        await plugin.on_message_rejected(
+            channel=stranger, trace_id="t-refused", sender="mallory", text="hi"
+        )
+        assert await self._count(db, "t-refused") == 0
+
+    async def test_rejected_known_channel_keeps_row(self, db):
+        plugin, registry = await self._env(db)
+        known = registry.get_or_create("irc", "alice")
+        await plugin.on_message_rejected(
+            channel=known, trace_id="t-known", sender="alice", text="ok"
+        )
+        async with db.execute(
+            "SELECT channel_id, message_rowid, outcomes FROM exchange_log "
+            "WHERE trace_id = ?", ("t-known",),
+        ) as cursor:
+            row = await cursor.fetchone()
+        assert row[0] == "irc:alice"
+        assert row[1] is None
+        assert '"gate": "rejected"' in row[2] or '"gate":"rejected"' in row[2]
+
+    async def test_no_registry_fails_open(self, db):
+        from corvidae.channel import Channel
+
+        plugin, _ = await self._env(db, with_registry=False)
+        await plugin.on_message_rejected(
+            channel=Channel(transport="irc", scope="bob"),
+            trace_id="t-noreg", sender="bob", text="hi",
+        )
+        assert await self._count(db, "t-noreg") == 1
+
+
+class _DenyTransport:
+    """Transport stand-in whose gate refuses every message (an allowlist)."""
+
+    from corvidae.hooks import hookimpl as _hookimpl
+
+    @_hookimpl
+    async def should_process_message(self, channel, sender, text, trace_id):
+        return False
+
+
+class TestUnregisteredChannelRefusals:
+    """#261 review: no writer may insert a row for a channel the registry never held."""
+
+    async def test_refused_stranger_leaves_no_row_in_any_writer(self, db, tmp_path):
+        from corvidae.channel import Channel, ChannelRegistry
+        from corvidae_cognition.appraisal import AppraisalPlugin
+        from corvidae_cognition.gates import GatePlugin
+
+        # Wire registry + outcome_log + appraisal + gates + a refusing transport.
+        plugin = await _setup(db)
+        pm = plugin.pm
+        pm.register(ChannelRegistry({}), name="registry")
+        cfg = {"daemon": {"session_db": str(tmp_path / "s.db")}}
+        appraisal = AppraisalPlugin()
+        pm.register(appraisal, name="appraisal")
+        await appraisal.on_init(pm=pm, config=cfg)
+        await appraisal.on_start(config=cfg)
+        gates = GatePlugin()
+        pm.register(gates, name="gates")
+        await gates.on_init(pm=pm, config=cfg)
+        pm.register(_DenyTransport(), name="deny")
+
+        # A stranger on a channel the registry does not hold is refused.
+        ch = Channel(transport="irc", scope="mallory")
+        await pm.ahook.should_process_message(
+            channel=ch, sender="mallory", text="hello there", trace_id="tr1"
+        )
+        await pm.ahook.on_message_rejected(
+            channel=ch, trace_id="tr1", sender="mallory", text="hello there"
+        )
+        # Let fire-and-forget persistence tasks finish.
+        for _ in range(20):
+            await asyncio.sleep(0.01)
+        await appraisal.on_stop()
+
+        async with db.execute("SELECT channel_id FROM exchange_log") as cursor:
+            rows = await cursor.fetchall()
+        assert rows == [], f"refused stranger left rows: {rows}"
+
+    async def test_direct_writers_skip_unregistered_channel(self, db):
+        from corvidae.channel import ChannelRegistry
+
+        plugin = await _setup(db)
+        plugin.pm.register(ChannelRegistry({}), name="registry")
+        await plugin.record_exchange("t1", "irc:mallory")
+        await plugin.upsert_exchange("t2", "irc:mallory", outcomes={"x": 1})
+        async with db.execute("SELECT count(*) FROM exchange_log") as cursor:
+            assert (await cursor.fetchone())[0] == 0

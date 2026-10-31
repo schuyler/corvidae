@@ -199,6 +199,7 @@ async def test_agent_start_resolves_idle_tracker_from_plugin_manager():
     tools = NonCallableMagicMock(spec=ToolCollectionPlugin)
     tools.get_tools.return_value = ({}, [])
     tools.max_result_chars = 100_000
+    tools.generation = 0
     plugin.pm.register(llm, name="llm")
     plugin.pm.register(tools, name="tools")
     # Spy on the real tracker to see what the Agent pushes to it.

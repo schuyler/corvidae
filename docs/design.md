@@ -517,7 +517,19 @@ go together (PRD §3.5.3), for the global list too.
   (principle 2) and forks keep prefix parity (see [Forks](#forks)).
   `Agent` also implements `on_compaction` and re-resolves the view there.
   Compaction already rebuilds the KV cache, so this is the only point where
-  a running conversation's schemas can change.
+  a running conversation's schemas can change, with one exception: a
+  registry change.
+- **Registry changes reach the next turn.** `ToolCollectionPlugin.generation`
+  goes up whenever `rebuild_registry` yields different tool names or schemas
+  (an MCP server reconnecting, #107/#109). `Agent` records the generation
+  beside its `get_tools()` snapshot and, at the top of each queue item,
+  re-reads the snapshot when the generation has moved, logging one INFO line
+  naming the tools added and removed. Each conversation's view is then
+  rebuilt lazily from the new set and the view's own `disabled` set (a
+  reloaded `channels.<id>.tools.disabled` still waits for compaction). With
+  no change nothing is rebuilt and the schema list stays the same object.
+  The change costs one prefix-cache miss on that channel. Dispatch reads the
+  refreshed dict, so a removed tool is refused as unknown.
 - **Dispatch enforces.** Each tool task checks the name against
   `disabled_on(channel)` when it runs. That is the conversation view's set
   plus the live `Channel.disabled_tools`. A disabled call returns
@@ -1909,15 +1921,17 @@ round that reconnects something, exit when nothing is pending. Every MCP tool
 call also runs a retry round as a fast path. One `asyncio.Lock` serialises
 rounds, and a tool call that finds it held skips rather than wait out a
 handshake, so the loop and a tool call never connect a server twice. A
-successful retry rebuilds the cached tool list and the shared registry. Config
-errors (any exception from `_parse_server_config`, which runs before any
-transport opens: `McpHeaderEnvError`, `ValueError` for a wrong type or
-non-finite timeout, `KeyError` for a missing key) are reported once, naming
+successful retry rebuilds the cached tool list and the shared registry, and the
+running Agent re-reads it on its next turn (#109). Config errors (any exception
+from `_parse_server_config`, which runs before any transport opens:
+`McpHeaderEnvError`, `ValueError` for a wrong type or non-finite timeout,
+`KeyError` for a missing key) are reported once, naming
 `mcp.servers.<name>.<key>` and the value, and never queued. A malformed
 top-level block (`mcp` not a mapping, `mcp.servers` neither null nor a mapping)
 is caught by `validate_mcp_config`, which `Runtime.start()` runs with the other
 config checks (skipped when `mcp` is in `plugins.disabled`) and `on_init` runs
-again, so it exits with a `Config error` instead of an AttributeError. `on_stop` sets a stopping flag, cancels the loop, then
+again, so it exits with a `Config error` instead of an AttributeError.
+`on_stop` sets a stopping flag, cancels the loop, then
 stops the owners; a connect still in flight (loop or tool call) that finishes
 after the flag is set tears its owner down instead of registering it.
 
@@ -2204,7 +2218,9 @@ and the number dropped so far in the outage. After a successful connect,
 `on_connect` joins the configured channels and then flushes the queue in
 order, splitting each message exactly as a connected send does. A send made
 while the queue is non-empty queues behind it, so nothing overtakes older
-output. Limits: a connection that drops mid-flush leaves the unsent entries
+output. Sends also queue from TCP connect until `on_connect` has finished its
+joins: `IRCPlugin._ready` is set there and cleared in `on_disconnect`, so a
+reply in that window is not sent before the bot is in the channel (#251). Limits: a connection that drops mid-flush leaves the unsent entries
 queued, and a partly sent multi-line message is resent whole (duplicates
 rather than losses); pydle's `join` does not await the server's JOIN, so a
 channel that refuses the join drops the flushed text server-side; and the
@@ -2708,7 +2724,8 @@ Everything else uses `textContent`. Thinking and dividers render in closed
 `<details>`. The page reconnects with backoff (1 s → 30 s) and, after
 three failed connects, checks `/` for a 401 to detect an expired session.
 `tests/test_web_render_smoke.py` checks the sanitising in headless Chrome;
-it skips without Playwright, so CI doesn't run it. Run it by hand with
+it skips without Playwright, so the `web-smoke` CI job installs a pinned
+Playwright and Chromium and fails if the test is skipped. Run it locally with
 `uv run --with playwright pytest tests/test_web_render_smoke.py`.
 
 Known limitations:

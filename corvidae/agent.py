@@ -26,6 +26,7 @@ Logging:
 
 import asyncio
 import logging
+from typing import TYPE_CHECKING
 
 import aiohttp
 from collections.abc import Callable
@@ -33,6 +34,9 @@ from dataclasses import dataclass, field, fields as dc_fields
 from enum import Enum
 
 from corvidae.llm import LLMHTTPError
+
+if TYPE_CHECKING:
+    from corvidae.tool_collection import ToolCollectionPlugin
 from corvidae.turn import AgentTurnResult, run_agent_turn
 from corvidae.attribution import get_attribution, reset_attribution, set_attribution
 from corvidae.channel import (
@@ -215,6 +219,10 @@ class Agent(CorvidaePlugin):
         self._client = None
         self._tools: dict[str, Callable] = {}
         self._tool_schemas: list[dict] = []
+        # The ToolCollectionPlugin and the registry generation the two
+        # fields above were read at (#109); None until _start_plugin runs.
+        self._tools_plugin: "ToolCollectionPlugin | None" = None
+        self._tools_generation: int = 0
         self.queues: dict[str, SerialQueue] = {}
         # (channel_id, tool_call_id) of tool results queued but not yet
         # processed, so deliver_tool_error never adds a second result (#173).
@@ -807,6 +815,10 @@ class Agent(CorvidaePlugin):
             return
         conversation_message, request_text = msg_result
 
+        # Pick up registry changes (e.g. a reconnected MCP server) before
+        # any conversation is initialised or the turn's tools are read.
+        self._refresh_tools_if_changed()
+
         _t_conv_init_start = _time.monotonic()
 
         # 1. Lazy-initialize conversation on the channel
@@ -1182,7 +1194,9 @@ class Agent(CorvidaePlugin):
         not connected yet reads the same way; the warning says so.
         """
         disabled = channel.disabled_tools
-        view = build_tool_view(self._tools, self._tool_schemas, disabled)
+        view = build_tool_view(
+            self._tools, self._tool_schemas, disabled, self._tools_generation
+        )
         unknown = sorted(name for name in disabled if name not in self._tools)
         if unknown:
             # Name the config keys that carry the unknown names: a typo in a
@@ -1208,7 +1222,47 @@ class Agent(CorvidaePlugin):
             return self._build_tool_view(channel)
         if conv.tool_view is None:
             conv.tool_view = self._build_tool_view(channel)
+        elif conv.tool_view.generation != self._tools_generation:
+            # The registry moved since this view was built: re-narrow the
+            # new tool set by the view's own disabled set, not the live
+            # config, so a reloaded channels.<id>.tools.disabled still
+            # waits for the compaction boundary (#149, #109).
+            conv.tool_view = build_tool_view(
+                self._tools, self._tool_schemas,
+                conv.tool_view.disabled, self._tools_generation,
+            )
         return conv.tool_view
+
+    def _snapshot_tools(self, tools_plugin: "ToolCollectionPlugin") -> None:
+        """Read the tool dict, schemas and generation from the registry.
+
+        Plain attribute reads with no await between them, so a background
+        rebuild_registry cannot tear the three apart.
+        """
+        self._tools_plugin = tools_plugin
+        self._tools, self._tool_schemas = tools_plugin.get_tools()
+        self._tools_generation = tools_plugin.generation
+
+    def _refresh_tools_if_changed(self) -> None:
+        """Re-read the registry when its generation has moved (#109).
+
+        A no-op while the generation is unchanged, so the schema lists stay
+        the same objects turn after turn and the cached prompt prefix holds.
+        Each conversation's view is rebuilt lazily by _tool_view.
+        """
+        tools_plugin = self._tools_plugin
+        if tools_plugin is None or tools_plugin.generation == self._tools_generation:
+            return
+        previous = set(self._tools)
+        self._snapshot_tools(tools_plugin)
+        current = set(self._tools)
+        # One INFO line per change: it alters the head of the prompt.
+        logger.info(
+            "tool registry changed (generation %d): added [%s], removed [%s]",
+            self._tools_generation,
+            ", ".join(sorted(current - previous)),
+            ", ".join(sorted(previous - current)),
+        )
 
     @hookimpl
     async def on_compaction(
@@ -1407,7 +1461,7 @@ class Agent(CorvidaePlugin):
 
         # Get tool registry and config from ToolCollectionPlugin.
         tools_plugin = get_dependency(self.pm, "tools", ToolCollectionPlugin)
-        self._tools, self._tool_schemas = tools_plugin.get_tools()
+        self._snapshot_tools(tools_plugin)
         self._max_tool_result_chars = tools_plugin.max_result_chars
 
         # The idle tracker is optional: a hand-built plugin manager may lack it.
