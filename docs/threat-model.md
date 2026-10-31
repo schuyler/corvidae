@@ -585,8 +585,9 @@ Every `llm:` role is an OpenAI-compatible client, so any role can point at a
 hosted provider. Doing so sends that role's requests, conversation content
 included, to the provider. Which stage uses which role:
 
-- `main`: agent turns, and the forked appraisal and critique stages (they
-  fork the local window, so they cannot use a remote role).
+- `main`: agent turns, compaction summaries, and the forked appraisal and
+  critique stages (they fork the local window, so they cannot use a remote
+  role).
 - `background`: memory consolidation (conversation transcripts), the
   importance prior, subagents (their task context and tool results) and,
   when not forked, standalone appraisal and critique, which resolve

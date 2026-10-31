@@ -448,9 +448,18 @@ class TestApiKeyFromEnvironment:
             "main": _role_cfg("sk-main"),
             "background": _role_cfg("${" + _KEY_VAR + "}"),
         }
-        with caplog.at_level("DEBUG"):
-            with pytest.raises(ValueError) as excinfo:
-                await _start_plugin(llm)
+        from corvidae.llm_plugin import LLMPlugin
+
+        # Build the plugin here (not via _start_plugin) so teardown can stop
+        # the main client that on_start started before background failed.
+        plugin = LLMPlugin()
+        plugin._role_configs = dict(llm)
+        try:
+            with caplog.at_level("DEBUG"):
+                with pytest.raises(ValueError) as excinfo:
+                    await plugin.on_start(config={"llm": llm})
+        finally:
+            await plugin.on_stop()
         msg = str(excinfo.value)
         assert "llm.background.api_key" in msg
         assert _KEY_VAR in msg
