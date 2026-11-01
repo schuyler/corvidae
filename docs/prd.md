@@ -91,14 +91,15 @@ one is a bug even if its tests pass.
    (principle 13). These orderings across a slot hold only where the pool's
    concurrency is declared: on a pool without it, the server orders calls
    admitted together, and an exchange's own background work precedes only
-   its own channel's next main turn (§3.13.1). A declared limit, a cap or
-   policy can hold or defer a main turn beyond that (§3.13). Where the pool
-   has no spare capacity (one KV slot, or a rate limit already reached) a
-   background call can't run beside the main turn, so the requirement is to
-   keep its share of the pool small (bounded output, §3.8) and out of the
-   way; it is not a guarantee of zero delay. How a pool's capacity is shared
-   is §3.13 (principle 16). The inbound gate runs inside the transport read
-   path and never calls a model.
+   its own channel's next main turn (§3.13.1). A declared limit, a cap,
+   policy, or §3.13.7's precedence (another exchange's continuations, agency
+   past its bound) can hold or defer a main turn beyond that (§3.13). Where
+   the pool has no spare capacity (one KV slot, or a rate limit already
+   reached) a background call can't run beside the main turn, so the
+   requirement is to keep its share of the pool small (bounded output, §3.8)
+   and out of the way; it is not a guarantee of zero delay. How a pool's
+   capacity is shared is §3.13 (principle 16). The inbound gate runs inside
+   the transport read path and never calls a model.
 
 4. **The conversation log is append-only.** `message_log` rows are never
    deleted and their order is never rewritten. Compaction hides; memory
@@ -269,11 +270,13 @@ one is a bug even if its tests pass.
     any pool: background judgment forks because a rebuilt context loses the
     support the agent had (§3.8.2), whatever the fork costs. None of these
     rules is relaxed on a pool where it saves little; what varies is how
-    much it saves. Enforcement has one dependency: principle 3's ordering
-    across channels needs the pool's concurrency declared (§3.13.1). The
-    operator caps how much of each pool the agent uses; within the caps, the
-    agent and its plugins decide how the pool is shared (§3.13). Whether the
-    agent can move a cap is a lock (principle 15).
+    much it saves. Enforcement has two dependencies: principle 3's orderings
+    across a slot (other channels' main turns, past-due upkeep) need the
+    pool's concurrency declared (§3.13.1), and caps that hold across a
+    restart need the `usage_log` plugin (§3.13.10). The operator caps how
+    much of each pool the agent uses; within the caps, the agent and its
+    plugins decide how the pool is shared (§3.13). Whether the agent can
+    move a cap is a lock (principle 15).
 
 ## 3. Requirements
 
@@ -1204,7 +1207,7 @@ its budget, coalescing, charging per channel or sender) are tracked in
    no declared concurrency, admission holds no call for concurrency, and the
    server's own queue orders the calls admitted together. An exchange's own
    background work still finishes before the channel's next main turn, kept
-   by the kernel at dispatch whatever policy is loaded (item 3); whether
+   by the kernel at dispatch whatever policy is loaded (item 5); whether
    upkeep runs before a waiting main turn is then the server's to decide
    (principle 3). Context per call is not something admission waits on:
    keeping a window within it is compaction's job (§3.3), and a call that
@@ -1253,9 +1256,10 @@ its budget, coalescing, charging per channel or sender) are tracked in
    settings under principle 15: whether the agent can move one is a
    lock. A hard cap the agent can raise is a bound the agent, and any
    text that steers it, can lift (`docs/threat-model.md`).
-7. Work no plugin holds is ordered in this precedence, whatever the
-   policy; within a level, policy orders it, and held work gains
-   priority as it waits:
+7. Work no plugin holds is ordered in this precedence, whatever the policy;
+   within a level, policy orders it, and a call held for capacity gains
+   priority within its level as it waits, never past the order this list
+   fixes:
    1. an exchange's own background work that a waiting main turn must
       wait for under principle 3, and upkeep past its latency bound
       (past due, in principle 3's terms; principle 13);
@@ -1265,10 +1269,13 @@ its budget, coalescing, charging per channel or sender) are tracked in
    4. everything else, with a main turn that starts a new exchange
       ahead of upkeep not yet due (principle 3).
 
-   A main turn that policy holds or defers (items 3 and 5) holds no
-   other work back. Upkeep and agency wait past their bounds only for
-   declared capacity, hard caps, and the levels above them, and
-   `max_turns` bounds the continuations at level 2.
+   A main turn that policy holds or defers (items 3 and 5) holds no other
+   channel's work back; if work queued behind it on its own channel reaches
+   its latency bound, the hold or deferral lapses (item 5). Upkeep and
+   agency wait past their bounds only for declared capacity, the levels
+   above them, and work at their own level that policy orders first; at a
+   hard cap they are refused (item 6). `max_turns` bounds the continuations
+   at level 2.
 8. Deferral acts at exchange boundaries: a deferred channel still takes the
    continuations of an exchange in flight. A hold delays a call; it doesn't
    drop it. Only a hard cap stops an exchange mid tool cycle, and

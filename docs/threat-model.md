@@ -760,17 +760,18 @@ What each kind of unlock costs:
   every channel on the pool, which is why the recommended lock goes on every
   channel that draws on it. An unlocked soft cap lets an injection move when
   the agent starts saving, and an unlocked hard cap lets it remove the bound
-  the operator set on spend or rate. The caps still have to fit the context
-  (PRD §3.8.4).
+  the operator set on spend or rate. Stage output caps still have to fit the
+  context (PRD §3.8.4).
 - **Scheduling policy** (pausing or deferring a channel, the order of held
   calls, PRD §3.13). An injection can pause the operator's channel, move its
   own channel ahead of others, or push upkeep back. Every hold, deferral and
   pause lapses by itself and the operator can resume any channel (PRD
   §3.13.8), so the damage is delay, not a wedged agent; on a pool with
   declared concurrency, past-due upkeep still runs ahead of a waiting main
-  turn, and agency by its latency bound unless capacity, a hard cap, or an
-  in-flight exchange's continuations (bounded by `max_turns`) hold it (PRD
-  §3.13.1, §3.13.7).
+  turn, and agency by its latency bound, unless capacity or
+  higher-precedence work (background work an exchange still owes, past-due
+  upkeep, continuations bounded by `max_turns`) holds it, or a hard cap
+  refuses it (PRD §3.13.1, §3.13.7).
 - **Skills.** The skills index sits in the stable prompt region, so a
   skill written at an injection's request is offered to every future
   conversation on every channel and survives restarts. The idle scan
@@ -803,10 +804,10 @@ every channel sharing the server's slot, so those costs apply even there.
 ### 14. Untrusted traffic spends the operator's compute
 
 Every admitted message costs at least one main turn, and with cognition
-loaded, background calls on top: stage-2 appraisal per exchange, the
-critique lenses when appraisal selects them, and consolidation as the window
-fills or the channel goes quiet. On a local server that is slot time the
-operator's own turns wait behind; on a metered endpoint it is money. An
+loaded, background calls on top, among them: stage-2 appraisal per exchange,
+the critique lenses when appraisal selects them, and consolidation as the
+window fills or the channel goes quiet. On a local server that is slot time
+the operator's own turns wait behind; on a metered endpoint it is money. An
 admitted sender can drive the cost up by volume or by asking for work that
 loops through tools, and injected text in a fetched page or an MCP result
 can do the same from inside the operator's own channel. `max_turns` bounds
