@@ -147,18 +147,20 @@ one is a bug even if its tests pass.
    and sensitivity plugins); the operator configures where the boundary
    falls, and safety features are added as plugins over time, as with
    sandboxing. Fixed floors protect the operator's own control surface
-   rather than draw a trust boundary, and stay fixed: web auth
-   cannot be turned off (§3.2 Web), `redact` is never a tool (§3.7 Memory
-   8), `set_settings` can't lift a lock or change the lock list, the
+   rather than draw a trust boundary, and stay fixed: web auth cannot be
+   turned off (§3.2 Web), `redact` is never a tool (§3.7 Memory 8),
+   `set_settings` can't lift a lock or change the lock list, the
    request-body keys the agent loop builds (`messages`, `tools`,
    `tool_choice`, `stream`) are never overridden, and transport metadata
-   is out of the agent's reach (§3.5.6). Apart from these floors, what the
-   agent may change about itself is not fixed: every other restriction on
-   it is a lock the operator can lift (principle 15). The model's
-   authority is unbounded and unsandboxed by decision;
-   `docs/threat-model.md` is the standing record of what that costs and is
-   updated whenever untrusted text can reach somewhere new or a tool can
-   do something new.
+   is out of the agent's reach (§3.5.6). The floors bind the framework's
+   own surfaces; an agent permitted to edit its own code and restart
+   (principle 15) can change anything, floors included, and the threat
+   model records that cost. Apart from these floors, what the agent may
+   change about itself is not fixed: every other restriction on it is a
+   lock the operator can lift (principle 15). The model's authority is
+   unbounded and unsandboxed by decision; `docs/threat-model.md` is the
+   standing record of what that costs and is updated whenever untrusted
+   text can reach somewhere new or a tool can do something new.
 
 10. **Channel ids are persistence keys and never derive from names.**
     `transport:scope` keys `sessions.db`, the JSONL logs, memory
@@ -517,10 +519,12 @@ Per transport:
    calls still unanswered.
 6. `reasoning_history: drop | exchange | keep`, resolved per channel and
    applied to the whole in-memory window before every call, so reloaded
-   history obeys it. `exchange` strips assistant messages before the last
-   `role: user` message, matching the Qwen template boundary; the DB
-   always keeps reasoning. Any other value, or the retired key
-   `keep_thinking_in_history`, fails at startup and on reload.
+   history obeys it. A change to it takes effect at the next compaction
+   boundary or conversation start (§3.5.6, principle 15). `exchange`
+   strips assistant messages before the last `role: user` message,
+   matching the Qwen template boundary; the DB always keeps reasoning. Any
+   other value, or the retired key `keep_thinking_in_history`, fails at
+   startup and on reload.
 7. `agent.mid_conversation_system_role: system | user` sets the role under
    which every non-leading system message is sent (funnel CONTEXT,
    notifications without a tool-call id, framed orphan results). It is a
@@ -531,9 +535,9 @@ Per transport:
    framed block as the last user turn.
 8. The system prompt is a string or a list of file paths concatenated with
    blank lines, resolved against the config directory once per
-   conversation, and again at a compaction boundary when an unlocked
-   runtime override changed it (principle 15). It is the head of the
-   window, so principle 2 governs it: nothing mutates it per turn.
+   conversation and on restart, and again at a compaction boundary when an
+   unlocked runtime override changed it (principle 15). It is the head of
+   the window, so principle 2 governs it: nothing mutates it per turn.
    Plugin-contributed sections (the skills index, the self-model) are
    re-resolved only at a compaction boundary or when a conversation
    starts, because compaction already rebuilds the KV cache for everything

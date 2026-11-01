@@ -671,20 +671,22 @@ tools. The static keys are read from operator config alone (through
 a dotted name (`agent.request_logprobs`) is accepted but has no effect,
 and an undotted one is refused by the allowlist. Several prompts
 (subagent, heartbeat) are code constants with no config key at all (#287,
-#289). There is no restart tool in this tree; the agent can only restart
-by way of `shell`. None of these can be unlocked yet (#292). On a channel
+#289). There is no restart tool in this tree; the agent can restart only
+by way of `shell` or a tool an MCP server provides. Nor is there deferred
+application: a `reasoning_history` override applies to the whole window
+from the next call. None of these can be unlocked yet (#292). On a channel
 that still has `write_file` or `shell`, the agent can already get around
 all of them by rewriting `agent.yaml` or a system-prompt file (finding 4),
 unless the files are read-only to the daemon.
 
 The common shape: a runtime override is per channel and in memory, so an
 injected change lasts on that channel until the override is cleared or the
-daemon restarts. A change that alters what is already rendered in the
-window (system prompt, tool set, framing, `reasoning_history`) applies
-from the next compaction or conversation start, or at once if the agent
-makes it persistent and restarts. A skill or a persistent self-edit
-outlives both, and a closed-loop fit would re-derive itself from the
-outcome log after a restart.
+daemon restarts. Under the PRD, a change that alters what is already
+rendered in the window (system prompt, tool set, framing,
+`reasoning_history`) applies from the next compaction or conversation
+start, or at once if the agent makes it persistent and restarts. A skill
+or a persistent self-edit outlives both, and a closed-loop fit would
+re-derive itself from the outcome log after a restart.
 
 What each kind of unlock costs:
 
@@ -783,13 +785,19 @@ What each kind of unlock costs:
 - **Self-edit and restart** (its own code, configuration, prompt files and
   plugin set, applied by restarting; PRD §3.11.13). A code or config edit
   made at an injection's request is persistent and total: it can lift
-  every lock in this ledger, disable plugins, or plant code that runs with
-  the daemon's privileges, and it survives every restart after. This is
-  the cost finding 4 already records for a writable `agent.yaml` and
-  `shell`, reached on purpose. A restart also drops every runtime override
-  and briefly takes every channel offline; the operator's rate limit on
-  agent-requested restarts bounds how often. The locks are the restart
-  tool itself and file ownership (PRD §3.11.11).
+  every lock in this ledger, remove the principle 9 floors (they are fixed
+  in the framework, not in code the agent can rewrite), disable plugins,
+  or plant code that runs with the daemon's privileges, and it survives
+  every restart after. This is the cost finding 4 already records for a
+  writable `agent.yaml` and `shell`, reached on purpose. A restart also
+  drops every runtime override and briefly takes every channel offline;
+  the operator's rate limit on agent-requested restarts bounds how often.
+  The locks are the restart tool itself, file ownership of `agent.yaml`
+  and the prompt files (PRD §3.11.11), and, for code, keeping it read-only
+  to the daemon and outside the file tools' root, or disabling
+  `write_file` and `shell` (the tool set entry). A code edit the restart
+  tool can't apply still takes effect at the next restart the operator
+  does.
 
 Recommended locks for a channel with untrusted participants, as a starting
 point rather than a rule: the system prompt, the prompts that judge and
