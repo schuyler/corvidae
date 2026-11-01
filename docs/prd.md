@@ -231,22 +231,24 @@ one is a bug even if its tests pass.
       (principle 1): a change to code or to the plugin set takes a
       restart.
 
-    No deployment is required to allow any of it. Every restriction on
-    self-modification is a lock: a mechanism the framework supports and
-    the operator configures, never a prohibition in the architecture.
-    Operator config can lift any lock. The floors of principle 9 are the
-    exceptions and stay fixed, and the conversation log stays append-only
-    (principle 4). Each capability has a route that keeps the agent loop
-    consistent. A request-body override carries model parameters, never
-    the loop's own `messages`, `tools`, `tool_choice` or `stream`
-    (§3.5.6). Cache reuse is optimized for the general case: a change the
-    agent makes that would alter what is already rendered in the window
-    (the system prompt, the tool set, how earlier rows are framed or
-    stripped) takes effect at the channel's next compaction boundary or
-    conversation start, not mid-window (§3.3.8; principle 2). An agent
-    that wants a change applied at once makes it persistent and restarts.
-    What each unlock costs is recorded in `docs/threat-model.md`
-    (principle 9).
+    No deployment is required to allow any of it: the framework must let
+    the operator lock or disable anything the agent could change about
+    itself. A lock can freeze a value or bound it, to a range or a set of
+    allowed values. Every restriction on self-modification is a lock: a
+    mechanism the framework supports and the operator configures, never a
+    prohibition in the architecture. Operator config can lift any lock.
+    The floors of principle 9 are the exceptions and stay fixed, and the
+    conversation log stays append-only (principle 4). Each capability has
+    a route that keeps the agent loop consistent. A request-body override
+    carries model parameters, never the loop's own `messages`, `tools`,
+    `tool_choice` or `stream` (§3.5.6). Cache reuse is optimized for the
+    general case: a change the agent makes that would alter what is
+    already rendered in the window (the system prompt, the tool set, how
+    earlier rows are framed or stripped) takes effect at the channel's
+    next compaction boundary or conversation start, not mid-window
+    (§3.3.8; principle 2). An agent that wants a change applied at once
+    makes it persistent and restarts. What each unlock costs is recorded
+    in `docs/threat-model.md` (principle 9).
 
 ## 3. Requirements
 

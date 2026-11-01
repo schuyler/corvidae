@@ -712,17 +712,19 @@ What each kind of unlock costs:
   framed CONTEXT and notifications back into the `system` role, undoing
   the mitigation in finding 3.
 - **Model and inference parameters** (`model`, sampling keys,
-  `max_tokens`, `logprobs`). The agent can point its turns at any model
-  the server offers, including one with weaker safety tuning. What a
-  switch costs in latency depends on the backend: a router that has to
+  `max_tokens`, `logprobs`). Unbounded, the agent can point its turns at
+  any model the server offers, including one with weaker safety tuning or,
+  on a metered endpoint, a more expensive one; bounding `model` to an
+  allowed set (PRD principle 15) keeps the choice without that cost. What
+  a switch costs in latency depends on the backend: a router that has to
   load the new model into its only slot stalls every channel while it
   does. Large `max_tokens` or sampling extremes degrade replies on that
   channel. `logprobs` costs little: larger responses, and nothing from
   providers that don't support it. Any other request-body key falls here
-  too, and some reach past the channel: a backend's slot or cache
-  controls (llama-server's `id_slot`, `cache_prompt`) can evict another
-  channel's cached prefix, and a forced `response_format` or grammar can
-  stop the model emitting tool calls.
+  too, and some reach past the channel: a backend's slot or cache controls
+  (llama-server's `id_slot`, `cache_prompt`) can evict another channel's
+  cached prefix, and a forced `response_format` or grammar can stop the
+  model emitting tool calls.
 - **Gate tunables and thresholds** (`gate.*`,
   `critique.provenance.enabled`, `critique.sample_below_rate`, the
   critique lens thresholds `critique.lens.*`; open by default today).
@@ -801,11 +803,11 @@ What each kind of unlock costs:
 
 Recommended locks for a channel with untrusted participants, as a starting
 point rather than a rule: the system prompt, the prompts that judge and
-remember, the heartbeat and subagent prompts, framing, `model` and the
-backend's slot and cache controls, the gate tunables (which also blocks
-closed-loop fitting from moving them), the tool set, `llm.*`,
-`plugins.disabled`, `scheduler.jobs`, skill writes behind confirmation,
-and self-edit and restart.
+remember, the heartbeat and subagent prompts, framing, `model` (locked, or
+bounded to an allowed set) and the backend's slot and cache controls, the
+gate tunables (which also blocks closed-loop fitting from moving them),
+the tool set, `llm.*`, `plugins.disabled`, `scheduler.jobs`, skill writes
+behind confirmation, and self-edit and restart.
 
 A channel with only the operator on it has the smallest exposure, and it
 is where these unlocks cost least. It isn't free. Untrusted text still
