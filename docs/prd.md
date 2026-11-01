@@ -1209,7 +1209,8 @@ its budget, coalescing, charging per channel or sender) are tracked in
    capacity frees. Held calls start in an order policy decides; only a
    hard cap refuses (item 6).
 3. Separately from admission, policy decides whether a channel takes its
-   next queue item now or defers it, so one channel can be paused while
+   next queue item now or defers it. Deferring a channel's new work
+   until a deadline is a pause, so one channel can be paused while
    others run.
 4. Policy decides from a view the kernel keeps current without calling a
    model. Per channel: queue depth, the kinds and ages of queued items,
@@ -1220,7 +1221,9 @@ its budget, coalescing, charging per channel or sender) are tracked in
    every admission. Admission and dispatch never call a model, like the
    inbound gate (principle 3).
 5. Policy is pluggable. Holds and deferrals compose: any number of
-   plugins can hold a call or defer a channel, and a hold wins. Ordering
+   plugins can hold a call or defer a channel, and a hold wins, except
+   that no hold or deferral delays work past its latency bound (item 7).
+   Ordering
    doesn't compose: one implementation orders held calls. The kernel
    ships a default order that meets item 7, and a plugin can replace it.
    With no policy plugin loaded, the kernel enforces only declared
@@ -1229,7 +1232,9 @@ its budget, coalescing, charging per channel or sender) are tracked in
    a budget period) can carry a soft cap and a hard cap. Crossing a soft
    cap changes behaviour in a way the configuration docs state, logs a
    warning naming the pool, the cap and the usage, and emits a metric
-   (principle 5). Once usage reaches a hard cap, no further call is
+   (principle 5). A provider's rate limit is declared as capacity and
+   waited on (item 2); a cap is the operator's own limit on the agent's
+   usage. Once usage reaches a hard cap, no further call is
    admitted against it until its period rolls over; whether calls
    reserve against the cap in advance, so that none overshoots it, is
    #296's question. A call refused at a hard cap fails like an LLM
@@ -1247,9 +1252,11 @@ its budget, coalescing, charging per channel or sender) are tracked in
    - work a waiting main turn must wait for under principle 3 (an
      exchange's own background work still owed) runs at that turn's
      priority;
-   - held work gains priority as it waits, and work with a latency
-     bound (§3.1.16, principle 13) runs no later than its bound, so
-     nothing starves.
+   - held work gains priority as it waits, though upkeep overtakes a
+     waiting main turn only once it is past due (principle 3); work with
+     a latency bound (§3.1.16, principle 13) runs no later than its
+     bound, subject only to declared capacity and hard caps, so nothing
+     starves.
 8. Deferral acts at exchange boundaries: a deferred channel still takes
    the continuations of an exchange in flight. A hold delays a call; it
    doesn't drop it. Only a hard cap stops an exchange mid tool cycle,
@@ -1264,7 +1271,7 @@ its budget, coalescing, charging per channel or sender) are tracked in
    refusal at a hard cap, a missed window under §3.8.2) is logged with
    what was lost (principle 5).
 10. Usage is accounted from the per-call record principle 11 produces,
-    and read back from `usage_log` after a restart, so caps hold across
+    which names the model each call was sent with, and read back from `usage_log` after a restart, so caps hold across
     a restart without new state. A pool with a cap depends on the
     `usage_log` plugin for that.
 11. Holds, deferrals, refusals and pool usage emit `on_metrics` events

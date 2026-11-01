@@ -765,7 +765,8 @@ What each kind of unlock costs:
   move its own channel ahead of others, or push upkeep back. Every hold,
   deferral and pause lapses by itself and the operator can resume any
   channel (PRD §3.13.8), so the damage is delay, not a wedged agent;
-  upkeep with a latency bound still runs by its bound (PRD §3.13.7).
+  upkeep with a latency bound still runs by its bound unless capacity
+  or a hard cap stops it (PRD §3.13.7).
 - **Skills.** The skills index sits in the stable prompt region, so a
   skill written at an injection's request is offered to every future
   conversation on every channel and survives restarts. The idle scan
@@ -783,7 +784,8 @@ starting point rather than a rule: the system prompt, the prompts that
 judge and remember, the heartbeat and subagent prompts, framing, `model`,
 the gate tunables (which also blocks closed-loop fitting from moving
 them), the tool set, and skill writes behind confirmation. On a metered
-pool, add a hard spend cap, locked; `model`, already listed, matters
+pool, add a hard spend cap on the pool, locked on every channel that
+draws on it; `model`, already listed, matters
 more there, since on an endpoint that serves several models at
 different prices it sets the price (finding 14).
 
