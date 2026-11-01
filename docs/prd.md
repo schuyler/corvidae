@@ -153,14 +153,15 @@ one is a bug even if its tests pass.
    request-body keys the agent loop builds (`messages`, `tools`,
    `tool_choice`, `stream`) are never overridden, and transport metadata
    is out of the agent's reach (§3.5.6). The floors bind the framework's
-   own surfaces; an agent permitted to edit its own code and restart
-   (principle 15) can change anything, floors included, and the threat
-   model records that cost. Apart from these floors, what the agent may
-   change about itself is not fixed: every other restriction on it is a
-   lock the operator can lift (principle 15). The model's authority is
-   unbounded and unsandboxed by decision; `docs/threat-model.md` is the
-   standing record of what that costs and is updated whenever untrusted
-   text can reach somewhere new or a tool can do something new.
+   own surfaces; an agent permitted to edit its own code or configuration
+   and restart (principle 15) can change anything, floors included, and
+   the threat model records that cost. Apart from these floors and the
+   append-only log (principle 4), what the agent may change about itself
+   is not fixed: every other restriction on it is a lock the operator can
+   lift (principle 15). The model's authority is unbounded and unsandboxed
+   by decision; `docs/threat-model.md` is the standing record of what that
+   costs and is updated whenever untrusted text can reach somewhere new or
+   a tool can do something new.
 
 10. **Channel ids are persistence keys and never derive from names.**
     `transport:scope` keys `sessions.db`, the JSONL logs, memory
@@ -237,14 +238,15 @@ one is a bug even if its tests pass.
     allowed values. Every restriction on self-modification is a lock: a
     mechanism the framework supports and the operator configures, never a
     prohibition in the architecture. Operator config can lift any lock.
-    The floors of principle 9 are the exceptions and stay fixed, and the
-    conversation log stays append-only (principle 4). Each capability has
-    a route that keeps the agent loop consistent. A request-body override
-    carries model parameters, never the loop's own `messages`, `tools`,
-    `tool_choice` or `stream` (§3.5.6). Cache reuse is optimized for the
-    general case: a change the agent makes that would alter what is
-    already rendered in the window (the system prompt, the tool set, how
-    earlier rows are framed or stripped) takes effect at the channel's
+    The floors of principle 9 are the exceptions and stay fixed (they bind
+    the framework's own surfaces; see principle 9 for a self-edit), and
+    the conversation log stays append-only (principle 4). Each capability
+    has a route that keeps the agent loop consistent. A request-body
+    override carries model parameters, never the loop's own `messages`,
+    `tools`, `tool_choice` or `stream` (§3.5.6). Cache reuse is optimized
+    for the general case: a change the agent makes that would alter what
+    is already rendered in the window (the system prompt, the tool set,
+    how earlier rows are framed or stripped) takes effect at the channel's
     next compaction boundary or conversation start, not mid-window
     (§3.3.8; principle 2). An agent that wants a change applied at once
     makes it persistent and restarts. What each unlock costs is recorded
@@ -685,10 +687,10 @@ Per transport:
 3. `resolve_llm_error` turns a failure into a reply that names the status,
    an actionable hint, and the endpoint, and defers to the generic message
    otherwise.
-4. Logprobs are requested when `agent.request_logprobs` is on (§3.11.4)
-   or when the agent sets `logprobs` (§3.5.6). Either way they are
-   surfaced on the turn result and to `on_agent_response`, and never faked
-   for providers that return none.
+4. Logprobs are requested when the agent's `logprobs` override (§3.5.6)
+   says so, or, absent one, when `agent.request_logprobs` is on (§3.11.4).
+   Either way they are surfaced on the turn result and to
+   `on_agent_response`, and never faked for providers that return none.
 5. No streaming until a core change is planned for it; the web transport
    states the reason.
 

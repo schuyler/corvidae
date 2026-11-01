@@ -658,11 +658,12 @@ PRD principle 15 makes self-modification a design goal: the framework must
 be able to let the agent change its own prompts, skills, model and
 parameters, tunables, framework settings, caps and thresholds, tool set,
 and its own code and configuration (applied by restarting), and every
-restriction on that is a lock the operator can lift. This finding is the
-cost ledger it asks for, organized by kind of change so that a new key
-falls under an entry that already exists. It doesn't argue against the
-capability; it says what each kind of unlock buys an attacker who can get
-text in front of the model, so an operator can decide per channel.
+restriction on that, apart from the principle 9 floors and the append-only
+log, is a lock the operator can lift. This finding is the cost ledger it
+asks for, organized by kind of change so that a new key falls under an
+entry that already exists. It doesn't argue against the capability; it
+says what each kind of unlock buys an attacker who can get text in front
+of the model, so an operator can decide per channel.
 
 Where the tree stands: `set_settings` hard-blocks `system_prompt` and any
 undotted key outside its allowlist, and can't change a channel's disabled
@@ -787,27 +788,27 @@ What each kind of unlock costs:
 - **Self-edit and restart** (its own code, configuration, prompt files and
   plugin set, applied by restarting; PRD §3.11.13). A code or config edit
   made at an injection's request is persistent and total: it can lift
-  every lock in this ledger, remove the principle 9 floors (they are fixed
-  in the framework, not in code the agent can rewrite), disable plugins,
-  or plant code that runs with the daemon's privileges, and it survives
-  every restart after. This is the cost finding 4 already records for a
-  writable `agent.yaml` and `shell`, reached on purpose. A restart also
-  drops every runtime override and briefly takes every channel offline;
-  the operator's rate limit on agent-requested restarts bounds how often.
-  The locks are the restart tool itself, file ownership of `agent.yaml`
-  and the prompt files (PRD §3.11.11), and, for code, keeping it read-only
-  to the daemon and outside the file tools' root, or disabling
-  `write_file` and `shell` (the tool set entry). A code edit the restart
-  tool can't apply still takes effect at the next restart the operator
-  does.
+  every lock in this ledger, remove the principle 9 floors (they bind the
+  framework's own surfaces, and a self-edit rewrites the framework),
+  disable plugins, or plant code that runs with the daemon's privileges,
+  and it survives every restart after. This is the cost finding 4 already
+  records for a writable `agent.yaml` and `shell`, reached on purpose. A
+  restart also drops every runtime override and briefly takes every
+  channel offline; the operator's rate limit on agent-requested restarts
+  bounds how often. The locks are the restart tool itself, file ownership
+  of `agent.yaml` and the prompt files (PRD §3.11.11), and, for code,
+  keeping it read-only to the daemon and outside the file tools' root, or
+  disabling `write_file` and `shell` (the tool set entry). A code edit the
+  restart tool can't apply still takes effect at the next restart the
+  operator does.
 
 Recommended locks for a channel with untrusted participants, as a starting
 point rather than a rule: the system prompt, the prompts that judge and
 remember, the heartbeat and subagent prompts, framing, `model` (locked, or
 bounded to an allowed set) and the backend's slot and cache controls, the
-gate tunables (which also blocks closed-loop fitting from moving them),
-the tool set, `llm.*`, `plugins.disabled`, `scheduler.jobs`, skill writes
-behind confirmation, and self-edit and restart.
+gate tunables (locking them also keeps closed-loop fitting from moving
+them), the tool set, `llm.*`, `plugins.disabled`, `scheduler.jobs`, skill
+writes behind confirmation, and self-edit and restart.
 
 A channel with only the operator on it has the smallest exposure, and it
 is where these unlocks cost least. It isn't free. Untrusted text still
