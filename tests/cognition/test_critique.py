@@ -35,7 +35,7 @@ from corvidae_cognition.outcome_log import OutcomeLogPlugin
 from corvidae.persistence import PersistencePlugin, init_db
 from corvidae.task import TaskPlugin, TaskQueue
 
-from helpers import CORRUPT_MESSAGES, FakeForkAgent, insert_raw_message, skip_warnings
+from helpers import CORRUPT_MESSAGES, FakeForkAgent, insert_raw_message, skip_warnings, window_of
 
 
 EMPTY_VERDICT = json.dumps({"objections": []})
@@ -126,8 +126,16 @@ async def _seed_fts(path, contents):
 
 async def build_critique(
     tmp_path, appraisal=None, chat_text=OBJECTION_VERDICT, fts_contents=(),
-    with_funnel=False, config=None,
+    with_funnel=False, config=None, fork=True,
 ):
+    """Wire critique + outcome_log + llm(stub) + task over a file DB.
+
+    ``fork`` registers a ``FakeForkAgent({"critique"})`` answering with
+    ``chat_text`` and gives the channel a window holding rowids 1, 2 and 50,
+    the rows these tests give their exchanges. The stylistic lenses are forks
+    of the window (#320); a miss skips, so without both the lens never runs.
+    Tests that register their own agent pass ``fork=False``.
+    """
     from corvidae_cognition.critique import CritiquePlugin
 
     db_path = str(tmp_path / "sessions.db")
@@ -175,10 +183,16 @@ async def build_critique(
     await plugin.on_start(config=cfg)
 
     channel = _make_channel()
+    fork_agent = None
+    if fork:
+        # The default fork agent and a window containing the originating rows.
+        fork_agent = FakeForkAgent({"critique"}, text=chat_text)
+        pm.register(fork_agent, name="agent")
+        channel.conversation = window_of(channel.id, [1, 2, 50])
     return SimpleNamespace(
         pm=pm, db=db, db_path=db_path, plugin=plugin, task=task_plugin,
         outcome=outcome, llm=llm, stub=stub, funnel=funnel, channel=channel,
-        appraisal=appraisal,
+        appraisal=appraisal, fork_agent=fork_agent,
     )
 
 
@@ -212,6 +226,11 @@ async def _fire(env, trace_id="k", origin="user", response_text="resp",
     await env.outcome.record_exchange(trace_id, env.channel.id, origin=origin)
     if env.appraisal is not None:
         env.appraisal._originating_text[trace_id] = originating_text
+    # A lens forks only while the exchange's originating row is known and in
+    # the window (#320); persist row 1 unless the test already recorded one.
+    if env.fork_agent is not None and trace_id not in env.plugin._originating_rowid:
+        await env.plugin.on_message_persisted(
+            channel=env.channel, trace_id=trace_id, rowid=1, text=originating_text, meta={})
     if origin == "user":
         await env.plugin.on_message_admitted(
             channel=env.channel, trace_id=trace_id,
@@ -352,8 +371,9 @@ class TestEligibility:
         await _fire(env, "kt", origin="user",
                     originating_text="the ORIGINAL user question")
         await _run_next_task(env.task)
-        user_msg = env.stub.chat_calls[0]["messages"][1]["content"]
-        assert "the ORIGINAL user question" in user_msg
+        # The lens is a fork (#320); its instruction quotes the original text.
+        assert env.stub.chat_calls == []
+        assert "«the ORIGINAL user question»" in env.fork_agent.calls[0]["instruction"]
         await _teardown(env)
 
 
@@ -462,8 +482,9 @@ class TestExecution:
         env.pm.ahook.on_notify.assert_not_awaited()
         outcomes = await _read_outcomes(env.db, "kempty")
         assert outcomes["critique"]["objections"] == 0
-        # The critic call carried the exchange attribution.
-        attr = env.stub.chat_calls[0]["attribution"]
+        # The lens fork carried the exchange attribution.
+        assert env.stub.chat_calls == []
+        attr = env.fork_agent.calls[0]["attribution"]
         assert attr.get("stage") == "critique"
         assert attr.get("trace_id") == "kempty"
         await _teardown(env)
@@ -546,7 +567,7 @@ async def _provenance_env(tmp_path, chat_text=OBJECTION_VERDICT, with_funnel=Fal
     appraisal = FakeAppraisal()
     return await build_critique(
         tmp_path, appraisal=appraisal, chat_text=chat_text, with_funnel=with_funnel,
-        config={"critique": {"sample_below_rate": 0.0}},
+        config={"critique": {"sample_below_rate": 0.0}}, fork=False,
     )
 
 
@@ -1119,7 +1140,6 @@ async def _real_path_env(tmp_path, replies, past_claims):
 
     llm = LLMPlugin()
     pm.register(llm, name="llm")
-    llm._clients["appraisal"] = RoleStub(_stage2_reply(past_claims))
     critic = RoleStub(OBJECTION_VERDICT)
     llm._clients["critic"] = critic
 
@@ -1147,7 +1167,7 @@ async def _real_path_env(tmp_path, replies, past_claims):
     # an objection (the agent's own client is reserved for the turns).
     from corvidae.fork import ForkResult, ForksConfig, build_fork_prompt
 
-    agent._forks = ForksConfig(enabled=True, stages=frozenset({"critique"}))
+    agent._forks = ForksConfig(enabled=True, stages=frozenset({"appraisal", "critique"}))
     forks: list[dict] = []
 
     async def fork(ch, instruction, *, cut=None, extra_body=None):
@@ -1156,7 +1176,13 @@ async def _real_path_env(tmp_path, replies, past_claims):
             "request": build_fork_prompt(
                 ch.conversation, cut, instruction, frozenset(), "system"),
         })
-        return ForkResult(text=UNSUPPORTED_VERDICT, message={"role": "assistant"})
+        # Stage 2 (a fork too, #320) answers with the claims; critique with
+        # an unsupported verdict.
+        from corvidae_cognition.appraisal import DEFAULT_STAGE2_FORK_PROMPT
+
+        text = (_stage2_reply(past_claims) if instruction.startswith(DEFAULT_STAGE2_FORK_PROMPT)
+                else UNSUPPORTED_VERDICT)
+        return ForkResult(text=text, message={"role": "assistant"})
 
     agent.fork = fork
 

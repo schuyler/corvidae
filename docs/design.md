@@ -1472,7 +1472,8 @@ default priority) returned non-None first. The caller does not use the return va
    and use the reply as the summary. The prefix already holds any prior
    summary at its head, so no bounded copy is passed. If forks are off for
    the stage, or the fork raises or comes back empty (logged at WARNING),
-   fall through to the standalone call:
+   fall through to the standalone call (compaction is the one live-window
+   stage that keeps it, PRD §3.8.5):
    call `_summarize(new_messages_clean, prior_summaries_clean,
    max_tokens=max_tokens)` — sends the older messages to the LLM with a
    system prompt asking for a concise summary, incorporating any prior
@@ -1518,8 +1519,8 @@ LLM context window is exceeded.
 ## Forks
 
 `fork.py` plus `Agent.fork` — background processes run as branches of the
-main window (GitHub issue #51; plan of record `plans/forks.md`). Off by
-default: `agent.forks.enabled`.
+main window (GitHub issue #51; plan of record `plans/forks.md`). On by
+default (#320): `agent.forks.enabled`.
 
 A **fork** renders the channel's window exactly as the main turn does, up
 to a cut, and appends one `user` instruction. The prompt is then a prefix of
@@ -1556,8 +1557,12 @@ written out as text (`<tool_call>`, a `<function…>` tag, a bare
 `{"name", "arguments"}` object), raises `ForkRefused`. No live window or
 no main client raises `ForkUnavailable`.
 Every caller treats any fork exception, or an empty or unparseable reply,
-as a miss: it logs at WARNING and makes its standalone call instead
-(except the provenance check, which skips). A
+as a miss: it logs at WARNING and the live-window stage skips, with no
+standalone call (PRD §3.8.5, #320). The exceptions are compaction, whose
+summary is written standalone on a miss, and consolidation of a range that
+has left the window (the compaction trigger's task after the drop, an idle
+range not wholly in the window), which has no window to fork and runs
+standalone. A
 standalone JSON parse failure names the failing phase (consolidation,
 appraisal, or critique) and includes up to 500 characters of the provider
 text in the `ValueError`.
@@ -1566,17 +1571,18 @@ text in the `ValueError`.
 `fork_agent(pm, stage)`, which returns it only when that stage is enabled.
 Stage names are opaque to core (it never names cognition plugins).
 
-| Stage | Cut | Runs | Standalone when |
+| Stage | Cut | Runs | On a miss |
 |---|---|---|---|
-| `compaction` | dropped prefix | inline in `resolve_compaction` | forks off for the stage; fork miss |
-| `consolidation` (compaction trigger) | dropped prefix | inline in `before_compaction`; the record is stashed and the `on_compaction` task consumes it | also: a range dialog row is not in `messages[:cut]`; the watermark moved since the fork |
-| `consolidation` (idle trigger) | full window | in the idle task | also: no registered channel or live window; a range row not in the window |
-| `appraisal` (stage 2) | full window at run time | silent TaskQueue task | also: the exchange's originating rowid has left the window (or was never persisted) |
-| `critique` (each stylistic lens) | full window at run time | silent TaskQueue task | same as appraisal; a lens whose fork misses falls back alone |
-| `critique` (provenance) | prefix ending at the exchange's final reply | silent TaskQueue task | never: a miss (forks off, no live window, reply not recorded or not in the window, a compaction since the reply) or a failed fork skips with a warning |
+| `compaction` | dropped prefix | inline in `resolve_compaction` | standalone summary (then the over-budget fallback, #308) |
+| `consolidation` (compaction trigger) | dropped prefix | inline in `before_compaction`; the record is stashed and the `on_compaction` task consumes it | standalone in the `on_compaction` task: no stash (range not in `messages[:cut]`, fork failed) or the watermark moved since the fork |
+| `consolidation` (idle trigger) | full window | in the idle task | range wholly in the live window: skip with a warning, watermark unchanged, retried on the next idle trigger; no registered channel or window, or a range row not in the window: standalone |
+| `appraisal` (stage 2) | full window at run time | silent TaskQueue task | skip with a warning (forks off, originating rowid left the window or was never persisted, fork failed or unusable) |
+| `critique` (each stylistic lens) | full window at run time | silent TaskQueue task | same as appraisal; a lens whose fork misses is skipped alone; if no lens ran, no outcome is recorded |
+| `critique` (provenance) | prefix ending at the exchange's final reply | silent TaskQueue task | skip with a warning (forks off, no live window, reply not recorded or not in the window, a compaction since the reply, or a failed fork) |
 
 Seeding, imports, `consolidate_replay.py` and the `eval_*` scripts have no
-live window and always run standalone. Subagents are unchanged: workers
+live window and always run standalone, as does consolidation of a range
+outside the window. Subagents are unchanged: workers
 with their own persona-neutral prompts.
 
 The compaction and consolidation forks share one prefix: the second
@@ -1596,8 +1602,7 @@ records the reply's rowid and the channel's compaction count in
 the window changes), and checks both before its search and again right
 before the fork.
 
-**Instructions.** Each stage has a fork instruction beside its standalone
-prompt (provenance has none), written to the agent in the second person.
+**Instructions.** Each stage has a fork instruction, written to the agent in the second person.
 The voice is a choice, not a measured result; #186's prompt-voice A/B will
 say whether it matters:
 `agent.compaction_fork_prompt`, `memory.consolidation_fork_prompt`,
@@ -1625,7 +1630,7 @@ shows). `Agent.fork` always sets it, so it is None only when a
 ```yaml
 agent:
   forks:
-    enabled: false                # opt-in until measured (#73)
+    enabled: true                 # default; false: live-window stages skip, compaction goes standalone
     reasoning_budget_tokens: 2048 # per fork; null = server default
     stages: null                  # null = every stage; or a list of names
 ```
@@ -1641,27 +1646,20 @@ deployment meets it, and holds for llama.cpp's llama-server with one KV
 slot and Swift-1.5 (a Qwen 3.8 fine-tune); another backend may answer
 differently.
 
-**Fork by default (#180, implemented by #181).** This is the target,
-not the current code. Every background call that has a live window
-forks it: compaction from the dropped prefix; compaction-time
+**Fork by default (#180, #320).** Every background call that has a live
+window forks it: compaction from the dropped prefix; compaction-time
 consolidation from the same prefix in `before_compaction`, while the
 window is whole; idle consolidation from the full window; stage-2
-appraisal and each critique lens from the prefix ending at the exchange's
-final reply, as provenance does; provenance
-from the prefix ending at the exchange's final reply. Each forks only
-while the rows it needs are still in the window; for an exchange-scoped
-stage, a compaction between the reply and the fork is a miss, since the
-prefix would no longer be what the agent saw. A fork that would not fit
-the slot's context is a miss too. A miss skips the stage with a warning
-(the rescue is a retry or a skip, never a standalone call), except
-compaction, which takes its can't-fail fallback. Today only provenance
-follows this: it is fork-only, and with forks off for critique (the
-default config) it never runs. Every other stage still falls back to a
-standalone call on a miss or failure (critique `_fork_target`,
-`_fork_lens` and `_run_lens`; appraisal stage-2; `compaction.py`'s
-`_fork_summary` fallback; memory consolidation), until #181 converts them
-to skip-on-miss (compaction to its can't-fail fallback). Also #181's
-target, not enforced today: per-stage reasoning and reply caps (today one
+appraisal and each critique lens from the full window at run time;
+provenance from the prefix ending at the exchange's final reply. Each forks
+only while the rows it needs are still in the window. A miss skips the
+stage with a warning (the rescue is a retry or a skip, never a standalone
+call), except compaction, which writes a standalone summary and, if that
+fails too, leaves the window to the over-budget fallback (#308), and
+consolidation of a range that has left the window, which is windowless work
+and runs standalone. Skip-on-miss and the default are implemented (#320).
+Still targets, not enforced today: stage 2 and the lenses forking only the
+prefix ending at the reply, per-stage reasoning and reply caps (today one
 global `agent.forks.reasoning_budget_tokens` and no reply cap), the
 headroom guarantee in the cost model below, and treating a fork that would
 not fit the slot's context as a miss.
@@ -1692,14 +1690,14 @@ tool results, and objected to claims those supported (a `USER.md` fact, a
 is what the agent had, so provenance runs only as that fork and skips on
 a miss.
 
-**Rollout gate (#73).** Forking ships once #73's cache probes
-pass: the fork row and the main turn after it reuse the cached prefix
+**Cache probes (#73).** #73's probes measured what forking costs
+on a backend: the fork row and the main turn after it reuse the cached prefix
 (K1), the fork prompt begins with the main prompt (K2), and
 `response_format` holds under `tool_choice: "none"` with tools present
 (K3). On Lex at 913f7ab (appraisal and critique forking) all three
 passed; K3 ran offline on a Lex `sessions.db` snapshot. K3 also found
 the 2,048 reasoning budget binding on 5/10 appraisal and 9/10 provenance
-forks; #186 tracks it. The flip of `enabled` is tracked in #73. #73's comparisons of fork
+forks; #186 tracks it. The flip of `enabled` was made by #320. #73's comparisons of fork
 against standalone (planted-defect recall per lens, consolidation and
 compaction fidelity) are benchmarks, not gates.
 
@@ -3151,8 +3149,8 @@ Plugins with `depends_on = set()` (declared but empty):
 `FunnelPlugin` (cognition extra).
 
 "Soft-uses" means `fork_agent(pm, stage)` (`pm.get_plugin("agent")`,
-duck-typed): with the agent plugin absent or forks off, the stage runs
-standalone.
+duck-typed): with the agent plugin absent or forks off, the live-window stages skip
+(compaction runs standalone).
 
 Transport plugins use `get_dependency(pm, "registry", ChannelRegistry)` in
 `on_start` to retrieve the shared `ChannelRegistry`. `SubagentPlugin` calls

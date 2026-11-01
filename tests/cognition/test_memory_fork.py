@@ -2,11 +2,15 @@
 
 Compaction trigger: before_compaction forks the record from the dropped
 prefix and stashes it; the on_compaction task consumes it instead of the
-standalone call. Idle trigger: fork the full window. Any miss is the
-standalone call; everything after the LLM call is unchanged.
+standalone call, and a fork miss there is the standalone call (the range has
+left the window). Idle trigger: a range wholly in the live window forks the
+full window, and a miss skips (watermark unchanged, retried on the next
+trigger, #320, PRD §3.8.5); a range not wholly in a live window is windowless
+work and runs standalone. Everything after the LLM call is unchanged.
 """
 
 import json
+import logging
 
 import pytest
 
@@ -14,7 +18,9 @@ from corvidae.fork import ForkRefused
 from corvidae_cognition.memory import DEFAULT_CONSOLIDATION_FORK_PROMPT
 
 from helpers import FakeForkAgent, window_of
-from .test_memory_consolidation import build_consolidation_env, fetch_memories, seed_dialog
+from .test_memory_consolidation import (
+    build_consolidation_env, fetch_memories, fetch_watermark, seed_dialog,
+)
 
 FORK_JSON = json.dumps({"summary": "I told kestrel it was the brownout detector.",
                         "topic_tags": ["wifi"], "participants": ["kestrel"]})
@@ -129,10 +135,15 @@ async def test_summary_rows_in_range_do_not_block_the_fork(env):
     assert len(agent.calls) == 1
 
 
-@pytest.mark.parametrize("live_window,error,forked", [
-    (True, None, True), (False, None, False), (True, RuntimeError("down"), False),
+@pytest.mark.parametrize("live_window,error,forked,standalone", [
+    (True, None, True, 0),
+    # No live window: windowless work stays standalone.
+    (False, None, False, 1),
+    # A fork failure on an in-window range skips: no standalone call and no
+    # memory row (#320); test_idle_in_window_miss_skips covers the details.
+    (True, RuntimeError("down"), False, 0),
 ])
-async def test_idle_trigger_forks_the_full_window(env, live_window, error, forked):
+async def test_idle_trigger_forks_the_full_window(env, live_window, error, forked, standalone):
     memory, stub, channel, db, ids = env
     agent = _use(memory, FakeForkAgent({"consolidation"}, text=FORK_JSON, error=error))
     if not live_window:
@@ -140,8 +151,89 @@ async def test_idle_trigger_forks_the_full_window(env, live_window, error, forke
     await memory._consolidate_range(channel.id, ids[-1], "idle")
     if live_window:
         assert (agent.calls[0]["cut"], agent.calls[0]["attribution"]["trigger"]) == (None, "idle")
-    assert len(_standalone(stub)) == (0 if forked else 1)
+    assert len(_standalone(stub)) == standalone
+    assert len(await fetch_memories(db)) == (1 if (forked or standalone) else 0)
+
+
+@pytest.mark.parametrize("agent,reason", [
+    (FakeForkAgent({"consolidation"}, error=RuntimeError("down")), "RuntimeError"),
+    (FakeForkAgent({"consolidation"}, text="not json"), "the fork failed or its reply was unusable"),
+    (FakeForkAgent(set(), text=FORK_JSON), "forks are not enabled for consolidation"),
+    (None, "forks are not enabled for consolidation"),  # no agent plugin
+])
+async def test_idle_in_window_miss_skips(env, caplog, agent, reason):
+    """#320: an in-window range that cannot fork is skipped, not summarized
+    standalone; the watermark stays and a warning names the range."""
+    memory, stub, channel, db, ids = env
+    if agent is not None:
+        _use(memory, agent)
+    before = await fetch_watermark(db, channel.id)
+    with caplog.at_level(logging.WARNING, logger="corvidae.memory"):
+        await memory._consolidate_range(channel.id, ids[-1], "idle")
+    # No background-role call, no record, watermark unmoved.
+    assert stub.chat_calls == []
+    assert await fetch_memories(db) == []
+    assert await fetch_watermark(db, channel.id) == before
+    # One warning with the channel, the message range, the reason, the retry.
+    [text] = [r.getMessage() for r in caplog.records
+              if r.levelno == logging.WARNING and "consolidation skipped for channel" in r.getMessage()]
+    assert channel.id in text and f"{ids[0]}-{ids[-1]}" in text
+    assert reason in text and "watermark stays at" in text
+
+
+async def test_idle_skip_is_retried(env):
+    """#320: a skipped range stays unconsolidated; the next idle run with a
+    working fork consolidates it."""
+    memory, stub, channel, db, ids = env
+    _use(memory, FakeForkAgent({"consolidation"}, error=RuntimeError("down")))
+    await memory._consolidate_range(channel.id, ids[-1], "idle")
+    assert await fetch_memories(db) == []
+    # Swap in a working fork and run again.
+    memory.pm.unregister(name="agent")
+    agent = _use(memory, FakeForkAgent({"consolidation"}, text=FORK_JSON))
+    await memory._consolidate_range(channel.id, ids[-1], "idle")
+    assert len(agent.calls) == 1 and stub.chat_calls == []
+    [record] = await fetch_memories(db)
+    assert (record["msg_id_start"], record["msg_id_end"]) == (ids[0], ids[-1])
+
+
+def _no_window(memory, channel, ids):
+    channel.conversation = None
+
+
+def _no_registry_channel(memory, channel, ids):
+    memory.pm.unregister(name="registry")
+
+
+def _range_partly_trimmed(memory, channel, ids):
+    channel.conversation = window_of(channel.id, ids[2:], contents=[c for _, c in DIALOG][2:])
+
+
+@pytest.mark.parametrize("break_window", [_no_window, _no_registry_channel, _range_partly_trimmed])
+async def test_idle_out_of_window_is_standalone(env, break_window):
+    """#320 R5: a range that is not wholly in a live window is windowless
+    work: no fork even with a working agent, one standalone call, a record."""
+    memory, stub, channel, db, ids = env
+    agent = _use(memory, FakeForkAgent({"consolidation"}, text=FORK_JSON))
+    break_window(memory, channel, ids)
+    await memory._consolidate_range(channel.id, ids[-1], "idle")
+    assert agent.calls == []
+    assert len(_standalone(stub)) == 1
     assert len(await fetch_memories(db)) == 1
+
+
+async def test_compaction_trigger_without_stash_is_standalone(env, caplog):
+    """#320 R3: the fork at compaction fails, so nothing is stashed and the
+    on_compaction task makes the one standalone call, with a warning."""
+    memory, stub, channel, db, ids = env
+    _use(memory, FakeForkAgent({"consolidation"}, error=RuntimeError("down")))
+    with caplog.at_level(logging.WARNING, logger="corvidae.memory"):
+        await _compaction(memory, channel, ids[:3], cut=3)
+    assert memory._fork_stash == {}
+    assert len(_standalone(stub)) == 1
+    assert len(await fetch_memories(db)) == 1
+    assert any(r.levelno == logging.WARNING and channel.id in r.getMessage()
+               and "standalone" in r.getMessage() for r in caplog.records)
 
 
 @pytest.mark.parametrize("summary,watermark_index,expected", [

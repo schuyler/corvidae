@@ -727,14 +727,17 @@ class MyPlugin(CorvidaePlugin):
         agent = fork_agent(self.pm, "review")   # None unless agent.forks enables "review"
         conv = channel.conversation
         if agent is None or conv is None or rowid not in window_db_ids(conv.messages):
-            return None                         # caller makes its standalone call
+            # Live-window work skips on a miss, with a warning naming the
+            # stage, channel, trace and what was missing (PRD §3.8.5).
+            logger.warning("review skipped on channel %s: no fork or row %s not in the window", channel.id, rowid)
+            return None
         try:
             result = await agent.fork(
                 channel, "Pause here and review your last answer. Reply in JSON.",
                 extra_body={"response_format": {...}},
             )
-        except Exception:
-            logger.warning("review fork failed; using the standalone call", exc_info=True)
+        except Exception as exc:
+            logger.warning("review skipped on channel %s: fork failed (%s)", channel.id, type(exc).__name__, exc_info=True)
             return None
         return result.text
 ```
@@ -755,9 +758,9 @@ class MyPlugin(CorvidaePlugin):
   `agent.forks.reasoning_budget_tokens` instead.
 - It mutates nothing, persists nothing, fires no hooks and never runs
   tools: a reply with `tool_calls` (or a call written out as text) raises `ForkRefused`; no window or no
-  client raises `ForkUnavailable`. Always keep a standalone fallback.
+  client raises `ForkUnavailable`. Treat these as a miss: skip the live-window work and log it. Keep a standalone path only for windowless work (seeding, imports, a range that has left the window) and for stages whose output can't be skipped, as compaction does.
 - Set your own `stage` attribution around the call; `Agent.fork` adds
-  `mode="fork"`. Tag your standalone call `mode="standalone"`.
+  `mode="fork"`. Tag any standalone call you keep `mode="standalone"`.
 - Check containment yourself: a fork only makes sense while the rows your
   process is about are still in the window (`window_db_ids`).
 - Read the instruction from static config (`corvidae.tuning.config_value`),
@@ -1257,7 +1260,7 @@ Compacts conversation history when it approaches the channel's
 
 Implements one hook:
 
-- `resolve_compaction` (`trylast=True`) — fires before each LLM call. Checks whether the token estimate exceeds `compaction_threshold * max_tokens`. If so, and if the conversation has more than `min_messages_to_compact` messages, summarizes older messages to fit within `compaction_retention * max_tokens`, moving the cut off any tool cycle that straddles it where that still leaves a useful compaction (design.md, CompactionPlugin step 3). With `agent.forks` on for `compaction`, the summary comes from a fork of the dropped prefix (`agent.compaction_fork_prompt`); otherwise, or if the fork fails, from the standalone summarizer. Fires `before_compaction` before truncating and `on_compaction` after. Returns True to stop the `firstresult` chain. Runs after any third-party handlers at default priority.
+- `resolve_compaction` (`trylast=True`) — fires before each LLM call. Checks whether the token estimate exceeds `compaction_threshold * max_tokens`. If so, and if the conversation has more than `min_messages_to_compact` messages, summarizes older messages to fit within `compaction_retention * max_tokens`, moving the cut off any tool cycle that straddles it where that still leaves a useful compaction (design.md, CompactionPlugin step 3). With `agent.forks` on for `compaction`, the summary comes from a fork of the dropped prefix (`agent.compaction_fork_prompt`); otherwise, or if the fork fails, from the standalone summarizer (compaction keeps its standalone path on a miss). Fires `before_compaction` before truncating and `on_compaction` after. Returns True to stop the `firstresult` chain. Runs after any third-party handlers at default priority.
 
 Token counting uses tiktoken (cl100k_base encoding) via `count_tokens()` in `corvidae/context.py`. When tiktoken is unavailable, a character-based fallback is used (3.5 chars per token). `agent.chars_per_token` is deprecated and only takes effect in the fallback path.
 

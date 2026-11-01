@@ -12,7 +12,12 @@ Two independent paths:
   * The stylistic lenses (predictive / constrained / adversarial) are selected
     from the exchange's appraisal vector. Below all thresholds, critique fires
     anyway with probability ``critique.sample_below_rate`` — the standing
-    experiment's false-negative bound (operator directive 3).
+    experiment's false-negative bound (operator directive 3). Each lens runs
+    as a fork of the live window; a lens whose fork can't run (forks off, no
+    window, the exchange compacted out, the fork failed or its reply was
+    unusable) is skipped with a warning, like provenance, and makes no
+    standalone call (PRD §3.8.5, #320). A run in which no lens ran records
+    no outcome.
   * The provenance check (trap #4, redesigned in #155) runs when stage-2
     appraisal, a model, lists claims the reply makes about the past. It runs
     only as a fork of the live window cut at the exchange's final reply, so
@@ -56,6 +61,11 @@ from corvidae.task import Task
 from corvidae.tuning import config_value, resolve_tunable
 from corvidae_cognition.memory import ChannelScope
 from corvidae_cognition.probe import ReadOnlyProbe
+
+# Why a lens skips when forks are off for the stage (shared by both skip texts).
+FORKS_OFF_REASON = (
+    "forks are not enabled for critique (agent.forks.enabled / agent.forks.stages)"
+)
 
 # Named explicitly: corvidae/logging.py configures the "corvidae" logger,
 # and __name__ would be corvidae_cognition.critique.
@@ -1018,7 +1028,8 @@ class CritiquePlugin(CorvidaePlugin):
     async def _run_critique(
         self, channel, trace_id, originating_text, response_text, lenses, sampled,
     ) -> None:
-        """Run each selected stylistic lens, record the outcome, register
+        """Run each selected stylistic lens, record the outcome (nothing
+        when no lens ran), register
         non-empty verdicts.
 
         Attribution is set inside the body (usage rows join to the exchange
@@ -1029,34 +1040,33 @@ class CritiquePlugin(CorvidaePlugin):
             stage="critique", channel_id=channel.id, trace_id=trace_id
         )
         try:
-            client = self._critic_client()
+            # Forks off for the stage skips the whole run once, with no outcome.
+            if fork_agent(self.pm if hasattr(self, "pm") else None, "critique") is None:
+                logger.warning(
+                    "critique lenses %s skipped for trace %s on channel %s: %s; "
+                    "no outcome recorded",
+                    lenses, trace_id, channel.id, FORKS_OFF_REASON,
+                    extra={"channel": channel.id, "trace_id": trace_id},
+                )
+                return
             objections: list[dict] = []
+            ran: list[str] = []
             for lens in lenses:
-                # A fork of the live window when one is available; a lens
-                # whose fork misses falls back to its standalone call.
+                # A fork of the live window; a lens whose fork misses was
+                # already logged by _fork_lens and is skipped alone.
                 objs = await self._fork_lens(
                     channel, lens, trace_id, originating_text, response_text,
                 )
                 if objs is None:
-                    if client is None:
-                        continue
-                    standalone_token = set_attribution(mode="standalone")
-                    try:
-                        objs = await self._run_lens(
-                            client, channel, lens, originating_text, response_text,
-                        )
-                    except Exception:
-                        logger.warning(
-                            "critique lens %s failed", lens, exc_info=True,
-                            extra={"trace_id": trace_id},
-                        )
-                        continue
-                    finally:
-                        reset_attribution(standalone_token)
+                    continue
+                ran.append(lens)
                 objections.extend(objs)
 
+            # Nothing ran: record nothing (like provenance's skip).
+            if not ran:
+                return
             outcome = {"critique": {
-                "lenses": lenses,
+                "lenses": ran,
                 "objections": len(objections),
                 "sampled_below_threshold": sampled,
             }}
@@ -1112,49 +1122,42 @@ class CritiquePlugin(CorvidaePlugin):
                 extra={"trace_id": trace_id},
             )
 
-    async def _run_lens(
-        self, client, channel, lens, originating_text, response_text,
-    ) -> list[dict]:
-        prompt = resolve_tunable(
-            channel, self.config, f"critique.prompt.{lens}", DEFAULT_PROMPTS[lens]
+    def _skip_lens(
+        self, channel, lens: str, trace_id: str, reason: str, **kwargs
+    ) -> None:
+        """Log that one lens was skipped: lens, trace, channel and what was
+        missing (PRD §3.8.5)."""
+        logger.warning(
+            "critique lens %s skipped for trace %s on channel %s: %s; "
+            "no objections from this lens",
+            lens, trace_id, channel.id, reason,
+            extra={"channel": channel.id, "trace_id": trace_id}, **kwargs,
         )
-        user = (
-            f"Originating message:\n{originating_text or '(unknown)'}\n\n"
-            f"Agent's response:\n{response_text or '(none)'}"
-        )
-        response = await client.chat(
-            [
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": user},
-            ],
-            extra_body=OBJECTION_EXTRA_BODY,
-        )
-        return self._objections_from_text(response["choices"][0]["message"]["content"], lens)
 
     def _fork_target(self, channel, trace_id):
-        """The Agent to fork through, or None for the standalone path.
+        """The Agent to fork through, or a reason string when the lens must skip.
 
-        None when forks are off for "critique", the channel has no live
-        window, or the exchange's originating row has left the window.
+        A reason when the channel has no live window, the exchange's
+        originating row was not recorded, or it has left the window.
         """
         agent = fork_agent(self.pm if hasattr(self, "pm") else None, "critique")
         if agent is None:
-            return None
+            return FORKS_OFF_REASON
         rowid = self._originating_rowid.get(trace_id)
         conv = getattr(channel, "conversation", None)
-        if rowid is None or conv is None or rowid not in window_db_ids(conv.messages):
-            logger.debug(
-                "critique exchange not in the window; using the standalone call",
-                extra={"trace_id": trace_id},
-            )
-            return None
+        if rowid is None:
+            return "the originating message was not recorded or not persisted"
+        if conv is None:
+            return "no live window"
+        if rowid not in window_db_ids(conv.messages):
+            return "the exchange is not in the window"
         return agent
 
     async def _fork_lens(
         self, channel, lens, trace_id, originating_text, response_text,
     ) -> list[dict] | None:
-        """One stylistic lens as a fork of the full window; None for the
-        standalone path.
+        """One stylistic lens as a fork of the full window; None (a logged
+        skip) on any miss.
 
         The exchange is named by its opening message and the response the
         user was sent (which can differ from the window's last assistant
@@ -1166,7 +1169,9 @@ class CritiquePlugin(CorvidaePlugin):
         Agent.fork renders the prompt before its own first await, so the
         check and the render see the same window.
         """
+        # Forks may be switched off between lenses (a config reload).
         if fork_agent(self.pm if hasattr(self, "pm") else None, "critique") is None:
+            self._skip_lens(channel, lens, trace_id, FORKS_OFF_REASON)
             return None
         prompt = config_value(
             self.config, f"critique.fork_prompt.{lens}", DEFAULT_FORK_PROMPTS[lens]
@@ -1176,16 +1181,20 @@ class CritiquePlugin(CorvidaePlugin):
             f"«{quote(originating_text)}», and the response you sent began "
             f"«{quote(response_text)}»."
         )
+        # Containment check; a string is the reason the lens must skip.
         agent = self._fork_target(channel, trace_id)
-        if agent is None:
+        if isinstance(agent, str):
+            self._skip_lens(channel, lens, trace_id, agent)
             return None
+        # Fork and parse; any failure or unusable reply skips this lens.
         try:
             result = await agent.fork(channel, instruction, extra_body=OBJECTION_EXTRA_BODY)
             return self._objections_from_text(result.text, lens)
-        except Exception:
-            logger.warning(
-                "critique lens %s fork failed; using the standalone call", lens,
-                exc_info=True, extra={"trace_id": trace_id},
+        except Exception as exc:
+            self._skip_lens(
+                channel, lens, trace_id,
+                f"the fork failed or its reply was unusable ({type(exc).__name__})",
+                exc_info=True,
             )
             return None
 
@@ -1252,21 +1261,6 @@ class CritiquePlugin(CorvidaePlugin):
     # ------------------------------------------------------------------
     # DB helpers
     # ------------------------------------------------------------------
-
-    def _critic_client(self):
-        """Resolve the critic client: critic → background → main (WP2.7 p5)."""
-        llm = self.pm.get_plugin("llm") if hasattr(self, "pm") else None
-        if llm is None:
-            return None
-        clients = getattr(llm, "_clients", {})
-        for role in ("critic", "background"):
-            client = clients.get(role)
-            if client is not None:
-                return client
-        try:
-            return llm.get_client("main")
-        except Exception:
-            return None
 
     def _exchange_db(self):
         persistence = self.pm.get_plugin("persistence") if hasattr(self, "pm") else None

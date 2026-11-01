@@ -1,9 +1,11 @@
 """Critique lenses as forks of the window (GitHub issue #51, phase 5):
 each lens forks while the exchange is in the window (checked per lens),
 the provenance lens keeps its snapshot and evidence inline, and a lens whose
-fork misses falls back alone to its standalone call."""
+fork misses skips alone with a warning and no standalone call (#320, PRD
+§3.8.5); a run where every lens missed records no outcome."""
 
 import json
+import logging
 
 import pytest
 from unittest.mock import AsyncMock
@@ -27,7 +29,7 @@ QUESTION, RESPONSE = "when is the meeting?", "It was Tuesday, as you said."
 async def _run(tmp_path, agent, lenses, window_rowids=(7, 8), rowid=7, config=None,
                overrides=None):
     """Run one critique task for exchange "k"; returns (env, recorded outcome)."""
-    env = await build_critique(tmp_path, chat_text=EMPTY_VERDICT, config=config)
+    env = await build_critique(tmp_path, chat_text=EMPTY_VERDICT, config=config, fork=False)
     env.pm.register(agent, name="agent")
     env.channel.conversation = window_of(env.channel.id, list(window_rowids))
     env.channel.runtime_overrides.update(overrides or {})
@@ -35,7 +37,8 @@ async def _run(tmp_path, agent, lenses, window_rowids=(7, 8), rowid=7, config=No
     await env.plugin.on_message_persisted(
         channel=env.channel, trace_id="k", rowid=rowid, text=QUESTION, meta={})
     await env.plugin._run_critique(env.channel, "k", QUESTION, RESPONSE, lenses, False)
-    outcome = (await _read_outcomes(env.db, "k"))["critique"]
+    # None when no lens ran (nothing is recorded for an all-miss run).
+    outcome = ((await _read_outcomes(env.db, "k")) or {}).get("critique")
     await _teardown(env)
     return env, outcome
 
@@ -52,31 +55,65 @@ async def test_each_lens_forks(tmp_path):
     assert outcome["objections"] == 2
 
 
-@pytest.mark.parametrize("agent,window_rowids,rowid", [
-    (FakeForkAgent({"critique"}, text=FORK_VERDICT), (20, 21), 7),  # compacted out
-    (FakeForkAgent({"critique"}, text=FORK_VERDICT), (7, 8), None),  # never persisted
-    (FakeForkAgent(set(), text=FORK_VERDICT), (7, 8), 7),  # forks off
-    (FakeForkAgent({"critique"}, text="I think it's fine."), (7, 8), 7),
+def _warnings(caplog) -> list[str]:
+    """Messages of the WARNING records the critique plugin logged."""
+    return [r.getMessage() for r in caplog.records
+            if r.levelno == logging.WARNING and r.name == "corvidae.critique"]
+
+
+@pytest.mark.parametrize("agent,window_rowids,rowid,reason", [
+    (FakeForkAgent({"critique"}, text=FORK_VERDICT), (20, 21), 7, "not in the window"),  # compacted out
+    (FakeForkAgent({"critique"}, text=FORK_VERDICT), (7, 8), None, "not recorded"),  # never persisted
+    (FakeForkAgent(set(), text=FORK_VERDICT), (7, 8), 7, "forks are not enabled for critique"),
+    (FakeForkAgent({"critique"}, text=""), (7, 8), 7, "ValueError"),  # empty reply
+    (FakeForkAgent({"critique"}, text="I think it's fine."), (7, 8), 7, "ValueError"),
 ])
-async def test_fork_miss_is_standalone(tmp_path, agent, window_rowids, rowid):
-    env, _ = await _run(tmp_path, agent, ["constrained"], window_rowids, rowid)
-    [call] = env.stub.chat_calls
-    assert call["attribution"]["mode"] == "standalone"
+async def test_fork_miss_skips(tmp_path, caplog, agent, window_rowids, rowid, reason):
+    """#320: a miss makes no background-role call, records no outcome, and
+    logs a warning naming the lens, trace, channel and what was missing."""
+    with caplog.at_level(logging.WARNING, logger="corvidae.critique"):
+        env, outcome = await _run(tmp_path, agent, ["constrained"], window_rowids, rowid)
+    # No standalone call and nothing recorded (no lens ran).
+    assert env.stub.chat_calls == []
+    assert outcome is None
+    # Exactly one skip warning with the identifiers and the reason.
+    [text] = [w for w in _warnings(caplog) if "skipped" in w]
+    assert "trace k " in text and env.channel.id in text and reason in text
+    # Forks off skips the whole run once ("critique lenses [...]"); any other
+    # miss names the lens that missed.
+    assert ("critique lenses" if "not enabled" in reason else "critique lens constrained") in text
 
 
-@pytest.mark.parametrize("error", [ForkRefused("tool call"), RuntimeError("down")])
-async def test_failed_lens_falls_back_alone(tmp_path, error):
+@pytest.mark.parametrize("error,kind", [
+    (ForkRefused("tool call"), "ForkRefused"), (RuntimeError("down"), "RuntimeError"),
+])
+async def test_failed_lens_skips_alone(tmp_path, caplog, error, kind):
+    """#320: one failing lens is skipped with a warning; the other lens still
+    counts and no standalone call is made."""
     agent = FakeForkAgent({"critique"}, text=FORK_VERDICT, error=error,
                           fail_marker=DEFAULT_FORK_PROMPTS["adversarial"][:40])
-    env, outcome = await _run(tmp_path, agent, ["predictive", "adversarial"])
-    [call] = env.stub.chat_calls
-    assert "steelman" in call["messages"][0]["content"]  # the adversarial standalone prompt
-    assert outcome["objections"] == 1  # the fork's; the standalone verdict is empty
+    with caplog.at_level(logging.WARNING, logger="corvidae.critique"):
+        env, outcome = await _run(tmp_path, agent, ["predictive", "adversarial"])
+    assert env.stub.chat_calls == []
+    # The outcome lists only the lens that ran, with its objection.
+    assert outcome["lenses"] == ["predictive"]
+    assert outcome["objections"] == 1
+    [text] = [w for w in _warnings(caplog) if "skipped" in w]
+    assert "adversarial" in text and kind in text and "trace k " in text
 
 
-async def test_containment_rechecked_per_lens(tmp_path):
+async def test_all_lenses_missing_records_no_outcome(tmp_path):
+    """#320: when every lens misses there is no critique outcome row."""
+    agent = FakeForkAgent({"critique"}, text="not json")
+    env, outcome = await _run(tmp_path, agent, ["predictive", "constrained"])
+    assert env.stub.chat_calls == []
+    assert len(agent.calls) == 2
+    assert outcome is None
+
+
+async def test_containment_rechecked_per_lens(tmp_path, caplog):
     """Compaction drops the exchange while the first lens's fork is in
-    flight: later lenses go standalone."""
+    flight: later lenses skip, with no standalone call (#320)."""
     agent = FakeForkAgent({"critique"}, text=FORK_VERDICT)
     fork = agent.fork
 
@@ -86,8 +123,12 @@ async def test_containment_rechecked_per_lens(tmp_path):
         return result
 
     agent.fork = fork_then_compact
-    env, _ = await _run(tmp_path, agent, ["predictive", "constrained"])
-    assert (len(agent.calls), len(env.stub.chat_calls)) == (1, 1)
+    with caplog.at_level(logging.WARNING, logger="corvidae.critique"):
+        env, outcome = await _run(tmp_path, agent, ["predictive", "constrained"])
+    assert (len(agent.calls), len(env.stub.chat_calls)) == (1, 0)
+    assert outcome["lenses"] == ["predictive"]
+    [text] = [w for w in _warnings(caplog) if "skipped" in w]
+    assert "constrained" in text and "not in the window" in text
 
 
 async def test_fork_prompt_is_static_config(tmp_path):

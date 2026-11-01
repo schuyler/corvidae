@@ -966,7 +966,9 @@ class MemoryPlugin(CorvidaePlugin):
         ``(channel_id, max(compacted_ids))`` for the on_compaction task.
         Runs inline (the hook is awaited before replace_with_summary), so
         it costs the response path one more generation. Fail-soft: any
-        miss leaves no stash and the task makes the standalone call.
+        miss (range not in the window, fork failed) leaves no stash and the
+        on_compaction task makes the standalone call: after the drop the
+        range has left the window, so it is windowless work (#320).
         """
         if not compacted_ids:
             return
@@ -987,13 +989,22 @@ class MemoryPlugin(CorvidaePlugin):
             rows = await fetch_range_rows(db, channel.id, watermark, range_end)
             if not dialog_from_rows(rows, channel.id):
                 return
-            record = await self._fork_record(agent, channel, rows, cut)
-            if record is not None:
-                self._stash_put((channel.id, range_end), (watermark, record))
+            # The range must be wholly in the prefix the fork will see.
+            conv = getattr(channel, "conversation", None)
+            contained = self._range_in_window(conv, rows, cut) if conv is not None else None
+            if contained is None:
+                logger.debug(
+                    "consolidation range not in the window",
+                    extra={"channel_id": channel.id},
+                )
+                return
+            record = await self._fork_record(agent, channel, contained, cut)
+            self._stash_put((channel.id, range_end), (watermark, record))
         except Exception:
             logger.warning(
-                "consolidation fork at compaction failed", exc_info=True,
-                extra={"channel_id": channel.id},
+                "consolidation fork at compaction failed for channel %s; "
+                "the on_compaction task makes the standalone call", channel.id,
+                exc_info=True, extra={"channel_id": channel.id},
             )
         finally:
             reset_attribution(attribution_token)
@@ -1005,18 +1016,18 @@ class MemoryPlugin(CorvidaePlugin):
         while len(self._fork_stash) > FORK_STASH_MAXSIZE:
             self._fork_stash.popitem(last=False)
 
-    async def _fork_record(self, agent, channel, rows: list[tuple], cut: int | None) -> dict | None:
-        """The memory record from a fork of ``channel``'s window, or None.
+    @staticmethod
+    def _range_in_window(
+        conv, rows: list[tuple], cut: int | None
+    ) -> tuple[list[dict], set[int]] | None:
+        """``(prefix, dialog_ids)`` when every dialog row of ``rows`` is in the
+        window the fork would see (``messages[:cut]``), else None.
 
-        Forks only when every dialog row of the range is in the window the
-        fork sees (``messages[:cut]``): the record must be about rows the
-        model can read. Summary rows are skipped (summaries are never
-        consolidated, and a live window's summary has no rowid). Any fork
-        failure or unusable reply is logged and returns None.
+        The record must be about rows the model can read. Summary rows are
+        skipped (summaries are never consolidated, and a live window's
+        summary has no rowid). Pure: no await, so a caller can check and
+        render with the window unchanged between them.
         """
-        conv = getattr(channel, "conversation", None)
-        if conv is None:
-            return None
         prefix = conv.messages if cut is None else conv.messages[:cut]
         # A corrupt row never loaded into the window, so the fork must not
         # be required to find it there (dialog_from_rows warned about it).
@@ -1025,33 +1036,35 @@ class MemoryPlugin(CorvidaePlugin):
             if mtype == "message" and _decodes_to_object(raw)
         }
         if not dialog_ids <= window_db_ids(prefix):
-            logger.debug(
-                "consolidation range not in the window; using the standalone call",
-                extra={"channel_id": channel.id},
-            )
             return None
+        return prefix, dialog_ids
+
+    async def _fork_record(
+        self, agent, channel, contained: tuple[list[dict], set[int]], cut: int | None
+    ) -> dict:
+        """The memory record from a fork of ``channel``'s window.
+
+        ``contained`` is :meth:`_range_in_window`'s result, so the range is
+        known to be in the window. A fork failure or an unusable reply
+        raises: the caller decides between a skip (idle, in-window range)
+        and the standalone call (compaction).
+        """
+        prefix, dialog_ids = contained
         instruction = (
             self._consolidation_fork_prompt + "\n\n"
             + _fork_range_sentence(prefix, dialog_ids)
         )
-        try:
-            result = await agent.fork(
-                channel, instruction, cut=cut, extra_body=CONSOLIDATION_EXTRA_BODY
-            )
-            record = _record_from_text(result.text)
-            # Stamp the fork instruction (not the code-generated range
-            # sentence, which quotes conversation text) and the model sent.
-            record["stamp"] = RecordStamp(
-                self._consolidation_fork_prompt, "fork",
-                result.model,
-            )
-            return record
-        except Exception:
-            logger.warning(
-                "consolidation fork failed; using the standalone call",
-                exc_info=True, extra={"channel_id": channel.id},
-            )
-            return None
+        result = await agent.fork(
+            channel, instruction, cut=cut, extra_body=CONSOLIDATION_EXTRA_BODY
+        )
+        record = _record_from_text(result.text)
+        # Stamp the fork instruction (not the code-generated range
+        # sentence, which quotes conversation text) and the model sent.
+        record["stamp"] = RecordStamp(
+            self._consolidation_fork_prompt, "fork",
+            result.model,
+        )
+        return record
 
     @hookimpl
     async def on_compaction(
@@ -1351,12 +1364,15 @@ class MemoryPlugin(CorvidaePlugin):
                         await self._set_watermark(wdb, channel_id, range_end)
                 return
 
-            # The first-person record: a fork of the live window when one
-            # is available (stashed at compaction, or run now for idle),
-            # else one standalone background-model call.
+            # The first-person record: a fork of the live window for a range
+            # in it (stashed at compaction, or run now for idle), a skip when
+            # that fork misses, else one standalone background-model call
+            # for windowless work (#320).
             record = await self._consolidation_record(
                 channel_id, rows, dialog, watermark, range_end, trigger
             )
+            if record is None:
+                return
 
             # The appraisal-driven prior (WP2.5) scores over the consolidated
             # message-id range; pass the real channel when the registry has
@@ -1658,17 +1674,32 @@ class MemoryPlugin(CorvidaePlugin):
             )
         return memory_id
 
+    def _skip_consolidation(
+        self, channel_id: str, rows: list[tuple], watermark: int, reason: str, **kwargs
+    ) -> None:
+        """Log that an in-window range was skipped: channel, message range and
+        what was missing (consolidation has no trace id). The watermark is
+        untouched, so the next idle trigger retries."""
+        logger.warning(
+            "consolidation skipped for channel %s, messages %d-%d: %s; "
+            "the watermark stays at %d and the next idle trigger retries",
+            channel_id, rows[0][0], rows[-1][0], reason, watermark,
+            extra={"channel_id": channel_id}, **kwargs,
+        )
+
     async def _consolidation_record(
         self, channel_id: str, rows: list[tuple], dialog: list[dict],
         watermark: int, range_end: int, trigger: str,
-    ) -> dict:
-        """Produce the record for (watermark, range_end].
+    ) -> dict | None:
+        """Produce the record for (watermark, range_end], or None to skip.
 
         Compaction trigger: the record before_compaction stashed, if it was
         built against this same watermark (otherwise it covers a different
-        range and is dropped). Idle trigger: a fork of the channel's live
-        window when forks are on and the range is in it. Everything else,
-        and every miss, is the standalone call.
+        range and is dropped). Idle trigger: a range wholly in the channel's
+        live window forks it, and a miss (forks off, fork failed, unusable
+        reply) skips with a warning (PRD §3.8.5, #320). Everything else (no
+        channel, no window, a range not wholly in it, a compaction trigger
+        with no matching stash) is windowless work and is the standalone call.
         """
         record: dict | None = None
         if trigger == "compaction":
@@ -1676,11 +1707,30 @@ class MemoryPlugin(CorvidaePlugin):
             if stashed is not None and stashed[0] == watermark:
                 record = stashed[1]
         elif trigger == "idle":
-            agent = fork_agent(self.pm, "consolidation")
             registry = self.pm.get_plugin("registry")
             channel = registry.get(channel_id) if registry is not None else None
-            if agent is not None and channel is not None:
-                record = await self._fork_record(agent, channel, rows, None)
+            conv = getattr(channel, "conversation", None)
+            contained = self._range_in_window(conv, rows, None) if conv is not None else None
+            if contained is not None:
+                # Live-window work: fork or skip, never standalone (PRD §3.8.5).
+                agent = fork_agent(self.pm, "consolidation")
+                if agent is None:
+                    self._skip_consolidation(
+                        channel_id, rows, watermark,
+                        "forks are not enabled for consolidation "
+                        "(agent.forks.enabled / agent.forks.stages)",
+                    )
+                    return None
+                # No await between the containment check and the render.
+                try:
+                    return await self._fork_record(agent, channel, contained, None)
+                except Exception as exc:
+                    self._skip_consolidation(
+                        channel_id, rows, watermark,
+                        f"the fork failed or its reply was unusable ({type(exc).__name__})",
+                        exc_info=True,
+                    )
+                    return None
         if record is not None:
             return record
         token = set_attribution(mode="standalone")
