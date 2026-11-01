@@ -63,6 +63,22 @@ def is_model_not_loaded(error: BaseException) -> bool:
     return isinstance(error, LLMHTTPError) and _body_says_not_loaded(error.status, error.body)
 
 
+def is_backend_unreachable(error: BaseException) -> bool:
+    """Connection-class failure: the server could not be reached (connect
+    refused, reset, disconnected), or its router has no model loaded.
+
+    Timeouts are excluded: aiohttp's timeout classes are both
+    ClientConnectionError and TimeoutError, and a timeout is not retried.
+    """
+    # The router's "model is not loaded" is retried like a refused connection.
+    if is_model_not_loaded(error):
+        return True
+    # Any other connection-class error counts unless it is also a timeout.
+    return isinstance(error, aiohttp.ClientConnectionError) and not isinstance(
+        error, TimeoutError
+    )
+
+
 class LLMClient:
     """Async client for OpenAI-compatible Chat Completions API.
 
