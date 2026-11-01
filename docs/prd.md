@@ -138,10 +138,10 @@ one is a bug even if its tests pass.
    appraisal scores: the provenance check fires on any claim about the past
    and is judged against records, never on generator confidence. Thresholds
    ship as commented best guesses and are tuned from the outcome log.
-   Fitting them in a closed loop, with the agent applying what the
-   outcome log suggests, is a capability the framework can permit
-   (principle 15); building it waits until the harness can measure
-   whether it helps. Letting cheap work gate expensive work is principle
+   Fitting them in a closed loop, with the agent applying what the outcome
+   log suggests, is a capability the framework can permit (principle 15),
+   and like any mechanism it stands on a harness measure of whether it
+   helps (principle 6). Letting cheap work gate expensive work is principle
    16 applied to cognition.
 
 8. **Local-first: one process, one machine, one SQLite file.** No message
@@ -506,7 +506,7 @@ Per transport:
   drain. A token change on reload closes every socket with 4001; host,
   port and origins changes log "restart to apply". Token streaming,
   paging past 200 rows, an inspector pane, and views of other transports'
-  channels are out of scope for v1 and each gets its own decision.
+  channels are out of scope; each gets its own decision.
 - **ACP**: Agent Client Protocol v1 over stdio, the official Python SDK,
   as a dedicated `corvidae acp` subprocess that owns stdio (JSON-RPC only
   on stdout; logs to stderr or a file). Inert under `serve` and `cli`.
@@ -532,9 +532,9 @@ Per transport:
   reply is in `message_log`, and a reconnecting client's `session/load`
   replays it, whereas `cancelled` would misreport the agent's state and
   invite a retry of tools that already ran. The stdio loop starts
-  reading only once `Agent.started` is true. Deferred, each with a named
-  trigger: client-mediated tools (M-CLIENT-TOOLS), a remote listener on
-  the daemon (M-REMOTE), registry auth (M-REGISTRY), v2 (M-V2).
+  reading only once `Agent.started` is true. Out of scope, each with its
+  own decision: client-mediated tools, a remote listener on the daemon,
+  registry auth, ACP v2.
 
 ### 3.3 Context window, compaction, prompt construction
 
@@ -611,7 +611,7 @@ Per transport:
    to the system prompt at the next compaction or conversation boundary.
 9. `<think>` blocks are stripped from display, never from the DB.
 10. Double-buffer compaction (build the compacted prompt in a second KV
-    slot and swap) is out of scope until it has its own decision.
+    slot and swap) is out of scope.
 11. The agent writes in the social register of the channel it's in:
     texting-length turns in a one-on-one chat app, short turns that don't
     take over a group channel, longer answers where the medium invites them
@@ -791,8 +791,7 @@ Per transport:
    says so, or, absent one, when `agent.request_logprobs` is on (§3.11.4).
    Either way they are surfaced on the turn result and to
    `on_agent_response`, and never faked for providers that return none.
-5. No streaming until a core change is planned for it; the web transport
-   states the reason.
+5. No streaming; the web transport states why.
 
 ### 3.7 Cognition
 
@@ -890,8 +889,8 @@ deciding only what to newly append and in what order.
    that judges the exchange as the agent saw it (§3.8): the fuller vector
    (valence, stakes, ambiguity, commitment density, novelty), the
    importance prior, the memory record's valence tag. A tier-2 readout
-   head over the embedding replaces the model call only once trained
-   (#141).
+   head over the embedding replaces the model call where a trained head
+   matches it (#141).
 3. Vectors are keyed by trace id and direction in a bounded store and
    persisted to `exchange_log`; the compute is pull-based because
    broadcast hooks dispatch concurrently.
@@ -1064,12 +1063,12 @@ stable region is the one prompt position the funnel's data framing does not
 reach, the compile reads only `self` facts whose inherited trust meets a
 configured floor, and each refresh notifies the operator with the diff of
 the block: a review after the fact, not an approval before it. The
-self-model compile has an entry in `docs/threat-model.md`, before it ships,
-for the path from untrusted text through consolidation into the stable
-region. Both mechanisms are plugins outside the kernel. Its eval is the
-diff of the compiled block over months, read as coherent drift, thrash, or
-flattening toward the generic. This is the feedback edge that "memory is
-the personality" otherwise only half-delivers.
+self-model compile has an entry in `docs/threat-model.md` for the path from
+untrusted text through consolidation into the stable region. Both
+mechanisms are plugins outside the kernel. Its eval is the diff of the
+compiled block over months, read as coherent drift, thrash, or flattening
+toward the generic. This is the feedback edge that "memory is the
+personality" otherwise only half-delivers.
 
 **Hypothesis tier.** Two mechanisms are built only on a named failure of
 the longitudinal test (§3.12): commitment records (made-to person, terms,
@@ -1084,10 +1083,10 @@ initiates anything the operator judges worth initiating.
 
 **Toggles.** Surprise in the importance prior; semantic-tier
 promotion beyond persons, including `self`; salience arbitration in the
-funnel; the encode/retrieve gate; the interoception line. Each ships as a
-toggle with its fixture benchmark authored first, is measured against its
-simpler baseline at a fixed token budget, and graduates to a default only
-if it wins. The encode/retrieve gate is expected to lose.
+funnel; the encode/retrieve gate; the interoception line. Each is a
+toggle with its own fixture benchmark, measured against its simpler
+baseline at a fixed token budget, and on by default only where it wins.
+The encode/retrieve gate is expected to lose.
 
 ### 3.8 Forks
 
@@ -1158,9 +1157,11 @@ design, not requirement. The requirements are outcomes:
    reminders. The tools parse `when`
    themselves, refuse a bare number, cap pending rows per target channel
    and text length, and refuse to cancel config jobs.
-8. Recurring reminders by tool need a per-channel budget first. Cron
-   syntax waits for an operator to need it. Retention runs on the kernel
-   clock (§3.1.15, §3.7 Memory 6) and does not depend on the scheduler.
+8. Tools set one-shot reminders; recurrence comes only from operator jobs
+   (item 6), since a recurrence set by a tool would need a per-channel
+   budget of its own. Cron syntax is out of scope. Retention runs on the
+   kernel clock (§3.1.15, §3.7 Memory 6) and does not depend on the
+   scheduler.
 
 ### 3.10 Observability
 
@@ -1251,12 +1252,12 @@ design, not requirement. The requirements are outcomes:
 4. Deterministic retrieval metrics (recall@k, MRR, tokens) run in CI over
    operator-authored fixtures; live evals run behind `--run-eval`;
    consolidation replay and compaction evals run out of band.
-5. Fork evals (#73): the cache probes that gate enabling forks, then a
-   window-render replay instrument, a planted-defect exchange
-   fixture per lens, and consolidation and compaction fixtures,
-   deterministic where possible and judged where not. Past the cache
-   probes they are benchmarks that report shifts and regressions; they
-   gate nothing.
+5. Fork evals (#73): cache probes that show whether the backend reuses
+   the prefix (forking is on where they pass), a window-render replay
+   instrument, a planted-defect exchange fixture per lens, and
+   consolidation and compaction fixtures, deterministic where possible and
+   judged where not. Apart from the cache probes they are benchmarks that
+   report shifts and regressions; they gate nothing.
 6. Persyn's §9 criteria run as an integration suite against a live daemon
    with a scripted interlocutor: recalls across restart, hedges weak
    memories, refuses to remember fabricated events, pushes back on flawed
@@ -1267,8 +1268,7 @@ design, not requirement. The requirements are outcomes:
 7. The right to silence (§3.7) has a behavioural eval: in a
    conversational register, closers get silence and substantive questions
    get replies; in a task register, every addressed request is answered.
-8. Benchmarks for the toggles (§3.7) are authored before the toggles
-   are built.
+8. Each toggle in §3.7 has its benchmark.
 9. A third evaluation tier, below CI and the scheduled LLM-judged
    benchmarks, is the operator judging over weeks: consistency of voice,
    distinctiveness, legible drift, generalization under novel probes.
@@ -1414,7 +1414,7 @@ record that holds the reasoning.
 | Compaction is memory formation, not forgetting | §3.3; §3.7 Memory 1 |
 | Two forks off one prefix for compaction and consolidation, not one combined call: merging saves one think per compaction but couples two plugins through a JSON contract; merge only if measurement shows the second think dominates | §3.8 |
 | Compaction forks from the dropped prefix, not a described cut: a misplaced boundary in a summary is a quiet, compounding failure nothing downstream detects | §3.3.2; §3.8 |
-| Every background call with a live window forks it; a miss skips, never falls back to standalone; #73's cache probes gate forking, its fork-vs-standalone comparisons don't | §3.8; #180 |
+| Every background call with a live window forks it; a miss skips, never falls back to standalone; forking is on where #73's cache probes show the backend reuses the prefix; its fork-vs-standalone comparisons gate nothing | §3.8; #180 |
 | §3.8 states fork outcomes; backend-specific fork design (prefix parity, fork-by-default, cost model, rollout gate) is not a requirement | #188 |
 | Demote, don't delete; usage-weighted retention; near-duplicate merge at consolidation | §3.7 Memory 3, 6; diverges from the Persyn spec's culling |
 | Operator-only `redact` is the one deletion path; it stays in the kernel | principle 4; §3.7 Memory 8 |
@@ -1427,7 +1427,7 @@ record that holds the reasoning.
 | Persona may tune its own gates; `immutable_settings` is the valve | operator directive 2, 2026-07-06 |
 | Self-modification is a design goal: every restriction on it is a lock the framework supports and the operator can lift, never architecture; the principle 9 floors and the append-only log stay fixed | principle 15; operator directive, 2026-10-31 |
 | Every model endpoint is a resource pool the operator declares and caps; single-slot is a deployment choice, not architecture; every call is admitted at `LLMClient`, and policy over pools and channel queues is pluggable | principle 16; §3.13; #296 |
-| Best-guess defaults first; thresholds fit from experience; closed-loop fitting is a capability the operator can permit, built once the harness can measure it | principle 7; operator directives 1, 3; operator directive, 2026-10-31 |
+| Best-guess defaults first; thresholds fit from experience; closed-loop fitting is a capability the operator can permit, standing on a harness measure of whether it helps | principle 7; operator directives 1, 3; operator directive, 2026-10-31 |
 | Engagement gate calibrates offline unless the operator permits live fitting | §3.7; principle 15 |
 | Hedging vocabulary is persona, not architecture | §3.11.5; diverges from the Persyn spec |
 | The heartbeat starts on system idle, not on a schedule, and acts only when warranted; sleep is durable | §3.7 Heartbeat; #134; diverges from the Persyn spec's per-beat action |
@@ -1449,7 +1449,7 @@ record that holds the reasoning.
 | Metering at `LLMClient`, not the turn loop | principle 11; §3.10 |
 | `resolve_compaction` keeps `firstresult`; the first non-None return is how a plugin replaces the compactor | #23 |
 | Same repository, second distribution for cognition; no compatibility aliases on renamed hooks | principle 1; §1 |
-| Typed event bus deferred with a go criterion (observe class past 20 hooks, or a third `send`-shaped consolidation) | §3.1.11 |
+| No typed event bus unless the observe class passes 20 hooks or a third `send`-shaped consolidation appears | §3.1.11 |
 | `thinking.py` is kernel | principle 1 |
 | A hook only one plugin calls is owned by that plugin, not `AgentSpec`; names are `<prefix><owner>_<name>`, one owner per hook, checked at startup; the admission criterion (§3.1.11) still applies | #229 |
 | Review findings gate on consequence, not reachability; tests derive from acceptance criteria, not the design's test list; new capability goes through requirements | principle 12 |
@@ -1462,7 +1462,7 @@ record that holds the reasoning.
 | No container image until a second deployment needs one | #37 |
 | Topic structure is the `topic` subject's job, not a retrieval dimension | §3.7 Memory 7 |
 | Per-turn tool filtering and system-prompt transforms are rejected (the tool schemas and system prompt are the head of the prompt, principle 2); inbound-text rewriting is rejected (the log keeps what arrived); config-change notifications are unneeded (tunables resolve at decision time); a compaction veto is rejected (it trades a summary for an over-budget request). A per-call tool veto and per-channel tool sets, fixed per conversation, are tracked with the trust plugin (#138); a channel-created observation waits for a second implementer under §3.1.11 | #31, #148, #149, #150 |
-| The kernel owns the clock; idle keeps firing through quiet, and no plugin needs another's queues to learn of it; the April push-based decoupling stands | #167; #165 |
+| The kernel owns the clock; idle keeps firing through quiet, and no plugin needs another's queues to learn of it; idle reaches plugins by push | #167; #165 |
 | Upkeep runs on time regardless of agency plugins; the scheduler is agency and optional | #167 |
 | Transports deliver every emission on their own channels regardless of origin | #167 |
 | The agent is one actor with one identity on every channel; trust and sensitivity, not channel walls. No cross-channel allowlist and no memory compartments, as an option or otherwise; two identities means two instances | #167; operator directive, 2026-11-01; #234, #235 |
