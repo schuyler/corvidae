@@ -767,8 +767,9 @@ What each kind of unlock costs:
   move its own channel ahead of others, or push upkeep back. Every hold,
   deferral and pause lapses by itself and the operator can resume any
   channel (PRD §3.13.8), so the damage is delay, not a wedged agent;
-  upkeep with a latency bound still runs by its bound unless capacity,
-  a hard cap or an exchange already in flight delays it (PRD §3.13.7).
+  past-due upkeep still runs ahead of a waiting main turn, and agency
+  by its latency bound, unless capacity or a hard cap stops it (PRD
+  §3.13.7).
 - **Skills.** The skills index sits in the stable prompt region, so a
   skill written at an injection's request is offered to every future
   conversation on every channel and survives restarts. The idle scan
@@ -801,15 +802,16 @@ every channel sharing the server's slot, so those costs apply even there.
 ### 14. Untrusted traffic spends the operator's compute
 
 Every admitted message costs at least one main turn, and with cognition
-loaded, background calls on top: appraisal and the critique lenses per
-exchange, and consolidation as the window fills. On a local server that is
-slot time the operator's own turns wait behind; on a metered endpoint it is
-money. An admitted sender can drive the cost up by volume or by asking for
-work that loops through tools, and injected text in a fetched page or an MCP
-result can do the same from inside the operator's own channel. `max_turns`
-bounds one exchange; nothing bounds the total. Cost runs away without an
-attacker too: #286 measured about 68,000 prompt tokens per heartbeat that
-decided to do nothing.
+loaded, background calls on top: stage-2 appraisal per exchange, the
+critique lenses when appraisal selects them, and consolidation as the window
+fills or the channel goes quiet. On a local server that is slot time the
+operator's own turns wait behind; on a metered endpoint it is money. An
+admitted sender can drive the cost up by volume or by asking for work that
+loops through tools, and injected text in a fetched page or an MCP result
+can do the same from inside the operator's own channel. `max_turns` bounds
+one exchange; nothing bounds the total. Cost runs away without an attacker
+too: #286 measured about 68,000 prompt tokens per heartbeat that decided to
+do nothing.
 
 Where the tree stands: nothing caps use over time. `usage_log` records every
 call, but no budget reads it, and rate limits are met only by retrying (PRD

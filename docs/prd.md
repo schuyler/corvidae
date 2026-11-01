@@ -88,12 +88,14 @@ one is a bug even if its tests pass.
    beyond any exchange-scoped work still owed and past-due upkeep, the main
    turn waits at most for the call already running. Upkeep that is past due
    runs next, ahead of a waiting main turn, so traffic can't starve it
-   (principle 13). A declared limit, a cap or policy can hold or defer a
-   main turn beyond that (§3.13). Where the pool has no spare capacity (one
-   KV slot, or a rate limit already reached) a background call can't run
-   beside the main turn, so the requirement is to keep its share of the pool
-   small (bounded output, §3.8) and out of the way; it is not a guarantee of
-   zero delay. How a pool's capacity is shared is §3.13 (principle 16). The
+   (principle 13). Upkeep yields only where the pool's concurrency is
+   declared: on a pool without it, the server orders calls admitted together
+   (§3.13.1). A declared limit, a cap or policy can hold or defer a main
+   turn beyond that (§3.13). Where the pool has no spare capacity (one KV
+   slot, or a rate limit already reached) a background call can't run beside
+   the main turn, so the requirement is to keep its share of the pool small
+   (bounded output, §3.8) and out of the way; it is not a guarantee of zero
+   delay. How a pool's capacity is shared is §3.13 (principle 16). The
    inbound gate runs inside the transport read path and never calls a model.
 
 4. **The conversation log is append-only.** `message_log` rows are never
@@ -1191,18 +1193,19 @@ priority classes beyond what principle 3 fixes, whether the model sees
 its budget, coalescing, charging per channel or sender) are tracked in
 #296 and are not requirements until decided there.
 
-1. Every LLM role, chat and embedding alike, draws on a pool. The
-   operator can declare a pool's capacity (concurrent calls, context per
-   call, and request and token rates over time windows) and its prices
-   per token, per model where an endpoint serves several. Prices come
-   from operator config; nothing fetches a price list. Capacity that
-   isn't declared is unbounded, so a pool with nothing declared admits
-   every call at once. The kernel can keep principle 3's order only on a
-   pool whose concurrency is declared; on an undeclared pool, admission
-   holds nothing and the server's own queue orders calls. Context per
-   call is not something admission
-   waits on: keeping a window within it is compaction's job (§3.3), and
-   a call that can't fit fails as the server fails it.
+1. Every LLM role, chat and embedding alike, draws on a pool. The operator
+   can declare a pool's capacity (concurrent calls, context per call, and
+   request and token rates over time windows) and its prices per token, per
+   model where an endpoint serves several. Prices come from operator config;
+   nothing fetches a price list. Capacity that isn't declared is unbounded,
+   so a pool with nothing declared admits every call at once. On a pool with
+   no declared concurrency, admission holds no call for concurrency, and the
+   server's own queue orders the calls admitted together. An exchange's own
+   background work still finishes before the channel's next main turn, kept
+   at dispatch (item 3); whether upkeep runs before a waiting main turn is
+   then the server's to decide (principle 3). Context per call is not
+   something admission waits on: keeping a window within it is compaction's
+   job (§3.3), and a call that can't fit fails as the server fails it.
 2. Every LLM call, chat or embedding, is admitted at `LLMClient`
    (principle 11) before it is sent, whatever its path: a channel's
    turn, a task-queue worker, a plugin's own task, a fork, a subagent.
@@ -1258,7 +1261,7 @@ its budget, coalescing, charging per channel or sender) are tracked in
    - held work gains priority as it waits. Upkeep overtakes a main turn
      that is waiting only for capacity once the upkeep is past due
      (principle 3); a main turn that policy holds or defers (items 3
-     and 5) doesn't hold other work back. Work with a latency bound
+     and 5) doesn't hold other work back. Agency with a latency bound
      (§3.1.16, principle 13) runs no later than its bound, subject only
      to declared capacity, hard caps, and the continuations of
      exchanges already in flight (the first bullet; `max_turns` bounds
