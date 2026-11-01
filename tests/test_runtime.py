@@ -371,6 +371,74 @@ class TestRuntimeStart:
         assert "Config error:" in stderr
         assert str(config_path) in stderr
 
+    async def test_start_latin1_config_reports_utf8_config_error(
+        self, tmp_path, capsys
+    ):
+        """A Latin-1 config exits 1 with a one-line Config error naming the
+        cause, the byte offset, the remedy and the path (#310)."""
+        from corvidae.runtime import Runtime
+
+        # "é" in Latin-1 is the lone byte 0xE9, invalid as UTF-8.
+        config_path = tmp_path / "latin1.yaml"
+        config_path.write_bytes("name: caf\u00e9\n".encode("latin-1"))
+        rt = Runtime(config_path=str(config_path))
+        with pytest.raises(SystemExit) as excinfo:
+            await rt.start()
+
+        assert excinfo.value.code == 1
+        stderr = capsys.readouterr().err
+        assert "Config error:" in stderr
+        assert "not valid UTF-8" in stderr
+        assert "at byte 9)" in stderr
+        assert "re-save it as UTF-8" in stderr
+        assert str(config_path) in stderr
+        assert "Traceback" not in stderr
+
+    async def test_start_latin1_byte_past_8k_reports_exact_offset(
+        self, tmp_path, capsys
+    ):
+        """The reported byte offset is the file offset even past the first
+        8 KiB chunk a text-mode reader would decode (#310)."""
+        from corvidae.runtime import Runtime
+
+        # 9000 ASCII bytes of valid YAML comment, then one bad byte.
+        config_path = tmp_path / "late_latin1.yaml"
+        config_path.write_bytes(b"# " + b"x" * 8998 + b"\n" + b"k: caf\xe9\n")
+        bad_offset = config_path.read_bytes().index(b"\xe9")
+        assert bad_offset > 8192
+        rt = Runtime(config_path=str(config_path))
+        with pytest.raises(SystemExit) as excinfo:
+            await rt.start()
+
+        assert excinfo.value.code == 1
+        stderr = capsys.readouterr().err
+        assert f"at byte {bad_offset})" in stderr
+        assert "re-save it as UTF-8" in stderr
+        assert str(config_path) in stderr
+
+    async def test_start_deeply_nested_config_reports_config_error(
+        self, tmp_path, capsys
+    ):
+        """YAML nested deep enough to raise RecursionError exits 1 with a
+        one-line Config error naming the path and the remedy (#310)."""
+        from corvidae.runtime import Runtime
+
+        # PyYAML raises RecursionError on this as is.
+        config_path = tmp_path / "deep.yaml"
+        config_path.write_text("[" * 10000)
+        rt = Runtime(config_path=str(config_path))
+        with pytest.raises(SystemExit) as excinfo:
+            await rt.start()
+
+        assert excinfo.value.code == 1
+        stderr = capsys.readouterr().err
+        assert (
+            "Config error: YAML is nested too deeply to load; "
+            "reduce the nesting" in stderr
+        )
+        assert str(config_path) in stderr
+        assert "Traceback" not in stderr
+
     async def test_start_non_mapping_mcp_servers_reports_config_error_and_exits(
         self, tmp_path, capsys
     ):

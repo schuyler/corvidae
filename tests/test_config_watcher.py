@@ -441,6 +441,71 @@ async def test_config_watcher_handles_invalid_yaml(tmp_path, caplog):
     assert error_records, "Invalid YAML must produce an ERROR log"
 
 
+async def _reload_refused(tmp_path: Path, caplog, payload: bytes):
+    """Write ``payload`` over a loaded config, reload, and return
+    (dispatched configs, ERROR messages, config path) (#310)."""
+    from corvidae.config_watcher import ConfigWatcherPlugin
+
+    # Start from a valid config so there is a running config to keep.
+    config_file = tmp_path / "agent.yaml"
+    config_file.write_text("llm:\n  main:\n    base_url: http://localhost\n    model: m\n")
+    pm = MagicMock()
+    pm.hook.on_config_reload.get_hookimpls.return_value = []
+    plugin = ConfigWatcherPlugin()
+    await plugin.on_init(
+        pm=pm,
+        config={
+            "_config_path": config_file,
+            "_cli_overrides": {},
+            "llm": {"main": {"base_url": "http://localhost", "model": "m"}},
+        },
+    )
+
+    # Overwrite with the bad bytes and capture any dispatch.
+    config_file.write_bytes(payload)
+    dispatched: list[dict] = []
+
+    async def capture_dispatch(config: dict) -> None:
+        dispatched.append(config)
+
+    plugin._dispatch_config_reload = capture_dispatch
+    with caplog.at_level(logging.ERROR, logger="corvidae.config_watcher"):
+        # Must not raise.
+        await plugin._reload_config()
+    errors = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+    return dispatched, errors, config_file
+
+
+async def test_config_watcher_refuses_non_utf8_reload(tmp_path, caplog):
+    """A non-UTF-8 file is refused with an ERROR naming the path, the cause
+    and the remedy; nothing is dispatched (#310)."""
+    payload = b"# " + b"x" * 8998 + b"\n" + b"k: caf\xe9\n"
+    dispatched, errors, path = await _reload_refused(tmp_path, caplog, payload)
+
+    assert not dispatched, "A non-UTF-8 file must not result in a dispatch"
+    text = "\n".join(errors)
+    assert "not valid UTF-8" in text
+    assert f"at byte {payload.index(b'\xe9')}" in text
+    assert "re-save it as UTF-8" in text
+    assert str(path) in text
+    assert "running config stays in force" in text
+
+
+async def test_config_watcher_refuses_deeply_nested_reload(tmp_path, caplog):
+    """YAML that raises RecursionError is refused with an ERROR naming the
+    path, the cause and the remedy; nothing is dispatched (#310)."""
+    dispatched, errors, path = await _reload_refused(
+        tmp_path, caplog, b"[" * 10000
+    )
+
+    assert not dispatched, "Too-deep YAML must not result in a dispatch"
+    text = "\n".join(errors)
+    assert "nested too deeply" in text
+    assert "reduce the nesting" in text
+    assert str(path) in text
+    assert "running config stays in force" in text
+
+
 # ---------------------------------------------------------------------------
 # 8. ConfigWatcherPlugin handles missing file gracefully
 # ---------------------------------------------------------------------------

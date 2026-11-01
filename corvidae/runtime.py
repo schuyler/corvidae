@@ -143,9 +143,28 @@ class Runtime:
         """
         # 1. Load YAML config, reporting a missing or malformed file as a
         # one-line operator error instead of an uncaught traceback.
+        # The bytes are decoded explicitly, so the file is read as UTF-8
+        # whatever the locale and a decode error's offset counts from the
+        # start of the file (a text stream reports it per 8 KiB chunk).
         try:
-            with open(self.config_path) as f:
-                config = yaml.safe_load(f)
+            text = Path(self.config_path).read_bytes().decode("utf-8")
+            config = yaml.safe_load(text)
+        except UnicodeDecodeError as exc:
+            # Not an OSError or a YAMLError: name it, with the fix (#310).
+            sys.stderr.write(
+                f"Config error: file is not valid UTF-8 ({exc.reason} at byte "
+                f"{exc.start}); re-save it as UTF-8 — check {self.config_path}\n"
+            )
+            sys.stderr.flush()
+            raise SystemExit(1) from exc
+        except RecursionError as exc:
+            # PyYAML's composer recurses per nesting level (#310).
+            sys.stderr.write(
+                "Config error: YAML is nested too deeply to load; reduce the "
+                f"nesting — check {self.config_path}\n"
+            )
+            sys.stderr.flush()
+            raise SystemExit(1) from exc
         except (OSError, yaml.YAMLError) as exc:
             detail = getattr(exc, "strerror", None) or str(exc)
             sys.stderr.write(f"Config error: {detail} — check {self.config_path}\n")
