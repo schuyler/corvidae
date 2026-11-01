@@ -5,9 +5,11 @@ This document defines requirements: what must be true, and why. It is not
 a record of what the tree does now, and it never says what is or isn't
 built. When the tree and this document disagree, either the tree is wrong
 and a GitHub issue tracks the gap, or the requirement is wrong and the fix
-is an edit to this document, reviewed like code. `docs/design.md` says how
-the tree does these things; `plans/` says how a change gets built; this
-says what has to be true.
+is an edit to this document, reviewed like code. This document is the
+reference for the rest of the project: design docs, plans and code derive
+from it, and it cites none of them. It cites only external references (the
+Persyn BOOTSTRAP specification, the GitHub issues and operator directives
+that record decisions) and the threat model it requires (principle 9).
 
 ## 1. What it is
 
@@ -32,8 +34,9 @@ It serves one operator. Three deployment shapes define the requirements:
   llama-server, scripted probes with mechanical pass criteria.
 - **A personal instance** ("Lex"): a strict-template model (Swift-1.5, a
   Qwen 3.8 fine-tune) on a single-KV-slot llama-server router, Signal as the
-  primary transport, running unattended for weeks. The strict-template,
-  single-slot, and Signal requirements below come from this one.
+  primary transport, running unattended for weeks. The strict-template
+  and Signal requirements below come from this one, and every requirement
+  must hold on its single slot.
 - **An editor session**: corvidae as an ACP agent spawned by bb or Zed,
   one subprocess per editor connection, sharing the runtime with the daemon.
 
@@ -53,7 +56,8 @@ one is a bug even if its tests pass.
    declares its dependencies in `depends_on` (or `optional_depends_on`
    for one it works without), and documents what the system
    does without it. The cognition plugins (memory, retention, funnel,
-   appraisal, critique, outcome log, memory tools, trust, sensitivity) are
+   appraisal, critique, outcome log, memory tools, goals, trust,
+   sensitivity) are
    a second distribution behind a `cognition` extra; the kernel installs,
    boots, and passes its tests
    without them and without `sqlite-vec`. Heavy third-party clients that
@@ -150,17 +154,14 @@ one is a bug even if its tests pass.
 9. **The operator is trusted; everyone else is text.** Prompt injection is
    the threat, not other tenants. Anything that arrived from a channel, a
    web page, an MCP server, or a memory distilled from those is data, and
-   is framed as such at one chokepoint. Transports are default-deny with
-   silent refusal. The operator decides the trust boundary, not the
-   architecture: inbound transports stay default-deny, so the operator
-   decides who may reach the agent, and channels are not a boundary at
-   all (principle 14). What the agent knows, remembers and says crosses
-   between channels freely. The architecture supplies the mechanisms
-   (transport allowlists, the trust and sensitivity plugins, caps and
-   locks); the operator configures where the boundary falls, and safety
-   features are added as plugins over time, as with sandboxing. Fixed
-   floors protect the operator's own control surface
-   rather than draw a trust boundary, and stay fixed: web auth cannot be
+   is framed as such at one chokepoint. The operator decides the trust
+   boundary, not the architecture: transports are default-deny with
+   silent refusal, so the operator decides who may reach the agent, and
+   which safety plugins load (trust and sensitivity, and others added over
+   time, as with sandboxing). Channels are not a boundary (principle 14):
+   what the agent knows, remembers and says crosses between them freely.
+   Fixed floors protect the operator's own control surface rather than
+   draw a trust boundary, and stay fixed: web auth cannot be
    turned off (§3.2 Web), `redact` is never a tool (§3.7 Memory 8),
    `set_settings` can't lift a lock or change the lock list, the
    request-body keys the agent loop builds (`messages`, `tools`,
@@ -179,9 +180,9 @@ one is a bug even if its tests pass.
 10. **Channel ids are persistence keys and never derive from names.**
     `transport:scope` keys `sessions.db`, the JSONL logs, the channel a
     memory record came from, and the schedule. Scopes use identifiers
-    that cannot be
-    renamed or go missing: Signal's ACI, Discord's numeric ids, a web slug
-    the operator chose, an ACP session id reused across load and resume.
+    that cannot be renamed or go missing: Signal's ACI, Discord's numeric
+    ids, a web slug the operator chose, an ACP session id reused across
+    load and resume.
 
 11. **Every LLM call is metered at the one chokepoint it passes through.**
     `LLMClient.chat` fires the observability hooks, so compaction,
@@ -192,9 +193,10 @@ one is a bug even if its tests pass.
     (§3.13).
 
 12. **How the work is done.** Red/green TDD; every test under a timeout;
-    docs current before a change is complete. Plans are the design of
-    record, written to be executed without architectural judgment calls,
-    with requirements tagged by provenance and gated by the owner. Plans
+    docs current before a change is complete. A plan for a change takes
+    its requirements from this document, is written to be executed
+    without architectural judgment calls, tags each requirement with its
+    provenance, and is gated by the owner. Plans
     pass code-grounded adversarial review until a round comes back clean.
     Review findings gate on consequence (a security hole, data loss, a
     hang or crash, a wrong result the user sees), not on reachability.
@@ -223,9 +225,11 @@ one is a bug even if its tests pass.
     (§3.3.8). Any turn can speak on any channel a transport owns, leave a
     note for another channel's context, and read another channel's recent
     conversation (§3.5.9–11), and retrieval spans the whole memory. There
-    are no channel walls to configure: the per-channel queue, window and
-    settings exist for concurrency, the KV cache and register, and draw no
-    trust boundary. An operator who wants two identities runs two
+    are no channel walls to configure: the per-channel queue and window
+    exist for concurrency and the KV cache, and per-channel settings for
+    register and for bounding what a channel's participants can make the
+    agent do (its tool set and locks, §3.5.2, §3.5.6), never for what
+    crosses between channels. An operator who wants two identities runs two
     instances. Safety comes from who may reach the agent (inbound
     default-deny), trust (what came in is weighted and labelled by its
     source) and sensitivity (what goes out is filtered by who is present).
@@ -241,7 +245,8 @@ one is a bug even if its tests pass.
     framework can let the agent change, at runtime and through its own
     tools:
     - its prompts: every prompt the framework sends to a model on the
-      agent's behalf, among them the system prompt, every background
+      agent's behalf, among them the system prompt (the identity and
+      each channel's register, §3.3.8), every background
       stage's fork and standalone instructions, the critic's and
       appraiser's prompts, and the subagent and heartbeat prompts;
     - its skills (§3.7 Trust);
@@ -446,8 +451,8 @@ Per transport:
   messages are off by default or gated by `irc.allow` (services-
   authenticated accounts where the network offers them), because a nick
   is unauthenticated and whoever holds it later inherits the channel's
-  history and whatever the agent's memory admits to that channel, which by
-  default is all of it.
+  history and, since retrieval and reading span every channel (principle
+  14), whatever the agent knows.
 - **Signal**: newline-delimited JSON-RPC to an already-running `signal-cli`
   daemon over a unix socket; corvidae never spawns or supervises it.
   Direct messages only. Scope is the sender's ACI. Config may name
@@ -592,8 +597,9 @@ Per transport:
 8. The system prompt is a string or a list of file paths concatenated with
    blank lines, in two layers: the agent's identity, which is agent-wide
    and heads every channel's prompt, then the channel's register
-   (§3.3.11), which per-channel and transport-wide configuration append
-   after it. No channel setting replaces the identity (principle 14). It
+   (§3.3.11), which resolves like any channel setting (§3.11.2) and is
+   appended after it. No channel setting replaces the identity
+   (principle 14). It
    is resolved against the config directory once per
    conversation and on restart, and again at a compaction boundary when an
    unlocked runtime override changed it (principle 15). It is the head of
@@ -619,8 +625,7 @@ Per transport:
     after the identity, never in place of it (§3.3.8). How the register is
     achieved (prompt material, history, context, sampling) is otherwise a
     design choice, not a requirement; the bar is behavioural (principle
-    6), and an essay-length
-    reply to a one-line text is a bug.
+    6), and an essay-length reply to a one-line text is a bug.
 
 ### 3.4 Persistence
 
@@ -654,7 +659,8 @@ Per transport:
 1. Built-in tools: `shell`, `read_file`, `write_file`, `web_fetch`,
    `web_search`, `task_pipeline`, `task_status`, `set_settings`,
    `subagent`, the scheduler's `remind_me`/`list_reminders`/
-   `cancel_reminder`, and memory's `search_memory`/`recall_raw`. Schemas
+   `cancel_reminder`, memory's `search_memory`/`recall_raw`, and the
+   send, note and read tools (§3.5.9–11). Schemas
    are generated from type hints and docstrings; `_`-prefixed parameters
    are injected (`ToolContext`: channel, tool-call id, task queue), never
    exposed. Tool arguments are validated against the generated schema
@@ -685,7 +691,8 @@ Per transport:
    the database on the trusted side) is out of scope until corvidae runs
    on a machine the operator does not own; the ACP `ToolBackend` seam is
    where it attaches.
-6. `set_settings` lets the model adjust, per channel and in memory only:
+6. `set_settings` lets the model adjust, in memory only and per channel
+   (except the identity, which is agent-wide, §3.3.8):
    model and inference parameters (`model` and `logprobs` among them),
    which go into the request body; the framework keys (`max_turns`,
    `max_context_tokens`, `reasoning_history`, validated); and dotted
@@ -699,10 +706,11 @@ Per transport:
    default, with the documented recommended locks for channels with
    untrusted participants. `agent.immutable_settings` and the other locks
    narrow what the agent may set, and operator config can lift any of
-   them, `system_prompt` included (principle 15); an override of the
-   identity applies on every channel, and an override of a channel's
-   register applies to that channel (§3.3.8). An override that changes
-   already-rendered content (`system_prompt`,
+   them, the identity and the register included, each locked separately
+   (principle 15); an override of the identity applies on every channel,
+   and an override of a channel's register to that channel (§3.3.8). An
+   override that changes already-rendered content (the identity, a
+   register,
    `mid_conversation_system_role`, `reasoning_history`) takes effect at
    the channel's next compaction boundary or conversation start, as plugin
    sections do (§3.3.8; principle 2). `set_settings` can't lift a lock or
@@ -721,19 +729,22 @@ Per transport:
 9. Speaking on any channel: any turn can send a message on any channel a
    transport owns, not only its own, including turns on channels no
    transport owns (the heartbeat, §3.7; a reminder's firing, §3.9). The
-   owning transport delivers it as it delivers any emission (§3.2.10),
-   the tool reports whether it was delivered, and the message is recorded
-   at the tail of the target channel's history, so that channel's context
-   sees what the agent said there. Nothing gates which channel a turn may
-   speak on. With the sensitivity plugin loaded, what the agent says is
-   filtered by who is present on the channel it says it on, the same on
-   every channel (§3.7 Trust). Messages the agent starts on its own (as
-   opposed to the reply a turn owes the channel it runs on) and notes that
-   wake a channel (item 10) can carry a cap per destination over a period,
-   a setting under principle 15 with a best-guess default (principle 7),
-   so a loop cannot flood a contact. The cap is a runaway guard, not a
-   gate on crossing channels. `docs/threat-model.md` records what speaking
-   anywhere costs (principle 9).
+   owning transport delivers it as it delivers any emission (§3.2.10); a
+   send that cannot be delivered (no owning transport, a transport that
+   refuses it) returns an error naming the channel (principle 5). The
+   message is recorded in the target channel's history through that
+   channel's queue (§3.1.1), so it lands at the tail between that channel's
+   exchanges, never inside a tool cycle, and that channel's context sees
+   what the agent said there. Nothing gates which channel a turn may speak
+   on. With the sensitivity plugin loaded, what the agent says is filtered
+   by who is present on the channel it says it on, the same on every
+   channel (§3.7 Trust). Messages the agent starts on its own (as opposed
+   to the reply a turn owes the channel it runs on) and notes that wake a
+   channel (item 10) can carry a cap per destination over a period, a
+   setting under principle 15 with a best-guess default (principle 7), so a
+   loop cannot flood a contact. The cap is a runaway guard, not a gate on
+   crossing channels. `docs/threat-model.md` records what speaking anywhere
+   costs (principle 9).
 10. Notes to another channel's context: any turn can leave information
     for another channel. The note is admitted through the funnel at the
     tail of the target channel's window (§3.7 Funnel), framed as the
@@ -742,10 +753,18 @@ Per transport:
     compaction boundary (principle 2). It is information, not an
     instruction: the target channel's turn decides from its own view of
     that conversation what, if anything, to do with it. The sender chooses
-    whether the note waits for the target's next turn or wakes it.
+    whether the note waits for the target's next turn or wakes it. With
+    the trust plugin loaded, a note carries the minimum trust of the
+    participants of the channel it came from, and a low-trust note is
+    quarantined as a low-trust record is (§3.7 Trust).
 11. Reading another channel: any turn can read another channel's recent
     conversation from the raw log, including what consolidation hasn't
     reached, returned at the tail of the reader's window as framed data.
+    With the trust plugin loaded, what it returns carries the minimum
+    trust of that channel's participants and is quarantined the same way.
+    The send, note and read tools belong to a plugin, not the kernel
+    (principle 1); without it, a turn speaks only on its own channel and
+    learns of other channels only through memory.
 
 ### 3.6 LLM client
 
@@ -777,9 +796,9 @@ Per transport:
 
 ### 3.7 Cognition
 
-The design of record is `plans/bootstrap-mapping.md`, which translates
-Persyn's BOOTSTRAP architecture through principles 1–3 and records its
-divergences. The output of every subsystem here enters the main window
+This section adapts Persyn's BOOTSTRAP specification, the external
+reference, through principles 1–3; the decision log records where it
+diverges. The output of every subsystem here enters the main window
 only through the funnel.
 
 **Memory.**
@@ -793,13 +812,12 @@ only through the funnel.
    dated by when the conversation happened, embedded, linked to its
    `message_log` id range, and scored by a pluggable importance prior
    (cheap-model rubric by default; the appraisal vector when appraisal is
-   registered; a surprise term as a Phase 6 toggle). Surprise modulates
+   registered; a surprise term as a toggle, below). Surprise modulates
    encoding strength only, never entry into the raw log.
 3. Before inserting, consolidation merges a near-duplicate (cosine at or
    above `memory.dup_threshold`) anywhere in the agent's memory,
    superseding the old record and summing its access statistics.
-   Overlapping triggers on one range keep
-   one record.
+   Overlapping triggers on one range keep one record.
 4. Retrieval runs before each user-originated turn: embed the inbound
    text, exact KNN over `memory_vec`, filter to indexed and unredacted
    records from every channel (and, with the sensitivity
@@ -855,7 +873,8 @@ critique verdict cannot ride a reminder's stub; payloads unregister at
 admission, and the pending flag clears when a drain is attempted. A payload
 can instead register without a stub; it is admitted at the channel's next
 turn, whatever that turn's origin, and wakes nothing. Salience
-arbitration across sources is a policy swap inside the funnel (Phase 6),
+arbitration across sources is a policy swap inside the funnel (a toggle,
+below),
 deciding only what to newly append and in what order.
 
 **Appraisal.**
@@ -872,7 +891,7 @@ deciding only what to newly append and in what order.
    (valence, stakes, ambiguity, commitment density, novelty), the
    importance prior, the memory record's valence tag. A tier-2 readout
    head over the embedding replaces the model call only once trained
-   (Phase 5; #141).
+   (#141).
 3. Vectors are keyed by trace id and direction in a bounded store and
    persisted to `exchange_log`; the compute is pull-based because
    broadcast hooks dispatch concurrently.
@@ -910,10 +929,10 @@ deciding only what to newly append and in what order.
    Provenance objections re-enter at the turn their stub triggers, and the
    agent may end that turn without sending anything. It is told that
    silence is the default, and to reply only when it judges its earlier
-   reply could lead the other party to take an incorrect action. Where two models are deployed (a critic on a
-   different model from `llm.main`), each keeps its own append-only
-   window, and the critic forks the window of the one that did not
-   generate.
+   reply could lead the other party to take an incorrect action.
+5. A critic may run on a different model from `llm.main`. How it gets
+   the window it judges is design; the requirement is §3.8.2's: it judges
+   the window the agent saw when it wrote the reply.
 
 **Output gate and the right to silence.**
 
@@ -979,21 +998,25 @@ transport owns, so it reaches a person by speaking on that person's
 channel or leaving a note for its context (§3.5.9–10), like any turn.
 Putting it to sleep is durable across restarts.
 
-**People, observations, semantic facts.** `person` records keyed by
-`(transport, scope, sender)`, auto-created on first contact, carrying a
-trust level and an identity-assurance level (transport-verified versus
-bare nick), with trust capped by assurance. Semantic facts are
+**People, observations, semantic facts.** A person is one record across
+every channel, as the agent is one identity (principle 14). Each identity a
+transport sees, `(transport, sender)` and never the channel's scope,
+attaches to a person, auto-created on first contact; identities link to one
+person when a transport vouches for the link or the operator asserts it,
+never on the model's guess. A person carries a trust level, and each
+identity an identity-assurance level (transport-verified versus bare nick);
+trust is capped by the assurance of the identity in use. Semantic facts are
 subject-typed `(person | channel | topic | self, subject_id, type, value,
 timestamp, source episodes)`, extracted for persons first and for other
 subjects only when the eval demands it, reconciled against existing facts
 by a cheap-model judgment, synthesized into dossiers, curated by operator
 CLI commands including a first-class verb for operator-authored facts, and
-restricted to agent-specific, post-training regularities. Participant
-match joins the retrieval score here. `self` facts are the agent's own
-distilled runtime regularities ("I tend to over-hedge numeric claims"),
-the purest case of the frozen-weights criterion; their epistemic framing
-is mandatory, since the author is the agent, and a self-distilled fact
-never satisfies the provenance gate as corroboration.
+restricted to agent-specific, post-training regularities. Participant match
+joins the retrieval score here. `self` facts are the agent's own distilled
+runtime regularities ("I tend to over-hedge numeric claims"), the purest
+case of the frozen-weights criterion; their epistemic framing is mandatory,
+since the author is the agent, and a self-distilled fact never satisfies
+the provenance gate as corroboration.
 
 **Trust, sensitivity, guardrails, skills.** The trust plugin and the
 sensitivity plugin are optional cognition plugins (principle 1). With the
@@ -1059,7 +1082,7 @@ to the heartbeat behind the act-if-warranted and
 output gates, triggered by a month of heartbeats in which the agent never
 initiates anything the operator judges worth initiating.
 
-**Phase 6 toggles.** Surprise in the importance prior; semantic-tier
+**Toggles.** Surprise in the importance prior; semantic-tier
 promotion beyond persons, including `self`; salience arbitration in the
 funnel; the encode/retrieve gate; the interoception line. Each ships as a
 toggle with its fixture benchmark authored first, is measured against its
@@ -1071,7 +1094,7 @@ if it wins. The encode/retrieve gate is expected to lose.
 A fork is one LLM call whose prompt is a prefix of the channel's rendered
 window plus one `user` instruction. How the deployed backend uses forks
 (prefix parity, which stages fork, the cost model, the rollout gate) is
-design: `docs/design.md`, Forks. The requirements are outcomes:
+design, not requirement. The requirements are outcomes:
 
 1. A fork can't act, so the window and the log change only through main
    turns (principles 2 and 4). It mutates nothing, persists nothing, fires
@@ -1129,14 +1152,15 @@ design: `docs/design.md`, Forks. The requirements are outcomes:
    bounded by `catch_up_window`.
 6. Config jobs sync by name on start and reload; a removed name is a
    durable stop; an invalid entry logs and leaves the running job alone.
-7. Tools act on the calling channel unless told otherwise, and a
-   reminder may target any channel (principle 14). They parse `when`
+7. `remind_me` takes an optional target channel and defaults to the
+   calling one; a reminder may target any channel (principle 14), and
+   `list_reminders` and `cancel_reminder` cover every channel's
+   reminders. The tools parse `when`
    themselves, refuse a bare number, cap pending rows per target channel
    and text length, and refuse to cancel config jobs.
 8. Recurring reminders by tool need a per-channel budget first. Cron
-   syntax waits for an
-   operator to need it. Retention runs on the kernel clock (§3.1.15,
-   §3.7 Memory 6) and does not depend on the scheduler.
+   syntax waits for an operator to need it. Retention runs on the kernel
+   clock (§3.1.15, §3.7 Memory 6) and does not depend on the scheduler.
 
 ### 3.10 Observability
 
@@ -1176,8 +1200,9 @@ design: `docs/design.md`, Forks. The requirements are outcomes:
    (fork prompts, fork output caps, `request_logprobs`,
    `mid_conversation_system_role`) are set by the operator, and operator
    config decides whether the agent can change them (principle 15).
-5. Prompts under `prompts/` are documentation copies cited by path; no
-   code loads them. Persona is prompt material, never architecture.
+5. Prompt files under `prompts/` ship as examples that the operator's
+   configuration may load; no code loads them on its own. Persona is
+   prompt material, never architecture.
 6. Subcommands: `serve`, `cli`, `acp`, `scaffold`, `redact`, `calibrate`,
    `corrections`; plugins add their own through the `corvidae.commands`
    entry-point group.
@@ -1226,9 +1251,8 @@ design: `docs/design.md`, Forks. The requirements are outcomes:
 4. Deterministic retrieval metrics (recall@k, MRR, tokens) run in CI over
    operator-authored fixtures; live evals run behind `--run-eval`;
    consolidation replay and compaction evals run out of band.
-5. Fork evals (#73): the cache probes that gate enabling forks
-   (`docs/design.md`, Forks),
-   then a window-render replay instrument, a planted-defect exchange
+5. Fork evals (#73): the cache probes that gate enabling forks, then a
+   window-render replay instrument, a planted-defect exchange
    fixture per lens, and consolidation and compaction fixtures,
    deterministic where possible and judged where not. Past the cache
    probes they are benchmarks that report shifts and regressions; they
@@ -1236,12 +1260,15 @@ design: `docs/design.md`, Forks. The requirements are outcomes:
 6. Persyn's §9 criteria run as an integration suite against a live daemon
    with a scripted interlocutor: recalls across restart, hedges weak
    memories, refuses to remember fabricated events, pushes back on flawed
-   premises, declines a capable request, initiates unprompted, goes
-   dormant while the heartbeat sleeps.
+   premises, declines a request it is capable of when it has a reason
+   of its own (never as a quota, and never against §3.7's rule that a
+   request addressed to it in a task register is answered), initiates
+   unprompted, goes dormant while the heartbeat sleeps.
 7. The right to silence (§3.7) has a behavioural eval: in a
    conversational register, closers get silence and substantive questions
    get replies; in a task register, every addressed request is answered.
-8. Phase 6 benchmarks are authored before their toggles are built.
+8. Benchmarks for the toggles (§3.7) are authored before the toggles
+   are built.
 9. A third evaluation tier, below CI and the scheduled LLM-judged
    benchmarks, is the operator judging over weeks: consistency of voice,
    distinctiveness, legible drift, generalization under novel probes.
@@ -1381,61 +1408,64 @@ record that holds the reasoning.
 
 | Decision | Where |
 |---|---|
-| apluggy entry points, not a hand-written registration order; `depends_on` validated at startup | `docs/design.md`, Plugin Registration Order |
-| Single-turn dispatch; multi-turn reasoning emerges from notifications | README; `design.md`, Agent Loop |
-| Tail-append CONTEXT; no mid-window mutation | `bootstrap-mapping.md` §2.2 |
-| Compaction is memory formation, not forgetting | §3.1 |
-| Two forks off one prefix for compaction and consolidation, not one combined call | `plans/forks.md` |
-| Compaction forks from the dropped prefix, not a described cut | `plans/forks.md` |
-| Every background call with a live window forks it; a miss skips, never falls back to standalone; #73's cache probes gate forking, its fork-vs-standalone comparisons don't | #180; `design.md`, Forks |
-| §3.8 states fork outcomes; backend-specific fork design (prefix parity, fork-by-default, cost model, rollout gate) lives in `design.md` | #188 |
-| Demote, don't delete; usage-weighted retention; near-duplicate merge at consolidation | §3.1 |
-| Operator-only `redact` is the one deletion path; it stays in the kernel | §3.1; `kernel-split.md` Decisions |
-| Knowledge graph cut, not optional | §5.7 |
-| Emotion classifier replaced by appraisal valence | §5.2 |
-| Engagement decision inverted: cheap gate first, generate only past threshold | §5.3 |
-| Two-stage appraisal; stage 1 never calls a model; core mints the exchange key; pull-based compute | §3.2; `phase-2.md` traps 1–2 |
-| Origin is stamped and propagated, never inferred; critique eligibility by origin | §3.3 |
-| Silent tasks require no `tool_call_id` | §2.3 |
+| apluggy entry points, not a hand-written registration order; `depends_on` validated at startup | principle 1; §3.1.13 |
+| Single-turn dispatch; multi-turn reasoning emerges from notifications | principle 3; §3.1.2 |
+| Tail-append CONTEXT; no mid-window mutation | principle 2; diverges from the Persyn spec's per-query memory swap |
+| Compaction is memory formation, not forgetting | §3.3; §3.7 Memory 1 |
+| Two forks off one prefix for compaction and consolidation, not one combined call: merging saves one think per compaction but couples two plugins through a JSON contract; merge only if measurement shows the second think dominates | §3.8 |
+| Compaction forks from the dropped prefix, not a described cut: a misplaced boundary in a summary is a quiet, compounding failure nothing downstream detects | §3.3.2; §3.8 |
+| Every background call with a live window forks it; a miss skips, never falls back to standalone; #73's cache probes gate forking, its fork-vs-standalone comparisons don't | §3.8; #180 |
+| §3.8 states fork outcomes; backend-specific fork design (prefix parity, fork-by-default, cost model, rollout gate) is not a requirement | #188 |
+| Demote, don't delete; usage-weighted retention; near-duplicate merge at consolidation | §3.7 Memory 3, 6; diverges from the Persyn spec's culling |
+| Operator-only `redact` is the one deletion path; it stays in the kernel | principle 4; §3.7 Memory 8 |
+| Knowledge graph cut, not optional: extraction is noisy, n-hop context is expensive, and at personal scale a graph duplicates facts plus vector and FTS retrieval; revisited only if relational questions fail the eval | diverges from Persyn §4.3 |
+| Emotion classifier replaced by appraisal valence | §3.7 Appraisal; diverges from Persyn §4.9 |
+| Engagement decision inverted: cheap gate first, generate only past threshold | principle 7; §3.7 Appraisal; diverges from the Persyn spec |
+| Two-stage appraisal; stage 1 never calls a model; core mints the exchange key; pull-based compute | §3.7 Appraisal 1–3 |
+| Origin is stamped and propagated, never inferred; critique eligibility by origin | §3.1.4; §3.7 Critique 3 |
+| Silent tasks require no `tool_call_id` | principle 3; §3.7 Funnel |
 | Persona may tune its own gates; `immutable_settings` is the valve | operator directive 2, 2026-07-06 |
 | Self-modification is a design goal: every restriction on it is a lock the framework supports and the operator can lift, never architecture; the principle 9 floors and the append-only log stay fixed | principle 15; operator directive, 2026-10-31 |
 | Every model endpoint is a resource pool the operator declares and caps; single-slot is a deployment choice, not architecture; every call is admitted at `LLMClient`, and policy over pools and channel queues is pluggable | principle 16; §3.13; #296 |
 | Best-guess defaults first; thresholds fit from experience; closed-loop fitting is a capability the operator can permit, built once the harness can measure it | principle 7; operator directives 1, 3; operator directive, 2026-10-31 |
 | Engagement gate calibrates offline unless the operator permits live fitting | §3.7; principle 15 |
-| Hedging vocabulary is persona, not architecture | §5.9 |
-| The heartbeat starts on system idle, not on a schedule, and acts only when warranted; sleep is durable | §5.8; #134 |
+| Hedging vocabulary is persona, not architecture | §3.11.5; diverges from the Persyn spec |
+| The heartbeat starts on system idle, not on a schedule, and acts only when warranted; sleep is durable | §3.7 Heartbeat; #134; diverges from the Persyn spec's per-beat action |
 | Idle-triggered work may carry a latency bound: the quiet it needs decays with waiting, so traffic can't starve it | #214 |
 | The agent may decline any turn when it has nothing to add (Grice's maxims, by register); gates still never withhold a direct reply by default | #215 |
 | Model endpoints may be remote; a role's credentials should be storable in the environment rather than config (not required to be), and the threat model names what each role sends | #217 |
-| Operator-seeded goals allowed | §5.14 |
-| Memory poisoning answered on the write side with trust tagging (trust plugin) | §3.9, §5.10 |
-| No sandbox; the subagent/MCP seam is where one would attach | §5.11; `design.md`, Known Risks |
-| No distributed infrastructure | §5.12 |
-| Signal keys on ACI; E.164 resolved forward once per connect; no reverse resolution | `design.md`, Signal |
+| Critique is gated: stylistic lenses run on salience, the provenance check on every claim about the past, never unconditionally per reply | principle 7; §3.7 Critique 1–2; diverges from the Persyn spec |
+| No inline refine step: the sent reply is the candidate, and correction arrives on a later turn | principle 3; §3.7 Critique 4; the Persyn spec's own deferred-deliberation default |
+| Voice and an operator console are out of scope | §3.6.5; both optional in the Persyn spec |
+| Operator-seeded goals allowed | §3.7 Goals; diverges from the Persyn spec |
+| Memory poisoning answered on the write side with trust tagging (trust plugin) | §3.7 Trust; an addition to the Persyn spec |
+| No sandbox; the subagent/MCP seam is where one would attach | principle 9; §3.5.3, §3.5.5; diverges from the Persyn spec's sandboxed execution |
+| No distributed infrastructure | principle 8; diverges from the Persyn spec |
+| Signal keys on ACI; E.164 resolved forward once per connect; no reverse resolution | principle 10; §3.2 Signal |
 | Discord: no privileged intent; outbound mentions disabled; threads own their history | #80 |
-| Web: loopback default, auth cannot be turned off, HMAC cookie, strict CSP, no CDNs; duplicates over losses in replay | #87; `retro-web-transport-session.md` |
-| ACP: client-spawned subprocess, official SDK, v1 only, no auth, swappable tool backend | `acp-transport-design.md` D1–D5 |
+| Web: loopback default, auth cannot be turned off, HMAC cookie, strict CSP, no CDNs; duplicates over losses in replay | #87; §3.2 Web |
+| ACP: client-spawned subprocess, official SDK, v1 only, no auth, swappable tool backend | §3.2 ACP |
 | ACP rejects a concurrent prompt; a failed final delivery still ends the turn | #92 initial values |
-| Metering at `LLMClient`, not the turn loop | §3.7 |
-| `resolve_compaction` keeps `firstresult`; the first non-None return is how a plugin replaces the compactor | `kernel-split.md` Decisions; #23 |
-| Same repository, second distribution for cognition; no compatibility aliases on renamed hooks | `kernel-split.md` R5, R6 |
-| Typed event bus deferred with a go criterion (observe class past 20 hooks, or a third `send`-shaped consolidation) | `kernel-split.md` Part 1 §5 |
-| `thinking.py` is kernel | `kernel-split.md` R9 |
+| Metering at `LLMClient`, not the turn loop | principle 11; §3.10 |
+| `resolve_compaction` keeps `firstresult`; the first non-None return is how a plugin replaces the compactor | #23 |
+| Same repository, second distribution for cognition; no compatibility aliases on renamed hooks | principle 1; §1 |
+| Typed event bus deferred with a go criterion (observe class past 20 hooks, or a third `send`-shaped consolidation) | §3.1.11 |
+| `thinking.py` is kernel | principle 1 |
 | A hook only one plugin calls is owned by that plugin, not `AgentSpec`; names are `<prefix><owner>_<name>`, one owner per hook, checked at startup; the admission criterion (§3.1.11) still applies | #229 |
-| Review findings gate on consequence, not reachability; tests derive from acceptance criteria, not the design's test list; new capability goes through requirements | `retro-web-transport-session.md` |
+| Review findings gate on consequence, not reachability; tests derive from acceptance criteria, not the design's test list; new capability goes through requirements | principle 12 |
 | `discord-py` is a `discord` extra, like `acp` | #117 (R10) |
 | ACP keeps rejecting a concurrent prompt unless a real client is shown to steer with a bare prompt; a failed final delivery is `end_turn` | #93, #99 |
-| Summary role follows the mode: fork `assistant`, standalone `user` with data framing | `threat-model.md` finding 3 |
-| No process separation until corvidae runs on a machine the operator does not own | `threat-model.md`, Privilege separation |
-| Personality is duck-typed and judged longitudinally; goal retirement is a consolidation event; `self` is a fact subject, ungated beyond trust inheritance; the self-model compile reads only facts above a trust floor and sends the operator each diff; interoception line and self-model compile; commitment records and endogenous goals only on a named failure | `plans/personality-and-autonomy.md` (PR #48) |
+| Summary role follows the mode: fork `assistant`, standalone `user` with data framing | §3.3.3; `threat-model.md` finding 3 |
+| No process separation until corvidae runs on a machine the operator does not own | §3.5.5; `threat-model.md`, Privilege separation |
+| Personality is duck-typed and judged longitudinally; goal retirement is a consolidation event; `self` is a fact subject, ungated beyond trust inheritance; the self-model compile reads only facts above a trust floor and sends the operator each diff; interoception line and self-model compile; commitment records and endogenous goals only on a named failure | §3.7; §3.12.9; PR #48 |
 | No runtime plugin loading; changing the plugin set is a restart, which the agent may request (rate-limited) | #28; principle 15 |
 | No container image until a second deployment needs one | #37 |
-| Topic structure is the `topic` subject's job, not a retrieval dimension | `shakedown-findings.md` |
-| `plans/new-hooks.md` retired. Per-turn tool filtering and system-prompt transforms are rejected (the tool schemas and system prompt are the head of the prompt, principle 2); inbound-text rewriting is rejected (the log keeps what arrived); config-change notifications are unneeded (tunables resolve at decision time); a compaction veto is rejected (it trades a summary for an over-budget request). A per-call tool veto and per-channel tool sets, fixed per conversation, are tracked for Phase 5's trust work; a channel-created observation waits for a second implementer under §3.1.11 | #31, #148, #149, #150 |
+| Topic structure is the `topic` subject's job, not a retrieval dimension | §3.7 Memory 7 |
+| Per-turn tool filtering and system-prompt transforms are rejected (the tool schemas and system prompt are the head of the prompt, principle 2); inbound-text rewriting is rejected (the log keeps what arrived); config-change notifications are unneeded (tunables resolve at decision time); a compaction veto is rejected (it trades a summary for an over-budget request). A per-call tool veto and per-channel tool sets, fixed per conversation, are tracked with the trust plugin (#138); a channel-created observation waits for a second implementer under §3.1.11 | #31, #148, #149, #150 |
 | The kernel owns the clock; idle keeps firing through quiet, and no plugin needs another's queues to learn of it; the April push-based decoupling stands | #167; #165 |
 | Upkeep runs on time regardless of agency plugins; the scheduler is agency and optional | #167 |
 | Transports deliver every emission on their own channels regardless of origin | #167 |
-| The agent is one actor with one identity on every channel; trust and sensitivity, not channel walls. No cross-channel allowlist and no memory compartments, as an option or otherwise; two identities means two instances | operator directive, 2026-11-01; #234, #235 |
+| The agent is one actor with one identity on every channel; trust and sensitivity, not channel walls. No cross-channel allowlist and no memory compartments, as an option or otherwise; two identities means two instances | #167; operator directive, 2026-11-01; #234, #235 |
 | Any turn can speak on any channel, leave a note for another channel's context, and read another channel's conversation; a cap on self-started messages is a runaway guard, not a gate | operator directive, 2026-11-01; #234, #235 |
 | Identity is agent-wide and heads every prompt; channel register is appended after it and never replaces it | operator directive, 2026-11-01 |
 | The operator decides the trust boundary; inbound transports default-deny; channels are not a boundary; safety features layer in as plugins | #167; operator directive, 2026-11-01 |

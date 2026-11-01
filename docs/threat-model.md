@@ -10,14 +10,13 @@ moves, this document is wrong until someone fixes it.
 
 Corvidae is a personal agent daemon for a single machine, and the design
 says so. Within that model it does several things right: Signal is
-default-deny with silent refusal, retrieved context is framed as data,
-tool `_ctx` is hidden from the model,
-SQL is parameterized, signal-cli is pinned and signature-verified, and the
-docs are candid about plaintext at rest. The Discord transport follows
-Signal's model: default-deny, silent refusal, and outbound
-mentions disabled. The web transport binds loopback by default, needs a
-token that can't be turned off, and renders model output through
-DOMPurify under a strict CSP.
+default-deny with silent refusal, retrieved context is framed as data, tool
+`_ctx` is hidden from the model, SQL is parameterized, signal-cli is pinned
+and signature-verified, and the docs are candid about plaintext at rest.
+The Discord transport follows Signal's model: default-deny, silent refusal,
+and outbound mentions disabled. The web transport binds loopback by
+default, needs a token that can't be turned off, and renders model output
+through DOMPurify under a strict CSP.
 
 Memory is compartmentalized per channel in the tree today, but that is no
 longer the design: the PRD makes the agent one identity across channels,
@@ -40,7 +39,8 @@ them:
   tool description and result, and every memory distilled from any of the
   above.
 - **Exfiltration.** `web_fetch` will GET any URL with no scheme or host
-  restriction. `shell` has the network.
+  restriction. `shell` has the network. The PRD's send tool adds people
+  as destinations (finding 15).
 
 The provenance critic and the CONTEXT framing are soft mitigations. They
 depend on the model behaving, which is the one thing you cannot assume
@@ -48,8 +48,10 @@ under prompt injection or with a poisoned model. The provenance check is
 model-driven at both ends (#155). Stage-2 appraisal, reading the exchange,
 decides which claims to check, so injected text can talk it out of listing
 a claim. The provenance critic is shown excerpts of earlier raw-log
-messages. Those excerpts are limited to the channel's memory scope, so no
-text crosses a channel boundary that memory wouldn't already cross. But
+messages. In the tree those excerpts are limited to the channel's memory
+scope, so no text crosses a channel boundary that memory wouldn't already
+cross; the PRD widens the search to every channel, matching retrieval
+(finding 15). But
 they are quoted, untrusted text in the critic's prompt, framed as data, and
 the critic's objections re-enter the window as CONTEXT (provenance objections also wake a turn whose stub tells the agent it may reply `NO_REPLY` to send nothing; that veto applies to critique-origin turns only). The number of
 claims (5) and excerpts (5 per claim, 500 characters each) is capped, so
@@ -101,6 +103,11 @@ Adversaries:
 - **Anyone who controls a page the bot fetches**, or a search result it
   reads.
 - **An MCP server**, via its tool descriptions and results.
+- **Anyone who can read a room the bot speaks in** without being
+  allowlisted: a Discord guild channel, a public IRC channel. They can't
+  drive the agent, but they read its replies, and with one identity
+  across channels those replies can carry what it knows from elsewhere
+  (finding 15).
 - **The model itself**, if the weights are poisoned or the model is simply
   wrong in a way that happens to look like an attack. Every finding below
   applies equally to "the model was tricked" and "the model is hostile".
@@ -421,13 +428,13 @@ string with little memory of who wanted it. What bounds it:
   system role as for every other notification. The framing is a soft
   mitigation in the same sense as the funnel's.
 - **Scoping.** The three tools act on `_ctx.channel` and take no channel
-  argument. A reminder fires on the channel it was set on and nowhere
-  else, so a stranger on IRC cannot use one to make the bot message a
-  Signal contact. PRD §3.9.7 now lets a reminder target any channel, so
-  this scoping is slated to go; finding 15 covers what replaces it.
-  `cancel_reminder` refuses operator jobs and treats
-  another channel's row as not found; `list_reminders` shows only the
-  calling channel's rows.
+  argument. A reminder fires on the channel it was set on and nowhere else,
+  so a stranger on IRC cannot use one to make the bot message a Signal
+  contact. PRD §3.9.7 now lets a reminder target any channel, so this
+  scoping is slated to go; finding 15 covers what replaces it.
+  `cancel_reminder` refuses operator jobs and treats another channel's row
+  as not found; `list_reminders` shows only the calling channel's rows. PRD
+  §3.9.7 makes both span every channel.
 - **Volume.** `scheduler.max_reminders_per_channel` (default 50) caps
   pending reminders per channel, and text is capped at 2000 characters.
   The cap is per channel. Finding 5 used to let a stranger open new IRC PM
@@ -541,12 +548,11 @@ and shows them in a CONTEXT entry on every turn. Three things follow.
 - **No compartment.** Goals are agent-wide: every channel sees every goal,
   crossing `memory.channel_groups`. A goal written from a private channel
   appears on a public one at its next turn. #220 recorded this as a
-  variance from PRD principle 14; under the revised principle 14 it is
-  what the PRD requires of memory too (finding 15). Nothing in a goal is
-  scoped to its origin. The
-  heartbeat's review shows every retired goal's conclusion too, whatever
-  channel it was retired on, so a conclusion written on a private channel
-  reaches the heartbeat's window.
+  variance from PRD principle 14; under the revised principle 14 it is what
+  the PRD requires of memory too (finding 15). Nothing in a goal is scoped
+  to its origin. The heartbeat's review shows every retired goal's
+  conclusion too, whatever channel it was retired on, so a conclusion
+  written on a private channel reaches the heartbeat's window.
 - **Injected text can steer them.** Untrusted text on any channel can make
   the model call `add_goal`, `update_goal` or `retire_goal`, seeded goals
   included: the tools don't check who set a goal. An added goal
@@ -561,48 +567,6 @@ and shows them in a CONTEXT entry on every turn. Three things follow.
   redaction of the message it came from. A retirement record is an ordinary
   memory and is reached the way other memories are.
 
-### 11. Smaller things
-
-- `read_file` has a stat-then-read race and follows symlinks. Irrelevant
-  while finding 4 stands.
-- Tool arguments are not validated against the generated schema. Wrong
-  types produce a generic "tool failed". Robustness, not security.
-- `task_pipeline` never marks a non-zero exit as failed, because `shell`
-  returns a string, so dependents run after failures. A correctness bug
-  with mild safety consequences for "deploy after test" graphs.
-- `web_search` sends conversation-derived queries to DuckDuckGo. By
-  design, but it is an off-box data flow nobody sees.
-- `harness/install-signal-cli.sh` defaults `SERVICE_USER` to a real
-  account name. Not a secret, but it is a real identifier in a public
-  repository.
-- No secrets in `prompts/` or `docs/`.
-- A withheld (`unsent`) row is not sent to any transport, including web
-  and ACP history replay, but it is not secret: it sits in `sessions.db`,
-  the JSONL log and the window like any other row, and a fork or
-  compaction summary sees it. "Withheld" means not said to the channel,
-  not redacted.
-- The memory surfaces (`memory`, `memory_vec`, `memory_fts`,
-  `message_fts`) exist only when the cognition extra has been installed.
-  `corvidae redact` probes for each and silently skips one that is absent;
-  its `memory` form fails without the `memory` table. `message_fts` and its
-  triggers on `message_log` stay in `sessions.db` if the extra is later
-  removed, and keep indexing message text. `redact` clears them only while
-  it can load sqlite-vec: a database with `memory_vec` (any daemon that ran
-  with sqlite-vec) makes every form refuse until the cognition extra is
-  reinstalled (#198). That keeps a half-finished redaction from happening,
-  at the cost of the only deletion path while the extra is missing.
-- `exchange_log` copies conversation text into two columns: stage-2
-  `past_claims` (quoted from the reply) and `provenance_snapshot` (the
-  CONTEXT in the window). `corvidae redact` scrubs both (#160), through
-  the `exchange_log` scrubber the cognition extra registers under
-  `corvidae.redact`. A plugin that keeps its own copy of conversation text
-  and registers no scrubber is not reached. The
-  owning exchange's claims are tombstoned with their counts kept, and
-  every snapshot in the channel from the redacted message on is
-  dropped. What `redact` still doesn't reach: exchanges whose
-  `message_rowid` is NULL, the JSONL logs and the daemon log, and any
-  copy taken out of `sessions.db` (a calibration export, a backup).
-
 ### 11. The heartbeat acts on memory with nobody watching (opt-in)
 
 `HeartbeatPlugin` (#134; off unless `heartbeat.after` is set) starts a
@@ -614,12 +578,11 @@ in the loop to notice. This is finding 3 and finding 7 again with the
 human removed. What bounds it:
 
 - **Reach.** No transport owns `internal:heartbeat`, so the beat's replies
-  go to `sessions.db` and the logs only. There is no cross-channel send
-  yet (PRD §3.5.9, #234), so a beat can't message anyone. When there is,
-  a beat can message any contact, with no allowlist (finding 15). Its
-  tools are
-  another matter: `shell`, `web_fetch` and `write_file` are as available
-  to a beat as to any turn (finding 4). Drop them for the beat with
+  go to `sessions.db` and the logs only. There is no cross-channel send yet
+  (PRD §3.5.9, #234), so a beat can't message anyone. When there is, a beat
+  can message any contact, with no allowlist (finding 15). Its tools are
+  another matter: `shell`, `web_fetch` and `write_file` are as available to
+  a beat as to any turn (finding 4). Drop them for the beat with
   `channels.internal:heartbeat.tools.disabled`.
 - **Scope.** The beat reviews only the channels grouped with
   `internal:heartbeat` in `memory.channel_groups`, never its own earlier
@@ -693,20 +656,29 @@ policy (PRD §3.13) aren't built at all (#296). On a channel that still has
 rewriting `agent.yaml` or a system-prompt file (finding 4), unless the files
 are read-only to the daemon.
 
-The common shape: a runtime override is per channel and in memory, so an
-injected change lasts on that channel until the override is cleared or the
-daemon restarts. Under the PRD, a change the agent makes that alters what
-is already rendered in the window (system prompt, tool set, framing,
-`reasoning_history`) applies from the next compaction or conversation
-start, or at once if the agent makes it persistent and restarts. A skill
-or a persistent self-edit outlives both, and a closed-loop fit would
-re-derive itself from the outcome log after a restart.
+The common shape: a runtime override is per channel and in memory (under
+the PRD, except the identity, which is agent-wide; see the system prompt
+entry), so an injected change lasts on that channel until the override is
+cleared or the daemon restarts. Under the PRD, a change the agent makes
+that alters what is already rendered in the window (system prompt, tool
+set, framing, `reasoning_history`) applies from the next compaction or
+conversation start, or at once if the agent makes it persistent and
+restarts. A skill or a persistent self-edit outlives both, and a
+closed-loop fit would re-derive itself from the outcome log after a
+restart.
 
 What each kind of unlock costs:
 
-- **The system prompt.** An injection that talks the model into an edit
-  rewrites the persona and its instructions on that channel. This is the
-  largest single prompt unlock: everything else the operator wrote into
+- **The system prompt.** In the tree, a per-channel `system_prompt`
+  replaces the agent-level one, and an injection that talks the model into
+  an edit rewrites the persona and its instructions on that channel. Under
+  the PRD the prompt has two layers, locked separately (PRD §3.3.8,
+  §3.5.6). An unlocked register lets an injection rewrite how the agent
+  speaks on that channel. An unlocked identity is agent-wide: an injection
+  on any channel rewrites who the agent is on every channel, from each
+  one's next compaction or conversation start. Lock the identity unless
+  its self-modification is the point. This is the largest single prompt
+  unlock: everything else the operator wrote into
   the prompt, refusals included, is now the model's to change.
 - **The prompts that judge and remember** (the critic's and appraiser's
   prompts, open by default today; fork instructions; the standalone
@@ -770,8 +742,8 @@ What each kind of unlock costs:
   where the operator chose `exchange`.
 - **Everything else in `agent.yaml`** (kernel, client, scheduler and
   transport settings: `llm.*` endpoints and keys, `plugins.disabled`,
-  `scheduler.jobs`, the cross-channel send allowlist and budget once they
-  exist (PRD §3.5.9, #167), `agent.compaction_*`, the `tools.*` limits).
+  `scheduler.jobs`, the per-destination cap on messages the agent starts
+  if it is built (PRD §3.5.9), `agent.compaction_*`, the `tools.*` limits).
   Today these are reachable only through a writable `agent.yaml` (finding
   4); an unlock through a tool carries the same costs. A repointed
   `llm.main.base_url` sends every conversation, and the API key, to a host
@@ -910,24 +882,83 @@ decision (2026-11-01), and these are its costs.
   Signal contact can be messaged on the strength of text fetched in an IRC
   channel. Inbound default-deny bounds who can inject by talking; it does
   not bound what fetched content says.
+- **Notes and reads launder untrusted text.** A note is framed as the
+  agent's own, so text injected on IRC that prompts a note reaches the
+  operator's Signal window in the agent's voice, and a read pulls one
+  channel's untrusted text into another's window. With the trust plugin
+  loaded, both carry the minimum trust of the source channel's
+  participants and low-trust ones are quarantined (PRD §3.5.10–11); until
+  it exists, they arrive unlabelled.
+- **Reminders aimed at other channels.** A reminder may target any channel
+  (PRD §3.9.7), so injected text on one channel can queue firings onto
+  another, up to `scheduler.max_reminders_per_channel` per target, and can
+  fill a target's pending cap so the operator can't set reminders there
+  until the rows fire or are cancelled.
 - **Loops.** A note that wakes another channel starts a turn there, and
-  that turn can wake the first. Messages the agent starts on its own and
-  waking notes carry a per-destination cap (PRD §3.5.9), a runaway guard
-  rather than a gate; `max_turns` bounds one exchange and the caps of
-  finding 14 bound total spend.
+  that turn can wake the first. PRD §3.5.9 lets messages the agent starts
+  and waking notes carry a per-destination cap, a runaway guard rather
+  than a gate; `max_turns` bounds one exchange, and the caps of finding 14
+  will bound total spend once built (#296).
 - **One poisoned memory reaches every prompt.** With no compartments, a
   record distilled from untrusted text on any channel is retrievable on
   all of them. The trust plugin's quarantine (#138) is the planned answer;
   until then this is finding 3 at the agent's full reach.
 
-What remains for an operator who wants a channel kept apart: disable the
-send, note and read tools on a channel with untrusted participants
-(`channels.<id>.tools.disabled`), keep inbound allowlists tight, and for a
-genuinely separate identity, run a second instance with its own database.
+To narrow what text arriving on a channel with untrusted participants can
+make the agent do elsewhere, disable the send, note and read tools there
+(`channels.<id>.tools.disabled`) and keep inbound allowlists tight. That
+does not stop what the agent knows from surfacing on that channel (first
+bullet). For a separate identity, run a second instance with its own
+database.
 
 Where the tree stands: memory is still compartmented per channel by default
 (`memory.channel_groups`, #168), and there is no send, note or read tool
-(#234, #235), so the costs above arrive with those changes.
+(#234, #235), so most of the costs above arrive with those changes; goals
+already cross channels (finding 10). A per-channel `system_prompt` still
+replaces the agent-level one, so the identity layering isn't built either
+(#316).
+
+### Smaller things
+
+- `read_file` has a stat-then-read race and follows symlinks. Irrelevant
+  while finding 4 stands.
+- Tool arguments are not validated against the generated schema. Wrong
+  types produce a generic "tool failed". Robustness, not security.
+- `task_pipeline` never marks a non-zero exit as failed, because `shell`
+  returns a string, so dependents run after failures. A correctness bug
+  with mild safety consequences for "deploy after test" graphs.
+- `web_search` sends conversation-derived queries to DuckDuckGo. By
+  design, but it is an off-box data flow nobody sees.
+- `harness/install-signal-cli.sh` defaults `SERVICE_USER` to a real
+  account name. Not a secret, but it is a real identifier in a public
+  repository.
+- No secrets in `prompts/` or `docs/`.
+- A withheld (`unsent`) row is not sent to any transport, including web
+  and ACP history replay, but it is not secret: it sits in `sessions.db`,
+  the JSONL log and the window like any other row, and a fork or
+  compaction summary sees it. "Withheld" means not said to the channel,
+  not redacted.
+- The memory surfaces (`memory`, `memory_vec`, `memory_fts`,
+  `message_fts`) exist only when the cognition extra has been installed.
+  `corvidae redact` probes for each and silently skips one that is absent;
+  its `memory` form fails without the `memory` table. `message_fts` and its
+  triggers on `message_log` stay in `sessions.db` if the extra is later
+  removed, and keep indexing message text. `redact` clears them only while
+  it can load sqlite-vec: a database with `memory_vec` (any daemon that ran
+  with sqlite-vec) makes every form refuse until the cognition extra is
+  reinstalled (#198). That keeps a half-finished redaction from happening,
+  at the cost of the only deletion path while the extra is missing.
+- `exchange_log` copies conversation text into two columns: stage-2
+  `past_claims` (quoted from the reply) and `provenance_snapshot` (the
+  CONTEXT in the window). `corvidae redact` scrubs both (#160), through
+  the `exchange_log` scrubber the cognition extra registers under
+  `corvidae.redact`. A plugin that keeps its own copy of conversation text
+  and registers no scrubber is not reached. The
+  owning exchange's claims are tombstoned with their counts kept, and
+  every snapshot in the channel from the redacted message on is
+  dropped. What `redact` still doesn't reach: exchanges whose
+  `message_rowid` is NULL, the JSONL logs and the daemon log, and any
+  copy taken out of `sessions.db` (a calibration export, a backup).
 
 ## Privilege separation
 
