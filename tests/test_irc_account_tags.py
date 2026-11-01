@@ -254,3 +254,37 @@ async def test_whois_gap_impersonator_refused_with_account_tag():
 def _parse(line: str):
     """A TaggedMessage parsed from one raw IRC line."""
     return pydle_tags.TaggedMessage.parse(line.encode() + b"\r\n", encoding="utf-8")
+
+
+async def test_no_shared_channel_tracked_account_refused_without_account_tag():
+    """R1 (#264) against real pydle state: no account-tag, tracked account alice.
+
+    bob's record is created by his first PM and later gains account alice (as
+    account-notify would). While he shares no channel with the bot, both a PM
+    and a message to a channel he isn't in are refused; once pydle sees his
+    JOIN, both are admitted. Verdicts come from the production _dispatch.
+    """
+    plugin, client, _seen = _stack(["alice"], caps={"account-notify": True})
+    decisions: list[bool] = []
+
+    async def _record(**kwargs):
+        # The verdict _dispatch recorded for this message, before it is dropped.
+        decisions.append(plugin._verdicts[kwargs["trace_id"]][0])
+
+    plugin.pm.ahook.on_message = _record
+    plugin._registry = MagicMock()
+    # Undo _stack's recorder so messages take the real _dispatch path.
+    del plugin.on_channel_message
+    del plugin.on_private_message
+    client._create_channel("#chat")
+    # First PM creates bob's record with no account yet.
+    await _feed(client, ":bob!b@h PRIVMSG buster :one")
+    client.users["bob"]["account"] = "alice"
+    await _feed(client, ":bob!b@h PRIVMSG buster :two")
+    await _feed(client, ":bob!b@h PRIVMSG #chat :three")
+    # bob joins the bot's channel; now he shares one.
+    await _feed(client, ":bob!b@h JOIN #chat")
+    await _feed(client, ":bob!b@h PRIVMSG buster :four")
+    await _feed(client, ":bob!b@h PRIVMSG #chat :five")
+    assert decisions == [False, False, False, True, True]
+    assert "bob" in client.channels["#chat"]["users"]

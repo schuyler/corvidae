@@ -17,12 +17,21 @@ per ``after`` seconds of quiet, and none during traffic.
 Config:
     heartbeat:
       after: 3600    # seconds of system-wide quiet; absent = asleep
+      keep_beats: 3  # earlier beats a beat still sees; 0 = each starts empty
 
 Sleep is durable because it lives in agent.yaml: without
 ``heartbeat.after`` the plugin registers nothing, at every start.
 
+Window (#286): at the start of each beat a ``tryfirst`` ``resolve_compaction``
+handler drops everything older than the last ``keep_beats`` beats from the
+in-memory window, makes no LLM call, writes nothing to the log, and returns
+None so the kernel's CompactionPlugin still runs as the over-budget net.
+
 Logging:
     - INFO: asleep at start, each beat sent
+    - DEBUG: the window trimmed (rows dropped, beats kept)
+    - WARNING: a trim skipped (a tool cycle would straddle the cut, or a tool
+      call is still pending)
     - WARNING: memory or retired-goals read failed (beat skipped, retried
       after a period)
 """
@@ -31,7 +40,9 @@ from __future__ import annotations
 
 import logging
 import math
+from typing import Any
 
+from corvidae.context import MessageType
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 from corvidae.idle import IdleTracker, IdleWatch
 from corvidae_cognition.memory import MemoryPlugin, _format_age
@@ -85,6 +96,116 @@ MEMORY_HEADER = (
 )
 
 
+#: Earlier beats a beat still sees when ``heartbeat.keep_beats`` is absent.
+DEFAULT_KEEP_BEATS = 3
+
+#: How the Agent frames an untargeted notification (corvidae/agent.py, the
+#: ``f"[{source}]\n\n{text}"`` system message), so every beat's row starts
+#: with it. If that framing changes, trimming silently stops: the pipeline
+#: tests in tests/cognition/test_heartbeat_window.py go through the real Agent
+#: to catch it.
+BEAT_PREFIX = "[heartbeat]\n\n"
+
+
+def _heartbeat_block(config: dict) -> dict:
+    """Return the ``heartbeat`` config mapping ({} when absent).
+
+    Raises ValueError, naming the key and the accepted shape, when the key
+    holds something other than a mapping.
+    """
+    block = config.get("heartbeat") or {}
+    # A scalar or list under heartbeat: can't hold keys, so fail loudly.
+    if not isinstance(block, dict):
+        raise ValueError(
+            f"heartbeat: got {block!r}; expected a mapping such as "
+            "'heartbeat: {after: 3600}' — check agent.yaml"
+        )
+    return block
+
+
+def parse_keep_beats(config: dict) -> int:
+    """Return ``heartbeat.keep_beats``, DEFAULT_KEEP_BEATS when absent or null.
+
+    Raises ValueError naming the key, the value and what is accepted.
+    """
+    value = _heartbeat_block(config).get("keep_beats")
+    if value is None:
+        return DEFAULT_KEEP_BEATS
+    # bool is an int subclass; True is not a count. 2.5 and "3" are not either.
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(
+            f"heartbeat.keep_beats: got {value!r}; expected a whole number of "
+            "beats, 0 or more (0 starts every beat empty) — check agent.yaml, "
+            f"or remove the key for the default of {DEFAULT_KEEP_BEATS}"
+        )
+    return value
+
+
+def is_beat_notification(message: dict) -> bool:
+    """True for the system MESSAGE row a beat's notification leaves."""
+    content = message.get("content")
+    return (
+        message.get("role") == "system"
+        and message.get("_message_type") == MessageType.MESSAGE
+        and isinstance(content, str)
+        and content.startswith(BEAT_PREFIX)
+    )
+
+
+def _straddles(messages: list[dict], cut: int) -> bool:
+    """True when a tool call before ``cut`` has its result at or after it.
+
+    Written here rather than reusing the tool-cycle helpers in corvidae.fork:
+    those are not exported to plugins (tests/test_kernel_boundary.py). A call
+    with no result at all never straddles, matching how the kernel treats
+    abandoned calls.
+    """
+    # Ids of every call made in the part that would be dropped.
+    dropped_calls = {
+        call.get("id")
+        for m in messages[:cut]
+        for call in (m.get("tool_calls") or [])
+    }
+    # A kept tool result answering one of them would be orphaned.
+    return any(
+        m.get("tool_call_id") in dropped_calls for m in messages[cut:]
+    )
+
+
+def beat_cut(messages: list[dict], keep_beats: int) -> int:
+    """Index of the first message to keep, or 0 when nothing should be dropped.
+
+    A beat is everything from its notification to the next one. Trims only
+    when the window ends in a beat notification (a beat's first item), never
+    mid-beat.
+    """
+    # Not a beat start (tool result, empty window): never trim mid-beat.
+    # Without this gate the cut still can't fall inside the current beat
+    # while its notification is in the window, but it matters after
+    # CompactionPlugin fires mid-beat (a long beat's tool results pass the
+    # threshold) and resolve_compaction runs again on the next tool result:
+    # with the summary ahead of the current notification, the trim would drop
+    # that summary inside the tool cycle; with the notification summarized
+    # away too, `starts` is empty and the index below would raise, failing the
+    # whole hook call and skipping CompactionPlugin for the rest of the beat.
+    if not messages or not is_beat_notification(messages[-1]):
+        return 0
+    starts = [i for i, m in enumerate(messages) if is_beat_notification(m)]
+    # The current beat plus keep_beats earlier ones; anything older goes,
+    # including a leftover summary or CONTEXT row ahead of the oldest kept beat.
+    cut = starts[max(0, len(starts) - 1 - keep_beats)]
+    # A cut inside a tool cycle would orphan a result: skip, logged.
+    if cut and _straddles(messages, cut):
+        logger.warning(
+            "heartbeat: trim skipped on %s: a tool cycle straddles the cut at "
+            "message %d, so older beats kept this turn; the next beat's cut "
+            "moves past it",
+            HEARTBEAT_CHANNEL, cut, extra={"channel": HEARTBEAT_CHANNEL, "cut": cut},
+        )
+        return 0
+    return cut
+
+
 def parse_after(config: dict) -> float | None:
     """Return ``heartbeat.after`` in seconds, or None when the heartbeat sleeps.
 
@@ -92,13 +213,7 @@ def parse_after(config: dict) -> float | None:
     anything but a positive finite number: a zero period would mean
     back-to-back beats.
     """
-    block = config.get("heartbeat") or {}
-    if not isinstance(block, dict):
-        raise ValueError(
-            f"heartbeat: got {block!r}; expected a mapping such as "
-            "'heartbeat: {after: 3600}' — check agent.yaml"
-        )
-    value = block.get("after")
+    value = _heartbeat_block(config).get("after")
     if value is None:
         return None
     # bool is an int subclass; True is not a period. NaN would arm at zero
@@ -161,6 +276,7 @@ class HeartbeatPlugin(CorvidaePlugin):
         if pm is not None:
             self.pm = pm
         self._after: float | None = None
+        self._keep_beats: int = DEFAULT_KEEP_BEATS
         self._memory: MemoryPlugin | None = None
         self._idle: IdleTracker | None = None
         # The kernel ChannelRegistry, duck-typed: corvidae.channel is not
@@ -172,6 +288,8 @@ class HeartbeatPlugin(CorvidaePlugin):
     async def on_init(self, pm, config: dict) -> None:
         """Read heartbeat.after; an awake heartbeat requires memory."""
         await super().on_init(pm, config)
+        # Validated before the asleep return: a bad value fails startup either way.
+        self._keep_beats = parse_keep_beats(config)
         self._after = parse_after(config)
         if self._after is None:
             return
@@ -184,6 +302,39 @@ class HeartbeatPlugin(CorvidaePlugin):
                 "heartbeat.after to keep the heartbeat asleep"
             )
         self._memory = memory
+
+    @hookimpl(tryfirst=True)
+    async def resolve_compaction(self, channel: Any, conversation: Any, max_tokens: int) -> None:
+        """Drop all but the last ``keep_beats`` beats when a beat starts.
+
+        A side-effect handler: it only edits the in-memory window (the log is
+        untouched, no LLM is called) and always returns None, so the kernel's
+        CompactionPlugin still runs after it as the over-budget safety net.
+        """
+        # Only the heartbeat's own channel is ever trimmed.
+        if channel.id != HEARTBEAT_CHANNEL:
+            return None
+        messages = conversation.messages
+        cut = beat_cut(messages, self._keep_beats)
+        # Nothing to drop, or not at a beat start.
+        if cut <= 0:
+            return None
+        # A tool call in flight means the system is not quiet: never cut then.
+        if getattr(channel, "pending_tool_call_ids", None):
+            logger.warning(
+                "heartbeat: trim skipped on %s: tool calls are pending, so "
+                "older beats kept this turn",
+                HEARTBEAT_CHANNEL, extra={"channel": HEARTBEAT_CHANNEL},
+            )
+            return None
+        # In place, so any holder of the list sees the trim.
+        del messages[:cut]
+        logger.debug(
+            "heartbeat: window trimmed",
+            extra={"channel": HEARTBEAT_CHANNEL, "dropped": cut,
+                   "keep_beats": self._keep_beats},
+        )
+        return None
 
     @hookimpl
     async def on_start(self, config: dict) -> None:

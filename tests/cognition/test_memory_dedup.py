@@ -73,6 +73,10 @@ class DupStubClient:
                 return list(vec)
         return _bow_embed_dims(text, DIMS)
 
+    def request_model(self, extra_body=None):
+        """The model a call is sent with, as LLMClient.request_model does."""
+        return (extra_body or {}).get("model", "stub-model")
+
     async def chat(self, messages, tools=None, extra_body=None):
         self.chat_calls.append(messages)
         return {

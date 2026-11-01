@@ -310,7 +310,17 @@ class LLMClient:
     async def start(self)
     async def stop(self)
     async def chat(self, messages: list[dict], tools: list[dict] | None = None, extra_body: dict | None = None) -> dict
+    def request_model(self, extra_body: dict | None = None) -> str
 ```
+
+`request_model` returns the `model` a `chat` call with that `extra_body` is
+sent with: the configured model, overridden by the instance `extra_body`
+and then the call's (`llm.<role>.extra_body.model` can change the model).
+`chat` builds its payload's `model` from it. Memory consolidation stamps it
+on the records it writes ([cognition.md](cognition.md#record-stamps)).
+`embed` is deliberately not routed through it: it sends the configured
+`model` and ignores `extra_body`, so the encoder `embedding_meta` records
+can't be switched by an override.
 
 Retry parameters: `max_retries` (default 3, set to 0 to disable), `retry_base_delay`
 (base exponential backoff delay in seconds), `retry_max_delay` (cap on backoff delay).
@@ -694,7 +704,7 @@ persistence connection (`PersistencePlugin.db`). The others:
 | Connection | Opened by | Writes |
 |---|---|---|
 | persistence (`PersistencePlugin.db`) | persistence `on_start` | `message_log`, and every other plugin's tables (scheduler, usage_log, retrieval_log, goals, ...) |
-| memory write (`MemoryPlugin._write_db`) | memory `on_start`, after its schema exists | memory records only: consolidation (`memory`, `memory_vec`, `memory_fts` via trigger, `consolidation_watermark`) and `write_record`, each one `BEGIN IMMEDIATE` transaction |
+| memory write (`MemoryPlugin._write_db`) | memory `on_start`, after its schema exists | memory records only: consolidation (`memory`, `memory_vec`, `memory_fts` via trigger, `memory_prompt`, `consolidation_watermark`) and `write_record`, each one `BEGIN IMMEDIATE` transaction |
 | appraisal probe, critique probe | each plugin's `on_start` | read only (`message_fts` probes) |
 
 Only the memory write connection is isolated for atomicity: a commit on
@@ -797,7 +807,10 @@ per-channel `SerialQueue`. The queue's consumer calls
     interleave during this window — they don't clear the pending set.
 6. Calls `resolve_compaction` (`firstresult=True`): the first non-None
    return stops the chain, so a default-priority replacement runs before
-   the `trylast` `CompactionPlugin`; the return value is not used
+   the `trylast` `CompactionPlugin`; the return value is not used. A
+   `tryfirst` handler may trim the window in place and return None, which
+   doesn't stop the chain (cognition's HeartbeatPlugin does this on
+   `internal:heartbeat`, keeping its last `heartbeat.keep_beats` beats)
 7. Calls `before_agent_turn` hook (broadcast); fires `persist_message`
    for any messages injected by the hook
 8. **`_run_turn`** — calls `run_agent_turn` (single LLM invocation).
@@ -1241,8 +1254,10 @@ with `get_dependency`.
 passes or the optional `asyncio.Event` is set. `call_later(delay, cb,
 name=...)` and `call_at(when, cb, name=...)` run an async callback once and
 return a `Timer` whose `cancel()` stops it while it is still waiting
-(a no-op once the callback has started). `call_at` waits on wall time in
-steps of at most an hour, so a suspend or an NTP step is noticed within
+(a no-op once the callback has started). `call_soon(cb, name=...)` runs it
+once on the next loop step, without waiting on time, and tracks it like any
+timer, so `live_timer_names()` lists it and `close()` cancels it. `call_at`
+waits on wall time in steps of at most an hour, so a suspend or an NTP step is noticed within
 the hour. Timers are one-shot: a periodic job re-arms itself from its
 callback. A callback that raises is logged with the timer's name. A callback
 must let `asyncio.CancelledError` through, because `Clock.close()` stops
@@ -1264,7 +1279,11 @@ self._sys = idle.watch_system(60, self._on_system_quiet, name="my.plugin.sys")
 quiet `period` seconds. `watch_system(period, cb)` calls `cb()` once the
 whole system has been. Both return an `IdleWatch` with `cancel()`. A watch
 repeats every `repeat` seconds (default `period`) while the quiet lasts, and
-only if nothing became active while the callback ran. Activity cancels the
+only if nothing became active while the callback ran. `repeat` must be a
+positive finite number, and a negative `period` is rejected: both raise
+`ValueError` naming the watch. A zero period therefore needs an explicit
+`repeat`. A due zero-period watch runs through `Clock.call_soon`, so
+`clock.close()` cancels it like any other timer. Activity cancels the
 waiting timers. An upkeep callback (consolidation, retention) never starts
 a turn or enqueues anything; it does plugin-owned work. The one agency
 watcher, cognition's `HeartbeatPlugin`, starts a turn from its system
@@ -1529,6 +1548,13 @@ are still in view). Appraisal appends the exchange quotes and the
 retrieval profile. Critique appends the exchange quotes, and the
 provenance check also passes the CONTEXT snapshot inline, along with each
 past claim and its closest earlier messages.
+
+`ForkResult.model` is the model the fork request was sent with
+(`LLMClient.request_model` of the fork's body, so an `extra_body` override
+shows). `Agent.fork` always sets it, so it is None only when a
+`ForkResult` is built without it. Consolidation stamps it on a fork record, together with
+`memory.consolidation_fork_prompt` but not the range sentence
+([cognition.md](cognition.md#record-stamps)).
 
 **Configuration** (`agent.forks`, validated at startup and on reload by
 `validate_agent_config`):
@@ -2238,7 +2264,18 @@ means deny) and the entry is dropped when `on_message` returns, because
 pydle runs a task per line and a later line's `on_raw` can rewrite
 `users[nick]` while an earlier message is still in the hook pipeline.
 Without `account-tag`, the account is whatever `users[nick]` holds when the
-message arrives (pydle's tracked state; a residual risk). Entries and
+message arrives (pydle's tracked state; a residual risk for senders who
+share a channel with the bot). `_dispatch` then applies one more synchronous
+step to every message, PM or channel: if the sender would be admitted, an
+account is tracked, `account-tag` is not negotiated and
+`_shares_channel(nick)` (a casemapping-folded scan of pydle's
+`channels[*]["users"]`) is false, the verdict becomes a refusal carrying the
+`_UNVERIFIABLE_ACCOUNT` reason (#264). `_decide` returns
+`(allowed, account, reason)` with `reason` None; the recorded verdict is the
+same 3-tuple and `should_process_message` appends the reason to its INFO
+line. `IRCClient.on_connect` calls `_warn_unverifiable_accounts()` once per
+connection: one WARNING when `irc.allow` is set, `account-tag` is not
+negotiated and `account-notify` or `extended-join` is. Entries and
 senders are compared under the server's CASEMAPPING via the client's
 `normalize`.
 
@@ -2898,6 +2935,7 @@ scheduler:
 
 heartbeat:
   after: 3600                   # seconds of system quiet before a beat; absent = asleep
+  keep_beats: 3                 # earlier beats kept in the beat's window; 0 = start empty
 
 funnel:
   default_budget: 512           # tokens per admission-funnel call
@@ -3070,7 +3108,7 @@ corvidae/
 ├── logging.py            # StructuredFormatter, configure_logging()
 ├── agent.py              # Agent (single-turn dispatch)
 ├── persistence.py        # PersistencePlugin (DB lifecycle, conversation init)
-├── clock.py              # Clock, Timer (kernel clock: now, sleep, call_later, call_at)
+├── clock.py              # Clock, Timer (kernel clock: now, sleep, call_later, call_at, call_soon)
 ├── idle.py               # IdleTracker, IdleWatch (per-channel and system quiet)
 ├── thinking.py           # ThinkingPlugin, strip_thinking(), strip_reasoning_content()
 ├── compaction.py         # CompactionPlugin

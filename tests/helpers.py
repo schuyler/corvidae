@@ -133,8 +133,9 @@ class FakeForkAgent:
     limits the error to instructions containing it.
     """
 
-    def __init__(self, stages, text="", error=None, fail_marker=None):
+    def __init__(self, stages, text="", error=None, fail_marker=None, model=None):
         self.stages = set(stages)
+        self.model = model
         self.text = text
         self.error = error
         self.fail_marker = fail_marker
@@ -153,7 +154,12 @@ class FakeForkAgent:
         })
         if self.error is not None and (self.fail_marker is None or self.fail_marker in instruction):
             raise self.error
-        return ForkResult(text=self.text, message={"role": "assistant", "content": self.text})
+        # ``model`` (issue #299) is the model the fork was sent with; passed
+        # only when set so tests that ignore it run on any ForkResult.
+        extra = {"model": self.model} if self.model is not None else {}
+        return ForkResult(
+            text=self.text, message={"role": "assistant", "content": self.text}, **extra
+        )
 
 
 def window_of(channel_id, rowids, summary=False, contents=None):

@@ -163,7 +163,7 @@ The full sequence for processing a queue item (`agent.py:_process_queue_item`):
 1. **Lazy-init conversation** — on first message, resolve config, call `resolve_system_prompt()`, restore persisted history via the `resolve_conversation` hook (the return value is assigned directly to `conv.messages`).
 2. **Append user message** — add to `conv.messages` as `MessageType.MESSAGE`.
 3. **Persist** — fire `persist_message` hook for the user message.
-4. **Compact if needed** — fire `resolve_compaction` hook. `CompactionPlugin` summarizes old messages if the token budget is near full (runs `trylast=True`, returns `True` to stop the chain).
+4. **Compact if needed** — fire `resolve_compaction` hook. `CompactionPlugin` summarizes old messages if the token budget is near full (runs `trylast=True`, returns `True` to stop the chain). A `tryfirst` handler may trim the window and return None, which lets `CompactionPlugin` still run after it; cognition's HeartbeatPlugin does this on `internal:heartbeat` to keep its last `heartbeat.keep_beats` beats.
 5. **Inject context** — fire `before_agent_turn` hook; plugins append `CONTEXT` entries. Each injected entry is then individually persisted via `persist_message`.
 6. **Build prompt** — call `conv.build_prompt()` to produce the final message list.
 7. **Call LLM** — send `[system, ...history, ...injected context]` plus tool schemas.

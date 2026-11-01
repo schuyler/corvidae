@@ -630,15 +630,19 @@ class Tidy(CorvidaePlugin):
 ```
 
 `call_later` and `call_at` are one-shot; re-arm from the callback for a
-periodic job. `watch_channels` repeats every `repeat` seconds (default: the
-period) while the channel stays quiet, and `watch_system` does the same for
-the whole system. To learn that a channel just drained, as a transport
-does for a working indicator, watch with `watch_channels(0, cb, name=...,
-repeat=3600)`: a zero period fires at settle, and the callback sees every
-channel, so filter on the id. Cancel watches and timers in `on_stop`; the Runtime
-cancels stragglers afterwards. Callbacks must let `asyncio.CancelledError`
-through. An idle or timer callback is upkeep: it does plugin-owned work and
-must never start a turn or enqueue work on a channel (principle 13), so it
+periodic job. `call_soon(cb, name=...)` runs once on the next loop step.
+`watch_channels` repeats every `repeat` seconds (default: the period) while
+the channel stays quiet, and `watch_system` does the same for the whole
+system. `repeat` must be a positive finite number, so `watch_channels(0, cb,
+name=...)` without `repeat=` (or a negative period) raises `ValueError`. To
+learn that a channel just drained, as a transport does for a working
+indicator, watch with `watch_channels(0, cb, name=..., repeat=3600)`: a zero
+period fires at settle, and the callback sees every channel, so filter on
+the id. A zero-period callback that awaits something outside the clock
+blocks `FakeClock.settle()` in tests until it finishes. Cancel watches and
+timers in `on_stop`; the Runtime cancels stragglers afterwards. Callbacks
+must let `asyncio.CancelledError` through. An idle or timer callback is
+upkeep: it does plugin-owned work and must never start a turn or enqueue work on a channel (principle 13), so it
 never calls `on_notify`. Starting a turn on time is agency, which is the
 scheduler's job: its firings go through `on_notify` and run a full turn. In
 tests, `tests/fake_clock.py`'s `install_kernel_clock(pm)` registers
@@ -736,7 +740,12 @@ class MyPlugin(CorvidaePlugin):
 ```
 
 - `Agent.fork(channel, instruction, *, cut=None, extra_body=None)` returns
-  `ForkResult(text, message, usage)`. `cut=None` forks the whole window;
+  `ForkResult(text, message, usage, model)`. `model` is the model the fork
+  request was sent with (`LLMClient.request_model(body)`, so an
+  `extra_body["model"]` override shows), for plugins that record how their
+  output was made; `Agent.fork` always sets it, so it is None only when a
+  `ForkResult` is built without it. `cut=None` forks
+  the whole window;
   `cut=k` forks `messages[:k]` (use `snap_cut_to_tool_boundary` if `k`
   might split a tool cycle, or the prefix won't match the cache).
 - It uses `llm.main`, the agent's tool schemas with `tool_choice: "none"`,
