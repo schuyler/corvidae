@@ -351,8 +351,8 @@ someone's nick is not enough. Residual risks:
 - **Upgrade.** A deployment that used IRC goes silent until `irc.allow` is
   set; startup logs a WARNING saying so.
 
-Discord still creates the channel before its gate runs; IRC and Signal
-check the allowlist first.
+IRC, Signal and Discord all check the allowlist before resolving the
+channel, so a refused sender leaves no registry entry (#77, #103, #274).
 
 Partial mitigation (#149): `channels.<id>.tools.disabled` takes the
 dangerous tools off an IRC channel the operator configures, for example

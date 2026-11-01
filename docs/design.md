@@ -2555,7 +2555,12 @@ sender's user id must appear in `allow:` (entries are compared as strings,
 so YAML ints work). A refusal is logged at INFO naming the sender's id, and
 nothing is sent back. The transport fires `on_message` for every message
 that passes inbound filtering regardless: the gate is the one place that
-vetoes and the one place that logs the attempt. Note what that means in a
+vetoes and the one place that logs the attempt. The transport checks its
+allowlist before it resolves the channel, so a refused sender never creates
+a registry entry (#274, as #103 for Signal): their message is gated on a
+transient `Channel("discord", <scope>)` that is never registered, or on the
+live entry if one exists (a guild channel an allowed user talks in, or a
+sender since dropped from `allow:`). Note what that means in a
 server: anyone who can see the channel can @-mention the bot, and gets
 silence. The bot has no way to tell them it is configured to ignore them.
 
