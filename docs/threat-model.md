@@ -454,8 +454,13 @@ gives: keep `agent.yaml` unwritable by the daemon user.
 
 No tool sends to another channel yet. PRD §3.5.9 now requires one, with no
 allowlist of target channels: any turn may speak on any channel (#234).
-Finding 15 is its entry. Recurring reminders by tool are deferred for a
-separate reason: they need a per-channel budget of their own.
+Finding 15 is its entry. PRD §3.9.7 also lets the agent set recurring
+reminders, which the tree doesn't yet: a recurring reminder set because of
+injected text fires a main-model turn every interval until someone
+cancels it, which is persistence for that text with no end date. The
+operator can apply a floor on how often an agent-set reminder recurs; with
+none, the bound is the per-target pending cap and, once built, the pool
+caps of finding 14.
 
 ### 8. Forks put background instructions after untrusted text (opt-in)
 

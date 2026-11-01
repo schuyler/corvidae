@@ -480,34 +480,33 @@ Per transport:
   by aiohttp in the daemon's loop, no new dependencies, no build step,
   vendored marked and DOMPurify with recorded versions and hashes. Binds
   loopback by default and warns at startup on anything else. The token
-  comes from config, then `CORVIDAE_WEB_TOKEN`, then a generated one
-  logged once as a login URL; a provided token shorter than 16 characters
-  is rejected; there is no setting that turns auth off; comparisons are
+  comes from config, then `CORVIDAE_WEB_TOKEN`, then a generated one logged
+  once as a login URL; a provided token shorter than 16 characters is
+  rejected; there is no setting that turns auth off; comparisons are
   constant-time. Login sets an `HttpOnly; SameSite=Strict` cookie whose
   value is an HMAC of the token, so sessions survive a restart with the
   same token and die when it changes. Every route needs the cookie; the
-  WebSocket also needs an allowed `Origin`; every request needs an
-  allowed `Host`. A strict CSP (`'self'` only, `img-src 'self' data:`,
-  explicit `ws://`/`wss://` per allowed origin), `nosniff`,
-  `no-referrer`, `no-store`; the access log is off; a 500 never logs the
-  URL. Model output reaches the DOM only through
-  `DOMPurify.sanitize(marked.parse(text))` with `style`, `class`, `id`
-  and `data-*` forbidden. Scopes are operator-chosen slugs
-  `[a-z0-9][a-z0-9_-]{0,63}`; the conversation list merges `message_log`
-  and the live registry. Subscribe replays the newest 200 rows mapped to
-  the same item kinds the live hooks produce (summary rows as dividers,
-  context and system rows skipped), favouring duplicates over losses.
-  Every send is acknowledged to the sending socket with its sequence
-  number, and the page keeps unacknowledged sends to restore when the
-  socket closes, so a half-open socket loses nothing. Fan-out is through
-  a bounded per-client queue and a writer task; a client that falls
+  WebSocket also needs an allowed `Origin`; every request needs an allowed
+  `Host`. A strict CSP (`'self'` only, `img-src 'self' data:`, explicit
+  `ws://`/`wss://` per allowed origin), `nosniff`, `no-referrer`,
+  `no-store`; the access log is off; a 500 never logs the URL. Model output
+  reaches the DOM only through `DOMPurify.sanitize(marked.parse(text))`
+  with `style`, `class`, `id` and `data-*` forbidden. Scopes are
+  operator-chosen slugs `[a-z0-9][a-z0-9_-]{0,63}`; the conversation list
+  merges `message_log` and the live registry. Subscribe replays the newest
+  200 rows mapped to the same item kinds the live hooks produce (summary
+  rows as dividers, context and system rows skipped), favouring duplicates
+  over losses. Every send is acknowledged to the sending socket with its
+  sequence number, and the page keeps unacknowledged sends to restore when
+  the socket closes, so a half-open socket loses nothing. Fan-out is
+  through a bounded per-client queue and a writer task; a client that falls
   behind is dropped with 1008. Each connection is owned by its handler
   task; `on_stop` closes fan-out sockets, cancels handlers, and finishes
   inside Runtime's 3 s budget, aborting transports a dead peer will never
-  drain. A token change on reload closes every socket with 4001; host,
-  port and origins changes log "restart to apply". Token streaming,
-  paging past 200 rows, an inspector pane, and views of other transports'
-  channels are out of scope; each gets its own decision.
+  drain. A token change on reload closes every socket with 4001; host, port
+  and origins changes log "restart to apply". Paging past 200 rows, an
+  inspector pane, and views of other transports' channels are out of scope;
+  each gets its own decision.
 - **ACP**: Agent Client Protocol v1 over stdio, the official Python SDK,
   as a dedicated `corvidae acp` subprocess that owns stdio (JSON-RPC only
   on stdout; logs to stderr or a file). Inert under `serve` and `cli`.
@@ -792,7 +791,6 @@ Per transport:
    says so, or, absent one, when `agent.request_logprobs` is on (§3.11.4).
    Either way they are surfaced on the turn result and to
    `on_agent_response`, and never faked for providers that return none.
-5. No streaming; the web transport states why.
 
 ### 3.7 Cognition
 
@@ -1158,17 +1156,18 @@ design, not requirement. The requirements are outcomes:
    bounded by `catch_up_window`.
 6. Config jobs sync by name on start and reload; a removed name is a
    durable stop; an invalid entry logs and leaves the running job alone.
-7. `remind_me` takes an optional target channel and defaults to the
-   calling one; a reminder may target any channel (principle 14), and
-   `list_reminders` and `cancel_reminder` cover every channel's
-   reminders. The tools parse `when`
-   themselves, refuse a bare number, cap pending rows per target channel
-   and text length, and refuse to cancel config jobs.
-8. Tools set one-shot reminders; recurrence comes only from operator jobs
-   (item 6), since a recurrence set by a tool would need a per-channel
-   budget of its own. Cron syntax is out of scope. Retention runs on the
-   kernel clock (§3.1.15, §3.7 Memory 6) and does not depend on the
-   scheduler.
+7. The agent manages its own reminders, one-shot and recurring: it can
+   set, list, change and cancel them. A recurring reminder recurs as
+   item 5 describes. `remind_me` takes an optional target channel and
+   defaults to the calling one; a reminder may target any channel
+   (principle 14), and listing and cancelling cover every channel's
+   reminders. The tools parse `when` themselves, refuse a bare number,
+   cap pending rows per target channel and text length, and refuse to
+   change or cancel config jobs. A floor on how often a reminder the
+   agent sets may recur is a restriction the operator can apply
+   (principle 15).
+8. Retention runs on the kernel clock (§3.1.15, §3.7 Memory 6) and does
+   not depend on the scheduler.
 
 ### 3.10 Observability
 
@@ -1443,7 +1442,7 @@ record that holds the reasoning.
 | Model endpoints may be remote; a role's credentials should be storable in the environment rather than config (not required to be), and the threat model names what each role sends | #217 |
 | Critique is gated: stylistic lenses run on salience, the provenance check on every claim about the past, never unconditionally per reply | principle 7; §3.7 Critique 1–2; diverges from the Persyn spec |
 | No inline refine step: the sent reply is the candidate, and correction arrives on a later turn | principle 3; §3.7 Critique 4; the Persyn spec's own deferred-deliberation default |
-| Voice and an operator console are out of scope | §3.6.5; both optional in the Persyn spec |
+| Voice and an operator console are out of scope | both optional in the Persyn spec |
 | Operator-seeded goals allowed | §3.7 Goals; diverges from the Persyn spec |
 | Memory poisoning answered on the write side with trust tagging (trust plugin) | §3.7 Trust; an addition to the Persyn spec |
 | No sandbox; the subagent/MCP seam is where one would attach | principle 9; §3.5.3, §3.5.5; diverges from the Persyn spec's sandboxed execution |
