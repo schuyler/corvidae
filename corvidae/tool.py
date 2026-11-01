@@ -11,6 +11,8 @@ Public API:
     - ToolContext: context injected into tools that declare a ``_ctx`` parameter
     - ToolCallResult: result of a single dispatched tool call
     - dispatch_tool_call(): parse, dispatch, and wrap a tool call from an LLM response
+    - ToolTimeouts: the per-call time bound (default plus per-tool overrides)
+    - resolve_own_timeout(): read a tool's declared ``own_timeout`` at dispatch
 """
 
 from __future__ import annotations
@@ -19,9 +21,10 @@ import asyncio
 import inspect
 import json
 import logging
+import math
 import time
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from pydantic import create_model
@@ -33,11 +36,122 @@ TOOL_TRUNCATION_TEMPLATE = "\n[truncated \u2014 {original_len} chars total]"  # 
 
 _LOG_TRUNCATION_LENGTH = 200
 
+# Default bound, in seconds, on a single tool call (tools.call_timeout).
+DEFAULT_CALL_TIMEOUT: float = 600.0
+# Result string for a timed-out call. Format with name=<tool>, bound=<seconds>.
+TIMEOUT_RESULT_TEMPLATE = "Error: tool '{name}' timed out after {bound:g}s"
+# WARNING when the tool honoured the cancellation.
+TIMEOUT_WARNING_HONOURED = (
+    "tool %s timed out after %gs on %s (call %s) and was cancelled; "
+    "raise tools.timeouts.%s if this tool legitimately runs longer"
+)
+# WARNING when the tool swallowed the cancellation and its late result was dropped.
+TIMEOUT_WARNING_IGNORED = (
+    "tool %s timed out after %gs on %s (call %s) but ignored cancellation; "
+    "its late result was discarded \u2014 the tool must re-raise CancelledError; "
+    "raise tools.timeouts.%s if this tool legitimately runs longer"
+)
+
 if TYPE_CHECKING:
     from corvidae.channel import Channel
     from corvidae.task import TaskQueue
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ToolTimeouts:
+    """Per-call time bounds: a default plus per-tool overrides.
+
+    ``None`` means no bound. Config-free: the parser lives with the
+    ToolCollectionPlugin, which owns the ``tools.*`` keys.
+    """
+
+    default: float | None = DEFAULT_CALL_TIMEOUT
+    per_tool: Mapping[str, float | None] = field(default_factory=dict)
+
+    def for_tool(self, name: str) -> float | None:
+        """Return the bound for ``name``; an override wins, including None."""
+        return self.per_tool[name] if name in self.per_tool else self.default
+
+
+# Bound applied when a caller passes nothing, so third-party callers of the
+# public dispatch_tool_call are bounded too.
+DEFAULT_TOOL_TIMEOUTS = ToolTimeouts()
+
+# Tool names whose unreadable own_timeout has already been warned about.
+_warned_own_timeout: set[str] = set()
+
+
+def resolve_own_timeout(tool_fn: Callable, name: str | None = None) -> float | None:
+    """Read the ``own_timeout`` a tool declares, or None if it declares none.
+
+    ``own_timeout`` is a number or a zero-argument callable returning
+    ``float | None``, set as an attribute on the registered callable. It is
+    read per call so it tracks live config. A bound method reads its
+    function's attribute. For a partial or callable instance, set the
+    attribute on that object itself; a class-level property is not read.
+
+    A callable that raises, or a value that is not a finite real number,
+    is rescued as None (the outer bound then applies) with one WARNING per
+    tool name per process.
+    """
+    # Look up via vars() so Mock/AsyncMock tools cannot invent an attribute.
+    target = getattr(tool_fn, "__func__", tool_fn)
+    try:
+        declared = vars(target).get("own_timeout")
+    except TypeError:
+        # No __dict__ on this callable, so nothing can be declared.
+        return None
+    if declared is None:
+        return None
+    label = name or getattr(tool_fn, "__name__", repr(tool_fn))
+    try:
+        value = declared() if callable(declared) else declared
+    except Exception as exc:
+        _warn_own_timeout(label, declared, type(exc).__name__, exc_info=True)
+        return None
+    if value is None:
+        return None
+    # bool is an int subclass but never a sensible timeout.
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+    ):
+        _warn_own_timeout(label, value, "invalid value", exc_info=False)
+        return None
+    return float(value)
+
+
+def _warn_own_timeout(label: str, value: object, why: str, *, exc_info: bool) -> None:
+    """Log (once per tool per process) that own_timeout was unreadable."""
+    if label in _warned_own_timeout:
+        return
+    _warned_own_timeout.add(label)
+    logger.warning(
+        "tool %s declares an unreadable own_timeout %r (%s); applying the "
+        "outer tools.call_timeout instead \u2014 fix the tool's own_timeout",
+        label, value, why, exc_info=exc_info,
+    )
+
+
+def _outer_bound(
+    fn_name: str, tool_fn: Callable, call_timeouts: ToolTimeouts
+) -> float | None:
+    """Effective outer bound for a call, skipping it when the tool's own is shorter."""
+    bound = call_timeouts.for_tool(fn_name)
+    if bound is None:
+        return None
+    own = resolve_own_timeout(tool_fn, fn_name)
+    # R4: the tool's own (<=) timeout fires first and reports itself.
+    if own is not None and own <= bound:
+        logger.debug(
+            "outer call timeout skipped: tool's own timeout is not longer",
+            extra={"tool": fn_name, "own_timeout": own, "bound": bound},
+        )
+        return None
+    return bound
 
 
 def tool_to_schema(fn: Callable) -> dict:
@@ -256,6 +370,30 @@ class ToolCallResult:
     error: bool
 
 
+def _timed_out(
+    fn_name: str,
+    bound: float | None,
+    channel_label: str,
+    call_id: str,
+    *,
+    honoured: bool,
+    exc: BaseException | None = None,
+) -> str:
+    """Log the timeout WARNING and return the error result string."""
+    template = TIMEOUT_WARNING_HONOURED if honoured else TIMEOUT_WARNING_IGNORED
+    logger.warning(
+        template, fn_name, bound, channel_label, call_id, fn_name,
+        extra={
+            "tool": fn_name,
+            "channel": channel_label,
+            "tool_call_id": call_id,
+            "timeout": bound,
+        },
+        exc_info=exc,
+    )
+    return TIMEOUT_RESULT_TEMPLATE.format(name=fn_name, bound=bound)
+
+
 async def dispatch_tool_call(
     call: dict,
     tools: dict[str, Callable],
@@ -264,6 +402,7 @@ async def dispatch_tool_call(
     task_queue: "TaskQueue | None" = None,
     max_result_chars: int = MAX_TOOL_RESULT_CHARS,
     pm=None,
+    call_timeouts: ToolTimeouts = DEFAULT_TOOL_TIMEOUTS,
 ) -> ToolCallResult:
     """Parse, dispatch, and wrap a single tool call from an LLM response.
 
@@ -282,6 +421,10 @@ async def dispatch_tool_call(
         task_queue: TaskQueue for ToolContext injection. None when unavailable.
         max_result_chars: Maximum length of tool result strings before truncation.
         pm: pluggy PluginManager for firing transform_tool_result. None to skip.
+        call_timeouts: Bound on the call (default 600 s, per-tool overrides).
+            A timeout cancels the tool and returns an error result; the
+            outer bound is skipped when the tool declares a not-longer
+            ``own_timeout``.
 
     Returns:
         ToolCallResult with the content, error flag, and timing information.
@@ -345,35 +488,55 @@ async def dispatch_tool_call(
     latency_ms: float | None = None
     error = False
     tool_start = time.monotonic()
+    channel_label = channel.id if channel is not None else "no channel"
+    tool_fn = tools[fn_name]
+    # Outer bound (None => no deadline). The scope wraps step 4 only, so a
+    # slow transform_tool_result hook is never reported as a tool timeout.
+    bound = _outer_bound(fn_name, tool_fn, call_timeouts)
+    scope = asyncio.timeout(bound)
     try:
-        if backend is not None:
-            content = await backend.run(fn_name, args, channel)
+        async with scope:
+            if backend is not None:
+                content = await backend.run(fn_name, args, channel)
+            else:
+                content = await execute_tool_call(
+                    tool_fn,
+                    args,
+                    channel=channel,
+                    tool_call_id=call_id,
+                    task_queue=task_queue,
+                    max_result_chars=max_result_chars,
+                )
+        latency_ms = round((time.monotonic() - tool_start) * 1000, 1)
+        if scope.expired():
+            # The tool swallowed the cancel and returned: discard the late result.
+            content = _timed_out(fn_name, bound, channel_label, call_id, honoured=False)
+            error = True
         else:
-            tool_fn = tools[fn_name]
-            content = await execute_tool_call(
-                tool_fn,
-                args,
-                channel=channel,
-                tool_call_id=call_id,
-                task_queue=task_queue,
-                max_result_chars=max_result_chars,
+            logger.info(
+                "tool call result",
+                extra={"tool": fn_name, "result_length": len(str(content)), "latency_ms": latency_ms},
             )
+            logger.debug(
+                "tool call result content",
+                extra={
+                    "tool": fn_name,
+                    "content": _truncate(str(content)),
+                },
+            )
+    except Exception as exc:
         latency_ms = round((time.monotonic() - tool_start) * 1000, 1)
-        logger.info(
-            "tool call result",
-            extra={"tool": fn_name, "result_length": len(str(content)), "latency_ms": latency_ms},
-        )
-        logger.debug(
-            "tool call result content",
-            extra={
-                "tool": fn_name,
-                "content": _truncate(str(content)),
-            },
-        )
-    except Exception:
-        latency_ms = round((time.monotonic() - tool_start) * 1000, 1)
-        logger.warning("tool %s raised exception", fn_name, exc_info=True)
-        content = f"Error: tool '{fn_name}' failed"
+        if scope.expired():
+            # Our deadline fired: a TimeoutError means the cancel was honoured,
+            # anything else means the tool raised while handling it.
+            content = _timed_out(
+                fn_name, bound, channel_label, call_id,
+                honoured=isinstance(exc, TimeoutError), exc=exc,
+            )
+        else:
+            # Includes a tool's OWN TimeoutError raised before the deadline.
+            logger.warning("tool %s raised exception", fn_name, exc_info=True)
+            content = f"Error: tool '{fn_name}' failed"
         error = True
 
     # Step 5: Fire transform_tool_result hook (only when the tool was invoked)

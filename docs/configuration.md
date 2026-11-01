@@ -431,6 +431,8 @@ Configured by `CoreToolsPlugin`. `tools.max_result_chars` is read by `ToolCollec
 | `tools.web_max_response_bytes` | integer | `50000` | Maximum bytes of HTTP response body returned by `web_fetch`. Content beyond this limit is truncated with `[truncated]`. This limit is independent of `tools.max_result_chars`. |
 | `tools.max_file_read_bytes` | integer | `1048576` | Maximum file size in bytes that `read_file` will return. Files larger than this limit return an error string. Default is 1 MB (1,048,576 bytes). |
 | `tools.web_search_max_results` | integer | `8` | Maximum number of DuckDuckGo results returned by the `web_search` tool. |
+| `tools.call_timeout` | number or null | `600` | Seconds a single tool call may run before dispatch cancels it and returns `Error: tool '<name>' timed out after <n>s` to the model, so the turn continues and the task worker is freed. `0` or `null` disables the bound. Read by `ToolCollectionPlugin`; covers every dispatch path (Agent, subagent loop, ACP backend). Skipped for a tool whose own timeout is not longer: `shell` (`tools.shell_timeout`), `web_fetch` (`tools.web_fetch_timeout`) and MCP tools (`timeout_seconds`) report their own timeout error instead. A negative, non-numeric or non-finite value is rejected at startup. |
+| `tools.timeouts` | mapping of tool name to number or null | `{}` | Per-tool override of `tools.call_timeout`; `0` or `null` unbounds that tool only. Example: `timeouts: {subagent: 3600, task_pipeline: 3600}`. `subagent` returns a task id at once, so in practice only `task_pipeline` (120 s per step) needs a longer bound; neither is a default. An entry naming no registered tool logs one `WARNING` and is kept (an MCP tool registers when its server connects). A bad entry is rejected at startup. |
 | `tools.disabled` | list of strings | `[]` | Tool names dropped after collection, from any plugin (built-in or MCP), in `ToolCollectionPlugin.rebuild_registry`. This is the single chokepoint every registered tool passes through, so a disabled tool is absent from every channel's schemas and from subagents. `shell` and `task_pipeline` disable together: `task_pipeline` shells out on its own, so naming either removes both (PRD §3.5.3). A value that is not a list of names (a bare string, say) is rejected at startup. Not hot-reloaded. To narrow one channel instead, use `channels.<id>.tools.disabled`. See [threat-model.md](threat-model.md). |
 
 ---
@@ -699,7 +701,7 @@ mcp:
       env:                     # optional environment variables (stdio only)
         NODE_ENV: production
       tool_prefix: "fs"        # optional; defaults to server name
-      timeout_seconds: 30      # optional; per tool call; default 30
+      timeout_seconds: 30      # optional; per tool call; default 30 (above tools.call_timeout, the call is cut at call_timeout)
       connect_timeout_seconds: 30  # optional; connect + initialize + list_tools; default 30
 
     # streamable HTTP transport example, with a bearer token from the environment
@@ -714,7 +716,7 @@ mcp:
       transport: sse
       url: http://localhost:9000/sse   # required for sse transport
       tool_prefix: "remote"            # optional; defaults to server name
-      timeout_seconds: 30              # optional; per tool call; default 30
+      timeout_seconds: 30              # optional; per tool call; default 30 (above tools.call_timeout, the call is cut at call_timeout)
 ```
 
 `connect_timeout_seconds` bounds each server's startup handshake (transport
@@ -781,19 +783,20 @@ No restart is required for the changes listed below. Changes that require restar
 | `llm.background` | Not updated on reload. |
 | `memory.*` (including `memory.consolidation_prompt` and `memory.consolidation_fork_prompt`) | `MemoryPlugin` reads its section at init only. That includes `memory.idle_consolidate_after` and `memory.retention.*`: the idle watch and retention timer are set when the plugin starts. |
 | `heartbeat.after` | `HeartbeatPlugin` reads it at init and registers its idle watch at start. Putting the heartbeat to sleep or waking it takes a restart. |
-| `tools.max_result_chars`, `tools.shell_timeout`, `tools.web_fetch_timeout` | Deferred; not currently implemented in hot-reload path. |
+| `tools.max_result_chars`, `tools.shell_timeout`, `tools.web_fetch_timeout`, `tools.call_timeout`, `tools.timeouts` | Deferred; not currently implemented in hot-reload path. A bad `tools.call_timeout` or `tools.timeouts` value still refuses the whole reload (see Error handling). |
 
 ### Error handling
 
 At startup (not reload), a missing or malformed config file, or a rejected
 value in the `agent` or `channels` sections (e.g. a `channels.<id>.tools`
 block that is not `{disabled: [names]}`, or an unknown key such as
-`channels.<id>.max_turn`), prints
+`channels.<id>.max_turn`), or in `tools.call_timeout` / `tools.timeouts`, prints
 `Config error: <detail> — check <path>` to stderr and exits non-zero. The
 detail names the key, the rejected value and what is accepted.
 
 - **Invalid YAML**: logged at `ERROR`; reload is skipped and the running config is unchanged.
 - **Rejected value in `agent:`, `daemon:` or `channels:`** (e.g. a malformed `channels.<id>.tools`): logged at `ERROR` naming the file. For `channels:` the message also names the key and the value and says "reload skipped"; for `agent:` and `daemon:` the key is in the logged traceback. The reload is skipped whole: no section is applied and no plugin receives `on_config_reload`, so a typo in one `channels:` entry cannot change `agent:` values.
+- **Rejected `tools.call_timeout` or `tools.timeouts`**: logged at `ERROR` naming the key and the value, with "reload skipped"; the running config is unchanged.
 - **Missing `llm.main` after merge**: logged at `ERROR`; reload is skipped.
 - **Config file deleted**: logged at `WARNING`; polling continues. The file may reappear.
 - **Per-plugin failure in `on_config_reload`**: logged at `ERROR`; other plugins still receive the reload.

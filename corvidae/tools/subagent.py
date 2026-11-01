@@ -18,7 +18,13 @@ from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 from corvidae.llm import LLMClient
 from corvidae.task import Task
 from corvidae.thinking import strip_thinking
-from corvidae.tool import MAX_TOOL_RESULT_CHARS, ToolContext, dispatch_tool_call
+from corvidae.tool import (
+    DEFAULT_TOOL_TIMEOUTS,
+    MAX_TOOL_RESULT_CHARS,
+    ToolContext,
+    ToolTimeouts,
+    dispatch_tool_call,
+)
 
 if TYPE_CHECKING:
     from corvidae.channel import Channel
@@ -47,6 +53,7 @@ async def run_agent_loop(
     task_queue: "TaskQueue | None" = None,
     pm=None,
     max_result_chars: int = MAX_TOOL_RESULT_CHARS,
+    call_timeouts: ToolTimeouts = DEFAULT_TOOL_TIMEOUTS,
 ) -> str:
     """Run the agent loop to completion. Mutates messages in place.
 
@@ -64,6 +71,7 @@ async def run_agent_loop(
         max_turns: Maximum iterations before giving up
         max_result_chars: Maximum length of tool result strings before truncation.
             Defaults to MAX_TOOL_RESULT_CHARS.
+        call_timeouts: Per-call tool time bounds (tools.call_timeout).
 
     Returns:
         Final text content from the last LLM response, or a placeholder
@@ -87,6 +95,7 @@ async def run_agent_loop(
                 task_queue=task_queue,
                 max_result_chars=max_result_chars,
                 pm=pm,
+                call_timeouts=call_timeouts,
             )
             messages.append({
                 "role": "tool",
@@ -180,6 +189,7 @@ class SubagentPlugin(CorvidaePlugin):
         # without shell would get it back one hop away.
         registry = tools_plugin.get_registry().exclude("subagent", *disabled_on(channel))
         max_result_chars = tools_plugin.max_result_chars
+        call_timeouts = tools_plugin.call_timeouts
         tools_dict = registry.as_dict()
         tool_schemas = registry.schemas()
 
@@ -204,6 +214,7 @@ class SubagentPlugin(CorvidaePlugin):
                     channel=channel,
                     task_queue=task_queue,
                     max_result_chars=max_result_chars,
+                    call_timeouts=call_timeouts,
                 )
             finally:
                 reset_attribution(attribution_token)

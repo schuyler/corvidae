@@ -257,7 +257,8 @@ under `role: assistant`. The `user`-role experiment is still worth running.
 
 `shell` runs as the daemon user with no allowlist, no fixed cwd, and no
 confirmation (`tools/shell.py`). `task_pipeline` is `shell` with a
-120-second timeout, and it calls the shell implementation directly, so
+120-second timeout per step (and the default 600 s per-call bound,
+`tools.call_timeout`), and it calls the shell implementation directly, so
 `tools.disabled` couples the two: naming either removes both, globally
 and per channel (#149). `write_file` writes anywhere
 the daemon user can, creating parent directories, including over

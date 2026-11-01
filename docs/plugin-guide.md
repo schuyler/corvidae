@@ -479,6 +479,28 @@ class WeatherPlugin:
 
 `Tool.from_function()` infers the tool name from `fn.__name__` and generates a JSON schema from the type annotations. Parameters prefixed with `_` are excluded from the schema — they are injected at call time, not supplied by the LLM.
 
+### Timeouts and cancellation
+
+Every tool call is bounded by `tools.call_timeout` (default 600 s, per-tool
+`tools.timeouts`). A tool that has its own timeout can declare it so dispatch
+skips the outer bound when the tool's own is not longer:
+
+```python
+get_weather.own_timeout = lambda: self._timeout   # a number, or a zero-arg callable
+```
+
+Point it at the value the tool really uses; it is read at every call. Set it
+on the registered function, partial or instance itself (a class-level property
+is not read). A callable that raises, or a non-number, is ignored with one
+`WARNING` and the outer bound applies.
+
+On timeout the tool is cancelled. Clean up, then let `CancelledError`
+propagate: a tool that swallows it has its result discarded and a `WARNING`
+logged. `shell` (`corvidae/tools/shell.py`) is the model for subprocess
+cleanup: on `CancelledError` it kills and reaps its process, then re-raises.
+Work run through `asyncio.to_thread` and blocking code cannot be cancelled
+(a cancelled `write_file` may still write the file).
+
 ## Context injection (ToolContext)
 
 Tools that need channel context, the task queue, or the tool call ID declare a `_ctx: ToolContext` parameter. Corvidae injects it automatically; the LLM never sees it.
@@ -1069,12 +1091,14 @@ Registered by `CoreToolsPlugin` (entry point name: `core_tools`).
 | `write_file` | `path: str`, `content: str` | Writes `content` to `path`, creating parent directories as needed. Returns a confirmation with the byte count, or an error string on failure. |
 | `web_fetch` | `url: str` | Fetches a URL via HTTP GET and returns the response body as text. Times out after `tools.web_fetch_timeout` seconds (default 15). Truncates responses at `tools.web_max_response_bytes` characters (default 50,000, independent of `MAX_TOOL_RESULT_CHARS`). A network failure names the URL and the failure class. |
 | `web_search` | `query: str`, `max_results: int` (optional) | Searches the web via DuckDuckGo and returns formatted results with titles, URLs, and snippets. Defaults to 8 results per page. |
-| `task_pipeline` | `definition: str` | Executes a task graph defined in YAML or JSON. The definition must contain a `tasks` key with a list of objects, each having `name`, `command`, and optionally `depends_on`. Tasks run in topological order; failed tasks block their dependents. Returns a status summary; a task failure names the task and the command. |
+| `task_pipeline` | `definition: str` | Executes a task graph defined in YAML or JSON. The definition must contain a `tasks` key with a list of objects, each having `name`, `command`, and optionally `depends_on`. Tasks run in topological order; failed tasks block their dependents. Returns a status summary; a task failure names the task and the command. The whole pipeline is cut at `tools.call_timeout` (600 s by default); set `tools.timeouts.task_pipeline` for longer runs. |
 
 **CoreToolsPlugin config:**
 
 ```yaml
 tools:
+  call_timeout: 600                  # seconds bound on every tool call (0 or null disables)
+  timeouts: {task_pipeline: 3600}    # per-tool override of call_timeout
   shell_timeout: 30                  # seconds before shell command is killed
   web_fetch_timeout: 15              # seconds before web request is aborted
   web_max_response_bytes: 50000      # response body truncation limit
@@ -1146,7 +1170,7 @@ mcp:
       env:                     # optional: extra env vars for the subprocess
         NODE_ENV: production
       tool_prefix: "fs"        # optional: prefix for tool names; defaults to server name
-      timeout_seconds: 30      # optional: per-call timeout; default 30
+      timeout_seconds: 30      # optional: per-call timeout; default 30 (a value above tools.call_timeout is cut at call_timeout)
       connect_timeout_seconds: 30  # optional: startup handshake bound; default 30
 
     remote_api:

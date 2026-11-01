@@ -498,6 +498,13 @@ class ToolContext:
 
 Tools that don't declare `_ctx` work without modification.
 
+**ToolTimeouts** — frozen value type (`default`, `per_tool`, `for_tool(name)`)
+holding `tools.call_timeout` (default 600 s) and `tools.timeouts`; `None`
+means no bound. `dispatch_tool_call(..., call_timeouts=...)` bounds each call
+with it (see [Tool call dispatch](#tool-call-dispatch)). A tool may set an
+`own_timeout` attribute (number or zero-argument callable, read per dispatch;
+`resolve_own_timeout`) and the outer bound is skipped when it is not longer.
+
 ### Per-channel tool sets (`tool_policy.py`)
 
 `channels.<id>.tools.disabled` (#149) narrows one channel on top of the
@@ -927,6 +934,22 @@ closure calls `dispatch_tool_call()` from `tool.py`, which handles JSON
 parsing, unknown-tool detection, invocation, error wrapping, logging, and
 the `transform_tool_result` hook. The closure returns `result.content`; the
 TaskPlugin delivers it via `on_notify`.
+
+**Call bound.** `dispatch_tool_call` wraps the invocation (`backend.run` or
+`execute_tool_call`, not the hook) in `asyncio.timeout`, using a
+`ToolTimeouts` (`tools.call_timeout`, default 600 s, plus `tools.timeouts`
+per-tool overrides; `ToolCollectionPlugin.call_timeouts`, copied to the Agent
+and passed to the subagent loop). The bound is skipped when the tool declares
+an `own_timeout` (a number or zero-argument callable on the registered
+callable, read at each dispatch) that is not longer: `shell`, `web_fetch` and
+MCP tools declare theirs. On expiry the tool is cancelled and the result is
+`Error: tool '<name>' timed out after <n>s` (flagged as an error), so the
+turn continues and the task worker is freed; `transform_tool_result` still
+fires. One `WARNING` names the tool, channel, call id and bound. A tool that
+swallows the cancellation has its late result discarded and a second kind of
+`WARNING` says so. A tool's own `TimeoutError` before the deadline is an
+ordinary failure. An unreadable `own_timeout` falls back to the outer bound
+with one `WARNING` per tool per process.
 
 `TaskPlugin` is declared in `Agent.depends_on`. Without a task queue,
 tool dispatch logs an error naming the channel and the requested tools (with
@@ -1691,7 +1714,14 @@ setup.
   per-plugin opt-outs. The list is validated in `on_init` (a non-list
   raises naming `tools.disabled` and the value) and widened to coupled
   tools, so `shell` and `task_pipeline` go together. Per-channel narrowing
-  happens downstream in `Agent`; see "Per-channel tool sets".
+  happens downstream in `Agent`; see "Per-channel tool sets". After the
+  first registry build it logs one `WARNING` for each `tools.timeouts` entry
+  naming no registered tool (the entry is kept: an MCP tool registers when its
+  server connects).
+- `on_init` — also parses `tools.call_timeout` and `tools.timeouts` with
+  `parse_tool_timeouts` into `call_timeouts`. `Runtime.start` and the config
+  watcher validate the same keys first, so a bad value is a `Config error` at
+  startup and a refused reload.
 
 ### Tool access
 
@@ -1700,7 +1730,8 @@ agent loop. `ToolCollectionPlugin.get_registry()` returns the full `ToolRegistry
 for inspection or filtering (e.g., `exclude("subagent")`).
 
 `ToolCollectionPlugin.max_result_chars` is a public attribute read by `Agent` and
-`SubagentPlugin`.
+`SubagentPlugin`. `ToolCollectionPlugin.call_timeouts` (a `ToolTimeouts`) is
+read by both too and passed to `dispatch_tool_call`.
 
 ### Configuration
 
@@ -1708,6 +1739,8 @@ for inspection or filtering (e.g., `exclude("subagent")`).
 tools:
   max_result_chars: 100000   # truncation limit for tool result strings (default 100_000)
   disabled: [write_file]     # dropped for every channel; shell <-> task_pipeline coupled
+  call_timeout: 600          # seconds bound on every tool call; 0 or null disables
+  timeouts: {task_pipeline: 3600}   # per-tool override of call_timeout
 
 # Legacy (deprecated):
 agent:
@@ -1991,7 +2024,7 @@ mcp:
       url: <endpoint>         # sse and streamable_http
       headers: {...}          # sse and streamable_http, optional; ${VAR} from the environment
       tool_prefix: <prefix>   # optional; default: server name
-      timeout_seconds: 30     # optional; per tool call; default: 30
+      timeout_seconds: 30     # optional; per tool call; default: 30; above tools.call_timeout the call is cut at call_timeout
       connect_timeout_seconds: 30  # optional; handshake bound; default: 30
 ```
 
@@ -2104,7 +2137,7 @@ Registered via `CoreToolsPlugin` in `tools/__init__.py`:
 
 | Tool | File | Purpose |
 |------|------|---------|
-| `shell(command)` | `tools/shell.py` | Execute shell command, 30s timeout (configurable) |
+| `shell(command)` | `tools/shell.py` | Execute shell command, 30s timeout (configurable). On cancellation (the call bound, shutdown) it kills and reaps its `/bin/sh` process, then re-raises; `task_pipeline` inherits this. Grandchildren of the shell are not killed. |
 | `read_file(path)` | `tools/files.py` | Read file (1MB limit, configurable) |
 | `write_file(path, content)` | `tools/files.py` | Write file, creates parent dirs |
 | `web_fetch(url)` | `tools/web.py` | Fetch URL, 15s timeout, 50KB truncation (configurable) |
@@ -2766,7 +2799,9 @@ logs go to stderr or a log file.
 client `cwd` on `channel.runtime_overrides["cwd"]` (transport metadata,
 not LLM config). Tool calls on ACP channels go through a swappable
 `ToolBackend` (`LocalToolBackend` by default; see
-`corvidae/tools/backends.py`).
+`corvidae/tools/backends.py`). The call bound sits above the backend: when it
+expires dispatch gives up and cancels `backend.run`, but a client-side backend
+may keep running the tool on the client.
 
 **Session durability (Phase 2).** `initialize` advertises
 `loadSession: true` plus `sessionCapabilities` for `list`, `resume`, and
@@ -2830,6 +2865,8 @@ agent:
 
 tools:
   max_result_chars: 100000      # truncation limit for tool result strings (default 100_000)
+  # call_timeout: 600           # seconds bound on every tool call; 0 or null disables
+  # timeouts: {task_pipeline: 3600}  # per-tool override of call_timeout
   shell_timeout: 30             # shell tool timeout in seconds (default 30)
   web_fetch_timeout: 15         # web_fetch timeout in seconds (default 15)
   web_max_response_bytes: 50000 # web_fetch response truncation (default 50_000)

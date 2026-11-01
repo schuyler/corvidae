@@ -1719,3 +1719,36 @@ class TestKernelClockRuntime:
         assert any(line.startswith("Config error:") for line in stderr.splitlines())
         assert f"daemon.{key}" in stderr
         assert str(config_path) in stderr
+
+
+async def test_start_bad_call_timeout_is_config_error(tmp_path, capsys):
+    """Issue #94 R6: a negative tools.call_timeout stops startup with a Config
+    error naming the key, the rejected value and the file."""
+    from corvidae.runtime import Runtime
+
+    config_path = tmp_path / "agent.yaml"
+    config_path.write_text(
+        "llm:\n  main: {base_url: 'http://127.0.0.1:1', model: m}\n"
+        "tools:\n  call_timeout: -5\n"
+    )
+    rt = Runtime(config_path=str(config_path))
+    started = False
+    try:
+        with pytest.raises(SystemExit) as excinfo:
+            await rt.start()
+            started = True
+    finally:
+        # If start() wrongly succeeded, don't leak the running Runtime.
+        if started:
+            await rt.stop()
+
+    assert excinfo.value.code != 0
+    stderr = capsys.readouterr().err
+    assert "Config error:" in stderr
+    assert "tools.call_timeout" in stderr
+    # The rejected value as the message renders it (a bare "-5" could match
+    # the temp path), and the accepted values.
+    assert "got -5" in stderr
+    assert "number of seconds >= 0" in stderr
+    assert "0 or null disables" in stderr
+    assert str(config_path) in stderr

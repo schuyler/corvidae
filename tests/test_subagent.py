@@ -1391,3 +1391,72 @@ class TestSubagentAttribution:
         assert observed.get("channel_id") == channel.id
         # Attribution restored after the loop finishes.
         assert get_attribution().get("stage") != "subagent"
+
+
+# ---------------------------------------------------------------------------
+# Issue #94: tool calls inside the subagent loop are bounded
+# ---------------------------------------------------------------------------
+
+
+async def test_subagent_loop_bounds_tool_calls():
+    """R1: a hanging tool in the subagent loop times out and the loop continues."""
+    import asyncio
+    import time
+
+    from corvidae.tool import ToolTimeouts
+
+    async def hang(**kw):
+        # Far longer than the 15 s pytest timeout: unbounded means failure.
+        await asyncio.sleep(30)
+
+    client = MagicMock()
+    client.chat = AsyncMock(
+        side_effect=[
+            _make_tool_call_response([_make_tool_call("c1", "hang", {})]),
+            _make_text_response("done"),
+        ]
+    )
+    messages = [{"role": "user", "content": "go"}]
+
+    start = time.monotonic()
+    result = await asyncio.wait_for(
+        run_agent_loop(
+            client, messages, {"hang": hang}, [],
+            call_timeouts=ToolTimeouts(0.1),
+        ),
+        5,
+    )
+    elapsed = time.monotonic() - start
+
+    assert result == "done"
+    # messages: user, assistant (tool call), tool result, assistant (text)
+    assert messages[2]["content"] == "Error: tool 'hang' timed out after 0.1s"
+    assert elapsed < 1.0
+
+
+async def test_launch_passes_call_timeouts():
+    """R1: _launch hands the ToolCollectionPlugin's call_timeouts to the loop."""
+    from corvidae.hooks import get_dependency
+    from corvidae.tool import ToolTimeouts
+    from corvidae.tool_collection import ToolCollectionPlugin
+
+    plugin = await _make_started_plugin()
+    tools_plugin = get_dependency(plugin.pm, "tools", ToolCollectionPlugin)
+    tools_plugin.call_timeouts = ToolTimeouts(0.1)  # a fresh object
+
+    task_queue = MagicMock(spec=TaskQueue)
+    task_queue.enqueue = AsyncMock()
+    ctx = ToolContext(channel=_make_channel(), tool_call_id="call-ct", task_queue=task_queue)
+
+    captured_kwargs = {}
+
+    async def capture_run_agent_loop(client, messages, tools, tool_schemas, **kwargs):
+        captured_kwargs.update(kwargs)
+        return "done"
+
+    with patch("corvidae.tools.subagent.run_agent_loop", side_effect=capture_run_agent_loop), \
+         patch("corvidae.tools.subagent.strip_thinking", side_effect=lambda x: x):
+        await plugin._launch("instructions", "desc", ctx)
+        await task_queue.enqueue.call_args[0][0].work()
+
+    assert captured_kwargs.get("call_timeouts") is tools_plugin.call_timeouts

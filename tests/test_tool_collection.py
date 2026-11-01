@@ -299,3 +299,157 @@ class TestRegistryGeneration:
         fns[0] = _make_fn("alpha")
         await plugin.rebuild_registry()
         assert plugin.generation == before
+
+
+# ---------------------------------------------------------------------------
+# Issue #94: tools.call_timeout / tools.timeouts parsing (R6) and wiring
+# ---------------------------------------------------------------------------
+
+
+async def test_agent_start_copies_call_timeouts():
+    """R2: Agent._start_plugin copies call_timeouts from the tools plugin."""
+    from unittest.mock import NonCallableMagicMock
+
+    from helpers import build_plugin_and_channel
+    from corvidae.llm_plugin import LLMPlugin
+    from corvidae.tool import ToolTimeouts
+    from corvidae.tool_collection import ToolCollectionPlugin
+
+    agent, _channel, db = await build_plugin_and_channel()
+    llm = NonCallableMagicMock(spec=LLMPlugin)
+    llm.main_client = MagicMock()
+    tools = NonCallableMagicMock(spec=ToolCollectionPlugin)
+    tools.get_tools.return_value = ({}, [])
+    tools.max_result_chars = 100_000
+    tools.generation = 0
+    tools.call_timeouts = ToolTimeouts(0.1)
+    agent.pm.register(llm, name="llm")
+    agent.pm.register(tools, name="tools")
+    try:
+        await agent._start_plugin({})
+        assert agent._tool_call_timeouts is tools.call_timeouts
+    finally:
+        await agent.pm.get_plugin("task").on_stop()
+        await db.close()
+
+
+def test_parse_accepts_configured_values():
+    """R1/R3: a configured positive call_timeout and per-tool overrides are
+    used as given, ints and floats alike; an absent tools block gives 600."""
+    from corvidae.tool_collection import parse_tool_timeouts
+
+    assert parse_tool_timeouts({"call_timeout": 30}).default == 30
+    assert parse_tool_timeouts({"call_timeout": 0.5}).default == 0.5
+    assert parse_tool_timeouts(
+        {"timeouts": {"slow_tool": 0.2}}
+    ).per_tool == {"slow_tool": 0.2}
+    assert parse_tool_timeouts(None).default == 600.0
+
+
+@pytest.mark.parametrize("value", ["abc", -1, True, float("nan"), float("inf"), [1]])
+def test_parse_rejects_bad_call_timeout(value):
+    """A bad call_timeout names the key, the value and the accepted form."""
+    from corvidae.tool_collection import parse_tool_timeouts
+
+    with pytest.raises(ValueError) as excinfo:
+        parse_tool_timeouts({"call_timeout": value})
+    msg = str(excinfo.value)
+    assert "tools.call_timeout" in msg
+    assert repr(value) in msg
+    assert "number of seconds >= 0" in msg
+    assert "0 or null disables" in msg
+
+
+def test_parse_rejects_non_mapping_timeouts():
+    """A non-mapping tools.timeouts is rejected with an example."""
+    from corvidae.tool_collection import parse_tool_timeouts
+
+    with pytest.raises(ValueError) as excinfo:
+        parse_tool_timeouts({"timeouts": [1]})
+    msg = str(excinfo.value)
+    assert "tools.timeouts must be a mapping" in msg
+    assert "[1]" in msg
+    # Accepted values: a mapping of tool names to seconds.
+    assert "tool names to seconds" in msg
+
+
+@pytest.mark.parametrize("value", [-2, "x"])
+def test_parse_rejects_bad_entry(value):
+    """A bad per-tool entry names tools.timeouts.<name> and the value."""
+    from corvidae.tool_collection import parse_tool_timeouts
+
+    with pytest.raises(ValueError) as excinfo:
+        parse_tool_timeouts({"timeouts": {"slow": value}})
+    msg = str(excinfo.value)
+    assert "tools.timeouts.slow" in msg
+    assert repr(value) in msg
+    assert "number of seconds >= 0" in msg
+    assert "0 or null disables" in msg
+
+
+def test_parse_rejects_non_string_key():
+    """A non-string key is rejected; the message says keys are tool names (strings)."""
+    from corvidae.tool_collection import parse_tool_timeouts
+
+    with pytest.raises(ValueError) as excinfo:
+        parse_tool_timeouts({"timeouts": {1: 5}})
+    msg = str(excinfo.value)
+    assert "tools.timeouts" in msg
+    assert "non-string tool name" in msg
+    assert "1" in msg and "int" in msg
+    # Remedy: keys must be tool names, which are strings.
+    assert "tool names" in msg
+    assert "strings" in msg
+
+
+@pytest.mark.asyncio
+async def test_unknown_timeouts_entry_warns_and_is_kept(caplog):
+    """An entry naming no registered tool warns once and is kept."""
+    import logging
+
+    from corvidae.tool import Tool
+    from corvidae.tool_collection import ToolCollectionPlugin
+
+    async def echo(x: str) -> str:
+        """Echo."""
+        return x
+
+    pm = MagicMock()
+    pm.hook = MagicMock()
+    pm.hook.register_tools = MagicMock(
+        side_effect=lambda tool_registry: tool_registry.append(Tool.from_function(echo))
+    )
+
+    plugin = ToolCollectionPlugin(pm)
+    # One unknown name and one registered name: only the unknown one warns,
+    # and only once the registry is built (not at on_init).
+    config = {"tools": {"timeouts": {"ghost": 5, "echo": 5}}}
+    with caplog.at_level(logging.WARNING, logger="corvidae.tool_collection"):
+        await plugin.on_init(pm=pm, config=config)
+        await plugin.on_start(config=config)
+
+    warns = [
+        r for r in caplog.records
+        if r.levelno == logging.WARNING
+        and "tools.timeouts.ghost" in r.getMessage()
+        and "keeping it" in r.getMessage()
+    ]
+    assert len(warns) == 1
+    assert not any(
+        "tools.timeouts.echo" in r.getMessage() for r in caplog.records
+    )
+    assert plugin.call_timeouts.per_tool["ghost"] == 5
+    assert plugin.call_timeouts.per_tool["echo"] == 5
+
+
+@pytest.mark.parametrize("value", [[1], "x", 5])
+def test_parse_rejects_non_mapping_tools(value):
+    """A non-mapping ``tools`` is rejected naming the key, value and accepted form."""
+    from corvidae.tool_collection import parse_tool_timeouts
+
+    with pytest.raises(ValueError) as excinfo:
+        parse_tool_timeouts(value)
+    msg = str(excinfo.value)
+    # Key, accepted form and rejected value, per the design's message.
+    assert "tools must be a mapping" in msg
+    assert repr(value) in msg

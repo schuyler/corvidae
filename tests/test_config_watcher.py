@@ -1242,3 +1242,50 @@ async def test_config_watcher_on_start_creates_watcher_task(tmp_path):
         await plugin._watcher_task
     except (asyncio.CancelledError, Exception):
         pass
+
+
+async def test_reload_with_bad_tools_timeouts_is_rejected(tmp_path, caplog):
+    """Issue #94 R6: a reload carrying a non-mapping tools.timeouts is skipped:
+    nothing dispatched, defaults untouched, ERROR naming the key."""
+    from corvidae.channel import ChannelRegistry
+    from corvidae.config_watcher import ConfigWatcherPlugin
+
+    config_file = tmp_path / "agent.yaml"
+    config_file.write_text(
+        "llm:\n  main:\n    base_url: http://localhost\n    model: m\n"
+        "tools:\n  timeouts: [a]\n"
+    )
+
+    registry = ChannelRegistry({"reasoning_history": "drop"})
+    pm = MagicMock()
+    pm.hook.on_config_reload.get_hookimpls.return_value = []
+    pm.get_plugin.return_value = registry
+    plugin = ConfigWatcherPlugin()
+    await plugin.on_init(
+        pm=pm,
+        config={
+            "_config_path": config_file,
+            "_cli_overrides": {},
+            "llm": {"main": {"base_url": "http://localhost", "model": "m"}},
+        },
+    )
+
+    dispatched = []
+
+    async def capture_dispatch(config: dict) -> None:
+        dispatched.append(config)
+
+    plugin._dispatch_config_reload = capture_dispatch
+
+    with caplog.at_level(logging.ERROR, logger="corvidae.config_watcher"):
+        await plugin._reload_config()
+
+    # Rejected before anything is applied or dispatched.
+    assert not dispatched
+    assert registry.agent_defaults == {"reasoning_history": "drop"}
+    assert any(r.levelno >= logging.ERROR for r in caplog.records)
+    # R6: the refusal names the key, the rejected value and what is accepted.
+    assert "tools.timeouts" in caplog.text
+    assert "['a']" in caplog.text
+    assert "tool names to seconds" in caplog.text
+    assert "reload skipped" in caplog.text
