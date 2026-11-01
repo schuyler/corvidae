@@ -252,27 +252,27 @@ one is a bug even if its tests pass.
     9).
 
 16. **Compute is finite, and its shape depends on the endpoint.** Every
-    model endpoint is a resource pool, and the operator declares what
-    bounds it. A local server has a fixed KV-cache budget that the
-    operator divides between parallel slots and context per slot: Lex
-    runs one slot to get the longest window, a deployment choice rather
-    than an architectural one. A commercial API fixes context per model,
-    bounds request and token rates over time windows, and charges per
-    token. Roles on one endpoint share its pool; a role on another
-    endpoint draws on another pool. Principles 2, 3, 7 and 11 and the
-    fork requirements (§3.8) follow from this one: reuse the prefix, keep
-    background work out of the main turn's way, let cheap work gate
-    expensive work, meter every call. Each is worth what its pool's
-    binding resource makes it worth: prefix reuse saves slot time on a
-    local server and money where cached input is discounted, and yielding
-    to the main turn matters where capacity is short and little where it
-    isn't. A rule with a reason besides cost keeps that reason on any
-    pool: background judgment forks because a rebuilt context loses the
-    support the agent had (§3.8.2), whatever the fork costs. None of
-    these rules is relaxed on a pool where it saves little; what varies
-    is how much it saves. The operator
-    caps how much of each pool the agent uses; within the caps, the agent
-    and its plugins decide how the pool is shared (§3.13). Whether the
+    model endpoint is a resource pool, and the operator declares what bounds
+    it. A local server has a fixed KV-cache budget that the operator divides
+    between parallel slots and context per slot: Lex runs one slot to get
+    the longest window, a deployment choice rather than an architectural
+    one. A commercial API fixes context per model, bounds request and token
+    rates over time windows, and charges per token. Roles on one endpoint
+    share its pool; a role on another endpoint draws on another pool.
+    Principles 2, 3, 7 and 11 and the fork requirements (§3.8) follow from
+    this one: reuse the prefix, keep background work out of the main turn's
+    way, let cheap work gate expensive work, meter every call. Each is worth
+    what its pool's binding resource makes it worth: prefix reuse saves slot
+    time on a local server and money where cached input is discounted, and
+    yielding to the main turn matters where capacity is short and little
+    where it isn't. A rule with a reason besides cost keeps that reason on
+    any pool: background judgment forks because a rebuilt context loses the
+    support the agent had (§3.8.2), whatever the fork costs. None of these
+    rules is relaxed on a pool where it saves little; what varies is how
+    much it saves. Enforcement has one dependency: principle 3's ordering
+    across channels needs the pool's concurrency declared (§3.13.1). The
+    operator caps how much of each pool the agent uses; within the caps, the
+    agent and its plugins decide how the pool is shared (§3.13). Whether the
     agent can move a cap is a lock (principle 15).
 
 ## 3. Requirements
@@ -1204,17 +1204,19 @@ its budget, coalescing, charging per channel or sender) are tracked in
    no declared concurrency, admission holds no call for concurrency, and the
    server's own queue orders the calls admitted together. An exchange's own
    background work still finishes before the channel's next main turn, kept
-   at dispatch (item 3); whether upkeep runs before a waiting main turn is
-   then the server's to decide (principle 3). Context per call is not
-   something admission waits on: keeping a window within it is compaction's
-   job (§3.3), and a call that can't fit fails as the server fails it.
-2. Every LLM call, chat or embedding, is admitted at `LLMClient`
-   (principle 11) before it is sent, whatever its path: a channel's
-   turn, a task-queue worker, a plugin's own task, a fork, a subagent.
-   Admission starts the call, holds it, or refuses it. A call that would
-   take a pool past its declared concurrency or rate is held until
-   capacity frees. Held calls start in an order policy decides; only a
-   hard cap refuses (item 6).
+   by the kernel at dispatch whatever policy is loaded (item 3); whether
+   upkeep runs before a waiting main turn is then the server's to decide
+   (principle 3). Context per call is not something admission waits on:
+   keeping a window within it is compaction's job (§3.3), and a call that
+   can't fit fails as the server fails it.
+2. Every LLM call, chat or embedding, is admitted at `LLMClient` (principle
+   11) before it is sent, whatever its path: a channel's turn, a task-queue
+   worker, a plugin's own task, a fork, a subagent. Admission starts the
+   call, holds it, or refuses it. A call that would take a pool past its
+   declared concurrency or rate is held until capacity frees; a call too
+   large ever to fit a declared rate window is not held, and is sent to fail
+   as the server fails it. Held calls start in an order policy decides; only
+   a hard cap refuses (item 6).
 3. Separately from admission, policy decides whether a channel takes its
    next queue item now or defers it. Deferring a channel's new work
    until a deadline is a pause, so one channel can be paused while
@@ -1227,15 +1229,14 @@ its budget, coalescing, charging per channel or sender) are tracked in
    each rate window and cap period. Reading it is cheap enough to do on
    every admission. Admission and dispatch never call a model, like the
    inbound gate (principle 3).
-5. Policy is pluggable. Holds and deferrals compose: any number of
-   plugins can hold a call or defer a channel, and a hold wins, except
-   that no plugin's hold or deferral delays work past its latency bound
-   (item 7).
-   Ordering
-   doesn't compose: one implementation orders held calls. The kernel
-   ships a default order that meets item 7, and a plugin can replace it.
-   With no policy plugin loaded, the kernel enforces only declared
-   capacity, any caps, and its default order (principle 1).
+5. Policy is pluggable. Holds and deferrals compose: any number of plugins
+   can hold a call or defer a channel, and a hold wins, except that no
+   plugin's hold or deferral delays work past its latency bound (item 7).
+   Ordering doesn't compose: one implementation orders held calls. The
+   kernel ships a default order that meets item 7, and a plugin can replace
+   it. With no policy plugin loaded, the kernel enforces only declared
+   capacity, any caps, an exchange's own background work ahead of its
+   channel's next main turn (item 1), and its default order (principle 1).
 6. Usage over a period (tokens or requests in a rate window, spend over
    a budget period) can carry a soft cap and a hard cap. Crossing a soft
    cap changes behaviour in a way the configuration docs state, logs a
@@ -1252,32 +1253,32 @@ its budget, coalescing, charging per channel or sender) are tracked in
    settings under principle 15: whether the agent can move one is a
    lock. A hard cap the agent can raise is a bound the agent, and any
    text that steers it, can lift (`docs/threat-model.md`).
-7. Whatever the policy, held work is ordered as principle 3 requires,
-   and so that:
-   - a continuation of an exchange already in flight (a tool result, a
-     turn waiting on its own compaction) is not held behind work that
-     starts a new exchange;
-   - work a waiting main turn must wait for under principle 3 (an
-     exchange's own background work still owed) runs at that turn's
-     priority;
-   - held work gains priority as it waits. Upkeep overtakes a main turn
-     that is waiting only for capacity once the upkeep is past due
-     (principle 3); a main turn that policy holds or defers (items 3
-     and 5) doesn't hold other work back. Agency with a latency bound
-     (§3.1.16, principle 13) runs no later than its bound, subject only
-     to declared capacity, hard caps, and the continuations of
-     exchanges already in flight (the first bullet; `max_turns` bounds
-     those), so nothing starves.
-8. Deferral acts at exchange boundaries: a deferred channel still takes
-   the continuations of an exchange in flight. A hold delays a call; it
-   doesn't drop it. Only a hard cap stops an exchange mid tool cycle,
-   and `max_turns` (§3.1.3) bounds a tool loop either way. Every hold,
-   deferral or pause, whoever set it (declared capacity, a plugin, the
-   agent, a soft cap), lapses by itself: when capacity frees, at a
-   deadline, when usage falls back under the cap, or when the period
-   rolls over. A pause never needs a turn to undo it, so the agent
-   cannot pause itself into a state no turn can leave, and the operator
-   can resume any channel without going through a channel's queue.
+7. Work no plugin holds is ordered in this precedence, whatever the
+   policy; within a level, policy orders it, and held work gains
+   priority as it waits:
+   1. an exchange's own background work that a waiting main turn must
+      wait for under principle 3, and upkeep past its latency bound
+      (past due, in principle 3's terms; principle 13);
+   2. continuations of an exchange already in flight (a tool result, a
+      turn waiting on its own compaction);
+   3. agency past its latency bound (§3.1.16, principle 13);
+   4. everything else, with a main turn that starts a new exchange
+      ahead of upkeep not yet due (principle 3).
+
+   A main turn that policy holds or defers (items 3 and 5) holds no
+   other work back. Upkeep and agency wait past their bounds only for
+   declared capacity, hard caps, and the levels above them, and
+   `max_turns` bounds the continuations at level 2.
+8. Deferral acts at exchange boundaries: a deferred channel still takes the
+   continuations of an exchange in flight. A hold delays a call; it doesn't
+   drop it. Only a hard cap stops an exchange mid tool cycle, and
+   `max_turns` (§3.1.3) bounds a tool loop either way. Every hold, deferral
+   or pause, whoever set it (declared capacity, a plugin, the agent, a soft
+   cap), lapses by itself: when capacity frees, when the work it waits for
+   finishes or skips, at a deadline, when usage falls back under the cap, or
+   when the period rolls over. A pause never needs a turn to undo it, so the
+   agent cannot pause itself into a state no turn can leave, and the
+   operator can resume any channel without going through a channel's queue.
 9. Deferral and holding never drop work. Work that won't happen (a
    refusal at a hard cap, a missed window under §3.8.2) is logged with
    what was lost (principle 5).

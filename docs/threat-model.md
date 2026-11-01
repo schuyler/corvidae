@@ -762,14 +762,15 @@ What each kind of unlock costs:
   the agent starts saving, and an unlocked hard cap lets it remove the bound
   the operator set on spend or rate. The caps still have to fit the context
   (PRD §3.8.4).
-- **Scheduling policy** (pausing or deferring a channel, the order of
-  held calls, PRD §3.13). An injection can pause the operator's channel,
-  move its own channel ahead of others, or push upkeep back. Every hold,
-  deferral and pause lapses by itself and the operator can resume any
-  channel (PRD §3.13.8), so the damage is delay, not a wedged agent;
-  past-due upkeep still runs ahead of a waiting main turn, and agency
-  by its latency bound, unless capacity or a hard cap stops it (PRD
-  §3.13.7).
+- **Scheduling policy** (pausing or deferring a channel, the order of held
+  calls, PRD §3.13). An injection can pause the operator's channel, move its
+  own channel ahead of others, or push upkeep back. Every hold, deferral and
+  pause lapses by itself and the operator can resume any channel (PRD
+  §3.13.8), so the damage is delay, not a wedged agent; on a pool with
+  declared concurrency, past-due upkeep still runs ahead of a waiting main
+  turn, and agency by its latency bound unless capacity, a hard cap, or an
+  in-flight exchange's continuations (bounded by `max_turns`) hold it (PRD
+  §3.13.1, §3.13.7).
 - **Skills.** The skills index sits in the stable prompt region, so a
   skill written at an injection's request is offered to every future
   conversation on every channel and survives restarts. The idle scan
