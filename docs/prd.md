@@ -157,18 +157,21 @@ one is a bug even if its tests pass.
    and sensitivity plugins); the operator configures where the boundary
    falls, and safety features are added as plugins over time, as with
    sandboxing. Fixed floors protect the operator's own control surface
-   rather than draw a trust boundary, and stay fixed, among them: web auth
-   cannot be turned off (§3.2 Web), `redact` is never a tool (§3.7 Memory
-   8), `set_settings` can't lift a lock or change the lock list, the
+   rather than draw a trust boundary, and stay fixed: web auth cannot be
+   turned off (§3.2 Web), `redact` is never a tool (§3.7 Memory 8),
+   `set_settings` can't lift a lock or change the lock list, the
    request-body keys the agent loop builds (`messages`, `tools`,
    `tool_choice`, `stream`) are never overridden, and transport metadata
-   is out of the agent's reach (§3.5.6). Apart from these floors, what the
-   agent may change about itself is not fixed: every other restriction on
-   it is a lock the operator can lift (principle 15). The model's
-   authority is unbounded and unsandboxed by decision;
-   `docs/threat-model.md` is the standing record of what that costs and is
-   updated whenever untrusted text can reach somewhere new or a tool can
-   do something new.
+   is out of the agent's reach (§3.5.6). The floors bind the framework's
+   own surfaces; an agent permitted to edit its own code or configuration
+   and restart (principle 15) can change anything, floors included, and
+   the threat model records that cost. Apart from these floors and the
+   append-only log (principle 4), what the agent may change about itself
+   is not fixed: every other restriction on it is a lock the operator can
+   lift (principle 15). The model's authority is unbounded and unsandboxed
+   by decision; `docs/threat-model.md` is the standing record of what that
+   costs and is updated whenever untrusted text can reach somewhere new or
+   a tool can do something new.
 
 10. **Channel ids are persistence keys and never derive from names.**
     `transport:scope` keys `sessions.db`, the JSONL logs, memory
@@ -236,21 +239,30 @@ one is a bug even if its tests pass.
       fitting thresholds from the outcome log in a closed loop
       (principle 7);
     - its tool set, within the tools already registered (§3.5.2);
-      adding tools or plugins at runtime is out of scope (principle 1).
+    - its own code, configuration, prompt files and plugin set, applied
+      by restarting itself (§3.11.13). There is no runtime code loading
+      (principle 1): a change to code or to the plugin set takes a
+      restart.
 
-    No deployment is required to allow any of it. Every restriction on
-    self-modification is a lock: a mechanism the framework supports and the
-    operator configures, never a prohibition in the architecture. Operator
-    config can lift any lock. The floors of principle 9 are the exceptions
-    and stay fixed, and the conversation log
-    stays append-only (principle 4). Each capability has a route that keeps
-    the agent loop consistent. A request-body override carries model
-    parameters, never the loop's own `messages`, `tools`, `tool_choice` or
-    `stream` (§3.5.6). A change to the head of the window (the system
-    prompt, the tool set) takes effect at the channel's next compaction
-    boundary or conversation start, not mid-window (§3.3.8; principle 2).
-    What each unlock costs is recorded in `docs/threat-model.md` (principle
-    9).
+    No deployment is required to allow any of it: the framework must let
+    the operator lock or disable anything the agent could change about
+    itself. A lock can freeze a value or bound it, to a range or a set of
+    allowed values. Every restriction on self-modification is a lock: a
+    mechanism the framework supports and the operator configures, never a
+    prohibition in the architecture. Operator config can lift any lock.
+    The floors of principle 9 are the exceptions and stay fixed (they bind
+    the framework's own surfaces; see principle 9 for a self-edit), and
+    the conversation log stays append-only (principle 4). Each capability
+    has a route that keeps the agent loop consistent. A request-body
+    override carries model parameters, never the loop's own `messages`,
+    `tools`, `tool_choice` or `stream` (§3.5.6). Cache reuse is optimized
+    for the general case: a change the agent makes that would alter what
+    is already rendered in the window (the system prompt, the tool set,
+    how earlier rows are framed or stripped) takes effect at the channel's
+    next compaction boundary or conversation start, not mid-window
+    (§3.3.8; principle 2). An agent that wants a change applied at once
+    makes it persistent and restarts. What each unlock costs is recorded
+    in `docs/threat-model.md` (principle 9).
 
 16. **Compute is finite, and its shape depends on the endpoint.** Every
     model endpoint is a resource pool, and the operator declares what bounds
@@ -550,9 +562,11 @@ Per transport:
    calls still unanswered.
 6. `reasoning_history: drop | exchange | keep`, resolved per channel and
    applied to the whole in-memory window before every call, so reloaded
-   history obeys it. `exchange` strips assistant messages before the last
-   `role: user` message, matching the Qwen template boundary; the DB
-   always keeps reasoning. Any other value, or the retired key
+   history obeys it. An agent override of it takes effect at the next
+   compaction boundary or conversation start (§3.5.6, principle 15).
+   `exchange` strips assistant messages before the last `role: user`
+   message, matching the Qwen template boundary; the DB always keeps
+   reasoning. Any other value, or the retired key
    `keep_thinking_in_history`, fails at startup and on reload.
 7. `agent.mid_conversation_system_role: system | user` sets the role under
    which every non-leading system message is sent (funnel CONTEXT,
@@ -564,9 +578,9 @@ Per transport:
    framed block as the last user turn.
 8. The system prompt is a string or a list of file paths concatenated with
    blank lines, resolved against the config directory once per
-   conversation, and again at a compaction boundary when an unlocked
-   runtime override changed it (principle 15). It is the head of the
-   window, so principle 2 governs it: nothing mutates it per turn.
+   conversation and on restart, and again at a compaction boundary when an
+   unlocked runtime override changed it (principle 15). It is the head of
+   the window, so principle 2 governs it: nothing mutates it per turn.
    Plugin-contributed sections (the skills index, the self-model) are
    re-resolved only at a compaction boundary or when a conversation
    starts, because compaction already rebuilds the KV cache for everything
@@ -665,16 +679,17 @@ Per transport:
    default, with the documented recommended locks for channels with
    untrusted participants. `agent.immutable_settings` and the other locks
    narrow what the agent may set, and operator config can lift any of
-   them, `system_prompt` included (principle 15). An unlocked
-   `system_prompt` change takes effect at the channel's next compaction
-   boundary or conversation start, as plugin sections do (§3.3.8;
-   principle 2). `set_settings` can't lift a lock or change the lock list
-   itself.
+   them, `system_prompt` included (principle 15). An override that changes
+   already-rendered content (`system_prompt`,
+   `mid_conversation_system_role`, `reasoning_history`) takes effect at
+   the channel's next compaction boundary or conversation start, as plugin
+   sections do (§3.3.8; principle 2). `set_settings` can't lift a lock or
+   change the lock list itself.
 7. `subagent` launches a background agent on the shared `background`
    client with the calling channel's tool set minus itself and a
-   persona-neutral prompt, which is one of the agent's prompts under
-   principle 15; it returns a task id at once and its result arrives as a
-   notification like any other tool.
+   persona-neutral prompt as shipped, which is one of the agent's prompts
+   under principle 15; it returns a task id at once and its result arrives
+   as a notification like any other tool.
 8. MCP servers connect at startup over any transport the client
    supports, fail-soft per server. A server that fails recovers without a
    restart or a triggering tool call, and its tools reach the running
@@ -710,10 +725,10 @@ Per transport:
 3. `resolve_llm_error` turns a failure into a reply that names the status,
    an actionable hint, and the endpoint, and defers to the generic message
    otherwise.
-4. Logprobs are requested when `agent.request_logprobs` is on (§3.11.4)
-   or when the agent sets `logprobs` (§3.5.6). Either way they are
-   surfaced on the turn result and to `on_agent_response`, and never faked
-   for providers that return none.
+4. Logprobs are requested when the agent's `logprobs` override (§3.5.6)
+   says so, or, absent one, when `agent.request_logprobs` is on (§3.11.4).
+   Either way they are surfaced on the turn result and to
+   `on_agent_response`, and never faked for providers that return none.
 5. No streaming until a core change is planned for it; the web transport
    states the reason.
 
@@ -1031,13 +1046,13 @@ design: `docs/design.md`, Forks. The requirements are outcomes:
    intact, and keeps its share of the pool small (principles 2, 3 and
    16).
 4. Each background stage's reasoning and reply are capped per stage, and
-   its fork instructions are static config. Operator config decides
-   whether `set_settings` can lift the caps or rewrite the instructions
-   (principle 15); the threat model records the cost (principle 9). The
-   window at the compaction threshold, plus a stage's instruction and both
-   caps, fits the context whichever layer set them, so a stage just short
-   of compaction still runs. Each call is attributed in `usage_log` by
-   stage and `mode = fork | standalone` (principle 11).
+   its fork instructions are set in operator config; operator config also
+   decides whether `set_settings` can lift the caps or rewrite the
+   instructions (principle 15); the threat model records the cost
+   (principle 9). The window at the compaction threshold, plus a stage's
+   instruction and both caps, fits the context whichever layer set them,
+   so a stage just short of compaction still runs. Each call is attributed
+   in `usage_log` by stage and `mode = fork | standalone` (principle 11).
 5. A background stage that can't run skips and logs a warning naming the
    stage, the channel, the trace if there is one, and what was missing
    (principle 5). Compaction is the exception: it is never skipped and
@@ -1134,13 +1149,20 @@ design: `docs/design.md`, Forks. The requirements are outcomes:
 10. The ops docs (`signal-ops.md`, `discord-ops.md`, the web section of
     `configuration.md`) cover account setup and remote access; real
     identifiers stay in gitignored local notes.
-11. `agent.yaml` and the prompt files should be owned by another user and
-    read-only to the daemon, and the docs say so, because `write_file`
-    plus hot reload otherwise undoes every other control.
+11. Making `agent.yaml` and the prompt files owned by another user and
+    read-only to the daemon is how an operator locks self-edits of
+    configuration and prompts (principle 15). The docs say so, and say
+    the cost of leaving them writable: `write_file` plus hot reload or a
+    restart lets the agent lift every other lock.
 12. No container image until a second deployment needs one. When
     one is written it is a kernel image with `/data` as the working
     directory and `agent.yaml` bind-mounted, no ports unless `web:` is
     configured, and signal-cli and llama-server outside the container.
+13. The agent can restart the daemon to apply changes to its own code,
+    configuration, prompt files and plugin set (principle 15). Restarts
+    it requests are rate-limited by operator config, so an edit-restart
+    loop can't flap. The restart tool is a capability like any other:
+    the operator can lock it.
 
 ### 3.12 Evaluation and the harness
 
@@ -1240,22 +1262,24 @@ its budget, coalescing, charging per channel or sender) are tracked in
    it. With no policy plugin loaded, the kernel enforces only declared
    capacity, any caps, an exchange's own background work ahead of its
    channel's next main turn (item 1), and its default order (principle 1).
-6. Usage over a period (tokens or requests in a rate window, spend over
-   a budget period) can carry a soft cap and a hard cap. Crossing a soft
-   cap changes behaviour in a way the configuration docs state, logs a
-   warning naming the pool, the cap and the usage, and emits a metric
-   (principle 5). A provider's rate limit is declared as capacity and
-   waited on (item 2); a cap is the operator's own limit on the agent's
-   usage. Once usage reaches a hard cap, no further call is
-   admitted against it until its period rolls over; whether calls
-   reserve against the cap in advance, so that none overshoots it, is
-   #296's question. A call refused at a hard cap fails like an LLM
-   error: a background stage skips with a warning (§3.8.5), a main
-   turn's reply names the pool, the cap and when it resets, and
+6. Usage over a period (tokens or requests in a rate window, spend over a
+   budget period) can carry a soft cap and a hard cap. Crossing a soft cap
+   changes behaviour in a way the configuration docs state, logs a warning
+   naming the pool, the cap and the usage, and emits a metric (principle 5).
+   A provider's rate limit is declared as capacity and waited on (item 2); a
+   cap is the operator's own limit on the agent's usage. Once usage reaches
+   a hard cap, no further call is admitted against it until its period rolls
+   over; whether calls reserve against the cap in advance, so that none
+   overshoots it, is #296's question. A call refused at a hard cap fails
+   like an LLM error: a background stage skips with a warning (§3.8.5), a
+   main turn's reply names the pool, the cap and when it resets, and
    compaction keeps its fallback that cannot fail (§3.3.2). Caps are
-   settings under principle 15: whether the agent can move one is a
-   lock. A hard cap the agent can raise is a bound the agent, and any
-   text that steers it, can lift (`docs/threat-model.md`).
+   settings under principle 15: whether the agent can move one is a lock,
+   and a lock that bounds a soft cap to a range under the hard cap lets the
+   agent tune it without lifting the bound. A hard cap the agent can raise,
+   through an override or a self-edit of the configuration that declares it
+   (§3.11.11), is a bound the agent, and any text that steers it, can lift
+   (`docs/threat-model.md`).
 7. Work no plugin holds is ordered in this precedence, whatever the policy;
    within a level, policy orders it, and a call held for capacity gains
    priority within its level as it waits, never past the order this list
@@ -1354,7 +1378,7 @@ record that holds the reasoning.
 | Summary role follows the mode: fork `assistant`, standalone `user` with data framing | `threat-model.md` finding 3 |
 | No process separation until corvidae runs on a machine the operator does not own | `threat-model.md`, Privilege separation |
 | Personality is duck-typed and judged longitudinally; goal retirement is a consolidation event; `self` is a fact subject, ungated beyond trust inheritance; the self-model compile reads only facts above a trust floor and sends the operator each diff; interoception line and self-model compile; commitment records and endogenous goals only on a named failure | `plans/personality-and-autonomy.md` (PR #48) |
-| No runtime plugin loading; changing the plugin set is a restart | #28 |
+| No runtime plugin loading; changing the plugin set is a restart, which the agent may request (rate-limited) | #28; principle 15 |
 | No container image until a second deployment needs one | #37 |
 | Topic structure is the `topic` subject's job, not a retrieval dimension | `shakedown-findings.md` |
 | `plans/new-hooks.md` retired. Per-turn tool filtering and system-prompt transforms are rejected (the tool schemas and system prompt are the head of the prompt, principle 2); inbound-text rewriting is rejected (the log keeps what arrived); config-change notifications are unneeded (tunables resolve at decision time); a compaction veto is rejected (it trades a summary for an over-budget request). A per-call tool veto and per-channel tool sets, fixed per conversation, are tracked for Phase 5's trust work; a channel-created observation waits for a second implementer under §3.1.11 | #31, #148, #149, #150 |
