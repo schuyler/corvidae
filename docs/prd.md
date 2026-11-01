@@ -122,27 +122,22 @@ one is a bug even if its tests pass.
    exception text belongs in the log line. A plugin with no config block is
    silent; a plugin with a malformed one is loud and aborts startup.
 
-6. **Behavioural tests are the bar; mechanisms are hypotheses.** A
-   cognitive mechanism is built where an eval demands it, not because a
-   doctrine describes it. Deterministic metrics against operator-authored
-   fixtures run in CI; LLM-judged suites run out of band and are tracked as
-   benchmarks, never as gates. The pretrained weights are frozen and vast,
-   so mechanisms about the agent's own runtime stream (this user, these
-   channels, this deployment) are preferred over mechanisms that
-   reconstruct general knowledge the weights already hold. Expect the
-   honest eval to retire scaffolding.
+6. **Behavioural tests are the bar.** The framework can offer any
+   mechanism, and which ones a deployment runs is the operator's choice
+   (principle 1). Evals measure what a mechanism does, so the operator can
+   choose; they don't decide what gets built. Deterministic metrics
+   against operator-authored fixtures run in CI; LLM-judged suites run out
+   of band and are tracked as benchmarks, never as gates.
 
 7. **Cheap, always-on perception gates expensive cognition.** One appraisal
-   signal has three consumers: engagement, deliberation depth,
-   consolidation strength. Epistemic checks stay independent of the
-   appraisal scores: the provenance check fires on any claim about the past
-   and is judged against records, never on generator confidence. Thresholds
-   ship as commented best guesses and are tuned from the outcome log.
-   Fitting them in a closed loop, with the agent applying what the outcome
-   log suggests, is a capability the framework can permit (principle 15),
-   and like any mechanism it stands on a harness measure of whether it
-   helps (principle 6). Letting cheap work gate expensive work is principle
-   16 applied to cognition.
+   signal has two consumers: engagement and consolidation strength.
+   Epistemic checks stay independent of the appraisal scores: the
+   provenance check fires on any claim about the past and is judged against
+   records, never on generator confidence. Thresholds ship as commented
+   best guesses and are tuned from the outcome log. Fitting them in a
+   closed loop, with the agent applying what the outcome log suggests, is a
+   capability the framework can permit (principle 15). Letting cheap work
+   gate expensive work is principle 16 applied to cognition.
 
 8. **Local-first: one process, one machine, one SQLite file.** No message
    broker, no worker pool, no workflow engine. The database runs in WAL
@@ -1035,16 +1030,14 @@ never on the model's guess. A person carries a trust level, and each
 identity an identity-assurance level (transport-verified versus bare nick);
 trust is capped by the assurance of the identity in use. Semantic facts are
 subject-typed `(person | channel | topic | self, subject_id, type, value,
-timestamp, source episodes)`, extracted for persons first and for other
-subjects only when the eval demands it, reconciled against existing facts
-by a cheap-model judgment, synthesized into dossiers, curated by operator
-CLI commands including a first-class verb for operator-authored facts, and
-restricted to agent-specific, post-training regularities. Participant match
-joins the retrieval score here. `self` facts are the agent's own distilled
-runtime regularities ("I tend to over-hedge numeric claims"), the purest
-case of the frozen-weights criterion; their epistemic framing is mandatory,
-since the author is the agent, and a self-distilled fact never satisfies
-the provenance gate as corroboration.
+timestamp, source episodes)`, extracted for any subject, reconciled against
+existing facts by a cheap-model judgment, synthesized into dossiers, and
+curated by operator CLI commands including a first-class verb for
+operator-authored facts. Participant match joins the retrieval score here.
+`self` facts are the agent's own distilled runtime regularities ("I tend to
+over-hedge numeric claims"); their epistemic framing is mandatory, since
+the author is the agent, and a self-distilled fact never satisfies the
+provenance gate as corroboration.
 
 **Trust, sensitivity, guardrails, skills.** The trust plugin and the
 sensitivity plugin are optional cognition plugins (principle 1). With the
@@ -1104,23 +1097,20 @@ compiled block over months, read as coherent drift, thrash, or flattening
 toward the generic. This is the feedback edge that "memory is the
 personality" otherwise only half-delivers.
 
-**Hypothesis tier.** Two mechanisms are built only on a named failure of
-the longitudinal test (§3.12): commitment records (made-to person, terms,
-due, status, episode links, attached to dossiers, broken ones persisting
-as facts about the relationship), triggered by dropped commitments that
-retrieval should have surfaced; and endogenous goal candidates (curiosity:
+**Commitments and endogenous goals.** Commitment records (made-to
+person, terms, due, status, episode links, attached to dossiers, broken
+ones persisting as facts about the relationship) let retrieval surface
+what the agent has promised. Endogenous goal candidates (curiosity:
 unresolved high-surprise episodes from the outcome log; care: dormant
-commitments and long-quiet valued relationships), delivered only as inputs
-to the heartbeat behind the act-if-warranted and
-output gates, triggered by a month of heartbeats in which the agent never
-initiates anything the operator judges worth initiating.
+commitments and long-quiet valued relationships) reach the heartbeat only
+as inputs, behind the act-if-warranted and output gates.
 
 **Toggles.** Surprise in the importance prior; semantic-tier
 promotion beyond persons, including `self`; salience arbitration in the
 funnel; the encode/retrieve gate; the interoception line. Each is a
-toggle with its own fixture benchmark, measured against its simpler
-baseline at a fixed token budget, and on by default only where it wins.
-The encode/retrieve gate is expected to lose.
+toggle the operator turns on or off, with its own fixture benchmark
+measured against its simpler baseline at a fixed token budget, so the
+operator can see what it buys.
 
 ### 3.8 Forks
 
@@ -1313,8 +1303,7 @@ design, not requirement. The requirements are outcomes:
    automatable and the record says so rather than faking a fixture. Its
    one instrument is a periodic diff of the self-describing store
    (`self` facts, and the compiled self-model), read as
-   coherent drift, thrash, or flattening. The hypothesis-tier triggers in
-   §3.7 are defined against this tier.
+   coherent drift, thrash, or flattening.
 
 ### 3.13 Resource pools and queue arbitration
 
@@ -1454,7 +1443,7 @@ record that holds the reasoning.
 | §3.8 states fork outcomes; backend-specific fork design (prefix parity, fork-by-default, cost model, rollout gate) is not a requirement | #188 |
 | Demote, don't delete; usage-weighted retention; near-duplicate merge at consolidation | §3.7 Memory 3, 6; diverges from the Persyn spec's culling |
 | Operator-only `redact` is the one deletion path; it stays in the kernel | principle 4; §3.7 Memory 8 |
-| Knowledge graph cut, not optional: extraction is noisy, n-hop context is expensive, and at personal scale a graph duplicates facts plus vector and FTS retrieval; revisited only if relational questions fail the eval | diverges from Persyn §4.3 |
+| Knowledge graph not part of the shipped memory: extraction is noisy, n-hop context is expensive, and at personal scale a graph duplicates facts plus vector and FTS retrieval; a graph plugin isn't precluded | diverges from Persyn §4.3 |
 | Emotion classifier replaced by appraisal valence | §3.7 Appraisal; diverges from Persyn §4.9 |
 | Engagement decision inverted: cheap gate first, generate only past threshold | principle 7; §3.7 Appraisal; diverges from the Persyn spec |
 | Two-stage appraisal; stage 1 never calls a model; core mints the exchange key; pull-based compute | §3.7 Appraisal 1–3 |
@@ -1463,7 +1452,7 @@ record that holds the reasoning.
 | Persona may tune its own gates; `immutable_settings` is the valve | operator directive 2, 2026-07-06 |
 | Self-modification is a design goal: every restriction on it is a lock the framework supports and the operator can lift, never architecture; the principle 9 floors and the append-only log stay fixed | principle 15; operator directive, 2026-10-31 |
 | Every model endpoint is a resource pool the operator declares and caps; single-slot is a deployment choice, not architecture; every call is admitted at `LLMClient`, and policy over pools and channel queues is pluggable | principle 16; §3.13; #296 |
-| Best-guess defaults first; thresholds fit from experience; closed-loop fitting is a capability the operator can permit, standing on a harness measure of whether it helps | principle 7; operator directives 1, 3; operator directive, 2026-10-31 |
+| Best-guess defaults first; thresholds fit from experience; closed-loop fitting is a capability the operator can permit | principle 7; operator directives 1, 3; operator directive, 2026-10-31 |
 | Engagement gate calibrates offline unless the operator permits live fitting | §3.7; principle 15 |
 | Hedging vocabulary is persona, not architecture | §3.11.5; diverges from the Persyn spec |
 | The heartbeat starts on system idle, not on a schedule, and acts only when warranted; sleep is durable | §3.7 Heartbeat; #134; diverges from the Persyn spec's per-beat action |
@@ -1492,7 +1481,7 @@ record that holds the reasoning.
 | ACP keeps rejecting a concurrent prompt unless a real client is shown to steer with a bare prompt; a failed final delivery is `end_turn` | #93, #99 |
 | Summary role follows the mode: fork `assistant`, standalone `user` with data framing | §3.3.3; `threat-model.md` finding 3 |
 | No process separation until corvidae runs on a machine the operator does not own | §3.5.5; `threat-model.md`, Privilege separation |
-| Personality is duck-typed and judged longitudinally; goal retirement is a consolidation event; `self` is a fact subject, ungated beyond trust inheritance; the self-model compile reads only facts above a trust floor and sends the operator each diff; interoception line and self-model compile; commitment records and endogenous goals only on a named failure | §3.7; §3.12.9; PR #48 |
+| Personality is duck-typed and judged longitudinally; goal retirement is a consolidation event; `self` is a fact subject, ungated beyond trust inheritance; the self-model compile reads only facts above a trust floor and sends the operator each diff; interoception line and self-model compile; commitment records and endogenous goal candidates | §3.7; §3.12.9; PR #48 |
 | No runtime plugin loading; changing the plugin set is a restart, which the agent may request (rate-limited) | #28; principle 15 |
 | No container image until a second deployment needs one | #37 |
 | Topic structure is the `topic` subject's job, not a retrieval dimension | §3.7 Memory 7 |
@@ -1506,6 +1495,7 @@ record that holds the reasoning.
 | A turn a note wakes is its own exchange, linked to the one that sent the note; its origin, kind (agency or continuation), `max_turns` budget and precedence follow the exchange that started the chain; a continuation can cross channels | principle 13; §3.1.3; §3.5.10; operator directive, 2026-11-01 |
 | Accepted work survives a restart: inbound messages, notifications and notes go to a write-ahead log when accepted and are replayed if unfinished; the log is compacted and is not bound by the append-only rule | §3.4.8; operator directive, 2026-11-01 |
 | Messaging someone first, one to one, admits their replies on that channel; a group-channel message admits no one; admissions are durable and revocable, and the operator can lock the capability | §3.2.2; §3.5.9; operator directive, 2026-11-01 |
+| The framework can offer any mechanism; which ones a deployment runs is the operator's choice; evals measure, they don't decide what gets built | principle 6; operator directive, 2026-11-01 |
 | Identity is agent-wide and heads every prompt; channel register is appended after it and never replaces it | operator directive, 2026-11-01 |
 | The operator decides the trust boundary; inbound transports default-deny; channels are not a boundary; safety features layer in as plugins | #167; operator directive, 2026-11-01 |
 | Corvidae is a testbed first and a robust harness second | #167 |
