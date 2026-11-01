@@ -21,5 +21,7 @@ A failure has two audiences, and each gets different text from the same exceptio
 
 # Process instructions
 
-* If you are solving a GitHub issue, post the requirements and implementation plan as a comment on the issue before implementing.
+* Read `docs/prd.md` before implementing anything. The PRD is the reference for what must be true; issues, plans, design docs and the existing code derive from it.
+* Compare what an issue (or plan, or request) asks for against the PRD before implementing. Flag every difference to the owner — behaviour the issue specifies that the PRD doesn't, contradicts, or rules out, and PRD requirements the issue omits — and wait for the owner to resolve it. Don't silently follow either side, and don't treat an issue's older wording as a requirement the PRD has since dropped.
+* If you are solving a GitHub issue, post the requirements, the PRD comparison above, and the implementation plan as a comment on the issue before implementing.
 * Check @docs/ before your work is complete and make sure the documentation is updated.
