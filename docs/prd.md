@@ -233,13 +233,13 @@ one is a bug even if its tests pass.
     instances. Safety comes from who may reach the agent (inbound
     default-deny) and from restrictions the operator can apply (principle
     15): trust (what came in is weighted and labelled by its source) and
-    sensitivity (what enters a window is filtered by who is present
-    there). Neither is a requirement on the agent's behaviour; each is a
-    capability the framework offers. Without them, nothing is quarantined
-    and nothing is filtered by audience. That has a cost where people the operator never
-    allowed can read the agent's replies (a Discord guild channel, a public
-    IRC channel): something said on a private channel can surface there.
-    `docs/threat-model.md` records it (principle 9).
+    sensitivity (what enters a window is filtered by who is present there).
+    Neither is a requirement on the agent's behaviour; each is a capability
+    the framework offers. Without them, nothing is quarantined and nothing
+    is filtered by audience. That has a cost where people the operator
+    never allowed can read the agent's replies (a Discord guild channel, a
+    public IRC channel): something said on a private channel can surface
+    there. `docs/threat-model.md` records it (principle 9).
 
 15. **The agent can modify itself; the operator decides how far.** The
     capacity to self-modify and self-improve is a design goal. The

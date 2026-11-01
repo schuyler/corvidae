@@ -889,9 +889,9 @@ decision (2026-11-01), and these are its costs.
   agent's own, so text injected on IRC that prompts a note reaches the
   operator's Signal window in the agent's voice, and a read pulls one
   channel's untrusted text into another's window. With the trust plugin
-  loaded, both carry the minimum trust of the source channel's
-  participants and low-trust ones are quarantined (PRD §3.5.10–11); without
-  it, they arrive unlabelled.
+  loaded, both carry the minimum trust of the source channel's participants
+  and low-trust ones are quarantined (PRD §3.5.10–11); without it, they
+  arrive unlabelled.
 - **Reminders aimed at other channels.** A reminder may target any channel
   (PRD §3.9.7), so injected text on one channel can queue firings onto
   another, up to `scheduler.max_reminders_per_channel` per target, and can
