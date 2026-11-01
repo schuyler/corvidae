@@ -7,6 +7,7 @@ connection cannot land retention's partial work and a mid-batch failure
 leaves no row changed.
 """
 
+import logging
 import time
 
 import pytest
@@ -182,4 +183,169 @@ class TestBackfillAtomic:
         for mid in ids:
             assert (await fetch_memory(db, mid))["embedded"] == 1
             assert await vec_row_exists(db, mid)
+        await stop(memory, db)
+
+
+def mutate_before_txn(memory, db, nth, sql, params=()):
+    """Wrap ``memory._write_txn`` so ``sql`` commits on the shared connection
+    just before the nth (1-based) write transaction opens: after the pass's
+    candidate SELECT, before its write, and never inside the txn (which
+    holds the write lock)."""
+    real = memory._write_txn
+    state = {"calls": 0, "applied": False}
+
+    def wrapped():
+        # Count transactions; mutate only ahead of the one under test.
+        state["calls"] += 1
+        if state["calls"] == nth:
+            return _real_ctx(real, db, sql, params, state)
+        return real()
+
+    memory._write_txn = wrapped
+    return state
+
+
+def _real_ctx(real, db, sql, params, state):
+    """Context manager that mutates, then delegates fully to the real txn."""
+    inner = real()
+
+    class _Ctx:
+        async def __aenter__(self):
+            # Commit the mutation before the write lock is taken.
+            await db.execute(sql, params)
+            await db.commit()
+            state["applied"] = True
+            return await inner.__aenter__()
+
+        async def __aexit__(self, *exc):
+            return await inner.__aexit__(*exc)
+
+    return _Ctx()
+
+
+class TestDemotionRechecksSelection:
+    async def test_row_retrieved_meanwhile_is_not_demoted(self, tmp_path, caplog):
+        memory, stub, channel, db = await env(tmp_path)
+        mid = await seed_memory_row(db, channel.id, "old", importance=0.3,
+                                    created_at=OLD)
+        # A retrieval lands after the candidate SELECT, before the write.
+        # The stamp is old enough that the row would still score below the
+        # threshold, so a (wrong) demotion is not undone by re-promotion.
+        state = mutate_before_txn(
+            memory, db, 1,
+            "UPDATE memory SET last_retrieved_at = ? WHERE id = ?", (OLD + 1, mid),
+        )
+
+        with caplog.at_level(logging.INFO):
+            await run_retention_job(memory, now=NOW)
+
+        assert state["applied"]
+        # Nothing was written, so no "demoted" line is logged.
+        assert not [r for r in caplog.records if "retention: demoted" in r.message]
+
+        row = await fetch_memory(db, mid)
+        assert (row["indexed"], row["embedded"]) == (1, 1)
+        assert await vec_row_exists(db, mid)
+        await stop(memory, db)
+
+    async def test_row_redacted_meanwhile_is_not_demoted(self, tmp_path):
+        memory, stub, channel, db = await env(tmp_path)
+        mid = await seed_memory_row(db, channel.id, "old", importance=0.3,
+                                    created_at=OLD)
+        # A redaction lands between the SELECT and the write.
+        state = mutate_before_txn(
+            memory, db, 1, "UPDATE memory SET redacted = 1 WHERE id = ?", (mid,)
+        )
+
+        await run_retention_job(memory, now=NOW)
+
+        assert state["applied"]
+        row = await fetch_memory(db, mid)
+        assert (row["indexed"], row["embedded"], row["redacted"]) == (1, 1, 1)
+        assert await vec_row_exists(db, mid)
+        await stop(memory, db)
+
+    async def test_log_reports_rows_actually_demoted(self, tmp_path, caplog):
+        memory, stub, channel, db = await env(tmp_path)
+        ids = [
+            await seed_memory_row(db, channel.id, f"old {i}", importance=0.3,
+                                  created_at=OLD)
+            for i in range(2)
+        ]
+        # One of the two candidates is redacted before the write.
+        state = mutate_before_txn(
+            memory, db, 1, "UPDATE memory SET redacted = 1 WHERE id = ?", (ids[0],)
+        )
+
+        with caplog.at_level(logging.INFO):
+            await run_retention_job(memory, now=NOW)
+
+        assert state["applied"]
+        assert "retention: demoted 1 records" in caplog.text
+        assert (await fetch_memory(db, ids[1]))["indexed"] == 0
+        await stop(memory, db)
+
+
+# Mutations that make a row ineligible; each takes the row id as its param.
+SUPERSEDE = "UPDATE memory SET superseded_by = id + 1000 WHERE id = ?"
+REDACT = "UPDATE memory SET redacted = 1 WHERE id = ?"
+
+
+class TestRepromotionRechecksSelection:
+    @pytest.mark.parametrize("mutation", [SUPERSEDE, REDACT], ids=["superseded", "redacted"])
+    async def test_row_ineligible_meanwhile_stays_unindexed(self, tmp_path, mutation, caplog):
+        memory, stub, channel, db = await env(tmp_path)
+        mid = await seed_memory_row(db, channel.id, "fresh", importance=0.9,
+                                    indexed=0, embedded=0, created_at=NOW)
+        # Supersession or redaction lands between the SELECT and the write.
+        state = mutate_before_txn(memory, db, 1, mutation, (mid,))
+
+        with caplog.at_level(logging.INFO):
+            await run_retention_job(memory, now=NOW)
+
+        assert state["applied"]
+        row = await fetch_memory(db, mid)
+        assert row["indexed"] == 0
+        # Nothing was written, so no count line is logged.
+        assert not [r for r in caplog.records if "retention: re-promoted" in r.message]
+        await stop(memory, db)
+
+
+class TestBackfillRechecksSelection:
+    @pytest.mark.parametrize("mutation", [SUPERSEDE, REDACT], ids=["superseded", "redacted"])
+    async def test_row_ineligible_meanwhile_gets_no_vec_row(self, tmp_path, mutation, caplog):
+        memory, stub, channel, db = await env(tmp_path)
+        mid = await seed_memory_row(db, channel.id, "fresh", importance=0.9,
+                                    embedded=0, created_at=NOW)
+        stub.embed_result = [[1.0, 0.0, 0.0, 0.0]]
+        # No demotion/re-promotion candidates: backfill's txn is the 1st.
+        state = mutate_before_txn(memory, db, 1, mutation, (mid,))
+
+        with caplog.at_level(logging.INFO):
+            await run_retention_job(memory, now=NOW)
+
+        assert state["applied"]
+        row = await fetch_memory(db, mid)
+        assert row["embedded"] == 0
+        assert not await vec_row_exists(db, mid)
+        # Nothing was written, so no count line is logged.
+        assert not [r for r in caplog.records if "retention: backfilled" in r.message]
+        await stop(memory, db)
+
+    async def test_row_demoted_meanwhile_gets_no_vec_row(self, tmp_path):
+        memory, stub, channel, db = await env(tmp_path)
+        mid = await seed_memory_row(db, channel.id, "fresh", importance=0.9,
+                                    embedded=0, created_at=NOW)
+        stub.embed_result = [[1.0, 0.0, 0.0, 0.0]]
+        # A demotion lands between the SELECT and the backfill write.
+        state = mutate_before_txn(
+            memory, db, 1, "UPDATE memory SET indexed = 0 WHERE id = ?", (mid,)
+        )
+
+        await run_retention_job(memory, now=NOW)
+
+        assert state["applied"]
+        row = await fetch_memory(db, mid)
+        assert (row["indexed"], row["embedded"]) == (0, 0)
+        assert not await vec_row_exists(db, mid)
         await stop(memory, db)

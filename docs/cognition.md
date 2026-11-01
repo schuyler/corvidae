@@ -136,7 +136,12 @@ WARNING names the database path and the timeout) are logged too.
 `write_record` (goal retirement) uses the same transaction, as do retention's
 three passes (demotion, re-promotion, vec backfill): each batch commits whole
 or rolls back whole, and the backfill's embeddings are computed before the
-transaction opens. `_db_lock`
+transaction opens. Each pass selects its candidates before its transaction,
+so every write re-checks the selection: demotion skips a row redacted,
+already demoted or retrieved since the SELECT; re-promotion never
+re-indexes a row superseded or redacted meanwhile; the backfill writes no
+vec row for one demoted, redacted or superseded while its embedding was
+computed (#272, #309). The log lines count the rows actually written. `_db_lock`
 stays, serializing memory's own writers (consolidation versus goals);
 it no longer carries cross-plugin atomicity. A persistence DB with no
 file (in-memory, tests only) can't be opened twice, so memory's writes
