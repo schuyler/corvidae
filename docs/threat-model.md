@@ -762,10 +762,10 @@ What each kind of unlock costs:
   context (PRD §3.8.4).
 - **Scheduling policy** (pausing or deferring a channel, the order of
   held calls, PRD §3.13). An injection can pause the operator's channel,
-  move its own channel ahead of others, or push upkeep back. Every pause
-  lapses by itself and the operator can resume any channel (PRD
-  §3.13.8), so the damage is delay, not a wedged agent; past-due upkeep
-  still runs by its deadline (PRD §3.13.7).
+  move its own channel ahead of others, or push upkeep back. Every hold,
+  deferral and pause lapses by itself and the operator can resume any
+  channel (PRD §3.13.8), so the damage is delay, not a wedged agent;
+  upkeep with a latency bound still runs by its bound (PRD §3.13.7).
 - **Skills.** The skills index sits in the stable prompt region, so a
   skill written at an injection's request is offered to every future
   conversation on every channel and survives restarts. The idle scan
@@ -783,9 +783,9 @@ starting point rather than a rule: the system prompt, the prompts that
 judge and remember, the heartbeat and subagent prompts, framing, `model`,
 the gate tunables (which also blocks closed-loop fitting from moving
 them), the tool set, and skill writes behind confirmation. On a metered
-pool, add a hard spend cap, locked, and `model`, since on an endpoint
-that serves several models at different prices it sets the price
-(finding 14).
+pool, add a hard spend cap, locked; `model`, already listed, matters
+more there, since on an endpoint that serves several models at
+different prices it sets the price (finding 14).
 
 A channel with only the operator on it has the smallest exposure, and it
 is where these unlocks cost least. It isn't free. Untrusted text still
@@ -809,13 +809,14 @@ to do nothing.
 
 Where the tree stands: nothing caps use over time. `usage_log` records
 every call, but no budget reads it, and rate limits are met only by
-retrying (PRD §3.6.2). PRD principle 16 and §3.13 require operator caps
-per pool; #296 tracks the open questions, charging per sender among
+retrying (PRD §3.6.2). PRD principle 16 and §3.13 require that the
+operator can cap each pool; #296 tracks the open questions, charging per sender among
 them.
 
 Until then, on a metered endpoint, set a spend limit with the provider,
 and keep inbound allowlists tight on any channel with untrusted
-participants: admission is the only cost control the tree has today.
+participants: admission is the only control on total cost the tree
+has today.
 
 ## Privilege separation
 
