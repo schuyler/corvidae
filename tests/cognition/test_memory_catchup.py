@@ -288,18 +288,20 @@ async def test_summary_in_force_is_newest_decodable_before_range(env):
 
 
 # ---------------------------------------------------------------------------
-# R3: the background role
+# R3: the consolidation role
 # ---------------------------------------------------------------------------
 
 
-async def test_catchup_call_uses_background_client(env):
-    """R3: the catch-up call goes to the client for ``background``, as a view
-    (the system prompt first); the main client gets no consolidation call."""
+async def test_catchup_call_asks_for_consolidation_role(env):
+    """R3: the catch-up call asks for the ``consolidation`` role (chain:
+    consolidation → background → main, #238); with only main+background
+    configured it lands on background, as a view (the system prompt first);
+    the main client gets no consolidation call."""
     rows = await env.rows(alternating(["hello there", "hi, how can I help"]))
 
     await env.consolidate(rows[-1])
 
-    assert "background" in env.roles
+    assert "consolidation" in env.roles
     [call] = env.bg.chat_calls
     assert call["messages"][0]["content"] == "IDENTITY\n\nREGISTER"
     assert env.main.chat_calls == []

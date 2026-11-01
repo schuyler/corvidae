@@ -583,3 +583,183 @@ class TestApiKeyFromEnvironment:
             assert plugin.get_client("main") is old
         finally:
             await plugin.on_stop()
+
+
+# ---------------------------------------------------------------------------
+# #238: a role per model-calling stage, fallback chains in LLMPlugin
+# ---------------------------------------------------------------------------
+
+
+def test_fallback_table_pinned():
+    """R2: the chain table is the single source of fallback truth — pinned
+    verbatim so a change is a deliberate, visible edit."""
+    from corvidae.llm_plugin import LLMPlugin
+
+    assert LLMPlugin.FALLBACK_CHAINS == {
+        "subagent": ("subagent", "background", "main"),
+        "consolidation": ("consolidation", "background", "main"),
+        "rubric": ("rubric", "background", "main"),
+        "critic": ("critic", "background", "main"),
+        "appraisal": ("appraisal", "background", "main"),
+        "compaction": ("compaction", "background", "main"),
+    }
+
+
+@pytest.mark.parametrize(
+    "role,configured,expected",
+    [
+        # its own role wins when configured
+        ("subagent", {"main": 1, "background": 2, "subagent": 3}, "subagent"),
+        ("consolidation", {"main": 1, "background": 2, "consolidation": 3}, "consolidation"),
+        ("rubric", {"main": 1, "background": 2, "rubric": 3}, "rubric"),
+        ("critic", {"main": 1, "background": 2, "critic": 3}, "critic"),
+        ("appraisal", {"main": 1, "background": 2, "appraisal": 3}, "appraisal"),
+        ("compaction", {"main": 1, "compaction": 3}, "compaction"),
+        # chain falls through to background
+        ("subagent", {"main": 1, "background": 2}, "background"),
+        ("consolidation", {"main": 1, "background": 2}, "background"),
+        ("rubric", {"main": 1, "background": 2}, "background"),
+        ("critic", {"main": 1, "background": 2}, "background"),
+        ("appraisal", {"main": 1, "background": 2}, "background"),
+        # compaction falls through to background, like the other stages
+        ("compaction", {"main": 1, "background": 2}, "background"),
+        # unknown role: straight to main
+        ("something-new", {"main": 1, "background": 2}, "main"),
+        # nothing but main
+        ("critic", {"main": 1}, "main"),
+    ],
+)
+def test_get_client_walks_chain(role, configured, expected):
+    """R2: get_client walks the declared chain to the first configured role."""
+    from corvidae.llm_plugin import LLMPlugin
+
+    plugin = LLMPlugin(pm=None)
+    clients = {r: MagicMock(name=r) for r, _ in configured.items()}
+    for r, c in clients.items():
+        plugin._clients[r] = c
+    assert plugin.get_client(role) is clients[expected]
+
+
+@pytest.mark.parametrize(
+    "role,expected",
+    [
+        # R4: a config with only main/background/embedding routes every
+        # stage to the same client it used before #238.
+        ("subagent", "background"),       # was get_client("background")
+        ("consolidation", "background"),  # was get_client("background")
+        ("rubric", "background"),         # was get_client("background")
+        ("compaction", "background"),     # was llm.main_client; main's view path runs on background
+        ("critic", "background"),         # was the manual critic->bg->main loop
+        ("appraisal", "background"),      # was the manual appraisal->bg->main loop
+        ("main", "main"),
+        ("embedding", "embedding"),
+    ],
+)
+def test_legacy_config_routes_every_stage_as_before(role, expected):
+    from corvidae.llm_plugin import LLMPlugin
+
+    plugin = LLMPlugin(pm=None)
+    for r in ("main", "background", "embedding"):
+        plugin._clients[r] = MagicMock(name=r)
+    assert plugin.get_client(role) is plugin._clients[expected]
+
+
+async def test_on_start_logs_resolved_role_map(caplog):
+    """R5: one INFO line at startup shows where each stage's traffic goes."""
+    import logging
+
+    from corvidae.llm_plugin import LLMPlugin
+
+    plugin = LLMPlugin(pm=None)
+
+    class FakeClient:
+        def __init__(self, role):
+            self.role = role
+
+        async def start(self):
+            pass
+
+        async def stop(self):
+            pass
+
+    with patch.object(
+        plugin, "_create_client", lambda cfg, role="main": FakeClient(role)
+    ):
+        with caplog.at_level(logging.INFO):
+            await plugin.on_start(
+                {"llm": {"main": {"model": "m"}, "background": {"model": "b"}}}
+            )
+    line = next(
+        (r.message for r in caplog.records
+         if r.message.startswith("llm roles resolved:")),
+        None,
+    )
+    assert line is not None, "no 'llm roles resolved:' INFO line at startup"
+    assert "consolidation→background" in line
+    assert "subagent→background" in line
+    assert "compaction→background" in line
+    assert "main→main" in line
+
+
+def test_no_client_reads_llm_private_dict_outside_llm_plugin():
+    """R3: no consumer walks LLMPlugin._clients — the grep is the test.
+
+    web.py keeps its own unrelated _clients fan-out set; the patterns
+    below target the llm plugin's dict specifically.
+    """
+    import pathlib
+    import re
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    pattern = re.compile(r'getattr\(\s*llm\s*,\s*"_clients"|llm\._clients')
+    offenders = []
+    for path in list(root.glob("corvidae/**/*.py")) + list(root.glob("packages/**/*.py")):
+        if "test" in path.parts:
+            continue
+        if path.name == "llm_plugin.py":
+            continue
+        if pattern.search(path.read_text()):
+            offenders.append(str(path))
+    assert not offenders, f"reads of LLMPlugin._clients outside llm_plugin.py: {offenders}"
+
+
+def _fake_ep(name, dist_name):
+    import types
+
+    return types.SimpleNamespace(name=name, dist=types.SimpleNamespace(name=dist_name))
+
+
+def test_entry_point_duplicates_fail_loudly(monkeypatch):
+    """R6: two distributions claiming one entry-point name is a Config
+    error naming the point, both distributions, and the remedy."""
+    from corvidae import runtime
+
+    import importlib.metadata
+
+    monkeypatch.setattr(
+        importlib.metadata, "entry_points", lambda group="corvidae": [
+            _fake_ep("dup", "dist-a"),
+            _fake_ep("dup", "dist-b"),
+            _fake_ep("solo", "dist-a"),
+        ]
+    )
+    with pytest.raises(ValueError) as exc:
+        runtime.check_entry_point_duplicates("corvidae")
+    message = str(exc.value)
+    assert "dup" in message
+    assert "dist-a" in message and "dist-b" in message
+    assert "uninstall one" in message
+
+
+def test_entry_point_no_duplicates_passes(monkeypatch):
+    from corvidae import runtime
+
+    import importlib.metadata
+
+    monkeypatch.setattr(
+        importlib.metadata, "entry_points", lambda group="corvidae": [
+            _fake_ep("one", "dist-a"),
+            _fake_ep("two", "dist-b"),
+        ]
+    )
+    runtime.check_entry_point_duplicates("corvidae")  # no raise

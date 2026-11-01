@@ -384,14 +384,14 @@ class CompactionPlugin(CorvidaePlugin):
         return result.text
 
     async def _view_summary(self, channel: "Channel", conversation: "ContextWindow", cut: int) -> str:
-        """The summary written from the live window at ``cut`` on llm.background.
+        """The summary written from the live window at ``cut`` on llm.compaction.
 
         Renders the window prefix exactly as the fork does (compaction fork
         prompt, the channel's pending tool-call ids, the Agent's mid role)
         and sends it as a plain call with no tools. The render is the
         uncapped prefix (the window was over budget, which is why compaction
-        runs), so this call carries the summary's cost on the background
-        model.
+        runs), so this call carries the summary's cost on the compaction
+        role (compaction → background → main, #238).
 
         Raises:
             RuntimeError: no Agent can supply a view; the over-budget
@@ -414,5 +414,6 @@ class CompactionPlugin(CorvidaePlugin):
         # Bind the background client (falls back to main when unconfigured).
         from corvidae.llm_plugin import LLMPlugin
         llm = get_dependency(self.pm, "llm", LLMPlugin)
-        result = await view_call(llm.get_client("background"), channel.id, messages)
+        # The compaction role: compaction → background → main (#238 R1/R2).
+        result = await view_call(llm.get_client("compaction"), channel.id, messages)
         return result.text

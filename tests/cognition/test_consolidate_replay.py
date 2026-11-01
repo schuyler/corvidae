@@ -346,6 +346,39 @@ async def test_replay_sends_the_record_schema_extra_body(tmp_path):
     assert replay_client.extra_bodies == [CONSOLIDATION_EXTRA_BODY]
 
 
+async def test_catch_up_asks_for_the_consolidation_role(tmp_path):
+    """The daemon's catch-up consolidation asks for its own role (#238 R1).
+
+    Characterization test: it pins which role _catch_up requests so any
+    stage that must agree with production consolidation (the replay path)
+    keeps exercising the same client. Pinned at `consolidation` since #238
+    gives the stage its own role (chain: consolidation → background →
+    main)."""
+    from corvidae_cognition.memory import MemoryPlugin
+
+    client = _FakeClient()
+    llm = _FakeLLMPlugin(client)
+    plugin = MemoryPlugin()
+    plugin._llm = lambda: llm
+
+    db = await _seed_db(tmp_path / "t.db", [_row(1, "user", "hi")])
+    plugin._resolve_db = lambda: db
+
+    class _FakeAgent:
+        async def view_inputs(self, channel_id):
+            return _view_inputs()
+
+    class _FakePM:
+        def get_plugin(self, name):
+            return _FakeAgent() if name == "agent" else None
+
+    plugin.pm = _FakePM()
+    await plugin._catch_up("irc:#s-compact", 0, 1)
+
+    assert llm.roles_requested == ["consolidation"]
+    await db.close()
+
+
 # ---------------------------------------------------------------------------
 # R8 — failures name what was observed
 # ---------------------------------------------------------------------------

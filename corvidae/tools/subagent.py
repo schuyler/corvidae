@@ -199,7 +199,7 @@ class SubagentPlugin(CorvidaePlugin):
 
         # Use the shared background client from LLMPlugin (do NOT call start/stop).
         llm = get_dependency(self.pm, "llm", LLMPlugin)
-        client = llm.get_client("background")
+        client = llm.get_client("subagent")
 
         messages = [
             {"role": "system", "content": self._system_prompt},

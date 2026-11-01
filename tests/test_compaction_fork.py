@@ -240,7 +240,9 @@ def _view_rig(agent, text="view summary", bg_error=None):
 async def test_fork_miss_summarizes_from_background_view(agent):
     """R5: on a fork miss, or with forks off, the summary is written from the
     same view (system prompt, the window prefix at the cut, the compaction
-    fork instruction) as a plain call on llm.background with no tools."""
+    fork instruction) as a plain call on the compaction role with no tools
+    (chain: compaction → background → main, #238; lands on background in a
+    standard config)."""
     conv = _straddling_window()
     plugin, channel, main, background, llm = _view_rig(agent, text="background summary")
     # The view the fork would have sent, rendered before the window changes.
@@ -253,7 +255,7 @@ async def test_fork_miss_summarizes_from_background_view(agent):
     assert call["messages"] == expected
     assert call["messages"][-1] == {"role": "user", "content": CompactionPlugin.DEFAULT_FORK_PROMPT}
     assert call["tools"] is None
-    assert "background" in llm.roles
+    assert "compaction" in llm.roles
     assert main.chat_calls == []
     assert (call["attribution"]["stage"], call["attribution"]["mode"]) == ("compaction", "standalone")
     assert conv.messages[0]["content"] == "[Summary of earlier conversation]\nbackground summary"

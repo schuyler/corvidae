@@ -162,6 +162,19 @@ class LLMPlugin(CorvidaePlugin):
 
     depends_on = frozenset()
 
+    #: Fallback chains per requested role (#238 R2): a stage asks for its
+    #: own role and walks this chain to the first configured client. Any
+    #: role not in the table falls back straight to main, as before.
+    #: Pinned by test_llm_plugin::test_fallback_table.
+    FALLBACK_CHAINS: dict[str, tuple[str, ...]] = {
+        "subagent": ("subagent", "background", "main"),
+        "consolidation": ("consolidation", "background", "main"),
+        "rubric": ("rubric", "background", "main"),
+        "critic": ("critic", "background", "main"),
+        "appraisal": ("appraisal", "background", "main"),
+        "compaction": ("compaction", "background", "main"),
+    }
+
     def __init__(self, pm=None) -> None:
         if pm is not None:
             self.pm = pm
@@ -228,6 +241,13 @@ class LLMPlugin(CorvidaePlugin):
             client = self._create_client(cfg, role=role)
             await client.start()
             self._clients[role] = client
+
+        # R5: where each stage's traffic goes, in one line.
+        stage_roles = ("main", "embedding", *self.FALLBACK_CHAINS)
+        logger.info(
+            "llm roles resolved: %s",
+            ", ".join(f"{r}→{self.resolve_role(r)}" for r in stage_roles),
+        )
 
     @hookimpl
     async def on_stop(self) -> None:
@@ -321,13 +341,29 @@ class LLMPlugin(CorvidaePlugin):
             )
         return None
 
+    def fallback_chain(self, role: str) -> tuple[str, ...]:
+        """The roles tried, in order, when a stage asks for ``role`` (#238 R2)."""
+        return self.FALLBACK_CHAINS.get(role, (role, "main"))
+
+    def resolve_role(self, role: str) -> str:
+        """The configured role a request for ``role`` resolves to (#238 R5)."""
+        for candidate in self.fallback_chain(role):
+            if self._clients.get(candidate) is not None:
+                return candidate
+        return "main"
+
     def get_client(self, role: str = "main") -> LLMClient:
         """Return the client for the given role.
 
-        Unconfigured and unknown roles fall back to main
-        (bootstrap-mapping §4.3).
+        Walks the role's fallback chain to the first configured client
+        (#238 R2); unknown roles fall back to main, as before. Returns
+        None when nothing is configured (before on_start).
         """
-        return self._clients.get(role) or self._clients.get("main")
+        for candidate in self.fallback_chain(role):
+            client = self._clients.get(candidate)
+            if client is not None:
+                return client
+        return None
 
     def _create_client(self, cfg: dict, role: str = "main") -> LLMClient:
         """Construct an LLMClient from config and inject its hook observer.

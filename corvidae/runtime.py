@@ -38,6 +38,29 @@ from corvidae.tool_collection import parse_tool_timeouts
 logger = logging.getLogger(__name__)
 
 
+def check_entry_point_duplicates(group: str = "corvidae") -> None:
+    """Fail loudly when two distributions claim one entry-point name (#238 R6).
+
+    pluggy's load_setuptools_entrypoints skips a name it has already
+    registered, so an install-order winner would otherwise be silent. The
+    error names the entry point, both distributions, and the remedy.
+    """
+    import importlib.metadata
+
+    by_name: dict[str, list] = {}
+    for ep in importlib.metadata.entry_points(group=group):
+        by_name.setdefault(ep.name, []).append(ep)
+    for name, eps in sorted(by_name.items()):
+        if len(eps) < 2:
+            continue
+        dists = sorted({ep.dist.name for ep in eps if ep.dist is not None})
+        raise ValueError(
+            f"duplicate '{group}' entry point '{name}' provided by "
+            f"{', '.join(dists) if dists else 'unknown distributions'}; "
+            f"uninstall one of them"
+        )
+
+
 def disabled_plugins_from(config: dict) -> list[str]:
     """Return ``plugins.disabled`` as a list of names, validated.
 
@@ -239,7 +262,16 @@ class Runtime:
         for name in disabled_plugins:
             self.pm.set_blocked(name)
 
-        # 8. Load entry-point plugins
+        # 8. Load entry-point plugins. A duplicate name is an operator
+        #    error (two distributions shipping the same plugin): one line
+        #    and exit, like a malformed config, not a silent install-order
+        #    winner (#238 R6).
+        try:
+            check_entry_point_duplicates("corvidae")
+        except ValueError as exc:
+            sys.stderr.write(f"Config error: {exc}\n")
+            sys.stderr.flush()
+            raise SystemExit(1) from exc
         self.pm.load_setuptools_entrypoints("corvidae")
 
         # 8a. Record the effective plugin set: what actually loaded and what

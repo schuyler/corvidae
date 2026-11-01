@@ -1042,7 +1042,7 @@ class MemoryPlugin(CorvidaePlugin):
         self._db_lock = asyncio.Lock()
         # Pluggable importance prior; replaced by later phases (§3.1).
         self.importance_prior: ImportancePrior = RubricPrior(
-            lambda: self._llm().get_client("background"),
+            lambda: self._llm().get_client("rubric"),
             lambda: self._rubric_prompt,
         )
 
@@ -2038,8 +2038,8 @@ class MemoryPlugin(CorvidaePlugin):
     async def _catch_up(
         self, channel_id: str, watermark: int, range_end: int
     ) -> tuple[object, RecordStamp, list[CatchupSegment]]:
-        """The background client, record stamp and view segments for a range
-        that has left the window. Makes no commits.
+        """The consolidation client, record stamp and view segments for a
+        range that has left the window. Makes no commits.
 
         Raises:
             RuntimeError: no agent plugin can supply the channel's view
@@ -2055,7 +2055,8 @@ class MemoryPlugin(CorvidaePlugin):
             )
         inputs = await agent.view_inputs(channel_id)
         # Bound once (R3): the stamp's model and the requests share a client.
-        client = self._llm().get_client("background")
+        # The consolidation role: consolidation → background → main (#238 R1/R2).
+        client = self._llm().get_client("consolidation")
         stamp = RecordStamp(
             self._consolidation_fork_prompt, "standalone",
             client.request_model(CONSOLIDATION_EXTRA_BODY),

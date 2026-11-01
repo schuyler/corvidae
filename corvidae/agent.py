@@ -1578,7 +1578,9 @@ class Agent(CorvidaePlugin):
         if not self._forks.enabled:
             return
         llm = self.pm.get_plugin("llm")
-        background = getattr(llm, "_clients", {}).get("background") if llm is not None else None
+        # get_client falls back to main when background is unconfigured,
+        # which makes the model-equality check below a no-op: same path.
+        background = llm.get_client("background") if llm is not None else None
         main_model = getattr(self._client, "model", None)
         background_model = getattr(background, "model", None)
         if background is None or background_model == main_model:
