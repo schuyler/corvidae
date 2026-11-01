@@ -245,9 +245,8 @@ one is a bug even if its tests pass.
     stripped) takes effect at the channel's next compaction boundary or
     conversation start, not mid-window (§3.3.8; principle 2). An agent
     that wants a change applied at once makes it persistent and restarts.
-    An operator change applies as configured: it is a deliberate choice to
-    spend the prefill. What each unlock costs is recorded in
-    `docs/threat-model.md` (principle 9).
+    What each unlock costs is recorded in `docs/threat-model.md`
+    (principle 9).
 
 ## 3. Requirements
 
