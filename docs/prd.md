@@ -221,7 +221,7 @@ one is a bug even if its tests pass.
 14. **One actor, one identity, many channels.** Identity, memory, working
     knowledge and the ability to act are the agent's, not the channel's.
     The agent presents the same identity on every channel; what changes
-    from one channel to the next is register (§3.3.11), never who it is
+    from one channel to the next is register (§3.3.10), never who it is
     (§3.3.8). Any turn can speak on any channel a transport owns, leave a
     note for another channel's context, and read another channel's recent
     conversation (§3.5.9–11), and retrieval spans the whole memory. There
@@ -455,27 +455,24 @@ Per transport:
   history and, since retrieval and reading span every channel (principle
   14), whatever the agent knows.
 - **Signal**: newline-delimited JSON-RPC to an already-running `signal-cli`
-  daemon over a unix socket; corvidae never spawns or supervises it.
-  Direct messages only. Scope is the sender's ACI. Config may name
-  senders by E.164 in `allow:` and `channels:`; those resolve forward to
-  ACIs in one batched call after each connect, never at startup, and a
-  failed resolution retries after the next connect. Non-`dataMessage`
-  envelopes (including the account's own sync traffic) are dropped;
-  attachments are logged and discarded; text accompanying them is
-  processed; backlog older than five minutes is prefixed with its send
-  time. Typing starts on the first outstanding message and refreshes
-  every 10 s; the read receipt is sent at processing start, not arrival.
-  Notifications are never handled inline in the read loop. Groups
-  and disappearing-message handling are out of scope.
+  daemon over a unix socket; corvidae never spawns or supervises it. Scope
+  is the sender's ACI. Config may name senders by E.164 in `allow:` and
+  `channels:`; those resolve forward to ACIs in one batched call after each
+  connect, never at startup, and a failed resolution retries after the next
+  connect. Non-`dataMessage` envelopes (including the account's own sync
+  traffic) are dropped; text that arrives with an attachment is processed;
+  backlog older than five minutes is prefixed with its send time. Typing
+  starts on the first outstanding message and refreshes every 10 s; the
+  read receipt is sent at processing start, not arrival. Notifications are
+  never handled inline in the read loop.
 - **Discord**: discord.py's gateway behind the `discord` extra, default
-  intents, no privileged Message Content intent. Replies in DMs and when mentioned (not
-  `@everyone`, `@here`, or roles); drops bot authors and empty text;
-  strips the mention token. Scopes: `discord:<channel_id>`,
-  `discord:<thread_id>` (a thread has its own history), `discord:dm:<user_id>`.
-  Every send passes `AllowedMentions.none()`. A bad token is logged once
-  at ERROR and not retried. Gateway events are queued and consumed by one
-  processor so arrival order holds. Voice, slash commands, embeds,
-  attachments, reactions: out of scope.
+  intents, no privileged Message Content intent. Replies in DMs and when
+  mentioned (not `@everyone`, `@here`, or roles); drops bot authors and
+  empty text; strips the mention token. Scopes: `discord:<channel_id>`,
+  `discord:<thread_id>` (a thread has its own history),
+  `discord:dm:<user_id>`. Every send passes `AllowedMentions.none()`. A bad
+  token is logged once at ERROR and not retried. Gateway events are queued
+  and consumed by one processor so arrival order holds.
 - **Web**: one page, one WebSocket per tab, JSON frames both ways, served
   by aiohttp in the daemon's loop, no new dependencies, no build step,
   vendored marked and DOMPurify with recorded versions and hashes. Binds
@@ -504,9 +501,7 @@ Per transport:
   task; `on_stop` closes fan-out sockets, cancels handlers, and finishes
   inside Runtime's 3 s budget, aborting transports a dead peer will never
   drain. A token change on reload closes every socket with 4001; host, port
-  and origins changes log "restart to apply". Paging past 200 rows, an
-  inspector pane, and views of other transports' channels are out of scope;
-  each gets its own decision.
+  and origins changes log "restart to apply".
 - **ACP**: Agent Client Protocol v1 over stdio, the official Python SDK,
   as a dedicated `corvidae acp` subprocess that owns stdio (JSON-RPC only
   on stdout; logs to stderr or a file). Inert under `serve` and `cli`.
@@ -532,9 +527,7 @@ Per transport:
   reply is in `message_log`, and a reconnecting client's `session/load`
   replays it, whereas `cancelled` would misreport the agent's state and
   invite a retry of tools that already ran. The stdio loop starts
-  reading only once `Agent.started` is true. Out of scope, each with its
-  own decision: client-mediated tools, a remote listener on the daemon,
-  registry auth, ACP v2.
+  reading only once `Agent.started` is true.
 
 ### 3.3 Context window, compaction, prompt construction
 
@@ -597,7 +590,7 @@ Per transport:
 8. The system prompt is a string or a list of file paths concatenated with
    blank lines, in two layers: the agent's identity, which is agent-wide
    and heads every channel's prompt, then the channel's register
-   (§3.3.11), which resolves like any channel setting (§3.11.2) and is
+   (§3.3.10), which resolves like any channel setting (§3.11.2) and is
    appended after it. No channel setting replaces the identity
    (principle 14). It
    is resolved against the config directory once per
@@ -610,9 +603,7 @@ Per transport:
    after the system prompt; or appended to the current window, and moved
    to the system prompt at the next compaction or conversation boundary.
 9. `<think>` blocks are stripped from display, never from the DB.
-10. Double-buffer compaction (build the compacted prompt in a second KV
-    slot and swap) is out of scope.
-11. The agent writes in the social register of the channel it's in:
+10. The agent writes in the social register of the channel it's in:
     texting-length turns in a one-on-one chat app, short turns that don't
     take over a group channel, longer answers where the medium invites them
     (the web UI, a coding session), and only the formatting the transport
@@ -624,8 +615,8 @@ Per transport:
     identity speaks in a given place; prompt material for it is appended
     after the identity, never in place of it (§3.3.8). How the register is
     achieved (prompt material, history, context, sampling) is otherwise a
-    design choice, not a requirement; the bar is behavioural (principle
-    6), and an essay-length reply to a one-line text is a bug.
+    design choice, not a requirement; the bar is behavioural (principle 6),
+    and an essay-length reply to a one-line text is a bug.
 
 ### 3.4 Persistence
 
@@ -958,7 +949,7 @@ deciding only what to newly append and in what order.
    direct user reply by default.
 5. The agent itself may decline any turn, a direct user turn included,
    when it judges it has nothing true, relevant and substantial to add
-   (Grice's maxims). The channel's register (§3.3.11) sets the norm:
+   (Grice's maxims). The channel's register (§3.3.10) sets the norm:
    where the register is a task, a request addressed to the agent is
    always answered; in conversational registers, a conversation that has
    concluded gets silence. A declined turn sends nothing, is withheld as a
@@ -1443,7 +1434,6 @@ record that holds the reasoning.
 | Model endpoints may be remote; a role's credentials should be storable in the environment rather than config (not required to be), and the threat model names what each role sends | #217 |
 | Critique is gated: stylistic lenses run on salience, the provenance check on every claim about the past, never unconditionally per reply | principle 7; §3.7 Critique 1–2; diverges from the Persyn spec |
 | No inline refine step: the sent reply is the candidate, and correction arrives on a later turn | principle 3; §3.7 Critique 4; the Persyn spec's own deferred-deliberation default |
-| Voice and an operator console are out of scope | both optional in the Persyn spec |
 | Operator-seeded goals allowed | §3.7 Goals; diverges from the Persyn spec |
 | Memory poisoning answered on the write side with trust tagging (trust plugin) | §3.7 Trust; an addition to the Persyn spec |
 | No sandbox; the subagent/MCP seam is where one would attach | principle 9; §3.5.3, §3.5.5; diverges from the Persyn spec's sandboxed execution |
