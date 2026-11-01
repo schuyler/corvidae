@@ -721,8 +721,10 @@ What each kind of unlock costs:
   load the new model into its only slot stalls every channel while it
   does. Large `max_tokens` or sampling extremes degrade replies on that
   channel. `logprobs` costs little: larger responses, and nothing from
-  providers that don't support it. Any other request-body key falls here
-  too, and some reach past the channel: a backend's slot or cache controls
+  providers that don't support it; switched off where the operator turned
+  it on, it drops the entropy summary from the outcome log, which
+  calibration reads. Any other request-body key falls here too, and some
+  reach past the channel: a backend's slot or cache controls
   (llama-server's `id_slot`, `cache_prompt`) can evict another channel's
   cached prefix, and a forced `response_format` or grammar can stop the
   model emitting tool calls.
@@ -733,9 +735,9 @@ What each kind of unlock costs:
   switch off the provenance check. The recommended blocklist in
   [configuration.md](configuration.md) is the lock.
 - **Closed-loop threshold fitting.** The agent adjusts its gates from an
-  outcome log that untrusted traffic helps write. A sustained campaign
-  can walk thresholds somewhere no single message could, slowly enough
-  that no one turn looks wrong: finding 2 in slow motion. Not built yet.
+  outcome log that untrusted traffic helps write. A sustained campaign can
+  walk thresholds somewhere no single message could, slowly enough that no
+  one turn looks wrong: finding 2 in slow motion. Not built yet (#292).
 - **Framework settings** (`max_turns`, `max_context_tokens`,
   `reasoning_history`; open by default today). `max_context_tokens` sets
   the compaction threshold. Set above the server's context, compaction
@@ -751,9 +753,9 @@ What each kind of unlock costs:
 - **Everything else in `agent.yaml`** (kernel, client, scheduler and
   transport settings: `llm.*` endpoints and keys, `plugins.disabled`,
   `scheduler.jobs`, the cross-channel send allowlist and budget once they
-  exist (PRD §3.5.9), `agent.compaction_*`, the `tools.*` limits). Today
-  these are reachable only through a writable `agent.yaml` (finding 4); an
-  unlock through a tool carries the same costs. A repointed
+  exist (PRD §3.5.9, #167), `agent.compaction_*`, the `tools.*` limits).
+  Today these are reachable only through a writable `agent.yaml` (finding
+  4); an unlock through a tool carries the same costs. A repointed
   `llm.main.base_url` sends every conversation, and the API key, to a host
   of the attacker's choosing. `plugins.disabled` switches off the gates
   wholesale at the next restart. A scheduled job's prompt comes back
@@ -778,8 +780,8 @@ What each kind of unlock costs:
   skill written at an injection's request is offered to every future
   conversation on every channel and survives restarts. The idle scan
   watches skill-directory writes (PRD §3.7 Trust); operator confirmation
-  on writes is the lock. Skills are not built yet, so neither is the
-  lock.
+  or a trust gate on writes, or disabling them, is the lock. Skills are
+  not built yet, so neither is the lock (#292).
 - **The tool set.** If the agent can re-enable a tool the operator
   disabled on its channel, an injection on a channel where `shell` is
   registered but disabled can grant itself `shell`, and from there
@@ -798,9 +800,9 @@ What each kind of unlock costs:
   bounds how often. The locks are the restart tool itself, file ownership
   of `agent.yaml` and the prompt files (PRD §3.11.11), and, for code,
   keeping it read-only to the daemon and outside the file tools' root, or
-  disabling `write_file` and `shell` (the tool set entry). A code edit the
-  restart tool can't apply still takes effect at the next restart the
-  operator does.
+  disabling `write_file` and `shell` (the tool set entry). A code edit
+  made while the restart tool is locked or rate-limited still takes effect
+  at the next restart the operator does.
 
 Recommended locks for a channel with untrusted participants, as a starting
 point rather than a rule: the system prompt, the prompts that judge and
