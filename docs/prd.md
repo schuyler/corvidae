@@ -224,7 +224,10 @@ one is a bug even if its tests pass.
       fitting thresholds from the outcome log in a closed loop
       (principle 7);
     - its tool set, within the tools already registered (§3.5.2);
-      adding tools or plugins at runtime is out of scope (principle 1).
+    - its own code, configuration, prompt files and plugin set, applied
+      by restarting itself (§3.11.13). There is no runtime code loading
+      (principle 1): a change to code or to the plugin set takes a
+      restart.
 
     No deployment is required to allow any of it. Every restriction on
     self-modification is a lock: a mechanism the framework supports and
@@ -234,9 +237,12 @@ one is a bug even if its tests pass.
     (principle 4). Each capability has a route that keeps the agent loop
     consistent. A request-body override carries model parameters, never
     the loop's own `messages`, `tools`, `tool_choice` or `stream`
-    (§3.5.6). A change to the head of the window (the system prompt, the
-    tool set) takes effect at the channel's next compaction boundary or
-    conversation start, not mid-window (§3.3.8; principle 2). What each
+    (§3.5.6). Cache reuse is optimized for the general case: a change
+    that would alter what is already rendered in the window (the system
+    prompt, the tool set, how earlier rows are framed or stripped) takes
+    effect at the channel's next compaction boundary or conversation
+    start, not mid-window (§3.3.8; principle 2). An agent that wants a
+    change applied at once makes it persistent and restarts. What each
     unlock costs is recorded in `docs/threat-model.md` (principle 9).
 
 ## 3. Requirements
@@ -626,11 +632,12 @@ Per transport:
    default, with the documented recommended locks for channels with
    untrusted participants. `agent.immutable_settings` and the other locks
    narrow what the agent may set, and operator config can lift any of
-   them, `system_prompt` included (principle 15). An unlocked
-   `system_prompt` change takes effect at the channel's next compaction
-   boundary or conversation start, as plugin sections do (§3.3.8;
-   principle 2). `set_settings` can't lift a lock or change the lock list
-   itself.
+   them, `system_prompt` included (principle 15). An override that changes
+   already-rendered content (`system_prompt`,
+   `mid_conversation_system_role`, `reasoning_history`) takes effect at
+   the channel's next compaction boundary or conversation start, as plugin
+   sections do (§3.3.8; principle 2). `set_settings` can't lift a lock or
+   change the lock list itself.
 7. `subagent` launches a background agent on the shared `background`
    client with the calling channel's tool set minus itself and a
    persona-neutral prompt as shipped, which is one of the agent's prompts
@@ -1094,13 +1101,20 @@ design: `docs/design.md`, Forks. The requirements are outcomes:
 10. The ops docs (`signal-ops.md`, `discord-ops.md`, the web section of
     `configuration.md`) cover account setup and remote access; real
     identifiers stay in gitignored local notes.
-11. `agent.yaml` and the prompt files should be owned by another user and
-    read-only to the daemon, and the docs say so, because `write_file`
-    plus hot reload otherwise undoes every other control.
+11. Making `agent.yaml` and the prompt files owned by another user and
+    read-only to the daemon is how an operator locks self-edits of
+    configuration and prompts (principle 15). The docs say so, and say
+    the cost of leaving them writable: `write_file` plus hot reload or a
+    restart lets the agent lift every other lock.
 12. No container image until a second deployment needs one. When
     one is written it is a kernel image with `/data` as the working
     directory and `agent.yaml` bind-mounted, no ports unless `web:` is
     configured, and signal-cli and llama-server outside the container.
+13. The agent can restart the daemon to apply changes to its own code,
+    configuration, prompt files and plugin set (principle 15). Restarts
+    it requests are rate-limited by operator config, so an edit-restart
+    loop can't flap. The restart tool is a capability like any other:
+    the operator can lock it.
 
 ### 3.12 Evaluation and the harness
 
@@ -1203,7 +1217,7 @@ record that holds the reasoning.
 | Summary role follows the mode: fork `assistant`, standalone `user` with data framing | `threat-model.md` finding 3 |
 | No process separation until corvidae runs on a machine the operator does not own | `threat-model.md`, Privilege separation |
 | Personality is duck-typed and judged longitudinally; goal retirement is a consolidation event; `self` is a fact subject, ungated beyond trust inheritance; the self-model compile reads only facts above a trust floor and sends the operator each diff; interoception line and self-model compile; commitment records and endogenous goals only on a named failure | `plans/personality-and-autonomy.md` (PR #48) |
-| No runtime plugin loading; changing the plugin set is a restart | #28 |
+| No runtime plugin loading; changing the plugin set is a restart, which the agent may request (rate-limited) | #28; principle 15 |
 | No container image until a second deployment needs one | #37 |
 | Topic structure is the `topic` subject's job, not a retrieval dimension | `shakedown-findings.md` |
 | `plans/new-hooks.md` retired. Per-turn tool filtering and system-prompt transforms are rejected (the tool schemas and system prompt are the head of the prompt, principle 2); inbound-text rewriting is rejected (the log keeps what arrived); config-change notifications are unneeded (tunables resolve at decision time); a compaction veto is rejected (it trades a summary for an over-budget request). A per-call tool veto and per-channel tool sets, fixed per conversation, are tracked for Phase 5's trust work; a channel-created observation waits for a second implementer under §3.1.11 | #31, #148, #149, #150 |

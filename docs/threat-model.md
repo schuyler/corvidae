@@ -656,30 +656,33 @@ The key is never logged or echoed in errors and replies.
 
 PRD principle 15 makes self-modification a design goal: the framework must
 be able to let the agent change its own prompts, skills, model and
-parameters, tunables, framework settings, caps and thresholds, and tool
-set, and every restriction on that is a lock the operator can lift. This
-finding is the cost ledger it asks for, organized by kind of change so
-that a new key falls under an entry that already exists. It doesn't argue
-against the capability; it says what each kind of unlock buys an attacker
-who can get text in front of the model, so an operator can decide per
-channel.
+parameters, tunables, framework settings, caps and thresholds, tool set,
+and its own code and configuration (applied by restarting), and every
+restriction on that is a lock the operator can lift. This finding is the
+cost ledger it asks for, organized by kind of change so that a new key
+falls under an entry that already exists. It doesn't argue against the
+capability; it says what each kind of unlock buys an attacker who can get
+text in front of the model, so an operator can decide per channel.
 
 Where the tree stands: `set_settings` hard-blocks `system_prompt` and any
 undotted key outside its allowlist, and can't change a channel's disabled
 tools. The static keys are read from operator config alone (through
-`tuning.config_value` or their plugin's config section): an override under a
-dotted name (`agent.request_logprobs`) is accepted but has no effect, and
-an undotted one is refused by the allowlist. Several prompts (subagent,
-heartbeat) are code constants with no config key at all (#287, #289).
-None of these can be unlocked yet (#292). On a channel that still has
-`write_file` or `shell`, the agent can already get around all of them by
-rewriting `agent.yaml` or a system-prompt file (finding 4), unless the
-files are read-only to the daemon.
+`tuning.config_value` or their plugin's config section): an override under
+a dotted name (`agent.request_logprobs`) is accepted but has no effect,
+and an undotted one is refused by the allowlist. Several prompts
+(subagent, heartbeat) are code constants with no config key at all (#287,
+#289). There is no restart tool in this tree; the agent can only restart
+by way of `shell`. None of these can be unlocked yet (#292). On a channel
+that still has `write_file` or `shell`, the agent can already get around
+all of them by rewriting `agent.yaml` or a system-prompt file (finding 4),
+unless the files are read-only to the daemon.
 
 The common shape: a runtime override is per channel and in memory, so an
-injected change lasts on that channel until the override is cleared or
-the daemon restarts. A change to the head of the window (system prompt,
-tool set) applies from the next compaction or conversation start. A skill
+injected change lasts on that channel until the override is cleared or the
+daemon restarts. A change that alters what is already rendered in the
+window (system prompt, tool set, framing, `reasoning_history`) applies
+from the next compaction or conversation start, or at once if the agent
+makes it persistent and restarts. A skill or a persistent self-edit
 outlives both, and a closed-loop fit would re-derive itself from the
 outcome log after a restart.
 
@@ -777,14 +780,24 @@ What each kind of unlock costs:
   registered but disabled can grant itself `shell`, and from there
   everything in finding 4. This is the most important one to keep locked
   on any channel with untrusted participants.
+- **Self-edit and restart** (its own code, configuration, prompt files and
+  plugin set, applied by restarting; PRD §3.11.13). A code or config edit
+  made at an injection's request is persistent and total: it can lift
+  every lock in this ledger, disable plugins, or plant code that runs with
+  the daemon's privileges, and it survives every restart after. This is
+  the cost finding 4 already records for a writable `agent.yaml` and
+  `shell`, reached on purpose. A restart also drops every runtime override
+  and briefly takes every channel offline; the operator's rate limit on
+  agent-requested restarts bounds how often. The locks are the restart
+  tool itself and file ownership (PRD §3.11.11).
 
-Recommended locks for a channel with untrusted participants, as a
-starting point rather than a rule: the system prompt, the prompts that
-judge and remember, the heartbeat and subagent prompts, framing, `model`
-and the backend's slot and cache controls, the gate tunables (which also
-blocks closed-loop fitting from moving them), the tool set, `llm.*`,
-`plugins.disabled`, `scheduler.jobs`, and skill writes behind
-confirmation.
+Recommended locks for a channel with untrusted participants, as a starting
+point rather than a rule: the system prompt, the prompts that judge and
+remember, the heartbeat and subagent prompts, framing, `model` and the
+backend's slot and cache controls, the gate tunables (which also blocks
+closed-loop fitting from moving them), the tool set, `llm.*`,
+`plugins.disabled`, `scheduler.jobs`, skill writes behind confirmation,
+and self-edit and restart.
 
 A channel with only the operator on it has the smallest exposure, and it
 is where these unlocks cost least. It isn't free. Untrusted text still
