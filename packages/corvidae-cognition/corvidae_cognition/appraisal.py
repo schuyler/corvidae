@@ -957,14 +957,16 @@ class AppraisalPlugin(CorvidaePlugin):
     # ------------------------------------------------------------------
 
     async def importance_over_range(self, channel, msg_id_range) -> float | None:
-        """Max importance over exchanges whose message_rowid is in the range.
+        """Max importance over this channel's exchanges whose message_rowid
+        is in the range (other channels' interleaved exchanges are ignored).
 
         Per-exchange score = max(stage1.salience, stage2_composite) when
         stage 2 is present, else stage-1 salience alone, else the exchange is
         skipped. Returns None when no appraisal covers the range (the caller
         falls back to the wrapped prior).
         """
-        envelopes = await self._appraisals_in_range(msg_id_range)
+        # Only this channel's exchanges: message_log ids are global.
+        envelopes = await self._appraisals_in_range(channel.id, msg_id_range)
         if not envelopes:
             return None
         cfg = self.config
@@ -990,9 +992,11 @@ class AppraisalPlugin(CorvidaePlugin):
             return None
         return max(scores)
 
-    async def mean_valence(self, msg_id_range) -> float | None:
-        """Mean stage-2 valence over the range, or None when none present."""
-        envelopes = await self._appraisals_in_range(msg_id_range)
+    async def mean_valence(self, channel_id: str, msg_id_range) -> float | None:
+        """Mean stage-2 valence over the range on this channel, or None when
+        none present."""
+        # Only this channel's exchanges: message_log ids are global.
+        envelopes = await self._appraisals_in_range(channel_id, msg_id_range)
         valences: list[float] = []
         for env in envelopes:
             stage2 = env.get("stage2")
@@ -1002,8 +1006,11 @@ class AppraisalPlugin(CorvidaePlugin):
             return None
         return sum(valences) / len(valences)
 
-    async def _appraisals_in_range(self, msg_id_range) -> list[dict]:
-        """Return appraisal envelopes for exchanges whose rowid is in range."""
+    async def _appraisals_in_range(
+        self, channel_id: str, msg_id_range
+    ) -> list[dict]:
+        """Return appraisal envelopes for this channel's exchanges whose
+        message rowid is in range."""
         if not msg_id_range:
             return []
         lo, hi = msg_id_range
@@ -1014,11 +1021,21 @@ class AppraisalPlugin(CorvidaePlugin):
             async with db.execute(
                 "SELECT appraisal FROM exchange_log "
                 "WHERE message_rowid IS NOT NULL AND message_rowid >= ? "
-                "AND message_rowid <= ? AND appraisal IS NOT NULL",
-                (lo, hi),
+                "AND message_rowid <= ? AND appraisal IS NOT NULL "
+                "AND channel_id = ?",
+                (lo, hi, channel_id),
             ) as cursor:
                 rows = await cursor.fetchall()
-        except Exception:
+        except Exception as exc:
+            # Rescue: treat as "no appraisals" but log it so the fallback
+            # to the rubric prior / NULL valence is visible.
+            logger.warning(
+                "appraisal: exchange_log lookup failed for channel %s, "
+                "messages %d–%d (%s); the record falls back to the rubric "
+                "prior and NULL valence",
+                channel_id, lo, hi, type(exc).__name__,
+                exc_info=True, extra={"channel": channel_id},
+            )
             return []
         envelopes: list[dict] = []
         for (appraisal_json,) in rows:
