@@ -116,6 +116,40 @@ class TestChannelConfigResolve:
 # validate_agent_config — fail loudly on stale or bad reasoning config (#57)
 # ---------------------------------------------------------------------------
 
+class TestMaxToolCallsPerTurnConfig:
+    """max_tool_calls_per_turn: config surface (#285)."""
+
+    def test_resolve_defaults_to_no_limit(self):
+        cfg = ChannelConfig()
+        result = cfg.resolve({"system_prompt": "x"})
+        assert result["max_tool_calls_per_turn"] is None
+
+    def test_resolve_agent_default_fills_gap(self):
+        cfg = ChannelConfig()
+        result = cfg.resolve({"max_tool_calls_per_turn": 3})
+        assert result["max_tool_calls_per_turn"] == 3
+
+    def test_resolve_channel_override_wins(self):
+        cfg = ChannelConfig(max_tool_calls_per_turn=5)
+        result = cfg.resolve({"max_tool_calls_per_turn": 3})
+        assert result["max_tool_calls_per_turn"] == 5
+
+    @pytest.mark.parametrize("value", [1, 3, 10])
+    def test_parse_accepts_positive_int(self, value):
+        parsed = parse_channel_config({"channels": {
+            "irc:#a": {"max_tool_calls_per_turn": value},
+        }})
+        (cid, transport, scope, config), = parsed.exact
+        assert config.max_tool_calls_per_turn == value
+
+    @pytest.mark.parametrize("value", [0, -1, "3", True, 2.5])
+    def test_parse_rejects_non_positive_or_non_int(self, value):
+        with pytest.raises(ValueError, match="max_tool_calls_per_turn"):
+            parse_channel_config({"channels": {
+                "irc:#a": {"max_tool_calls_per_turn": value},
+            }})
+
+
 class TestValidateAgentConfig:
     @pytest.mark.parametrize("value", ["drop", "exchange", "keep"])
     def test_accepts_valid_values(self, value):
