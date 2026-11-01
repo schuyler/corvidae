@@ -364,10 +364,13 @@ class Runtime:
 
         try:
             await self.start()
-        except Exception:
+        except BaseException:
             # Close whatever did start (persistence's aiosqlite connection has
             # a non-daemon thread that would otherwise hang interpreter exit),
             # then let the failure propagate so the process exits non-zero.
+            # BaseException, not Exception: a CancelledError leaked from a
+            # plugin's on_start skipped this cleanup and left the process
+            # alive and silent under systemd (#282).
             await self._cleanup_failed_start()
             raise
         _starting = False

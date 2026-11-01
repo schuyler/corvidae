@@ -1309,8 +1309,9 @@ of never. `note_restored` ignores channels the tracker already knows.
 `clock.close()`, which cancels any timers plugins left behind. Plugins
 should still cancel their own watches and timers in `on_stop`.
 
-**Failed start.** If `Runtime.start()` raises (`Exception`, not the
-`SystemExit` a config error raises before any plugin loads),
+**Failed start.** If `Runtime.start()` raises anything, `BaseException`
+included (a `CancelledError` leaked from a plugin's `on_start`, #282; a
+config error's `SystemExit` before any plugin loads finds nothing to close),
 `Runtime.run` runs `_cleanup_failed_start()` before re-raising: the
 `on_stop` broadcast, `idle.stop()` and `clock.close()`, under the same 3 s
 bound as `stop()` (as there, an `on_stop` that raises skips the last two;
