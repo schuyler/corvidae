@@ -776,9 +776,9 @@ decide gate treats it as non-user, and `exchange_log` records it.
 
 **What it can reach.** No transport owns `internal:heartbeat`, so a beat's
 reply goes to `sessions.db` and the jsonl log, never to a person. Reaching
-a person needs a cross-channel send (PRD §3.5.9, #169), which doesn't exist
-yet; when it lands, the beat uses it like any other tool, behind its
-allowlist and budget. The prompt tells the model that most beats warrant
+a person needs the send or note tools (PRD §3.5.9–10, #234, #235), which
+don't exist yet; when they land, the beat uses them like any other turn,
+with no allowlist. The prompt tells the model that most beats warrant
 nothing, and to say so in one line and stop.
 
 **What it reviews.** Memory is compartmented, so the beat sees only the

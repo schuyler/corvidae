@@ -53,7 +53,8 @@ fixture anyway; the guard is a backstop.
 ## Architecture pointers
 
 Three layers: an apluggy plugin system, the agent loop, and transport plugins.
-`docs/design.md` is the authority; `docs/plugin-guide.md` is the how-to.
+`docs/prd.md` is the reference for what must be true; `docs/design.md` describes
+how the tree does it; `docs/plugin-guide.md` is the how-to.
 
 Things that are easy to get wrong and won't fail loudly:
 
