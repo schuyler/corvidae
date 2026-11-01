@@ -89,7 +89,8 @@ def resolve_own_timeout(tool_fn: Callable, name: str | None = None) -> float | N
     ``own_timeout`` is a number or a zero-argument callable returning
     ``float | None``, set as an attribute on the registered callable. It is
     read per call so it tracks live config. A bound method reads its
-    function's attribute. For a partial or callable instance, set the
+    function's attribute (a method object forwards ``__dict__`` to its
+    function). For a partial or callable instance, set the
     attribute on that object itself; a class-level property is not read.
 
     A callable that raises, or a value that is not a finite real number,
@@ -97,9 +98,8 @@ def resolve_own_timeout(tool_fn: Callable, name: str | None = None) -> float | N
     tool name per process.
     """
     # Look up via vars() so Mock/AsyncMock tools cannot invent an attribute.
-    target = getattr(tool_fn, "__func__", tool_fn)
     try:
-        declared = vars(target).get("own_timeout")
+        declared = vars(tool_fn).get("own_timeout")
     except TypeError:
         # No __dict__ on this callable, so nothing can be declared.
         return None

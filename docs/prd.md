@@ -330,7 +330,7 @@ one is a bug even if its tests pass.
    has, not dropped.
 8. A tool call that never returns cannot wedge a channel: `dispatch` bounds
    every call with `tools.call_timeout` (default 600 s, per-tool overrides
-   in `tools.timeouts`, skipped when the tool's own timeout is shorter),
+   in `tools.timeouts`, skipped when the tool's own timeout is not longer),
    and a timeout returns an error string to the model so the turn
    continues.
 9. Tool-dispatch failure paths (no task queue, a raising `on_notify`) still

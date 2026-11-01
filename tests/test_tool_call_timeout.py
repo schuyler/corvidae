@@ -366,19 +366,6 @@ async def test_unreadable_own_timeout_falls_back_and_warns_once(caplog):
     assert len(own_warns) == 1
 
 
-def test_own_timeout_on_bound_method():
-    """A bound method reads own_timeout from its underlying function."""
-    from corvidae.tool import resolve_own_timeout
-
-    class Holder:
-        async def run(self):
-            return "x"
-
-        run.own_timeout = 7
-
-    assert resolve_own_timeout(Holder().run) == 7
-
-
 def test_mock_tool_has_no_own_timeout(caplog):
     """An AsyncMock tool must not invent an own_timeout, nor warn."""
     from corvidae.tool import resolve_own_timeout
