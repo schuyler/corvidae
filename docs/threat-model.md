@@ -906,8 +906,11 @@ decision (2026-11-01), and these are its costs.
   unless the operator sets one (PRD §3.5.9), so one exchange can send up to
   its `max_turns` budget's worth of messages to any one contact, and
   reminder firings aimed at a contact add to that. A note that wakes
-  another channel starts a turn there, and that turn can wake the first.
-  The caps of finding 14 will bound total spend once built (#296).
+  another channel starts a turn there, and that turn can wake the first,
+  but the whole chain shares the `max_turns` budget of the exchange that
+  started it (PRD §3.1.3, §3.5.10), so the ping-pong ends when that
+  budget does. The caps of finding 14 will bound total spend once built
+  (#296).
 - **One poisoned memory reaches every prompt.** With no compartments, a
   record distilled from untrusted text on any channel is retrievable on
   all of them. The trust plugin's quarantine (#138) is the capability an

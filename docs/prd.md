@@ -213,7 +213,10 @@ one is a bug even if its tests pass.
     on the agent's own initiative rather than as a continuation of an
     exchange: reminders and the heartbeat are agency;
     provenance objections and task results continue an exchange and are
-    not; stylistic critique objections start no turn at all. Agency is
+    not, and neither is a turn a note wakes on another channel (§3.5.10):
+    a continuation can cross channels, and a chain of continuations is
+    agency only if the exchange that started it was. Stylistic critique
+    objections start no turn at all. Agency is
     optional. Without agency plugins the agent never initiates a turn and
     has no reminders or heartbeat, and its upkeep still runs. No plugin's
     documented behaviour may depend on traffic it does not control.
@@ -324,7 +327,10 @@ one is a bug even if its tests pass.
 3. `max_turns` is a per-exchange budget. The counter resets on any item
    that originates a new trace while no tool cycle is in flight, so a
    channel fed only by scheduler notifications never exhausts it. An item
-   arriving mid-cycle is charged to the running cycle.
+   arriving mid-cycle is charged to the running cycle. An exchange's
+   budget follows it to every channel it reaches: a turn a note wakes
+   (§3.5.10) is charged to the budget of the chain that woke it, never
+   given a fresh one.
 4. Every inbound item carries a trace id. Transports mint it from a
    stdlib-only module and pass it to `on_message`; the Agent mints at
    dequeue for a notification that inherits none. The id and an opaque
@@ -748,7 +754,15 @@ Per transport:
     whether the note waits for the target's next turn or wakes it. With
     the trust plugin loaded, a note carries the minimum trust of the
     participants of the channel it came from, and a low-trust note is
-    quarantined as a low-trust record is (§3.7 Trust).
+    quarantined as a low-trust record is (§3.7 Trust). A turn a note
+    wakes is its own exchange on the target channel, with its own trace
+    and a stamped link to the exchange that sent the note, never an
+    inferred one. It carries the origin of the exchange that started the
+    chain (§3.1.4), so the chain's kind (principle 13), critique
+    eligibility (§3.7 Critique 3), budget (§3.1.3) and precedence
+    (§3.13.7) all follow how the chain started. The target's turn still
+    judges for itself, and may end without sending anything (§3.7, the
+    right to silence).
 11. Reading another channel: any turn can read another channel's recent
     conversation from the raw log, including what consolidation hasn't
     reached, returned at the tail of the reader's window as framed data.
@@ -911,7 +925,8 @@ deciding only what to newly append and in what order.
    The reply is never a record of itself. Generator confidence is
    never evidence.
 3. Eligibility is by propagated origin: `user` and `reminder` exchanges
-   are judged, against the stored originating message; `critique`,
+   are judged, against the stored originating message, which for a turn
+   a note woke may be on another channel (§3.5.10); `critique`,
    `heartbeat`, and `task` exchanges are exempt, unbypassable by tool use.
    Withheld responses stay eligible.
 4. Empty objections are recorded and wake nothing. Stylistic objections
@@ -1360,7 +1375,8 @@ decided there.
       wait for under principle 3, and upkeep past its latency bound
       (past due, in principle 3's terms; principle 13);
    2. continuations of an exchange already in flight (a tool result, a
-      turn waiting on its own compaction);
+      turn waiting on its own compaction, a turn a note woke when its
+      chain did not start as agency, §3.5.10);
    3. agency past its latency bound (§3.1.16, principle 13);
    4. everything else, with a main turn that starts a new exchange
       ahead of upkeep not yet due (principle 3).
@@ -1465,6 +1481,7 @@ record that holds the reasoning.
 | The agent is one actor with one identity on every channel; trust and sensitivity, not channel walls. No cross-channel allowlist and no memory compartments, as an option or otherwise; two identities means two instances | #167; operator directive, 2026-11-01; #234, #235 |
 | Any turn can speak on any channel, leave a note for another channel's context, and read another channel's conversation; a per-destination limit on messages the agent starts is a restriction the operator can apply, off unless set, never a gate on crossing channels | operator directive, 2026-11-01; #234, #235 |
 | Audience filtering is a capability, not a requirement: the sensitivity plugin, where the operator loads it, filters what enters a window (retrieval, notes, reads, goals) by who is present; it never gates a reply | principle 15; operator directive, 2026-11-01 |
+| A turn a note wakes is its own exchange, linked to the one that sent the note; its origin, kind (agency or continuation), `max_turns` budget and precedence follow the exchange that started the chain; a continuation can cross channels | principle 13; §3.1.3; §3.5.10; operator directive, 2026-11-01 |
 | Identity is agent-wide and heads every prompt; channel register is appended after it and never replaces it | operator directive, 2026-11-01 |
 | The operator decides the trust boundary; inbound transports default-deny; channels are not a boundary; safety features layer in as plugins | #167; operator directive, 2026-11-01 |
 | Corvidae is a testbed first and a robust harness second | #167 |
