@@ -858,12 +858,14 @@ only through the funnel.
    type's job (below), not a retrieval dimension, and the harness
    conflation probe is what says whether that holds.
 8. `corvidae redact` (`message`, `memory`, `range` forms, `--dry-run`)
-   tombstones `message_log` content in place and cascades to every
-   derived surface on the same channel: memory summaries, flags, vectors,
-   both FTS indexes. It asserts WAL, probes for schema before touching it,
-   never creates schema, reports found-of-requested, and verifies its own
-   completeness with an FTS probe for a sample token. It is never a
-   registered tool and never reachable from a hook the model can influence.
+   tombstones `message_log` content in place and cascades to every derived
+   surface on the same channel: memory summaries, flags, vectors, both FTS
+   indexes. It reaches only the channel it is run on: copies on other
+   channels (reads, notes and sends, §3.5.9–11) are not followed. It
+   asserts WAL, probes for schema before touching it, never creates schema,
+   reports found-of-requested, and verifies its own completeness with an
+   FTS probe for a sample token. It is never a registered tool and never
+   reachable from a hook the model can influence.
 9. The epistemic-calibration prompt fragment is documented and never
    auto-injected.
 

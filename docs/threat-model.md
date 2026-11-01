@@ -970,8 +970,11 @@ replaces the agent-level one, so the identity layering isn't built either
   owning exchange's claims are tombstoned with their counts kept, and
   every snapshot in the channel from the redacted message on is
   dropped. What `redact` still doesn't reach: exchanges whose
-  `message_rowid` is NULL, the JSONL logs and the daemon log, and any
-  copy taken out of `sessions.db` (a calibration export, a backup).
+  `message_rowid` is NULL, the JSONL logs and the daemon log, any copy
+  taken out of `sessions.db` (a calibration export, a backup), and, under
+  PRD §3.7 Memory 8, copies on other channels: a read of the redacted
+  message, a note or send that restates it, and whatever those channels
+  consolidated from them.
 
 ## Privilege separation
 
