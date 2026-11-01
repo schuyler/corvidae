@@ -1573,7 +1573,7 @@ Stage names are opaque to core (it never names cognition plugins).
 
 | Stage | Cut | Runs | On a miss |
 |---|---|---|---|
-| `compaction` | dropped prefix | inline in `resolve_compaction` | standalone summary (then the can't-fail fallback) |
+| `compaction` | dropped prefix | inline in `resolve_compaction` | standalone summary (then the over-budget fallback, #308) |
 | `consolidation` (compaction trigger) | dropped prefix | inline in `before_compaction`; the record is stashed and the `on_compaction` task consumes it | standalone in the `on_compaction` task: no stash (range not in `messages[:cut]`, fork failed) or the watermark moved since the fork |
 | `consolidation` (idle trigger) | full window | in the idle task | range wholly in the live window: skip with a warning, watermark unchanged, retried on the next idle trigger; no registered channel or window, or a range row not in the window: standalone |
 | `appraisal` (stage 2) | full window at run time | silent TaskQueue task | skip with a warning (forks off, originating rowid left the window or was never persisted, fork failed or unusable) |
@@ -1654,7 +1654,8 @@ appraisal and each critique lens from the full window at run time;
 provenance from the prefix ending at the exchange's final reply. Each forks
 only while the rows it needs are still in the window. A miss skips the
 stage with a warning (the rescue is a retry or a skip, never a standalone
-call), except compaction, which takes its can't-fail fallback, and
+call), except compaction, which writes a standalone summary and, if that
+fails too, leaves the window to the over-budget fallback (#308), and
 consolidation of a range that has left the window, which is windowless work
 and runs standalone. Skip-on-miss and the default are implemented (#320).
 Still targets, not enforced today: stage 2 and the lenses forking only the
