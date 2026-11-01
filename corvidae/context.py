@@ -330,7 +330,6 @@ class ContextWindow:
                 cut = c
                 break
             tail -= toks[c]
-        cut = min(cut, n - 1)
 
         # Snap forward past a straddling tool cycle; moving forward only drops
         # more, so the tail still fits. If that would drop the newest row, keep

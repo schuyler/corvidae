@@ -755,9 +755,10 @@ What each kind of unlock costs:
   every turn on that channel fails until the override is cleared. Set far
   below it, compaction runs on nearly every turn, rewriting history into
   summaries. Below `min_messages_to_compact + 1` rows' worth, compaction
-  never runs and every turn drops all but the newest row from the
-  in-memory window (the log keeps them); the over-budget WARNING is the
-  signal. A large `max_turns` lets one injected tool loop run far
+  never runs and the fallback drops the oldest rows from the in-memory
+  window every turn to stay within budget, down to the newest row alone
+  for a budget that small (the log keeps them); the over-budget WARNING is
+  the signal. A large `max_turns` lets one injected tool loop run far
   longer before dispatch is suppressed, holding the pool: the shared
   slot on a local server, the rate window or the budget on a metered
   endpoint (finding 14).
