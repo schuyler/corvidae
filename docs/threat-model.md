@@ -192,10 +192,10 @@ a gap (#293). Until it closes, the critic's and appraiser's
 standalone prompts above are reachable, and they are runtime tunables,
 so keep them in `immutable_settings` with forks on too.
 
-None of this is a defect to engineer away. The capacity to tune and
-rewrite its own gates is part of a design goal (PRD principle 15); this
-finding records its cost, and finding 13 records the cost of each kind of
-self-modification.
+The tunability itself is not a defect to engineer away (the fallback gap
+above is): the capacity to tune and rewrite its own gates is part of a
+design goal (PRD principle 15). This finding records its cost, and finding
+13 records the cost of each kind of self-modification.
 
 ### 3. Untrusted text is promoted to the `system` role
 
@@ -667,13 +667,14 @@ front of the model, so an operator can decide per channel.
 Where the tree stands: `set_settings` hard-blocks `system_prompt` and any
 undotted key outside its allowlist, and can't change a channel's disabled
 tools. The static keys are read from operator config alone (through
-`tuning.config_value` or the agent config directly): an override under a
+`tuning.config_value` or their plugin's config section): an override under a
 dotted name (`agent.request_logprobs`) is accepted but has no effect, and
 an undotted one is refused by the allowlist. Several prompts (subagent,
 heartbeat) are code constants with no config key at all (#287, #289).
-None of these can be unlocked yet (#292). The agent can already get
-around all of them by rewriting `agent.yaml` or a system-prompt file with
-`write_file` (finding 4), unless the files are read-only to the daemon.
+None of these can be unlocked yet (#292). On a channel that still has
+`write_file` or `shell`, the agent can already get around all of them by
+rewriting `agent.yaml` or a system-prompt file (finding 4), unless the
+files are read-only to the daemon.
 
 The common shape: a runtime override is per channel and in memory, so an
 injected change lasts on that channel until the override is cleared or
@@ -689,9 +690,10 @@ What each kind of unlock costs:
   largest single prompt unlock: everything else the operator wrote into
   the prompt, refusals included, is now the model's to change.
 - **The prompts that judge and remember** (the critic's and appraiser's
-  prompts, open by default today; fork instructions, the standalone
-  compaction and consolidation prompts, `agent.forks.*`). The check can
-  be rewritten by the thing it checks (finding 2). An injection can
+  prompts, open by default today; fork instructions; the standalone
+  compaction and consolidation prompts; and `agent.forks.*`, which
+  decides whether those stages fork at all). The check can be rewritten
+  by the thing it checks (finding 2). An injection can
   rewrite how the agent summarizes, consolidates and scores its own
   exchanges, under its own persona, and the results persist: a summary
   it later reads as its own words, a memory record, an `exchange_log`
@@ -713,11 +715,12 @@ What each kind of unlock costs:
   does. Large `max_tokens` or sampling extremes degrade replies on that
   channel. `logprobs` costs little: larger responses, and nothing from
   providers that don't support it.
-- **Gate tunables and thresholds** (`gate.*`, `critique.provenance.enabled`,
-  `critique.sample_below_rate`, the appraisal thresholds; open by default
-  today). Covered in finding 2: an injection can silence the agent on a
-  channel or switch off the provenance check. The recommended blocklist
-  in [configuration.md](configuration.md) is the lock.
+- **Gate tunables and thresholds** (`gate.*`,
+  `critique.provenance.enabled`, `critique.sample_below_rate`, the
+  critique lens thresholds `critique.lens.*`; open by default today).
+  Covered in finding 2: an injection can silence the agent on a channel or
+  switch off the provenance check. The recommended blocklist in
+  [configuration.md](configuration.md) is the lock.
 - **Closed-loop threshold fitting.** The agent adjusts its gates from an
   outcome log that untrusted traffic helps write. A sustained campaign
   can walk thresholds somewhere no single message could, slowly enough
@@ -728,15 +731,19 @@ What each kind of unlock costs:
   never fires in time: once the window outgrows what the server accepts,
   every turn on that channel fails until the override is cleared. Set far
   below it, compaction runs on nearly every turn, rewriting history into
-  summaries. A large `max_turns` lets one injected loop hold the
-  slot.
-- **Other plugin tunables** (`memory.retrieval_k`, `appraisal.probe.*`,
-  the appraisal weights; open by default today). Raising retrieval
-  breadth pulls more stored memory, including text distilled on other
-  channels (PRD principle 14), into every prompt on the channel and fills
-  the window toward compaction. Probe budgets lengthen slot time like the
-  caps below. A plugin tunable not named in this ledger falls under this
-  entry or under the gate entry, by what it controls.
+  summaries. A large `max_turns` lets one injected tool loop run far
+  longer before dispatch is suppressed, holding the shared model slot.
+- **Other plugin tunables** (`appraisal.weights.*`, `appraisal.prior.*`,
+  `appraisal.probe.*`; open by default today). The weights and priors
+  move what the agent attends to and how strongly it remembers it.
+  Raising the probe budget delays stage-1 appraisal of each inbound
+  message on the channel by up to that budget; it doesn't hold the
+  model's slot. Retrieval breadth (`memory.retrieval.k`) is static config
+  today; unlocked, raising it pulls more stored memory, including text
+  distilled on other channels (PRD principle 14), into every prompt on
+  the channel and fills the window toward compaction. A plugin tunable
+  not named in this ledger falls under this entry or under the gate
+  entry, by what it controls.
 - **Caps** (background-stage output caps). The agent can lengthen a
   stage's slot time on every exchange, which starves main turns on a
   single-slot server (PRD principle 3). The caps still have to fit the

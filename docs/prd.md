@@ -149,13 +149,16 @@ one is a bug even if its tests pass.
    sandboxing. Fixed floors protect the operator's own control surface
    rather than draw a trust boundary, and stay fixed, among them: web auth
    cannot be turned off (§3.2 Web), `redact` is never a tool (§3.7 Memory
-   8), `set_settings` can't lift a lock or change the lock list, and
-   transport metadata is out of the agent's reach (§3.5.6). What the agent
-   may change about itself is not a floor: every restriction on it is a
-   lock the operator can lift (principle 15). The model's authority is
-   unbounded and unsandboxed by decision; `docs/threat-model.md` is the
-   standing record of what that costs and is updated whenever untrusted
-   text can reach somewhere new or a tool can do something new.
+   8), `set_settings` can't lift a lock or change the lock list, the
+   request-body keys the agent loop builds (`messages`, `tools`,
+   `tool_choice`, `stream`) are never overridden, and transport metadata
+   is out of the agent's reach (§3.5.6). Apart from these floors, what the
+   agent may change about itself is not fixed: every other restriction on
+   it is a lock the operator can lift (principle 15). The model's
+   authority is unbounded and unsandboxed by decision;
+   `docs/threat-model.md` is the standing record of what that costs and is
+   updated whenever untrusted text can reach somewhere new or a tool can
+   do something new.
 
 10. **Channel ids are persistence keys and never derive from names.**
     `transport:scope` keys `sessions.db`, the JSONL logs, memory
@@ -226,8 +229,8 @@ one is a bug even if its tests pass.
     No deployment is required to allow any of it. Every restriction on
     self-modification is a lock: a mechanism the framework supports and the
     operator configures, never a prohibition in the architecture. Operator
-    config can lift any lock. The floors of principle 9 are not
-    self-modification capabilities and stay fixed, and the conversation log
+    config can lift any lock. The floors of principle 9 are the exceptions
+    and stay fixed, and the conversation log
     stays append-only (principle 4). Each capability has a route that keeps
     the agent loop consistent. A request-body override carries model
     parameters, never the loop's own `messages`, `tools`, `tool_choice` or
