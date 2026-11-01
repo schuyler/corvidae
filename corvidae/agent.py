@@ -1163,6 +1163,8 @@ class Agent(CorvidaePlugin):
             text=message.get("content") or "",
             message=message,
             usage=response.get("usage"),
+            # What the request was sent with, so records can be stamped.
+            model=self._client.request_model(body),
         )
 
     def _warn_if_forks_change_model(self) -> None:

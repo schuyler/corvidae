@@ -354,3 +354,17 @@ async def test_usage_log_mode_column_upgrades_and_records(db):
                                        latency_ms=1.0, attribution=attribution, error=None)
     async with db.execute("SELECT request_id, mode FROM usage_log ORDER BY id") as cursor:
         assert await cursor.fetchall() == [("old", None), ("f", "fork"), ("s", "standalone"), ("t", None)]
+
+
+async def test_fork_result_carries_request_model(forking_agent):
+    """Issue #299 R1: ForkResult.model is what the fork was sent with, taken from
+    the client's request_model for the fork's body, not a constant."""
+    plugin, channel, client = forking_agent
+    # Echo the body's model override, else a fixed default.
+    client.request_model = lambda extra_body=None: (extra_body or {}).get("model", "m")
+
+    overridden = await plugin.fork(channel, INSTRUCTION, extra_body={"model": "fork-m"})
+    plain = await plugin.fork(channel, INSTRUCTION)
+
+    assert overridden.model == "fork-m"
+    assert plain.model == "m"

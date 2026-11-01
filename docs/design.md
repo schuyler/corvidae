@@ -310,7 +310,15 @@ class LLMClient:
     async def start(self)
     async def stop(self)
     async def chat(self, messages: list[dict], tools: list[dict] | None = None, extra_body: dict | None = None) -> dict
+    def request_model(self, extra_body: dict | None = None) -> str
 ```
+
+`request_model` returns the `model` a `chat` call with that `extra_body` is
+sent with: the configured model, overridden by the instance `extra_body`
+and then the call's (`llm.<role>.extra_body.model` can change the model).
+`chat` builds its payload from it, so the two can't drift. It is what
+consolidation stamps on a record. `embed` is deliberately not routed
+through it: it sends the configured `model` and ignores `extra_body`.
 
 Retry parameters: `max_retries` (default 3, set to 0 to disable), `retry_base_delay`
 (base exponential backoff delay in seconds), `retry_max_delay` (cap on backoff delay).
@@ -687,7 +695,7 @@ persistence connection (`PersistencePlugin.db`). The others:
 | Connection | Opened by | Writes |
 |---|---|---|
 | persistence (`PersistencePlugin.db`) | persistence `on_start` | `message_log`, and every other plugin's tables (scheduler, usage_log, retrieval_log, goals, ...) |
-| memory write (`MemoryPlugin._write_db`) | memory `on_start`, after its schema exists | memory records only: consolidation (`memory`, `memory_vec`, `memory_fts` via trigger, `consolidation_watermark`) and `write_record`, each one `BEGIN IMMEDIATE` transaction |
+| memory write (`MemoryPlugin._write_db`) | memory `on_start`, after its schema exists | memory records only: consolidation (`memory`, `memory_vec`, `memory_fts` via trigger, `consolidation_watermark`) and `write_record`, each one `BEGIN IMMEDIATE` transaction. `corvidae memory reconsolidate` opens its own copy in a second process |
 | appraisal probe, critique probe | each plugin's `on_start` | read only (`message_fts` probes) |
 
 Only the memory write connection is isolated for atomicity: a commit on
@@ -1055,6 +1063,40 @@ the summary row with `timestamp = boundary - 1e-6`, and commits.
 
 **Graceful degradation:** without `PersistencePlugin`, `resolve_conversation` returns
 no history and conversation events are not persisted.
+
+## Re-consolidation (`corvidae memory`)
+
+`corvidae_cognition/memory_command.py`, registered under `corvidae.commands`.
+Operator-only, never a registered tool.
+
+Every `memory` row carries a stamp (#299): `prompt_hash` (sha256 of the
+consolidation instruction text, stored once in `memory_prompt(hash, text)`),
+`mode` (`fork | standalone | direct`) and `model` (what the call was sent
+with, from `LLMClient.request_model` or `ForkResult.model`). NULL stamps
+mean the row predates stamping ("unknown"); `direct` rows (goal retirement,
+`write_record`) were written by no consolidation call. The columns are added
+in place by `add_column_if_missing`; no existing row is rewritten.
+
+```
+corvidae memory --db sessions.db stamps
+corvidae memory --db sessions.db reconsolidate STAMP --config agent.yaml
+corvidae memory --db sessions.db reconsolidate STAMP --dry-run
+```
+
+`stamps` and `--dry-run` open the database read-only and never migrate it;
+every read is built from a schema probe, so pre-change and partly migrated
+databases work. A live run is a second process on a live database: it
+asserts WAL, uses its own `MemoryPlugin` write connection
+(`BEGIN IMMEDIATE`, busy timeout 5 s), never runs `memory.on_start` (no
+retention, backfill or idle watches), drops `llm.embedding` from its config
+(so it can't create `memory_vec` or write `embedding_meta`), loads sqlite-vec
+only when `memory_vec` exists, to delete a superseded record's vector (it
+refuses before any LLM call if it can't load), and logs to stderr only.
+Re-consolidation goes through the standalone path, never a fork, and
+`reconsolidate_record` re-reads the old row inside the write transaction, so
+a record merged, redacted, demoted or retrieved during the LLM call is
+handled. Details of selection, inheritance and failure handling are in
+[cognition.md](cognition.md#operator-cli-corvidae-memory).
 
 ## Operator redaction (`corvidae redact`)
 
@@ -1503,8 +1545,10 @@ write them. Consolidation appends a sentence naming where the range
 starts ("the whole conversation above", "what follows the summary at its
 top", or a quote of the first new message when rows below the watermark
 are still in view). Appraisal appends the exchange quotes and the
-retrieval profile. Critique appends the exchange quotes, and the
-provenance check also passes the CONTEXT snapshot inline, along with each
+retrieval profile. `ForkResult.model` carries the model the fork was sent
+with (`request_model` of the fork's body); consolidation stamps it on the
+record (see [Re-consolidation](#re-consolidation-corvidae-memory)).
+Critique appends the exchange quotes, and the provenance check also passes the CONTEXT snapshot inline, along with each
 past claim and its closest earlier messages.
 
 **Configuration** (`agent.forks`, validated at startup and on reload by
@@ -3067,6 +3111,7 @@ packages/corvidae-cognition/   # the cognition extra (docs/cognition.md)
     ├── memory.py         # MemoryPlugin (consolidation + retrieval + message_fts schema)
     ├── retention.py      # run_retention_job(), retention_score()
     ├── memory_tools.py   # MemoryToolsPlugin, search_memory, recall_raw
+    ├── memory_command.py # corvidae memory: stamps, reconsolidate (operator CLI)
     ├── funnel.py         # FunnelPlugin (context-admission funnel)
     ├── appraisal.py      # AppraisalPlugin
     ├── critique.py       # CritiquePlugin

@@ -714,7 +714,10 @@ class MyPlugin(CorvidaePlugin):
 ```
 
 - `Agent.fork(channel, instruction, *, cut=None, extra_body=None)` returns
-  `ForkResult(text, message, usage)`. `cut=None` forks the whole window;
+  `ForkResult(text, message, usage, model)`. `model` is the model the fork
+  request was sent with (`LLMClient.request_model(body)`, so an
+  `extra_body["model"]` override shows), for plugins that stamp their output
+  with how it was made; it is None when the client can't say. `cut=None` forks the whole window;
   `cut=k` forks `messages[:k]` (use `snap_cut_to_tool_boundary` if `k`
   might split a tool cycle, or the prefix won't match the cache).
 - It uses `llm.main`, the agent's tool schemas with `tool_choice: "none"`,

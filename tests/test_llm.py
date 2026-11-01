@@ -613,3 +613,22 @@ class TestLLMHTTPErrorDetails:
         with pytest.raises(aiohttp.ContentTypeError) as excinfo:
             await client.chat(MESSAGES)
         assert not isinstance(excinfo.value, LLMHTTPError)
+
+
+class TestRequestModel:
+    """Issue #299 R1: the model a call is actually sent with."""
+
+    async def test_request_model_follows_extra_body_override(self):
+        """request_model mirrors chat's payload["model"], extra_body override included."""
+        client = LLMClient(base_url=BASE_URL, model="a", extra_body={"model": "b"})
+
+        # The instance extra_body overrides the configured model; a call-level one wins.
+        assert client.request_model() == "b"
+        assert client.request_model({"model": "c"}) == "c"
+
+        # And the payload chat posts agrees with request_model for the same call body.
+        client.session = _make_mock_session(_make_mock_response())
+        call_body = {"model": "c"}
+        await client.chat(MESSAGES, extra_body=call_body)
+        payload = client.session.post.call_args[1]["json"]
+        assert payload["model"] == client.request_model(call_body)

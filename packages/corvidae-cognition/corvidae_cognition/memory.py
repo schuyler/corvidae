@@ -9,6 +9,12 @@ This module owns the memory schema:
   - ``memory``: one row per consolidated first-person record, linked back
     to the raw dialog by a ``message_log`` id range. Rows are never
     deleted — demotion/redaction (Phase 1b) mutate columns.
+    Each row is stamped with how it was made (issue #299): ``prompt_hash``
+    (sha256 of the consolidation instruction text), ``mode`` (``fork`` |
+    ``standalone`` | ``direct``) and ``model`` (the model the call was sent
+    with). All NULL means the row predates stamping ("unknown"); ``direct``
+    rows (goal retirement) were written by no consolidation call.
+  - ``memory_prompt``: ``hash`` -> instruction text, stored once per hash.
   - ``consolidation_watermark``: per-channel last-consolidated
     ``message_log`` id; what makes the compaction/idle trigger overlap safe.
   - ``embedding_meta``: the encoder identity the vector cache was built
@@ -53,6 +59,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import hashlib
 import json
 import logging
 import math
@@ -227,6 +234,15 @@ def _parse_json_block(text: str) -> dict:
     if start == -1 or end == -1 or end <= start:
         raise ValueError(f"consolidation: no JSON object in LLM output: {text[:500]!r}")
     return json.loads(text[start:end + 1])
+
+
+@dataclass(frozen=True)
+class _RecordInputs:
+    """Importance prior, valence and source date for a consolidated range."""
+
+    importance: float
+    valence: float | None
+    created_at: float
 
 
 class _StubChannel:
@@ -571,9 +587,97 @@ CREATE TABLE IF NOT EXISTS memory (
     indexed INTEGER NOT NULL DEFAULT 1, -- 0 = demoted out of retrieval (Phase 1b)
     superseded_by INTEGER,              -- near-dup merge target (Phase 1b)
     redacted INTEGER NOT NULL DEFAULT 0,-- redact tombstone flag (Phase 1b)
-    embedded INTEGER NOT NULL DEFAULT 0 -- 0 = embedding pending/failed (backfillable)
+    embedded INTEGER NOT NULL DEFAULT 0,-- 0 = embedding pending/failed (backfillable)
+    prompt_hash TEXT,                   -- sha256 of the instruction text; NULL = unknown/direct
+    mode TEXT,                          -- fork | standalone | direct; NULL = unknown (pre-stamp)
+    model TEXT                          -- model the consolidation call was sent with
 )
 """
+
+# Instruction text of each stamp, stored once per hash (issue #299). Holds
+# configured instructions only, never conversation text.
+MEMORY_PROMPT_DDL = """
+CREATE TABLE IF NOT EXISTS memory_prompt (
+    hash TEXT PRIMARY KEY,
+    text TEXT NOT NULL
+)
+"""
+
+
+
+def prompt_hash(text: str) -> str:
+    """The stamp hash of an instruction text: sha256 of its UTF-8 bytes."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True)
+class RecordStamp:
+    """How a memory record was made: instruction text, mode and model sent.
+
+    ``prompt`` is None for ``direct`` records (no consolidation call);
+    ``model`` is None when the client could not say.
+    """
+
+    prompt: str | None
+    mode: str
+    model: str | None
+
+    @property
+    def hash(self) -> str | None:
+        """The prompt's hash, or None when there is no prompt."""
+        return None if self.prompt is None else prompt_hash(self.prompt)
+
+
+# Records no consolidation call produced (goal retirement): mode only.
+DIRECT_STAMP = RecordStamp(None, "direct", None)
+
+
+class ReconsolidateSkipped(Exception):
+    """A record was skipped by re-consolidation; ``reason`` is one of
+    ``superseded``, ``redacted``, ``direct`` or ``no dialog``."""
+
+    def __init__(self, reason: str, detail: str = "") -> None:
+        super().__init__(f"{reason}: {detail}" if detail else reason)
+        self.reason = reason
+
+
+def resolve_consolidation_prompts(memory_cfg: dict) -> tuple[str, str]:
+    """The (standalone, fork) consolidation instructions for a memory config.
+
+    Each is the configured value or the default when the key is absent. A
+    present non-string value raises ValueError naming the key: stamping a
+    default or "" would record text the call never sent. Shared by the
+    daemon and the operator CLI so they cannot resolve differently.
+    """
+    resolved = []
+    for key, default in (
+        ("consolidation_prompt", DEFAULT_CONSOLIDATION_PROMPT),
+        ("consolidation_fork_prompt", DEFAULT_CONSOLIDATION_FORK_PROMPT),
+    ):
+        value = memory_cfg.get(key, default)
+        if not isinstance(value, str):
+            raise ValueError(
+                f"memory.{key} must be a string; got {value!r}. "
+                f"Set it to the instruction text or remove the key to use the default."
+            )
+        resolved.append(value)
+    return resolved[0], resolved[1]
+
+
+def _as_model(value: object) -> str | None:
+    """``value`` if it is a str, else None (a stub's MagicMock is not a model)."""
+    return value if isinstance(value, str) else None
+
+
+def _model_sent(client: object, extra_body: dict | None) -> str | None:
+    """The model a call to ``client`` with ``extra_body`` is sent with, or None.
+
+    shortcut: a client without request_model stamps model NULL; production
+    clients are always LLMClient, so drop the guard if stubs are updated.
+    """
+    request_model = getattr(client, "request_model", None)
+    return _as_model(request_model(extra_body)) if callable(request_model) else None
+
 
 MEMORY_INDEX_DDL = (
     "CREATE INDEX IF NOT EXISTS idx_memory_channel ON memory (channel_id, created_at)"
@@ -700,6 +804,10 @@ class MemoryPlugin(CorvidaePlugin):
         self._owns_write_db = False
         self._write_path: str = "<unknown>"
         self._vec_available = False
+        # Set by the operator CLI: load sqlite-vec on every (re)opened write
+        # connection even though no embedding role is configured, so it can
+        # delete a superseded record's vector.
+        self._load_vec_on_write = False
         self._encoder_mismatch = False
         self._embedding_cfg: dict | None = None
         self._memory_cfg: dict = {}
@@ -771,11 +879,9 @@ class MemoryPlugin(CorvidaePlugin):
         self._retention_max_delay = float(
             retention_cfg.get("max_delay", DEFAULT_RETENTION_MAX_DELAY)
         )
-        self._consolidation_prompt = self._memory_cfg.get(
-            "consolidation_prompt", DEFAULT_CONSOLIDATION_PROMPT
-        )
-        self._consolidation_fork_prompt = self._memory_cfg.get(
-            "consolidation_fork_prompt", DEFAULT_CONSOLIDATION_FORK_PROMPT
+        # Non-str prompts are refused here (startup fails loudly).
+        self._consolidation_prompt, self._consolidation_fork_prompt = (
+            resolve_consolidation_prompts(self._memory_cfg)
         )
         retrieval_cfg = self._memory_cfg.get("retrieval", {}) or {}
         self._retrieval_k = retrieval_cfg.get("k", DEFAULT_RETRIEVAL_K)
@@ -961,7 +1067,14 @@ class MemoryPlugin(CorvidaePlugin):
             result = await agent.fork(
                 channel, instruction, cut=cut, extra_body=CONSOLIDATION_EXTRA_BODY
             )
-            return _record_from_text(result.text)
+            record = _record_from_text(result.text)
+            # Stamp the fork instruction (not the code-generated range
+            # sentence, which quotes conversation text) and the model sent.
+            record["stamp"] = RecordStamp(
+                self._consolidation_fork_prompt, "fork",
+                _as_model(getattr(result, "model", None)),
+            )
+            return record
         except Exception:
             logger.warning(
                 "consolidation fork failed; using the standalone call",
@@ -1274,37 +1387,12 @@ class MemoryPlugin(CorvidaePlugin):
                 channel_id, rows, dialog, watermark, range_end, trigger
             )
 
-            # The appraisal-driven prior (WP2.5) scores over the consolidated
-            # message-id range; pass the real channel when the registry has
-            # one, else a stub with empty runtime_overrides (sanctioned by
-            # WP2.3's duck-typed resolver) so config/default surfaces apply.
-            msg_id_range = (rows[0][0], rows[-1][0])
-            registry = self.pm.get_plugin("registry")
-            channel = registry.get(channel_id) if registry is not None else None
-            if channel is None:
-                channel = _StubChannel(channel_id)
-            importance = await self.importance_prior.score(
-                dialog, msg_id_range=msg_id_range, channel=channel
+            # Importance prior, valence and source date for the range.
+            inputs = await self._record_inputs(db, channel_id, rows, dialog)
+            importance, valence, created_at = (
+                inputs.importance, inputs.valence, inputs.created_at
             )
-
-            # Valence: mean stage-2 valence over the range (NULL when none) —
-            # the §4.9-classifier deletion made real: affect is the appraisal
-            # already computed. Fail-soft when appraisal is absent.
-            valence: float | None = None
-            appraisal_plugin = self.pm.get_plugin("appraisal")
-            if appraisal_plugin is not None:
-                try:
-                    valence = await appraisal_plugin.mean_valence(msg_id_range)
-                except Exception:
-                    logger.warning(
-                        "mean-valence lookup failed; storing NULL valence",
-                        exc_info=True, extra={"channel_id": channel_id},
-                    )
-
-            # Date the record from when its source conversation happened,
-            # not from when consolidation ran — imported history would
-            # otherwise be dated at import time (issue #52).
-            created_at = await source_timestamp(db, rows[-1][0])
+            msg_id_range = (rows[0][0], rows[-1][0])
 
             # Embed the summary; failure stores embedded=0 for later
             # backfill (trap #10 — degrade, never block).
@@ -1351,6 +1439,7 @@ class MemoryPlugin(CorvidaePlugin):
                     msg_id_start=rows[0][0],
                     msg_id_end=rows[-1][0],
                     embedding=embedding,
+                    stamp=record["stamp"],
                 )
                 await self._set_watermark(wdb, channel_id, range_end)
             logger.info(
@@ -1378,22 +1467,75 @@ class MemoryPlugin(CorvidaePlugin):
         finally:
             reset_attribution(attribution_token)
 
+    async def _record_inputs(
+        self, db: aiosqlite.Connection, channel_id: str, rows: list[tuple],
+        dialog: list[dict],
+    ) -> "_RecordInputs":
+        """Importance prior, valence and source date for a consolidated range.
+
+        Never embeds: the embedding stays with the caller that wants one.
+        """
+        # The appraisal-driven prior (WP2.5) scores over the consolidated
+        # message-id range; pass the real channel when the registry has
+        # one, else a stub with empty runtime_overrides (sanctioned by
+        # WP2.3's duck-typed resolver) so config/default surfaces apply.
+        msg_id_range = (rows[0][0], rows[-1][0])
+        registry = self.pm.get_plugin("registry")
+        channel = registry.get(channel_id) if registry is not None else None
+        if channel is None:
+            channel = _StubChannel(channel_id)
+        importance = await self.importance_prior.score(
+            dialog, msg_id_range=msg_id_range, channel=channel
+        )
+
+        # Valence: mean stage-2 valence over the range (NULL when none) —
+        # the §4.9-classifier deletion made real: affect is the appraisal
+        # already computed. Fail-soft when appraisal is absent.
+        valence: float | None = None
+        appraisal_plugin = self.pm.get_plugin("appraisal")
+        if appraisal_plugin is not None:
+            try:
+                valence = await appraisal_plugin.mean_valence(msg_id_range)
+            except Exception:
+                logger.warning(
+                    "mean-valence lookup failed; storing NULL valence",
+                    exc_info=True, extra={"channel_id": channel_id},
+                )
+
+        # Date the record from when its source conversation happened,
+        # not from when consolidation ran — imported history would
+        # otherwise be dated at import time (issue #52).
+        created_at = await source_timestamp(db, rows[-1][0])
+        return _RecordInputs(importance, valence, created_at)
+
     async def _insert_record(
         self, db: aiosqlite.Connection, *, channel_id: str, summary: str,
         created_at: float, importance: float, valence: float | None,
         topic_tags: list[str], participants: list[str],
         msg_id_start: int, msg_id_end: int, embedding: list[float] | None,
+        stamp: RecordStamp, indexed: int = 1, retrieval_count: int = 0,
+        last_retrieved_at: float | None = None,
     ) -> int:
         """Insert + vec row + near-dup merge on ``db``, the write connection.
 
         The caller holds ``_db_lock`` inside ``_write_txn`` and so owns the
-        commit or rollback.
+        commit or rollback. ``stamp`` says how the record was made; its
+        instruction text is stored once in ``memory_prompt``. ``indexed``,
+        ``retrieval_count`` and ``last_retrieved_at`` default to a fresh
+        record's values; re-consolidation passes the old record's.
         """
+        # The instruction text, once per hash (an empty prompt still counts).
+        if stamp.prompt is not None:
+            await db.execute(
+                "INSERT OR IGNORE INTO memory_prompt (hash, text) VALUES (?, ?)",
+                (stamp.hash, stamp.prompt),
+            )
         cursor = await db.execute(
             "INSERT INTO memory (channel_id, created_at, summary, "
             "importance, valence, topic_tags, participants, "
-            "msg_id_start, msg_id_end, embedded) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "msg_id_start, msg_id_end, embedded, indexed, retrieval_count, "
+            "last_retrieved_at, prompt_hash, mode, model) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 channel_id,
                 created_at,
@@ -1405,6 +1547,12 @@ class MemoryPlugin(CorvidaePlugin):
                 msg_id_start,
                 msg_id_end,
                 1 if embedding is not None else 0,
+                indexed,
+                retrieval_count,
+                last_retrieved_at,
+                stamp.hash,
+                stamp.mode,
+                stamp.model,
             ),
         )
         memory_id = cursor.lastrowid
@@ -1556,9 +1704,124 @@ class MemoryPlugin(CorvidaePlugin):
                 created_at=created_at, importance=importance, valence=None,
                 topic_tags=[], participants=[],
                 msg_id_start=msg_id_start, msg_id_end=msg_id_end,
-                embedding=embedding,
+                embedding=embedding, stamp=DIRECT_STAMP,
             )
         return memory_id
+
+    async def reconsolidate_record(self, memory_id: int) -> int:
+        """Rebuild one record from ``message_log`` with the current instructions.
+
+        Operator-initiated (``corvidae memory reconsolidate``). Standalone
+        call, never a fork (there is no live window). Returns the new record's
+        id; the old one is superseded (demoted, not deleted) and the new one
+        inherits its retention state, retrieval statistics, creation time and
+        importance floor. Never embeds: the new record is stored
+        ``embedded=0`` for the retention backfill. The watermark is untouched.
+
+        Raises ReconsolidateSkipped for a direct, superseded or redacted
+        record or one with no dialog left, before any LLM call.
+        """
+        db = await self._ensure_schema()
+        if db is None:
+            raise RuntimeError("memory database is not open")
+        # Cheap pre-check, so a row that changed since selection costs no call.
+        async with db.execute(
+            "SELECT channel_id, msg_id_start, msg_id_end, mode, superseded_by, "
+            "redacted FROM memory WHERE id = ?", (memory_id,),
+        ) as cursor:
+            old = await cursor.fetchone()
+        if old is None:
+            raise LookupError(f"memory record {memory_id} not found")
+        channel_id, start, end, mode, superseded_by, redacted = old
+        reason = self._skip_reason(mode, superseded_by, redacted)
+        if reason is not None:
+            raise ReconsolidateSkipped(reason, f"memory record {memory_id}")
+
+        # Rebuild the dialog from the record's own message range.
+        rows = await fetch_range_rows(db, channel_id, start - 1, end)
+        dialog = dialog_from_rows(rows, channel_id)
+        if not dialog:
+            raise ReconsolidateSkipped(
+                "no dialog", f"no dialog left in message ids {start}-{end}"
+            )
+
+        # LLM work happens before the write transaction opens.
+        token = set_attribution(
+            stage="consolidation", channel_id=channel_id, trigger="reconsolidate"
+        )
+        try:
+            record = await self._standalone_record(dialog)
+            inputs = await self._record_inputs(db, channel_id, rows, dialog)
+        finally:
+            reset_attribution(token)
+
+        async with self._db_lock, self._write_txn() as wdb:
+            # Re-read inside the transaction: the daemon may have merged,
+            # redacted, demoted or retrieved the record during the LLM call,
+            # and the inherited history must be the current one.
+            async with wdb.execute(
+                "SELECT superseded_by, redacted, mode, indexed, retrieval_count, "
+                "last_retrieved_at, importance, created_at FROM memory WHERE id = ?",
+                (memory_id,),
+            ) as cursor:
+                current = await cursor.fetchone()
+            (superseded_by, redacted, mode, indexed, retrieval_count,
+             last_retrieved_at, importance, created_at) = current
+            reason = self._skip_reason(mode, superseded_by, redacted)
+            if reason is not None:
+                raise ReconsolidateSkipped(reason, f"memory record {memory_id}")
+            new_id = await self._insert_record(
+                wdb, channel_id=channel_id, summary=record["summary"],
+                created_at=created_at,
+                importance=max(importance or 0.0, inputs.importance),
+                valence=inputs.valence, topic_tags=record["topic_tags"],
+                participants=record["participants"],
+                msg_id_start=start, msg_id_end=end, embedding=None,
+                stamp=record["stamp"], indexed=indexed,
+                retrieval_count=retrieval_count,
+                last_retrieved_at=last_retrieved_at,
+            )
+            # Supersede the old record as a near-dup merge does.
+            await wdb.execute(
+                "UPDATE memory SET superseded_by = ?, indexed = 0, embedded = 0 "
+                "WHERE id = ?", (new_id, memory_id),
+            )
+            await self._delete_vector(wdb, memory_id)
+        return new_id
+
+    @staticmethod
+    def _skip_reason(mode: str | None, superseded_by: int | None, redacted: int) -> str | None:
+        """Why re-consolidation must skip a record, or None when it may run."""
+        if mode == "direct":
+            return "direct"
+        if superseded_by is not None:
+            return "superseded"
+        if redacted:
+            return "redacted"
+        return None
+
+    async def _delete_vector(self, wdb: aiosqlite.Connection, memory_id: int) -> None:
+        """Delete a superseded record's vector row when ``memory_vec`` exists.
+
+        Gated on the table existing, not on ``_vec_available`` (False in the
+        CLI). A missing sqlite-vec module is re-raised with the db path and
+        the remedy.
+        """
+        async with wdb.execute(
+            "SELECT 1 FROM sqlite_master WHERE name = 'memory_vec'"
+        ) as cursor:
+            if await cursor.fetchone() is None:
+                return
+        try:
+            await wdb.execute("DELETE FROM memory_vec WHERE memory_id = ?", (memory_id,))
+        except sqlite3.OperationalError as exc:
+            if "no such module" not in str(exc):
+                raise
+            raise RuntimeError(
+                f"sqlite-vec isn't loaded on the memory write connection for "
+                f"{self._write_path}; install the cognition extra "
+                f"(uv sync --extra cognition) and retry"
+            ) from exc
 
     async def _consolidation_record(
         self, channel_id: str, rows: list[tuple], dialog: list[dict],
@@ -1585,6 +1848,11 @@ class MemoryPlugin(CorvidaePlugin):
                 record = await self._fork_record(agent, channel, rows, None)
         if record is not None:
             return record
+        return await self._standalone_record(dialog)
+
+    async def _standalone_record(self, dialog: list[dict]) -> dict:
+        """The record from one standalone background-model call, attributed
+        ``mode=standalone``. Shared by consolidation and re-consolidation."""
         token = set_attribution(mode="standalone")
         try:
             return await self._summarize_range(dialog)
@@ -1594,11 +1862,16 @@ class MemoryPlugin(CorvidaePlugin):
     async def _summarize_range(self, dialog: list[dict]) -> dict:
         """One llm.background call producing the first-person record.
 
-        Returns {"summary": str, "topic_tags": list, "participants": list}.
+        Returns {"summary", "topic_tags", "participants", "stamp"}.
         A malformed reply is retried once; if both attempts are unusable it
         degrades to the raw transcript rather than losing the range.
         """
         client = self._llm().get_client("background")
+        # Captured before the first attempt: the stamp describes the call sent.
+        stamp = RecordStamp(
+            self._consolidation_prompt, "standalone",
+            _model_sent(client, CONSOLIDATION_EXTRA_BODY),
+        )
         messages = [
             {"role": "system", "content": self._consolidation_prompt},
             {"role": "user", "content": _dialog_transcript(dialog)},
@@ -1609,7 +1882,7 @@ class MemoryPlugin(CorvidaePlugin):
             )
             text = response["choices"][0]["message"]["content"]
             try:
-                return _record_from_text(text)
+                return {**_record_from_text(text), "stamp": stamp}
             except ValueError as exc:
                 logger.warning(
                     "consolidation reply unusable (attempt %d/2): %s",
@@ -1620,6 +1893,7 @@ class MemoryPlugin(CorvidaePlugin):
             "summary": _dialog_transcript(dialog),
             "topic_tags": [],
             "participants": [],
+            "stamp": stamp,
         }
 
     # ------------------------------------------------------------------
@@ -2003,7 +2277,9 @@ class MemoryPlugin(CorvidaePlugin):
         try:
             await conn.execute(f"PRAGMA journal_mode={journal_mode}")
             await conn.execute(f"PRAGMA busy_timeout={int(WRITE_BUSY_TIMEOUT_MS)}")
-            if self._vec_available and not await self._load_vec_extension(conn):
+            if (
+                self._vec_available or self._load_vec_on_write
+            ) and not await self._load_vec_extension(conn):
                 logger.warning(
                     "memory: sqlite-vec failed to load on the write connection "
                     "for %s; vector inserts on it will fail until restart "
@@ -2145,6 +2421,12 @@ class MemoryPlugin(CorvidaePlugin):
         # Core tables and the FTS surface land unconditionally.
         await db.execute(MEMORY_DDL)
         await db.execute(MEMORY_INDEX_DDL)
+        # Stamp columns (#299): tables from before stamping gain them as
+        # nullable columns without rewriting any row; old rows read NULL.
+        await add_column_if_missing(db, "memory", "prompt_hash", "TEXT")
+        await add_column_if_missing(db, "memory", "mode", "TEXT")
+        await add_column_if_missing(db, "memory", "model", "TEXT")
+        await db.execute(MEMORY_PROMPT_DDL)
         await db.execute(WATERMARK_DDL)
         await db.execute(EMBEDDING_META_DDL)
         # Schema upgrade: pre-existing two-column tables (before this feature)

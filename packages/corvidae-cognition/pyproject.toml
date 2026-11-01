@@ -14,6 +14,7 @@ exchange_log = "corvidae_cognition.outcome_log:redact_exchange_log"
 
 [project.entry-points."corvidae.commands"]
 goals = "corvidae_cognition.goals:goals_command"
+memory = "corvidae_cognition.memory_command:memory_command"
 
 [project.entry-points.corvidae]
 memory = "corvidae_cognition.memory:MemoryPlugin"

