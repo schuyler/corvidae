@@ -180,6 +180,14 @@ def beat_cut(messages: list[dict], keep_beats: int) -> int:
     mid-beat.
     """
     # Not a beat start (tool result, empty window): never trim mid-beat.
+    # Without this gate the cut still can't fall inside the current beat
+    # while its notification is in the window, but it matters after
+    # CompactionPlugin fires mid-beat (a long beat's tool results pass the
+    # threshold) and resolve_compaction runs again on the next tool result:
+    # with the summary ahead of the current notification, the trim would drop
+    # that summary inside the tool cycle; with the notification summarized
+    # away too, `starts` is empty and the index below would raise, failing the
+    # whole hook call and skipping CompactionPlugin for the rest of the beat.
     if not messages or not is_beat_notification(messages[-1]):
         return 0
     starts = [i for i, m in enumerate(messages) if is_beat_notification(m)]

@@ -789,7 +789,8 @@ starts on `internal:heartbeat`, deletes everything older than the oldest kept
 beat from the in-memory window, including a leftover compaction summary, and
 returns None. It makes no LLM call, writes nothing to `message_log` (the rows
 stay), and fires neither `before_compaction` nor `on_compaction`. It never
-trims mid-beat: only when the window ends in a beat notification, and never
+trims mid-beat: only when the window ends in a beat notification (so a
+compaction summary written mid-beat stays until the next beat), and never
 across a tool call and its result or while a tool call is pending (each skip
 logs a WARNING naming `internal:heartbeat` and the reason; the next beat
 trims past it). Because it returns None, `CompactionPlugin` still runs
@@ -830,6 +831,26 @@ Records consolidated from the beat channel itself are left out of the
 review, so beats don't review earlier beats. One edge: when near-duplicate
 merging leaves a beat-owned record as the survivor of a conversation
 memory, that memory drops out of later reviews.
+
+**Known limitation: a beat can lose sight of its own outreach.** PRD §3.5.9
+and §3.7 Heartbeat let a beat speak on another channel or leave a note
+there. A beat sees its own earlier actions only in the window, which holds
+its last `keep_beats` beats. Older beats leave the window, and memory
+doesn't bring them back: heartbeat rows may wait for traffic before they're
+consolidated (see *When* above), and the review leaves out records owned by
+`internal:heartbeat` anyway. So once the send and note tools exist, a beat
+could repeat an outreach made more than `keep_beats` beats ago. Today it
+can't happen: there is no send, note or read tool yet (#234, #235), so a
+beat can't reach anyone. The bounds once they land are the `keep_beats`
+window, the goals entry (a beat that records an outreach as a goal step sees
+it in later beats), and the target channel's memories, when that channel is
+in the heartbeat's review scope and its rows have been consolidated; the
+PRD's per-destination limit on messages the agent starts caps repeats too,
+but only when the operator sets it. The
+cross-channel tools (§3.5.9–11) should record each outreach where a later
+beat can see it, for example as a row on the target channel that the review
+picks up. The same holds for a beat's other side effects (`write_file`,
+`shell`): nothing records them outside the window either.
 
 **Sleep.** The heartbeat is asleep whenever `heartbeat.after` is absent
 (the block deleted, `null` or empty). It reads the key once at `on_init`,

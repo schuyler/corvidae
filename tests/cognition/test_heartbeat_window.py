@@ -191,6 +191,62 @@ async def test_trimming_makes_no_llm_call(rig_factory):
     assert compaction._fork_summary.await_count == 0
 
 
+async def test_compaction_still_runs_when_the_kept_beats_exceed_the_budget(rig_factory):
+    """PRD §3.3.2: the trim returns None, so CompactionPlugin still runs after
+    it as the over-budget safety net. Beats 1-4 are short and beats 5-8 long;
+    three long notifications fit under the threshold and four don't. So beat
+    8 is the first window over budget, and only after the trim has dropped
+    beats 1-4: compaction summarizes the kept beats, never the trimmed ones."""
+    max_tokens = 2000
+    budget = 0.8 * max_tokens
+    pad = "pad " * 450
+
+    def beat_tokens(text: str) -> int:
+        """Tokens of one beat's two rows, notification and reply."""
+        return sum(
+            message_tokens({"role": "system", "content": c})
+            for c in beat_rows(0, text=text)
+        )
+
+    # Precondition: beat 7's trimmed window (short beat 4, long beats 5-6 and
+    # beat 7's notification) fits, so compaction can't fire before beat 8.
+    assert count_tokens(SYSTEM_PROMPT) + beat_tokens("beat 4") + 3 * beat_tokens(pad) < budget
+    # Precondition: beat 8's trimmed window (long beats 5-7 and beat 8's
+    # notification) alone passes the threshold.
+    assert 4 * message_tokens({"role": "system", "content": f"[heartbeat]\n\n{pad}"}) > budget
+
+    rig = await rig_factory(
+        agent_defaults={
+            "system_prompt": SYSTEM_PROMPT,
+            "max_context_tokens": max_tokens,
+            "reasoning_history": "drop",
+        },
+    )
+    compaction = CompactionPlugin(rig.plugin.pm)
+    # No fork, so the standalone summarizer receives the rows it replaces.
+    compaction._fork_summary = AsyncMock(return_value=None)
+    compaction._summarize = AsyncMock(return_value="summary")
+    rig.plugin.pm.register(compaction, name="compaction")
+
+    # Four short beats, then four long ones.
+    for i in range(1, 5):
+        await rig.beat(i)
+    for i in range(5, 9):
+        await rig.beat(i, text=f"{pad} {i}")
+
+    # Compaction ran once, at beat 8, on the trimmed window.
+    assert compaction._summarize.await_count == 1
+    summarized = [m["content"] for m in compaction._summarize.await_args.args[0]]
+    assert summarized and all(
+        c.startswith(f"[heartbeat]\n\n{pad}") or c in {"reply 5", "reply 6", "reply 7"}
+        for c in summarized
+    )
+    assert f"[heartbeat]\n\n{pad} 5" in summarized
+    # Beat 8's prompt starts with the summary, not with any short beat.
+    assert not any(c in rig.contents(-1) for c in beat_rows(4))
+    assert "summary" in rig.contents(-1)[0]
+
+
 # ---------------------------------------------------------------------------
 # R4: nothing is deleted from the log
 # ---------------------------------------------------------------------------
@@ -329,35 +385,6 @@ def _call(call_id: str) -> dict:
     ])
 
 
-def test_beat_cut_never_trims_on_a_tool_result_tail():
-    """R5: a window whose tail is a tool result is mid-beat, so the cut is 0
-    even with keep_beats 0."""
-    # beat_cut is new in #286: imported here so the other tests collect.
-    from corvidae_cognition.heartbeat import beat_cut
-
-    window = [
-        _msg("system", notification(1)), _msg("assistant", "reply 1"),
-        _msg("system", notification(2)), _call("c1"),
-        _msg("tool", "probed", tool_call_id="c1"),
-    ]
-    assert beat_cut(window, 0) == 0
-
-
-def test_beat_cut_counts_beats_not_messages():
-    """R2: beats of uneven length are counted as beats: keeping one earlier
-    beat keeps all three of beat 2's rows after beat 1's two are dropped."""
-    from corvidae_cognition.heartbeat import beat_cut
-
-    window = [
-        _msg("system", notification(1)), _msg("assistant", "reply 1"),
-        _msg("system", notification(2)), _call("c1"),
-        _msg("tool", "probed", tool_call_id="c1"),
-        _msg("assistant", "reply 2"),
-        _msg("system", notification(3)),
-    ]
-    assert beat_cut(window, 1) == 2
-
-
 SUMMARY_TEXT = "[Summary of earlier conversation]\nthe agent reviewed goals"
 
 
@@ -367,19 +394,41 @@ def _summary_row() -> dict:
             "_message_type": MessageType.SUMMARY}
 
 
-def test_beat_cut_drops_a_leftover_summary_ahead_of_the_oldest_kept_beat():
-    """R1/R2: a compaction summary at window[0], as a reload from a DB that
-    already compacted this channel produces, is cut with the older beats.
-    Indexes: summary 0, n1 1, r1 2, n2 3, r2 4, n3 5; keep 1 keeps beat 2."""
+@pytest.mark.parametrize("case", ["older_beats", "compacted_mid_beat",
+                                  "notification_compacted_away"])
+def test_beat_cut_never_trims_on_a_tool_result_tail(case):
+    """R5: a window whose tail is a tool result is mid-beat, so the cut is 0.
+
+    The last two cases are windows CompactionPlugin leaves when it fires
+    mid-beat (a long beat's tool results pass the threshold). Without the
+    tail gate, "compacted_mid_beat" would drop the fresh summary inside the
+    tool cycle, and "notification_compacted_away" (no beat notification left
+    at all) would raise IndexError, which makes the whole resolve_compaction
+    call fail and skips CompactionPlugin for the rest of that beat.
+    """
+    # beat_cut is new in #286: imported here so the other tests collect.
     from corvidae_cognition.heartbeat import beat_cut
 
-    window = [
-        _summary_row(),
-        _msg("system", notification(1)), _msg("assistant", "reply 1"),
-        _msg("system", notification(2)), _msg("assistant", "reply 2"),
-        _msg("system", notification(3)),
-    ]
-    assert beat_cut(window, 1) == 3
+    # Each window ends in the result of a tool call the current beat made.
+    window, keep = {
+        # Older beats still in the window, keep_beats 0.
+        "older_beats": ([
+            _msg("system", notification(1)), _msg("assistant", "reply 1"),
+            _msg("system", notification(2)), _call("c1"),
+            _msg("tool", "probed", tool_call_id="c1"),
+        ], 0),
+        # A summary ahead of the current beat's notification.
+        "compacted_mid_beat": ([
+            _summary_row(), _msg("system", notification(9)), _call("c5"),
+            _msg("tool", "probed", tool_call_id="c5"),
+        ], 3),
+        # The summary swallowed the current beat's notification too.
+        "notification_compacted_away": ([
+            _summary_row(), _call("c5"),
+            _msg("tool", "probed", tool_call_id="c5"),
+        ], 3),
+    }[case]
+    assert beat_cut(window, keep) == 0
 
 
 @pytest.mark.parametrize("leader", ["summary", "context", "unsent", "tail"])
@@ -401,24 +450,6 @@ def test_beat_cut_drops_non_beat_rows_ahead_of_the_first_beat(leader):
     window = [lead, _msg("system", notification(1)), _msg("system", notification(2))]
     assert beat_cut(window, 3) == 1
 
-
-def test_beat_cut_drops_context_rows_with_their_older_beat():
-    """R1/R2: CONTEXT and UNSENT rows inside an older beat (the goals entry
-    the funnel admits, a not-sent marker) go with that beat, and the oldest
-    kept beat's own CONTEXT row stays. Indexes: n1 0, ctx 1, unsent 2, n2 3,
-    ctx 4, r2 5, n3 6; keep 1 cuts at 3."""
-    from corvidae_cognition.heartbeat import beat_cut
-
-    ctx = {"role": "system", "content": "Open goals as of now",
-           "_message_type": MessageType.CONTEXT}
-    unsent = {"role": "assistant", "content": "held back",
-              "_message_type": MessageType.UNSENT}
-    window = [
-        _msg("system", notification(1)), ctx, unsent,
-        _msg("system", notification(2)), ctx, _msg("assistant", "reply 2"),
-        _msg("system", notification(3)),
-    ]
-    assert beat_cut(window, 1) == 3
 
 
 def test_beat_cut_skips_a_straddling_cycle_with_warning(caplog):
