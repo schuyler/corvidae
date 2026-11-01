@@ -335,7 +335,13 @@ response is retried with the same backoff until a total of
 fit), independently of `max_retries`; `0` disables it. Any terminal non-2xx
 response raises `LLMHTTPError`, a `ClientResponseError` subclass carrying the
 response `body` (truncated to 2000 characters) and the client's `model`;
-`is_model_not_loaded(error)` recognizes the unloaded-model case. A malformed
+`is_model_not_loaded(error)` recognizes the unloaded-model case.
+`is_backend_unreachable(error)` is true for a connection-class failure (any
+`aiohttp.ClientConnectionError` that is not also a `TimeoutError`: connect
+refused, reset, server disconnected) and for the not-loaded case; it excludes
+every timeout class (`ServerTimeoutError`, `SocketTimeoutError`,
+`ConnectionTimeoutError`, `TimeoutError`), server HTTP errors and other
+exceptions. The Agent retries a turn on it (see Message processing). A malformed
 response envelope (missing `choices`, an empty choice list, or a choice with
 no `message`) raises `ValueError` naming the provider model and endpoint, the
 missing key, and the top-level keys actually received.
@@ -823,6 +829,25 @@ per-channel `SerialQueue`. The queue's consumer calls
    quota, endpoint/model) and a short provider body; for connection and
    timeout failures it points at `llm.main.base_url`. It defers (`None`)
    on every other error, so the generic message still applies.
+   **Retry when the backend is unreachable (#281).** When the failure
+   satisfies `is_backend_unreachable` (the client has already spent its own
+   `max_retries` and `model_not_loaded_wait`), the Agent also schedules a
+   retry on the kernel clock, before the error gate so a vetoed fallback
+   cannot cancel it. The fallback goes out once, on the first failure. The
+   retry is a copy of the failed `QueueItem` (`retry=True`,
+   `originating=False`, same trace id) enqueued on the channel's serial queue
+   after `min(5 * 2**n, 60)` seconds (`TURN_RETRY_BASE_DELAY`,
+   `TURN_RETRY_MAX_DELAY`: 5, 10, 20, 40, 60, 60, ... forever). Each
+   scheduling logs one WARNING naming the channel and the delay. A retry that
+   fails again for the same reason reschedules silently; any other failure
+   ends the retries with a WARNING and no reply (the user can resend). One
+   retry is pending per channel: any successful turn on the channel drops it
+   (a newer message's turn already contains the earlier one), a newer failed
+   turn replaces it, and a retry item that is no longer the pending one is
+   skipped when dequeued. `Agent.on_stop` cancels pending retries. Without a
+   registered `clock` the retry is skipped with a WARNING. Out of scope:
+   background stages (they retry on their own triggers) and retries across a
+   restart.
 8b. **The final send gate.** When the result's tool calls will not
     dispatch (no tool calls, or `turn_counter >= max_turns`), resolves the
     display text once (the max-turns fallback on that branch) and fires
@@ -1023,7 +1048,16 @@ class QueueItem:
     source: str | None = None
     tool_call_id: str | None = None
     meta: dict = field(default_factory=dict)
+    trace_id: str | None = None
+    originating: bool = False
+    retry: bool = False
 ```
+
+`retry` marks the re-run of a turn whose LLM call could not reach the backend
+(#281). The item's message is already in the window and the log, so the
+retry skips the `turn_counter` reset (step 2), the append/persist,
+`on_message_persisted`, tool-result batching, compaction and
+`before_agent_turn` (steps 4-6) and goes straight to the LLM call.
 
 ## PersistencePlugin
 
@@ -1262,6 +1296,10 @@ the hour. Timers are one-shot: a periodic job re-arms itself from its
 callback. A callback that raises is logged with the timer's name. A callback
 must let `asyncio.CancelledError` through, because `Clock.close()` stops
 running callbacks that way.
+
+The Agent uses the clock for turn retries: it schedules a
+`turn-retry:<channel id>` timer after a backend-unreachable failure (see
+Message processing).
 
 **IdleTracker.** It answers "has this channel been quiet for N seconds?" and
 "has the whole system?". A channel is busy from `note_activity` until

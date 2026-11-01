@@ -30,10 +30,11 @@ from typing import TYPE_CHECKING
 
 import aiohttp
 from collections.abc import Callable
-from dataclasses import dataclass, field, fields as dc_fields
+from dataclasses import dataclass, field, fields as dc_fields, replace
 from enum import Enum
 
-from corvidae.llm import LLMHTTPError
+from corvidae.clock import Clock, Timer
+from corvidae.llm import LLMHTTPError, is_backend_unreachable
 
 if TYPE_CHECKING:
     from corvidae.tool_collection import ToolCollectionPlugin
@@ -162,6 +163,10 @@ class QueueItem:
             tool-result notifications that inherited an id from a prior
             item. Tracked on the item, never re-derived, so
             on_message_persisted firing discipline stays correct.
+        retry: True for the re-run of a turn whose LLM call could not reach
+            the backend (#281). The item is a copy of the failed one with
+            ``originating=False``; its message is already in the window and
+            the log, so steps 2 and 4-6 of processing skip it.
     """
 
     role: QueueItemRole
@@ -173,6 +178,22 @@ class QueueItem:
     meta: dict = field(default_factory=dict)
     trace_id: str | None = None
     originating: bool = False
+    retry: bool = False
+
+
+#: Backoff for re-running a turn the backend could not answer (#281): the
+#: delay for attempt n is min(BASE * 2**n, MAX) seconds (5, 10, 20, 40, 60...).
+TURN_RETRY_BASE_DELAY = 5.0
+TURN_RETRY_MAX_DELAY = 60.0
+
+
+@dataclass
+class _TurnRetry:
+    """The one pending retry of a channel: its item, attempt number and timer."""
+
+    item: QueueItem
+    attempt: int
+    timer: Timer
 
 
 
@@ -245,6 +266,8 @@ class Agent(CorvidaePlugin):
         # while no client exists yet (#71). _stopping tells a waiter which.
         self._started_event: asyncio.Event = asyncio.Event()
         self._stopping: bool = False
+        # Channel id -> the pending retry of its unreachable-backend turn.
+        self._turn_retries: dict[str, _TurnRetry] = {}
 
     @property
     def tools(self) -> dict[str, Callable]:
@@ -502,9 +525,32 @@ class Agent(CorvidaePlugin):
         supplies the trace id and meta for that gate.
         """
         try:
-            return await run_agent_turn(self._client, messages, tool_schemas, extra_body=llm_overrides)
+            result = await run_agent_turn(self._client, messages, tool_schemas, extra_body=llm_overrides)
         except Exception as exc:
+            unreachable = is_backend_unreachable(exc)
+            if item is not None and item.retry:
+                # A failed retry sends nothing (the fallback went out on the
+                # first failure).
+                if unreachable:
+                    # Still unreachable: back off further; the schedule logs
+                    # the one WARNING.
+                    self._schedule_turn_retry(channel, item, exc)
+                else:
+                    # Some other failure ends the retries.
+                    logger.warning(
+                        "retry of turn on channel %s (trace_id %s) failed with %s; "
+                        "not retrying — the user can resend the message",
+                        channel.id, item.trace_id, type(exc).__name__,
+                        exc_info=True,
+                        extra={"channel": channel.id, "trace_id": item.trace_id},
+                    )
+                    self._turn_retries.pop(channel.id, None)
+                return None
             logger.exception("run_agent_turn failed for channel %s", channel.id)
+            # Schedule the retry before the error gate: a vetoed fallback
+            # returns early below and must not cancel the retry.
+            if unreachable and item is not None:
+                self._schedule_turn_retry(channel, item, exc)
             # The error hook is optional policy: if it raises, fall back to the
             # default message rather than leaving the user with silence.
             try:
@@ -539,6 +585,66 @@ class Agent(CorvidaePlugin):
                     extra={"channel": channel.id},
                 )
             return None
+        # Any successful turn makes a pending retry of this channel redundant.
+        self._cancel_turn_retry(channel.id)
+        return result
+
+    def _cancel_turn_retry(self, channel_id: str) -> None:
+        """Drop the channel's pending retry and cancel its timer (no-op if fired)."""
+        state = self._turn_retries.pop(channel_id, None)
+        if state is not None:
+            state.timer.cancel()
+
+    def _schedule_turn_retry(
+        self, channel: Channel, item: QueueItem, exc: Exception
+    ) -> None:
+        """Arm a timer that re-enqueues ``item`` as a retry after a backoff delay."""
+        # Resolved lazily: test helpers mark the Agent started without _start_plugin.
+        # shortcut: hand-built plugin managers omit the clock; make it strict
+        # (depends_on) if a non-Runtime entry point appears
+        clock = self.pm.get_plugin("clock")
+        if not isinstance(clock, Clock):
+            logger.warning(
+                "turn on channel %s (trace_id %s) will not be retried: "
+                "no kernel clock registered (name 'clock'); Runtime registers one",
+                channel.id, item.trace_id,
+                extra={"channel": channel.id, "trace_id": item.trace_id},
+            )
+            return
+        state = self._turn_retries.get(channel.id)
+        if state is not None and state.item is item:
+            # Another failure of the same retry: back off further.
+            attempt = state.attempt + 1
+            retry_item = state.item
+        else:
+            # A newer failed turn supersedes any older pending retry; its
+            # window already holds the older message.
+            if state is not None:
+                state.timer.cancel()
+            attempt = 0
+            retry_item = replace(item, originating=False, retry=True)
+        delay = min(TURN_RETRY_BASE_DELAY * 2**attempt, TURN_RETRY_MAX_DELAY)
+
+        async def fire() -> None:
+            # Never enqueue after on_stop: the queues are gone and so is the client.
+            if not self._started:
+                return
+            # Enqueue (not call) to keep the channel's serial ordering.
+            await self._get_or_create_queue(channel).enqueue(retry_item)
+            self._note_activity(channel.id)
+
+        timer = clock.call_later(delay, fire, name=f"turn-retry:{channel.id}")
+        self._turn_retries[channel.id] = _TurnRetry(retry_item, attempt, timer)
+        logger.warning(
+            "turn on channel %s (trace_id %s) could not reach the LLM backend (%s); "
+            "retrying in %g s — check that the server at llm.main.base_url is "
+            "running and has its model loaded",
+            channel.id, item.trace_id, type(exc).__name__, delay,
+            extra={
+                "channel": channel.id, "trace_id": item.trace_id,
+                "attempt": attempt, "delay": delay,
+            },
+        )
 
     async def _gate_send(
         self,
@@ -807,6 +913,17 @@ class Agent(CorvidaePlugin):
         self, item: QueueItem, channel: Channel
     ) -> None:
         """Body of _process_queue_item, run with turn attribution set."""
+        # A retry only runs while it is still the channel's pending one; a
+        # newer successful turn may have dropped it after its timer fired.
+        if item.retry:
+            state = self._turn_retries.get(channel.id)
+            if state is None or state.item is not item:
+                logger.debug(
+                    "retry superseded on channel %s (trace_id %s)",
+                    channel.id, item.trace_id,
+                    extra={"channel": channel.id, "trace_id": item.trace_id},
+                )
+                return
         import time as _time
         _t0 = _time.monotonic()
         _phases: dict[str, float] = {}
@@ -850,109 +967,112 @@ class Agent(CorvidaePlugin):
         # max_turns. Keying on `originating` rather than USER role lets a
         # notification-only channel (scheduler reminders, heartbeat) get a
         # fresh per-exchange budget instead of exhausting it permanently.
-        if item.originating and not channel.pending_tool_call_ids:
+        if not item.retry and item.originating and not channel.pending_tool_call_ids:
             channel.turn_counter = 0
 
         # 3. Resolve config and read max_turns_limit
         resolved = self._registry.resolve_config(channel)
         max_turns_limit = resolved["max_turns"]
 
-        # 4. Append message to conversation log and fire persistence event.
-        # The resolved rowid attaches to the WINDOW copy (conv.append
-        # shallow-copies, so the local dict would not update the window).
-        _t_persist_start = _time.monotonic()
-        conv.append(conversation_message)
-        rowid = None
-        try:
-            results = await self.pm.ahook.persist_message(
-                channel=channel,
-                message=conversation_message,
-                message_type=MessageType.MESSAGE,
-            )
-            rowid = resolve_single_result(results, "persist_message")
-            if rowid is not None:
-                conv.messages[-1]["_db_id"] = rowid
-        except Exception:
-            logger.warning("persist_message hook failed", exc_info=True)
-        _phases["persist"] = _time.monotonic() - _t_persist_start
-
-        # 4c. Fire on_message_persisted only when this item originates its
-        # trace (USER items, and notification items whose id was
-        # minted at dequeue). Mid-exchange tool-result rows, injected
-        # CONTEXT, and assistant rows never fire it — per-row firing under
-        # one id would overwrite the rowid with each successive row. Fires
-        # regardless of persistence outcome (rowid may be None).
-        if item.originating and item.trace_id is not None:
-            try:
-                await self.pm.ahook.on_message_persisted(
-                    channel=channel, trace_id=item.trace_id,
-                    rowid=rowid, text=request_text, meta=item.meta,
-                )
-            except Exception:
-                logger.warning("on_message_persisted hook failed", exc_info=True, extra={"channel": channel.id})
-
-        # 4b. Batch tool results: if this is a tool-result notification and
-        # there are still pending tool calls, skip the LLM call.
-        # pending_tool_call_ids is unioned across every in-flight dispatch
-        # batch (R3), not scoped to one batch — so the LLM call fires after
-        # the last result of the last outstanding batch, not the current
-        # one. The serial queue ensures results arrive one at a time. User
-        # messages can interleave — they don't clear the pending set, so the
-        # agent remains responsive while tools run.
-        if item.role == QueueItemRole.NOTIFICATION and item.tool_call_id:
-            channel.pending_tool_call_ids.discard(item.tool_call_id)
-            # Same step as the discard: a result is either queued or no
-            # longer pending, never neither (see deliver_tool_error).
-            self._queued_tool_results.discard((channel.id, item.tool_call_id))
-            if channel.pending_tool_call_ids:
-                logger.debug(
-                    "tool result buffered, pending: %d",
-                    len(channel.pending_tool_call_ids),
-                    extra={"channel": channel.id, "tool_call_id": item.tool_call_id},
-                )
-                return
-
-        # 5. Compact if approaching context limit
-        _t_compact_start = _time.monotonic()
-        try:
-            await self.pm.ahook.resolve_compaction(
-                channel=channel, conversation=conv,
-                max_tokens=resolved["max_context_tokens"],
-            )
-        except Exception:
-            logger.warning("compaction failed, skipping", exc_info=True)
-        _phases["compact"] = _time.monotonic() - _t_compact_start
-
-        # 6. Let plugins inject context before the LLM call
-        _t_before_turn_start = _time.monotonic()
-        msg_count_before = len(conv.messages)
-        try:
-            await self.pm.ahook.before_agent_turn(
-                channel=channel, trace_id=item.trace_id, meta=item.meta,
-            )
-        except Exception:
-            logger.warning(
-                "before_agent_turn hook failed, skipping", exc_info=True
-            )
-        # Fire persist_message for any messages injected by
-        # before_agent_turn. Messages already carrying a _db_id were
-        # persisted by their producer — firing again would double-store
-        # them.
-        for msg in conv.messages[msg_count_before:]:
-            if isinstance(msg.get("_db_id"), int):
-                continue
-            mt = msg.get("_message_type", MessageType.MESSAGE)
-            clean = {k: v for k, v in msg.items() if not k.startswith("_")}
+        # Steps 4-6 already ran on the first attempt of a retried turn (its
+        # output is in the window), so a retry goes straight to the LLM call.
+        if not item.retry:
+            # 4. Append message to conversation log and fire persistence event.
+            # The resolved rowid attaches to the WINDOW copy (conv.append
+            # shallow-copies, so the local dict would not update the window).
+            _t_persist_start = _time.monotonic()
+            conv.append(conversation_message)
+            rowid = None
             try:
                 results = await self.pm.ahook.persist_message(
-                    channel=channel, message=clean, message_type=mt,
+                    channel=channel,
+                    message=conversation_message,
+                    message_type=MessageType.MESSAGE,
                 )
                 rowid = resolve_single_result(results, "persist_message")
                 if rowid is not None:
-                    msg["_db_id"] = rowid
+                    conv.messages[-1]["_db_id"] = rowid
             except Exception:
                 logger.warning("persist_message hook failed", exc_info=True)
-        _phases["before_turn"] = _time.monotonic() - _t_before_turn_start
+            _phases["persist"] = _time.monotonic() - _t_persist_start
+
+            # 4c. Fire on_message_persisted only when this item originates its
+            # trace (USER items, and notification items whose id was
+            # minted at dequeue). Mid-exchange tool-result rows, injected
+            # CONTEXT, and assistant rows never fire it — per-row firing under
+            # one id would overwrite the rowid with each successive row. Fires
+            # regardless of persistence outcome (rowid may be None).
+            if item.originating and item.trace_id is not None:
+                try:
+                    await self.pm.ahook.on_message_persisted(
+                        channel=channel, trace_id=item.trace_id,
+                        rowid=rowid, text=request_text, meta=item.meta,
+                    )
+                except Exception:
+                    logger.warning("on_message_persisted hook failed", exc_info=True, extra={"channel": channel.id})
+
+            # 4b. Batch tool results: if this is a tool-result notification and
+            # there are still pending tool calls, skip the LLM call.
+            # pending_tool_call_ids is unioned across every in-flight dispatch
+            # batch (R3), not scoped to one batch — so the LLM call fires after
+            # the last result of the last outstanding batch, not the current
+            # one. The serial queue ensures results arrive one at a time. User
+            # messages can interleave — they don't clear the pending set, so the
+            # agent remains responsive while tools run.
+            if item.role == QueueItemRole.NOTIFICATION and item.tool_call_id:
+                channel.pending_tool_call_ids.discard(item.tool_call_id)
+                # Same step as the discard: a result is either queued or no
+                # longer pending, never neither (see deliver_tool_error).
+                self._queued_tool_results.discard((channel.id, item.tool_call_id))
+                if channel.pending_tool_call_ids:
+                    logger.debug(
+                        "tool result buffered, pending: %d",
+                        len(channel.pending_tool_call_ids),
+                        extra={"channel": channel.id, "tool_call_id": item.tool_call_id},
+                    )
+                    return
+
+            # 5. Compact if approaching context limit
+            _t_compact_start = _time.monotonic()
+            try:
+                await self.pm.ahook.resolve_compaction(
+                    channel=channel, conversation=conv,
+                    max_tokens=resolved["max_context_tokens"],
+                )
+            except Exception:
+                logger.warning("compaction failed, skipping", exc_info=True)
+            _phases["compact"] = _time.monotonic() - _t_compact_start
+
+            # 6. Let plugins inject context before the LLM call
+            _t_before_turn_start = _time.monotonic()
+            msg_count_before = len(conv.messages)
+            try:
+                await self.pm.ahook.before_agent_turn(
+                    channel=channel, trace_id=item.trace_id, meta=item.meta,
+                )
+            except Exception:
+                logger.warning(
+                    "before_agent_turn hook failed, skipping", exc_info=True
+                )
+            # Fire persist_message for any messages injected by
+            # before_agent_turn. Messages already carrying a _db_id were
+            # persisted by their producer — firing again would double-store
+            # them.
+            for msg in conv.messages[msg_count_before:]:
+                if isinstance(msg.get("_db_id"), int):
+                    continue
+                mt = msg.get("_message_type", MessageType.MESSAGE)
+                clean = {k: v for k, v in msg.items() if not k.startswith("_")}
+                try:
+                    results = await self.pm.ahook.persist_message(
+                        channel=channel, message=clean, message_type=mt,
+                    )
+                    rowid = resolve_single_result(results, "persist_message")
+                    if rowid is not None:
+                        msg["_db_id"] = rowid
+                except Exception:
+                    logger.warning("persist_message hook failed", exc_info=True)
+            _phases["before_turn"] = _time.monotonic() - _t_before_turn_start
 
         # 7. Build prompt and call run_agent_turn (single LLM invocation)
         _t_llm_start = _time.monotonic()
@@ -1431,6 +1551,11 @@ class Agent(CorvidaePlugin):
         # Stop advertising readiness first, so producers stop injecting
         # notifications into queues that are about to be cancelled.
         self._started = False
+        # Drop pending turn retries: a timer firing after this would run a
+        # turn with no client (#281).
+        for state in self._turn_retries.values():
+            state.timer.cancel()
+        self._turn_retries.clear()
         # Release any message still held waiting for a start that won't come.
         self.release_held_messages()
         # Cancel all channel queue consumers.
