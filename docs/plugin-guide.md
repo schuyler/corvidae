@@ -1015,7 +1015,7 @@ Broadcast hook calls from `Agent` are wrapped in `try/except`. If a plugin raise
 
 For `firstresult=True` hooks (`resolve_compaction`, `resolve_conversation`, `resolve_llm_error`), pluggy propagates the first handler's exception immediately — the chain stops and no further handlers run. The call sites in `Agent` handle these as follows:
 
-- `resolve_compaction` — wrapped in try/except; failure is logged at WARNING and the turn continues without compaction.
+- `resolve_compaction` — wrapped in try/except; failure is logged at WARNING and the turn continues without compaction. Whatever an implementation returns or raises, the kernel then enforces `max_context_tokens` itself, dropping the oldest rows from the in-memory window if it is still over budget.
 - `resolve_conversation` — not wrapped; an exception propagates to `_process_queue_item`, which will fail the queue item.
 - `resolve_llm_error` — wrapped in its own try/except inside `_run_turn`'s error handler; failure is logged at WARNING and the default error message is sent instead.
 

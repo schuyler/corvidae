@@ -591,3 +591,39 @@ async def test_pending_tool_call_skips_the_trim_with_warning(rig_factory, caplog
     assert any(
         HEARTBEAT_CHANNEL in m and "tool calls are pending" in m for m in messages
     )
+
+
+# ---------------------------------------------------------------------------
+# #308: the over-budget fallback covers a window the trim skipped
+# ---------------------------------------------------------------------------
+
+
+async def test_skipped_trim_over_budget_is_brought_within_budget(rig_factory):
+    """#308 (design test 17): with tool calls pending the trim is skipped, and
+    no CompactionPlugin is registered, so only the kernel's fallback can bring
+    the grown window within max_context_tokens before each beat's LLM call."""
+    budget = 300
+    rig = await rig_factory(agent_defaults={
+        "system_prompt": SYSTEM_PROMPT,
+        "max_context_tokens": budget,
+        "reasoning_history": "drop",
+    })
+    # Record the window's estimate at the moment of every LLM call.
+    estimates: list[int] = []
+    inner = rig.chat
+
+    async def spy(messages, *args, **kwargs) -> dict:
+        """Snapshot conv.token_estimate(), then answer as the rig does."""
+        estimates.append(rig.hb_ch.conversation.token_estimate())
+        return await inner(messages, *args, **kwargs)
+
+    rig.client.chat.side_effect = spy
+    # One beat to initialise, then an in-flight call that blocks the trim.
+    await rig.beat(0)
+    rig.hb_ch.pending_tool_call_ids = frozenset({"c9"})
+    # Beats of about 60 tokens each: eight of them overrun 300 tokens.
+    big = " ".join(["word"] * 60)
+    for i in range(1, 9):
+        await rig.beat(i, text=big)
+    assert len(estimates) == 9
+    assert all(e <= budget for e in estimates), estimates

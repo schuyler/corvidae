@@ -294,3 +294,81 @@ class ContextWindow:
         for msg in self.messages:
             total += message_tokens(msg)
         return total
+
+    def fit_to_budget(self, max_tokens: int) -> tuple[list[dict], bool]:
+        """Bring the window within ``max_tokens`` without any LLM call (#308).
+
+        The over-budget fallback behind PRD §3.3.2: drops the oldest rows from
+        the head of the in-memory window (``message_log`` is never touched),
+        snapping the cut forward past a straddling tool cycle when that can be
+        done without dropping the newest row. The newest row is always kept;
+        if it alone does not fit, its content is truncated in memory only,
+        with a visible marker. Pure and synchronous; it cannot fail.
+
+        Returns:
+            ``(dropped, truncated)``: the rows removed (oldest first) and
+            whether the newest row's content was truncated. ``([], False)``
+            when the window already fits, or is empty.
+        """
+        # Nothing to do when the window already fits (or there is no row to cut).
+        if self.token_estimate() <= max_tokens or not self.messages:
+            return [], False
+
+        # Function-local import: corvidae.fork imports ContextWindow from this
+        # module, so a module-level import would be circular.
+        from corvidae.fork import snap_cut_forward
+
+        fixed = count_tokens(self.system_prompt)
+        toks = [message_tokens(m) for m in self.messages]
+        n = len(self.messages)
+
+        # Smallest head cut whose tail fits; never cut away the newest row.
+        tail = sum(toks)
+        cut = n - 1
+        for c in range(n):
+            if fixed + tail <= max_tokens:
+                cut = c
+                break
+            tail -= toks[c]
+
+        # Snap forward past a straddling tool cycle; moving forward only drops
+        # more, so the tail still fits. If that would drop the newest row, keep
+        # the raw cut and let build_prompt frame the orphaned result (§3.3.4).
+        snapped = snap_cut_forward(self.messages, cut)
+        if snapped <= n - 1:
+            cut = snapped
+
+        # Drop in place so any holder of the list sees the change.
+        dropped = self.messages[:cut]
+        del self.messages[:cut]
+
+        # The newest row alone may still not fit: truncate it in memory only.
+        truncated = False
+        newest = self.messages[-1]
+        if fixed + message_tokens(newest) > max_tokens:
+            content = str(newest.get("content") or "")
+            total = len(content)
+            room = max_tokens - fixed
+
+            def candidate(k: int) -> dict:
+                """The newest row cut to its first k characters plus marker."""
+                marker = (
+                    "\n\n[truncated to fit the context window: showing the "
+                    f"first {k} of {total} characters]"
+                )
+                return {**newest, "content": content[:k] + marker}
+
+            # Binary search the largest k measured to fit; lo always holds a
+            # k already known to fit, since token counts are not monotone in k.
+            if message_tokens(candidate(0)) <= room:
+                lo, hi = 0, total
+                while lo < hi - 1:
+                    mid = (lo + hi) // 2
+                    if message_tokens(candidate(mid)) <= room:
+                        lo = mid
+                    else:
+                        hi = mid
+                self.messages[-1] = candidate(lo)
+                truncated = True
+            # Else nothing more can be removed; the caller reports the overage.
+        return dropped, truncated

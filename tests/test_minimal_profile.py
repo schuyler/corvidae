@@ -219,7 +219,16 @@ class TestMinimalProfile:
             compact_channel = registry.get("test:compact")
             assert compact_channel is not None
 
-            filler = "the quick brown fox jumps over the lazy dog. " * 15
+            # Sizing (#308): the over-budget fallback caps the window at 200
+            # tokens, so rows must be small enough that min_messages_to_compact
+            # (5) + 1 rows fit the budget, or compaction never runs. Measured
+            # with corvidae.context.message_tokens/count_tokens: system prompt
+            # 6 tokens, a user row 37, the fake reply ("ack: " + 30 chars) 21.
+            # Five rows (u a u a u) = 6 + 3*37 + 2*21 = 159 <= 200 and under
+            # the 160-token compaction threshold; seven rows when the fourth
+            # message arrives = 6 + 4*37 + 3*21 = 217 >= 160, so compaction
+            # fires there (6+ rows cross the threshold, 5 stay within 200).
+            filler = "the quick brown fox jumps over the lazy dog. " * 2
             for i in range(8):
                 await rt.pm.ahook.on_message(
                     channel=compact_channel, sender="user",
