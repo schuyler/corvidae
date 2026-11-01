@@ -711,16 +711,16 @@ What each kind of unlock costs:
 - **Framing** (`mid_conversation_system_role`). The injection can move
   framed CONTEXT and notifications back into the `system` role, undoing
   the mitigation in finding 3.
-- **Model and inference parameters** (`model`, sampling keys,
-  `max_tokens`, `logprobs`). The agent can point its turns at any model
-  the server offers, including one with weaker safety tuning. What a
-  switch costs in latency depends on the backend: a router that has to
-  load the new model into its only slot stalls every channel while it
-  does. On a metered endpoint that serves several models, `model` is a
-  price: one switch can multiply what every turn on the channel costs,
-  up to the pool's hard spend cap if there is one (finding 14). Large `max_tokens` or sampling extremes degrade replies on that
-  channel. `logprobs` costs little: larger responses, and nothing from
-  providers that don't support it.
+- **Model and inference parameters** (`model`, sampling keys, `max_tokens`,
+  `logprobs`). The agent can point its turns at any model the server offers,
+  including one with weaker safety tuning. What a switch costs in latency
+  depends on the backend: a router that has to load the new model into its
+  only slot stalls every channel while it does. On a metered endpoint that
+  serves several models, `model` is a price: one switch can multiply what
+  every turn on the channel costs, up to the pool's hard spend cap if there
+  is one (finding 14). Large `max_tokens` or sampling extremes degrade
+  replies on that channel. `logprobs` costs little: larger responses, and
+  nothing from providers that don't support it.
 - **Gate tunables and thresholds** (`gate.*`,
   `critique.provenance.enabled`, `critique.sample_below_rate`, the
   critique lens thresholds `critique.lens.*`; open by default today).
@@ -752,21 +752,23 @@ What each kind of unlock costs:
   the channel and fills the window toward compaction. A plugin tunable
   not named in this ledger falls under this entry or under the gate
   entry, by what it controls.
-- **Caps** (background-stage output caps, pool caps). The agent can lengthen a
-  stage's slot time on every exchange, which starves main turns on a
-  single-slot server (PRD principle 3) and spends tokens on every
-  exchange on a metered one. Pool caps (PRD §3.13) are caps too: an
-  unlocked soft cap lets an injection move when the agent starts
-  saving, and an unlocked hard cap lets it remove the bound the
-  operator set on spend or rate. The caps still have to fit the
-  context (PRD §3.8.4).
+- **Caps** (background-stage output caps, pool caps). The agent can lengthen
+  a stage's slot time on every exchange, which starves main turns on a
+  single-slot server (PRD principle 3) and spends tokens on every exchange
+  on a metered one. Pool caps (PRD §3.13) are caps too. A pool cap is
+  shared, so an override from any channel that can move it moves it for
+  every channel on the pool, which is why the recommended lock goes on every
+  channel that draws on it. An unlocked soft cap lets an injection move when
+  the agent starts saving, and an unlocked hard cap lets it remove the bound
+  the operator set on spend or rate. The caps still have to fit the context
+  (PRD §3.8.4).
 - **Scheduling policy** (pausing or deferring a channel, the order of
   held calls, PRD §3.13). An injection can pause the operator's channel,
   move its own channel ahead of others, or push upkeep back. Every hold,
   deferral and pause lapses by itself and the operator can resume any
   channel (PRD §3.13.8), so the damage is delay, not a wedged agent;
-  upkeep with a latency bound still runs by its bound unless capacity
-  or a hard cap stops it (PRD §3.13.7).
+  upkeep with a latency bound still runs by its bound unless capacity,
+  a hard cap or an exchange already in flight delays it (PRD §3.13.7).
 - **Skills.** The skills index sits in the stable prompt region, so a
   skill written at an injection's request is offered to every future
   conversation on every channel and survives restarts. The idle scan
@@ -800,20 +802,19 @@ every channel sharing the server's slot, so those costs apply even there.
 
 Every admitted message costs at least one main turn, and with cognition
 loaded, background calls on top: appraisal and the critique lenses per
-exchange, and consolidation as the window fills. On a local server that is slot time the operator's own
-turns wait behind; on a metered endpoint it is money. An admitted sender
-can drive the cost up by volume or by asking for work that loops through
-tools, and injected text in a fetched page or an MCP result can do the
-same from inside the operator's own channel. `max_turns` bounds one
-exchange; nothing bounds the total. Cost runs away without an attacker
-too: #286 measured about 68,000 prompt tokens per heartbeat that decided
-to do nothing.
+exchange, and consolidation as the window fills. On a local server that is
+slot time the operator's own turns wait behind; on a metered endpoint it is
+money. An admitted sender can drive the cost up by volume or by asking for
+work that loops through tools, and injected text in a fetched page or an MCP
+result can do the same from inside the operator's own channel. `max_turns`
+bounds one exchange; nothing bounds the total. Cost runs away without an
+attacker too: #286 measured about 68,000 prompt tokens per heartbeat that
+decided to do nothing.
 
-Where the tree stands: nothing caps use over time. `usage_log` records
-every call, but no budget reads it, and rate limits are met only by
-retrying (PRD §3.6.2). PRD principle 16 and §3.13 require that the
-operator can cap each pool; #296 tracks the open questions, charging per sender among
-them.
+Where the tree stands: nothing caps use over time. `usage_log` records every
+call, but no budget reads it, and rate limits are met only by retrying (PRD
+§3.6.2). PRD principle 16 and §3.13 require that the operator can cap each
+pool; #296 tracks the open questions, charging per sender among them.
 
 Until then, on a metered endpoint, set a spend limit with the provider,
 and keep inbound allowlists tight on any channel with untrusted

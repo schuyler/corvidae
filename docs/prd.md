@@ -89,13 +89,12 @@ one is a bug even if its tests pass.
    turn waits at most for the call already running. Upkeep that is past due
    runs next, ahead of a waiting main turn, so traffic can't starve it
    (principle 13). A declared limit, a cap or policy can hold or defer a
-   main turn beyond that (§3.13). Where the pool has no spare capacity (one KV slot, or
-   a rate limit already reached) a background call can't run beside the
-   main turn, so the requirement is to keep its share of the pool small
-   (bounded output, §3.8) and out of the way; it is not a guarantee of
-   zero delay. How a pool's capacity is shared is §3.13 (principle 16).
-   The inbound gate runs inside the transport read path and
-   never calls a model.
+   main turn beyond that (§3.13). Where the pool has no spare capacity (one
+   KV slot, or a rate limit already reached) a background call can't run
+   beside the main turn, so the requirement is to keep its share of the pool
+   small (bounded output, §3.8) and out of the way; it is not a guarantee of
+   zero delay. How a pool's capacity is shared is §3.13 (principle 16). The
+   inbound gate runs inside the transport read path and never calls a model.
 
 4. **The conversation log is append-only.** `message_log` rows are never
    deleted and their order is never rewritten. Compaction hides; memory
@@ -1198,7 +1197,10 @@ its budget, coalescing, charging per channel or sender) are tracked in
    per token, per model where an endpoint serves several. Prices come
    from operator config; nothing fetches a price list. Capacity that
    isn't declared is unbounded, so a pool with nothing declared admits
-   every call at once. Context per call is not something admission
+   every call at once. The kernel can keep principle 3's order only on a
+   pool whose concurrency is declared; on an undeclared pool, admission
+   holds nothing and the server's own queue orders calls. Context per
+   call is not something admission
    waits on: keeping a window within it is compaction's job (§3.3), and
    a call that can't fit fails as the server fails it.
 2. Every LLM call, chat or embedding, is admitted at `LLMClient`
@@ -1222,7 +1224,8 @@ its budget, coalescing, charging per channel or sender) are tracked in
    inbound gate (principle 3).
 5. Policy is pluggable. Holds and deferrals compose: any number of
    plugins can hold a call or defer a channel, and a hold wins, except
-   that no hold or deferral delays work past its latency bound (item 7).
+   that no plugin's hold or deferral delays work past its latency bound
+   (item 7).
    Ordering
    doesn't compose: one implementation orders held calls. The kernel
    ships a default order that meets item 7, and a plugin can replace it.
@@ -1252,11 +1255,14 @@ its budget, coalescing, charging per channel or sender) are tracked in
    - work a waiting main turn must wait for under principle 3 (an
      exchange's own background work still owed) runs at that turn's
      priority;
-   - held work gains priority as it waits, though upkeep overtakes a
-     waiting main turn only once it is past due (principle 3); work with
-     a latency bound (§3.1.16, principle 13) runs no later than its
-     bound, subject only to declared capacity and hard caps, so nothing
-     starves.
+   - held work gains priority as it waits. Upkeep overtakes a main turn
+     that is waiting only for capacity once the upkeep is past due
+     (principle 3); a main turn that policy holds or defers (items 3
+     and 5) doesn't hold other work back. Work with a latency bound
+     (§3.1.16, principle 13) runs no later than its bound, subject only
+     to declared capacity, hard caps, and the continuations of
+     exchanges already in flight (the first bullet; `max_turns` bounds
+     those), so nothing starves.
 8. Deferral acts at exchange boundaries: a deferred channel still takes
    the continuations of an exchange in flight. A hold delays a call; it
    doesn't drop it. Only a hard cap stops an exchange mid tool cycle,
@@ -1270,10 +1276,12 @@ its budget, coalescing, charging per channel or sender) are tracked in
 9. Deferral and holding never drop work. Work that won't happen (a
    refusal at a hard cap, a missed window under §3.8.2) is logged with
    what was lost (principle 5).
-10. Usage is accounted from the per-call record principle 11 produces,
-    which names the model each call was sent with, and read back from `usage_log` after a restart, so caps hold across
-    a restart without new state. A pool with a cap depends on the
-    `usage_log` plugin for that.
+10. Usage is accounted from the per-call record principle 11 produces.
+    That record names the model each call was sent with, not only the
+    role's configured one, so per-model prices apply (#297). It is read
+    back from `usage_log` after a restart, so caps hold across a restart
+    without new state; a pool with a cap depends on the `usage_log`
+    plugin for that.
 11. Holds, deferrals, refusals and pool usage emit `on_metrics` events
     attributed like the calls they affect (§3.10), so the wait a main
     turn spends behind other work is measurable (#182).
