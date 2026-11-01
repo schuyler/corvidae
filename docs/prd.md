@@ -650,6 +650,19 @@ Per transport:
    file names, flushed and closed on stop.
 7. A failing test that leaves an aiosqlite connection open cannot hang
    pytest at exit; the test suite's guard closes them at teardown.
+8. The agent keeps a write-ahead log of accepted work, in its database
+   (principle 8): every inbound message, notification and note is
+   written to it when accepted, before it waits in a channel's queue or
+   for a channel's next turn. After a stop or a crash, the agent replays
+   what was accepted and not finished, in order, so nothing accepted is
+   lost to a restart, the agent's own included (§3.11.13). An item whose
+   turn finished is never replayed. An item interrupted mid-turn is
+   never silently dropped and never replayed as though nothing had
+   happened; like an interrupted tool call (item 4), the window says it
+   was interrupted. Replays are logged with their channel and count
+   (principle 5). The log is compacted: finished entries retire and are
+   removed, so it stays small. It is not the conversation log, and
+   principle 4 does not bind it.
 
 ### 3.5 Tools
 
@@ -743,26 +756,26 @@ Per transport:
    it counts as one. It limits flooding a contact, not crossing channels.
    `docs/threat-model.md` records what speaking anywhere
    costs (principle 9).
-10. Notes to another channel's context: any turn can leave information
-    for another channel. The note is admitted through the funnel at the
-    tail of the target channel's window (§3.7 Funnel), framed as the
-    agent's own note and labelled with the channel it came from,
-    persisted like any CONTEXT row (principle 4), and retires past the
-    compaction boundary (principle 2). It is information, not an
-    instruction: the target channel's turn decides from its own view of
-    that conversation what, if anything, to do with it. The sender chooses
-    whether the note waits for the target's next turn or wakes it. With
-    the trust plugin loaded, a note carries the minimum trust of the
-    participants of the channel it came from, and a low-trust note is
-    quarantined as a low-trust record is (§3.7 Trust). A turn a note
-    wakes is its own exchange on the target channel, with its own trace
-    and a stamped link to the exchange that sent the note, never an
-    inferred one. It carries the origin of the exchange that started the
-    chain (§3.1.4), so the chain's kind (principle 13), critique
-    eligibility (§3.7 Critique 3), budget (§3.1.3) and precedence
-    (§3.13.7) all follow how the chain started. The target's turn still
-    judges for itself, and may end without sending anything (§3.7, the
-    right to silence).
+10. Notes to another channel's context: any turn can leave information for
+    another channel. The note is admitted through the funnel at the tail of
+    the target channel's window (§3.7 Funnel), framed as the agent's own
+    note and labelled with the channel it came from, persisted like any
+    CONTEXT row (principle 4), and retires past the compaction boundary
+    (principle 2). It is information, not an instruction: the target
+    channel's turn decides from its own view of that conversation what, if
+    anything, to do with it. The sender chooses whether the note waits for
+    the target's next turn or wakes it; a note waiting for its turn
+    survives a restart (§3.4.8). With the trust plugin loaded, a note
+    carries the minimum trust of the participants of the channel it came
+    from, and a low-trust note is quarantined as a low-trust record is
+    (§3.7 Trust). A turn a note wakes is its own exchange on the target
+    channel, with its own trace and a stamped link to the exchange that
+    sent the note, never an inferred one. It carries the origin of the
+    exchange that started the chain (§3.1.4), so the chain's kind
+    (principle 13), critique eligibility (§3.7 Critique 3), budget (§3.1.3)
+    and precedence (§3.13.7) all follow how the chain started. The target's
+    turn still judges for itself, and may end without sending anything
+    (§3.7, the right to silence).
 11. Reading another channel: any turn can read another channel's recent
     conversation from the raw log, including what consolidation hasn't
     reached, returned at the tail of the reader's window as framed data.
@@ -1484,6 +1497,7 @@ record that holds the reasoning.
 | Any turn can speak on any channel, leave a note for another channel's context, and read another channel's conversation; a per-destination limit on messages the agent starts is a restriction the operator can apply, off unless set, never a gate on crossing channels | operator directive, 2026-11-01; #234, #235 |
 | Audience filtering is a capability, not a requirement: the sensitivity plugin, where the operator loads it, filters what enters a window (retrieval, notes, reads, goals) by who is present; it never gates a reply | principle 15; operator directive, 2026-11-01 |
 | A turn a note wakes is its own exchange, linked to the one that sent the note; its origin, kind (agency or continuation), `max_turns` budget and precedence follow the exchange that started the chain; a continuation can cross channels | principle 13; §3.1.3; §3.5.10; operator directive, 2026-11-01 |
+| Accepted work survives a restart: inbound messages, notifications and notes go to a write-ahead log when accepted and are replayed if unfinished; the log is compacted and is not bound by the append-only rule | §3.4.8; operator directive, 2026-11-01 |
 | Identity is agent-wide and heads every prompt; channel register is appended after it and never replaces it | operator directive, 2026-11-01 |
 | The operator decides the trust boundary; inbound transports default-deny; channels are not a boundary; safety features layer in as plugins | #167; operator directive, 2026-11-01 |
 | Corvidae is a testbed first and a robust harness second | #167 |
