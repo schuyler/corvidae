@@ -10,16 +10,19 @@ moves, this document is wrong until someone fixes it.
 
 Corvidae is a personal agent daemon for a single machine, and the design
 says so. Within that model it does several things right: Signal is
-default-deny with silent refusal, memory is compartmentalized per channel
-(or per operator-configured channel group; goals are agent-wide, finding
-10),
-retrieved context is framed as data, tool `_ctx` is hidden from the model,
+default-deny with silent refusal, retrieved context is framed as data,
+tool `_ctx` is hidden from the model,
 SQL is parameterized, signal-cli is pinned and signature-verified, and the
 docs are candid about plaintext at rest. The Discord transport follows
 Signal's model: default-deny, silent refusal, and outbound
 mentions disabled. The web transport binds loopback by default, needs a
 token that can't be turned off, and renders model output through
 DOMPurify under a strict CSP.
+
+Memory is compartmentalized per channel in the tree today, but that is no
+longer the design: the PRD makes the agent one identity across channels,
+with no compartments and no cross-channel allowlist. Finding 15 records what
+that costs, including a gap the operator has accepted.
 
 The weak spot is that the model's authority is unbounded and the model's
 inputs are not. Simon Willison's "lethal trifecta" is three things in one
@@ -420,7 +423,9 @@ string with little memory of who wanted it. What bounds it:
 - **Scoping.** The three tools act on `_ctx.channel` and take no channel
   argument. A reminder fires on the channel it was set on and nowhere
   else, so a stranger on IRC cannot use one to make the bot message a
-  Signal contact. `cancel_reminder` refuses operator jobs and treats
+  Signal contact. PRD §3.9.7 now lets a reminder target any channel, so
+  this scoping is slated to go; finding 15 covers what replaces it.
+  `cancel_reminder` refuses operator jobs and treats
   another channel's row as not found; `list_reminders` shows only the
   calling channel's rows.
 - **Volume.** `scheduler.max_reminders_per_channel` (default 50) caps
@@ -440,12 +445,10 @@ prompt is framed as the operator's. It is hot-reloaded, so it joins the
 just at the next restart. The mitigation is the one finding 4 already
 gives: keep `agent.yaml` unwritable by the daemon user.
 
-Deferred on purpose: a `send_to_channel(channel_id, text)` tool, so the
-heartbeat could message people. It would be a new exfil and spam path
-from any channel, model, or injected text to any other channel. Before it
-lands it needs an allowlist of target channels, a send budget, and its
-own entry here. Recurring reminders by tool are deferred for a related
-reason: they need a per-channel budget of their own.
+No tool sends to another channel yet. PRD §3.5.9 now requires one, with no
+allowlist of target channels: any turn may speak on any channel (#234).
+Finding 15 is its entry. Recurring reminders by tool are deferred for a
+separate reason: they need a per-channel budget of their own.
 
 ### 8. Forks put background instructions after untrusted text (opt-in)
 
@@ -537,8 +540,10 @@ and shows them in a CONTEXT entry on every turn. Three things follow.
 
 - **No compartment.** Goals are agent-wide: every channel sees every goal,
   crossing `memory.channel_groups`. A goal written from a private channel
-  appears on a public one at its next turn. This is a recorded variance from
-  PRD principle 14 (#220). Nothing in a goal is scoped to its origin. The
+  appears on a public one at its next turn. #220 recorded this as a
+  variance from PRD principle 14; under the revised principle 14 it is
+  what the PRD requires of memory too (finding 15). Nothing in a goal is
+  scoped to its origin. The
   heartbeat's review shows every retired goal's conclusion too, whatever
   channel it was retired on, so a conclusion written on a private channel
   reaches the heartbeat's window.
@@ -610,7 +615,9 @@ human removed. What bounds it:
 
 - **Reach.** No transport owns `internal:heartbeat`, so the beat's replies
   go to `sessions.db` and the logs only. There is no cross-channel send
-  yet (PRD §3.5.9, #169), so a beat can't message anyone. Its tools are
+  yet (PRD §3.5.9, #234), so a beat can't message anyone. When there is,
+  a beat can message any contact, with no allowlist (finding 15). Its
+  tools are
   another matter: `shell`, `web_fetch` and `write_file` are as available
   to a beat as to any turn (finding 4). Drop them for the beat with
   `channels.internal:heartbeat.tools.disabled`.
@@ -620,7 +627,9 @@ human removed. What bounds it:
   what a beat's turn consolidates into memory, including anything its tools
   fetched, becomes retrievable from every channel in the group. Keep
   channels with untrusted participants out of the heartbeat's group, or
-  disable the beat's network tools.
+  disable the beat's network tools. The PRD drops `memory.channel_groups`
+  (#168), after which the beat reviews the whole memory and disabling its
+  tools is the remaining control.
 - **Framing.** The summaries are presented as the agent's own and as data
   to review, not instructions. The framing is soft, as everywhere else.
 - **Rate.** At most one beat per `heartbeat.after` seconds of quiet, and
@@ -872,6 +881,53 @@ pool; #296 tracks the open questions, charging per sender among them.
 Until then, on a metered endpoint, set a spend limit with the provider, and
 keep inbound allowlists tight on any channel with untrusted participants:
 inbound admission is the main control on total cost the tree has today.
+
+### 15. One identity across channels (by design)
+
+PRD principle 14 makes the agent one identity on every channel. Retrieval
+spans the whole memory with no compartments, any turn can speak on any
+channel a transport owns, leave a note for another channel's context, and
+read another channel's recent conversation (PRD §3.5.9–11), and there is no
+cross-channel allowlist, as a default or as an option. Channels are not a
+trust boundary; inbound admission is (principle 9). This is the operator's
+decision (2026-11-01), and these are its costs.
+
+- **Private things can surface in rooms other people read.** Inbound
+  allowlists say who may *drive* the agent, not who reads its replies.
+  Everyone in a Discord guild channel or a public IRC channel reads them.
+  Something said on a private Signal channel can come back in a reply
+  there: through retrieval, a goal (finding 10), a note, or the agent
+  reading the Signal conversation because a question on the public channel
+  made it relevant. The sensitivity plugin (#138), filtering by who is
+  present, is the planned answer. **Until it exists, this gap is accepted:**
+  keep the agent out of rooms where people you haven't allowed can read it,
+  or accept that anything it knows can surface there.
+- **Text from one channel can steer action on every other.** A web page,
+  an MCP result or a distilled memory read on one channel can make the
+  model message any contact, send another channel's context a note, or
+  pull another channel's conversation into the current window. This is the
+  exfiltration leg of the trifecta with people as the destination: a
+  Signal contact can be messaged on the strength of text fetched in an IRC
+  channel. Inbound default-deny bounds who can inject by talking; it does
+  not bound what fetched content says.
+- **Loops.** A note that wakes another channel starts a turn there, and
+  that turn can wake the first. Messages the agent starts on its own and
+  waking notes carry a per-destination cap (PRD §3.5.9), a runaway guard
+  rather than a gate; `max_turns` bounds one exchange and the caps of
+  finding 14 bound total spend.
+- **One poisoned memory reaches every prompt.** With no compartments, a
+  record distilled from untrusted text on any channel is retrievable on
+  all of them. The trust plugin's quarantine (#138) is the planned answer;
+  until then this is finding 3 at the agent's full reach.
+
+What remains for an operator who wants a channel kept apart: disable the
+send, note and read tools on a channel with untrusted participants
+(`channels.<id>.tools.disabled`), keep inbound allowlists tight, and for a
+genuinely separate identity, run a second instance with its own database.
+
+Where the tree stands: memory is still compartmented per channel by default
+(`memory.channel_groups`, #168), and there is no send, note or read tool
+(#234, #235), so the costs above arrive with those changes.
 
 ## Privilege separation
 

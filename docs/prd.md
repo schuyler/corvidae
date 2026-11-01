@@ -152,14 +152,14 @@ one is a bug even if its tests pass.
    web page, an MCP server, or a memory distilled from those is data, and
    is framed as such at one chokepoint. Transports are default-deny with
    silent refusal. The operator decides the trust boundary, not the
-   architecture: defaults are open on what the agent's memory reaches and
-   what may cross between channels through memory, inbound transports stay
-   default-deny, and the cross-channel send allowlist starts empty. The
-   architecture supplies the mechanisms (transport allowlists, the
-   cross-channel send allowlist and budget, memory compartments, the trust
-   and sensitivity plugins); the operator configures where the boundary
-   falls, and safety features are added as plugins over time, as with
-   sandboxing. Fixed floors protect the operator's own control surface
+   architecture: inbound transports stay default-deny, so the operator
+   decides who may reach the agent, and channels are not a boundary at
+   all (principle 14). What the agent knows, remembers and says crosses
+   between channels freely. The architecture supplies the mechanisms
+   (transport allowlists, the trust and sensitivity plugins, caps and
+   locks); the operator configures where the boundary falls, and safety
+   features are added as plugins over time, as with sandboxing. Fixed
+   floors protect the operator's own control surface
    rather than draw a trust boundary, and stay fixed: web auth cannot be
    turned off (§3.2 Web), `redact` is never a tool (§3.7 Memory 8),
    `set_settings` can't lift a lock or change the lock list, the
@@ -177,8 +177,9 @@ one is a bug even if its tests pass.
    a tool can do something new.
 
 10. **Channel ids are persistence keys and never derive from names.**
-    `transport:scope` keys `sessions.db`, the JSONL logs, memory
-    compartments, and the schedule. Scopes use identifiers that cannot be
+    `transport:scope` keys `sessions.db`, the JSONL logs, the channel a
+    memory record came from, and the schedule. Scopes use identifiers
+    that cannot be
     renamed or go missing: Signal's ACI, Discord's numeric ids, a web slug
     the operator chose, an ACP session id reused across load and resume.
 
@@ -215,17 +216,25 @@ one is a bug even if its tests pass.
     has no reminders or heartbeat, and its upkeep still runs. No plugin's
     documented behaviour may depend on traffic it does not control.
 
-14. **One actor, many channels.** Memory and identity are the agent's, not
-    the channel's. Safety comes from trust (what came in is weighted and
-    labelled by its source) and sensitivity (what goes out is filtered by
-    who is present), not from walling channels off. Compartments
-    (`memory.channel_groups`) are an operator option. Principle 1 applies:
-    without the sensitivity plugin, retrieval is not filtered by audience;
-    without the trust plugin, nothing is quarantined; retrieval spans the
-    whole memory unless the operator draws a boundary with compartments
-    (principle 9). The whole-memory default has an entry in
-    `docs/threat-model.md` (principle 9), since it lets text distilled on
-    one channel reach prompts on every other.
+14. **One actor, one identity, many channels.** Identity, memory, working
+    knowledge and the ability to act are the agent's, not the channel's.
+    The agent presents the same identity on every channel; what changes
+    from one channel to the next is register (§3.3.11), never who it is
+    (§3.3.8). Any turn can speak on any channel a transport owns, leave a
+    note for another channel's context, and read another channel's recent
+    conversation (§3.5.9–11), and retrieval spans the whole memory. There
+    are no channel walls to configure: the per-channel queue, window and
+    settings exist for concurrency, the KV cache and register, and draw no
+    trust boundary. An operator who wants two identities runs two
+    instances. Safety comes from who may reach the agent (inbound
+    default-deny), trust (what came in is weighted and labelled by its
+    source) and sensitivity (what goes out is filtered by who is present).
+    Principle 1 applies: without the sensitivity plugin, nothing the agent
+    says or retrieves is filtered by audience; without the trust plugin,
+    nothing is quarantined. That has a cost where people the operator never
+    allowed can read the agent's replies (a Discord guild channel, a public
+    IRC channel): something said on a private channel can surface there.
+    `docs/threat-model.md` records it (principle 9).
 
 15. **The agent can modify itself; the operator decides how far.** The
     capacity to self-modify and self-improve is a design goal. The
@@ -581,7 +590,11 @@ Per transport:
    `memory_role` probe showing the model still answers the person with the
    framed block as the last user turn.
 8. The system prompt is a string or a list of file paths concatenated with
-   blank lines, resolved against the config directory once per
+   blank lines, in two layers: the agent's identity, which is agent-wide
+   and heads every channel's prompt, then the channel's register
+   (§3.3.11), which per-channel and transport-wide configuration append
+   after it. No channel setting replaces the identity (principle 14). It
+   is resolved against the config directory once per
    conversation and on restart, and again at a compaction boundary when an
    unlocked runtime override changed it (principle 15). It is the head of
    the window, so principle 2 governs it: nothing mutates it per turn.
@@ -601,9 +614,12 @@ Per transport:
     conversation end (§3.7, the right to silence). The operator decides
     what each channel's register is and can give a whole class of channels
     one, including channels that don't exist yet (each new Signal contact,
-    each ACP session), without listing them. How the register is achieved
-    (prompt material, history, context, sampling) is a design choice, not a
-    requirement; the bar is behavioural (principle 6), and an essay-length
+    each ACP session), without listing them. Register is how the one
+    identity speaks in a given place; prompt material for it is appended
+    after the identity, never in place of it (§3.3.8). How the register is
+    achieved (prompt material, history, context, sampling) is otherwise a
+    design choice, not a requirement; the bar is behavioural (principle
+    6), and an essay-length
     reply to a one-line text is a bug.
 
 ### 3.4 Persistence
@@ -683,7 +699,9 @@ Per transport:
    default, with the documented recommended locks for channels with
    untrusted participants. `agent.immutable_settings` and the other locks
    narrow what the agent may set, and operator config can lift any of
-   them, `system_prompt` included (principle 15). An override that changes
+   them, `system_prompt` included (principle 15); an override of the
+   identity applies on every channel, and an override of a channel's
+   register applies to that channel (§3.3.8). An override that changes
    already-rendered content (`system_prompt`,
    `mid_conversation_system_role`, `reasoning_history`) takes effect at
    the channel's next compaction boundary or conversation start, as plugin
@@ -700,13 +718,34 @@ Per transport:
    Agent. Shutdown closes every server cleanly. Tools are named
    `<prefix>__<tool>`, first wins on collision, top-level JSON Schema
    metadata keys are stripped.
-9. Cross-channel sends: the agent can send to a channel other than the
-   current turn's own, only to destinations on an operator allowlist,
-   which starts empty, and within a send budget. When the trust and
-   sensitivity plugins are loaded, it sends only content whose trust and
-   sensitivity fit the destination's audience (§3.7 Trust); without them,
-   the allowlist and the budget are the whole gate. It has an entry in
-   `docs/threat-model.md` before it ships (principle 9).
+9. Speaking on any channel: any turn can send a message on any channel a
+   transport owns, not only its own, including turns on channels no
+   transport owns (the heartbeat, §3.7; a reminder's firing, §3.9). The
+   owning transport delivers it as it delivers any emission (§3.2.10),
+   the tool reports whether it was delivered, and the message is recorded
+   at the tail of the target channel's history, so that channel's context
+   sees what the agent said there. Nothing gates which channel a turn may
+   speak on. With the sensitivity plugin loaded, what the agent says is
+   filtered by who is present on the channel it says it on, the same on
+   every channel (§3.7 Trust). Messages the agent starts on its own (as
+   opposed to the reply a turn owes the channel it runs on) and notes that
+   wake a channel (item 10) can carry a cap per destination over a period,
+   a setting under principle 15 with a best-guess default (principle 7),
+   so a loop cannot flood a contact. The cap is a runaway guard, not a
+   gate on crossing channels. `docs/threat-model.md` records what speaking
+   anywhere costs (principle 9).
+10. Notes to another channel's context: any turn can leave information
+    for another channel. The note is admitted through the funnel at the
+    tail of the target channel's window (§3.7 Funnel), framed as the
+    agent's own note and labelled with the channel it came from,
+    persisted like any CONTEXT row (principle 4), and retires past the
+    compaction boundary (principle 2). It is information, not an
+    instruction: the target channel's turn decides from its own view of
+    that conversation what, if anything, to do with it. The sender chooses
+    whether the note waits for the target's next turn or wakes it.
+11. Reading another channel: any turn can read another channel's recent
+    conversation from the raw log, including what consolidation hasn't
+    reached, returned at the tail of the reader's window as framed data.
 
 ### 3.6 LLM client
 
@@ -757,13 +796,13 @@ only through the funnel.
    registered; a surprise term as a Phase 6 toggle). Surprise modulates
    encoding strength only, never entry into the raw log.
 3. Before inserting, consolidation merges a near-duplicate (cosine at or
-   above `memory.dup_threshold`) within the channel's retrieval scope,
-   only with a record of equal reach, superseding the old record and
-   summing its access statistics. Overlapping triggers on one range keep
+   above `memory.dup_threshold`) anywhere in the agent's memory,
+   superseding the old record and summing its access statistics.
+   Overlapping triggers on one range keep
    one record.
 4. Retrieval runs before each user-originated turn: embed the inbound
    text, exact KNN over `memory_vec`, filter to indexed and unredacted
-   records in the channel's retrieval scope (and, with the sensitivity
+   records from every channel (and, with the sensitivity
    plugin loaded, to records whose sensitivity fits who is present; with
    the trust plugin loaded, low-trust records stay retrievable but
    quarantined, §3.7 Trust), score by similarity times recency decay
@@ -773,10 +812,9 @@ only through the funnel.
    later one, and admit through the funnel as `[band] (age) summary`
    lines. Admitted records get their access statistics bumped; every
    retrieval writes a `retrieval_log` row and the exchange's retrieval
-   profile. A channel's *retrieval scope* is the agent's whole memory
-   unless the operator narrows it with compartments
-   (`memory.channel_groups`, whose members may be globs); the whole-memory
-   default has an entry in `docs/threat-model.md` (principle 14).
+   profile. Retrieval spans the agent's whole memory; there is no
+   per-channel scope to narrow it (principle 14), and
+   `docs/threat-model.md` records what that costs.
 5. Degradation: encoder down, FTS5 over `memory_fts`, flagged; sqlite-vec
    unloadable, FTS5 with one startup warning; no embedding role, records
    stored unembedded for backfill; a stored encoder different from config,
@@ -858,8 +896,8 @@ deciding only what to newly append and in what order.
    the window up to the reply (the system prompt, the exchange's
    own rows including its tool results, and the CONTEXT admitted for it),
    plus a keyword search, fetched by code, of earlier raw-dialog messages
-   within the channel's retrieval scope, which reaches what has left the
-   window; its hits are quoted to the critic as data, not instructions.
+   on every channel, which reaches what has left the window; its hits
+   are quoted to the critic as data, not instructions.
    The reply is never a record of itself. Generator confidence is
    never evidence.
 3. Eligibility is by propagated origin: `user` and `reminder` exchanges
@@ -937,8 +975,9 @@ evidence that produced it.
 is idle (§3.1.16), with a latency bound so a busy system can't starve it.
 It reviews recent memory and open and retired goals, assesses itself, and
 acts only when the assessment warrants it. It runs on a channel no
-transport owns, so it reaches a person only through a gated cross-channel
-send (§3.5.9). Putting it to sleep is durable across restarts.
+transport owns, so it reaches a person by speaking on that person's
+channel or leaving a note for its context (§3.5.9–10), like any turn.
+Putting it to sleep is durable across restarts.
 
 **People, observations, semantic facts.** `person` records keyed by
 `(transport, scope, sender)`, auto-created on first contact, carrying a
@@ -1079,8 +1118,8 @@ design: `docs/design.md`, Forks. The requirements are outcomes:
    inbound item on that channel (§3.1.16), and injects through
    `on_notify` with `meta={"origin", "schedule_id"}`; the whole pipeline
    then runs. A firing on a channel no transport owns is delivered by no
-   transport; it reaches a person only through a cross-channel send
-   (§3.5.9).
+   transport; it reaches a person by speaking on another channel
+   (§3.5.9), like any turn.
 4. Reminder text is framed as data with its quote marks neutralized;
    operator jobs are framed as the operator's; a late firing is prefixed
    with how overdue it was.
@@ -1090,12 +1129,12 @@ design: `docs/design.md`, Forks. The requirements are outcomes:
    bounded by `catch_up_window`.
 6. Config jobs sync by name on start and reload; a removed name is a
    durable stop; an invalid entry logs and leaves the running job alone.
-7. Tools act on the calling channel; a reminder for any other channel is a
-   cross-channel send and passes its gate (§3.5.9). They parse `when`
+7. Tools act on the calling channel unless told otherwise, and a
+   reminder may target any channel (principle 14). They parse `when`
    themselves, refuse a bare number, cap pending rows per target channel
    and text length, and refuse to cancel config jobs.
-8. Cross-channel sends are specified in §3.5.9. Recurring reminders
-   by tool need a per-channel budget first. Cron syntax waits for an
+8. Recurring reminders by tool need a per-channel budget first. Cron
+   syntax waits for an
    operator to need it. Retention runs on the kernel clock (§3.1.15,
    §3.7 Memory 6) and does not depend on the scheduler.
 
@@ -1368,7 +1407,6 @@ record that holds the reasoning.
 | Idle-triggered work may carry a latency bound: the quiet it needs decays with waiting, so traffic can't starve it | #214 |
 | The agent may decline any turn when it has nothing to add (Grice's maxims, by register); gates still never withhold a direct reply by default | #215 |
 | Model endpoints may be remote; a role's credentials should be storable in the environment rather than config (not required to be), and the threat model names what each role sends | #217 |
-| Cross-channel sends are a requirement, gated by an operator allowlist that starts empty, a budget, a threat-model entry, and trust and sensitivity when those plugins are loaded | #167 |
 | Operator-seeded goals allowed | §5.14 |
 | Memory poisoning answered on the write side with trust tagging (trust plugin) | §3.9, §5.10 |
 | No sandbox; the subagent/MCP seam is where one would attach | §5.11; `design.md`, Known Risks |
@@ -1397,6 +1435,8 @@ record that holds the reasoning.
 | The kernel owns the clock; idle keeps firing through quiet, and no plugin needs another's queues to learn of it; the April push-based decoupling stands | #167; #165 |
 | Upkeep runs on time regardless of agency plugins; the scheduler is agency and optional | #167 |
 | Transports deliver every emission on their own channels regardless of origin | #167 |
-| The agent is one actor; trust and sensitivity, not channel walls; channel compartments are an operator option; the whole-memory default has a threat-model entry | #167 |
-| The operator decides the trust boundary; memory reach and cross-channel flow default open, inbound transports default-deny; safety features layer in as plugins | #167 |
+| The agent is one actor with one identity on every channel; trust and sensitivity, not channel walls. No cross-channel allowlist and no memory compartments, as an option or otherwise; two identities means two instances | operator directive, 2026-11-01; #234, #235 |
+| Any turn can speak on any channel, leave a note for another channel's context, and read another channel's conversation; a cap on self-started messages is a runaway guard, not a gate | operator directive, 2026-11-01; #234, #235 |
+| Identity is agent-wide and heads every prompt; channel register is appended after it and never replaces it | operator directive, 2026-11-01 |
+| The operator decides the trust boundary; inbound transports default-deny; channels are not a boundary; safety features layer in as plugins | #167; operator directive, 2026-11-01 |
 | Corvidae is a testbed first and a robust harness second | #167 |
