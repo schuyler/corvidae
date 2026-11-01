@@ -72,7 +72,8 @@ async def run_retention_job(memory: "MemoryPlugin", now: float | None = None) ->
     ) as cursor:
         rows = await cursor.fetchall()
 
-    demoted_ids = []
+    # (id, last_retrieved_at as selected): the write re-checks both (#272).
+    demoted: list[tuple[int, float | None]] = []
     for row in rows:
         mid, importance, retrieval_count, last_retrieved_at, created_at = row
         if now - created_at < grace_seconds:
@@ -82,17 +83,26 @@ async def run_retention_job(memory: "MemoryPlugin", now: float | None = None) ->
         last_activity = max(created_at, last_retrieved_at or 0.0)
         score = retention_score(importance, retrieval_count, last_activity, now, half_life_days)
         if score < demote_below:
-            demoted_ids.append(mid)
+            demoted.append((mid, last_retrieved_at))
 
-    if demoted_ids:
+    if demoted:
         # One transaction on memory's write connection: the whole batch
         # demotes or none of it does (#257). A failure rolls back and
         # propagates; the job's caller logs it and the next run retries.
+        # Each UPDATE re-checks the selection, so a row redacted, demoted
+        # or retrieved since the SELECT above is left alone (#272).
+        demoted_count = 0
         async with memory._db_lock, memory._write_txn() as wdb:
-            for mid in demoted_ids:
-                await wdb.execute(
-                    "UPDATE memory SET indexed = 0, embedded = 0 WHERE id = ?", (mid,)
+            for mid, selected_last_retrieved in demoted:
+                cursor = await wdb.execute(
+                    "UPDATE memory SET indexed = 0, embedded = 0 "
+                    "WHERE id = ? AND indexed = 1 AND redacted = 0 "
+                    "AND last_retrieved_at IS ?",
+                    (mid, selected_last_retrieved),
                 )
+                if cursor.rowcount != 1:
+                    continue
+                demoted_count += 1
                 if memory._vec_available:
                     try:
                         await wdb.execute(
@@ -102,7 +112,8 @@ async def run_retention_job(memory: "MemoryPlugin", now: float | None = None) ->
                         logger.debug(
                             "vec row delete failed for memory %d", mid, exc_info=True
                         )
-        logger.info("retention: demoted %d records", len(demoted_ids))
+        if demoted_count:
+            logger.info("retention: demoted %d records", demoted_count)
 
     # ------------------------------------------------------------------
     # Pass 2: Re-promotion
@@ -126,12 +137,19 @@ async def run_retention_job(memory: "MemoryPlugin", now: float | None = None) ->
 
     if repromoted_ids:
         # One transaction on memory's write connection (#257).
+        # The UPDATE re-checks the selection, so a row superseded or
+        # redacted since the SELECT is never re-indexed (#309, #272).
+        repromoted_count = 0
         async with memory._db_lock, memory._write_txn() as wdb:
             for mid in repromoted_ids:
-                await wdb.execute(
-                    "UPDATE memory SET indexed = 1 WHERE id = ?", (mid,)
+                cursor = await wdb.execute(
+                    "UPDATE memory SET indexed = 1 WHERE id = ? AND indexed = 0 "
+                    "AND redacted = 0 AND superseded_by IS NULL",
+                    (mid,),
                 )
-        logger.info("retention: re-promoted %d records", len(repromoted_ids))
+                repromoted_count += cursor.rowcount == 1
+        if repromoted_count:
+            logger.info("retention: re-promoted %d records", repromoted_count)
 
     # ------------------------------------------------------------------
     # Pass 3: Backfill
@@ -168,8 +186,19 @@ async def run_retention_job(memory: "MemoryPlugin", now: float | None = None) ->
         embeddings = await client.embed(texts, kind="document")
         # Embeddings are computed above, so no network await runs inside the
         # transaction; the batch commits whole or rolls back whole (#257).
+        # Each row is re-checked inside the transaction before its vec row
+        # is written: one demoted, redacted or superseded while the
+        # embeddings were computed gets no vec row (#309, #272).
+        backfilled_count = 0
         async with memory._db_lock, memory._write_txn() as wdb:
             for (mid, _summary), embedding in zip(backfill_rows, embeddings):
+                cursor = await wdb.execute(
+                    "UPDATE memory SET embedded = 1 WHERE id = ? AND indexed = 1 "
+                    "AND redacted = 0 AND superseded_by IS NULL AND embedded = 0",
+                    (mid,),
+                )
+                if cursor.rowcount != 1:
+                    continue
                 # vec0 does not support INSERT OR REPLACE; clear any stale row.
                 await wdb.execute(
                     "DELETE FROM memory_vec WHERE memory_id = ?", (mid,)
@@ -178,10 +207,9 @@ async def run_retention_job(memory: "MemoryPlugin", now: float | None = None) ->
                     "INSERT INTO memory_vec (memory_id, embedding) VALUES (?, ?)",
                     (mid, sqlite_vec.serialize_float32(embedding)),
                 )
-                await wdb.execute(
-                    "UPDATE memory SET embedded = 1 WHERE id = ?", (mid,)
-                )
-        logger.info("retention: backfilled %d records", len(backfill_rows))
+                backfilled_count += 1
+        if backfilled_count:
+            logger.info("retention: backfilled %d records", backfilled_count)
     except Exception as exc:
         logger.warning(
             "retention: backfill of %d records failed and was rolled back "
