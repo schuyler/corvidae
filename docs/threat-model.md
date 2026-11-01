@@ -146,9 +146,9 @@ The allowlist does three jobs, and the PRD keeps two of them. Keeping
 stays: an override there replaces what the agent loop built on every turn.
 Keeping the transport metadata keys `cwd` and `tool_backend` out of the
 agent's reach stays too. Keeping the agent away from other model
-parameters (`model`, `logprobs`, sampling keys beyond the seven) does not:
-PRD §3.5.6 makes them settable where the operator allows, and finding 13
-records the cost (#ISSUE).
+parameters (`model`, `logprobs`, keys beyond the seven in
+`INFERENCE_KEYS`) does not: PRD §3.5.6 makes them settable where the
+operator allows, and finding 13 records the cost (#ISSUE).
 
 ### 2. The model can turn off its own gates
 
@@ -185,8 +185,9 @@ only calls that actually fork. In the tree, a fork miss (forks off for
 the stage, the exchange has left the window, a refused or unparseable
 fork) falls back to the standalone prompt for stage-2 appraisal, the
 stylistic critique lenses and consolidation; compaction falls back by
-design (PRD §3.8.5), and the provenance check skips. PRD §3.8 makes any
-other miss a skip, so the appraisal, lens and consolidation fallbacks are
+design (PRD §3.8.5), and the provenance check skips. PRD §3.8.2 and
+§3.8.5 make any other miss a skip (only windowless work runs
+standalone), so the appraisal, lens and consolidation fallbacks are
 a gap (#ISSUE2). Until it closes, the critic's and appraiser's
 standalone prompts above are reachable, and they are runtime tunables,
 so keep them in `immutable_settings` with forks on too.
@@ -722,11 +723,20 @@ What each kind of unlock costs:
   can walk thresholds somewhere no single message could, slowly enough
   that no one turn looks wrong: finding 2 in slow motion. Not built yet.
 - **Framework settings** (`max_turns`, `max_context_tokens`,
-  `reasoning_history`; open by default today). A `max_context_tokens`
-  above the server's context makes every turn on that channel fail; one
-  far below it forces compaction on nearly every turn, rewriting history
-  into summaries. A large `max_turns` lets one injected loop hold the
+  `reasoning_history`; open by default today). `max_context_tokens` sets
+  the compaction threshold. Set above the server's context, compaction
+  never fires in time: once the window outgrows what the server accepts,
+  every turn on that channel fails until the override is cleared. Set far
+  below it, compaction runs on nearly every turn, rewriting history into
+  summaries. A large `max_turns` lets one injected loop hold the
   slot.
+- **Other plugin tunables** (`memory.retrieval_k`, `appraisal.probe.*`,
+  the appraisal weights; open by default today). Raising retrieval
+  breadth pulls more stored memory, including text distilled on other
+  channels (PRD principle 14), into every prompt on the channel and fills
+  the window toward compaction. Probe budgets lengthen slot time like the
+  caps below. A plugin tunable not named in this ledger falls under this
+  entry or under the gate entry, by what it controls.
 - **Caps** (background-stage output caps). The agent can lengthen a
   stage's slot time on every exchange, which starves main turns on a
   single-slot server (PRD principle 3). The caps still have to fit the
@@ -735,7 +745,8 @@ What each kind of unlock costs:
   skill written at an injection's request is offered to every future
   conversation on every channel and survives restarts. The idle scan
   watches skill-directory writes (PRD §3.7 Trust); operator confirmation
-  on writes is the lock. Not built yet.
+  on writes is the lock. Skills are not built yet, so neither is the
+  lock.
 - **The tool set.** If the agent can re-enable a tool the operator
   disabled on its channel, an injection on a channel where `shell` is
   registered but disabled can grant itself `shell`, and from there
@@ -743,9 +754,10 @@ What each kind of unlock costs:
   on any channel with untrusted participants.
 
 Recommended locks for a channel with untrusted participants, as a
-starting point rather than a rule: the system prompt and the prompts that
-judge and remember, framing, `model`, the gate tunables, the tool set,
-and skill writes behind confirmation.
+starting point rather than a rule: the system prompt, the prompts that
+judge and remember, the heartbeat and subagent prompts, framing, `model`,
+the gate tunables (which also blocks closed-loop fitting from moving
+them), the tool set, and skill writes behind confirmation.
 
 A channel with only the operator on it has the smallest exposure, and it
 is where these unlocks cost least. It isn't free. Untrusted text still
