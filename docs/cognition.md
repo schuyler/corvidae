@@ -19,7 +19,7 @@ transports.
 | `MemoryToolsPlugin` | `memory_tools` | `search_memory` and `recall_raw` tools for the model |
 | `FunnelPlugin` | `funnel` | Admits retrieved context into the window under a budget |
 | `AppraisalPlugin` | `appraisal` | Scores every inbound message at the gate (novelty, commitment density, disagreement, question, salience), then appraises the exchange once the agent has answered |
-| `CritiquePlugin` | `critique` | Reviews the agent's replies after the fact through the stylistic lenses (predictive, constrained, adversarial) and the provenance check |
+| `CritiquePlugin` | `critique` | Reviews the agent's replies after the fact through the stylistic lenses (predictive, constrained, adversarial; each a fork of the window that is skipped with a warning on a miss) and the provenance check |
 | `GoalsPlugin` | `goals` | The agent's open goals: three tools to add, update and retire them, and a CONTEXT entry listing the open ones each turn |
 | `OutcomeLogPlugin` | `outcome_log` | Records each exchange and its outcome in `exchange_log` |
 | `GatePlugin` | `gates` | The engagement gate (may the agent ignore a message?) and the decide gate (may it stay silent instead of answering?), both over the appraisal vector |
@@ -84,9 +84,11 @@ Both spawn a tracked plugin-owned `asyncio.create_task` (never the
 TaskQueue — every TaskQueue completion wakes the main model). The task
 reads the per-channel **consolidation watermark**, fetches the working
 range, produces the record (first-person summary with epistemic framing,
-JSON out) — from a fork of the live window when one is available (see
+JSON out) — from a fork of the live window when the range is in it (see
 [Forks](design.md#forks)), else one standalone `llm.background` call
-(`prompts/memory_consolidation.md`); both are constrained by a
+(`prompts/memory_consolidation.md`); an idle range that is in the window
+but can't be forked is skipped instead, with a warning, and retried on the
+next trigger. Both calls are constrained by a
 `response_format` JSON schema (`summary` required, `topic_tags` and
 `participants` optional), like appraisal and critique, so a model can't
 answer the transcript instead of writing a record —
@@ -347,7 +349,8 @@ Implements five hooks and two kernel timers:
 - `on_compaction` — spawns a tracked background task consolidating the
   `compacted_ids` range above the per-channel watermark, using the stashed
   fork record when there is one for that range and watermark, else one
-  standalone `llm.background` call.
+  standalone `llm.background` call (after the drop the range has left the
+  window).
 - `before_agent_turn` — embeds the inbound user text, scores candidates
   (`similarity × exp(-age_days / half_life)`, with age from `created_at` or,
   under `memory.retrieval.recency_from: last_used`, from the last
@@ -361,8 +364,11 @@ Two kernel registrations replace the old `on_idle` hook:
 
 - **Idle watch** (`watch_channels`, period `memory.idle_consolidate_after`, which must be a positive finite number)
   — consolidates the un-consolidated tail of the quiet channel, forking
-  the live window when forks are on and the range is in it. One run per
-  channel at a time.
+  the live window when the range is wholly in it; if that fork misses
+  (forks off, failed, unusable reply) the run is skipped with a warning, the
+  watermark stays and the next period retries. A range not wholly in a live
+  window (no registered channel, trimmed rows) is consolidated standalone.
+  One run per channel at a time.
 - **Retention timer** — fires at `last_run + memory.retention.interval`
   on the clock. It then prefers system quiet: it registers a system idle
   watch for 60 s of quiet and a deadline `memory.retention.max_delay`
@@ -637,8 +643,11 @@ no gate registered. It catches and logs every exception: one raising
 implementation in that broadcast would discard every sibling's verdict.
 `get_appraisal_out(trace_id)` reads the vector back.
 
-**Stage 2** (`on_agent_response`) is a silent model call over the
-finished exchange: valence, stakes, ambiguity, commitment density, novelty,
+**Stage 2** (`on_agent_response`) is a silent fork of the live window over
+the finished exchange. On a miss (forks off, the exchange left the window,
+the fork failed or its reply was unusable) it is skipped with a warning
+naming the stage, channel, trace and reason: the exchange keeps stage 1 only
+and no standalone call is made. It produces: valence, stakes, ambiguity, commitment density, novelty,
 correction, and `past_claims`. `past_claims` is a list of `{claim,
 queries}`: each statement in the reply that presents something as
 established before the exchange, with up to 3 short search phrases. A
@@ -881,8 +890,9 @@ after it, as the over-budget safety net on the trimmed window. Four
 consequences.
 
 - *Memory.* The trim leaves rows above the channel's memory watermark, and
-  the idle trigger consolidates every one of them: as a fork when forks are on
-  and the range is wholly in the window, standalone once any of it has been
+  the idle trigger consolidates every one of them: as a fork when the range
+  is wholly in the window (with forks off the run is skipped, so in-window
+  heartbeat rows wait until trimmed), standalone once any of it has been
   trimmed out. The compaction safety net can also cover them, when the kept
   beats pass the compaction threshold and `on_compaction` fires.
 - *When.* The trim keeps compaction from firing, so the compaction route to

@@ -59,7 +59,7 @@ agent:
   # compaction_prompt: "..."        # summarizer system prompt, used in every compaction round
   # compaction_fork_prompt: "..."   # instruction a compaction fork appends (prompts/compaction_fork.md)
   # forks:                          # run background stages as forks of the main window (#51)
-  #   enabled: false                # opt-in; any fork failure falls back to the standalone call
+  #   enabled: true                 # default; false: live-window stages skip, compaction goes standalone
   #   reasoning_budget_tokens: 2048 # per-fork think budget; null = server default
   #   stages: null                  # null = all; or [compaction, consolidation, appraisal, critique]
   # chars_per_token: 3.5            # deprecated: retained for config compatibility; has no effect on token counting

@@ -172,10 +172,30 @@ def test_snap_reaches_a_fixpoint_and_ignores_unanswered_calls():
     ({}, ForksConfig()),
     ({"forks": {"enabled": True, "reasoning_budget_tokens": 512, "stages": ["x"]}},
      ForksConfig(True, 512, frozenset({"x"}))),
-    ({"forks": {"reasoning_budget_tokens": None, "stages": None}}, ForksConfig(False, None, None)),
+    ({"forks": {"reasoning_budget_tokens": None, "stages": None}}, ForksConfig(True, None, None)),
 ])
 def test_parse_forks_config(raw, expected):
     assert parse_forks_config(raw) == expected
+
+
+@pytest.mark.parametrize("raw", [{}, {"forks": {}}, {"forks": {"stages": None}}])
+def test_forks_default_on(raw):
+    """#320: with no ``enabled`` key every stage forks (PRD §3.8)."""
+    # Parse the config the way the daemon does; no key means forks on.
+    cfg = parse_forks_config(raw)
+    assert cfg.enabled is True
+    for stage in ("compaction", "consolidation", "appraisal", "critique"):
+        assert cfg.stage_enabled(stage), f"stage {stage!r} should fork by default"
+
+
+async def test_agent_forks_default_on_without_forks_block():
+    """#320: an Agent started with no ``agent.forks`` block forks every stage."""
+    plugin, channel, db = await build_plugin_and_channel()
+    # Initialise with an agent config that has no ``forks`` key at all.
+    await plugin.on_init(plugin.pm, {"agent": {}})
+    await db.close()
+    for stage in ("compaction", "consolidation", "appraisal", "critique"):
+        assert plugin.fork_enabled(stage), f"stage {stage!r} should fork by default"
 
 
 def test_stage_enabled():

@@ -153,6 +153,11 @@ async def make_env(tmp_path):
             await p.on_init(pm=pm, config=cfg)
             if hasattr(p, "on_start"):
                 await p.on_start(config=cfg)
+        # These tests are not about forks: switch them off so stage 2 skips
+        # (forks are on by default, #320) instead of eating a scripted reply.
+        from corvidae.fork import ForksConfig
+
+        plugin._forks = ForksConfig(enabled=False)
         client = MagicMock()
         client.chat = AsyncMock(side_effect=list(responses))
         plugin._client = client

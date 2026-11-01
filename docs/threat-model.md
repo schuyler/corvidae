@@ -194,18 +194,17 @@ The fork instructions added for #51 (`appraisal.stage2_fork_prompt`,
 `critique.fork_prompt.<lens>`, `memory.consolidation_fork_prompt`,
 `agent.compaction_fork_prompt`) and `agent.forks.*` are read from operator
 config only, so `set_settings` can't rewrite them. That covers only calls
-that actually fork. In the tree, a fork miss (forks off for the stage, the
-exchange has left the window, a refused or unparseable fork) falls back to
-the standalone prompt for stage-2 appraisal, the stylistic critique lenses
-and consolidation; compaction falls back by design (PRD §3.8.5), and the
-provenance check skips. PRD §3.8.2 and §3.8.5 make any other miss a skip
-(only windowless work runs standalone), so the appraisal, lens and
-consolidation fallbacks are a gap (#293). Until it closes, the critic's
-and appraiser's standalone prompts above are reachable, and they are
-runtime tunables, so keep them in `immutable_settings` with forks on too.
+that actually fork. A fork miss (forks off for the stage, the exchange has
+left the window, a refused or unparseable fork) skips stage-2 appraisal, the
+stylistic critique lenses and the provenance check with a warning (#320, PRD
+§3.8.5), so the standalone prompts `appraisal.stage2_prompt` and
+`critique.prompt.<lens>` are no longer reachable from any live stage. They
+stay in the tunable list above, and no stage reads them. Compaction falls
+back to its standalone summary by design, and consolidation of a range that
+has left the window runs standalone, as windowless work.
 
-The tunability itself is not a defect to engineer away (the fallback gap
-above is): the capacity to tune and rewrite its own gates is part of a
+The tunability itself is not a defect to engineer away: the capacity to
+tune and rewrite its own gates is part of a
 design goal (PRD principle 15). This finding records its cost, and finding
 13 records the cost of each kind of self-modification.
 
@@ -467,9 +466,9 @@ operator can apply a floor on how often an agent-set reminder recurs; with
 none, the bound is the per-target pending cap and, once built, the pool
 caps of finding 14.
 
-### 8. Forks put background instructions after untrusted text (opt-in)
+### 8. Forks put background instructions after untrusted text
 
-With `agent.forks.enabled` (off by default, #51), compaction,
+With `agent.forks.enabled` (on by default since #320; #51), compaction,
 consolidation, appraisal and critique don't build their own prompts. Each
 appends its instruction as a `user` turn to the channel's rendered window,
 after whatever untrusted text the window holds, under the agent's own
@@ -496,8 +495,8 @@ What bounds it:
 
 Critique independence is the open question: a critic that shares the
 agent's context and persona may share its blind spots. #73 measures it
-behaviorally (planted-defect recall, fork vs standalone) before the
-default flips.
+behaviorally (planted-defect recall, fork vs standalone); the default
+has flipped (#320).
 
 ### 9. The web transport is a shell behind a bearer token
 
@@ -623,11 +622,11 @@ included, to the provider. Which stage uses which role:
 
 - `main`: agent turns, compaction summaries, and the forked appraisal and
   critique stages (they fork the local window, so they cannot use a remote
-  role).
-- `background`: memory consolidation (conversation transcripts), the
-  importance prior, subagents (their task context and tool results) and,
-  when not forked, standalone appraisal and critique, which resolve
-  `appraisal`/`critic` then `background` then `main`.
+  role). The `llm.appraisal` and `llm.critic` roles are no longer read by any
+  stage: stage 2 and the lenses run only as forks on `llm.main` (#320).
+- `background`: memory consolidation of ranges outside the window
+  (conversation transcripts), the importance prior and subagents (their
+  task context and tool results).
 - `embedding`: memory embedding and retrieval queries, and retention.
 
 A role that isn't configured falls back to `main`, so the endpoint of

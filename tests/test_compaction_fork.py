@@ -261,3 +261,32 @@ async def test_fork_through_real_agent_is_prefix_of_main_render():
         assert conv.messages[0]["content"].endswith("real fork")
     finally:
         await db.close()
+
+
+async def test_default_forks_on_and_failing_fork_still_summarizes_standalone():
+    """#320 R4: with no ``agent.forks`` config the fork is attempted (the
+    default is on), and when it fails compaction still writes the
+    standalone summary."""
+    agent, channel, db = await build_plugin_and_channel()
+    try:
+        # No ``forks`` key anywhere in the agent config: the default decides.
+        await agent.on_init(agent.pm, {"agent": {}})
+        client = MagicMock()
+        client.chat = AsyncMock(side_effect=RuntimeError("http 500"))
+        agent._client = client
+        agent._mark_started()
+        conv = _straddling_window()
+        channel.conversation = conv
+
+        plugin = CompactionPlugin(pm=agent.pm)
+        await plugin.on_init(agent.pm, {"agent": {}})
+        summarize = AsyncMock(return_value="standalone summary")
+        with patch.object(plugin, "_summarize", summarize):
+            assert await plugin.resolve_compaction(
+                channel=channel, conversation=conv, max_tokens=MAX_TOKENS)
+        # The fork was tried, then the standalone summary was used.
+        client.chat.assert_awaited()
+        summarize.assert_awaited_once()
+        assert conv.messages[0]["content"].endswith("standalone summary")
+    finally:
+        await db.close()

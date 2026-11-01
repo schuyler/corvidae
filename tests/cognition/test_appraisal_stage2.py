@@ -34,6 +34,8 @@ from corvidae_cognition.outcome_log import OutcomeLogPlugin
 from corvidae.persistence import PersistencePlugin, init_db
 from corvidae.task import TaskPlugin
 
+from helpers import FakeForkAgent, window_of
+
 
 VALID_STAGE2_JSON = json.dumps({
     "valence": 0.8, "stakes": 0.9, "ambiguity": 0.2,
@@ -109,9 +111,15 @@ async def build_env(tmp_path, chat_text=VALID_STAGE2_JSON, start_worker=False):
     await appraisal.on_start(config=cfg)
 
     channel = _make_channel()
+    # Stage 2 is a fork of the live window (#320): a fork agent answers it
+    # with ``chat_text`` and a window holds every rowid these tests persist.
+    # A miss skips, so without both the stage-2 vector would never exist.
+    agent = FakeForkAgent({"appraisal"}, text=chat_text)
+    pm.register(agent, name="agent")
+    channel.conversation = window_of(channel.id, list(range(1, 200)))
     return SimpleNamespace(
         pm=pm, db=db, db_path=db_path, appraisal=appraisal, task=task_plugin,
-        outcome=outcome, llm=llm, stub=stub, channel=channel,
+        outcome=outcome, llm=llm, stub=stub, channel=channel, agent=agent,
     )
 
 
@@ -134,6 +142,15 @@ async def _run_next_task(task_plugin):
     task = queue.queue.get_nowait()
     result = await asyncio.create_task(task.work(), context=task.ctx)
     return task, result
+
+
+async def _originate(env, trace_id, rowid=1, text="the user asked"):
+    """Record the exchange's originating row, as the Agent does when it
+    persists the user message. Stage 2 forks only when this row is known
+    and in the window; without it the stage skips (#320)."""
+    await env.appraisal.on_message_persisted(
+        channel=env.channel, trace_id=trace_id, rowid=rowid, text=text, meta={},
+    )
 
 
 async def _read_appraisal(db, key):
@@ -218,10 +235,13 @@ class TestOriginatingTextLRU:
         )
         await _run_next_task(env.task)
 
-        assert len(env.stub.chat_calls) == 1
-        user_message = env.stub.chat_calls[0]["messages"][1]["content"]
-        assert "the original user text" in user_message
-        assert "tool result: done" not in user_message
+        # Stage 2 is a fork of the window (#320); the instruction quotes the
+        # recovered originating text, not the last tool-result turn.
+        assert env.stub.chat_calls == []
+        assert len(env.agent.calls) == 1
+        instruction = env.agent.calls[0]["instruction"]
+        assert "«the original user text»" in instruction
+        assert "tool result: done" not in instruction
         await _teardown(env)
 
 
@@ -293,14 +313,16 @@ class TestTrigger:
         env = await build_env(tmp_path)
         # Seed the row so update_exchange lands.
         await env.outcome.record_exchange("k3", env.channel.id, origin="user")
+        await _originate(env, "k3")
         await env.appraisal.on_agent_response(
             channel=env.channel, request_text="req", response_text="resp",
             trace_id="k3", meta={},
             logprobs=None,
         )
         await _run_next_task(env.task)
-        assert len(env.stub.chat_calls) == 1
-        attr = env.stub.chat_calls[0]["attribution"]
+        assert env.stub.chat_calls == []
+        assert len(env.agent.calls) == 1
+        attr = env.agent.calls[0]["attribution"]
         assert attr.get("stage") == "appraisal"
         assert attr.get("trace_id") == "k3"
         await _teardown(env)
@@ -315,6 +337,7 @@ class TestStage2Persist:
     async def test_stage2_persisted_under_key(self, tmp_path):
         env = await build_env(tmp_path)
         await env.outcome.record_exchange("kp", env.channel.id, origin="user")
+        await _originate(env, "kp")
         await env.appraisal.on_agent_response(
             channel=env.channel, request_text="req", response_text="resp",
             trace_id="kp", meta={},
@@ -337,6 +360,7 @@ class TestStage2Persist:
             "km", env.channel.id, "user",
             appraisal={"stage1": {"salience": 0.3}, "stage1_out": {"salience": 0.4}},
         )
+        await _originate(env, "km")
         await env.appraisal.on_agent_response(
             channel=env.channel, request_text="req", response_text="resp",
             trace_id="km", meta={},
@@ -354,6 +378,7 @@ class TestStage2Persist:
         await env.outcome.upsert_exchange(
             "kbad", env.channel.id, "user", appraisal={"stage1": {"salience": 0.5}},
         )
+        await _originate(env, "kbad")
         await env.appraisal.on_agent_response(
             channel=env.channel, request_text="req", response_text="resp",
             trace_id="kbad", meta={},
@@ -369,6 +394,7 @@ class TestStage2Persist:
     async def test_entropy_persisted_when_logprobs_present(self, tmp_path):
         env = await build_env(tmp_path)
         await env.outcome.record_exchange("ke", env.channel.id, origin="user")
+        await _originate(env, "ke")
         logprobs = {"content": [
             {"token": "a", "logprob": -0.1,
              "top_logprobs": [{"token": "a", "logprob": -0.1},
@@ -454,6 +480,7 @@ class TestPastClaims:
 class TestStage2Listeners:
     async def _run(self, env, trace_id, meta=None):
         await env.outcome.record_exchange(trace_id, env.channel.id, origin="user")
+        await _originate(env, trace_id)
         await env.appraisal.on_agent_response(
             channel=env.channel, request_text="req", response_text="the reply",
             trace_id=trace_id, meta=meta if meta is not None else {"origin": "reminder"},

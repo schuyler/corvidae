@@ -99,7 +99,7 @@ The `llm.main` block is required. Every other key under `llm:` is an optional **
 
 **API key from the environment.** Quote the reference so YAML keeps it as text: `api_key: "${OPENAI_API_KEY}"`. The variable is read from the environment the daemon runs in, so a tracked `agent.yaml` holds no secret. This works for every role, `main` included, and uses the same `${VAR}` expansion as MCP `headers`. A literal key still works; a value with no `${NAME}` (including one containing a bare `$`) is used as is. If the variable is unset, empty or contains a newline or NUL (often a trailing newline), startup fails with an error naming `llm.<role>.api_key` and the variable; set it in the environment corvidae runs in and restart. The key's value is never logged or put in an error or a reply. A config reload re-reads the same variable; to pick up a changed environment, restart. A reload that newly references an unset variable fails, is logged, and keeps the old `llm.main` client.
 
-**Remote roles.** Every role is an OpenAI-compatible client, so any of them can point at a hosted endpoint. Whatever that role is sent then leaves the host: `main` serves turns and compaction summaries (and the forked appraisal and critique stages, which need the local window and so cannot move); `background` serves memory consolidation, the importance prior, subagents and, when not forked, standalone appraisal and critique; `embedding` serves memory embedding, retrieval and retention. An unconfigured role falls back to `main`. Conversation content is in all of these inputs. See `threat-model.md` finding 12. Hosted endpoints give no latency guarantee, so set `llm.<role>.timeout` generously.
+**Remote roles.** Every role is an OpenAI-compatible client, so any of them can point at a hosted endpoint. Whatever that role is sent then leaves the host: `main` serves turns and compaction summaries (and the forked appraisal and critique stages, which need the local window and so cannot move); `background` serves memory consolidation, the importance prior, subagents and out-of-window consolidation; `embedding` serves memory embedding, retrieval and retention. An unconfigured role falls back to `main`. Conversation content is in all of these inputs. See `threat-model.md` finding 12. Hosted endpoints give no latency guarantee, so set `llm.<role>.timeout` generously.
 
 `llm.background` is parsed by `LLMPlugin`. If the key is absent, `LLMPlugin.get_client("background")` returns the main client, so all callers (including `SubagentPlugin`) fall back to `llm.main`. When `llm.embedding` is absent, `MemoryPlugin` stores records with `embedded=0` and retrieval degrades to FTS5 keyword search.
 
@@ -138,7 +138,7 @@ These values apply to all channels. Per-channel overrides in the `channels` sect
 | `agent.min_messages_to_compact` | integer | `5` | Skip compaction if the conversation has this many messages or fewer. |
 | `agent.compaction_prompt` | string | built-in | System prompt for the compaction summarizer. Used in every compaction round; when earlier summaries exist, an instruction to carry them forward and the (bounded) prior-summary text are appended after it. |
 | `agent.compaction_fork_prompt` | string | built-in | Instruction a compaction *fork* appends to the dropped prefix, used instead of `compaction_prompt` when forks are on for `compaction` (see [`agent.forks`](#agentforks--background-processes-as-forks)). Documented copy: `prompts/compaction_fork.md`. |
-| `agent.forks` | mapping | off | Run compaction, consolidation, appraisal and critique as forks of the main window. See [`agent.forks`](#agentforks--background-processes-as-forks). |
+| `agent.forks` | mapping | on | Run compaction, consolidation, appraisal and critique as forks of the main window. See [`agent.forks`](#agentforks--background-processes-as-forks). |
 | `agent.chars_per_token` | float | `3.5` | **Deprecated.** Accepted for interface and config compatibility. Has no effect on token counting — `count_tokens()` uses the module-level `_FALLBACK_CHARS_PER_TOKEN` constant (3.5) regardless of this value. |
 | `agent.immutable_settings` | list of strings | `[]` | Keys the agent is blocked from changing via the `set_settings` tool, on top of its built-in allowlist. `set_settings` only accepts the inference parameters `temperature`, `top_p`, `top_k`, `frequency_penalty`, `presence_penalty`, `max_tokens` and `seed`, the framework keys `max_turns`, `max_context_tokens` and `reasoning_history`, and dotted plugin tunables, so this list is for narrowing that set (e.g. the gate keys under "Runtime-tunable gate parameters"). `system_prompt` is always blocked. |
 | `agent.request_logprobs` | boolean | `false` | When `true`, `Agent` merges `"logprobs": true` into every LLM request body. llama-server returns a logprobs envelope (surfaced to plugins via `on_agent_response`); Anthropic-style providers return nothing and the field surfaces as `None`. Static operator-only flag — captured at init and on config reload, not per-channel tunable. |
@@ -146,20 +146,25 @@ These values apply to all channels. Per-channel overrides in the `channels` sect
 
 ### `agent.forks` — background processes as forks
 
-Off by default (GitHub issue #51; the evals that gate turning it on are
-#73). With forks on, a background stage doesn't build its own prompt. It
-renders the channel's window exactly as the main turn does, appends one
-`user` instruction, and makes one call on `llm.main`. On a single-slot
-llama-server that reuses the cached prefix instead of evicting it, and the
-agent's own system prompt is in view, so records and summaries are written
-in its voice. Any fork failure falls back to the stage's standalone call,
-as does a stage whose rows have left the window. The provenance check is
-the exception: it runs only as a fork, and without one it skips with a
-warning ([cognition.md](cognition.md#critiqueplugin-the-provenance-check-packagescorvidae-cognitioncorvidae_cognitioncritiquepy)). See [design.md](design.md#forks).
+On by default (GitHub issue #51; the default flipped in #320). A background
+stage doesn't build its own prompt. It renders the channel's window exactly
+as the main turn does, appends one `user` instruction, and makes one call on
+`llm.main`. On a single-slot llama-server that reuses the cached prefix
+instead of evicting it, and the agent's own system prompt is in view, so
+records and summaries are written in its voice. A fork miss (forks off for
+the stage, the exchange left the window, the fork failed or its reply was
+unusable) skips the stage with a warning naming the stage, channel, trace
+and what was missing; it makes no standalone call. That covers stage-2
+appraisal, every critique lens, the provenance check and idle
+consolidation of a range still in the window. Two exceptions keep a
+standalone call: compaction writes a standalone summary on a miss (then the
+fallback described in design.md applies), and consolidation of a range that
+has left the window, including the compaction trigger's task, runs
+standalone because it has no window to fork. See [design.md](design.md#forks).
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `agent.forks.enabled` | boolean | `false` | Master switch. `false` leaves every stage on its standalone call; the provenance check then skips, with a warning, on every exchange that has past claims. |
+| `agent.forks.enabled` | boolean | `true` | Master switch. `false` makes every live-window stage except compaction skip on every run (appraisal stage 2, all lenses, provenance, idle consolidation of in-window ranges); compaction and out-of-window consolidation go standalone. With forks off, a channel that never compacts never consolidates its in-window rows. |
 | `agent.forks.reasoning_budget_tokens` | integer or null | `2048` | Sent as `reasoning_budget_tokens` on every fork. A fork keeps the main reasoning effort, because the chat template renders it into the system block and changing it would break the cached prefix; this per-request budget bounds the fork's think instead. `null` sends nothing (server default). llama-server applies it only when the template declares thinking tags. |
 | `agent.forks.stages` | list of strings or null | `null` | Which stages fork: `compaction`, `consolidation`, `appraisal`, `critique`. `null` means all of them. A name no plugin uses matches nothing. `consolidation`, `appraisal` and `critique` belong to the cognition extra; without it only `compaction` exists. |
 
@@ -167,18 +172,20 @@ Any other key under `agent.forks`, a non-boolean `enabled`, a negative or
 non-integer budget, or `stages` that isn't a list of strings fails at
 startup, and a reload carrying one is rejected.
 
-Each stage has a fork instruction, next to its standalone prompt where it has one:
+Each stage has a fork instruction:
 
 | Key | Default copy | Notes |
 |-----|--------------|-------|
 | `agent.compaction_fork_prompt` | `prompts/compaction_fork.md` | Appended to the dropped prefix. |
 | `memory.consolidation_fork_prompt` | `prompts/memory_consolidation_fork.md` | Followed by a sentence naming where the range starts. Restart-only, like the rest of `memory.*`. The output schema is fixed in code: an override must still ask for the record shape (`summary`, `topic_tags`, `participants`). |
 | `appraisal.stage2_fork_prompt` | `prompts/appraisal_fork.md` | Followed by quotes of the exchange's opening message and of the response sent, and the retrieval profile. |
-| `critique.fork_prompt.<lens>` | `prompts/critique_<lens>_fork.md` | Followed by quotes of the exchange's opening message and of the response sent; provenance also gets each claim's search hits and the CONTEXT snapshot. Provenance has no standalone prompt, and an override must ask for its per-claim verdicts format or every run skips. |
+| `critique.fork_prompt.<lens>` | `prompts/critique_<lens>_fork.md` | Followed by quotes of the exchange's opening message and of the response sent; provenance also gets each claim's search hits and the CONTEXT snapshot. An override must ask for its per-claim verdicts format or every run skips. |
 
-These are static config, read with `corvidae.tuning.config_value`. Unlike
-`appraisal.stage2_prompt` and `critique.prompt.<lens>`, they aren't runtime
-tunables: `set_settings` can write the key, but nothing reads the override.
+These are static config, read with `corvidae.tuning.config_value`. They
+aren't runtime tunables: `set_settings` can write the key, but nothing reads
+the override. The standalone prompts `appraisal.stage2_prompt` and
+`critique.prompt.<lens>` are no longer read by any live stage (stage 2 and
+the lenses run only as forks); the keys remain accepted.
 
 Forks always run on `llm.main`, because only the main model shares the
 window's cache. If `llm.background` names a different model, enabling

@@ -17,7 +17,7 @@ override filter, reasoning effort). Plugins reach it through
 Config:
     agent:
       forks:
-        enabled: false                # opt-in until measured on Lex (#73)
+        enabled: true                 # default; false makes every live-window stage but compaction skip
         reasoning_budget_tokens: 2048 # per fork call; null = server default
         stages: null                  # null = every stage; or a list of names
 
@@ -81,7 +81,7 @@ class ForkResult:
 class ForksConfig:
     """Parsed ``agent.forks`` section. Static operator flags, never tunables."""
 
-    enabled: bool = False
+    enabled: bool = True
     reasoning_budget_tokens: int | None = DEFAULT_FORK_REASONING_BUDGET
     #: None means every stage; otherwise only the named stages fork.
     stages: frozenset[str] | None = None
@@ -110,7 +110,7 @@ def parse_forks_config(agent_config: dict) -> ForksConfig:
     if unknown:
         raise ValueError(f"agent.forks: unknown key(s) {sorted(unknown)}")
 
-    enabled = raw.get("enabled", False)
+    enabled = raw.get("enabled", True)
     if not isinstance(enabled, bool):
         raise ValueError(f"agent.forks.enabled must be true or false; got {enabled!r}")
 

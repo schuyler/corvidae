@@ -13,7 +13,7 @@ Config:
     agent:
       chars_per_token: 4.0  # optional — deprecated; retained for config compatibility only
       forks:                # background processes as forks of the window (#51)
-        enabled: false      # see corvidae.fork for the full section
+        enabled: true       # default; see corvidae.fork for the full section
 
 LLM client configuration is owned by LLMPlugin (llm: main:, llm: background:).
 Tool result truncation configuration is owned by ToolCollectionPlugin (tools: max_result_chars:).

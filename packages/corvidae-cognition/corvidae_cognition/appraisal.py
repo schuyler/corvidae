@@ -794,9 +794,11 @@ class AppraisalPlugin(CorvidaePlugin):
         self, channel, trace_id: str, originating_text: str | None,
         response_text: str | None, logprobs: dict | None,
     ) -> dict | None:
-        """The silent task body: one tier-3 call, merge-persist stage 2.
+        """The silent task body: one fork of the window, merge-persist stage 2.
 
-        Returns the stage-2 vector, or None when no vector was produced.
+        Returns the stage-2 vector, or None when no vector was produced: a
+        fork miss skips the stage with a warning and makes no standalone call
+        (PRD §3.8.5, #320), and the row keeps stage 1 only.
 
         Sets attribution inside the body (usage rows join to the exchange for
         WP2.10's per-band cost report). Malformed model output is logged and
@@ -807,42 +809,14 @@ class AppraisalPlugin(CorvidaePlugin):
         )
         try:
             profile = await self._retrieval_profile_summary(trace_id)
-            # A fork of the live window when one is available; else (and
-            # on any fork miss) the standalone tier-3 call.
+            # A fork of the live window; a miss skips (logged inside).
             stage2 = await self._fork_stage2(
                 channel, trace_id, originating_text, response_text, profile
             )
+            # A miss was already logged by _fork_stage2: the exchange keeps
+            # stage 1 only (no persist, no listeners, no standalone call).
             if stage2 is None:
-                client = self._appraisal_client()
-                if client is None:
-                    logger.debug("stage-2 appraisal skipped: no LLM client available")
-                    return None
-                prompt = resolve_tunable(
-                    channel, self.config, "appraisal.stage2_prompt", DEFAULT_STAGE2_PROMPT
-                )
-                user_content = (
-                    f"Originating message:\n{originating_text or '(unknown)'}\n\n"
-                    f"Agent's final response:\n{response_text or '(none)'}\n\n"
-                    f"Memory retrieval for this exchange:\n{profile}"
-                )
-                standalone_token = set_attribution(mode="standalone")
-                try:
-                    response = await client.chat(
-                        [
-                            {"role": "system", "content": prompt},
-                            {"role": "user", "content": user_content},
-                        ],
-                        extra_body=STAGE2_EXTRA_BODY,
-                    )
-                    stage2 = _stage2_from_text(response["choices"][0]["message"]["content"])
-                except Exception:
-                    logger.warning(
-                        "stage-2 appraisal call/parse failed; row keeps stage 1",
-                        exc_info=True, extra={"trace_id": trace_id},
-                    )
-                    return None
-                finally:
-                    reset_attribution(standalone_token)
+                return None
 
             # Merge, never overwrite: a full-column write would erase
             # WP2.9's stage1_out on every exchange that gets stage 2. Do NOT
@@ -867,11 +841,23 @@ class AppraisalPlugin(CorvidaePlugin):
         finally:
             reset_attribution(token)
 
+    def _skip_stage2(
+        self, channel, trace_id: str, reason: str, **kwargs
+    ) -> None:
+        """Log that stage 2 was skipped, naming the stage, trace, channel and
+        what was missing (PRD §3.8.5); the exchange keeps stage 1 only."""
+        logger.warning(
+            "stage-2 appraisal skipped for trace %s on channel %s: %s; "
+            "the exchange keeps stage 1 only",
+            trace_id, channel.id, reason,
+            extra={"channel": channel.id, "trace_id": trace_id}, **kwargs,
+        )
+
     async def _fork_stage2(
         self, channel, trace_id: str, originating_text: str | None,
         response_text: str | None, profile: str,
     ) -> dict | None:
-        """Stage 2 from a fork of the channel's live window, or None.
+        """Stage 2 from a fork of the channel's live window, or None (a skip).
 
         Forks only when forks are on for "appraisal" and the exchange's
         originating row is still in the window (compaction hasn't dropped
@@ -880,19 +866,32 @@ class AppraisalPlugin(CorvidaePlugin):
         the response the user was sent (which can differ from the window's
         last assistant message, e.g. the max-turns fallback). The check and
         Agent.fork's prompt render run with no await between them.
-        Any fork failure or unusable reply is logged and returns None.
+        Every miss (forks off, row unknown or out of the window, fork
+        refused, failed, empty or unparseable) logs a skip warning and
+        returns None; there is no standalone call.
         """
+        # Forks off for this stage (or no agent plugin) is a miss.
         agent = fork_agent(self.pm if hasattr(self, "pm") else None, "appraisal")
         if agent is None:
-            return None
-        rowid = self.get_originating_rowid(trace_id)
-        conv = getattr(channel, "conversation", None)
-        if rowid is None or conv is None or rowid not in window_db_ids(conv.messages):
-            logger.debug(
-                "stage-2 exchange not in the window; using the standalone call",
-                extra={"trace_id": trace_id},
+            self._skip_stage2(
+                channel, trace_id,
+                "forks are not enabled for appraisal (agent.forks.enabled / agent.forks.stages)",
             )
             return None
+        # The originating row must be known and still in the window.
+        rowid = self.get_originating_rowid(trace_id)
+        conv = getattr(channel, "conversation", None)
+        if rowid is None:
+            self._skip_stage2(
+                channel, trace_id, "the originating message was not recorded or not persisted")
+            return None
+        if conv is None:
+            self._skip_stage2(channel, trace_id, "no live window")
+            return None
+        if rowid not in window_db_ids(conv.messages):
+            self._skip_stage2(channel, trace_id, "the exchange is not in the window")
+            return None
+        # Build the instruction from the static fork prompt and the exchange.
         prompt = config_value(
             self.config, "appraisal.stage2_fork_prompt", DEFAULT_STAGE2_FORK_PROMPT
         )
@@ -902,33 +901,16 @@ class AppraisalPlugin(CorvidaePlugin):
             f"and the response you sent began «{quote(response_text)}».\n"
             f"Memory retrieval for this exchange: {profile}"
         )
+        # Fork and parse; any failure or unusable reply is a miss.
         try:
             result = await agent.fork(channel, instruction, extra_body=STAGE2_EXTRA_BODY)
             return _stage2_from_text(result.text)
-        except Exception:
-            logger.warning(
-                "stage-2 appraisal fork failed; using the standalone call",
-                exc_info=True, extra={"trace_id": trace_id},
+        except Exception as exc:
+            self._skip_stage2(
+                channel, trace_id,
+                f"the fork failed or its reply was unusable ({type(exc).__name__})",
+                exc_info=True,
             )
-            return None
-
-    def _appraisal_client(self):
-        """Resolve the tier-3 client: appraisal → background → main.
-
-        LLMPlugin.get_client only falls back to main, so the two-step
-        appraisal→background fallback is implemented here (WP2.5 point 2).
-        """
-        llm = self.pm.get_plugin("llm") if hasattr(self, "pm") else None
-        if llm is None:
-            return None
-        clients = getattr(llm, "_clients", {})
-        for role in ("appraisal", "background"):
-            client = clients.get(role)
-            if client is not None:
-                return client
-        try:
-            return llm.get_client("main")
-        except Exception:
             return None
 
     async def _retrieval_profile_summary(self, trace_id: str) -> str:
