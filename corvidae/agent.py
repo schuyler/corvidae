@@ -1142,10 +1142,14 @@ class Agent(CorvidaePlugin):
         if self._forks.reasoning_budget_tokens is not None:
             body["reasoning_budget_tokens"] = self._forks.reasoning_budget_tokens
 
+        # Bound once: a config reload or plugin stop can replace or clear
+        # self._client during the await, and the stamp must name the model
+        # this request was actually sent with.
+        client = self._client
         token = set_attribution(channel_id=channel.id, mode="fork")
         try:
             # The channel's own schemas: a fork must share the turn's prefix.
-            response = await self._client.chat(
+            response = await client.chat(
                 messages, tools=self._tool_view(channel).schemas or None, extra_body=body
             )
         finally:
@@ -1163,6 +1167,8 @@ class Agent(CorvidaePlugin):
             text=message.get("content") or "",
             message=message,
             usage=response.get("usage"),
+            # What the request was sent with, so records can be stamped.
+            model=client.request_model(body),
         )
 
     def _warn_if_forks_change_model(self) -> None:

@@ -233,3 +233,16 @@ class TestLLMPluginRoles:
         # Both prefix attributes must be set on the constructed client.
         assert client.document_prefix == "search_document: "
         assert client.query_prefix == "search_query: "
+
+
+class TestEmbedModelIsolation:
+    async def test_embed_model_ignores_extra_body(self):
+        """Regression guard (passes today, issue #299): embed sends the configured
+        model and ignores extra_body, so routing it through request_model would
+        silently switch the encoder while embedding_meta records the old one."""
+        client = LLMClient(base_url=BASE_URL, model="a", extra_body={"model": "b"})
+        client.session = _make_mock_session(_make_mock_response())
+
+        await client.embed(["alpha", "beta"], kind="document")
+
+        assert client.session.post.call_args[1]["json"]["model"] == "a"

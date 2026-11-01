@@ -697,7 +697,16 @@ What each kind of unlock costs:
   summarizes, consolidates and scores its own exchanges, under its own
   persona, and the results persist: a summary it later reads as its own
   words, a memory record, an `exchange_log` score. Unlocking fork
-  instructions also removes a bound finding 8 relies on.
+  instructions also removes a bound finding 8 relies on. In the tree, each
+  memory record written since stamping carries a stamp (earlier rows read
+  NULL) (`prompt_hash`, `mode`, `model`, with the
+  instruction text in `memory_prompt`), so the records written under an
+  edited `memory.consolidation_prompt` or `memory.consolidation_fork_prompt`
+  can be found afterwards. The stamp records the consolidation instructions,
+  not the system prompt and window a fork runs under, so an edit to the
+  system prompt isn't identifiable this way; nor does it cover the
+  compaction, appraisal or critique prompts. `memory_prompt` holds
+  instruction text only, never conversation text.
 - **Other prompts sent on the agent's behalf** (subagent, heartbeat,
   notification text). Each steers a turn that has no person in it: a
   rewritten heartbeat prompt acts on memory with nobody watching
