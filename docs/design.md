@@ -1069,7 +1069,8 @@ class QueueItem:
 (#281). The item's message is already in the window and the log, so the
 retry skips the `turn_counter` reset, the append/persist,
 `on_message_persisted`, tool-result batching, compaction and
-`before_agent_turn` and goes straight to the LLM call.
+`before_agent_turn` and goes straight to the LLM call; the
+`max_context_tokens` ceiling (`fit_to_budget`, #308) still runs first.
 
 ## PersistencePlugin
 

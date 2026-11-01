@@ -168,7 +168,8 @@ class QueueItem:
         retry: True for the re-run of a turn whose LLM call could not reach
             the backend (#281). The item is a copy of the failed one with
             ``originating=False``; its message is already in the window and
-            the log, so steps 2 and 4-6 of processing skip it.
+            the log, so steps 2 and 4-6 of processing skip it (the 5b
+            budget ceiling still runs).
     """
 
     role: QueueItemRole
