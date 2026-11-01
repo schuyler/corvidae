@@ -1294,7 +1294,9 @@ class MemoryPlugin(CorvidaePlugin):
             appraisal_plugin = self.pm.get_plugin("appraisal")
             if appraisal_plugin is not None:
                 try:
-                    valence = await appraisal_plugin.mean_valence(msg_id_range)
+                    valence = await appraisal_plugin.mean_valence(
+                        channel_id, msg_id_range
+                    )
                 except Exception:
                     logger.warning(
                         "mean-valence lookup failed; storing NULL valence",
