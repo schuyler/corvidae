@@ -738,12 +738,13 @@ Per transport:
    what the agent said there. Nothing gates which channel a turn may speak
    on. What the agent says is not filtered by audience; the sensitivity
    capability, where the operator applies it, filters what enters a window
-   instead (§3.7 Trust). Messages the agent starts on its own (as opposed
-   to the reply a turn owes the channel it runs on) and notes that wake a
-   channel (item 10) can carry a cap per destination over a period, a
-   setting under principle 15 with a best-guess default (principle 7), so a
-   loop cannot flood a contact. The cap is a runaway guard, not a gate on
-   crossing channels. `docs/threat-model.md` records what speaking anywhere
+   instead (§3.7 Trust). A limit on how many messages the agent starts on
+   any one destination over a period is a restriction the operator can
+   apply (principle 15); none applies unless set. It counts every message
+   the agent starts, as opposed to the reply a turn owes the channel it
+   runs on, and a reminder firing on a channel other than the one that set
+   it counts as one. It limits flooding a contact, not crossing channels.
+   `docs/threat-model.md` records what speaking anywhere
    costs (principle 9).
 10. Notes to another channel's context: any turn can leave information
     for another channel. The note is admitted through the funnel at the
@@ -1472,7 +1473,7 @@ record that holds the reasoning.
 | Upkeep runs on time regardless of agency plugins; the scheduler is agency and optional | #167 |
 | Transports deliver every emission on their own channels regardless of origin | #167 |
 | The agent is one actor with one identity on every channel; trust and sensitivity, not channel walls. No cross-channel allowlist and no memory compartments, as an option or otherwise; two identities means two instances | #167; operator directive, 2026-11-01; #234, #235 |
-| Any turn can speak on any channel, leave a note for another channel's context, and read another channel's conversation; a cap on self-started messages is a runaway guard, not a gate | operator directive, 2026-11-01; #234, #235 |
+| Any turn can speak on any channel, leave a note for another channel's context, and read another channel's conversation; a per-destination limit on messages the agent starts is a restriction the operator can apply, off unless set, never a gate on crossing channels | operator directive, 2026-11-01; #234, #235 |
 | Audience filtering is a capability, not a requirement: the sensitivity plugin, where the operator loads it, filters what enters a window (retrieval, notes, reads, goals) by who is present; it never gates a reply | principle 15; operator directive, 2026-11-01 |
 | Identity is agent-wide and heads every prompt; channel register is appended after it and never replaces it | operator directive, 2026-11-01 |
 | The operator decides the trust boundary; inbound transports default-deny; channels are not a boundary; safety features layer in as plugins | #167; operator directive, 2026-11-01 |

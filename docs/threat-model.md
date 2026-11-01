@@ -902,11 +902,12 @@ decision (2026-11-01), and these are its costs.
   another, up to `scheduler.max_reminders_per_channel` per target, and can
   fill a target's pending cap so the operator can't set reminders there
   until the rows fire or are cancelled.
-- **Loops.** A note that wakes another channel starts a turn there, and
-  that turn can wake the first. PRD §3.5.9 lets messages the agent starts
-  and waking notes carry a per-destination cap, a runaway guard rather
-  than a gate; `max_turns` bounds one exchange, and the caps of finding 14
-  will bound total spend once built (#296).
+- **Floods and loops.** No limit applies to messages the agent starts
+  unless the operator sets one (PRD §3.5.9), so one exchange can send up to
+  its `max_turns` budget's worth of messages to any one contact, and
+  reminder firings aimed at a contact add to that. A note that wakes
+  another channel starts a turn there, and that turn can wake the first.
+  The caps of finding 14 will bound total spend once built (#296).
 - **One poisoned memory reaches every prompt.** With no compartments, a
   record distilled from untrusted text on any channel is retrievable on
   all of them. The trust plugin's quarantine (#138) is the capability an
