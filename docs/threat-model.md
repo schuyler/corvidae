@@ -78,7 +78,10 @@ Assets, roughly in order of how bad it is to lose them:
    Discord the company can read them whatever corvidae does.
 4. `agent.yaml`: operator intent, hot-reloaded within seconds of a write
    (default poll 2s).
-5. The LLM server, if it is shared with anything else.
+5. The LLM server, if it is shared with anything else, and each model
+   pool's capacity and budget (PRD principle 16): slot time the
+   operator's own turns need on a local server, and money on a metered
+   endpoint.
 
 Adversaries:
 
@@ -671,7 +674,8 @@ tools. The static keys are read from operator config alone (through
 dotted name (`agent.request_logprobs`) is accepted but has no effect, and
 an undotted one is refused by the allowlist. Several prompts (subagent,
 heartbeat) are code constants with no config key at all (#287, #289).
-None of these can be unlocked yet (#292). On a channel that still has
+None of these can be unlocked yet (#292). Pool caps and scheduling
+policy (PRD §3.13) aren't built at all (#296). On a channel that still has
 `write_file` or `shell`, the agent can already get around all of them by
 rewriting `agent.yaml` or a system-prompt file (finding 4), unless the
 files are read-only to the daemon.
@@ -712,7 +716,9 @@ What each kind of unlock costs:
   the server offers, including one with weaker safety tuning. What a
   switch costs in latency depends on the backend: a router that has to
   load the new model into its only slot stalls every channel while it
-  does. Large `max_tokens` or sampling extremes degrade replies on that
+  does. On a metered endpoint that serves several models, `model` is a
+  price: one switch can multiply what every turn on the channel costs,
+  up to the pool's hard spend cap if there is one (finding 14). Large `max_tokens` or sampling extremes degrade replies on that
   channel. `logprobs` costs little: larger responses, and nothing from
   providers that don't support it.
 - **Gate tunables and thresholds** (`gate.*`,
@@ -732,7 +738,9 @@ What each kind of unlock costs:
   every turn on that channel fails until the override is cleared. Set far
   below it, compaction runs on nearly every turn, rewriting history into
   summaries. A large `max_turns` lets one injected tool loop run far
-  longer before dispatch is suppressed, holding the shared model slot.
+  longer before dispatch is suppressed, holding the pool: the shared
+  slot on a local server, the rate window or the budget on a metered
+  endpoint (finding 14).
 - **Other plugin tunables** (`appraisal.weights.*`, `appraisal.prior.*`,
   `appraisal.probe.*`; open by default today). The weights and priors
   move what the agent attends to and how strongly it remembers it.
@@ -744,10 +752,20 @@ What each kind of unlock costs:
   the channel and fills the window toward compaction. A plugin tunable
   not named in this ledger falls under this entry or under the gate
   entry, by what it controls.
-- **Caps** (background-stage output caps). The agent can lengthen a
+- **Caps** (background-stage output caps, pool caps). The agent can lengthen a
   stage's slot time on every exchange, which starves main turns on a
-  single-slot server (PRD principle 3). The caps still have to fit the
+  single-slot server (PRD principle 3) and spends tokens on every
+  exchange on a metered one. Pool caps (PRD §3.13) are caps too: an
+  unlocked soft cap lets an injection move when the agent starts
+  saving, and an unlocked hard cap lets it remove the bound the
+  operator set on spend or rate. The caps still have to fit the
   context (PRD §3.8.4).
+- **Scheduling policy** (pausing or deferring a channel, the order of
+  held calls, PRD §3.13). An injection can pause the operator's channel,
+  move its own channel ahead of others, or push upkeep back. Every pause
+  lapses by itself and the operator can resume any channel (PRD
+  §3.13.8), so the damage is delay, not a wedged agent; past-due upkeep
+  still runs by its deadline (PRD §3.13.7).
 - **Skills.** The skills index sits in the stable prompt region, so a
   skill written at an injection's request is offered to every future
   conversation on every channel and survives restarts. The idle scan
@@ -764,7 +782,10 @@ Recommended locks for a channel with untrusted participants, as a
 starting point rather than a rule: the system prompt, the prompts that
 judge and remember, the heartbeat and subagent prompts, framing, `model`,
 the gate tunables (which also blocks closed-loop fitting from moving
-them), the tool set, and skill writes behind confirmation.
+them), the tool set, and skill writes behind confirmation. On a metered
+pool, add a hard spend cap, locked, and `model`, since on an endpoint
+that serves several models at different prices it sets the price
+(finding 14).
 
 A channel with only the operator on it has the smallest exposure, and it
 is where these unlocks cost least. It isn't free. Untrusted text still
@@ -772,6 +793,29 @@ reaches it through `web_fetch`, search results, MCP results and memory
 distilled on other channels (findings 4 and 6, PRD principle 14). A skill
 written there reaches every channel, and a model switch there can stall
 every channel sharing the server's slot, so those costs apply even there.
+
+### 14. Untrusted traffic spends the operator's compute
+
+Every admitted message costs at least one main turn, and with cognition
+loaded, background calls on top: appraisal and the critique lenses per
+exchange, and consolidation as the window fills. On a local server that is slot time the operator's own
+turns wait behind; on a metered endpoint it is money. An admitted sender
+can drive the cost up by volume or by asking for work that loops through
+tools, and injected text in a fetched page or an MCP result can do the
+same from inside the operator's own channel. `max_turns` bounds one
+exchange; nothing bounds the total. Cost runs away without an attacker
+too: #286 measured about 68,000 prompt tokens per heartbeat that decided
+to do nothing.
+
+Where the tree stands: nothing caps use over time. `usage_log` records
+every call, but no budget reads it, and rate limits are met only by
+retrying (PRD §3.6.2). PRD principle 16 and §3.13 require operator caps
+per pool; #296 tracks the open questions, charging per sender among
+them.
+
+Until then, on a metered endpoint, set a spend limit with the provider,
+and keep inbound allowlists tight on any channel with untrusted
+participants: admission is the only cost control the tree has today.
 
 ## Privilege separation
 
