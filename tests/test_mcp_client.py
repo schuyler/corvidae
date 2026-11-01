@@ -1617,3 +1617,26 @@ class TestRetryLoopSurvivesRebuildError:
             assert all("background retry" in m for m in msgs)
         finally:
             await plugin.on_stop()
+
+
+# ---------------------------------------------------------------------------
+# Issue #94: MCP tools declare a live own_timeout
+# ---------------------------------------------------------------------------
+
+
+async def test_mcp_tool_declares_live_own_timeout():
+    """R4: the MCP tool's own_timeout and call timeout track server.timeout_seconds."""
+    from corvidae.tool import resolve_own_timeout
+
+    server = _make_server_state(timeout_seconds=12)
+    tool = _make_tool(server, _make_mcp_tool("read_file"))
+    assert resolve_own_timeout(tool.fn) == 12
+
+    # Changing the server's timeout is seen at the next read, not captured.
+    server.timeout_seconds = 4
+    assert resolve_own_timeout(tool.fn) == 4
+
+    # The call itself also uses the live value.
+    with patch("corvidae.mcp_client._call_mcp_tool", new=AsyncMock(return_value="ok")) as call:
+        await tool.fn()
+    assert call.await_args.args[3] == 4

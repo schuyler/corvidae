@@ -813,7 +813,8 @@ class McpClientPlugin(CorvidaePlugin):
 def _make_tool(server: _McpServerState, mcp_tool, plugin=None) -> Tool:
     """Build a Corvidae Tool from one MCP tool definition.
 
-    Captures session, original tool name, and timeout in the closure.
+    Captures session and original tool name in the closure; the timeout is
+    read from ``server`` at call time and declared as ``own_timeout``.
     No _ctx parameter — MCP tools receive only LLM-provided arguments.
     """
     tool_name = (
@@ -823,16 +824,20 @@ def _make_tool(server: _McpServerState, mcp_tool, plugin=None) -> Tool:
 
     session = server.session
     original_name = mcp_tool.name
-    timeout = server.timeout_seconds
     server_name = server.name
 
     async def tool_fn(**kwargs) -> str:
         # Give startup-failed servers a chance to come back before the call.
         if plugin is not None:
             await plugin._retry_pending_servers()
-        return await _call_mcp_tool(session, original_name, kwargs, timeout, server_name)
+        # timeout_seconds is read at call time, not captured at registration.
+        return await _call_mcp_tool(
+            session, original_name, kwargs, server.timeout_seconds, server_name
+        )
 
     tool_fn.__name__ = tool_name
+    # Declare the server's own timeout so dispatch skips a longer outer bound.
+    tool_fn.own_timeout = lambda: server.timeout_seconds  # type: ignore[attr-defined]
     return Tool(name=tool_name, fn=tool_fn, schema=schema)
 
 

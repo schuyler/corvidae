@@ -81,7 +81,7 @@ from corvidae.outbound import (
 )
 from corvidae.queue import SerialQueue
 from corvidae.task import Task
-from corvidae.tool import dispatch_tool_call
+from corvidae.tool import DEFAULT_TOOL_TIMEOUTS, ToolTimeouts, dispatch_tool_call
 from corvidae.tool_policy import (
     ToolView,
     build_tool_view,
@@ -229,6 +229,8 @@ class Agent(CorvidaePlugin):
         self._queued_tool_results: set[tuple[str, str]] = set()
         self._registry: ChannelRegistry | None = None
         self._max_tool_result_chars: int = 100_000
+        # Per-call tool time bounds, copied from ToolCollectionPlugin at start.
+        self._tool_call_timeouts: ToolTimeouts = DEFAULT_TOOL_TIMEOUTS
         self._chars_per_token: float = DEFAULT_CHARS_PER_TOKEN
         self._base_dir = None
         self._request_logprobs: bool = False
@@ -1397,6 +1399,7 @@ class Agent(CorvidaePlugin):
                     task_queue=task_queue,
                     max_result_chars=self._max_tool_result_chars,
                     pm=self.pm,
+                    call_timeouts=self._tool_call_timeouts,
                 )
                 return result.content
 
@@ -1469,6 +1472,7 @@ class Agent(CorvidaePlugin):
         tools_plugin = get_dependency(self.pm, "tools", ToolCollectionPlugin)
         self._snapshot_tools(tools_plugin)
         self._max_tool_result_chars = tools_plugin.max_result_chars
+        self._tool_call_timeouts = tools_plugin.call_timeouts
 
         # The idle tracker is optional: a hand-built plugin manager may lack it.
         # shortcut: hand-built plugin managers omit the idle tracker; make it strict if a non-Runtime entry point appears

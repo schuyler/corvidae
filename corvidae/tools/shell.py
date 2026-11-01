@@ -12,6 +12,8 @@ TIMEOUT_ERROR_TEMPLATE = "Error: command timed out after {timeout} seconds"
 
 async def shell(command: str, timeout: int = 30) -> str:
     """Execute a shell command and return the output."""
+    # Set once spawned, so the cancel handler knows whether there is a process.
+    proc = None
     try:
         proc = await asyncio.create_subprocess_shell(
             command,
@@ -27,6 +29,16 @@ async def shell(command: str, timeout: int = 30) -> str:
         except OSError:
             logger.debug("proc.kill() failed (process may have already exited)", exc_info=True)
         return TIMEOUT_ERROR_TEMPLATE.format(timeout=timeout)
+    except asyncio.CancelledError:
+        # Cancelled from outside (call timeout, shutdown): don't leave the
+        # command running. Kill and reap it, then propagate the cancel.
+        if proc is not None and proc.returncode is None:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                logger.debug("proc.kill() after cancel: process already exited", exc_info=True)
+            await proc.wait()
+        raise
 
     stdout = stdout_bytes.decode(errors="replace").strip()
     stderr = stderr_bytes.decode(errors="replace").strip()

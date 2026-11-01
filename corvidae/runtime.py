@@ -33,6 +33,7 @@ from corvidae.hooks import (
 from corvidae.idle import IdleTracker, validate_daemon_config
 from corvidae.logging import configure_logging
 from corvidae.mcp_client import validate_mcp_config
+from corvidae.tool_collection import parse_tool_timeouts
 
 logger = logging.getLogger(__name__)
 
@@ -119,8 +120,8 @@ class Runtime:
         5.  Create plugin manager.
         6.  Create ChannelRegistry, Clock and IdleTracker and register them
             with the plugin manager as "registry", "clock" and "idle".
-        7.  Validate the agent and daemon sections; load channel config from
-            merged config.
+        7.  Validate the agent and daemon sections and tools.call_timeout /
+            tools.timeouts; load channel config from merged config.
         7b. Block disabled plugins via pm.set_blocked for each name in
             config["plugins"]["disabled"]. Must precede step 8 so blocked
             plugins are never instantiated by the entry-point loader.
@@ -205,6 +206,8 @@ class Runtime:
             # A disabled mcp plugin never reads its block, so skip the check.
             if "mcp" not in disabled_plugins:
                 validate_mcp_config(config)
+            # tools.call_timeout / tools.timeouts: reject a bad value at startup.
+            parse_tool_timeouts(config.get("tools"))
             self.registry.agent_defaults = config.get("agent", {})
             load_channel_config(config, self.registry)
         except ValueError as exc:

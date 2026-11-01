@@ -185,6 +185,7 @@ async def test_agent_start_resolves_idle_tracker_from_plugin_manager():
     resolves it.
     """
     from corvidae.llm_plugin import LLMPlugin
+    from corvidae.tool import DEFAULT_TOOL_TIMEOUTS
     from corvidae.tool_collection import ToolCollectionPlugin
 
     plugin, channel, db = await build_plugin_and_channel()
@@ -199,6 +200,7 @@ async def test_agent_start_resolves_idle_tracker_from_plugin_manager():
     tools = NonCallableMagicMock(spec=ToolCollectionPlugin)
     tools.get_tools.return_value = ({}, [])
     tools.max_result_chars = 100_000
+    tools.call_timeouts = DEFAULT_TOOL_TIMEOUTS
     tools.generation = 0
     plugin.pm.register(llm, name="llm")
     plugin.pm.register(tools, name="tools")

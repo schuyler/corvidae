@@ -52,6 +52,9 @@ class CoreToolsPlugin(CorvidaePlugin):
             from corvidae.tools.shell import shell as _shell_impl
             return await _shell_impl(command, timeout=plugin._shell_timeout)
 
+        # Declare the timeout shell really uses, read live at dispatch (R4).
+        shell.own_timeout = lambda: plugin._shell_timeout  # type: ignore[attr-defined]
+
         async def read_file(path: str) -> str:
             """Read the contents of a file."""
             from corvidae.tools.files import read_file as _read_file_impl
@@ -64,6 +67,9 @@ class CoreToolsPlugin(CorvidaePlugin):
                 max_response_bytes=plugin._web_max_response_bytes,
                 timeout=plugin._web_fetch_timeout,
             )
+
+        # web_fetch's own timeout, read live at dispatch (R4).
+        web_fetch.own_timeout = lambda: plugin._web_fetch_timeout  # type: ignore[attr-defined]
 
         async def _web_search(query: str, max_results: int | None = None) -> str:
             """Search the web via DuckDuckGo."""

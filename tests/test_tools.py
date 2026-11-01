@@ -4,6 +4,7 @@ All tests are expected to FAIL until corvidae/tools.py is implemented.
 """
 
 import asyncio
+import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -563,3 +564,118 @@ class TestWebFetchErrorContext:
 
         assert "http://example.com/broken" in result
         assert "ClientConnectorError" in result
+
+
+# ---------------------------------------------------------------------------
+# Issue #94: own_timeout declarations and shell cancellation cleanup
+# ---------------------------------------------------------------------------
+
+
+def _tool_fns(plugin) -> dict:
+    """Map tool name -> callable for everything the plugin registers."""
+    reg: list = []
+    plugin.register_tools(tool_registry=reg)
+    return {t.name: t.fn for t in reg}
+
+
+async def test_shell_and_web_fetch_declare_live_own_timeout():
+    """R4: shell/web_fetch declare own_timeout, read live from the plugin."""
+    from corvidae.tool import resolve_own_timeout
+
+    plugin = CoreToolsPlugin(None)
+    await plugin.on_init(
+        pm=MagicMock(),
+        config={"tools": {"shell_timeout": 7, "web_fetch_timeout": 9}},
+    )
+    try:
+        fns = _tool_fns(plugin)
+        assert resolve_own_timeout(fns["shell"]) == 7
+        assert resolve_own_timeout(fns["web_fetch"]) == 9
+
+        # Read at call time: changing the plugin attribute changes the answer.
+        plugin._shell_timeout = 3
+        assert resolve_own_timeout(fns["shell"]) == 3
+        plugin._web_fetch_timeout = 2
+        assert resolve_own_timeout(fns["web_fetch"]) == 2
+    finally:
+        # Close the HTTP session on_init opened.
+        await plugin.on_stop()
+
+
+def _pid_alive(pid: int) -> bool:
+    """True while ``pid`` exists (signal 0 probes without delivering)."""
+    import os
+
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="needs POSIX sh and signals")
+async def test_shell_cancelled_by_call_timeout_kills_process(tmp_path):
+    """R5: the outer timer cancelling shell kills and reaps its process."""
+    import json
+    import os
+    import signal
+    import time
+
+    from corvidae.tool import ToolTimeouts, dispatch_tool_call
+
+    plugin = CoreToolsPlugin(None)
+    await plugin.on_init(pm=MagicMock(), config={"tools": {"shell_timeout": 30}})
+    shell_fn = _tool_fns(plugin)["shell"]
+
+    pidfile = tmp_path / "pid"
+    marker = tmp_path / "marker"
+    # Record the shell's pid, linger, then do a visible side effect.
+    command = f"echo $$ > {pidfile}; sleep 1; echo hi > {marker}"
+    call = {"id": "c1", "function": {"name": "shell", "arguments": json.dumps({"command": command})}}
+
+    start = time.monotonic()
+    try:
+        # Own timeout 30 > 0.3, so the outer timer applies.
+        r = await asyncio.wait_for(
+            dispatch_tool_call(call, {"shell": shell_fn}, call_timeouts=ToolTimeouts(600, {"shell": 0.3})),
+            5,
+        )
+        elapsed = time.monotonic() - start
+        assert r.content == "Error: tool 'shell' timed out after 0.3s"
+        assert elapsed < 2.0
+
+        assert pidfile.exists(), "shell never wrote its pid file"
+        pid = int(pidfile.read_text().strip())
+        # Killed and reaped: the pid is gone.
+        assert not _pid_alive(pid), f"shell process {pid} survived the call timeout"
+
+        # And its follow-up side effect never happens.
+        await asyncio.sleep(1.2)
+        assert not marker.exists()
+    finally:
+        # Never leave the test's process behind if the assertion failed.
+        if pidfile.exists():
+            try:
+                os.kill(int(pidfile.read_text().strip()), signal.SIGKILL)
+            except (ProcessLookupError, ValueError):
+                pass
+        # Close the HTTP session on_init opened.
+        await plugin.on_stop()
+
+
+async def test_shell_cancel_before_spawn_reraises():
+    """Regression guard (passes today): cancelling shell during spawn re-raises
+    CancelledError, with no UnboundLocalError from a missing ``proc``."""
+    started = asyncio.Event()
+
+    async def blocked_spawn(*args, **kwargs):
+        # Stand in for create_subprocess_shell: block until cancelled.
+        started.set()
+        await asyncio.sleep(30)
+
+    with patch("asyncio.create_subprocess_shell", side_effect=blocked_spawn):
+        task = asyncio.ensure_future(shell("echo hi"))
+        await asyncio.wait_for(started.wait(), 2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 2)

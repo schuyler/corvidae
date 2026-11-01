@@ -36,6 +36,7 @@ from corvidae.channel import (
 from corvidae.hooks import CorvidaePlugin, hookimpl
 from corvidae.idle import validate_daemon_config
 from corvidae.runtime import deep_merge
+from corvidae.tool_collection import parse_tool_timeouts
 
 logger = logging.getLogger(__name__)
 
@@ -141,8 +142,9 @@ class ConfigWatcherPlugin(CorvidaePlugin):
         1. Parse YAML from disk. On failure: log ERROR, skip.
         2. Deep-merge CLI overrides on top of the new YAML.
         3. Validate (must be a dict with llm.main). On failure: log ERROR, skip.
-        3b-3d. Validate agent, daemon and channels sections. On failure: log
-           ERROR, skip the whole reload (nothing is applied, #208).
+        3b-3e. Validate agent, daemon, channels and tools (call_timeout,
+           timeouts) sections. On failure: log ERROR, skip the whole reload
+           (nothing is applied, #208).
         4. Update ChannelRegistry.agent_defaults from the new agent config.
         5. Apply the parsed channel entries (cannot fail validation now).
         6. Dispatch on_config_reload to each plugin with per-plugin error isolation.
@@ -206,6 +208,17 @@ class ConfigWatcherPlugin(CorvidaePlugin):
         # ("a malformed reload changes nothing", #208).
         try:
             parsed_channels = parse_channel_config(new_config)
+        except ValueError as exc:
+            logger.error(
+                "config reload failed: %s in %s; reload skipped, running config unchanged",
+                exc, self._config_path, exc_info=True,
+            )
+            return
+
+        # Step 3e: Validate tools.call_timeout / tools.timeouts. The keys
+        # stay restart-only; a bad value refuses the whole reload.
+        try:
+            parse_tool_timeouts(new_config.get("tools"))
         except ValueError as exc:
             logger.error(
                 "config reload failed: %s in %s; reload skipped, running config unchanged",

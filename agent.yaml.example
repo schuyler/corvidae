@@ -116,6 +116,9 @@ agent:
 
 # Built-in tool settings (optional)
 # tools:
+#   call_timeout: 600               # seconds bound on every tool call (0 or null disables);
+#                                   # skipped when the tool's own timeout is not longer
+#   timeouts: {task_pipeline: 3600} # per-tool override of call_timeout
 #   shell_timeout: 30               # seconds before shell command is killed
 #   web_fetch_timeout: 15           # seconds before HTTP request is aborted
 #   web_max_response_bytes: 50000   # max bytes of HTTP response body

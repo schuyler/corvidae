@@ -1,5 +1,7 @@
 """Tests for corvidae.tools.task_pipeline."""
 
+import sys
+
 import pytest
 
 from corvidae.tools.task_pipeline import (
@@ -181,3 +183,64 @@ tasks:
         assert "build" in result
         assert "make all" in result
         assert "boom" in result
+
+
+# --- Issue #94: cancellation kills the running step's process ---
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="needs POSIX sh and signals")
+async def test_task_pipeline_cancel_kills_step_process(tmp_path):
+    """R5: the call timeout cancelling task_pipeline kills the step's process."""
+    import asyncio
+    import json
+    import os
+    import signal
+    import time
+
+    from corvidae.tool import ToolTimeouts, dispatch_tool_call
+    from corvidae.tools.task_pipeline import TaskPipelinePlugin
+
+    reg: list = []
+    TaskPipelinePlugin(None).register_tools(reg)
+    fn = {t.name: t.fn for t in reg}["task_pipeline"]
+
+    pidfile = tmp_path / "pid"
+    marker = tmp_path / "marker"
+    # Same command shape as the shell test: record pid, linger, side effect.
+    definition = json.dumps({"tasks": [{
+        "name": "step",
+        "command": f"echo $$ > {pidfile}; sleep 1; echo hi > {marker}",
+        "depends_on": [],
+    }]})
+    call = {"id": "c1", "function": {"name": "task_pipeline", "arguments": json.dumps({"definition": definition})}}
+
+    start = time.monotonic()
+    try:
+        r = await asyncio.wait_for(
+            dispatch_tool_call(
+                call, {"task_pipeline": fn},
+                call_timeouts=ToolTimeouts(600, {"task_pipeline": 0.3}),
+            ),
+            5,
+        )
+        assert r.content == "Error: tool 'task_pipeline' timed out after 0.3s"
+        assert time.monotonic() - start < 2.0
+
+        assert pidfile.exists(), "pipeline step never wrote its pid file"
+        pid = int(pidfile.read_text().strip())
+        try:
+            os.kill(pid, 0)
+            alive = True
+        except ProcessLookupError:
+            alive = False
+        assert not alive, f"pipeline step process {pid} survived the call timeout"
+
+        await asyncio.sleep(1.2)
+        assert not marker.exists()
+    finally:
+        # Clean up the step's process if the assertions above failed.
+        if pidfile.exists():
+            try:
+                os.kill(int(pidfile.read_text().strip()), signal.SIGKILL)
+            except (ProcessLookupError, ValueError):
+                pass
