@@ -806,6 +806,48 @@ class TestScope:
             await h.plugin.on_stop()
 
 
+class TestRefusedSenderChannel:
+    """#274: a refused sender must not leave a ChannelRegistry entry (PRD 3.2)."""
+
+    async def test_refused_dm_leaves_no_registry_entry(self):
+        """A DM from a sender outside discord.allow reaches the gate on a
+        channel with the usual id, is vetoed, and nothing is registered."""
+        h = await _start_plugin()
+        try:
+            # Deliver a DM from an unauthorized sender.
+            await _deliver(h, make_dm("let me in", author_id=OTHER_ID))
+            ch = h.on_message.await_args_list[0].kwargs["channel"]
+            # The gate sees the normal id, refuses, and no entry outlives it.
+            assert ch.id == f"discord:dm:{OTHER_ID}"
+            assert await h.plugin.should_process_message(
+                channel=ch, sender=str(OTHER_ID), text="let me in", trace_id="tid",
+            ) is False
+            assert h.registry.get(f"discord:dm:{OTHER_ID}") is None
+        finally:
+            await h.plugin.on_stop()
+
+    async def test_refused_sender_reuses_registered_guild_channel(self):
+        """In an already-registered guild channel the live Channel object is
+        reused for a refused sender (not a fresh transient copy)."""
+        h = await _start_plugin()
+        try:
+            # An allowed user's earlier traffic registered the channel.
+            live = h.registry.get_or_create("discord", str(CHAN_ID))
+            # A refused sender then mentions the bot in that channel.
+            await _deliver(h, make_message(
+                f"<@{BOT_ID}> hi", author_id=OTHER_ID,
+                mentions=[BOT_MENTION], channel_id=CHAN_ID,
+            ))
+            ch = h.on_message.await_args_list[0].kwargs["channel"]
+            assert ch is live
+            assert h.registry.get(f"discord:{CHAN_ID}") is live
+        finally:
+            await h.plugin.on_stop()
+
+    # Allowed sender still registers: already covered by
+    # TestScope.test_guild_channel_scope (registry.get is the channel).
+
+
 # ---------------------------------------------------------------------------
 # R14: ordering
 # ---------------------------------------------------------------------------

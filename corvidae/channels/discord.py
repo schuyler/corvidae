@@ -472,7 +472,14 @@ class DiscordPlugin(TransportPlugin):
         # and threads on their own channel id.
         sender = str(author.id)
         scope = f"dm:{sender}" if is_dm else str(message.channel.id)
-        channel = self._registry.get_or_create("discord", scope)
+        # The allowlist is checked before the channel is resolved, so a
+        # refused sender never adds a registry entry (PRD §3.2 default-deny;
+        # #274, as #103 did for Signal and #77 for IRC).
+        allowed = sender in self._allow
+        if allowed:
+            channel = self._registry.get_or_create("discord", scope)
+        else:
+            channel = self._transient_channel(scope)
 
         # Typing only ever applies to an allowlisted sender -- others get no
         # sign the bot is live. on_message still fires so the real
@@ -480,7 +487,7 @@ class DiscordPlugin(TransportPlugin):
         # Mint the trace id here; the Agent uses it verbatim (#95), and it
         # keys whether this message was admitted.
         trace_id = mint_trace_id()
-        took_slot = sender in self._allow
+        took_slot = allowed
         try:
             if took_slot:
                 await self._begin_typing(channel)
@@ -496,6 +503,20 @@ class DiscordPlugin(TransportPlugin):
             if took_slot and trace_id not in self._admitted:
                 self._decrement_outstanding(channel)
             self._admitted.discard(trace_id)
+
+    def _transient_channel(self, scope: str) -> Channel:
+        """The channel a refused sender's message is gated on.
+
+        A live registry entry is reused (a guild channel an allowed user
+        already talks in, or a sender since dropped from ``allow``);
+        otherwise the Channel is built without registering it, so the gate
+        still sees the ``discord:<scope>`` id it logs, and nothing outlives
+        the refusal.
+        """
+        existing = self._registry.get(f"discord:{scope}")
+        if existing is not None:
+            return existing
+        return Channel(transport="discord", scope=scope)
 
     # -----------------------------------------------------------------
     # Channel resolution
