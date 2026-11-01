@@ -148,14 +148,14 @@ one is a bug even if its tests pass.
    falls, and safety features are added as plugins over time, as with
    sandboxing. Fixed floors protect the operator's own control surface
    rather than draw a trust boundary, and stay fixed, among them: web auth
-   cannot be turned off (§3.2 Web), `redact` is never a tool (§3.7
-   Memory 8), and `set_settings` can't lift a lock or change the lock
-   list (§3.5.6). What the agent may change about itself is not a floor:
-   every restriction on it is a lock the operator can lift (principle
-   15). The model's authority is unbounded and unsandboxed by decision;
-   `docs/threat-model.md` is the standing record of what that costs and
-   is updated whenever untrusted text can reach somewhere new or a tool
-   can do something new.
+   cannot be turned off (§3.2 Web), `redact` is never a tool (§3.7 Memory
+   8), `set_settings` can't lift a lock or change the lock list, and
+   transport metadata is out of the agent's reach (§3.5.6). What the agent
+   may change about itself is not a floor: every restriction on it is a
+   lock the operator can lift (principle 15). The model's authority is
+   unbounded and unsandboxed by decision; `docs/threat-model.md` is the
+   standing record of what that costs and is updated whenever untrusted
+   text can reach somewhere new or a tool can do something new.
 
 10. **Channel ids are persistence keys and never derive from names.**
     `transport:scope` keys `sessions.db`, the JSONL logs, memory
@@ -210,13 +210,16 @@ one is a bug even if its tests pass.
     capacity to self-modify and self-improve is a design goal. The
     framework can let the agent change, at runtime and through its own
     tools:
-    - its prompts: the system prompt, every background stage's fork and
-      standalone instructions, and the critic's and appraiser's prompts;
+    - its prompts: every prompt the framework sends to a model on the
+      agent's behalf, among them the system prompt, every background
+      stage's fork and standalone instructions, the critic's and
+      appraiser's prompts, and the subagent and heartbeat prompts;
     - its skills (§3.7 Trust);
     - its model and inference parameters, `model` and `logprobs`
       included (§3.5.6);
-    - its tunables, caps and thresholds, including fitting thresholds
-      from the outcome log in a closed loop (principle 7);
+    - its tunables, framework settings, caps and thresholds, including
+      fitting thresholds from the outcome log in a closed loop
+      (principle 7);
     - its tool set (§3.5.2).
 
     No deployment is required to allow any of it. Every restriction on
@@ -611,17 +614,20 @@ Per transport:
    which go into the request body; the framework keys (`max_turns`,
    `max_context_tokens`, `reasoning_history`, validated); and dotted
    plugin tunables. The request-body keys the agent loop builds itself
-   (`messages`, `tools`, `tool_choice`, `stream`) are never overridden:
-   an override there would replace the loop's work on every turn rather
-   than change the agent. The agent changes its tool set through §3.5.2
-   instead. The persona may tune its own gates by default, with the
-   documented recommended locks for channels with untrusted
-   participants. `agent.immutable_settings` and the other locks narrow
-   what the agent may set, and operator config can lift any of them,
-   `system_prompt` included (principle 15). An unlocked `system_prompt`
-   change takes effect at the channel's next compaction boundary or
-   conversation start, as plugin sections do (§3.3.8; principle 2).
-   `set_settings` can't lift a lock or change the lock list itself.
+   (`messages`, `tools`, `tool_choice`, `stream`) are never overridden: an
+   override there would replace the loop's work on every turn rather than
+   change the agent. The agent changes its tool set through §3.5.2
+   instead. Transport metadata kept on the channel (ACP's `cwd`, the
+   `tool_backend` selection) is out of the agent's reach: `set_settings`
+   can neither set nor clear it. The persona may tune its own gates by
+   default, with the documented recommended locks for channels with
+   untrusted participants. `agent.immutable_settings` and the other locks
+   narrow what the agent may set, and operator config can lift any of
+   them, `system_prompt` included (principle 15). An unlocked
+   `system_prompt` change takes effect at the channel's next compaction
+   boundary or conversation start, as plugin sections do (§3.3.8;
+   principle 2). `set_settings` can't lift a lock or change the lock list
+   itself.
 7. `subagent` launches a background agent on the shared `background`
    client with the calling channel's tool set minus itself and a persona-neutral
    prompt; it returns a task id at once and its result arrives as a
@@ -1057,8 +1063,8 @@ design: `docs/design.md`, Forks. The requirements are outcomes:
    YAML, transport-wide YAML (an entry covering every channel whose id
    starts with a given prefix; less specific before more specific),
    per-channel YAML keyed by channel id, runtime overrides. A channel's
-   disabled tools are the union of every config layer, so a config layer
-   can narrow but never re-enable. The agent widens its own tool set only
+   disabled tools are the union of every YAML layer, so a YAML layer can
+   narrow but never re-enable. The agent widens its own tool set only
    as far as the operator has unlocked it (§3.5.2, principle 15).
 3. `agent.yaml` is hot-reloaded on mtime change with per-plugin error
    isolation; the configuration doc states which keys apply live and which

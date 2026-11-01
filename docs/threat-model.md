@@ -181,16 +181,20 @@ The fork instructions added for #51 (`appraisal.stage2_fork_prompt`,
 `critique.fork_prompt.<lens>`, `memory.consolidation_fork_prompt`,
 `agent.compaction_fork_prompt`) and `agent.forks.*` are read from
 operator config only, so `set_settings` can't rewrite them. That covers
-only calls that actually fork: every fork miss (forks off for the stage,
-the exchange has left the window, a refused or unparseable fork) falls
-back to the standalone prompt. The critic's and appraiser's standalone
-prompts above are still runtime tunables, so keep them in
-`immutable_settings` with forks on too.
+only calls that actually fork. In the tree, a fork miss (forks off for
+the stage, the exchange has left the window, a refused or unparseable
+fork) falls back to the standalone prompt for stage-2 appraisal, the
+stylistic critique lenses and consolidation; compaction falls back by
+design (PRD §3.8.5), and the provenance check skips. PRD §3.8 makes any
+other miss a skip, so the appraisal, lens and consolidation fallbacks are
+a gap (#ISSUE2). Until it closes, the critic's and appraiser's
+standalone prompts above are reachable, and they are runtime tunables,
+so keep them in `immutable_settings` with forks on too.
 
 None of this is a defect to engineer away. The capacity to tune and
 rewrite its own gates is part of a design goal (PRD principle 15); this
-finding records its cost, and finding 13 lists every capability of that
-kind and what unlocking it costs.
+finding records its cost, and finding 13 records the cost of each kind of
+self-modification.
 
 ### 3. Untrusted text is promoted to the `system` role
 
@@ -651,22 +655,24 @@ The key is never logged or echoed in errors and replies.
 ### 13. The agent can modify itself (by design)
 
 PRD principle 15 makes self-modification a design goal: the framework
-must be able to let the agent change its own prompts, skills, model,
-parameters, thresholds and tool set, and every restriction on that is a
-lock the operator can lift. This finding is the cost ledger it asks for.
-It doesn't argue against the capability; it says what each unlock buys an
-attacker who can get text in front of the model, so an operator can
-decide per channel.
+must be able to let the agent change its own prompts, skills, model and
+parameters, tunables and thresholds, and tool set, and every restriction
+on that is a lock the operator can lift. This finding is the cost ledger
+it asks for, organized by kind of change so that a new key falls under
+an entry that already exists. It doesn't argue against the capability;
+it says what each kind of unlock buys an attacker who can get text in
+front of the model, so an operator can decide per channel.
 
-Where the tree stands: `set_settings` hard-blocks `system_prompt` and
-any undotted key outside its allowlist, and can't change a channel's
-disabled tools. The static keys are read from operator config alone
-(through `tuning.config_value` or the agent config directly), so an
-override of one is accepted but has no effect. None of those can be
-unlocked yet (#ISSUE).
-The agent can already get around all of them by rewriting `agent.yaml`
-or a system-prompt file with `write_file` (finding 4), unless the files
-are read-only to the daemon.
+Where the tree stands: `set_settings` hard-blocks `system_prompt` and any
+undotted key outside its allowlist, and can't change a channel's disabled
+tools. The static keys are read from operator config alone (through
+`tuning.config_value` or the agent config directly): an override under a
+dotted name (`agent.request_logprobs`) is accepted but has no effect, and
+an undotted one is refused by the allowlist. Several prompts (subagent,
+heartbeat) are code constants with no config key at all (#287, #289).
+None of these can be unlocked yet (#ISSUE). The agent can already get
+around all of them by rewriting `agent.yaml` or a system-prompt file with
+`write_file` (finding 4), unless the files are read-only to the daemon.
 
 The common shape: a runtime override is per channel and in memory, so an
 injected change lasts on that channel until the override is cleared or
@@ -675,62 +681,78 @@ tool set) applies from the next compaction or conversation start. A skill
 outlives both, and a closed-loop fit would re-derive itself from the
 outcome log after a restart.
 
-What each unlock costs:
+What each kind of unlock costs:
 
 - **The system prompt.** An injection that talks the model into an edit
   rewrites the persona and its instructions on that channel. This is the
-  largest single unlock: everything else the operator wrote into the
-  prompt, refusals included, is now the model's to change.
-- **The critic's and appraiser's prompts** (`critique.prompt.*`,
-  `appraisal.stage2_prompt`; open by default today). Covered in
-  finding 2: the check can be rewritten by the thing it checks.
-- **Fork instructions, the standalone compaction and consolidation
-  prompts (`agent.compaction_prompt`, `memory.consolidation_prompt`),
-  and `agent.forks.*`.** An injection can rewrite how
-  the agent summarizes, consolidates and scores its own exchanges, under
-  its own persona, and the results persist: a summary it later reads as
-  its own words, a memory record, an `exchange_log` score. It also
-  removes a bound finding 8 relies on.
-- **Background-stage output caps.** The agent can lengthen a stage's slot
-  time on every exchange, which starves main turns on a single-slot
-  server (PRD principle 3). The caps still have to fit the context (PRD
-  §3.8.4).
-- **`mid_conversation_system_role`.** The injection can move framed
-  CONTEXT and notifications back into the `system` role, undoing the
-  mitigation in finding 3.
-- **`model` and the other model parameters.** The agent can point its
-  turns at any model the server offers, including one with weaker safety
-  tuning. On a router with one KV slot, a model switch evicts the slot
-  and stalls every channel while the new model loads. Large `max_tokens`
-  or sampling extremes degrade replies on that channel. `logprobs` costs
-  little: larger responses, and nothing from providers that don't
-  support it.
-- **Skills.** Skills sit in the stable prompt region, so a skill written
-  at an injection's request reaches every future conversation on every
-  channel and survives restarts. The idle scan watches skill-directory
-  writes (PRD §3.7 Trust); operator confirmation on writes is the lock.
-- **The tool set.** If the agent can re-enable a tool the operator turned
-  off, an injection on a channel without `shell` can grant itself
-  `shell`, and from there everything in finding 4. This is the most
-  important one to keep locked on any channel with untrusted
-  participants.
+  largest single prompt unlock: everything else the operator wrote into
+  the prompt, refusals included, is now the model's to change.
+- **The prompts that judge and remember** (the critic's and appraiser's
+  prompts, open by default today; fork instructions, the standalone
+  compaction and consolidation prompts, `agent.forks.*`). The check can
+  be rewritten by the thing it checks (finding 2). An injection can
+  rewrite how the agent summarizes, consolidates and scores its own
+  exchanges, under its own persona, and the results persist: a summary
+  it later reads as its own words, a memory record, an `exchange_log`
+  score. Unlocking fork instructions also removes a bound finding 8
+  relies on.
+- **Other prompts sent on the agent's behalf** (subagent, heartbeat,
+  notification text). Each steers a turn that has no person in it: a
+  rewritten heartbeat prompt acts on memory with nobody watching
+  (finding 11, heartbeat), and a rewritten subagent prompt runs with the
+  calling channel's tools.
+- **Framing** (`mid_conversation_system_role`). The injection can move
+  framed CONTEXT and notifications back into the `system` role, undoing
+  the mitigation in finding 3.
+- **Model and inference parameters** (`model`, sampling keys,
+  `max_tokens`, `logprobs`). The agent can point its turns at any model
+  the server offers, including one with weaker safety tuning. What a
+  switch costs in latency depends on the backend: a router that has to
+  load the new model into its only slot stalls every channel while it
+  does. Large `max_tokens` or sampling extremes degrade replies on that
+  channel. `logprobs` costs little: larger responses, and nothing from
+  providers that don't support it.
+- **Gate tunables and thresholds** (`gate.*`, `critique.provenance.enabled`,
+  `critique.sample_below_rate`, the appraisal thresholds; open by default
+  today). Covered in finding 2: an injection can silence the agent on a
+  channel or switch off the provenance check. The recommended blocklist
+  in [configuration.md](configuration.md) is the lock.
 - **Closed-loop threshold fitting.** The agent adjusts its gates from an
   outcome log that untrusted traffic helps write. A sustained campaign
   can walk thresholds somewhere no single message could, slowly enough
   that no one turn looks wrong: finding 2 in slow motion. Not built yet.
+- **Framework settings** (`max_turns`, `max_context_tokens`,
+  `reasoning_history`; open by default today). A `max_context_tokens`
+  above the server's context makes every turn on that channel fail; one
+  far below it forces compaction on nearly every turn, rewriting history
+  into summaries. A large `max_turns` lets one injected loop hold the
+  slot.
+- **Caps** (background-stage output caps). The agent can lengthen a
+  stage's slot time on every exchange, which starves main turns on a
+  single-slot server (PRD principle 3). The caps still have to fit the
+  context (PRD §3.8.4).
+- **Skills.** The skills index sits in the stable prompt region, so a
+  skill written at an injection's request is offered to every future
+  conversation on every channel and survives restarts. The idle scan
+  watches skill-directory writes (PRD §3.7 Trust); operator confirmation
+  on writes is the lock. Not built yet.
+- **The tool set.** If the agent can re-enable a tool the operator
+  disabled on its channel, an injection on a channel where `shell` is
+  registered but disabled can grant itself `shell`, and from there
+  everything in finding 4. This is the most important one to keep locked
+  on any channel with untrusted participants.
 
 Recommended locks for a channel with untrusted participants, as a
-starting point rather than a rule: the system prompt, the critic's and
-appraiser's prompts, fork and standalone background instructions,
-`mid_conversation_system_role`, `model`, the tool set, and skill writes
-behind confirmation.
+starting point rather than a rule: the system prompt and the prompts that
+judge and remember, framing, `model`, the gate tunables, the tool set,
+and skill writes behind confirmation.
 
 A channel with only the operator on it has the smallest exposure, and it
-is the configuration the design goal is for. It isn't free. Untrusted
-text still reaches it through `web_fetch`, search results, MCP results
-and memory distilled on other channels (findings 4 and 6, PRD principle
-14), and a skill write or a model switch made there reaches every
-channel, so the skill and `model` costs above apply even there.
+is where these unlocks cost least. It isn't free. Untrusted text still
+reaches it through `web_fetch`, search results, MCP results and memory
+distilled on other channels (findings 4 and 6, PRD principle 14). A skill
+written there reaches every channel, and a model switch there can stall
+every channel sharing the server's slot, so those costs apply even there.
 
 ## Privilege separation
 
