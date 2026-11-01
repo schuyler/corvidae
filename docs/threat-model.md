@@ -902,6 +902,17 @@ decision (2026-11-01), and these are its costs.
   another, up to `scheduler.max_reminders_per_channel` per target, and can
   fill a target's pending cap so the operator can't set reminders there
   until the rows fire or are cancelled.
+- **Messaging someone first opens the door to them.** Under PRD §3.5.9 a
+  one-to-one message to a contact outside the inbound allowlist admits
+  their replies on that channel. Injected text (a fetched page, an MCP
+  result, a distilled memory) that talks the model into messaging an
+  address the attacker controls turns a one-way injection into a
+  conversation the attacker drives, with that channel's full tool set.
+  Inbound default-deny no longer bounds who can talk to the agent; the
+  agent does, and so does whatever steers it. Controls: lock the
+  capability; list and revoke admissions; narrow the tools on the
+  transport's channels (`channels.signal:*.tools.disabled` and the like);
+  and with the trust plugin loaded, weight such contacts low.
 - **Floods and loops.** No limit applies to messages the agent starts
   unless the operator sets one (PRD §3.5.9), so one exchange can send up to
   its `max_turns` budget's worth of messages to any one contact, and

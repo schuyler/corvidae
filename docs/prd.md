@@ -155,25 +155,26 @@ one is a bug even if its tests pass.
    the threat, not other tenants. Anything that arrived from a channel, a
    web page, an MCP server, or a memory distilled from those is data, and
    is framed as such at one chokepoint. The operator decides the trust
-   boundary, not the architecture: transports are default-deny with
-   silent refusal, so the operator decides who may reach the agent, and
-   which safety plugins load (trust and sensitivity, and others added over
-   time, as with sandboxing). Channels are not a boundary (principle 14):
-   what the agent knows, remembers and says crosses between them freely.
-   Fixed floors protect the operator's own control surface rather than
-   draw a trust boundary, and stay fixed: web auth cannot be
-   turned off (§3.2 Web), `redact` is never a tool (§3.7 Memory 8),
-   `set_settings` can't lift a lock or change the lock list, the
+   boundary, not the architecture: transports are default-deny with silent
+   refusal, so the operator decides who may reach the agent (the
+   allowlists, plus anyone the agent messages first, unless the operator
+   locks that, §3.5.9), and which safety plugins load (trust and
+   sensitivity, and others added over time, as with sandboxing). Channels
+   are not a boundary (principle 14): what the agent knows, remembers and
+   says crosses between them freely. Fixed floors protect the operator's
+   own control surface rather than draw a trust boundary, and stay fixed:
+   web auth cannot be turned off (§3.2 Web), `redact` is never a tool (§3.7
+   Memory 8), `set_settings` can't lift a lock or change the lock list, the
    request-body keys the agent loop builds (`messages`, `tools`,
-   `tool_choice`, `stream`) are never overridden, and transport metadata
-   is out of the agent's reach (§3.5.6). The floors bind the framework's
-   own surfaces; an agent permitted to edit its own code or configuration
-   and restart (principle 15) can change anything, floors included, and
-   the threat model records that cost. Apart from these floors and the
-   append-only log (principle 4), what the agent may change about itself
-   is not fixed: every other restriction on it is a lock the operator can
-   lift (principle 15). The model's authority is unbounded and unsandboxed
-   by decision; `docs/threat-model.md` is the standing record of what that
+   `tool_choice`, `stream`) are never overridden, and transport metadata is
+   out of the agent's reach (§3.5.6). The floors bind the framework's own
+   surfaces; an agent permitted to edit its own code or configuration and
+   restart (principle 15) can change anything, floors included, and the
+   threat model records that cost. Apart from these floors and the
+   append-only log (principle 4), what the agent may change about itself is
+   not fixed: every other restriction on it is a lock the operator can lift
+   (principle 15). The model's authority is unbounded and unsandboxed by
+   decision; `docs/threat-model.md` is the standing record of what that
    costs and is updated whenever untrusted text can reach somewhere new or
    a tool can do something new.
 
@@ -413,7 +414,8 @@ The contract every transport meets:
    indicator is shown. The transport fires `on_message` for every decoded
    message regardless; the gate is the one place that vetoes. Web
    substitutes a bearer token for the allowlist; the token is the
-   authorization.
+   authorization. A sender the agent has messaged first, one to one, is
+   admitted on that channel (§3.5.9).
 3. Transports subclass `TransportPlugin`, set `transport`, and override the
    `send_*` methods they can display. The one `send(channel, event)` hook
    does the ownership check once; a transport's `owns(channel)` predicate
@@ -753,9 +755,14 @@ Per transport:
    apply (principle 15); none applies unless set. It counts every message
    the agent starts, as opposed to the reply a turn owes the channel it
    runs on, and a reminder firing on a channel other than the one that set
-   it counts as one. It limits flooding a contact, not crossing channels.
-   `docs/threat-model.md` records what speaking anywhere
-   costs (principle 9).
+   it counts as one. It limits flooding a contact, not crossing channels. A
+   message to someone the inbound allowlist doesn't cover, on a one-to-one
+   channel, admits that person's replies on that channel: the agent can
+   start a conversation, not only send into a void. A message into a group
+   channel admits no one. The admission is recorded durably, and the
+   operator can list and revoke it. Admitting people this way is a
+   capability the operator can lock (principle 15). `docs/threat-model.md`
+   records what speaking anywhere costs (principle 9).
 10. Notes to another channel's context: any turn can leave information for
     another channel. The note is admitted through the funnel at the tail of
     the target channel's window (§3.7 Funnel), framed as the agent's own
@@ -1498,6 +1505,7 @@ record that holds the reasoning.
 | Audience filtering is a capability, not a requirement: the sensitivity plugin, where the operator loads it, filters what enters a window (retrieval, notes, reads, goals) by who is present; it never gates a reply | principle 15; operator directive, 2026-11-01 |
 | A turn a note wakes is its own exchange, linked to the one that sent the note; its origin, kind (agency or continuation), `max_turns` budget and precedence follow the exchange that started the chain; a continuation can cross channels | principle 13; §3.1.3; §3.5.10; operator directive, 2026-11-01 |
 | Accepted work survives a restart: inbound messages, notifications and notes go to a write-ahead log when accepted and are replayed if unfinished; the log is compacted and is not bound by the append-only rule | §3.4.8; operator directive, 2026-11-01 |
+| Messaging someone first, one to one, admits their replies on that channel; a group-channel message admits no one; admissions are durable and revocable, and the operator can lock the capability | §3.2.2; §3.5.9; operator directive, 2026-11-01 |
 | Identity is agent-wide and heads every prompt; channel register is appended after it and never replaces it | operator directive, 2026-11-01 |
 | The operator decides the trust boundary; inbound transports default-deny; channels are not a boundary; safety features layer in as plugins | #167; operator directive, 2026-11-01 |
 | Corvidae is a testbed first and a robust harness second | #167 |
