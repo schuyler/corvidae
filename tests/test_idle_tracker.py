@@ -397,3 +397,155 @@ async def test_zero_period_watch_fires_at_settle(kernel_clock):
         await asyncio.sleep(0)
 
     assert rec.calls == [(0.0, "a")]
+
+
+# --- #248 R1/R2: a watch's repeat must be positive and finite -------------
+
+
+@pytest.mark.parametrize("method", ["channel", "system"])
+async def test_zero_period_without_repeat_rejected_naming_watch(kernel_clock, method):
+    """#248 R1: period 0 with no repeat would re-fire every loop step, so it
+    is rejected with a message naming the watch, the defaulted value and the
+    remedy; nothing is registered or armed."""
+    clock, idle = kernel_clock
+    rec = Recorder(clock)
+    watch = getattr(idle, f"watch_{method}s" if method == "channel" else "watch_system")
+    cb = getattr(rec, method)
+
+    # Activity first, so a wrongly-registered watch would have armed a timer.
+    idle.note_activity("a")
+    idle.note_settled("a")
+    with pytest.raises(ValueError) as exc:
+        watch(0, cb, name="x")
+
+    msg = str(exc.value)
+    assert "'x'" in msg
+    assert "repeat defaults to the period, 0" in msg
+    assert "pass repeat=" in msg
+    assert "positive number of seconds" in msg
+    # The rejected watch left nothing behind.
+    assert idle._watches == []
+    assert _idle_timers(clock) == []
+
+
+@pytest.mark.parametrize("bad", [0, -1, float("nan"), float("inf")])
+async def test_bad_explicit_repeat_rejected(kernel_clock, bad):
+    """#248 R1: an explicit repeat that is zero, negative or not finite is
+    rejected, naming the watch and the rejected value."""
+    clock, idle = kernel_clock
+    rec = Recorder(clock)
+
+    with pytest.raises(ValueError) as exc:
+        idle.watch_channels(60, rec.channel, name="x", repeat=bad)
+
+    msg = str(exc.value)
+    assert "'x'" in msg
+    assert f"repeat {bad!r}" in msg
+    assert "pass repeat=" in msg
+    assert "positive number of seconds" in msg
+    assert idle._watches == []
+
+
+async def test_nan_period_without_repeat_rejected(kernel_clock):
+    """#248 R1: a NaN period defaults repeat to NaN, which a plain `<= 0`
+    check would let through; it is rejected naming the watch and value."""
+    clock, idle = kernel_clock
+    rec = Recorder(clock)
+
+    with pytest.raises(ValueError) as exc:
+        idle.watch_system(float("nan"), rec.system, name="x")
+
+    msg = str(exc.value)
+    assert "'x'" in msg
+    assert "nan" in msg
+    assert "positive number of seconds" in msg
+    # The rejected watch was never registered.
+    assert idle._watches == []
+
+
+async def test_zero_period_with_repeat_accepted(kernel_clock):
+    """#248 R1: period 0 with an explicit positive repeat (web's settle
+    watch) stays accepted. Passes today; guards against over-rejection."""
+    clock, idle = kernel_clock
+    rec = Recorder(clock)
+
+    w = idle.watch_channels(0, rec.channel, name="x", repeat=3600)
+
+    assert w.repeat == 3600
+    assert w in idle._watches
+
+
+@pytest.mark.parametrize("method", ["channel", "system"])
+async def test_negative_period_rejected_naming_watch(kernel_clock, method):
+    """#248 R2: a negative period is rejected even with a valid repeat,
+    naming the watch, the value and the accepted range."""
+    clock, idle = kernel_clock
+    rec = Recorder(clock)
+    watch = getattr(idle, f"watch_{method}s" if method == "channel" else "watch_system")
+    cb = getattr(rec, method)
+
+    with pytest.raises(ValueError) as exc:
+        watch(-1, cb, name="y", repeat=10)
+
+    msg = str(exc.value)
+    assert "'y'" in msg
+    assert "period -1" in msg
+    assert "expected 0 or a positive number of seconds" in msg
+    assert idle._watches == []
+
+
+# --- #248 R4: the zero-period run is a clock timer ------------------------
+
+
+async def test_zero_period_run_listed_and_cancelled_by_clock_close(kernel_clock):
+    """#248 R4: a due zero-period run is listed by live_timer_names() while
+    pending, and clock.close() cancels it before it runs."""
+    clock, idle = kernel_clock
+    rec = Recorder(clock)
+    idle.watch_channels(0, rec.channel, name="w", repeat=3600)
+
+    idle.note_activity("a")
+    idle.note_settled("a")
+    # No await yet: the run is pending and must be visible on the clock.
+    assert "idle:w:a" in clock.live_timer_names()
+
+    await clock.close()
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+    assert rec.calls == []
+
+
+async def test_settle_waits_for_zero_period_run(kernel_clock):
+    """#248 R4: FakeClock.settle() waits for a multi-step zero-period
+    callback instead of returning after its fixed number of bare yields."""
+    clock, idle = kernel_clock
+    rec = Recorder(clock)
+
+    async def slow(cid: str) -> None:
+        # Many loop steps before recording, longer than settle()'s bare yields.
+        for _ in range(20):
+            await asyncio.sleep(0)
+        await rec.channel(cid)
+
+    idle.watch_channels(0, slow, name="w", repeat=3600)
+    idle.note_activity("a")
+    idle.note_settled("a")
+    await clock.settle()
+
+    assert rec.calls == [(0.0, "a")]
+
+
+async def test_watch_cancel_before_step_stops_zero_period_run(kernel_clock):
+    """Guards unchanged cancel() behaviour, not a #248 requirement: cancelling
+    the watch before the run's first loop step stops it. Passes today."""
+    clock, idle = kernel_clock
+    rec = Recorder(clock)
+    watch = idle.watch_channels(0, rec.channel, name="w", repeat=3600)
+
+    idle.note_activity("a")
+    idle.note_settled("a")
+    watch.cancel()
+    await clock.settle()
+
+    assert rec.calls == []

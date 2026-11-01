@@ -311,7 +311,7 @@ A record's `created_at` is the `sessions.db` timestamp of the last message in it
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `memory.idle_consolidate_after` | float | `1800` | Seconds a channel must be quiet before idle consolidation runs on its un-consolidated tail, and the period between repeat runs while it stays quiet. A channel that never goes quiet is consolidated through compaction instead, except `internal:heartbeat`: its window is trimmed without compaction, so with `heartbeat.after` shorter than this value its rows wait for traffic to interrupt the beats. Takes effect at restart. |
+| `memory.idle_consolidate_after` | float | `1800` | Seconds a channel must be quiet before idle consolidation runs on its un-consolidated tail, and the period between repeat runs while it stays quiet. A channel that never goes quiet is consolidated through compaction instead, except `internal:heartbeat`: its window is trimmed without compaction, so with `heartbeat.after` shorter than this value its rows wait for traffic to interrupt the beats. Must be a positive finite number; zero, negative or non-finite values fail at startup naming this key. Takes effect at restart. |
 | `memory.half_life_days` | float | `30` | Recency decay constant of the retrieval score (`similarity × exp(-age_days / half_life)`). It is an e-folding time: the factor is `1/e`, not `1/2`, at `half_life_days`. |
 | `memory.retrieval.k` | integer | `8` | Vector-KNN candidate count per retrieval. |
 | `memory.retrieval.bands.strong` | float | `0.75` | Value at or above which a retrieved memory is banded `[strong]`. The value is the decayed score, or raw similarity under `band_on: similarity`. |

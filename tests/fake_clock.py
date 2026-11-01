@@ -100,7 +100,7 @@ class FakeClock(Clock):
         ):
             raise AssertionError(
                 f"FakeClock could not find the task for timer {name!r}; "
-                "Clock.call_later/call_at must name it 'clock:<name>'"
+                "Clock.call_later/call_at/call_soon must name it 'clock:<name>'"
             )
 
     def call_later(
@@ -108,6 +108,12 @@ class FakeClock(Clock):
     ) -> Timer:
         """Schedule as the real clock does, and record the timer task."""
         timer = super().call_later(delay, callback, name=name)
+        self._record_timers(name)
+        return timer
+
+    def call_soon(self, callback: ClockCallback, *, name: str) -> Timer:
+        """Schedule as the real clock does, and record the timer task."""
+        timer = super().call_soon(callback, name=name)
         self._record_timers(name)
         return timer
 

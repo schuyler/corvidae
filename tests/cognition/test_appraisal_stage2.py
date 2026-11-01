@@ -568,7 +568,10 @@ class TestEntropySummary:
 
 
 class TestAppraisalPrior:
-    async def _seed(self, env, key, rowid, stage1=None, stage2=None):
+    async def _seed(self, env, key, rowid, stage1=None, stage2=None,
+                    channel_id=None):
+        # channel_id defaults to env.channel so existing tests are unchanged.
+        channel_id = channel_id if channel_id is not None else env.channel.id
         cols = {}
         env_appraisal = {}
         if stage1 is not None:
@@ -576,7 +579,7 @@ class TestAppraisalPrior:
         if stage2 is not None:
             env_appraisal["stage2"] = stage2
         await env.outcome.upsert_exchange(
-            key, env.channel.id, "user", appraisal=env_appraisal,
+            key, channel_id, "user", appraisal=env_appraisal,
         )
         await env.outcome.update_exchange(key, message_rowid=rowid)
 
@@ -632,10 +635,155 @@ class TestAppraisalPrior:
         await self._seed(env, "v1", 40, stage2={"valence": 0.2})
         await self._seed(env, "v2", 41, stage2={"valence": 0.8})
         await self._seed(env, "v3", 42, stage1={"salience": 0.5})  # no stage2
-        mean = await env.appraisal.mean_valence((35, 45))
+        mean = await env.appraisal.mean_valence(env.channel.id, (35, 45))
         assert mean == pytest.approx(0.5)
         # No stage-2 anywhere → None.
-        assert await env.appraisal.mean_valence((100, 200)) is None
+        assert await env.appraisal.mean_valence(env.channel.id, (100, 200)) is None
+        await _teardown(env)
+
+    # R1 (#195): importance for channel A's range must ignore channel B's
+    # exchanges, whose message_log rowids interleave inside A's range.
+    async def test_importance_over_range_ignores_other_channels(self, tmp_path):
+        env = await build_env(tmp_path)
+        await self._seed(env, "a1", 40, stage1={"salience": 0.2})
+        await self._seed(env, "b1", 41, stage1={"salience": 0.95},
+                         channel_id="irc:#b")
+        await self._seed(env, "a2", 42, stage1={"salience": 0.3})
+        score = await env.appraisal.importance_over_range(env.channel, (40, 42))
+        # Only A's exchanges count: max(0.2, 0.3), not B's 0.95.
+        assert score == pytest.approx(0.3)
+        await _teardown(env)
+
+    # R2 (#195): mean_valence takes a channel id and averages only that
+    # channel's stage-2 valences (A: 0.2, 0.4; interleaved B: 0.9 -> 0.3).
+    async def test_mean_valence_ignores_other_channels(self, tmp_path):
+        env = await build_env(tmp_path)
+        await self._seed(env, "a1", 40, stage2={"valence": 0.2})
+        await self._seed(env, "b1", 41, stage2={"valence": 0.9},
+                         channel_id="irc:#b")
+        await self._seed(env, "a2", 42, stage2={"valence": 0.4})
+        mean = await env.appraisal.mean_valence(env.channel.id, (40, 42))
+        assert mean == pytest.approx(0.3)
+        await _teardown(env)
+
+    # R2 (#195) end to end: consolidating channel A stores A's mean valence
+    # even though a channel B exchange sits inside A's message-id range.
+    async def test_consolidation_valence_ignores_interleaved_channel(self, tmp_path):
+        from corvidae_cognition.appraisal import AppraisalPlugin
+        from corvidae.channel import Channel, ChannelConfig
+        from corvidae.context import MessageType
+        from corvidae_cognition.memory import MemoryPlugin
+
+        consolidation_json = json.dumps({
+            "summary": "I discussed the plan with the user.",
+            "topic_tags": ["plan"],
+            "participants": ["user"],
+        })
+
+        # Wire persistence, outcome_log, llm stub, memory and appraisal.
+        db_path = str(tmp_path / "sessions.db")
+        db = await aiosqlite.connect(db_path)
+        await init_db(db)
+        pm = create_plugin_manager()
+        persistence = PersistencePlugin()
+        persistence.db = db
+        pm.register(persistence, name="persistence")
+        outcome = OutcomeLogPlugin()
+        pm.register(outcome, name="outcome_log")
+        await outcome.on_init(pm=pm, config={})
+        await outcome.on_start(config={})
+        llm = LLMPlugin()
+        pm.register(llm, name="llm")
+        llm._clients["main"] = StubClient(consolidation_json)
+        llm._clients["background"] = StubClient(consolidation_json)
+        cfg = {"daemon": {"session_db": db_path}, "memory": {}}
+        memory = MemoryPlugin()
+        pm.register(memory, name="memory")
+        await memory.on_init(pm=pm, config=cfg)
+        await memory.on_start(config=cfg)
+        appraisal = AppraisalPlugin()
+        pm.register(appraisal, name="appraisal")
+        await appraisal.on_init(pm=pm, config=cfg)
+        await appraisal.on_start(config=cfg)
+
+        chan_a = Channel(transport="test", scope="conv-a", config=ChannelConfig())
+        chan_b = Channel(transport="test", scope="conv-b", config=ChannelConfig())
+
+        # Interleave message_log rows: A, B, A (B's row lands inside A's range).
+        rowids = []
+        for chan, role, content in [
+            (chan_a, "user", "here is the plan"),
+            (chan_b, "user", "unrelated chatter"),
+            (chan_a, "assistant", "understood, I will do it"),
+        ]:
+            rowids.append(await persistence.persist_message(
+                channel=chan,
+                message={"role": role, "content": content},
+                message_type=MessageType.MESSAGE,
+            ))
+
+        # Stage-2 valences: A 0.2 and 0.4, interleaved B 0.9 -> A's mean 0.3.
+        for key, chan, rowid, val in [
+            ("xa1", chan_a, rowids[0], 0.2),
+            ("xb1", chan_b, rowids[1], 0.9),
+            ("xa2", chan_a, rowids[2], 0.4),
+        ]:
+            await outcome.upsert_exchange(
+                key, chan.id, "user",
+                appraisal={"stage2": {"stakes": 0.5, "valence": val, "novelty": 0.5}},
+            )
+            await outcome.update_exchange(key, message_rowid=rowid)
+
+        # try/finally so teardown runs even when an assertion fails.
+        try:
+            await memory._consolidate_range(chan_a.id, rowids[-1], "test")
+
+            async with db.execute(
+                "SELECT valence FROM memory WHERE channel_id = ?", (chan_a.id,),
+            ) as cursor:
+                row = await cursor.fetchone()
+            assert row is not None
+            assert row[0] == pytest.approx(0.3)
+
+        finally:
+            await appraisal.on_stop()
+            await db.close()
+
+    # R3 (#195): a failing exchange_log query is logged as one WARNING naming
+    # the channel, id range, exception type and fallback, and yields [].
+    async def test_appraisals_in_range_logs_lookup_failure(self, tmp_path, caplog):
+        import logging
+        import sqlite3
+
+        env = await build_env(tmp_path)
+        # Replace the exchange DB with one whose execute() raises.
+        broken = MagicMock()
+        broken.execute = MagicMock(side_effect=sqlite3.OperationalError("boom"))
+        env.appraisal._exchange_db = lambda: broken
+
+        with caplog.at_level(logging.WARNING):
+            result = await env.appraisal._appraisals_in_range(
+                env.channel.id, (40, 42)
+            )
+
+        assert result == []
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        record = warnings[0]
+        text = record.getMessage()
+        # Every element R3 names: the channel, the id range as the message
+        # renders it, the exception type, and both halves of the fallback.
+        for needle in (
+            env.channel.id,
+            "messages 40–42",
+            "OperationalError",
+            "rubric prior",
+            "NULL valence",
+        ):
+            assert needle in text
+        # The traceback attached is the lookup's own exception.
+        assert record.exc_info is not None
+        assert record.exc_info[0] is sqlite3.OperationalError
         await _teardown(env)
 
     async def test_consolidation_writes_mean_valence(self, tmp_path):

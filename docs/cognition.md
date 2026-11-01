@@ -92,7 +92,9 @@ answer the transcript instead of writing a record —
 scores an importance prior through the pluggable
 `MemoryPlugin.importance_prior` (default: cheap-model `RubricPrior`,
 schema-constrained to `{"importance": number}`, 0.5 on failure; `AppraisalPlugin` wraps it in `AppraisalPrior` when
-appraisal is enabled), embeds the summary via
+appraisal is enabled; the prior and the record's mean stage-2 valence read only
+the record's own channel's exchanges, and a failed `exchange_log` lookup is logged
+and falls back to the rubric prior and NULL valence), embeds the summary via
 `llm.embedding`, and commits the memory row (with its vec row and any near-duplicate
 merge) together with the watermark advance in one compare-and-set
 section.
@@ -276,7 +278,7 @@ Implements five hooks and two kernel timers:
 
 Two kernel registrations replace the old `on_idle` hook:
 
-- **Idle watch** (`watch_channels`, period `memory.idle_consolidate_after`)
+- **Idle watch** (`watch_channels`, period `memory.idle_consolidate_after`, which must be a positive finite number)
   — consolidates the un-consolidated tail of the quiet channel, forking
   the live window when forks are on and the range is in it. One run per
   channel at a time.
@@ -300,7 +302,9 @@ effect at restart.
 
 The importance prior is pluggable (`MemoryPlugin.importance_prior`,
 default `RubricPrior`); `AppraisalPlugin` wraps it in `AppraisalPrior`
-when appraisal is enabled. Configuration is documented in
+when appraisal is enabled; it reads only the consolidating channel's own
+exchanges (message ids are global), logging a failed lookup and falling back to
+the rubric prior and NULL valence. Configuration is documented in
 [configuration.md](configuration.md) (`memory.*`, `llm.embedding`).
 
 `recent(channel_id, limit)` is the one read API for other plugins: the
@@ -814,9 +818,9 @@ consequences.
 
 **What it can reach.** No transport owns `internal:heartbeat`, so a beat's
 reply goes to `sessions.db` and the jsonl log, never to a person. Reaching
-a person needs a cross-channel send (PRD §3.5.9, #169), which doesn't exist
-yet; when it lands, the beat uses it like any other tool, behind its
-allowlist and budget. The prompt tells the model that most beats warrant
+a person needs the send or note tools (PRD §3.5.9–10, #234, #235), which
+don't exist yet; when they land, the beat uses them like any other turn,
+with no allowlist. The prompt tells the model that most beats warrant
 nothing, and to say so in one line and stop.
 
 **What it reviews.** Memory is compartmented, so the beat sees only the

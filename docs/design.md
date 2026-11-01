@@ -1221,8 +1221,10 @@ with `get_dependency`.
 passes or the optional `asyncio.Event` is set. `call_later(delay, cb,
 name=...)` and `call_at(when, cb, name=...)` run an async callback once and
 return a `Timer` whose `cancel()` stops it while it is still waiting
-(a no-op once the callback has started). `call_at` waits on wall time in
-steps of at most an hour, so a suspend or an NTP step is noticed within
+(a no-op once the callback has started). `call_soon(cb, name=...)` runs it
+once on the next loop step, without waiting on time, and tracks it like any
+timer, so `live_timer_names()` lists it and `close()` cancels it. `call_at`
+waits on wall time in steps of at most an hour, so a suspend or an NTP step is noticed within
 the hour. Timers are one-shot: a periodic job re-arms itself from its
 callback. A callback that raises is logged with the timer's name. A callback
 must let `asyncio.CancelledError` through, because `Clock.close()` stops
@@ -1244,7 +1246,11 @@ self._sys = idle.watch_system(60, self._on_system_quiet, name="my.plugin.sys")
 quiet `period` seconds. `watch_system(period, cb)` calls `cb()` once the
 whole system has been. Both return an `IdleWatch` with `cancel()`. A watch
 repeats every `repeat` seconds (default `period`) while the quiet lasts, and
-only if nothing became active while the callback ran. Activity cancels the
+only if nothing became active while the callback ran. `repeat` must be a
+positive finite number, and a negative `period` is rejected: both raise
+`ValueError` naming the watch. A zero period therefore needs an explicit
+`repeat`. A due zero-period watch runs through `Clock.call_soon`, so
+`clock.close()` cancels it like any other timer. Activity cancels the
 waiting timers. An upkeep callback (consolidation, retention) never starts
 a turn or enqueues anything; it does plugin-owned work. The one agency
 watcher, cognition's `HeartbeatPlugin`, starts a turn from its system
@@ -3037,7 +3043,7 @@ corvidae/
 ├── logging.py            # StructuredFormatter, configure_logging()
 ├── agent.py              # Agent (single-turn dispatch)
 ├── persistence.py        # PersistencePlugin (DB lifecycle, conversation init)
-├── clock.py              # Clock, Timer (kernel clock: now, sleep, call_later, call_at)
+├── clock.py              # Clock, Timer (kernel clock: now, sleep, call_later, call_at, call_soon)
 ├── idle.py               # IdleTracker, IdleWatch (per-channel and system quiet)
 ├── thinking.py           # ThinkingPlugin, strip_thinking(), strip_reasoning_content()
 ├── compaction.py         # CompactionPlugin
