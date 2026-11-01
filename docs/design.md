@@ -2205,7 +2205,18 @@ means deny) and the entry is dropped when `on_message` returns, because
 pydle runs a task per line and a later line's `on_raw` can rewrite
 `users[nick]` while an earlier message is still in the hook pipeline.
 Without `account-tag`, the account is whatever `users[nick]` holds when the
-message arrives (pydle's tracked state; a residual risk). Entries and
+message arrives (pydle's tracked state; a residual risk for senders who
+share a channel with the bot). `_dispatch` then applies one more synchronous
+step to every message, PM or channel: if the sender would be admitted, an
+account is tracked, `account-tag` is not negotiated and
+`_shares_channel(nick)` (a casemapping-folded scan of pydle's
+`channels[*]["users"]`) is false, the verdict becomes a refusal carrying the
+`_UNVERIFIABLE_ACCOUNT` reason (#264). `_decide` returns
+`(allowed, account, reason)` with `reason` None; the recorded verdict is the
+same 3-tuple and `should_process_message` appends the reason to its INFO
+line. `IRCClient.on_connect` calls `_warn_unverifiable_accounts()` once per
+connection: one WARNING when `irc.allow` is set, `account-tag` is not
+negotiated and `account-notify` or `extended-join` is. Entries and
 senders are compared under the server's CASEMAPPING via the client's
 `normalize`.
 

@@ -1052,3 +1052,212 @@ class TestRefusedSenderLeavesNothing:
             assert registry.get("irc:alice") is not None
         finally:
             await db.close()
+
+
+# ---------------------------------------------------------------------------
+# Issue #264 — no account-tag: a sender sharing no channel with the bot is
+# never admitted on a tracked account
+# ---------------------------------------------------------------------------
+
+
+async def _no_shared_channel_plugin(members=("carol",)):
+    """A gated plugin: bob's tracked account alice is allowed, no account-tag.
+
+    The network offers account-notify but not account-tag; the bot is in
+    #test with only `members`. Returns (pm, registry, plugin, captured).
+    """
+    pm, registry, plugin = await _gate_plugin(
+        ["alice"],
+        users={"bob": {"account": "alice", "identified": True}},
+        capabilities={"account-notify": True},
+    )
+    plugin.client.channels = {"#test": {"users": set(members)}}
+    captured: list = []
+
+    async def _record(**kwargs):
+        # Read the verdict while it is still recorded (it dies after the hook).
+        captured.append(plugin._verdicts[kwargs["trace_id"]])
+
+    pm.ahook.on_message.side_effect = _record
+    return pm, registry, plugin, captured
+
+
+class TestNoSharedChannelAccount:
+    """R1/R2 of #264. R1 tests drive the production path (_dispatch)."""
+
+    async def test_pm_from_tracked_account_in_no_shared_channel_refused(self):
+        """R1: a PM from a no-shared-channel sender with a listed tracked account is refused."""
+        _pm, registry, plugin, captured = await _no_shared_channel_plugin()
+        await plugin.on_private_message("TestBot", "bob", "hi")
+        # Refused with the reason, and no channel is registered for the sender.
+        assert captured == [(False, "alice", _irc_module._UNVERIFIABLE_ACCOUNT)]
+        assert registry.get("irc:bob") is None
+
+    async def test_pm_from_tracked_account_in_shared_channel_admitted(self):
+        """R1: the same record admitted when the sender shares a channel."""
+        _pm, registry, plugin, captured = await _no_shared_channel_plugin(
+            members=("bob",)
+        )
+        await plugin.on_private_message("TestBot", "bob", "hi")
+        assert captured == [(True, "alice", None)]
+        assert registry.get("irc:bob") is not None
+
+    async def test_shared_channel_check_uses_casemapping(self):
+        """R1: membership is compared under the server casemapping (bob[ == BOB{)."""
+        _pm, _reg, plugin, captured = await _no_shared_channel_plugin(
+            members=("bob[",)
+        )
+        # rfc1459 fold: [ ] \\ ~ equal { } | ^, plus ASCII lowercase, so a
+        # plain str.lower() comparison would not match BOB{ with bob[.
+        table = str.maketrans({"[": "{", "]": "}", "\\": "|", "~": "^"})
+        plugin.client.normalize = lambda n: n.lower().translate(table)
+        plugin.client.users = {"BOB{": {"account": "alice", "identified": True}}
+        await plugin.on_private_message("TestBot", "BOB{", "hi")
+        assert captured == [(True, "alice", None)]
+
+    async def test_whois_account_without_caps_refused_without_shared_channel(self):
+        """R1: a WHOIS-learned account (no account caps) is refused too without a shared channel."""
+        _pm, _reg, plugin, captured = await _no_shared_channel_plugin()
+        plugin.client._capabilities = {}
+        await plugin.on_private_message("TestBot", "bob", "hi")
+        assert captured == [(False, "alice", _irc_module._UNVERIFIABLE_ACCOUNT)]
+
+    async def test_non_member_channel_message_refused(self):
+        """R1: a non-member writing to a (-n) channel is refused like a PM sender."""
+        _pm, registry, plugin, captured = await _no_shared_channel_plugin()
+        await plugin.on_channel_message("#test", "bob", "hi")
+        assert captured == [(False, "alice", _irc_module._UNVERIFIABLE_ACCOUNT)]
+        assert registry.get("irc:#test") is None
+
+    async def test_member_channel_message_admitted(self):
+        """R1: a channel member's message is admitted."""
+        _pm, _reg, plugin, captured = await _no_shared_channel_plugin(
+            members=("bob",)
+        )
+        await plugin.on_channel_message("#test", "bob", "hi")
+        assert captured == [(True, "alice", None)]
+
+    async def test_member_of_other_channel_writing_to_non_joined_channel_admitted(self):
+        """R1: a sender sharing #a with the bot is admitted writing to a -n channel #b."""
+        _pm, _reg, plugin, captured = await _no_shared_channel_plugin(
+            members=("bob",)
+        )
+        # The bot is in #test (bob a member) and #b (bob not a member).
+        plugin.client.channels["#b"] = {"users": {"carol"}}
+        await plugin.on_channel_message("#b", "bob", "hi")
+        assert captured == [(True, "alice", None)]
+
+    async def test_account_tag_ignores_shared_channel(self):
+        """R4: with account-tag negotiated, no channel is needed (red today only on the 3-tuple shape; the behaviour is a guard)."""
+        _pm, _reg, plugin, captured = await _no_shared_channel_plugin()
+        plugin.client._capabilities = {"account-tag": True, "account-notify": True}
+        # The tag's account is carried by the contextvar, as on_raw sets it.
+        token = _irc_module._message_account.set("alice")
+        try:
+            await plugin.on_private_message("TestBot", "bob", "hi")
+        finally:
+            _irc_module._message_account.reset(token)
+        assert captured == [(True, "alice", None)]
+
+    async def test_no_account_network_nick_match_unchanged(self):
+        """R4: no account support means nick matching (red today only on the 3-tuple shape; the behaviour is a guard)."""
+        _pm, _reg, plugin, captured = await _no_shared_channel_plugin()
+        plugin.client._capabilities = {}
+        plugin.client.users = {"alice": {"account": None}}
+        await plugin.on_private_message("TestBot", "alice", "hi")
+        assert captured == [(True, None, None)]
+
+    async def test_refusal_log_names_nick_account_reason_and_remedy(self, caplog):
+        """R2: one INFO naming nick, account, the reason, and both remedies."""
+        _pm, _reg, plugin, captured = await _no_shared_channel_plugin()
+        await plugin.on_private_message("TestBot", "bob", "hi")
+        # Replay the recorded verdict through the gate hook, as the agent does.
+        plugin._verdicts["t1"] = captured[0]
+        with caplog.at_level(logging.INFO, logger="corvidae.irc_plugin"):
+            result = await plugin.should_process_message(
+                channel=Channel(transport="irc", scope="bob"),
+                sender="bob", text="hi", trace_id="t1",
+            )
+        assert result is False
+        lines = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+        assert len(lines) == 1
+        for needle in (
+            "nick=bob", "account=alice", "shares no channel with the bot",
+            "join a channel the bot is in", "account-tag",
+            "can't be kept current", "network that offers account-tag",
+        ):
+            assert needle in lines[0]
+
+    async def test_plain_refusal_has_no_reason(self, caplog):
+        """Refusal for an unlisted account carries no reason and no reason text.
+
+        Verdict is captured through _dispatch; the shape assertion (3-tuple)
+        is red today, the no-"shares no channel" log check is a guard.
+        """
+        _pm, _reg, plugin, captured = await _no_shared_channel_plugin()
+        plugin.client.users = {"bob": {"account": "eve"}}
+        await plugin.on_private_message("TestBot", "bob", "hi")
+        assert captured == [(False, "eve", None)]
+        # Replay the recorded verdict through the gate hook for the log line.
+        plugin._verdicts["t1"] = captured[0]
+        with caplog.at_level(logging.INFO, logger="corvidae.irc_plugin"):
+            await plugin.should_process_message(
+                channel=Channel(transport="irc", scope="bob"),
+                sender="bob", text="hi", trace_id="t1",
+            )
+        lines = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+        assert len(lines) == 1
+        msg = lines[0]
+        assert "account=eve" in msg
+        assert "shares no channel" not in msg
+
+
+class TestAccountTagWarning:
+    """R3 of #264: one WARNING per connection when account matching can't work for PM-only senders."""
+
+    def _connect_fixture(self, caps, allow=("alice",)):
+        """A real IRCClient with the given negotiated caps and allowlist."""
+        plugin, client, _parent, _channel = _make_queue_fixture()
+        plugin._allow = set(allow)
+        plugin._irc_server = "irc.example.com"
+        client._capabilities = dict(caps)
+        client.connected = True
+        return client
+
+    async def test_warns_once_on_connect_without_account_tag(self, caplog):
+        """R3: server, reason, consequence and a channel remedy in one WARNING."""
+        client = self._connect_fixture({"account-notify": True})
+        with caplog.at_level(logging.WARNING, logger="corvidae.irc_plugin"):
+            await client.on_connect()
+        warns = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warns) == 1
+        for needle in (
+            "irc.example.com", "did not negotiate account-tag",
+            "share no channel with the bot will be refused",
+            "can't be kept current", "#test",
+        ):
+            assert needle in warns[0]
+
+    @pytest.mark.parametrize(
+        "caps,allow",
+        [
+            ({"account-tag": True, "account-notify": True}, ("alice",)),
+            ({"account-notify": True}, ()),
+            ({}, ("alice",)),
+        ],
+        ids=["account-tag", "empty-allow", "no-account-caps"],
+    )
+    async def test_no_warning(self, caplog, caps, allow):
+        """Guard (R3/R4, passes today): no warning when account-tag is on, allow is empty, or there are no accounts."""
+        client = self._connect_fixture(caps, allow)
+        with caplog.at_level(logging.WARNING, logger="corvidae.irc_plugin"):
+            await client.on_connect()
+        assert not [r for r in caplog.records if r.levelno == logging.WARNING]
+
+    async def test_extended_join_alone_warns(self, caplog):
+        """R3: extended-join alone also means the network reports accounts."""
+        client = self._connect_fixture({"extended-join": True})
+        with caplog.at_level(logging.WARNING, logger="corvidae.irc_plugin"):
+            await client.on_connect()
+        warns = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warns) == 1
