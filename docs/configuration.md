@@ -105,6 +105,12 @@ The `llm.main` block is required. Every other key under `llm:` is an optional **
 
 Retry behavior applies to transient status codes (429, 500, 502, 503, 504) and connection errors. The `Retry-After` header (429 responses) is honored when present; otherwise exponential backoff is used. Retries do not apply to client errors (4xx) other than 429.
 
+If all per-request connection retries are exhausted, the Agent keeps the
+already-persisted turn and retries it in the background with a separate
+bounded 2-to-60-second backoff. The first connection error is shown to the
+channel; later attempts do not emit duplicate error messages. A successful
+retry completes the original turn without requiring another inbound message.
+
 ---
 
 ## `daemon` — daemon-level settings

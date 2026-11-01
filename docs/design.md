@@ -797,7 +797,12 @@ per-channel `SerialQueue`. The queue's consumer calls
    On exception, calls `resolve_llm_error` (`firstresult=True`; if the hook
    itself raises, the failure is logged at WARNING and the default message
    is used), sends the error message to the channel, and returns `None` to abort
-   processing. `LLMPlugin` implements it `trylast`: for an unloaded
+   processing. When the failure is an `aiohttp.ClientConnectionError`, the
+   already-persisted queue item is retained and re-enqueued with bounded
+   exponential delays (2, 4, 8, 16, 32, then 60 seconds); replay items reuse
+   the existing conversation entry, so the user message is not duplicated.
+   The first failure is reported to the channel, while later recovery attempts
+   stay quiet. `LLMPlugin` implements it `trylast`: for an unloaded
    backend model it returns a message naming the model; for any non-2xx
    `LLMHTTPError` it names the status, an actionable hint (API key,
    quota, endpoint/model) and a short provider body; for connection and

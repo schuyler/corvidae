@@ -173,6 +173,8 @@ class QueueItem:
     meta: dict = field(default_factory=dict)
     trace_id: str | None = None
     originating: bool = False
+    retry_attempt: int = 0
+    replaying: bool = False
 
 
 
@@ -227,6 +229,8 @@ class Agent(CorvidaePlugin):
         # (channel_id, tool_call_id) of tool results queued but not yet
         # processed, so deliver_tool_error never adds a second result (#173).
         self._queued_tool_results: set[tuple[str, str]] = set()
+        self._retry_tasks: set[asyncio.Task[None]] = set()
+        self._pending_retry_items: dict[int, QueueItem] = {}
         self._registry: ChannelRegistry | None = None
         self._max_tool_result_chars: int = 100_000
         self._chars_per_token: float = DEFAULT_CHARS_PER_TOKEN
@@ -287,7 +291,61 @@ class Agent(CorvidaePlugin):
         # processing an item, so that channel stays busy until its next item.
         if channel.pending_tool_call_ids:
             return
+        if any(
+            item.channel.id == channel.id for item in self._pending_retry_items.values()
+        ):
+            return
         self._idle.note_settled(channel.id)
+
+    @staticmethod
+    def _is_retryable_llm_error(error: Exception) -> bool:
+        """Return whether a failed LLM call can be retried without a new message."""
+        return isinstance(error, aiohttp.ClientConnectionError)
+
+    def _retry_delay(self, attempt: int) -> float:
+        """Return the bounded delay before retrying a lost backend connection."""
+        return min(2.0 * (2 ** min(max(attempt - 1, 0), 5)), 60.0)
+
+    def _schedule_turn_retry(self, item: QueueItem) -> bool:
+        """Schedule a failed queue item for a later backend recovery attempt."""
+        if self._stopping or not self._started:
+            return False
+        item.retry_attempt += 1
+        item.replaying = True
+        delay = self._retry_delay(item.retry_attempt)
+        self._pending_retry_items[id(item)] = item
+        task = asyncio.create_task(self._retry_after_delay(item, delay))
+        self._retry_tasks.add(task)
+        task.add_done_callback(self._retry_tasks.discard)
+        logger.warning(
+            "LLM backend unavailable for channel %s; retrying queue item %d in %.1fs",
+            item.channel.id,
+            item.retry_attempt,
+            delay,
+            extra={"channel": item.channel.id, "retry_attempt": item.retry_attempt},
+        )
+        self._note_activity(item.channel.id)
+        return True
+
+    async def _retry_after_delay(self, item: QueueItem, delay: float) -> None:
+        """Re-enqueue a failed item after the backend recovery delay."""
+        try:
+            await asyncio.sleep(delay)
+            if self._stopping or not self._started:
+                self._pending_retry_items.pop(id(item), None)
+                return
+            await self._get_or_create_queue(item.channel).enqueue(item)
+        except asyncio.CancelledError:
+            self._pending_retry_items.pop(id(item), None)
+            raise
+        except Exception:
+            self._pending_retry_items.pop(id(item), None)
+            logger.warning(
+                "failed to requeue LLM retry for channel %s",
+                item.channel.id,
+                exc_info=True,
+                extra={"channel": item.channel.id, "retry_attempt": item.retry_attempt},
+            )
 
     @hookimpl
     async def on_init(self, pm, config: dict) -> None:
@@ -503,6 +561,11 @@ class Agent(CorvidaePlugin):
             return await run_agent_turn(self._client, messages, tool_schemas, extra_body=llm_overrides)
         except Exception as exc:
             logger.exception("run_agent_turn failed for channel %s", channel.id)
+            retry_scheduled = (
+                item is not None
+                and self._is_retryable_llm_error(exc)
+                and self._schedule_turn_retry(item)
+            )
             # The error hook is optional policy: if it raises, fall back to the
             # default message rather than leaving the user with silence.
             try:
@@ -519,6 +582,10 @@ class Agent(CorvidaePlugin):
                 error_msg = _llm_error_message(exc)
             # Per-emission gate: a veto suppresses this unpersisted send and
             # nothing else — no assistant message exists on this path.
+            # Report the first failure, then keep the retry quiet so recovery
+            # does not produce one error message per backoff attempt.
+            if retry_scheduled and item is not None and item.retry_attempt > 1:
+                return None
             if not await self._gate_send(channel, error_msg, "error", item):
                 logger.info(
                     "error fallback not sent: vetoed by should_send_response",
@@ -758,6 +825,8 @@ class Agent(CorvidaePlugin):
         for the entire tool-calling sequence.
         """
         channel = item.channel
+        if item.replaying:
+            self._pending_retry_items.pop(id(item), None)
         # The whole body is guarded so a failed or early-returning item still
         # reports the channel as settled.
         try:
@@ -859,19 +928,21 @@ class Agent(CorvidaePlugin):
         # The resolved rowid attaches to the WINDOW copy (conv.append
         # shallow-copies, so the local dict would not update the window).
         _t_persist_start = _time.monotonic()
-        conv.append(conversation_message)
+        if not item.replaying:
+            conv.append(conversation_message)
         rowid = None
-        try:
-            results = await self.pm.ahook.persist_message(
-                channel=channel,
-                message=conversation_message,
-                message_type=MessageType.MESSAGE,
-            )
-            rowid = resolve_single_result(results, "persist_message")
-            if rowid is not None:
-                conv.messages[-1]["_db_id"] = rowid
-        except Exception:
-            logger.warning("persist_message hook failed", exc_info=True)
+        if not item.replaying:
+            try:
+                results = await self.pm.ahook.persist_message(
+                    channel=channel,
+                    message=conversation_message,
+                    message_type=MessageType.MESSAGE,
+                )
+                rowid = resolve_single_result(results, "persist_message")
+                if rowid is not None:
+                    conv.messages[-1]["_db_id"] = rowid
+            except Exception:
+                logger.warning("persist_message hook failed", exc_info=True)
         _phases["persist"] = _time.monotonic() - _t_persist_start
 
         # 4c. Fire on_message_persisted only when this item originates its
@@ -880,7 +951,7 @@ class Agent(CorvidaePlugin):
         # CONTEXT, and assistant rows never fire it — per-row firing under
         # one id would overwrite the rowid with each successive row. Fires
         # regardless of persistence outcome (rowid may be None).
-        if item.originating and item.trace_id is not None:
+        if item.originating and item.trace_id is not None and not item.replaying:
             try:
                 await self.pm.ahook.on_message_persisted(
                     channel=channel, trace_id=item.trace_id,
@@ -1424,6 +1495,13 @@ class Agent(CorvidaePlugin):
         self._started = False
         # Release any message still held waiting for a start that won't come.
         self.release_held_messages()
+        retry_tasks = list(self._retry_tasks)
+        for task in retry_tasks:
+            task.cancel()
+        if retry_tasks:
+            await asyncio.gather(*retry_tasks, return_exceptions=True)
+        self._retry_tasks.clear()
+        self._pending_retry_items.clear()
         # Cancel all channel queue consumers.
         for queue in self.queues.values():
             await queue.stop()

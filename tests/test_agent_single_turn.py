@@ -10,6 +10,7 @@ These tests specify behavior that doesn't exist yet (Red TDD). They fail because
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
+import aiohttp
 import aiosqlite
 import pytest
 
@@ -1046,3 +1047,56 @@ class TestCompactionFailureResilience:
             "Expected a WARNING log about compaction failure; "
             "exceptions must not be silently swallowed"
         )
+
+
+# ---------------------------------------------------------------------------
+# Test 15: backend recovery replays a failed turn
+# ---------------------------------------------------------------------------
+
+
+class TestBackendRecoveryRetry:
+    async def test_connection_refused_requeues_same_message_after_recovery(
+        self, plugin_and_channel
+    ):
+        """A transient connection loss retries the persisted user turn once the backend returns."""
+        plugin, channel, db = plugin_and_channel
+        plugin._retry_delay = lambda attempt: 0.05
+
+        calls = 0
+        recovered = asyncio.Event()
+
+        async def chat(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise aiohttp.ClientConnectionError("connection refused")
+            recovered.set()
+            return _make_text_response("recovered response")
+
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(side_effect=chat)
+        plugin._client = mock_client
+        plugin._mark_started()
+
+        await plugin.on_message(
+            channel=channel,
+            sender="user",
+            text="hello",
+            trace_id=mint_trace_id(),
+        )
+        await drain(plugin, channel)
+        assert calls == 1
+
+        await asyncio.wait_for(recovered.wait(), 2)
+        await drain(plugin, channel)
+
+        assert calls == 2
+        assert [
+            message["content"]
+            for message in channel.conversation.messages
+            if message["role"] == "user"
+        ] == ["hello"]
+        async with db.execute("SELECT COUNT(*) FROM message_log") as cursor:
+            row = await cursor.fetchone()
+        assert row == (2,)
+        assert sent_texts(plugin.pm, OutboundMessage)[-1] == "recovered response"
