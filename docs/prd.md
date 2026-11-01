@@ -1030,14 +1030,15 @@ never on the model's guess. A person carries a trust level, and each
 identity an identity-assurance level (transport-verified versus bare nick);
 trust is capped by the assurance of the identity in use. Semantic facts are
 subject-typed `(person | channel | topic | self, subject_id, type, value,
-timestamp, source episodes)`, extracted for any subject, reconciled against
-existing facts by a cheap-model judgment, synthesized into dossiers, and
-curated by operator CLI commands including a first-class verb for
-operator-authored facts. Participant match joins the retrieval score here.
-`self` facts are the agent's own distilled runtime regularities ("I tend to
-over-hedge numeric claims"); their epistemic framing is mandatory, since
-the author is the agent, and a self-distilled fact never satisfies the
-provenance gate as corroboration.
+timestamp, source episodes)`, extracted for persons and, where the operator
+turns on semantic-tier promotion (Toggles, below), for other subjects,
+reconciled against existing facts by a cheap-model judgment, synthesized
+into dossiers, and curated by operator CLI commands including a first-class
+verb for operator-authored facts. Participant match joins the retrieval
+score here. `self` facts are the agent's own distilled runtime regularities
+("I tend to over-hedge numeric claims"); their epistemic framing is
+mandatory, since the author is the agent, and a self-distilled fact never
+satisfies the provenance gate as corroboration.
 
 **Trust, sensitivity, guardrails, skills.** The trust plugin and the
 sensitivity plugin are optional cognition plugins (principle 1). With the
