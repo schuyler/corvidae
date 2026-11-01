@@ -1278,12 +1278,13 @@ design, not requirement. The requirements are outcomes:
 4. Deterministic retrieval metrics (recall@k, MRR, tokens) run in CI over
    operator-authored fixtures; live evals run behind `--run-eval`;
    consolidation replay and compaction evals run out of band.
-5. Fork evals (#73): cache probes that show whether the backend reuses
-   the prefix (forking is on where they pass), a window-render replay
-   instrument, a planted-defect exchange fixture per lens, and
-   consolidation and compaction fixtures, deterministic where possible and
-   judged where not. Apart from the cache probes they are benchmarks that
-   report shifts and regressions; they gate nothing.
+5. Fork evals (#73): cache probes that show whether the backend reuses the
+   prefix, which says what forking costs on that backend, not whether
+   judgment forks (principle 16), a window-render replay instrument, a
+   planted-defect exchange fixture per lens, and consolidation and
+   compaction fixtures, deterministic where possible and judged where not.
+   All of them, the cache probes included, report shifts and regressions;
+   they gate nothing.
 6. Persyn's §9 criteria run as an integration suite against a live daemon
    with a scripted interlocutor: recalls across restart, hedges weak
    memories, refuses to remember fabricated events, pushes back on flawed
@@ -1440,7 +1441,7 @@ record that holds the reasoning.
 | Compaction is memory formation, not forgetting | §3.3; §3.7 Memory 1 |
 | Two forks off one prefix for compaction and consolidation, not one combined call: merging saves one think per compaction but couples two plugins through a JSON contract; merge only if measurement shows the second think dominates | §3.8 |
 | Compaction forks from the dropped prefix, not a described cut: a misplaced boundary in a summary is a quiet, compounding failure nothing downstream detects | §3.3.2; §3.8 |
-| Every background call with a live window forks it; a miss skips, never falls back to standalone; forking is on where #73's cache probes show the backend reuses the prefix; its fork-vs-standalone comparisons gate nothing | §3.8; #180 |
+| Every background call with a live window forks it; a miss skips, never falls back to standalone; #73's cache probes measure whether the backend reuses the prefix, and they and its fork-vs-standalone comparisons gate nothing | §3.8; #180 |
 | §3.8 states fork outcomes; backend-specific fork design (prefix parity, fork-by-default, cost model, rollout gate) is not a requirement | #188 |
 | Demote, don't delete; usage-weighted retention; near-duplicate merge at consolidation | §3.7 Memory 3, 6; diverges from the Persyn spec's culling |
 | Operator-only `redact` is the one deletion path; it stays in the kernel | principle 4; §3.7 Memory 8 |
@@ -1486,7 +1487,7 @@ record that holds the reasoning.
 | No runtime plugin loading; changing the plugin set is a restart, which the agent may request (rate-limited) | #28; principle 15 |
 | No container image until a second deployment needs one | #37 |
 | Topic structure is the `topic` subject's job, not a retrieval dimension | §3.7 Memory 7 |
-| Per-turn tool filtering and system-prompt transforms are rejected (the tool schemas and system prompt are the head of the prompt, principle 2); inbound-text rewriting is rejected (the log keeps what arrived); config-change notifications are unneeded (tunables resolve at decision time); a compaction veto is rejected (it trades a summary for an over-budget request). A per-call tool veto and per-channel tool sets, fixed per conversation, are tracked with the trust plugin (#138); a channel-created observation waits for a second implementer under §3.1.11 | #31, #148, #149, #150 |
+| Per-turn tool filtering and per-turn system-prompt transforms are rejected (the tool schemas and system prompt are the head of the prompt, principle 2); inbound-text rewriting is rejected (the log keeps what arrived); config-change notifications are unneeded (tunables resolve at decision time); a compaction veto is rejected (it trades a summary for an over-budget request). A per-call tool veto and per-channel tool sets, fixed per conversation, are tracked with the trust plugin (#138); a channel-created observation waits for a second implementer under §3.1.11 | #31, #148, #149, #150 |
 | The kernel owns the clock; idle keeps firing through quiet, and no plugin needs another's queues to learn of it; idle reaches plugins by push | #167; #165 |
 | Upkeep runs on time regardless of agency plugins; the scheduler is agency and optional | #167 |
 | Transports deliver every emission on their own channels regardless of origin | #167 |
