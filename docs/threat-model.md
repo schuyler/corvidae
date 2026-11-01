@@ -722,17 +722,19 @@ What each kind of unlock costs:
   endpoint, a more expensive one; bounding `model` to an allowed set (PRD
   principle 15) keeps the choice without that cost; without the bound, one
   switch can multiply what every turn on the channel costs, up to the pool's
-  hard spend cap if there is one (finding 14). What a switch costs in
-  latency depends on the backend: a router that has to load the new model
-  into its only slot stalls every channel while it does. Large `max_tokens`
-  or sampling extremes degrade replies on that channel. `logprobs` costs
-  little: larger responses, and nothing from providers that don't support
-  it; switched off where the operator turned it on, it drops the entropy
-  summary from the outcome log, which calibration reads. Any other
-  request-body key falls here too, and some reach past the channel: a
-  backend's slot or cache controls (llama-server's `id_slot`,
-  `cache_prompt`) can evict another channel's cached prefix, and a forced
-  `response_format` or grammar can stop the model emitting tool calls.
+  hard spend cap if there is one (finding 14); reaching it refuses every
+  channel on the pool, the operator's included, until its period rolls over
+  (PRD §3.13.6). What a switch costs in latency depends on the backend: a
+  router that has to load the new model into its only slot stalls every
+  channel while it does. Large `max_tokens` or sampling extremes degrade
+  replies on that channel. `logprobs` costs little: larger responses, and
+  nothing from providers that don't support it; switched off where the
+  operator turned it on, it drops the entropy summary from the outcome log,
+  which calibration reads. Any other request-body key falls here too, and
+  some reach past the channel: a backend's slot or cache controls
+  (llama-server's `id_slot`, `cache_prompt`) can evict another channel's
+  cached prefix, and a forced `response_format` or grammar can stop the
+  model emitting tool calls.
 - **Gate tunables and thresholds** (`gate.*`,
   `critique.provenance.enabled`, `critique.sample_below_rate`, the
   critique lens thresholds `critique.lens.*`; open by default today).
@@ -834,11 +836,12 @@ remember, the heartbeat and subagent prompts, framing, `model` (locked, or
 bounded to an allowed set) and the backend's slot and cache controls, the
 gate tunables (locking them also keeps closed-loop fitting from moving
 them), the tool set, `llm.*`, `plugins.disabled`, `scheduler.jobs`, skill
-writes behind confirmation, and self-edit and restart. On a metered
-pool, add a hard spend cap on the pool, locked on every channel that
-draws on it; `model` matters more there, since on an endpoint that
-serves several models at different prices it sets the price (finding
-14).
+writes behind confirmation, and self-edit and restart. On a metered pool,
+add a hard spend cap on the pool, locked on every channel that draws on it,
+knowing that traffic which reaches it refuses every channel on the pool, the
+operator's included, until its period rolls over; `model` matters more
+there, since on an endpoint that serves several models at different prices
+it sets the price (finding 14).
 
 A channel with only the operator on it has the smallest exposure, and it
 is where these unlocks cost least. It isn't free. Untrusted text still
@@ -866,10 +869,9 @@ call, but no budget reads it, and rate limits are met only by retrying (PRD
 §3.6.2). PRD principle 16 and §3.13 require that the operator can cap each
 pool; #296 tracks the open questions, charging per sender among them.
 
-Until then, on a metered endpoint, set a spend limit with the provider,
-and keep inbound allowlists tight on any channel with untrusted
-participants: admission is the only control on total cost the tree
-has today.
+Until then, on a metered endpoint, set a spend limit with the provider, and
+keep inbound allowlists tight on any channel with untrusted participants:
+inbound admission is the main control on total cost the tree has today.
 
 ## Privilege separation
 

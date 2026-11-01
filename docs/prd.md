@@ -88,11 +88,12 @@ one is a bug even if its tests pass.
    beyond any exchange-scoped work still owed and past-due upkeep, the main
    turn waits at most for the call already running. Upkeep that is past due
    runs next, ahead of a waiting main turn, so traffic can't starve it
-   (principle 13). These orderings across a slot hold only where admission
-   holds calls, which takes a declared concurrency or a declared rate
-   already reached (§3.13.2): elsewhere the server orders calls admitted
-   together, and an exchange's own background work precedes only its own
-   channel's next main turn (§3.13.1). Background work that policy holds
+   (principle 13). The kernel enforces these orderings across a slot only
+   where admission holds calls for capacity, which takes a declared
+   concurrency or a declared rate the call would exceed (§3.13.2); elsewhere
+   the server orders calls admitted together unless a policy plugin holds
+   some (§3.13.1), and an exchange's own background work precedes only its
+   own channel's next main turn (§3.13.1). Background work that policy holds
    holds back no other channel's main turn (§3.13.7). A declared limit, a
    cap, policy, or §3.13.7's precedence (another exchange's continuations,
    agency past its bound) can hold or defer a main turn beyond that (§3.13).
@@ -286,12 +287,12 @@ one is a bug even if its tests pass.
     rules is relaxed on a pool where it saves little; what varies is how
     much it saves. Enforcement has two dependencies: principle 3's orderings
     across a slot (other channels' main turns, past-due upkeep) need
-    admission to hold calls, which takes a declared concurrency or a
-    declared rate already reached (§3.13.1, §3.13.2), and caps that hold
-    across a restart need the `usage_log` plugin (§3.13.10). The operator
-    caps how much of each pool the agent uses; within the caps, the agent
-    and its plugins decide how the pool is shared (§3.13). Whether the agent
-    can move a cap is a lock (principle 15).
+    admission to hold calls for capacity, which takes a declared concurrency
+    or a declared rate the call would exceed (§3.13.1, §3.13.2), and caps
+    that hold across a restart need the `usage_log` plugin (§3.13.10). The
+    operator caps how much of each pool the agent uses; within the caps, the
+    agent and its plugins decide how the pool is shared (§3.13). Whether the
+    agent can move a cap is a lock (principle 15).
 
 ## 3. Requirements
 
@@ -1303,21 +1304,24 @@ decided there.
    A main turn, or an exchange's own background work, that policy holds or
    defers (items 3 and 5) holds no other channel's work back; if work queued
    behind it on its own channel reaches its latency bound, the hold or
-   deferral lapses (item 5). Upkeep and agency past their bounds outrank
-   everything below their level, and no policy hold or deferral delays them
-   (item 5); at a hard cap they are refused (item 6). `max_turns` bounds the
-   continuations at level 2.
+   deferral lapses (item 5). A latency bound (§3.1.16) is where work becomes
+   past due; under contention for a pool, "no later than the bound" means
+   that from then on it outranks everything below its level here. Upkeep and
+   agency past their bounds outrank everything below their level, and no
+   policy hold or deferral delays them (item 5); at a hard cap they are
+   refused (item 6). `max_turns` bounds the continuations at level 2.
 8. Deferral acts at exchange boundaries: a deferred channel still takes the
    continuations of an exchange in flight. A hold delays a call; it doesn't
    drop it. Only a hard cap stops an exchange mid tool cycle, and
    `max_turns` (§3.1.3) bounds a tool loop either way. Every hold, deferral
    or pause, whoever set it (declared capacity, a plugin, the agent, a soft
    cap), lapses by itself: when capacity frees, when the work it waits for
-   finishes, skips, or is itself held, at a deadline, when usage falls back
-   under the cap, or when the period rolls over. A pause never needs a turn
-   to undo it, so the agent cannot pause itself into a state no turn can
-   leave, and the operator can resume any channel without going through a
-   channel's queue.
+   finishes, skips, or is itself held by policy or kept waiting by the
+   kernel (item 1), a hold for capacity not counting, at a deadline, when
+   usage falls back under the cap, or when the period rolls over. A pause
+   never needs a turn to undo it, so the agent cannot pause itself into a
+   state no turn can leave, and the operator can resume any channel without
+   going through a channel's queue.
 9. Deferral and holding never drop work. Work that won't happen (a
    refusal at a hard cap, a missed window under §3.8.2) is logged with
    what was lost (principle 5).
