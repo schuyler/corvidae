@@ -141,13 +141,14 @@ allowlist further; it is no longer the only thing between the model and
 finding 2. If you don't need agent self-tuning at all,
 `tools.disabled: [set_settings]` closes finding 2 outright too.
 
-The allowlist does two jobs, and the PRD keeps only one of them. Keeping
+The allowlist does three jobs, and the PRD keeps two of them. Keeping
 `messages`, `tools`, `tool_choice` and `stream` out of the request body
-stays: an override there replaces what the agent loop built on every
-turn. Keeping the agent away from other model parameters (`model`,
-`logprobs`, sampling keys beyond the seven) does not: PRD §3.5.6 makes
-them settable where the operator allows, and finding 13 records the
-cost (#ISSUE).
+stays: an override there replaces what the agent loop built on every turn.
+Keeping the transport metadata keys `cwd` and `tool_backend` out of the
+agent's reach stays too. Keeping the agent away from other model
+parameters (`model`, `logprobs`, sampling keys beyond the seven) does not:
+PRD §3.5.6 makes them settable where the operator allows, and finding 13
+records the cost (#ISSUE).
 
 ### 2. The model can turn off its own gates
 
@@ -178,12 +179,13 @@ by the thing being checked.
 
 The fork instructions added for #51 (`appraisal.stage2_fork_prompt`,
 `critique.fork_prompt.<lens>`, `memory.consolidation_fork_prompt`,
-`agent.compaction_fork_prompt`) and `agent.forks.*` are read from config
-only (`tuning.config_value`), so `set_settings` can't rewrite them. That
-covers only calls that actually fork: every fork miss (forks off for the
-stage, the exchange has left the window, a refused or unparseable fork)
-falls back to the standalone prompts above, which are still runtime
-tunables. Keep them in `immutable_settings` with forks on too.
+`agent.compaction_fork_prompt`) and `agent.forks.*` are read from
+operator config only, so `set_settings` can't rewrite them. That covers
+only calls that actually fork: every fork miss (forks off for the stage,
+the exchange has left the window, a refused or unparseable fork) falls
+back to the standalone prompt. The critic's and appraiser's standalone
+prompts above are still runtime tunables, so keep them in
+`immutable_settings` with forks on too.
 
 None of this is a defect to engineer away. The capacity to tune and
 rewrite its own gates is part of a design goal (PRD principle 15); this
@@ -227,7 +229,7 @@ Available as an opt-in: `agent.mid_conversation_system_role: user` sends
 every system message after the operator's system prompt (all four places
 above) as `user`, with the framing unchanged. It is applied at prompt
 build, so the stored rows keep `role: system`. The default in the tree is
-still `system`, because the evals were tuned against it; PRD §3.3 7 makes
+still `system`, because the evals were tuned against it; PRD §3.3.7 makes
 `user` the default once the harness `memory_role` probe passes. One
 behavioural caveat: CONTEXT is appended after the person's message, so
 with `user` the framed block becomes the last user turn the model sees.
@@ -657,9 +659,11 @@ attacker who can get text in front of the model, so an operator can
 decide per channel.
 
 Where the tree stands: `set_settings` hard-blocks `system_prompt` and
-anything outside its undotted allowlist, reads the static keys through
-`tuning.config_value` so overrides are ignored, and can't change a
-channel's disabled tools. None of those can be unlocked yet (#ISSUE).
+any undotted key outside its allowlist, and can't change a channel's
+disabled tools. The static keys are read from operator config alone
+(through `tuning.config_value` or the agent config directly), so an
+override of one is accepted but has no effect. None of those can be
+unlocked yet (#ISSUE).
 The agent can already get around all of them by rewriting `agent.yaml`
 or a system-prompt file with `write_file` (finding 4), unless the files
 are read-only to the daemon.
@@ -668,7 +672,8 @@ The common shape: a runtime override is per channel and in memory, so an
 injected change lasts on that channel until the override is cleared or
 the daemon restarts. A change to the head of the window (system prompt,
 tool set) applies from the next compaction or conversation start. A skill
-or a closed-loop fit outlives both.
+outlives both, and a closed-loop fit would re-derive itself from the
+outcome log after a restart.
 
 What each unlock costs:
 
@@ -679,7 +684,9 @@ What each unlock costs:
 - **The critic's and appraiser's prompts** (`critique.prompt.*`,
   `appraisal.stage2_prompt`; open by default today). Covered in
   finding 2: the check can be rewritten by the thing it checks.
-- **Fork instructions and `agent.forks.*`.** An injection can rewrite how
+- **Fork instructions, the standalone compaction and consolidation
+  prompts (`agent.compaction_prompt`, `memory.consolidation_prompt`),
+  and `agent.forks.*`.** An injection can rewrite how
   the agent summarizes, consolidates and scores its own exchanges, under
   its own persona, and the results persist: a summary it later reads as
   its own words, a memory record, an `exchange_log` score. It also
@@ -704,8 +711,9 @@ What each unlock costs:
   writes (PRD §3.7 Trust); operator confirmation on writes is the lock.
 - **The tool set.** If the agent can re-enable a tool the operator turned
   off, an injection on a channel without `shell` can grant itself
-  `shell`, and from there everything in finding 4. This is the one to
-  keep locked on any channel with untrusted participants.
+  `shell`, and from there everything in finding 4. This is the most
+  important one to keep locked on any channel with untrusted
+  participants.
 - **Closed-loop threshold fitting.** The agent adjusts its gates from an
   outcome log that untrusted traffic helps write. A sustained campaign
   can walk thresholds somewhere no single message could, slowly enough
@@ -713,10 +721,16 @@ What each unlock costs:
 
 Recommended locks for a channel with untrusted participants, as a
 starting point rather than a rule: the system prompt, the critic's and
-appraiser's prompts, fork instructions, `mid_conversation_system_role`,
-the tool set, and skill writes behind confirmation. A channel with only
-the operator on it can leave all of it open; that is the configuration
-the design goal is for.
+appraiser's prompts, fork and standalone background instructions,
+`mid_conversation_system_role`, `model`, the tool set, and skill writes
+behind confirmation.
+
+A channel with only the operator on it has the smallest exposure, and it
+is the configuration the design goal is for. It isn't free. Untrusted
+text still reaches it through `web_fetch`, search results, MCP results
+and memory distilled on other channels (findings 4 and 6, PRD principle
+14), and a skill write or a model switch made there reaches every
+channel, so the skill and `model` costs above apply even there.
 
 ## Privilege separation
 

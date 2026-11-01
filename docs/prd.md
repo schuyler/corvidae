@@ -213,7 +213,8 @@ one is a bug even if its tests pass.
     - its prompts: the system prompt, every background stage's fork and
       standalone instructions, and the critic's and appraiser's prompts;
     - its skills (§3.7 Trust);
-    - its model and inference parameters, `model` included (§3.5.6);
+    - its model and inference parameters, `model` and `logprobs`
+      included (§3.5.6);
     - its tunables, caps and thresholds, including fitting thresholds
       from the outcome log in a closed loop (principle 7);
     - its tool set (§3.5.2).
@@ -228,7 +229,7 @@ one is a bug even if its tests pass.
     parameters, never the loop's own `messages`, `tools`, `tool_choice`
     or `stream` (§3.5.6). A change to the head of the window (the system
     prompt, the tool set) takes effect at the channel's next compaction
-    boundary or conversation start, not mid-window (§3.3 8; principle 2).
+    boundary or conversation start, not mid-window (§3.3.8; principle 2).
     What each unlock costs is recorded in `docs/threat-model.md`
     (principle 9).
 
@@ -619,7 +620,7 @@ Per transport:
    what the agent may set, and operator config can lift any of them,
    `system_prompt` included (principle 15). An unlocked `system_prompt`
    change takes effect at the channel's next compaction boundary or
-   conversation start, as plugin sections do (§3.3 8; principle 2).
+   conversation start, as plugin sections do (§3.3.8; principle 2).
    `set_settings` can't lift a lock or change the lock list itself.
 7. `subagent` launches a background agent on the shared `background`
    client with the calling channel's tool set minus itself and a persona-neutral
@@ -660,10 +661,10 @@ Per transport:
 3. `resolve_llm_error` turns a failure into a reply that names the status,
    an actionable hint, and the endpoint, and defers to the generic message
    otherwise.
-4. Logprobs are requested when `agent.request_logprobs` is on (an
-   operator key the operator can unlock, §3.11.4), surfaced on the turn
-   result and to `on_agent_response`, and never faked for providers that
-   return none.
+4. Logprobs are requested when `agent.request_logprobs` is on (§3.11.4)
+   or when the agent sets `logprobs` (§3.5.6). Either way they are
+   surfaced on the turn result and to `on_agent_response`, and never faked
+   for providers that return none.
 5. No streaming until a core change is planned for it; the web transport
    states the reason.
 
@@ -824,12 +825,12 @@ deciding only what to newly append and in what order.
    sites suppress that emission only, with a window annotation for
    suppressed text.
 4. The engagement gate runs in shadow mode (compute, record, pass
-   everything) unless `gate.engagement.enforce` is set; enforcing is the
-   operator's choice, made after calibrating offline against logged
-   traffic; fitting it live is the closed-loop capability of principle 7,
-   which the operator can permit (principle 15). The decide gate withholds a
-   task-origin final that adds nothing; no gate withholds a direct user
-   reply by default.
+   everything) unless `gate.engagement.enforce` is set. Enforcing is meant
+   to follow offline calibration against logged traffic. Whether the agent
+   may enforce it, or fit it live (the closed-loop capability of principle
+   7), is a lock the operator sets (principle 15). The decide gate
+   withholds a task-origin final that adds nothing; no gate withholds a
+   direct user reply by default.
 5. The agent itself may decline any turn, a direct user turn included,
    when it judges it has nothing true, relevant and substantial to add
    (Grice's maxims). The channel's register (§3.3.11) sets the norm:
@@ -980,15 +981,13 @@ design: `docs/design.md`, Forks. The requirements are outcomes:
    window rather than rebuilding it, leaves the main window's cached prefix
    intact, and keeps its slot time short (principles 2 and 3).
 4. Each background stage's reasoning and reply are capped per stage, and
-   its instructions are static config. Operator config is applied after
-   runtime overrides, so `set_settings` can neither lift the caps nor
-   rewrite the instructions unless operator config unlocks them
+   its fork instructions are static config. Operator config decides
+   whether `set_settings` can lift the caps or rewrite the instructions
    (principle 15); the threat model records the cost (principle 9). The
    window at the compaction threshold, plus a stage's instruction and both
    caps, fits the context whichever layer set them, so a stage just short
-   of compaction still runs. Each call is
-   attributed in `usage_log` by stage and `mode = fork | standalone`
-   (principle 11).
+   of compaction still runs. Each call is attributed in `usage_log` by
+   stage and `mode = fork | standalone` (principle 11).
 5. A background stage that can't run skips and logs a warning naming the
    stage, the channel, the trace if there is one, and what was missing
    (principle 5). Compaction is the exception: it is never skipped and
@@ -1067,8 +1066,8 @@ design: `docs/design.md`, Forks. The requirements are outcomes:
 4. Dotted tunables resolve at decision time through override, then live
    config, then default; they never reach the request body. Static keys
    (fork prompts, fork output caps, `request_logprobs`,
-   `mid_conversation_system_role`) are set by the operator and locked
-   against the agent unless operator config unlocks them (principle 15).
+   `mid_conversation_system_role`) are set by the operator, and operator
+   config decides whether the agent can change them (principle 15).
 5. Prompts under `prompts/` are documentation copies cited by path; no
    code loads them. Persona is prompt material, never architecture.
 6. Subcommands: `serve`, `cli`, `acp`, `scaffold`, `redact`, `calibrate`,
@@ -1165,7 +1164,7 @@ record that holds the reasoning.
 | Silent tasks require no `tool_call_id` | §2.3 |
 | Persona may tune its own gates; `immutable_settings` is the valve | operator directive 2, 2026-07-06 |
 | Self-modification is a design goal: every restriction on it is a lock the framework supports and the operator can lift, never architecture; the principle 9 floors and the append-only log stay fixed | principle 15; operator directive, 2026-10-31 |
-| Best-guess defaults first; thresholds fit from experience; closed-loop fitting is a capability the operator can permit, built once the harness can measure it | principle 7; operator directives 1, 3 |
+| Best-guess defaults first; thresholds fit from experience; closed-loop fitting is a capability the operator can permit, built once the harness can measure it | principle 7; operator directives 1, 3; operator directive, 2026-10-31 |
 | Engagement gate calibrates offline unless the operator permits live fitting | §3.7; principle 15 |
 | Hedging vocabulary is persona, not architecture | §5.9 |
 | The heartbeat starts on system idle, not on a schedule, and acts only when warranted; sleep is durable | §5.8; #134 |
