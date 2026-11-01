@@ -148,7 +148,7 @@ Keeping the transport metadata keys `cwd` and `tool_backend` out of the
 agent's reach stays too. Keeping the agent away from other model
 parameters (`model`, `logprobs`, keys beyond the seven in
 `INFERENCE_KEYS`) does not: PRD §3.5.6 makes them settable where the
-operator allows, and finding 13 records the cost (#ISSUE).
+operator allows, and finding 13 records the cost (#292).
 
 ### 2. The model can turn off its own gates
 
@@ -188,7 +188,7 @@ stylistic critique lenses and consolidation; compaction falls back by
 design (PRD §3.8.5), and the provenance check skips. PRD §3.8.2 and
 §3.8.5 make any other miss a skip (only windowless work runs
 standalone), so the appraisal, lens and consolidation fallbacks are
-a gap (#ISSUE2). Until it closes, the critic's and appraiser's
+a gap (#293). Until it closes, the critic's and appraiser's
 standalone prompts above are reachable, and they are runtime tunables,
 so keep them in `immutable_settings` with forks on too.
 
@@ -671,7 +671,7 @@ tools. The static keys are read from operator config alone (through
 dotted name (`agent.request_logprobs`) is accepted but has no effect, and
 an undotted one is refused by the allowlist. Several prompts (subagent,
 heartbeat) are code constants with no config key at all (#287, #289).
-None of these can be unlocked yet (#ISSUE). The agent can already get
+None of these can be unlocked yet (#292). The agent can already get
 around all of them by rewriting `agent.yaml` or a system-prompt file with
 `write_file` (finding 4), unless the files are read-only to the daemon.
 
