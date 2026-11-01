@@ -145,9 +145,9 @@ The allowlist does three jobs, and the PRD keeps two of them. Keeping
 `messages`, `tools`, `tool_choice` and `stream` out of the request body
 stays: an override there replaces what the agent loop built on every turn.
 Keeping the transport metadata keys `cwd` and `tool_backend` out of the
-agent's reach stays too. Keeping the agent away from other model
-parameters (`model`, `logprobs`, keys beyond the seven in
-`INFERENCE_KEYS`) does not: PRD §3.5.6 makes them settable where the
+agent's reach stays too. Keeping the agent away from every other model
+parameter (`model`, `logprobs`, or any key outside the seven in
+`INFERENCE_KEYS`) does not stay: PRD §3.5.6 makes them settable where the
 operator allows, and finding 13 records the cost (#292).
 
 ### 2. The model can turn off its own gates
@@ -654,15 +654,15 @@ The key is never logged or echoed in errors and replies.
 
 ### 13. The agent can modify itself (by design)
 
-PRD principle 15 makes self-modification a design goal: the framework
-must be able to let the agent change its own prompts, skills, model and
+PRD principle 15 makes self-modification a design goal: the framework must
+be able to let the agent change its own prompts, skills, model and
 parameters, tunables, framework settings, caps and thresholds, and tool
-set, and every restriction
-on that is a lock the operator can lift. This finding is the cost ledger
-it asks for, organized by kind of change so that a new key falls under
-an entry that already exists. It doesn't argue against the capability;
-it says what each kind of unlock buys an attacker who can get text in
-front of the model, so an operator can decide per channel.
+set, and every restriction on that is a lock the operator can lift. This
+finding is the cost ledger it asks for, organized by kind of change so
+that a new key falls under an entry that already exists. It doesn't argue
+against the capability; it says what each kind of unlock buys an attacker
+who can get text in front of the model, so an operator can decide per
+channel.
 
 Where the tree stands: `set_settings` hard-blocks `system_prompt` and any
 undotted key outside its allowlist, and can't change a channel's disabled
@@ -737,19 +737,20 @@ What each kind of unlock costs:
   summaries. A large `max_turns` lets one injected tool loop run far
   longer before dispatch is suppressed, holding the shared model slot.
   `reasoning_history: keep` fills the window with reasoning and brings
-  compaction sooner; `drop` strips the reasoning a tool chain in progress
-  relies on, which degrades Qwen-family tool use.
+  compaction sooner; `drop` (the shipped default) strips the reasoning a
+  tool chain in progress relies on, which degrades Qwen-family tool use
+  where the operator chose `exchange`.
 - **Everything else in `agent.yaml`** (kernel, client, scheduler and
   transport settings: `llm.*` endpoints and keys, `plugins.disabled`,
-  `scheduler.jobs`, the cross-channel send allowlist and budget,
-  `agent.compaction_*`, the `tools.*` limits). Today these are reachable
-  only through a writable `agent.yaml` (finding 4); an unlock through a
-  tool carries the same costs. A repointed `llm.main.base_url` sends
-  every conversation, and the API key, to a host of the attacker's
-  choosing. `plugins.disabled` switches off the gates wholesale at the
-  next restart. A scheduled job's prompt comes back framed as the
-  operator's. A setting not named in this ledger falls under this entry
-  unless another entry fits better by what it controls.
+  `scheduler.jobs`, the cross-channel send allowlist and budget once they
+  exist (PRD §3.5.9), `agent.compaction_*`, the `tools.*` limits). Today
+  these are reachable only through a writable `agent.yaml` (finding 4); an
+  unlock through a tool carries the same costs. A repointed
+  `llm.main.base_url` sends every conversation, and the API key, to a host
+  of the attacker's choosing. `plugins.disabled` switches off the gates
+  wholesale at the next restart. A scheduled job's prompt comes back
+  framed as the operator's. A setting not named in this ledger falls under
+  this entry unless another entry fits better by what it controls.
 - **Other plugin tunables** (`appraisal.weights.*`, `appraisal.prior.*`,
   `appraisal.probe.*`; open by default today). The weights and priors
   move what the agent attends to and how strongly it remembers it.

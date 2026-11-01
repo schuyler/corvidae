@@ -227,17 +227,17 @@ one is a bug even if its tests pass.
       adding tools or plugins at runtime is out of scope (principle 1).
 
     No deployment is required to allow any of it. Every restriction on
-    self-modification is a lock: a mechanism the framework supports and the
-    operator configures, never a prohibition in the architecture. Operator
-    config can lift any lock. The floors of principle 9 are the exceptions
-    and stay fixed, and the conversation log stays append-only (principle
-    4). Each capability has a route that keeps the agent loop consistent. A
-    request-body override carries model parameters, never the loop's own
-    `messages`, `tools`, `tool_choice` or `stream` (§3.5.6). A change to the
-    head of the window (the system prompt, the tool set) takes effect at the
-    channel's next compaction boundary or conversation start, not mid-window
-    (§3.3.8; principle 2). What each unlock costs is recorded in
-    `docs/threat-model.md` (principle 9).
+    self-modification is a lock: a mechanism the framework supports and
+    the operator configures, never a prohibition in the architecture.
+    Operator config can lift any lock. The floors of principle 9 are the
+    exceptions and stay fixed, and the conversation log stays append-only
+    (principle 4). Each capability has a route that keeps the agent loop
+    consistent. A request-body override carries model parameters, never
+    the loop's own `messages`, `tools`, `tool_choice` or `stream`
+    (§3.5.6). A change to the head of the window (the system prompt, the
+    tool set) takes effect at the channel's next compaction boundary or
+    conversation start, not mid-window (§3.3.8; principle 2). What each
+    unlock costs is recorded in `docs/threat-model.md` (principle 9).
 
 ## 3. Requirements
 
@@ -633,9 +633,9 @@ Per transport:
    itself.
 7. `subagent` launches a background agent on the shared `background`
    client with the calling channel's tool set minus itself and a
-   persona-neutral prompt, which is one of the agent's prompts under
-   principle 15; it returns a task id at once and its result arrives as a
-   notification like any other tool.
+   persona-neutral prompt as shipped, which is one of the agent's prompts
+   under principle 15; it returns a task id at once and its result arrives
+   as a notification like any other tool.
 8. MCP servers connect at startup over any transport the client
    supports, fail-soft per server. A server that fails recovers without a
    restart or a triggering tool call, and its tools reach the running
