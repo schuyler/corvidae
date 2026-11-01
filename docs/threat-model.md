@@ -795,11 +795,11 @@ What each kind of unlock costs:
   calls, PRD §3.13). An injection can pause the operator's channel, move its
   own channel ahead of others, or push upkeep back. Every hold, deferral and
   pause lapses by itself and the operator can resume any channel (PRD
-  §3.13.8), so the damage is delay, not a wedged agent. On a pool with
-  declared concurrency, no policy hold or deferral, the agent's included,
-  delays upkeep or agency past its latency bound, and bounded work keeps its
-  place in the precedence PRD §3.13.7 fixes; a hard cap refuses it instead
-  (PRD §3.13.1, §3.13.5).
+  §3.13.8), so the damage is delay, not a wedged agent. No policy hold or
+  deferral, the agent's included, delays upkeep or agency past its latency
+  bound (PRD §3.13.5); where admission holds calls, bounded work also keeps
+  its place in the precedence PRD §3.13.7 fixes (§3.13.2); a hard cap
+  refuses it instead (PRD §3.13.6).
 - **Skills.** The skills index sits in the stable prompt region, so a
   skill written at an injection's request is offered to every future
   conversation on every channel and survives restarts. The idle scan

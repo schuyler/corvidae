@@ -88,14 +88,16 @@ one is a bug even if its tests pass.
    beyond any exchange-scoped work still owed and past-due upkeep, the main
    turn waits at most for the call already running. Upkeep that is past due
    runs next, ahead of a waiting main turn, so traffic can't starve it
-   (principle 13). These orderings across a slot hold only where the pool's
-   concurrency is declared: on a pool without it, the server orders calls
-   admitted together, and an exchange's own background work precedes only
-   its own channel's next main turn (§3.13.1). A declared limit, a cap,
-   policy, or §3.13.7's precedence (another exchange's continuations, agency
-   past its bound) can hold or defer a main turn beyond that (§3.13). Where
-   the pool has no spare capacity (one KV slot, or a rate limit already
-   reached) a background call can't run beside the main turn, so the
+   (principle 13). These orderings across a slot hold only where admission
+   holds calls, which takes a declared concurrency or a declared rate
+   already reached (§3.13.2): elsewhere the server orders calls admitted
+   together, and an exchange's own background work precedes only its own
+   channel's next main turn (§3.13.1). Background work that policy holds
+   holds back no other channel's main turn (§3.13.7). A declared limit, a
+   cap, policy, or §3.13.7's precedence (another exchange's continuations,
+   agency past its bound) can hold or defer a main turn beyond that (§3.13).
+   Where the pool has no spare capacity (one KV slot, or a rate limit
+   already reached) a background call can't run beside the main turn, so the
    requirement is to keep its share of the pool small (bounded output, §3.8)
    and out of the way; it is not a guarantee of zero delay. How a pool's
    capacity is shared is §3.13 (principle 16). The inbound gate runs inside
@@ -283,12 +285,13 @@ one is a bug even if its tests pass.
     support the agent had (§3.8.2), whatever the fork costs. None of these
     rules is relaxed on a pool where it saves little; what varies is how
     much it saves. Enforcement has two dependencies: principle 3's orderings
-    across a slot (other channels' main turns, past-due upkeep) need the
-    pool's concurrency declared (§3.13.1), and caps that hold across a
-    restart need the `usage_log` plugin (§3.13.10). The operator caps how
-    much of each pool the agent uses; within the caps, the agent and its
-    plugins decide how the pool is shared (§3.13). Whether the agent can
-    move a cap is a lock (principle 15).
+    across a slot (other channels' main turns, past-due upkeep) need
+    admission to hold calls, which takes a declared concurrency or a
+    declared rate already reached (§3.13.1, §3.13.2), and caps that hold
+    across a restart need the `usage_log` plugin (§3.13.10). The operator
+    caps how much of each pool the agent uses; within the caps, the agent
+    and its plugins decide how the pool is shared (§3.13). Whether the agent
+    can move a cap is a lock (principle 15).
 
 ## 3. Requirements
 
@@ -1215,11 +1218,11 @@ design: `docs/design.md`, Forks. The requirements are outcomes:
 
 Principle 16 as outcomes. How policy plugins attach (hook names and
 semantics) is design. Questions this section leaves open on purpose (the
-unit of account, reserving against a cap before a call, the order of
-priority classes beyond what principle 3 fixes, whether the model sees its
-budget, coalescing, charging per channel or sender, how a per-channel
-override applies to a cap the whole pool shares) are tracked in #296 and are
-not requirements until decided there.
+unit of account, reserving against a cap before a call, the order within
+each level of item 7, whether the model sees its budget, coalescing,
+charging per channel or sender, how a per-channel override applies to a cap
+the whole pool shares) are tracked in #296 and are not requirements until
+decided there.
 
 1. Every LLM role, chat and embedding alike, draws on a pool. The operator
    can declare a pool's capacity (concurrent calls, context per call, and
@@ -1241,9 +1244,10 @@ not requirements until decided there.
    worker, a plugin's own task, a fork, a subagent. Admission starts the
    call, holds it, or refuses it. A call that would take a pool past its
    declared concurrency or rate is held until capacity frees; a call too
-   large ever to fit a declared rate window is not held, and is sent to fail
-   as the server fails it. Held calls start in an order policy decides; only
-   a hard cap refuses (item 6).
+   large ever to fit a declared rate window is not held for that window, and
+   once any other hold lapses it is sent to fail as the server fails it.
+   Held calls start in an order policy decides; only a hard cap refuses
+   (item 6).
 3. Separately from admission, policy decides whether a channel takes its
    next queue item now or defers it. Deferring a channel's new work
    until a deadline is a pause, so one channel can be paused while
@@ -1283,10 +1287,10 @@ not requirements until decided there.
    through an override or a self-edit of the configuration that declares it
    (§3.11.11), is a bound the agent, and any text that steers it, can lift
    (`docs/threat-model.md`).
-7. Work no plugin holds is ordered in this precedence, whatever the policy;
-   within a level, policy orders it, and a call held for capacity gains
-   priority within its level as it waits, never past the order this list
-   fixes:
+7. Calls admission holds (item 2) and no plugin holds start in this
+   precedence, whatever the policy; within a level, policy orders it, and a
+   call held for capacity gains priority within its level as it waits, never
+   past the order this list fixes:
    1. an exchange's own background work that a waiting main turn must
       wait for under principle 3, and upkeep past its latency bound
       (past due, in principle 3's terms; principle 13);
@@ -1309,10 +1313,11 @@ not requirements until decided there.
    `max_turns` (§3.1.3) bounds a tool loop either way. Every hold, deferral
    or pause, whoever set it (declared capacity, a plugin, the agent, a soft
    cap), lapses by itself: when capacity frees, when the work it waits for
-   finishes or skips, at a deadline, when usage falls back under the cap, or
-   when the period rolls over. A pause never needs a turn to undo it, so the
-   agent cannot pause itself into a state no turn can leave, and the
-   operator can resume any channel without going through a channel's queue.
+   finishes, skips, or is itself held, at a deadline, when usage falls back
+   under the cap, or when the period rolls over. A pause never needs a turn
+   to undo it, so the agent cannot pause itself into a state no turn can
+   leave, and the operator can resume any channel without going through a
+   channel's queue.
 9. Deferral and holding never drop work. Work that won't happen (a
    refusal at a hard cap, a missed window under §3.8.2) is logged with
    what was lost (principle 5).
