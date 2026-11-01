@@ -870,8 +870,11 @@ decision (2026-11-01), and these are its costs.
   Something said on a private Signal channel can come back in a reply
   there: through retrieval, a goal (finding 10), a note, or the agent
   reading the Signal conversation because a question on the public channel
-  made it relevant. The sensitivity plugin (#138), filtering by who is
-  present, is the planned answer. **Until it exists, this gap is accepted:**
+  made it relevant. The sensitivity plugin (#138) is the capability an
+  operator can load against this: it filters what enters a window
+  (retrieval, notes, reads, the goals entry) by who is present, though not
+  text already in the window. It is off unless loaded, and it isn't built.
+  **Without it, this gap is accepted:**
   keep the agent out of rooms where people you haven't allowed can read it,
   or accept that anything it knows can surface there.
 - **Text from one channel can steer action on every other.** A web page,
@@ -887,8 +890,8 @@ decision (2026-11-01), and these are its costs.
   operator's Signal window in the agent's voice, and a read pulls one
   channel's untrusted text into another's window. With the trust plugin
   loaded, both carry the minimum trust of the source channel's
-  participants and low-trust ones are quarantined (PRD §3.5.10–11); until
-  it exists, they arrive unlabelled.
+  participants and low-trust ones are quarantined (PRD §3.5.10–11); without
+  it, they arrive unlabelled.
 - **Reminders aimed at other channels.** A reminder may target any channel
   (PRD §3.9.7), so injected text on one channel can queue firings onto
   another, up to `scheduler.max_reminders_per_channel` per target, and can
@@ -901,8 +904,9 @@ decision (2026-11-01), and these are its costs.
   will bound total spend once built (#296).
 - **One poisoned memory reaches every prompt.** With no compartments, a
   record distilled from untrusted text on any channel is retrievable on
-  all of them. The trust plugin's quarantine (#138) is the planned answer;
-  until then this is finding 3 at the agent's full reach.
+  all of them. The trust plugin's quarantine (#138) is the capability an
+  operator can load against it; without it, this is finding 3 at the
+  agent's full reach.
 
 To narrow what text arriving on a channel with untrusted participants can
 make the agent do elsewhere, disable the send, note and read tools there

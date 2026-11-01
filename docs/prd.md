@@ -231,11 +231,12 @@ one is a bug even if its tests pass.
     agent do (its tool set and locks, §3.5.2, §3.5.6), never for what
     crosses between channels. An operator who wants two identities runs two
     instances. Safety comes from who may reach the agent (inbound
-    default-deny), trust (what came in is weighted and labelled by its
-    source) and sensitivity (what goes out is filtered by who is present).
-    Principle 1 applies: without the sensitivity plugin, nothing the agent
-    says or retrieves is filtered by audience; without the trust plugin,
-    nothing is quarantined. That has a cost where people the operator never
+    default-deny) and from restrictions the operator can apply (principle
+    15): trust (what came in is weighted and labelled by its source) and
+    sensitivity (what enters a window is filtered by who is present
+    there). Neither is a requirement on the agent's behaviour; each is a
+    capability the framework offers. Without them, nothing is quarantined
+    and nothing is filtered by audience. That has a cost where people the operator never
     allowed can read the agent's replies (a Discord guild channel, a public
     IRC channel): something said on a private channel can surface there.
     `docs/threat-model.md` records it (principle 9).
@@ -736,9 +737,9 @@ Per transport:
    channel's queue (§3.1.1), so it lands at the tail between that channel's
    exchanges, never inside a tool cycle, and that channel's context sees
    what the agent said there. Nothing gates which channel a turn may speak
-   on. With the sensitivity plugin loaded, what the agent says is filtered
-   by who is present on the channel it says it on, the same on every
-   channel (§3.7 Trust). Messages the agent starts on its own (as opposed
+   on. What the agent says is not filtered by audience; the sensitivity
+   capability, where the operator applies it, filters what enters a window
+   instead (§3.7 Trust). Messages the agent starts on its own (as opposed
    to the reply a turn owes the channel it runs on) and notes that wake a
    channel (item 10) can carry a cap per destination over a period, a
    setting under principle 15 with a best-guess default (principle 7), so a
@@ -819,8 +820,9 @@ only through the funnel.
    Overlapping triggers on one range keep one record.
 4. Retrieval runs before each user-originated turn: embed the inbound
    text, exact KNN over `memory_vec`, filter to indexed and unredacted
-   records from every channel (and, with the sensitivity
-   plugin loaded, to records whose sensitivity fits who is present; with
+   records from every channel (and, where the operator applies the
+   sensitivity capability, to records whose sensitivity fits who is
+   present; with
    the trust plugin loaded, low-trust records stay retrievable but
    quarantined, §3.7 Trust), score by similarity times recency decay
    (`half_life_days`, from creation or last use), band strong/moderate/
@@ -1032,8 +1034,13 @@ provenance-gate exclusion already answer a poisoned one. The self-model
 below is the exception, because it is the one agent-authored write outside
 that framing. Epistemic framing at consolidation plus the append-only log
 with `recall_raw` are named anti-self-manipulation machinery, not style.
-With the sensitivity plugin loaded, a sensitivity column filters retrieval
-by who is present; without it, retrieval is not filtered by audience. An
+Audience filtering is a capability, not a requirement: the framework can
+filter by who is present, and the operator decides whether it does
+(principle 15). With the sensitivity plugin loaded, anything that enters a
+window from elsewhere (retrieved records, notes and reads from other
+channels, the goals entry) is filtered by who is present in that window.
+It never gates a reply, and text already in a window is not filtered
+again. Without the plugin, nothing is filtered by audience. An
 idle scan is upkeep (principle 13) that runs preferably when the system is
 idle (§3.1.16) and at least every N (configurable), so traffic or the
 heartbeat cannot starve it: it looks for escalating conflict,
@@ -1467,6 +1474,7 @@ record that holds the reasoning.
 | Transports deliver every emission on their own channels regardless of origin | #167 |
 | The agent is one actor with one identity on every channel; trust and sensitivity, not channel walls. No cross-channel allowlist and no memory compartments, as an option or otherwise; two identities means two instances | #167; operator directive, 2026-11-01; #234, #235 |
 | Any turn can speak on any channel, leave a note for another channel's context, and read another channel's conversation; a cap on self-started messages is a runaway guard, not a gate | operator directive, 2026-11-01; #234, #235 |
+| Audience filtering is a capability, not a requirement: the sensitivity plugin, where the operator loads it, filters what enters a window (retrieval, notes, reads, goals) by who is present; it never gates a reply | principle 15; operator directive, 2026-11-01 |
 | Identity is agent-wide and heads every prompt; channel register is appended after it and never replaces it | operator directive, 2026-11-01 |
 | The operator decides the trust boundary; inbound transports default-deny; channels are not a boundary; safety features layer in as plugins | #167; operator directive, 2026-11-01 |
 | Corvidae is a testbed first and a robust harness second | #167 |
