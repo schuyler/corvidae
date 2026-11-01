@@ -839,7 +839,7 @@ per-channel `SerialQueue`. The queue's consumer calls
    after `min(5 * 2**n, 60)` seconds (`TURN_RETRY_BASE_DELAY`,
    `TURN_RETRY_MAX_DELAY`: 5, 10, 20, 40, 60, 60, ... forever). Each
    scheduling logs one WARNING naming the channel and the delay. A retry that
-   fails again for the same reason reschedules silently; any other failure
+   fails again for the same reason reschedules without a reply; any other failure
    ends the retries with a WARNING and no reply (the user can resend). One
    retry is pending per channel: any successful turn on the channel drops it
    (a newer message's turn already contains the earlier one), a newer failed
@@ -1055,9 +1055,9 @@ class QueueItem:
 
 `retry` marks the re-run of a turn whose LLM call could not reach the backend
 (#281). The item's message is already in the window and the log, so the
-retry skips the `turn_counter` reset (step 2), the append/persist,
+retry skips the `turn_counter` reset, the append/persist,
 `on_message_persisted`, tool-result batching, compaction and
-`before_agent_turn` (steps 4-6) and goes straight to the LLM call.
+`before_agent_turn` and goes straight to the LLM call.
 
 ## PersistencePlugin
 
