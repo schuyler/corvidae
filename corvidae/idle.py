@@ -9,8 +9,8 @@ never enqueues and never starts a turn.
 
 from __future__ import annotations
 
-import asyncio
 import logging
+import math
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
@@ -23,6 +23,36 @@ SystemIdleCallback = Callable[[], Awaitable[None]]
 
 #: Daemon keys removed with the on_idle hook (#165).
 _REMOVED_DAEMON_KEYS = ("idle_cooldown_seconds", "idle_poll_interval")
+
+
+def _effective_repeat(name: str, period: float, repeat: float | None) -> float:
+    """Return the repeat a watch will use, or raise ValueError naming the watch.
+
+    A zero, negative or non-finite repeat would re-fire on every loop step
+    during a sustained quiet (#248), so it is rejected at registration.
+    """
+    # A negative period is never meaningful; check it first so R2 gets the
+    # period message.
+    if period < 0:
+        raise ValueError(
+            f"idle watch {name!r}: period {period!r} is not accepted; "
+            "expected 0 or a positive number of seconds"
+        )
+    effective = period if repeat is None else repeat
+    # Reject zero, negative, NaN and infinity (NaN slips past a plain <= 0).
+    if not math.isfinite(effective) or effective <= 0:
+        if repeat is None:
+            raise ValueError(
+                f"idle watch {name!r}: repeat defaults to the period, "
+                f"{period!r}, which is not accepted; expected a positive "
+                "number of seconds; pass repeat= for a zero-period watch"
+            )
+        raise ValueError(
+            f"idle watch {name!r}: repeat {repeat!r} is not accepted; "
+            "expected a positive number of seconds; "
+            "pass repeat= for a zero-period watch"
+        )
+    return effective
 
 
 def validate_daemon_config(daemon: dict) -> None:
@@ -180,9 +210,9 @@ class IdleTracker:
         repeat: float | None = None,
     ) -> IdleWatch:
         """Call ``callback(channel_id)`` once a channel has been quiet ``period`` seconds."""
-        watch = IdleWatch(
-            self, name, period, period if repeat is None else repeat, callback, False
-        )
+        # Validate before building or registering anything.
+        effective = _effective_repeat(name, period, repeat)
+        watch = IdleWatch(self, name, period, effective, callback, False)
         self._watches.append(watch)
         self._arm_watch_all(watch)
         return watch
@@ -196,9 +226,9 @@ class IdleTracker:
         repeat: float | None = None,
     ) -> IdleWatch:
         """Call ``callback()`` once no channel has been busy for ``period`` seconds."""
-        watch = IdleWatch(
-            self, name, period, period if repeat is None else repeat, callback, True
-        )
+        # Validate before building or registering anything.
+        effective = _effective_repeat(name, period, repeat)
+        watch = IdleWatch(self, name, period, effective, callback, True)
         self._watches.append(watch)
         self._arm_watch_all(watch)
         return watch
@@ -266,21 +296,10 @@ class IdleTracker:
         if delay > 0 or watch.period > 0:
             watch._timers[key] = self._clock.call_later(delay, fire, name=name)
             return
-        # A zero-period watch (e.g. web's settle watch) is due at settle: run on the
-        # next loop step rather than parking on the clock, so the callback
-        # fires at settle even when the clock only moves on advance().
-        timer = Timer(name)
-
-        async def run_now() -> None:
-            # Past this point cancel() is a no-op, as for a clock timer.
-            timer._started = True
-            try:
-                await fire()
-            except Exception:
-                logger.warning("idle watch %s failed", name, exc_info=True)
-
-        timer._task = asyncio.create_task(run_now(), name=f"idle-now:{name}")
-        watch._timers[key] = timer
+        # A zero-period watch (e.g. web's settle watch) is due at settle: run on
+        # the next loop step through the clock, so it fires at settle even when
+        # the clock only moves on advance(), and clock.close() still cancels it.
+        watch._timers[key] = self._clock.call_soon(fire, name=name)
 
     def _is_quiet(self, key: str | None) -> bool:
         """True if ``key`` (a channel id, or None for the system) is quiet now."""

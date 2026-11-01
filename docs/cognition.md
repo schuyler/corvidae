@@ -277,7 +277,7 @@ Implements five hooks and two kernel timers:
 
 Two kernel registrations replace the old `on_idle` hook:
 
-- **Idle watch** (`watch_channels`, period `memory.idle_consolidate_after`)
+- **Idle watch** (`watch_channels`, period `memory.idle_consolidate_after`, which must be a positive finite number)
   — consolidates the un-consolidated tail of the quiet channel, forking
   the live window when forks are on and the range is in it. One run per
   channel at a time.

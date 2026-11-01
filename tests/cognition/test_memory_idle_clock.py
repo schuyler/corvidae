@@ -554,3 +554,21 @@ async def test_retention_meta_read_failure_keeps_traceback(make_env, caplog):
     assert warnings[0].levelno == logging.WARNING
     assert warnings[0].exc_info is not None
     assert env.memory._retention_timer.name == "memory.retention.rearm"
+
+
+@pytest.mark.parametrize("bad", [0, -5, float("nan"), float("inf")])
+async def test_idle_consolidate_after_must_be_positive(bad):
+    """#248 R3: a non-positive or non-finite idle_consolidate_after fails at
+    startup naming the config key and the rejected value, rather than later
+    inside the idle tracker."""
+    with pytest.raises(ValueError) as exc:
+        await MemoryPlugin().on_init(
+            pm=create_plugin_manager(),
+            config={"memory": {"idle_consolidate_after": bad}},
+        )
+
+    msg = str(exc.value)
+    assert "memory.idle_consolidate_after" in msg
+    assert repr(bad) in msg
+    assert "positive finite number of seconds" in msg
+    assert "agent.yaml" in msg
