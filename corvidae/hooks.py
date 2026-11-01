@@ -948,6 +948,10 @@ class AgentSpec:
         Who answers: CompactionPlugin, unless a default-priority replacement
         answers first (docs/plugin-guide.md, FancyCompactionPlugin).
 
+        The kernel enforces the token budget after this hook whatever an
+        implementation returns or raises: a window still over max_tokens
+        loses its oldest rows from memory (ContextWindow.fit_to_budget).
+
         Args:
             channel: The Channel being compacted.
             conversation: The ContextWindow to compact.

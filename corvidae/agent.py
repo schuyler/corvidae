@@ -50,6 +50,8 @@ from corvidae.context import (
     DEFAULT_CHARS_PER_TOKEN,
     UNSENT_MARKER_LABEL,  # noqa: F401 (re-exported for tests and plugins)
     ContextWindow,
+    count_tokens,
+    message_tokens,
     MessageType,
     unsent_marker_text,
 )
@@ -921,6 +923,15 @@ class Agent(CorvidaePlugin):
             )
         except Exception:
             logger.warning("compaction failed, skipping", exc_info=True)
+
+        # 5b. Hard ceiling (#308, PRD §3.3.2): whatever compaction did or
+        # skipped, a window over max_context_tokens loses its oldest rows from
+        # memory (message_log keeps them). Pure list arithmetic, so not wrapped.
+        max_ctx = resolved["max_context_tokens"]
+        dropped, truncated = conv.fit_to_budget(max_ctx)
+        still_over = conv.token_estimate() > max_ctx
+        if dropped or truncated or still_over:
+            self._warn_over_budget(channel, conv, max_ctx, dropped, truncated)
         _phases["compact"] = _time.monotonic() - _t_compact_start
 
         # 6. Let plugins inject context before the LLM call
@@ -1091,6 +1102,55 @@ class Agent(CorvidaePlugin):
             for k, v in channel.runtime_overrides.items()
             if k in INFERENCE_KEYS
         }
+
+    def _warn_over_budget(
+        self, channel: Channel, conv: ContextWindow, max_ctx: int,
+        dropped: list[dict], truncated: bool,
+    ) -> None:
+        """Log the one WARNING for a fit_to_budget application (#308)."""
+        # Message_log id range of the dropped rows, when they carry ids.
+        ids = [m["_db_id"] for m in dropped if isinstance(m.get("_db_id"), int)]
+        if not dropped:
+            what = "dropped no rows"
+        elif ids:
+            what = (
+                f"dropped {len(dropped)} oldest rows from memory (message_log "
+                f"ids {min(ids)}-{max(ids)}; the log keeps them)"
+            )
+        else:
+            what = (
+                f"dropped {len(dropped)} oldest rows from memory (no "
+                "message_log ids (rows not saved))"
+            )
+        if truncated:
+            newest_id = conv.messages[-1].get("_db_id")
+            what += (
+                "; truncated the newest row (message_log id "
+                f"{newest_id if isinstance(newest_id, int) else 'unsaved'}) to fit"
+            )
+        # Still over budget: say so with the numbers, nothing more to remove.
+        remedy = "Raise max_context_tokens (agent-wide or this channel's override)"
+        if conv.token_estimate() > max_ctx:
+            sys_tokens = count_tokens(conv.system_prompt)
+            if sys_tokens > max_ctx:
+                what += (
+                    f"; still over budget: the system prompt alone ({sys_tokens} "
+                    f"tokens) exceeds the {max_ctx} budget; sent as is"
+                )
+                remedy += ", shorten the system prompt"
+            else:
+                newest_tokens = message_tokens(conv.messages[-1]) if conv.messages else 0
+                what += (
+                    f"; still over budget: system prompt {sys_tokens} tokens, "
+                    f"newest row {newest_tokens} tokens, budget {max_ctx}; sent as is"
+                )
+        logger.warning(
+            "context window for %s was over the %d token budget after "
+            "compaction: %s. %s, or check why compaction did not bring the "
+            "window down (see earlier log lines).",
+            channel.id, max_ctx, what, remedy,
+            extra={"channel": channel.id},
+        )
 
     def fork_enabled(self, stage: str) -> bool:
         """Whether ``stage`` runs as a fork (agent.forks.enabled and stages)."""

@@ -609,8 +609,16 @@ All operations are synchronous; no database access:
 - `replace_with_summary(summary_msg, retain_count)` — replaces older messages
   with a summary in-memory, retaining the `retain_count` most-recent entries.
   Raises `ValueError` if `retain_count` exceeds `len(messages)`.
+- `fit_to_budget(max_tokens)` — the over-budget fallback (#308, PRD §3.3.2).
+  Pure and synchronous, no LLM call. Drops the oldest rows from the head of
+  the in-memory window (in place; `message_log` is untouched), moving the
+  cut forward past a straddling tool cycle (`snap_cut_forward`) unless that
+  would drop the newest row, in which case the orphaned result renders as a
+  framed notification. The newest row is always kept; if it alone exceeds
+  the budget its content is truncated in memory only, with a visible
+  marker. Returns `(dropped, truncated)`.
 - The window only grows at the tail (`append`) and truncates at the head
-  (`replace_with_summary`). Nothing is inserted, removed or mutated
+  (`replace_with_summary`, `fit_to_budget`). Nothing is inserted, removed or mutated
   mid-window, so there is no method for removing entries by type; stale
   `CONTEXT` entries retire by aging past the compaction boundary.
 
@@ -810,7 +818,11 @@ per-channel `SerialQueue`. The queue's consumer calls
    the `trylast` `CompactionPlugin`; the return value is not used. A
    `tryfirst` handler may trim the window in place and return None, which
    doesn't stop the chain (cognition's HeartbeatPlugin does this on
-   `internal:heartbeat`, keeping its last `heartbeat.keep_beats` beats)
+   `internal:heartbeat`, keeping its last `heartbeat.keep_beats` beats).
+   Right after the hook, whatever it did or raised, the kernel calls
+   `conv.fit_to_budget(max_context_tokens)` (also when no compaction
+   plugin is loaded) and logs one WARNING if it dropped rows, truncated
+   the newest row, or the window is still over budget
 7. Calls `before_agent_turn` hook (broadcast); fires `persist_message`
    for any messages injected by the hook
 8. **`_run_turn`** — calls `run_agent_turn` (single LLM invocation).
@@ -1368,6 +1380,17 @@ by `MemoryPlugin` (compaction-time memory consolidation plus retrieval), and
 per-turn token stats now live in the `usage_log` table.
 
 ### resolve_compaction
+
+**Over-budget fallback.** Compaction can decline (too few rows, failure
+cooldown, too soon, an empty summary) or fail, so after the hook the
+kernel enforces `max_context_tokens` itself with
+`ContextWindow.fit_to_budget` (see the ContextWindow section): oldest rows
+leave the in-memory window, `message_log` keeps them, no compaction hook
+fires, and one WARNING names the channel, the rows dropped (with their
+`message_log` id range), any truncation, and the remedy (raise
+`max_context_tokens` or check compaction). When `min_messages_to_compact + 1`
+rows don't fit the budget, compaction never runs on that channel and the
+fallback alone keeps it under budget.
 
 Implements the `resolve_compaction` hook (`firstresult=True`) at
 `trylast`, so it runs only if no earlier implementation (tryfirst or
