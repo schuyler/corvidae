@@ -1216,9 +1216,10 @@ design: `docs/design.md`, Forks. The requirements are outcomes:
 Principle 16 as outcomes. How policy plugins attach (hook names and
 semantics) is design. Questions this section leaves open on purpose (the
 unit of account, reserving against a cap before a call, the order of
-priority classes beyond what principle 3 fixes, whether the model sees
-its budget, coalescing, charging per channel or sender) are tracked in
-#296 and are not requirements until decided there.
+priority classes beyond what principle 3 fixes, whether the model sees its
+budget, coalescing, charging per channel or sender, how a per-channel
+override applies to a cap the whole pool shares) are tracked in #296 and are
+not requirements until decided there.
 
 1. Every LLM role, chat and embedding alike, draws on a pool. The operator
    can declare a pool's capacity (concurrent calls, context per call, and
@@ -1231,9 +1232,10 @@ its budget, coalescing, charging per channel or sender) are tracked in
    background work still finishes before the channel's next main turn, kept
    by the kernel at dispatch whatever policy is loaded (item 5); whether
    upkeep runs before a waiting main turn is then the server's to decide
-   (principle 3). Context per call is not something admission waits on:
-   keeping a window within it is compaction's job (§3.3), and a call that
-   can't fit fails as the server fails it.
+   unless a policy plugin holds one of them (item 5; principle 3). Context
+   per call is not something admission waits on: keeping a window within it
+   is compaction's job (§3.3), and a call that can't fit fails as the server
+   fails it.
 2. Every LLM call, chat or embedding, is admitted at `LLMClient` (principle
    11) before it is sent, whatever its path: a channel's turn, a task-queue
    worker, a plugin's own task, a fork, a subagent. Admission starts the
@@ -1256,12 +1258,13 @@ its budget, coalescing, charging per channel or sender) are tracked in
    inbound gate (principle 3).
 5. Policy is pluggable. Holds and deferrals compose: any number of plugins
    can hold a call or defer a channel, and a hold wins, except that no
-   plugin's hold or deferral delays work past its latency bound (item 7).
-   Ordering doesn't compose: one implementation orders held calls. The
-   kernel ships a default order that meets item 7, and a plugin can replace
-   it. With no policy plugin loaded, the kernel enforces only declared
-   capacity, any caps, an exchange's own background work ahead of its
-   channel's next main turn (item 1), and its default order (principle 1).
+   policy hold or deferral (a plugin's, the agent's, or a soft cap's) delays
+   work past its latency bound (item 7). Ordering doesn't compose: one
+   implementation orders held calls. The kernel ships a default order that
+   meets item 7, and a plugin can replace it. With no policy plugin loaded,
+   the kernel enforces only declared capacity, any caps, an exchange's own
+   background work ahead of its channel's next main turn (item 1), and its
+   default order (principle 1).
 6. Usage over a period (tokens or requests in a rate window, spend over a
    budget period) can carry a soft cap and a hard cap. Crossing a soft cap
    changes behaviour in a way the configuration docs state, logs a warning
@@ -1293,13 +1296,13 @@ its budget, coalescing, charging per channel or sender) are tracked in
    4. everything else, with a main turn that starts a new exchange
       ahead of upkeep not yet due (principle 3).
 
-   A main turn that policy holds or defers (items 3 and 5) holds no other
-   channel's work back; if work queued behind it on its own channel reaches
-   its latency bound, the hold or deferral lapses (item 5). Upkeep and
-   agency wait past their bounds only for declared capacity, the levels
-   above them, and work at their own level that policy orders first; at a
-   hard cap they are refused (item 6). `max_turns` bounds the continuations
-   at level 2.
+   A main turn, or an exchange's own background work, that policy holds or
+   defers (items 3 and 5) holds no other channel's work back; if work queued
+   behind it on its own channel reaches its latency bound, the hold or
+   deferral lapses (item 5). Upkeep and agency past their bounds outrank
+   everything below their level, and no policy hold or deferral delays them
+   (item 5); at a hard cap they are refused (item 6). `max_turns` bounds the
+   continuations at level 2.
 8. Deferral acts at exchange boundaries: a deferred channel still takes the
    continuations of an exchange in flight. A hold delays a call; it doesn't
    drop it. Only a hard cap stops an exchange mid tool cycle, and
