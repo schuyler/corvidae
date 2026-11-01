@@ -334,9 +334,13 @@ someone's nick is not enough. Residual risks:
   tag, which the network sets (no tag means not logged in, no nick fallback);
   pydle's user record is never consulted. Without it, matching relies on
   pydle's tracked state (`account-notify`, `extended-join`, WHOIS), which
-  only knows users it has seen, can lag a logout, is shared across lines, and
-  for a user who only ever sends PMs (no shared channel) is never cleared
-  once learned. An ircd or services that mis-tags, or a message delivered
+  only knows users it has seen, can lag a logout, and is shared across lines.
+  A sender who shares no channel with the bot (a PM-only user, or a
+  non-member writing to a channel without `+n`) never has that record kept
+  current (no logout reaches it), so such messages are refused outright
+  without `account-tag` (#264).
+  The residual risk is logout lag and WHOIS races for senders who do share a
+  channel. An ircd or services that mis-tags, or a message delivered
   between a logout and its notification or a nick change racing a WHOIS on a
   network without `account-tag`, defeats it. Prefer networks that send
   `account-tag`.

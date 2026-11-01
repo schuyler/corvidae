@@ -31,6 +31,14 @@ _message_account: contextvars.ContextVar = contextvars.ContextVar(
     "irc_message_account", default=_UNSET
 )
 
+# Why a sender whose tracked account is listed is still refused when they
+# share no channel with the bot and account-tag is not negotiated (#264).
+_UNVERIFIABLE_ACCOUNT = (
+    "the account can't be kept current because the sender shares no channel "
+    "with the bot; join a channel the bot is in, or use a network that offers "
+    "account-tag"
+)
+
 
 class IRCClient(pydle.Client):
     """Thin pydle subclass. Holds reference to IRCPlugin."""
@@ -95,6 +103,9 @@ class IRCClient(pydle.Client):
     async def on_connect(self):
         """Join configured channels after connecting."""
         await super().on_connect()
+        # Capabilities are final here; tell the operator once per connection
+        # if account matching can't work for senders sharing no channel (#264).
+        self.plugin._warn_unverifiable_accounts()
         for channel in self.plugin.channels:
             await self.join(channel)
         # Joins are done: from here sends may go out directly (#251). Set
@@ -175,10 +186,12 @@ class IRCPlugin(TransportPlugin):
         # Empty means nobody: IRC is default-deny (#77).
         self._allow: set[str] = set()
         # Verdicts decided once per message in the synchronous path, keyed
-        # by the transport-minted trace_id: (allowed, account). Nothing
-        # re-reads pydle's mutable user state after a suspension point.
-        # Entries live only while on_message runs (see _dispatch).
-        self._verdicts: dict[str, tuple[bool, Optional[str]]] = {}
+        # by the transport-minted trace_id: (allowed, account, reason), where
+        # reason is why a sender was refused beyond the plain allowlist miss
+        # (or None). Nothing re-reads pydle's mutable user state after a
+        # suspension point. Entries live only while on_message runs (see
+        # _dispatch).
+        self._verdicts: dict[str, tuple[bool, Optional[str], Optional[str]]] = {}
         # Output held while disconnected, oldest first (#106).
         # True while _flush_outbound is delivering _outbound[0]; that entry
         # is in flight and must not be dropped by overflow handling.
@@ -256,7 +269,9 @@ class IRCPlugin(TransportPlugin):
         pydle's tracked user state, with account support inferred from the
         negotiated IRCv3 capabilities or from the nick already having an
         account (e.g. learned from WHOIS). That state is shared and can lag
-        the sender (a residual risk, docs/threat-model.md).
+        the sender (a residual risk, docs/threat-model.md); _dispatch refuses
+        senders who share no channel with the bot, whose record is never
+        updated.
         """
         if self._account_tag_negotiated():
             account = _message_account.get()
@@ -267,6 +282,45 @@ class IRCPlugin(TransportPlugin):
         caps = getattr(self.client, "_capabilities", None) or {}
         supported = bool(account) or any(caps.get(c) for c in self._ACCOUNT_CAPS)
         return supported, account
+
+    def _shares_channel(self, nick: str) -> bool:
+        """Whether nick is a member of any channel the bot is in.
+
+        pydle's ``channels`` only holds channels the bot has joined; each
+        entry's ``users`` is a plain set of nicks as the server sent them, so
+        both sides are folded under the server casemapping. Synchronous and
+        I/O-free, so it is safe on the decision path.
+        """
+        channels = getattr(self.client, "channels", None) or {}
+        folded = self._fold(nick)
+        return any(
+            self._fold(member) == folded
+            for ch in channels.values()
+            for member in ch.get("users", ())
+        )
+
+    def _warn_unverifiable_accounts(self) -> None:
+        """Log one WARNING if accounts can't be vouched for without account-tag.
+
+        Called from IRCClient.on_connect, so it runs once per connection.
+        Fires only when an allowlist exists, account-tag is not negotiated and
+        the network reports accounts (account-notify or extended-join).
+        """
+        caps = getattr(self.client, "_capabilities", None) or {}
+        # Nothing to warn about with account-tag, an empty allowlist, or no
+        # account support (nick matching).
+        if caps.get("account-tag") or not self._allow:
+            return
+        if not any(caps.get(c) for c in self._ACCOUNT_CAPS):
+            return
+        logger.warning(
+            "irc: %s did not negotiate account-tag; messages from senders who "
+            "share no channel with the bot will be refused, because their "
+            "services account can't be kept current without it. Allowed users "
+            "can join one of the bot's channels (%s), or use a network that "
+            "offers account-tag",
+            self._irc_server, ", ".join(self.channels) or "none configured",
+        )
 
     def _fold(self, name: str) -> str:
         """Normalize a nick/account under the server's CASEMAPPING.
@@ -291,15 +345,18 @@ class IRCPlugin(TransportPlugin):
         allowed = {self._fold(entry) for entry in self._allow}
         return self._fold(identity) in allowed
 
-    def _decide(self, nick: str) -> tuple[bool, Optional[str]]:
-        """Decide once, synchronously: (allowed, account) for this sender.
+    def _decide(self, nick: str) -> tuple[bool, Optional[str], Optional[str]]:
+        """Decide once, synchronously: (allowed, account, reason) for this sender.
+
+        reason is always None here; _dispatch fills it in when it refuses for
+        the shared-channel rule (#264).
 
         One account lookup feeds both the verdict and the logged account.
         Must run before any await on the message's path; the result is
         recorded and never recomputed.
         """
         supported, account = self._account_of(nick)
-        return self._match(supported, account, nick), account
+        return self._match(supported, account, nick), account, None
 
     def _gate_channel(self, scope: str, allowed: bool) -> Channel:
         """The channel to gate a message on, given the recorded verdict.
@@ -336,25 +393,35 @@ class IRCPlugin(TransportPlugin):
                 trace_id,
             )
             return False
-        allowed, account = verdict
+        allowed, account, reason = verdict
         if allowed:
             return True
         # Silent refusal: log once, say nothing to the sender.
         logger.info(
-            "irc: rejected message from unauthorized sender nick=%s%s",
+            "irc: rejected message from unauthorized sender nick=%s%s%s",
             sender,
             f" account={account}" if account else "",
+            f": {reason}" if reason else "",
         )
         return False
 
     async def _dispatch(self, scope: str, by: str, message: str) -> None:
         """Decide the sender's verdict once, then hand the message on."""
         # Synchronous: no await between reading user state and recording.
-        allowed, account = self._decide(by)
+        allowed, account, reason = self._decide(by)
+        # Without account-tag, a tracked account for a sender sharing no
+        # channel with the bot can't be kept current: refuse (#264).
+        if (
+            allowed
+            and account is not None
+            and not self._account_tag_negotiated()
+            and not self._shares_channel(by)
+        ):
+            allowed, reason = False, _UNVERIFIABLE_ACCOUNT
         channel = self._gate_channel(scope, allowed)
         # Transport-minted id; the Agent uses it verbatim (#95).
         trace_id = mint_trace_id()
-        self._verdicts[trace_id] = (allowed, account)
+        self._verdicts[trace_id] = (allowed, account, reason)
         try:
             await self.pm.ahook.on_message(
                 channel=channel, sender=by, text=message, trace_id=trace_id
