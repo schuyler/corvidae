@@ -800,7 +800,10 @@ per-channel `SerialQueue`. The queue's consumer calls
     interleave during this window — they don't clear the pending set.
 6. Calls `resolve_compaction` (`firstresult=True`): the first non-None
    return stops the chain, so a default-priority replacement runs before
-   the `trylast` `CompactionPlugin`; the return value is not used
+   the `trylast` `CompactionPlugin`; the return value is not used. A
+   `tryfirst` handler may trim the window in place and return None, which
+   doesn't stop the chain (cognition's HeartbeatPlugin does this on
+   `internal:heartbeat`, keeping its last `heartbeat.keep_beats` beats)
 7. Calls `before_agent_turn` hook (broadcast); fires `persist_message`
    for any messages injected by the hook
 8. **`_run_turn`** — calls `run_agent_turn` (single LLM invocation).
@@ -2895,6 +2898,7 @@ scheduler:
 
 heartbeat:
   after: 3600                   # seconds of system quiet before a beat; absent = asleep
+  keep_beats: 3                 # earlier beats kept in the beat's window; 0 = start empty
 
 funnel:
   default_budget: 512           # tokens per admission-funnel call
