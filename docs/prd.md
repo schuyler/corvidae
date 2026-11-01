@@ -829,13 +829,14 @@ only through the funnel.
    task that never starts a turn.
 2. A record is a first-person summary with epistemic framing preserved,
    dated by when the conversation happened, embedded, and linked to its
-   `message_log` id range. It carries the instructions, mode
-   (`fork | standalone`) and model of the call that produced it, so the
-   records a given prompt wrote can be found; a record no consolidation
-   call produced is marked as such. It is scored by a pluggable importance prior
-   (cheap-model rubric by default; the appraisal vector when appraisal is
-   registered; a surprise term as a toggle, below). Surprise modulates
-   encoding strength only, never entry into the raw log.
+   `message_log` id range. It carries the instructions, mode (`fork |
+   standalone`) and model of the call that produced it, so the records a
+   given prompt wrote can be found; a record no consolidation call
+   produced is marked as such. It is scored by a pluggable importance
+   prior (cheap-model rubric by default; the appraisal vector when
+   appraisal is registered; a surprise term as a toggle, below).
+   Surprise modulates encoding strength only, never entry into the raw
+   log.
 3. Before inserting, consolidation merges a near-duplicate (cosine at or
    above `memory.dup_threshold`) anywhere in the agent's memory,
    superseding the old record and summing its access statistics.

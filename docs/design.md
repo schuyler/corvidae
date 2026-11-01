@@ -697,7 +697,7 @@ persistence connection (`PersistencePlugin.db`). The others:
 | Connection | Opened by | Writes |
 |---|---|---|
 | persistence (`PersistencePlugin.db`) | persistence `on_start` | `message_log`, and every other plugin's tables (scheduler, usage_log, retrieval_log, goals, ...) |
-| memory write (`MemoryPlugin._write_db`) | memory `on_start`, after its schema exists | memory records only: consolidation (`memory`, `memory_vec`, `memory_fts` via trigger, `consolidation_watermark`) and `write_record`, each one `BEGIN IMMEDIATE` transaction |
+| memory write (`MemoryPlugin._write_db`) | memory `on_start`, after its schema exists | memory records only: consolidation (`memory`, `memory_vec`, `memory_fts` via trigger, `memory_prompt`, `consolidation_watermark`) and `write_record`, each one `BEGIN IMMEDIATE` transaction |
 | appraisal probe, critique probe | each plugin's `on_start` | read only (`message_fts` probes) |
 
 Only the memory write connection is isolated for atomicity: a commit on
@@ -1525,7 +1525,8 @@ past claim and its closest earlier messages.
 
 `ForkResult.model` is the model the fork request was sent with
 (`LLMClient.request_model` of the fork's body, so an `extra_body` override
-shows). Consolidation stamps it on a fork record, together with
+shows). `Agent.fork` always sets it, so it is None only when a
+`ForkResult` is built without it. Consolidation stamps it on a fork record, together with
 `memory.consolidation_fork_prompt` but not the range sentence
 ([cognition.md](cognition.md#record-stamps)).
 

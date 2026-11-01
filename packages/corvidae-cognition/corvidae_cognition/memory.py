@@ -644,21 +644,6 @@ def resolve_consolidation_prompts(memory_cfg: dict) -> tuple[str, str]:
     return resolved[0], resolved[1]
 
 
-def _as_model(value: object) -> str | None:
-    """``value`` if it is a str, else None (a stub's MagicMock is not a model)."""
-    return value if isinstance(value, str) else None
-
-
-def _model_sent(client: object, extra_body: dict | None) -> str | None:
-    """The model a call to ``client`` with ``extra_body`` is sent with, or None.
-
-    shortcut: a client without request_model stamps model NULL; production
-    clients are always LLMClient, so drop the guard if stubs are updated.
-    """
-    request_model = getattr(client, "request_model", None)
-    return _as_model(request_model(extra_body)) if callable(request_model) else None
-
-
 MEMORY_INDEX_DDL = (
     "CREATE INDEX IF NOT EXISTS idx_memory_channel ON memory (channel_id, created_at)"
 )
@@ -1058,7 +1043,7 @@ class MemoryPlugin(CorvidaePlugin):
             # sentence, which quotes conversation text) and the model sent.
             record["stamp"] = RecordStamp(
                 self._consolidation_fork_prompt, "fork",
-                _as_model(result.model),
+                result.model,
             )
             return record
         except Exception:
@@ -1715,7 +1700,7 @@ class MemoryPlugin(CorvidaePlugin):
         # Captured before the first attempt: the stamp describes the call sent.
         stamp = RecordStamp(
             self._consolidation_prompt, "standalone",
-            _model_sent(client, CONSOLIDATION_EXTRA_BODY),
+            client.request_model(CONSOLIDATION_EXTRA_BODY),
         )
         messages = [
             {"role": "system", "content": self._consolidation_prompt},

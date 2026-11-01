@@ -368,3 +368,39 @@ async def test_fork_result_carries_request_model(forking_agent):
 
     assert overridden.model == "fork-m"
     assert plain.model == "m"
+
+
+async def test_fork_model_is_the_client_the_call_was_sent_with(forking_agent):
+    """Issue #299 R1: a config reload that swaps the client mid-call must not
+    change the model the record is stamped with."""
+    plugin, channel, client = forking_agent
+    client.request_model = lambda extra_body=None: "original-m"
+    replacement = MagicMock()
+    replacement.request_model = lambda extra_body=None: "replacement-m"
+
+    async def chat(messages, **kwargs):
+        # A reload replaces the client while the request is in flight.
+        plugin._client = replacement
+        return _make_text_response("fork says hi")
+
+    client.chat = AsyncMock(side_effect=chat)
+    result = await plugin.fork(channel, INSTRUCTION)
+
+    assert result.model == "original-m"
+
+
+async def test_fork_survives_client_cleared_mid_call(forking_agent):
+    """Issue #299 R1: a plugin stop that clears the client mid-call must not
+    make a successful fork raise; it keeps the original model."""
+    plugin, channel, client = forking_agent
+    client.request_model = lambda extra_body=None: "original-m"
+
+    async def chat(messages, **kwargs):
+        # A stop clears the client while the request is in flight.
+        plugin._client = None
+        return _make_text_response("fork says hi")
+
+    client.chat = AsyncMock(side_effect=chat)
+    result = await plugin.fork(channel, INSTRUCTION)
+
+    assert result.model == "original-m"

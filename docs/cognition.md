@@ -39,8 +39,9 @@ Their loggers keep their `corvidae.*` names (`corvidae.memory`,
 as before the split.
 
 They own these tables in `sessions.db`: `memory`, `memory_fts`,
-`memory_vec`, `embedding_meta`, `consolidation_watermark`,
-`retention_meta`, `retrieval_log`, `exchange_log` and `goals`.
+`memory_vec`, `memory_prompt`, `embedding_meta`,
+`consolidation_watermark`, `retention_meta`, `retrieval_log`,
+`exchange_log` and `goals`.
 
 **One object crosses the line.** `MemoryPlugin` creates `message_fts` and
 two triggers, `message_log_ai` and `message_log_au`, on the kernel's
@@ -212,8 +213,10 @@ nullable `memory` columns:
 - `mode`: `fork`, `standalone` or `direct`.
 - `model`: the model the call was sent with, after any
   `llm.<role>.extra_body.model` override, so a record says what actually
-  ran rather than what `llm.<role>.model` names. NULL when the client can't
-  say.
+  ran rather than what `llm.<role>.model` names. `Agent.fork` always sets
+  `ForkResult.model` from `LLMClient.request_model`, so it is NULL only for a
+  row written without a model (a pre-stamp row, or a `ForkResult` built
+  without one).
 
 What each path stamps:
 
@@ -260,8 +263,9 @@ ORDER BY mode IS NULL, mode, records DESC;
 ```
 
 `mode` reads `unknown` for pre-stamp rows; `stamp` is empty for those and
-for `direct` rows. Add `WHERE superseded_by IS NULL AND redacted = 0` to
-count only live records. To read a stamp's instruction text, and the
+for `direct` rows. Adding `WHERE superseded_by IS NULL AND redacted = 0`
+excludes superseded and redacted records; adding `AND indexed = 1` counts
+only the retrievable ones. To read a stamp's instruction text, and the
 records it wrote:
 
 ```sql

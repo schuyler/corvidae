@@ -698,7 +698,8 @@ What each kind of unlock costs:
   persona, and the results persist: a summary it later reads as its own
   words, a memory record, an `exchange_log` score. Unlocking fork
   instructions also removes a bound finding 8 relies on. In the tree, each
-  memory record carries a stamp (`prompt_hash`, `mode`, `model`, with the
+  memory record written since stamping carries a stamp (earlier rows read
+  NULL) (`prompt_hash`, `mode`, `model`, with the
   instruction text in `memory_prompt`), so the records written under an
   edited `memory.consolidation_prompt` or `memory.consolidation_fork_prompt`
   can be found afterwards. The stamp records the consolidation instructions,

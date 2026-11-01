@@ -721,7 +721,8 @@ class MyPlugin(CorvidaePlugin):
   `ForkResult(text, message, usage, model)`. `model` is the model the fork
   request was sent with (`LLMClient.request_model(body)`, so an
   `extra_body["model"]` override shows), for plugins that record how their
-  output was made; it is None when the client can't say. `cut=None` forks
+  output was made; `Agent.fork` always sets it, so it is None only when a
+  `ForkResult` is built without it. `cut=None` forks
   the whole window;
   `cut=k` forks `messages[:k]` (use `snap_cut_to_tool_boundary` if `k`
   might split a tool cycle, or the prefix won't match the cache).

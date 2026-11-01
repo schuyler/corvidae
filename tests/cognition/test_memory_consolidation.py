@@ -55,6 +55,10 @@ class StubClient:
         self.embed_calls: list[list[str]] = []
         self.embed_result: list[list[float]] | Exception = [[1.0, 0.0, 0.0, 0.0]]
 
+    def request_model(self, extra_body=None):
+        """The model a call is sent with, as LLMClient.request_model does."""
+        return (extra_body or {}).get("model", "stub-model")
+
     async def chat(self, messages, tools=None, extra_body=None):
         self.chat_calls.append({
             "messages": messages,
