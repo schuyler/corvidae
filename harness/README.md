@@ -503,7 +503,8 @@ The units:
 
 `--sizes` (default `16384,65536,131072,160000`) sets the R1/R2 prompt sizes.
 `--units` runs a subset, e.g. `--units r1-effort,r2` after changing
-`cache-ram`. `--kib-per-token` (default 120) only sizes R2's fill: the fill
+`cache-ram` (into a new `--out`: a run overwrites the files in its
+directory). `--kib-per-token` (default 120) only sizes R2's fill: the fill
 must evict at least once for R2 to find the limit, and the report says when
 it didn't.
 

@@ -298,21 +298,24 @@ from the cache every time:
 Going the other way (the 4k prompt returning after the big window) takes
 1.2–5.4 s, because the big window has to be saved first. Restore cost
 grows with the tokens saved plus the tokens loaded, at about 25–30 µs a
-token each way.
+token each way (noisier at 16k, where the fixed cost dominates).
 
 **Effort switch (R1).** Our template prepends a reasoning-effort line to
 the system block, so the same conversation at `medium` and at `xhigh` is
 two cache entries. Each swap saves one big window and loads the other,
-so it costs about twice the small-interloper case: 1.6 s at 16k, 4.3 s
-at 65k, 8.0 s at 131k, 9.4 s at 160k, against 19–264 s to reprocess
-cold.
+so from 65k up it costs about twice the small-interloper case: 1.6 s at
+16k, 4.3 s at 65k, 8.0 s at 131k, 9.4 s at 160k, against 19–271 s to
+reprocess cold. Each of these swaps needs both windows resident at once,
+so the 160k hit is direct evidence that two near-full windows fit.
 
 **Residency (R2).** The cache held at least 19 entries of 16k, 6 of 65k,
 4 of 131k and 3 of 160k. Every probe hit, so these are lower bounds: the
 probe filled the cache assuming about 120 KiB per token (what Lex's
-evictions suggested), and the probe's entries are smaller than that. At
-160k one entry is at most 10.9 GiB (≤ 68 KiB/token), so two near-full
-windows fit in 32 GiB.
+evictions suggested), and the probe's entries are smaller than that. No
+entry was evicted, so no residency limit and no evicted-restore cost were
+measured. A rerun of `--units r2` with `--kib-per-token` of about 60 or
+less would find them. At 160k one entry is at most 10,923 MiB (about
+10.7 GiB, ≤ 70 KiB/token), so two near-full windows fit in 32 GiB.
 
 **Catch-up (R3).** After a restore at 65k, the new turns since the save
 are processed at the normal prompt rate on top of the restore: 3.5 s
