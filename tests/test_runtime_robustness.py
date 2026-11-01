@@ -147,6 +147,37 @@ class TestFailedStartCleansUp:
             await self._run(config_file({"llm": _LLM}), pm)
         assert order == ["on_start", "on_stop"]
 
+    @pytest.mark.parametrize(
+        "exc_type", [asyncio.CancelledError, KeyboardInterrupt]
+    )
+    async def test_base_exception_on_start_runs_cleanup_then_reraises(
+        self, config_file, exc_type
+    ):
+        # #282: a BaseException (CancelledError, KeyboardInterrupt) escaping a
+        # plugin's on_start still triggers the on_stop broadcast, and the
+        # original exception type propagates out of Runtime.run().
+        pm, _agent = _mock_pm()
+        order: list[str] = []
+
+        # on_start records itself, then raises the BaseException under test.
+        async def failing_start(**kwargs):
+            order.append("on_start")
+            raise exc_type()
+
+        # on_stop records that cleanup ran.
+        async def record_stop(**kwargs):
+            order.append("on_stop")
+            return []
+
+        pm.ahook.on_start = AsyncMock(side_effect=failing_start)
+        pm.ahook.on_stop = AsyncMock(side_effect=record_stop)
+
+        # The same exception type must come out of run(), and cleanup must
+        # have been observed.
+        with pytest.raises(exc_type):
+            await self._run(config_file({"llm": _LLM}), pm)
+        assert order == ["on_start", "on_stop"]
+
     async def test_cleanup_failure_does_not_mask_start_failure(
         self, config_file, caplog
     ):
