@@ -471,6 +471,52 @@ Nothing here scores anything. The point is to put N replies to identical
 input side by side so a reader can judge whether a variant covers every topic
 in a heterogeneous range and attributes facts to the right one.
 
+## Measuring cache-ram swap cost
+
+`harness/cache_swap.py` measures what it costs llama-server to swap prompts
+through its host-RAM prompt cache (`--cache-ram`) on a one-slot server: the
+case where a background call or a different reasoning effort takes the slot
+between main turns, and the main window has to come back from RAM (#231).
+It talks to llama-server directly, with synthetic filler prompts, so the
+numbers belong to the server, the model and the hardware, not to corvidae.
+
+```
+uv run python -m harness.cache_swap --base-url http://127.0.0.1:8080 \
+    --model swift-1.5 --out ~/cache-swap-$(date -u +%Y%m%dT%H%M%SZ)
+```
+
+It needs the llama-server **router** (it reads the model's launch args from
+`GET /models` and resets the cache with `/models/unload` and `/models/load`),
+a single slot (`parallel = 1`; it refuses otherwise), and nothing else using
+that model while it runs. Stop the agent first. Each unit unloads and reloads
+the model, so the cache starts empty every time.
+
+The units:
+
+| Group | Measures |
+|---|---|
+| `r1-standalone` | Restore cost in both directions, per size, when a ~4k background-shaped prompt held the slot, against a cold prefill |
+| `r1-effort` | The same when the other prompt is the same window at `reasoning_effort: medium`. At the largest size this answers whether two near-full windows both fit |
+| `r2` | Residency: how many prompts of each size stay cached, bounds on the entry size, and the `cache-ram` needed to keep two resident |
+| `r3` | Catch-up at 64k: restore a window 1, 5 or 20 turns behind and prefill the new turns |
+| `r4` | The first switch into a freshly compacted 128k window (40% retained) |
+
+`--sizes` (default `16384,65536,131072,160000`) sets the R1/R2 prompt sizes.
+`--units` runs a subset, e.g. `--units r1-effort,r2` after changing
+`cache-ram`. `--kib-per-token` (default 120) only sizes R2's fill: the fill
+must evict at least once for R2 to find the limit, and the report says when
+it didn't.
+
+The full set takes about two hours on sagan. Output in `--out`:
+
+- `run.json`: `/props`, the router's `/models` entry (launch args), the
+  parsed `cache_ram_mib`, build and model.
+- `requests.jsonl`: one row per request, written as each finishes: tokens,
+  `cached_tokens`, `prompt_ms`, client wall time.
+- `report.md`: the tables. *Overhead* is wall time minus `prompt_ms` and
+  decode time: the cache save and restore, plus HTTP and tokenizing. No API
+  reports the save or restore directly.
+
 ## Manual state management
 
 ```
