@@ -201,10 +201,82 @@ with `embedded=0`, retrieval FTS5-only; a stored encoder differing from
 config → ERROR and embeddings disabled rather than silently mixing
 encoders. Nothing in the memory path raises into the turn loop.
 
+#### Record stamps
+
+Every record says how it was made (#299, PRD §3.7 Memory 2), in three
+nullable `memory` columns:
+
+- `prompt_hash`: sha256 of the UTF-8 instruction text the call used. The
+  text itself is stored once per hash in `memory_prompt`, however many
+  records share it. An empty prompt is still a prompt and is stored as `''`.
+- `mode`: `fork`, `standalone` or `direct`.
+- `model`: the model the call was sent with, after any
+  `llm.<role>.extra_body.model` override, so a record says what actually
+  ran rather than what `llm.<role>.model` names. NULL when the client can't
+  say.
+
+What each path stamps:
+
+| Path | `mode` | Instruction text | `model` |
+|---|---|---|---|
+| Fork of the live window (compaction or idle) | `fork` | `memory.consolidation_fork_prompt` | `ForkResult.model` |
+| Standalone `llm.background` call | `standalone` | `memory.consolidation_prompt` | `LLMClient.request_model` of the call |
+| Raw-transcript fallback after two unusable replies | `standalone` | `memory.consolidation_prompt` | as above (the call was sent; only its reply was unusable) |
+| `write_record` (goal retirement) | `direct` | none: `prompt_hash` NULL, no `memory_prompt` row | NULL |
+
+A fork's instruction also carries a code-generated sentence naming where
+the range starts, which can quote the first new message. That sentence is
+left out of the stamp: `memory_prompt` is outside `corvidae redact`'s
+cascade, so storing conversation text there would put it where redaction
+can't reach (PRD §3.7 Memory 8). `memory_prompt` holds configured
+instructions only. The stamp is the consolidation instruction, not the
+agent's system prompt and window that frame a fork.
+
+A `direct` record was written by no consolidation call, so it has nothing
+to stamp but its mode; it lists apart from the unknown rows.
+
+Rows written before stamping have all three columns NULL, meaning
+"unknown". Opening an older database adds the columns in place
+(`add_column_if_missing`) without rewriting any row; nothing backfills
+them.
+
+**Finding records by stamp.** There is no command for this; query
+`sessions.db` directly (`sqlite3 sessions.db`). One row per stamp, with the
+record count, models, channels and date range (`created_at` is when the
+source conversation happened):
+
+```sql
+SELECT
+  COALESCE(mode, 'unknown')               AS mode,
+  substr(prompt_hash, 1, 12)              AS stamp,
+  COUNT(*)                                AS records,
+  GROUP_CONCAT(DISTINCT model)            AS models,
+  GROUP_CONCAT(DISTINCT channel_id)       AS channels,
+  datetime(MIN(created_at), 'unixepoch')  AS first,
+  datetime(MAX(created_at), 'unixepoch')  AS last
+FROM memory
+GROUP BY prompt_hash, mode
+ORDER BY mode IS NULL, mode, records DESC;
+```
+
+`mode` reads `unknown` for pre-stamp rows; `stamp` is empty for those and
+for `direct` rows. Add `WHERE superseded_by IS NULL AND redacted = 0` to
+count only live records. To read a stamp's instruction text, and the
+records it wrote:
+
+```sql
+SELECT hash, text FROM memory_prompt WHERE hash LIKE 'abcdef123456%';
+
+SELECT id, channel_id, msg_id_start, msg_id_end
+FROM memory WHERE prompt_hash LIKE 'abcdef123456%';
+```
+
 #### Schema
 
 `memory` (records, with `indexed`, `superseded_by`, `redacted`, and
-`embedded` columns), `consolidation_watermark`, `embedding_meta`,
+`embedded` columns, and the stamp columns `prompt_hash`, `mode` and
+`model`), `memory_prompt` (`hash`, `text`: each distinct instruction text
+once), `consolidation_watermark`, `embedding_meta`,
 `memory_fts` (external-content FTS5 with insert/update sync triggers; no
 delete trigger — memory rows are never deleted), `memory_vec` (vec0,
 created only when the extension loads), `retrieval_log`, `retention_meta`
@@ -460,7 +532,9 @@ usual channel-scope rules. `write_record` embeds the summary (falling back
 to `embedded=0` for backfill) and inserts under the memory plugin's DB lock;
 `write_record` shares `_insert_record` (insert, vec row, near-dup merge)
 with consolidation, so the record can absorb a near-duplicate memory; the
-returned id is the surviving record's.
+returned id is the surviving record's. The record is stamped mode `direct`
+with no prompt hash and no model, since no consolidation call produced it
+(see [Record stamps](#record-stamps)).
 
 **Operator CLI:** `corvidae goals --db PATH seed TEXT` inserts an open goal
 from a second process, registered under the `corvidae.commands` entry-point

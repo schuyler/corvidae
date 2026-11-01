@@ -196,6 +196,21 @@ class LLMClient:
 
         logger.info("client stopped")
 
+    def request_model(self, extra_body: dict | None = None) -> str:
+        """The model name a chat call with ``extra_body`` is sent with.
+
+        ``chat`` builds its payload's ``model`` from this, so the two cannot
+        drift: the configured model, overridden by the instance ``extra_body``
+        and then the call's ``extra_body`` (a ``model`` key in either wins).
+        ``embed`` deliberately does not use it: it sends ``self.model``.
+        """
+        model = self.model
+        # Instance defaults first, then the call-level override, as in chat().
+        for body in (self.extra_body, extra_body):
+            if body and "model" in body:
+                model = body["model"]
+        return model
+
     async def chat(
         self,
         messages: list[dict],
@@ -233,7 +248,7 @@ class LLMClient:
         )
 
         payload = {
-            "model": self.model,
+            "model": self.request_model(extra_body),
             "messages": messages,
         }
         if tools:

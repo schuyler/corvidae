@@ -828,8 +828,11 @@ only through the funnel.
    per-channel watermark so the two never double-store, in a plugin-owned
    task that never starts a turn.
 2. A record is a first-person summary with epistemic framing preserved,
-   dated by when the conversation happened, embedded, linked to its
-   `message_log` id range, and scored by a pluggable importance prior
+   dated by when the conversation happened, embedded, and linked to its
+   `message_log` id range. It carries the instructions, mode
+   (`fork | standalone`) and model of the call that produced it, so the
+   records a given prompt wrote can be found; a record no consolidation
+   call produced is marked as such. It is scored by a pluggable importance prior
    (cheap-model rubric by default; the appraisal vector when appraisal is
    registered; a surprise term as a toggle, below). Surprise modulates
    encoding strength only, never entry into the raw log.

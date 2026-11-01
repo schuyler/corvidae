@@ -9,6 +9,12 @@ This module owns the memory schema:
   - ``memory``: one row per consolidated first-person record, linked back
     to the raw dialog by a ``message_log`` id range. Rows are never
     deleted — demotion/redaction (Phase 1b) mutate columns.
+    Each row is stamped with how it was made (issue #299): ``prompt_hash``
+    (sha256 of the consolidation instruction text), ``mode`` (``fork`` |
+    ``standalone`` | ``direct``) and ``model`` (the model the call was sent
+    with). All NULL means the row predates stamping ("unknown"); ``direct``
+    rows (goal retirement) were written by no consolidation call.
+  - ``memory_prompt``: ``hash`` -> instruction text, stored once per hash.
   - ``consolidation_watermark``: per-channel last-consolidated
     ``message_log`` id; what makes the compaction/idle trigger overlap safe.
   - ``embedding_meta``: the encoder identity the vector cache was built
@@ -53,6 +59,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import hashlib
 import json
 import logging
 import math
@@ -571,9 +578,86 @@ CREATE TABLE IF NOT EXISTS memory (
     indexed INTEGER NOT NULL DEFAULT 1, -- 0 = demoted out of retrieval (Phase 1b)
     superseded_by INTEGER,              -- near-dup merge target (Phase 1b)
     redacted INTEGER NOT NULL DEFAULT 0,-- redact tombstone flag (Phase 1b)
-    embedded INTEGER NOT NULL DEFAULT 0 -- 0 = embedding pending/failed (backfillable)
+    embedded INTEGER NOT NULL DEFAULT 0,-- 0 = embedding pending/failed (backfillable)
+    prompt_hash TEXT,                   -- sha256 of the instruction text; NULL = unknown/direct
+    mode TEXT,                          -- fork | standalone | direct; NULL = unknown (pre-stamp)
+    model TEXT                          -- model the consolidation call was sent with
 )
 """
+
+# Instruction text of each stamp, stored once per hash (issue #299). Holds
+# configured instructions only, never conversation text.
+MEMORY_PROMPT_DDL = """
+CREATE TABLE IF NOT EXISTS memory_prompt (
+    hash TEXT PRIMARY KEY,
+    text TEXT NOT NULL
+)
+"""
+
+
+def prompt_hash(text: str) -> str:
+    """The stamp hash of an instruction text: sha256 of its UTF-8 bytes."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True)
+class RecordStamp:
+    """How a memory record was made: instruction text, mode and model sent.
+
+    ``prompt`` is None for ``direct`` records (no consolidation call);
+    ``model`` is None when the client could not say.
+    """
+
+    prompt: str | None
+    mode: str
+    model: str | None
+
+    @property
+    def hash(self) -> str | None:
+        """The prompt's hash, or None when there is no prompt."""
+        return None if self.prompt is None else prompt_hash(self.prompt)
+
+
+# Records no consolidation call produced (goal retirement): mode only.
+DIRECT_STAMP = RecordStamp(None, "direct", None)
+
+
+def resolve_consolidation_prompts(memory_cfg: dict) -> tuple[str, str]:
+    """The (standalone, fork) consolidation instructions for a memory config.
+
+    Each is the configured value or the default when the key is absent. A
+    present non-string value raises ValueError naming the key: stamping a
+    default or "" would record text the call never sent.
+    """
+    resolved = []
+    for key, default in (
+        ("consolidation_prompt", DEFAULT_CONSOLIDATION_PROMPT),
+        ("consolidation_fork_prompt", DEFAULT_CONSOLIDATION_FORK_PROMPT),
+    ):
+        value = memory_cfg.get(key, default)
+        if not isinstance(value, str):
+            raise ValueError(
+                f"memory.{key} must be a string; got {value!r}. "
+                f"Set it to the instruction text or remove the key to use the default."
+            )
+        resolved.append(value)
+    return resolved[0], resolved[1]
+
+
+def _as_model(value: object) -> str | None:
+    """``value`` if it is a str, else None (a stub's MagicMock is not a model)."""
+    return value if isinstance(value, str) else None
+
+
+def _model_sent(client: object, extra_body: dict | None) -> str | None:
+    """The model a call to ``client`` with ``extra_body`` is sent with, or None.
+
+    shortcut: a client without request_model stamps model NULL; production
+    clients are always LLMClient, so drop the guard if stubs are updated.
+    """
+    request_model = getattr(client, "request_model", None)
+    return _as_model(request_model(extra_body)) if callable(request_model) else None
+
 
 MEMORY_INDEX_DDL = (
     "CREATE INDEX IF NOT EXISTS idx_memory_channel ON memory (channel_id, created_at)"
@@ -781,11 +865,9 @@ class MemoryPlugin(CorvidaePlugin):
         self._retention_max_delay = float(
             retention_cfg.get("max_delay", DEFAULT_RETENTION_MAX_DELAY)
         )
-        self._consolidation_prompt = self._memory_cfg.get(
-            "consolidation_prompt", DEFAULT_CONSOLIDATION_PROMPT
-        )
-        self._consolidation_fork_prompt = self._memory_cfg.get(
-            "consolidation_fork_prompt", DEFAULT_CONSOLIDATION_FORK_PROMPT
+        # Non-str prompts are refused here (startup fails loudly).
+        self._consolidation_prompt, self._consolidation_fork_prompt = (
+            resolve_consolidation_prompts(self._memory_cfg)
         )
         retrieval_cfg = self._memory_cfg.get("retrieval", {}) or {}
         self._retrieval_k = retrieval_cfg.get("k", DEFAULT_RETRIEVAL_K)
@@ -971,7 +1053,14 @@ class MemoryPlugin(CorvidaePlugin):
             result = await agent.fork(
                 channel, instruction, cut=cut, extra_body=CONSOLIDATION_EXTRA_BODY
             )
-            return _record_from_text(result.text)
+            record = _record_from_text(result.text)
+            # Stamp the fork instruction (not the code-generated range
+            # sentence, which quotes conversation text) and the model sent.
+            record["stamp"] = RecordStamp(
+                self._consolidation_fork_prompt, "fork",
+                _as_model(result.model),
+            )
+            return record
         except Exception:
             logger.warning(
                 "consolidation fork failed; using the standalone call",
@@ -1363,6 +1452,7 @@ class MemoryPlugin(CorvidaePlugin):
                     msg_id_start=rows[0][0],
                     msg_id_end=rows[-1][0],
                     embedding=embedding,
+                    stamp=record["stamp"],
                 )
                 await self._set_watermark(wdb, channel_id, range_end)
             logger.info(
@@ -1395,17 +1485,25 @@ class MemoryPlugin(CorvidaePlugin):
         created_at: float, importance: float, valence: float | None,
         topic_tags: list[str], participants: list[str],
         msg_id_start: int, msg_id_end: int, embedding: list[float] | None,
+        stamp: RecordStamp,
     ) -> int:
         """Insert + vec row + near-dup merge on ``db``, the write connection.
 
         The caller holds ``_db_lock`` inside ``_write_txn`` and so owns the
-        commit or rollback.
+        commit or rollback. ``stamp`` says how the record was made; its
+        instruction text is stored once in ``memory_prompt``.
         """
+        # The instruction text, once per hash (an empty prompt still counts).
+        if stamp.prompt is not None:
+            await db.execute(
+                "INSERT OR IGNORE INTO memory_prompt (hash, text) VALUES (?, ?)",
+                (stamp.hash, stamp.prompt),
+            )
         cursor = await db.execute(
             "INSERT INTO memory (channel_id, created_at, summary, "
             "importance, valence, topic_tags, participants, "
-            "msg_id_start, msg_id_end, embedded) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "msg_id_start, msg_id_end, embedded, prompt_hash, mode, model) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 channel_id,
                 created_at,
@@ -1417,6 +1515,9 @@ class MemoryPlugin(CorvidaePlugin):
                 msg_id_start,
                 msg_id_end,
                 1 if embedding is not None else 0,
+                stamp.hash,
+                stamp.mode,
+                stamp.model,
             ),
         )
         memory_id = cursor.lastrowid
@@ -1568,7 +1669,7 @@ class MemoryPlugin(CorvidaePlugin):
                 created_at=created_at, importance=importance, valence=None,
                 topic_tags=[], participants=[],
                 msg_id_start=msg_id_start, msg_id_end=msg_id_end,
-                embedding=embedding,
+                embedding=embedding, stamp=DIRECT_STAMP,
             )
         return memory_id
 
@@ -1606,11 +1707,16 @@ class MemoryPlugin(CorvidaePlugin):
     async def _summarize_range(self, dialog: list[dict]) -> dict:
         """One llm.background call producing the first-person record.
 
-        Returns {"summary": str, "topic_tags": list, "participants": list}.
+        Returns {"summary", "topic_tags", "participants", "stamp"}.
         A malformed reply is retried once; if both attempts are unusable it
         degrades to the raw transcript rather than losing the range.
         """
         client = self._llm().get_client("background")
+        # Captured before the first attempt: the stamp describes the call sent.
+        stamp = RecordStamp(
+            self._consolidation_prompt, "standalone",
+            _model_sent(client, CONSOLIDATION_EXTRA_BODY),
+        )
         messages = [
             {"role": "system", "content": self._consolidation_prompt},
             {"role": "user", "content": _dialog_transcript(dialog)},
@@ -1621,7 +1727,7 @@ class MemoryPlugin(CorvidaePlugin):
             )
             text = response["choices"][0]["message"]["content"]
             try:
-                return _record_from_text(text)
+                return {**_record_from_text(text), "stamp": stamp}
             except ValueError as exc:
                 logger.warning(
                     "consolidation reply unusable (attempt %d/2): %s",
@@ -1632,6 +1738,7 @@ class MemoryPlugin(CorvidaePlugin):
             "summary": _dialog_transcript(dialog),
             "topic_tags": [],
             "participants": [],
+            "stamp": stamp,
         }
 
     # ------------------------------------------------------------------
@@ -2157,6 +2264,12 @@ class MemoryPlugin(CorvidaePlugin):
         # Core tables and the FTS surface land unconditionally.
         await db.execute(MEMORY_DDL)
         await db.execute(MEMORY_INDEX_DDL)
+        # Stamp columns (#299): tables from before stamping gain them as
+        # nullable columns without rewriting any row; old rows read NULL.
+        await add_column_if_missing(db, "memory", "prompt_hash", "TEXT")
+        await add_column_if_missing(db, "memory", "mode", "TEXT")
+        await add_column_if_missing(db, "memory", "model", "TEXT")
+        await db.execute(MEMORY_PROMPT_DDL)
         await db.execute(WATERMARK_DDL)
         await db.execute(EMBEDDING_META_DDL)
         # Schema upgrade: pre-existing two-column tables (before this feature)

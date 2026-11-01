@@ -310,7 +310,17 @@ class LLMClient:
     async def start(self)
     async def stop(self)
     async def chat(self, messages: list[dict], tools: list[dict] | None = None, extra_body: dict | None = None) -> dict
+    def request_model(self, extra_body: dict | None = None) -> str
 ```
+
+`request_model` returns the `model` a `chat` call with that `extra_body` is
+sent with: the configured model, overridden by the instance `extra_body`
+and then the call's (`llm.<role>.extra_body.model` can change the model).
+`chat` builds its payload's `model` from it. Memory consolidation stamps it
+on the records it writes ([cognition.md](cognition.md#record-stamps)).
+`embed` is deliberately not routed through it: it sends the configured
+`model` and ignores `extra_body`, so the encoder `embedding_meta` records
+can't be switched by an override.
 
 Retry parameters: `max_retries` (default 3, set to 0 to disable), `retry_base_delay`
 (base exponential backoff delay in seconds), `retry_max_delay` (cap on backoff delay).
@@ -1512,6 +1522,12 @@ are still in view). Appraisal appends the exchange quotes and the
 retrieval profile. Critique appends the exchange quotes, and the
 provenance check also passes the CONTEXT snapshot inline, along with each
 past claim and its closest earlier messages.
+
+`ForkResult.model` is the model the fork request was sent with
+(`LLMClient.request_model` of the fork's body, so an `extra_body` override
+shows). Consolidation stamps it on a fork record, together with
+`memory.consolidation_fork_prompt` but not the range sentence
+([cognition.md](cognition.md#record-stamps)).
 
 **Configuration** (`agent.forks`, validated at startup and on reload by
 `validate_agent_config`):

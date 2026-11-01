@@ -67,11 +67,14 @@ class ForkResult:
         text: The reply's content ("" when the model produced none).
         message: The raw assistant message dict from the response.
         usage: The response's usage envelope, or None.
+        model: The model name the fork request was sent with (after any
+            ``extra_body`` override), or None when the client can't say.
     """
 
     text: str
     message: dict
     usage: dict | None = None
+    model: str | None = None
 
 
 @dataclass(frozen=True)
