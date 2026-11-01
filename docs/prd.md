@@ -88,15 +88,17 @@ one is a bug even if its tests pass.
    beyond any exchange-scoped work still owed and past-due upkeep, the main
    turn waits at most for the call already running. Upkeep that is past due
    runs next, ahead of a waiting main turn, so traffic can't starve it
-   (principle 13). Upkeep yields only where the pool's concurrency is
-   declared: on a pool without it, the server orders calls admitted together
-   (§3.13.1). A declared limit, a cap or policy can hold or defer a main
-   turn beyond that (§3.13). Where the pool has no spare capacity (one KV
-   slot, or a rate limit already reached) a background call can't run beside
-   the main turn, so the requirement is to keep its share of the pool small
-   (bounded output, §3.8) and out of the way; it is not a guarantee of zero
-   delay. How a pool's capacity is shared is §3.13 (principle 16). The
-   inbound gate runs inside the transport read path and never calls a model.
+   (principle 13). These orderings across a slot hold only where the pool's
+   concurrency is declared: on a pool without it, the server orders calls
+   admitted together, and an exchange's own background work precedes only
+   its own channel's next main turn (§3.13.1). A declared limit, a cap or
+   policy can hold or defer a main turn beyond that (§3.13). Where the pool
+   has no spare capacity (one KV slot, or a rate limit already reached) a
+   background call can't run beside the main turn, so the requirement is to
+   keep its share of the pool small (bounded output, §3.8) and out of the
+   way; it is not a guarantee of zero delay. How a pool's capacity is shared
+   is §3.13 (principle 16). The inbound gate runs inside the transport read
+   path and never calls a model.
 
 4. **The conversation log is append-only.** `message_log` rows are never
    deleted and their order is never rewritten. Compaction hides; memory
