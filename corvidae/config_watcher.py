@@ -150,9 +150,26 @@ class ConfigWatcherPlugin(CorvidaePlugin):
         6. Dispatch on_config_reload to each plugin with per-plugin error isolation.
         """
         # Step 1: Parse YAML from disk.
+        # Decoded explicitly, as at startup: UTF-8 whatever the locale, and a
+        # decode error's offset counts from the start of the file.
         try:
-            with open(self._config_path) as f:
-                raw = yaml.safe_load(f)
+            text = Path(self._config_path).read_bytes().decode("utf-8")
+            raw = yaml.safe_load(text)
+        except UnicodeDecodeError as exc:
+            # Name the cause and the fix rather than "could not read" (#310).
+            logger.error(
+                "config reload failed: %s is not valid UTF-8 (%s at byte %d); "
+                "re-save it as UTF-8; the running config stays in force",
+                self._config_path, exc.reason, exc.start, exc_info=True,
+            )
+            return
+        except RecursionError:
+            logger.error(
+                "config reload failed: YAML in %s is nested too deeply to load; "
+                "reduce the nesting; the running config stays in force",
+                self._config_path, exc_info=True,
+            )
+            return
         except yaml.YAMLError:
             logger.exception("config reload failed: invalid YAML in %s", self._config_path)
             return

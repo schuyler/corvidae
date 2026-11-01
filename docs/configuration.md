@@ -794,9 +794,13 @@ value in the `agent` or `channels` sections (e.g. a `channels.<id>.tools`
 block that is not `{disabled: [names]}`, or an unknown key such as
 `channels.<id>.max_turn`), or in `tools.call_timeout` / `tools.timeouts`, prints
 `Config error: <detail> — check <path>` to stderr and exits non-zero. The
-detail names the key, the rejected value and what is accepted.
+detail names the key, the rejected value and what is accepted. The file is
+read as UTF-8 whatever the locale: one that isn't valid UTF-8 says so, with
+the byte offset of the first bad byte and "re-save it as UTF-8", and YAML
+nested too deeply to load says to reduce the nesting.
 
 - **Invalid YAML**: logged at `ERROR`; reload is skipped and the running config is unchanged.
+- **Not valid UTF-8, or YAML nested too deeply**: logged at `ERROR` naming the file, the cause (with the byte offset for UTF-8) and the remedy; reload is skipped and the running config stays in force.
 - **Rejected value in `agent:`, `daemon:` or `channels:`** (e.g. a malformed `channels.<id>.tools`): logged at `ERROR` naming the file. For `channels:` the message also names the key and the value and says "reload skipped"; for `agent:` and `daemon:` the key is in the logged traceback. The reload is skipped whole: no section is applied and no plugin receives `on_config_reload`, so a typo in one `channels:` entry cannot change `agent:` values.
 - **Rejected `tools.call_timeout` or `tools.timeouts`**: logged at `ERROR` naming the key and the value, with "reload skipped"; the running config is unchanged.
 - **Missing `llm.main` after merge**: logged at `ERROR`; reload is skipped.
