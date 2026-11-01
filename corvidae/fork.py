@@ -289,7 +289,8 @@ def fork_agent(pm, stage: str):
 
     Duck-typed (``pm.get_plugin("agent")``), the same pattern the
     cognition plugins use for each other, so plugins don't import
-    Agent and a disabled agent plugin degrades to the standalone path.
+    Agent. A disabled agent plugin degrades to a miss: a live-window
+    stage skips (PRD §3.8.5); compaction writes its standalone summary.
     """
     if pm is None:
         return None

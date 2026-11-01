@@ -1665,8 +1665,8 @@ tool results, and objected to claims those supported (a `USER.md` fact, a
 is what the agent had, so provenance runs only as that fork and skips on
 a miss.
 
-**Rollout gate (#73).** Forking ships once #73's cache probes
-pass: the fork row and the main turn after it reuse the cached prefix
+**Cache probes (#73).** #73's probes measured what forking costs
+on a backend: the fork row and the main turn after it reuse the cached prefix
 (K1), the fork prompt begins with the main prompt (K2), and
 `response_format` holds under `tool_choice: "none"` with tools present
 (K3). On Lex at 913f7ab (appraisal and critique forking) all three

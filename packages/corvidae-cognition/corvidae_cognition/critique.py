@@ -1028,7 +1028,8 @@ class CritiquePlugin(CorvidaePlugin):
     async def _run_critique(
         self, channel, trace_id, originating_text, response_text, lenses, sampled,
     ) -> None:
-        """Run each selected stylistic lens, record the outcome, register
+        """Run each selected stylistic lens, record the outcome (nothing
+        when no lens ran), register
         non-empty verdicts.
 
         Attribution is set inside the body (usage rows join to the exchange
