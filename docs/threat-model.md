@@ -613,7 +613,10 @@ human removed. What bounds it:
   yet (PRD §3.5.9, #169), so a beat can't message anyone. Its tools are
   another matter: `shell`, `web_fetch` and `write_file` are as available
   to a beat as to any turn (finding 4). Drop them for the beat with
-  `channels.internal:heartbeat.tools.disabled`.
+  `channels.internal:heartbeat.tools.disabled`. Set it before start: the
+  heartbeat window is trimmed without compaction, so a reloaded list is
+  enforced at dispatch at once but reaches the beat's tool schemas only at a
+  restart.
 - **Scope.** The beat reviews only the channels grouped with
   `internal:heartbeat` in `memory.channel_groups`, never its own earlier
   beats. With no group it sees nothing. Group membership works both ways:

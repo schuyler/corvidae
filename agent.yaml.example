@@ -191,6 +191,7 @@ agent:
 # memory.channel_groups, e.g.  lex: [internal:heartbeat, "irc:#lex"]
 # heartbeat:
 #   after: 3600                        # seconds of quiet before a beat; also the gap between beats
+#   keep_beats: 3                      # earlier beats a beat still sees; 0 = each beat starts empty
 
 # ACP stdio transport (optional — does not enable ACP by itself).
 # Start with: uv sync --extra acp --extra cognition && uv run corvidae acp

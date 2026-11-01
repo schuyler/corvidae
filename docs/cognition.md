@@ -23,7 +23,7 @@ transports.
 | `GoalsPlugin` | `goals` | The agent's open goals: three tools to add, update and retire them, and a CONTEXT entry listing the open ones each turn |
 | `OutcomeLogPlugin` | `outcome_log` | Records each exchange and its outcome in `exchange_log` |
 | `GatePlugin` | `gates` | The engagement gate (may the agent ignore a message?) and the decide gate (may it stay silent instead of answering?), both over the appraisal vector |
-| `HeartbeatPlugin` | `heartbeat` | Starts a turn on `internal:heartbeat` when the whole system has been quiet for `heartbeat.after` seconds; the turn reviews recent memory (and goals, when loaded) and acts only if something warrants it. Asleep unless configured |
+| `HeartbeatPlugin` | `heartbeat` | Starts a turn on `internal:heartbeat` when the whole system has been quiet for `heartbeat.after` seconds; the turn reviews recent memory (and goals, when loaded) and acts only if something warrants it; keeps only its last `keep_beats` beats in its window. Asleep unless configured |
 
 Entry-point names are the same as when these plugins lived in the kernel, so
 `plugins.disabled` lists in existing `agent.yaml` files keep working. Without
@@ -76,7 +76,8 @@ Two triggers, one watermarked code path:
   with history but no traffic since boot count as quiet since their last
   message, so a restart does not lose them. A channel that never goes
   quiet never reaches this trigger; it is consolidated through compaction,
-  as dialog leaves the window.
+  as dialog leaves the window. The exception is `internal:heartbeat`, whose
+  window is trimmed without compaction (see HeartbeatPlugin, Its window).
 
 Both spawn a tracked plugin-owned `asyncio.create_task` (never the
 TaskQueue — every TaskQueue completion wakes the main model). The task
@@ -774,6 +775,43 @@ ordinary notification pipeline with the agent's normal tools. The `heartbeat`
 origin keeps the existing conventions: critique doesn't review it, the
 decide gate treats it as non-user, and `exchange_log` records it.
 
+**Its window.** A beat sees only the last `heartbeat.keep_beats` beats
+(default 3; `0` starts every beat empty), so its prompt doesn't grow with the
+number of earlier beats (#286). A beat is its notification row (a system
+message starting `[heartbeat]`) and everything up to the next one: the
+assistant rows, tool calls and results, a goals entry, a not-sent marker. The
+plugin registers a `tryfirst` `resolve_compaction` handler that, when a beat
+starts on `internal:heartbeat`, deletes everything older than the oldest kept
+beat from the in-memory window, including a leftover compaction summary, and
+returns None. It makes no LLM call, writes nothing to `message_log` (the rows
+stay), and fires neither `before_compaction` nor `on_compaction`. It never
+trims mid-beat: only when the window ends in a beat notification, and never
+across a tool call and its result or while a tool call is pending (each skip
+logs a WARNING naming `internal:heartbeat` and the reason; the next beat
+trims past it). Because it returns None, `CompactionPlugin` still runs
+after it, as the over-budget safety net on the trimmed window. Four
+consequences.
+
+- *Memory.* The trim leaves rows above the channel's memory watermark, and
+  the idle trigger consolidates every one of them: as a fork when forks are on
+  and the range is wholly in the window, standalone once any of it has been
+  trimmed out. The compaction safety net can also cover them, when the kept
+  beats pass the compaction threshold and `on_compaction` fires.
+- *When.* The trim keeps compaction from firing, so the compaction route to
+  consolidation is normally gone on this channel. If `heartbeat.after` is
+  shorter than `memory.idle_consolidate_after` and nothing else is going on,
+  the channel never idles long enough, and heartbeat rows are consolidated
+  only once traffic interrupts the beats. This is an exception to "a
+  channel that never goes quiet is consolidated through compaction".
+- *Tool set.* `on_compaction` is where the Agent re-resolves a channel's
+  tool set, so a reloaded `channels.internal:heartbeat.tools.disabled`
+  refuses the tool at once but reaches the heartbeat's schemas only at a
+  restart (or a real compaction).
+- *Restart.* A restart still loads every heartbeat row since the last
+  summary (about 860 rows a day at a 300 s beat); the next beat trims that
+  to the kept beats before the prompt is built, so the prompt is bounded and
+  only startup load grows.
+
 **What it can reach.** No transport owns `internal:heartbeat`, so a beat's
 reply goes to `sessions.db` and the jsonl log, never to a person. Reaching
 a person needs a cross-channel send (PRD §3.5.9, #169), which doesn't exist
@@ -798,7 +836,9 @@ it.
 **Failures.** A memory or retired-goals read that raises is logged as a WARNING naming the
 channel and the exception, and that beat is skipped; the tracker retries
 `after` seconds later. An invalid `heartbeat.after` (zero, negative, non-finite,
-boolean, non-numeric) fails startup with a `ValueError`, and an awake
+boolean, non-numeric) fails startup with a `ValueError`, as does an invalid
+`heartbeat.keep_beats` (negative, fractional, boolean or string; checked even
+while the heartbeat sleeps), naming the key, the value and what is accepted, and an awake
 heartbeat without the memory plugin fails startup with a `RuntimeError`
 saying to enable memory or remove `heartbeat.after`.
 

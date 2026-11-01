@@ -316,3 +316,34 @@ async def test_sleep_survives_restart(make_env):
     after = await make_env({"heartbeat": {}})
     await after.clock.advance(THIRTY_DAYS)
     assert after.beats == []
+
+
+# ---------------------------------------------------------------------------
+# #286 R7: heartbeat.keep_beats is validated at startup
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("bad", [-1, 2.5, True, "3"])
+async def test_rejects_a_bad_keep_beats(make_env, bad):
+    """R7: a negative, fractional, boolean or string keep_beats fails startup,
+    naming the key, the rejected value, what is accepted and where to fix it."""
+    with pytest.raises(ValueError) as exc:
+        await make_env({"heartbeat": {"keep_beats": bad}}, with_memory=False)
+    message = str(exc.value)
+    assert "heartbeat.keep_beats" in message
+    assert f"got {bad!r}" in message
+    # What is accepted: a whole number, 0 or more (2.5 is "0 or more" but
+    # not a count of beats).
+    assert "whole number" in message
+    assert "0 or more" in message
+    assert "agent.yaml" in message
+
+
+def test_keep_beats_defaults_to_three_and_accepts_zero():
+    """R2/R7: absent or null keep_beats is 3; 0 is a valid count."""
+    # parse_keep_beats is new in #286: imported here so the other tests collect.
+    from corvidae_cognition.heartbeat import parse_keep_beats
+
+    assert parse_keep_beats({}) == 3
+    assert parse_keep_beats({"heartbeat": {"keep_beats": None}}) == 3
+    assert parse_keep_beats({"heartbeat": {"keep_beats": 0}}) == 0

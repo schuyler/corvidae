@@ -311,7 +311,7 @@ A record's `created_at` is the `sessions.db` timestamp of the last message in it
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `memory.idle_consolidate_after` | float | `1800` | Seconds a channel must be quiet before idle consolidation runs on its un-consolidated tail, and the period between repeat runs while it stays quiet. A channel that never goes quiet is consolidated through compaction instead. Takes effect at restart. |
+| `memory.idle_consolidate_after` | float | `1800` | Seconds a channel must be quiet before idle consolidation runs on its un-consolidated tail, and the period between repeat runs while it stays quiet. A channel that never goes quiet is consolidated through compaction instead, except `internal:heartbeat`: its window is trimmed without compaction, so with `heartbeat.after` shorter than this value its rows wait for traffic to interrupt the beats. Takes effect at restart. |
 | `memory.half_life_days` | float | `30` | Recency decay constant of the retrieval score (`similarity × exp(-age_days / half_life)`). It is an e-folding time: the factor is `1/e`, not `1/2`, at `half_life_days`. |
 | `memory.retrieval.k` | integer | `8` | Vector-KNN candidate count per retrieval. |
 | `memory.retrieval.bands.strong` | float | `0.75` | Value at or above which a retrieved memory is banded `[strong]`. The value is the decayed score, or raw similarity under `band_on: similarity`. |
@@ -387,6 +387,7 @@ A job costs a main-model turn per firing on the shared backend; keep intervals i
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `heartbeat.after` | number (seconds) | none | Seconds of system-wide quiet before a beat, and the minimum gap between beats: each beat makes the system busy, so the next one comes `after` seconds after it settles. Traffic on any channel cancels the pending beat and starts the count again. Absent, `null`, or an empty `heartbeat:` block: the heartbeat is asleep. Zero, negative, non-finite, boolean or non-numeric values fail startup with a `ValueError` naming the key and the value. Read at startup only. |
+| `heartbeat.keep_beats` | integer | `3` | Earlier beats a beat still sees in its window; older ones are dropped from the prompt (never from the log), with no LLM call. `0` starts every beat empty. Negative, fractional, boolean or string values fail startup with a `ValueError` naming the key, the value and what is accepted, even while the heartbeat sleeps. Read at startup only. |
 
 **Sleep.** The heartbeat sleeps whenever `heartbeat.after` is absent. To put it to sleep, delete or comment out the block and restart; it stays asleep across every restart after that, because `agent.yaml` is the record. `plugins.disabled: [heartbeat]` does the same. Reloading the config doesn't wake it or put it to sleep; restart.
 
@@ -402,7 +403,7 @@ memory:
 
 Group membership works both ways, so the other channels in the group can retrieve the memories consolidated from beats too (see [threat-model.md](threat-model.md)).
 
-**Cost.** Each beat is a main-model turn on the shared backend. A beat waits for quiet, so it never competes with a conversation, but a short `after` keeps the system from staying quiet long enough for memory retention's 60-second quiet window; retention then runs on its `max_delay` instead.
+**Cost.** Each beat is a main-model turn on the shared backend, and `heartbeat.keep_beats` bounds its prompt to the system prompt, the current beat and that many earlier ones. A beat waits for quiet, so it never competes with a conversation, but a short `after` keeps the system from staying quiet long enough for memory retention's 60-second quiet window; retention then runs on its `max_delay` instead.
 
 ---
 
@@ -765,7 +766,7 @@ No restart is required for the changes listed below. Changes that require restar
 | Dotted plugin tunables (`appraisal.*`, `critique.*`) | Resolved per-decision via `corvidae.tuning.resolve_tunable`; a reloaded value applies on the next appraisal/critique decision. Per-channel `set_settings` overrides still take precedence. |
 | `agent.immutable_settings` | `RuntimeSettingsPlugin` resets its blocklist and re-applies the new list. Constructor-supplied immutable keys are always retained. |
 | New channel entries in `channels:` | `load_channel_config` registers newly added channels. |
-| `channels.<id>.tools.disabled` on a registered channel | Updated in place. Dispatch refuses a newly disabled tool at once; the schemas follow at the next compaction or conversation start, never mid-conversation. See [Per-channel tool sets](#per-channel-tool-sets). A reload with a malformed entry changes no channel. |
+| `channels.<id>.tools.disabled` on a registered channel | Updated in place. Dispatch refuses a newly disabled tool at once; the schemas follow at the next compaction or conversation start, never mid-conversation (on `internal:heartbeat`, whose window is trimmed without compaction, at the next restart). See [Per-channel tool sets](#per-channel-tool-sets). A reload with a malformed entry changes no channel. |
 | Transport-wide entries (`channels.<transport>:*`) | Replaced and re-matched against every running channel. Scalar keys apply from the next turn, `tools.disabled` as above, the system prompt only to conversations that start after the reload. See [Transport-wide entries](#transport-wide-entries). |
 | `web.token` | A changed token logs out every browser (their sockets close and the page says the session expired). A token removed from config falls back to `CORVIDAE_WEB_TOKEN` as the daemon started with it, else a fresh generated one, which is logged. Changing `CORVIDAE_WEB_TOKEN` itself needs a restart. |
 | `agent` defaults | `ChannelRegistry.agent_defaults` is updated. `max_turns`, `max_context_tokens` and `reasoning_history` are resolved every turn, so running channels pick them up at their next turn; `system_prompt` reaches only conversations that start after the reload. |
@@ -781,6 +782,7 @@ No restart is required for the changes listed below. Changes that require restar
 | `llm.background` | Not updated on reload. |
 | `memory.*` (including `memory.consolidation_prompt` and `memory.consolidation_fork_prompt`) | `MemoryPlugin` reads its section at init only. That includes `memory.idle_consolidate_after` and `memory.retention.*`: the idle watch and retention timer are set when the plugin starts. |
 | `heartbeat.after` | `HeartbeatPlugin` reads it at init and registers its idle watch at start. Putting the heartbeat to sleep or waking it takes a restart. |
+| `heartbeat.keep_beats` | `HeartbeatPlugin` reads it at init. Changing it takes a restart. |
 | `tools.max_result_chars`, `tools.shell_timeout`, `tools.web_fetch_timeout` | Deferred; not currently implemented in hot-reload path. |
 
 ### Error handling
