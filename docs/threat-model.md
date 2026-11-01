@@ -179,18 +179,17 @@ by the thing being checked.
 
 The fork instructions added for #51 (`appraisal.stage2_fork_prompt`,
 `critique.fork_prompt.<lens>`, `memory.consolidation_fork_prompt`,
-`agent.compaction_fork_prompt`) and `agent.forks.*` are read from
-operator config only, so `set_settings` can't rewrite them. That covers
-only calls that actually fork. In the tree, a fork miss (forks off for
-the stage, the exchange has left the window, a refused or unparseable
-fork) falls back to the standalone prompt for stage-2 appraisal, the
-stylistic critique lenses and consolidation; compaction falls back by
-design (PRD §3.8.5), and the provenance check skips. PRD §3.8.2 and
-§3.8.5 make any other miss a skip (only windowless work runs
-standalone), so the appraisal, lens and consolidation fallbacks are
-a gap (#293). Until it closes, the critic's and appraiser's
-standalone prompts above are reachable, and they are runtime tunables,
-so keep them in `immutable_settings` with forks on too.
+`agent.compaction_fork_prompt`) and `agent.forks.*` are read from operator
+config only, so `set_settings` can't rewrite them. That covers only calls
+that actually fork. In the tree, a fork miss (forks off for the stage, the
+exchange has left the window, a refused or unparseable fork) falls back to
+the standalone prompt for stage-2 appraisal, the stylistic critique lenses
+and consolidation; compaction falls back by design (PRD §3.8.5), and the
+provenance check skips. PRD §3.8.2 and §3.8.5 make any other miss a skip
+(only windowless work runs standalone), so the appraisal, lens and
+consolidation fallbacks are a gap (#293). Until it closes, the critic's
+and appraiser's standalone prompts above are reachable, and they are
+runtime tunables, so keep them in `immutable_settings` with forks on too.
 
 The tunability itself is not a defect to engineer away (the fallback gap
 above is): the capacity to tune and rewrite its own gates is part of a
@@ -657,7 +656,8 @@ The key is never logged or echoed in errors and replies.
 
 PRD principle 15 makes self-modification a design goal: the framework
 must be able to let the agent change its own prompts, skills, model and
-parameters, tunables and thresholds, and tool set, and every restriction
+parameters, tunables, framework settings, caps and thresholds, and tool
+set, and every restriction
 on that is a lock the operator can lift. This finding is the cost ledger
 it asks for, organized by kind of change so that a new key falls under
 an entry that already exists. It doesn't argue against the capability;
@@ -691,14 +691,13 @@ What each kind of unlock costs:
   the prompt, refusals included, is now the model's to change.
 - **The prompts that judge and remember** (the critic's and appraiser's
   prompts, open by default today; fork instructions; the standalone
-  compaction and consolidation prompts; and `agent.forks.*`, which
-  decides whether those stages fork at all). The check can be rewritten
-  by the thing it checks (finding 2). An injection can
-  rewrite how the agent summarizes, consolidates and scores its own
-  exchanges, under its own persona, and the results persist: a summary
-  it later reads as its own words, a memory record, an `exchange_log`
-  score. Unlocking fork instructions also removes a bound finding 8
-  relies on.
+  compaction and consolidation prompts; and `agent.forks.*`, which decides
+  whether those stages fork at all). The check can be rewritten by the
+  thing it checks (finding 2). An injection can rewrite how the agent
+  summarizes, consolidates and scores its own exchanges, under its own
+  persona, and the results persist: a summary it later reads as its own
+  words, a memory record, an `exchange_log` score. Unlocking fork
+  instructions also removes a bound finding 8 relies on.
 - **Other prompts sent on the agent's behalf** (subagent, heartbeat,
   notification text). Each steers a turn that has no person in it: a
   rewritten heartbeat prompt acts on memory with nobody watching
@@ -714,7 +713,11 @@ What each kind of unlock costs:
   load the new model into its only slot stalls every channel while it
   does. Large `max_tokens` or sampling extremes degrade replies on that
   channel. `logprobs` costs little: larger responses, and nothing from
-  providers that don't support it.
+  providers that don't support it. Any other request-body key falls here
+  too, and some reach past the channel: a backend's slot or cache
+  controls (llama-server's `id_slot`, `cache_prompt`) can evict another
+  channel's cached prefix, and a forced `response_format` or grammar can
+  stop the model emitting tool calls.
 - **Gate tunables and thresholds** (`gate.*`,
   `critique.provenance.enabled`, `critique.sample_below_rate`, the
   critique lens thresholds `critique.lens.*`; open by default today).
@@ -733,6 +736,20 @@ What each kind of unlock costs:
   below it, compaction runs on nearly every turn, rewriting history into
   summaries. A large `max_turns` lets one injected tool loop run far
   longer before dispatch is suppressed, holding the shared model slot.
+  `reasoning_history: keep` fills the window with reasoning and brings
+  compaction sooner; `drop` strips the reasoning a tool chain in progress
+  relies on, which degrades Qwen-family tool use.
+- **Everything else in `agent.yaml`** (kernel, client, scheduler and
+  transport settings: `llm.*` endpoints and keys, `plugins.disabled`,
+  `scheduler.jobs`, the cross-channel send allowlist and budget,
+  `agent.compaction_*`, the `tools.*` limits). Today these are reachable
+  only through a writable `agent.yaml` (finding 4); an unlock through a
+  tool carries the same costs. A repointed `llm.main.base_url` sends
+  every conversation, and the API key, to a host of the attacker's
+  choosing. `plugins.disabled` switches off the gates wholesale at the
+  next restart. A scheduled job's prompt comes back framed as the
+  operator's. A setting not named in this ledger falls under this entry
+  unless another entry fits better by what it controls.
 - **Other plugin tunables** (`appraisal.weights.*`, `appraisal.prior.*`,
   `appraisal.probe.*`; open by default today). The weights and priors
   move what the agent attends to and how strongly it remembers it.
@@ -762,9 +779,11 @@ What each kind of unlock costs:
 
 Recommended locks for a channel with untrusted participants, as a
 starting point rather than a rule: the system prompt, the prompts that
-judge and remember, the heartbeat and subagent prompts, framing, `model`,
-the gate tunables (which also blocks closed-loop fitting from moving
-them), the tool set, and skill writes behind confirmation.
+judge and remember, the heartbeat and subagent prompts, framing, `model`
+and the backend's slot and cache controls, the gate tunables (which also
+blocks closed-loop fitting from moving them), the tool set, `llm.*`,
+`plugins.disabled`, `scheduler.jobs`, and skill writes behind
+confirmation.
 
 A channel with only the operator on it has the smallest exposure, and it
 is where these unlocks cost least. It isn't free. Untrusted text still

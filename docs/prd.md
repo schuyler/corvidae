@@ -147,7 +147,7 @@ one is a bug even if its tests pass.
    and sensitivity plugins); the operator configures where the boundary
    falls, and safety features are added as plugins over time, as with
    sandboxing. Fixed floors protect the operator's own control surface
-   rather than draw a trust boundary, and stay fixed, among them: web auth
+   rather than draw a trust boundary, and stay fixed: web auth
    cannot be turned off (§3.2 Web), `redact` is never a tool (§3.7 Memory
    8), `set_settings` can't lift a lock or change the lock list, the
    request-body keys the agent loop builds (`messages`, `tools`,
@@ -230,15 +230,14 @@ one is a bug even if its tests pass.
     self-modification is a lock: a mechanism the framework supports and the
     operator configures, never a prohibition in the architecture. Operator
     config can lift any lock. The floors of principle 9 are the exceptions
-    and stay fixed, and the conversation log
-    stays append-only (principle 4). Each capability has a route that keeps
-    the agent loop consistent. A request-body override carries model
-    parameters, never the loop's own `messages`, `tools`, `tool_choice` or
-    `stream` (§3.5.6). A change to the head of the window (the system
-    prompt, the tool set) takes effect at the channel's next compaction
-    boundary or conversation start, not mid-window (§3.3.8; principle 2).
-    What each unlock costs is recorded in `docs/threat-model.md` (principle
-    9).
+    and stay fixed, and the conversation log stays append-only (principle
+    4). Each capability has a route that keeps the agent loop consistent. A
+    request-body override carries model parameters, never the loop's own
+    `messages`, `tools`, `tool_choice` or `stream` (§3.5.6). A change to the
+    head of the window (the system prompt, the tool set) takes effect at the
+    channel's next compaction boundary or conversation start, not mid-window
+    (§3.3.8; principle 2). What each unlock costs is recorded in
+    `docs/threat-model.md` (principle 9).
 
 ## 3. Requirements
 
@@ -992,13 +991,13 @@ design: `docs/design.md`, Forks. The requirements are outcomes:
    window rather than rebuilding it, leaves the main window's cached prefix
    intact, and keeps its slot time short (principles 2 and 3).
 4. Each background stage's reasoning and reply are capped per stage, and
-   its fork instructions are static config. Operator config decides
-   whether `set_settings` can lift the caps or rewrite the instructions
-   (principle 15); the threat model records the cost (principle 9). The
-   window at the compaction threshold, plus a stage's instruction and both
-   caps, fits the context whichever layer set them, so a stage just short
-   of compaction still runs. Each call is attributed in `usage_log` by
-   stage and `mode = fork | standalone` (principle 11).
+   its fork instructions are set in operator config; operator config also
+   decides whether `set_settings` can lift the caps or rewrite the
+   instructions (principle 15); the threat model records the cost
+   (principle 9). The window at the compaction threshold, plus a stage's
+   instruction and both caps, fits the context whichever layer set them,
+   so a stage just short of compaction still runs. Each call is attributed
+   in `usage_log` by stage and `mode = fork | standalone` (principle 11).
 5. A background stage that can't run skips and logs a warning naming the
    stage, the channel, the trace if there is one, and what was missing
    (principle 5). Compaction is the exception: it is never skipped and
