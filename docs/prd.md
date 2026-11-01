@@ -239,13 +239,15 @@ one is a bug even if its tests pass.
     (principle 4). Each capability has a route that keeps the agent loop
     consistent. A request-body override carries model parameters, never
     the loop's own `messages`, `tools`, `tool_choice` or `stream`
-    (§3.5.6). Cache reuse is optimized for the general case: a change
-    that would alter what is already rendered in the window (the system
-    prompt, the tool set, how earlier rows are framed or stripped) takes
-    effect at the channel's next compaction boundary or conversation
-    start, not mid-window (§3.3.8; principle 2). An agent that wants a
-    change applied at once makes it persistent and restarts. What each
-    unlock costs is recorded in `docs/threat-model.md` (principle 9).
+    (§3.5.6). Cache reuse is optimized for the general case: a change the
+    agent makes that would alter what is already rendered in the window
+    (the system prompt, the tool set, how earlier rows are framed or
+    stripped) takes effect at the channel's next compaction boundary or
+    conversation start, not mid-window (§3.3.8; principle 2). An agent
+    that wants a change applied at once makes it persistent and restarts.
+    An operator change applies as configured: it is a deliberate choice to
+    spend the prefill. What each unlock costs is recorded in
+    `docs/threat-model.md` (principle 9).
 
 ## 3. Requirements
 
@@ -519,12 +521,12 @@ Per transport:
    calls still unanswered.
 6. `reasoning_history: drop | exchange | keep`, resolved per channel and
    applied to the whole in-memory window before every call, so reloaded
-   history obeys it. A change to it takes effect at the next compaction
-   boundary or conversation start (§3.5.6, principle 15). `exchange`
-   strips assistant messages before the last `role: user` message,
-   matching the Qwen template boundary; the DB always keeps reasoning. Any
-   other value, or the retired key `keep_thinking_in_history`, fails at
-   startup and on reload.
+   history obeys it. An agent override of it takes effect at the next
+   compaction boundary or conversation start (§3.5.6, principle 15).
+   `exchange` strips assistant messages before the last `role: user`
+   message, matching the Qwen template boundary; the DB always keeps
+   reasoning. Any other value, or the retired key
+   `keep_thinking_in_history`, fails at startup and on reload.
 7. `agent.mid_conversation_system_role: system | user` sets the role under
    which every non-leading system message is sent (funnel CONTEXT,
    notifications without a tool-call id, framed orphan results). It is a

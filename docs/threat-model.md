@@ -681,8 +681,8 @@ unless the files are read-only to the daemon.
 
 The common shape: a runtime override is per channel and in memory, so an
 injected change lasts on that channel until the override is cleared or the
-daemon restarts. Under the PRD, a change that alters what is already
-rendered in the window (system prompt, tool set, framing,
+daemon restarts. Under the PRD, a change the agent makes that alters what
+is already rendered in the window (system prompt, tool set, framing,
 `reasoning_history`) applies from the next compaction or conversation
 start, or at once if the agent makes it persistent and restarts. A skill
 or a persistent self-edit outlives both, and a closed-loop fit would
