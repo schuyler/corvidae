@@ -204,3 +204,110 @@ async def test_real_clock_zero_delay_timer_runs():
         await asyncio.wait_for(ran.wait(), timeout=2)
     finally:
         await real.close()
+
+
+# --- #248 R4: Clock.call_soon ---------------------------------------------
+
+
+async def test_call_soon_runs_at_settle_without_advance(clock):
+    """#248 R4: call_soon runs on the next loop step with no time passing,
+    is listed while pending, and never touches the sleep queue."""
+    calls: list[int] = []
+
+    async def callback() -> None:
+        calls.append(1)
+
+    before = clock.monotonic()
+    clock.call_soon(callback, name="soon")
+    # Pending timers are visible synchronously.
+    assert clock.live_timer_names() == ["soon"]
+
+    await clock.settle()
+
+    assert calls == [1]
+    assert clock.monotonic() == before
+    assert clock.sleeps.empty()
+    assert clock.live_timer_names() == []
+
+
+async def test_call_soon_settle_waits_for_callback(clock):
+    """#248 R4: settle() waits for a callback needing many loop steps."""
+    calls: list[int] = []
+
+    async def callback() -> None:
+        # Longer than settle()'s bare yields, so it must be tracked.
+        for _ in range(20):
+            await asyncio.sleep(0)
+        calls.append(1)
+
+    clock.call_soon(callback, name="slow")
+    await clock.settle()
+
+    assert calls == [1]
+
+
+async def test_call_soon_cancel_before_step_never_runs(clock):
+    """#248 R4: cancelling a call_soon handle before its first step stops
+    the callback, matching call_later semantics."""
+    calls: list[int] = []
+
+    async def callback() -> None:
+        calls.append(1)
+
+    timer = clock.call_soon(callback, name="soon")
+    timer.cancel()
+    await clock.settle()
+
+    assert calls == []
+    assert clock.live_timer_names() == []
+
+
+async def test_call_soon_cancel_inside_callback_is_noop(clock):
+    """#248 R4: cancelling one's own call_soon handle from the running
+    callback does nothing, as for call_later."""
+    handles: list = []
+    finished: list[int] = []
+
+    async def callback() -> None:
+        # Cancel our own handle, then yield so a cancellation would land.
+        handles[0].cancel()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        finished.append(1)
+
+    handles.append(clock.call_soon(callback, name="self-cancel"))
+    await clock.settle()
+
+    assert finished == [1]
+
+
+async def test_close_cancels_call_soon_before_it_runs(clock):
+    """#248 R4: close() cancels a call_soon task that has not yet stepped."""
+    calls: list[int] = []
+
+    async def callback() -> None:
+        calls.append(1)
+
+    clock.call_soon(callback, name="soon")
+    await clock.close()
+    await clock.settle()
+
+    assert calls == []
+    assert clock.live_timer_names() == []
+
+
+async def test_real_clock_call_soon_runs():
+    """#248 R4: the real Clock runs a call_soon callback without waiting."""
+    from corvidae.clock import Clock
+
+    real = Clock()
+    ran = asyncio.Event()
+
+    async def callback() -> None:
+        ran.set()
+
+    try:
+        real.call_soon(callback, name="soon")
+        await asyncio.wait_for(ran.wait(), timeout=2)
+    finally:
+        await real.close()

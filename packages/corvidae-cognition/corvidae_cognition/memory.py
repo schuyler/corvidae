@@ -761,9 +761,19 @@ class MemoryPlugin(CorvidaePlugin):
         await super().on_init(pm, config)
         self._memory_cfg = config.get("memory", {}) or {}
         self._embedding_cfg = (config.get("llm", {}) or {}).get("embedding")
-        self._idle_consolidate_after = float(self._memory_cfg.get(
+        raw_after = self._memory_cfg.get(
             "idle_consolidate_after", DEFAULT_IDLE_CONSOLIDATE_AFTER
-        ))
+        )
+        self._idle_consolidate_after = float(raw_after)
+        # Fail at startup, naming the key, rather than inside the idle tracker.
+        if (
+            not math.isfinite(self._idle_consolidate_after)
+            or self._idle_consolidate_after <= 0
+        ):
+            raise ValueError(
+                f"memory.idle_consolidate_after: got {raw_after!r}; expected "
+                "a positive finite number of seconds — check agent.yaml"
+            )
         retention_cfg = self._memory_cfg.get("retention", {}) or {}
         self._retention_interval = float(
             retention_cfg.get("interval", DEFAULT_RETENTION_INTERVAL)

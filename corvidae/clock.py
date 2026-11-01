@@ -84,6 +84,15 @@ class Clock:
 
         return self._schedule(wait, callback, name)
 
+    def call_soon(self, callback: ClockCallback, *, name: str) -> Timer:
+        """Run ``callback`` once, on the next loop step, without waiting on time."""
+
+        async def wait() -> None:
+            # Nothing to wait for; returns without suspending.
+            return
+
+        return self._schedule(wait, callback, name)
+
     def call_at(self, when: float, callback: ClockCallback, *, name: str) -> Timer:
         """Run ``callback`` once, when wall time reaches ``when``."""
 

@@ -608,15 +608,19 @@ class Tidy(CorvidaePlugin):
 ```
 
 `call_later` and `call_at` are one-shot; re-arm from the callback for a
-periodic job. `watch_channels` repeats every `repeat` seconds (default: the
-period) while the channel stays quiet, and `watch_system` does the same for
-the whole system. To learn that a channel just drained, as a transport
-does for a working indicator, watch with `watch_channels(0, cb, name=...,
-repeat=3600)`: a zero period fires at settle, and the callback sees every
-channel, so filter on the id. Cancel watches and timers in `on_stop`; the Runtime
-cancels stragglers afterwards. Callbacks must let `asyncio.CancelledError`
-through. An idle or timer callback is upkeep: it does plugin-owned work and
-must never start a turn or enqueue work on a channel (principle 13), so it
+periodic job. `call_soon(cb, name=...)` runs once on the next loop step.
+`watch_channels` repeats every `repeat` seconds (default: the period) while
+the channel stays quiet, and `watch_system` does the same for the whole
+system. `repeat` must be a positive finite number, so `watch_channels(0, cb,
+name=...)` without `repeat=` (or a negative period) raises `ValueError`. To
+learn that a channel just drained, as a transport does for a working
+indicator, watch with `watch_channels(0, cb, name=..., repeat=3600)`: a zero
+period fires at settle, and the callback sees every channel, so filter on
+the id. A zero-period callback that awaits something outside the clock
+blocks `FakeClock.settle()` in tests until it finishes. Cancel watches and
+timers in `on_stop`; the Runtime cancels stragglers afterwards. Callbacks
+must let `asyncio.CancelledError` through. An idle or timer callback is
+upkeep: it does plugin-owned work and must never start a turn or enqueue work on a channel (principle 13), so it
 never calls `on_notify`. Starting a turn on time is agency, which is the
 scheduler's job: its firings go through `on_notify` and run a full turn. In
 tests, `tests/fake_clock.py`'s `install_kernel_clock(pm)` registers
