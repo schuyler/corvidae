@@ -289,6 +289,7 @@ class TestThroughTheAgent:
         expected_type = "FileNotFoundError" if content is None else "UnicodeDecodeError"
         assert any(
             channel.id in w and "reg.md" in w and "register_prompt" in w and expected_type in w
+            and "check the path" in w
             for w in warnings
         ), warnings
 
@@ -298,7 +299,7 @@ class TestThroughTheAgent:
 # ---------------------------------------------------------------------------
 
 
-def test_moved_fragments_are_deleted_from_prompts(tmp_path):
+def test_moved_fragments_are_deleted_from_prompts():
     from pathlib import Path
 
     root = Path(__file__).resolve().parent.parent / "prompts"
