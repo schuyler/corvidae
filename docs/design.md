@@ -608,10 +608,13 @@ All operations are synchronous; no database access:
   to stay cache-stable.
 - `token_estimate()` — sums the token count of every message via tiktoken
   (`cl100k_base`), with a character-based fallback when tiktoken is
-  unavailable. Each message is sized by its JSON-serialized visible fields
-  (role, content, `tool_calls`, `reasoning_content`, etc.), not just the
-  `content` string, so a message whose size is mostly in tool-call
-  arguments or reasoning content is still counted accurately.
+  unavailable. Special-token strings such as `<|endoftext|>` count as plain
+  text, and any tiktoken failure logs a warning and falls back to the
+  character estimate, so `count_tokens` never raises. Each message is sized
+  by its JSON-serialized visible fields (role, content, `tool_calls`,
+  `reasoning_content`, etc.), not just the `content` string, so a message
+  whose size is mostly in tool-call arguments or reasoning content is still
+  counted accurately.
 - `replace_with_summary(summary_msg, retain_count)` — replaces older messages
   with a summary in-memory, retaining the `retain_count` most-recent entries.
   Raises `ValueError` if `retain_count` exceeds `len(messages)`.

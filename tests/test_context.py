@@ -641,3 +641,38 @@ def test_context_window_has_no_mid_window_removal():
     the window; it must stay retired.
     """
     assert not hasattr(ContextWindow, "remove_by_type")
+
+
+class TestCountTokensNeverRaises:
+    def test_special_token_string_counts_as_plain_text(self, caplog):
+        """Special-token strings in a message must not wedge token_estimate or fit_to_budget (#352)."""
+        from corvidae.context import count_tokens
+
+        with caplog.at_level("WARNING", logger="corvidae.context"):
+            assert count_tokens("<|endoftext|>") > 0
+        assert not caplog.records
+
+        conv = ContextWindow("test:special")
+        conv.messages.append({
+            "role": "tool", "tool_call_id": "c1", "content": "<|endoftext|>",
+            "_db_id": 1, "_message_type": MessageType.MESSAGE,
+        })
+        assert conv.token_estimate() > 0
+        conv.fit_to_budget(1000)
+
+    def test_encoder_failure_falls_back_with_warning(self, monkeypatch, caplog):
+        """Any tiktoken failure logs a warning and returns the character estimate (#352)."""
+        import corvidae.context as context
+
+        class BrokenEncoder:
+            def encode(self, text, **kwargs):
+                raise RuntimeError("boom")
+
+        monkeypatch.setattr(context, "_encoder", BrokenEncoder())
+        with caplog.at_level("WARNING", logger="corvidae.context"):
+            result = context.count_tokens("hello world")
+        assert result == int(len("hello world") / context._FALLBACK_CHARS_PER_TOKEN)
+        # The warning names the failure type and the size of the text.
+        warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warnings) == 1
+        assert "RuntimeError" in warnings[0] and "11-char" in warnings[0]
