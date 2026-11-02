@@ -237,8 +237,7 @@ class ContextWindow:
         assistant row after it; results before that point are gathered
         into the call's block. A block whose calls are all answered
         before the interruption is deferred to its last result, so an
-        uninterrupted cycle emits as one contiguous block there (a
-        placeholder stands in for any call with no result yet). Otherwise
+        uninterrupted cycle emits as one contiguous block there. Otherwise
         the block emits in place at the call, holding the gathered results
         and a placeholder per remaining call: TOOL_RESULT_PENDING when that
         call's result appears later in the window (so the prefix does not
