@@ -587,7 +587,8 @@ Per transport:
    starts, because compaction already rebuilds the KV cache for everything
    after the system prompt; or appended to the current window, and moved
    to the system prompt at the next compaction or conversation boundary.
-9. `<think>` blocks are stripped from display, never from the DB.
+9. `<think>` blocks are stripped from display, never from the DB, except
+   where the model's reply is malformed.
 10. The agent writes in the social register of the channel it's in:
     texting-length turns in a one-on-one chat app, short turns that don't
     take over a group channel, longer answers where the medium invites them
@@ -1198,6 +1199,10 @@ design, not requirement. The requirements are outcomes:
    operator watches (queue depth, compaction, task latency). Never emit
    `on_metrics` from inside an `on_metrics` implementation.
 4. Startup logs the loaded and blocked plugin sets.
+5. Every anomalous model response is logged at warning level, naming the
+   channel and carrying the response text, so the cause can be read
+   afterwards rather than guessed. This puts raw model output in the
+   daemon log, which the threat model accounts for.
 
 ### 3.11 Configuration and operations
 

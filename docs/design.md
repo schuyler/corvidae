@@ -365,6 +365,24 @@ shortcut: this
 assumes the chat template forces thinking open, so set the option only on
 such endpoints; elsewhere every non-reasoning reply reads as cut off.
 
+**Reopened reasoning (#348).** After the split, `cut_reopened_reasoning`
+looks for a `<think>` or `</think>` in the remaining `content`: the model
+finished its answer and started reasoning again instead of ending the turn,
+sometimes inventing a user question and answering it. `content` is cut at
+the tag (trailing whitespace stripped), the response gets a top-level
+`reasoning_reopened: True`, and `chat` logs one warning with the channel
+(from attribution, or `(none)`), the model and the full raw completion. The
+tail is in neither `content` nor `reasoning_content`, so it reaches no
+transport, no row and no memory; the log is its only copy (PRD §3.3.9,
+§3.10). This runs on every role's client. `AgentTurnResult.reasoning_reopened`
+carries the flag. `Agent._run_turn` checks it before the cut-off check:
+with `llm.main.reasoning_reopened: rerun`, a final (no tool calls) that
+reopened is popped from the messages and regenerated once, and that result
+is used whatever it holds (a second reopen is already cut); then the
+cut-off check runs on it as on any reply. With `truncate` (the default)
+the cut reply is used as is. A stray `</think>` has no start marker, so the
+cut lands at the tag and the line before it survives.
+
 Raw mode is decided per call (#360). llama-server can't apply a JSON-schema
 grammar with `reasoning_format: none` (HTTP 400), so a call whose merged
 payload carries `response_format` (e.g. the forked and standalone appraisal,
