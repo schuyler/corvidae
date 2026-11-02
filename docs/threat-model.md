@@ -640,15 +640,15 @@ included, to the provider. Which stage uses which role:
   role). The `llm.appraisal` and `llm.critic` roles are no longer read by any
   stage: stage 2 and the lenses run only as forks on `llm.main` (#320).
 - `background`: the rendered view (PRD §3.8) for memory consolidation of
-  ranges that have left the window, one per segment up to the channel's
-  `max_context_tokens`, and for compaction's summary on a fork miss or with
+  ranges that have left the window, one per segment trimmed to the channel's
+  `max_context_tokens` (an oversized row or tool cycle can still exceed it), and for compaction's summary on a fork miss or with
   forks off; the importance prior; and subagents (their task context and
   tool results). The view is the whole window the agent held: the system
   prompt (identity and register), CONTEXT blocks, tool calls and their
   results, and earlier summaries. Before #380/#388 this role saw only a
-  dialog transcript (consolidation) or a JSON dump of the messages
-  (compaction), so a remote `background` endpoint now receives much more of
-  the host's data. Compaction's fallback sends the uncapped window prefix at
+  dialog transcript (consolidation); compaction's fallback ran on `main`.
+  A remote `background` endpoint now receives much more of the host's
+  data, compaction content included. Compaction's fallback sends the uncapped window prefix at
   the cut, since the window is over budget when compaction runs. A remote
   `background` role is a disclosure decision for all of it, not only for
   the importance prior.

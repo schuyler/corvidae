@@ -1470,7 +1470,7 @@ record that holds the reasoning.
 | Review findings gate on consequence, not reachability; tests derive from acceptance criteria, not the design's test list; new capability goes through requirements | principle 12 |
 | `discord-py` is a `discord` extra, like `acp` | #117 (R10) |
 | ACP keeps rejecting a concurrent prompt unless a real client is shown to steer with a bare prompt; a failed final delivery is `end_turn` | #93, #99 |
-| Summary role: `assistant` from the agent's own view, `user` only when the retained tail has no user message, or for a neutral summary written without the view (replays and evals), with data framing | §3.3.3; `threat-model.md` finding 3; #380; #388 |
+| Summary role: `assistant` from the agent's own view, `user` only when the retained tail has no user message, or for a neutral summary written without the view (evals), with data framing | §3.3.3; `threat-model.md` finding 3; #380; #388 |
 | The rendered view: a range that has left the window, and compaction's miss, are written from the agent's view (system prompt, window as held, instruction) on the background role, never from a standalone prompt that tells a model about the conversation; judgment still never reconstructs (#164) | §3.8; #380; #388 |
 | No process separation until corvidae runs on a machine the operator does not own | §3.5.5; `threat-model.md`, Privilege separation |
 | Personality is duck-typed and judged longitudinally; goal retirement is a consolidation event; `self` is a fact subject, ungated beyond trust inheritance; the self-model compile reads only facts above a trust floor and sends the operator each diff; interoception line and self-model compile; commitment records and endogenous goal candidates | §3.7; §3.12.9; PR #48 |

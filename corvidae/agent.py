@@ -1392,7 +1392,8 @@ class Agent(CorvidaePlugin):
         if channel is None:
             raise ValueError(
                 f"channel id {channel_id!r} is not transport:scope; "
-                "cannot build a view for it"
+                "cannot build a view for it; check the channel id recorded "
+                "in message_log for this range"
             )
         resolved = self._registry.resolve_config(channel)
         policy = resolved["reasoning_history"]

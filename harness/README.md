@@ -365,7 +365,9 @@ boundary, or its rows exceed the budget) is rejected, and the error lists the
 segments' id ranges; replay those ranges one at a time. That includes the
 range of some legacy `standalone` records, written before catch-up was
 segmented, so such a record's range can be rejected even though the daemon
-wrote it as one record. `--prompt-file` defaults to
+wrote it as one record, and the range of a record whose span absorbed a
+preceding segment with no dialog (catch-up folds that span into the next
+record). `--prompt-file` defaults to
 `memory.consolidation_fork_prompt` from `--config`, then to
 `DEFAULT_CONSOLIDATION_FORK_PROMPT` (the text in
 `prompts/memory_consolidation_fork.md`), as the daemon resolves it, and

@@ -169,8 +169,9 @@ prefix at the cut (the window is over budget when compaction runs), so on a
 fork miss or with forks off the summary's cost and quality move from
 `llm.main` to `llm.background`, and a background endpoint with a smaller
 context than `max_context_tokens` falls to the over-budget fallback more
-often. Catch-up consolidation sends at most `max_context_tokens` per
-segment.
+often. Catch-up consolidation trims each segment's view to
+`max_context_tokens`; a single oversized row or tool cycle can still exceed
+it, and a warning names the segment.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
