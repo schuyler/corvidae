@@ -9,6 +9,8 @@ on_compaction hook infrastructure.
 
 Logging:
     - WARNING: logged once at import time if tiktoken is unavailable
+    - WARNING: logged per call when tiktoken fails and count_tokens falls back
+      to the character-based estimate
     - DEBUG: entries removed by type
 """
 
@@ -35,11 +37,34 @@ _FALLBACK_CHARS_PER_TOKEN: float = 3.5
 
 
 def count_tokens(text: str) -> int:
-    """Count tokens in a string using tiktoken, or fall back to char estimate."""
+    """Count tokens in a string using tiktoken, or fall back to char estimate.
+
+    Never raises: any tiktoken failure is logged and the character-based
+    estimate is returned instead (PRD 3.3.1; #352).
+    """
+    # Empty text costs nothing.
     if not text:
         return 0
     if _encoder is not None:
-        return len(_encoder.encode(text))
+        try:
+            # tiktoken's default error stops special-token strings in user text
+            # being encoded as real control tokens when the IDs go to a model.
+            # We only measure length and never send IDs, so the check protects
+            # nothing, and would send every message containing such a string
+            # (tool output, pasted logs) down the fallback below.
+            return len(_encoder.encode(text, disallowed_special=()))
+        except Exception as exc:
+            # Rescue: log it, then fall through to the character estimate.
+            # shortcut: ~3.5 chars/token is approximate; upgrade if tiktoken
+            # failures turn out to be routine rather than rare.
+            logger.warning(
+                "tiktoken failed on %d-char text (%s); using character-based "
+                "estimate instead",
+                len(text),
+                type(exc).__name__,
+                exc_info=True,
+            )
+    # Character-based estimate: tiktoken is unavailable or just failed.
     return int(len(text) / _FALLBACK_CHARS_PER_TOKEN)
 
 
