@@ -288,12 +288,7 @@ one is a bug even if its tests pass.
     warm, not call by call (§3.13). Principles 2, 3, 7 and 11 and the fork
     requirements (§3.8) follow from this one: reuse the prefix, keep
     background work out of the main turn's way, let cheap work gate
-    expensive work, meter every call. A rule with a reason besides cost
-    keeps that reason on any pool: background judgment forks because a
-    rebuilt context loses the support the agent had (§3.8.2), whatever the
-    fork costs. Money and provider rate limits are outside this principle
-    for now: corvidae meets rate limits by retrying (§3.6.2), and a spend
-    limit is the operator's to set with the provider (#296).
+    expensive work, meter every call.
 
 ## 3. Requirements
 
@@ -762,7 +757,7 @@ Per transport:
     sent the note, never an inferred one. It carries the origin of the
     exchange that started the chain (§3.1.4), so the chain's kind
     (principle 13), critique eligibility (§3.7 Critique 3), budget (§3.1.3)
-    and latency class (§3.13.5) all follow how the chain started. The target's
+    and latency bound (§3.13.5) all follow how the chain started. The target's
     turn still judges for itself, and may end without sending anything
     (§3.7, the right to silence).
 11. Reading another channel: any turn can read another channel's recent
@@ -1339,20 +1334,17 @@ items) are tracked in #296 and are not requirements until decided there.
    background work therefore finishes before its channel's next main turn
    and pays no prefill beyond its own tail (principle 3). A fork whose
    prefix no longer holds a head waits for a lease like any queue.
-5. Every queue has a latency class, which sets its latency bound: how long
-   its waiting work may wait for a head. A channel's class defaults from
-   its transport (someone typing into a web UI expects an immediate reply;
-   someone texting doesn't) and the operator can override it per channel.
-   Upkeep and agency take the latency bounds §3.1.16 gives idle work
-   (principle 13). A lease holder yields at its next call boundary when a
-   waiting queue reaches its latency bound, and may yield earlier of its
-   own accord at any call boundary (consolidation between chunks, for
-   example). A yield never interrupts a call in flight; the queue that
-   yielded waits for a head again. Waiting work past its bound takes the
-   next free head ahead of work within its bound. So upkeep past its bound
-   is not starved, and a flooded channel holds a head no longer than
-   another queue's bound. Whether the agent can move a latency class is a
-   lock (principle 15).
+5. Every queue has a latency bound: how long its waiting work may wait
+   for a head. A channel gets its bound from a latency class, a named
+   bound set in operator config: each transport declares the class its
+   channels default to (someone typing into a web UI expects an immediate
+   reply; someone texting doesn't), and the operator can assign a channel
+   another class. The operator config defines which classes exist and what
+   each one's bound is. Upkeep and agency take the latency bounds §3.1.16
+   gives idle work (principle 13). A lease holder yields at its next call
+   boundary when a waiting queue reaches its latency bound, and the head
+   goes to that queue. A holder may also yield of its own accord at any
+   call boundary (consolidation between chunks, for example).
 6. While a pool has a free head, a queue with work takes it without
    waiting, background work included: background work runs beside a main
    turn rather than yielding to it. Principle 3's yield applies only when
