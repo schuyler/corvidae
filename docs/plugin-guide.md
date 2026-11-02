@@ -584,13 +584,13 @@ here is a plugin-API change and needs a line in this guide.
 | Module | Names |
 |---|---|
 | `corvidae.hooks` | `CorvidaePlugin`, `TransportPlugin`, `hookimpl`, `get_dependency`, `resolve_single_result` |
-| `corvidae.fork` | `fork_agent`, `quote`, `window_db_ids` (see [Forking the window](#forking-the-window)) |
+| `corvidae.fork` | `fork_agent`, `quote`, `window_db_ids`, `ViewInputs`, `view_agent`, `view_call`, `ForkRefused`, `build_fork_prompt`, `snap_cut_forward`, `snap_cut_to_tool_boundary` (see [Forking the window](#forking-the-window) and [The view call](#the-view-call)) |
 | `corvidae.attribution` | `set_attribution`, `reset_attribution` |
 | `corvidae.tuning` | `config_value`, `resolve_tunable` |
-| `corvidae.context` | `MessageType`, `ContextWindow`, `count_tokens` |
+| `corvidae.context` | `MessageType`, `ContextWindow`, `count_tokens`, `message_tokens` |
 | `corvidae.task` | `Task` |
 | `corvidae.tool` | `Tool`, `tool_to_schema` |
-| `corvidae.persistence` | `PersistencePlugin`, `add_column_if_missing` |
+| `corvidae.persistence` | `PersistencePlugin`, `add_column_if_missing`, `view_rows`, `decodable_summaries` |
 | `corvidae.llm_plugin` | `LLMPlugin` |
 | `corvidae.clock` | `Clock`, `Timer` (see [Acting on time and quiet](#acting-on-time-and-quiet)) |
 | `corvidae.idle` | `IdleTracker`, `IdleWatch` |
@@ -763,7 +763,7 @@ class MyPlugin(CorvidaePlugin):
   `agent.forks.reasoning_budget_tokens` instead.
 - It mutates nothing, persists nothing, fires no hooks and never runs
   tools: a reply with `tool_calls` (or a call written out as text) raises `ForkRefused`; no window or no
-  client raises `ForkUnavailable`. Treat these as a miss: skip the live-window work and log it. Keep a standalone path only for windowless work (seeding, imports, a range that has left the window) and for stages whose output can't be skipped, as compaction does.
+  client raises `ForkUnavailable`. Treat these as a miss: skip the live-window work and log it. Keep a non-fork path only for windowless work (seeding, imports), and for a range that has left the window or a stage whose output can't be skipped, as compaction does: for those use the view call below, not a prompt that describes the conversation.
 - Set your own `stage` attribution around the call; `Agent.fork` adds
   `mode="fork"`. Tag any standalone call you keep `mode="standalone"`.
 - Check containment yourself: a fork only makes sense while the rows your
@@ -772,6 +772,28 @@ class MyPlugin(CorvidaePlugin):
   not `resolve_tunable`, unless you want the agent to be able to rewrite it.
 - Stage names are opaque strings. List yours in `agent.forks.stages` (or
   leave it null for all stages).
+
+### The view call
+
+When the work is about a range that is no longer in the live window, send the
+agent's rendered view of it (PRD §3.8) rather than a standalone prompt. That
+is a window (live, or rebuilt from `message_log`) rendered with
+`build_fork_prompt` under the channel's system prompt, plus your instruction
+as the last `user` message, sent with `view_call(client, channel_id,
+messages, extra_body=...)` on a client you bind once
+(`llm.get_client("background")`). It sends no tools, raises `ForkRefused` on
+a reply with tool calls (structured or written out), and tags the call
+`mode="standalone"`; set your own `stage`, channel and trigger attribution
+around it. Get the channel's system prompt, budget (`max_tokens`),
+mid-conversation role and `reasoning_history` policy from
+`view_agent(self.pm).view_inputs(channel_id)`, which returns a `ViewInputs`
+(`view_agent` is None when no agent can supply one; it ignores
+`agent.forks`). `view_rows` and `decodable_summaries` in
+`corvidae.persistence` read the rows a reload would load under a summary.
+Trim the rebuilt window to `max_tokens` with `ContextWindow.fit_to_budget`
+and apply the policy, as the live loop does. Do not use the view for judgment
+of an exchange: that must fork the live window (PRD §3.8.2). Memory's
+`build_catchup_segments` is the worked example.
 
 ## Message gating and lifecycle
 
@@ -1267,7 +1289,7 @@ Compacts conversation history when it approaches the channel's
 
 Implements one hook:
 
-- `resolve_compaction` (`trylast=True`) — fires before each LLM call. Checks whether the token estimate exceeds `compaction_threshold * max_tokens`. If so, and if the conversation has more than `min_messages_to_compact` messages, summarizes older messages to fit within `compaction_retention * max_tokens`, moving the cut off any tool cycle that straddles it where that still leaves a useful compaction (design.md, CompactionPlugin step 3). With `agent.forks` on for `compaction`, the summary comes from a fork of the dropped prefix (`agent.compaction_fork_prompt`); otherwise, or if the fork fails, from the standalone summarizer (compaction keeps its standalone path on a miss). Fires `before_compaction` before truncating and `on_compaction` after. Returns True to stop the `firstresult` chain. Runs after any third-party handlers at default priority.
+- `resolve_compaction` (`trylast=True`) — fires before each LLM call. Checks whether the token estimate exceeds `compaction_threshold * max_tokens`. If so, and if the conversation has more than `min_messages_to_compact` messages, summarizes older messages to fit within `compaction_retention * max_tokens`, moving the cut off any tool cycle that straddles it where that still leaves a useful compaction (design.md, CompactionPlugin step 3). With `agent.forks` on for `compaction`, the summary comes from a fork of the dropped prefix (`agent.compaction_fork_prompt`); otherwise, or if the fork fails, from the same render sent on `llm.background` with no tools (the view call); if that fails too, the over-budget fallback applies. Fires `before_compaction` before truncating and `on_compaction` after. Returns True to stop the `firstresult` chain. Runs after any third-party handlers at default priority.
 
 Token counting uses tiktoken (cl100k_base encoding) via `count_tokens()` in `corvidae/context.py`. When tiktoken is unavailable, a character-based fallback is used (3.5 chars per token). `agent.chars_per_token` is deprecated and only takes effect in the fallback path.
 

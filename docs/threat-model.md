@@ -204,9 +204,13 @@ left the window, a refused or unparseable fork) skips stage-2 appraisal, the
 stylistic critique lenses and the provenance check with a warning (#320, PRD
 §3.8.5), so the standalone prompts `appraisal.stage2_prompt` and
 `critique.prompt.<lens>` are no longer reachable from any live stage. They
-stay in the tunable list above, and no stage reads them. Compaction falls
-back to its standalone summary by design, and consolidation of a range that
-has left the window runs standalone, as windowless work.
+stay in the tunable list above, and no stage reads them. Compaction on a
+fork miss, and consolidation of a range that has left the window, don't use
+a standalone prompt either: they send the agent's rendered view (system
+prompt, window, fork instruction) on `llm.background` with no tools (PRD
+§3.8; #380, #388), so the fork instructions above are the only prompts that
+steer them. The old `agent.compaction_prompt` and
+`memory.consolidation_prompt` are gone.
 
 The tunability itself is not a defect to engineer away: the capacity to
 tune and rewrite its own gates is part of a
@@ -257,15 +261,17 @@ with `user` the framed block becomes the last user turn the model sees.
 Check in `harness/` that the model still answers the person before you
 make it the default.
 
-Compaction is the adjacent problem. Summaries paraphrase other people's
-IRC messages and raw tool output and are stored as `role: assistant`
-(`compaction.py`), so the model reads whatever was injected as something
-it said itself, and that persists across restarts too. The obvious
-candidate is a `user`-role summary with the same data framing; it hasn't
-been tried. With `agent.forks` on for compaction (finding 8) this changes
-character: the summary is then genuinely the agent's own words about what
-it read, written under its own persona, not a neutral paraphrase stored
-under `role: assistant`. The `user`-role experiment is still worth running.
+Compaction is the adjacent problem. Summaries are stored as
+`role: assistant` (`compaction.py`), so the model reads whatever was
+injected as something it said itself, and that persists across restarts
+too. Every summary is now written from the agent's rendered view, by a
+fork or, on a miss, as a call on `llm.background` (PRD §3.3.3, §3.8). It
+is genuinely the agent's own words about what it read, written under its
+own persona, not a neutral paraphrase stored under `role: assistant`: the
+earlier standalone summarizer, which made the neutral paraphrase, is gone.
+The only `user`-role summary is the one for a retained tail with no user
+message (#56). A `user`-role summary with data framing, the obvious
+hardening, is still an experiment worth running.
 
 ### 4. Tools are unsandboxed and the exfil path is open
 
@@ -475,7 +481,10 @@ queue's bound, but nothing bounds their total (finding 14).
 ### 8. Forks put background instructions after untrusted text
 
 With `agent.forks.enabled` (on by default since #320; #51), compaction,
-consolidation, appraisal and critique don't build their own prompts. Each
+consolidation, appraisal and critique don't build their own prompts. (With
+forks off, or on a miss, compaction and out-of-window consolidation send
+the same view on `llm.background` instead of forking it: see the
+`background` role in finding 12, and the same exposure applies.) Each
 appends its instruction as a `user` turn to the channel's rendered window,
 after whatever untrusted text the window holds, under the agent's own
 persona, with the agent's tool schemas in the prompt. Injection that could
@@ -626,13 +635,23 @@ Every `llm:` role is an OpenAI-compatible client, so any role can point at a
 hosted provider. Doing so sends that role's requests, conversation content
 included, to the provider. Which stage uses which role:
 
-- `main`: agent turns, compaction summaries, and the forked appraisal and
-  critique stages (they fork the local window, so they cannot use a remote
+- `main`: agent turns, compaction summaries written by a fork, and the
+  forked appraisal and critique stages (they fork the local window, so they cannot use a remote
   role). The `llm.appraisal` and `llm.critic` roles are no longer read by any
   stage: stage 2 and the lenses run only as forks on `llm.main` (#320).
-- `background`: memory consolidation of ranges outside the window
-  (conversation transcripts), the importance prior and subagents (their
-  task context and tool results).
+- `background`: the rendered view (PRD §3.8) for memory consolidation of
+  ranges that have left the window, one per segment up to the channel's
+  `max_context_tokens`, and for compaction's summary on a fork miss or with
+  forks off; the importance prior; and subagents (their task context and
+  tool results). The view is the whole window the agent held: the system
+  prompt (identity and register), CONTEXT blocks, tool calls and their
+  results, and earlier summaries. Before #380/#388 this role saw only a
+  dialog transcript (consolidation) or a JSON dump of the messages
+  (compaction), so a remote `background` endpoint now receives much more of
+  the host's data. Compaction's fallback sends the uncapped window prefix at
+  the cut, since the window is over budget when compaction runs. A remote
+  `background` role is a disclosure decision for all of it, not only for
+  the importance prior.
 - `embedding`: memory embedding and retrieval queries, and retention.
 
 A role that isn't configured falls back to `main`, so the endpoint of
@@ -698,8 +717,9 @@ What each kind of unlock costs:
   unlock: everything else the operator wrote into
   the prompt, refusals included, is now the model's to change.
 - **The prompts that judge and remember** (the critic's and appraiser's
-  prompts, open by default today; fork instructions; the standalone
-  compaction and consolidation prompts; and `agent.forks.*`, which decides
+  prompts, open by default today; fork instructions, which now also steer
+  the background view for compaction misses and out-of-window
+  consolidation; and `agent.forks.*`, which decides
   whether those stages fork at all). The check can be rewritten by the
   thing it checks (finding 2). An injection can rewrite how the agent
   summarizes, consolidates and scores its own exchanges, under its own
@@ -709,8 +729,9 @@ What each kind of unlock costs:
   memory record written since stamping carries a stamp (earlier rows read
   NULL) (`prompt_hash`, `mode`, `model`, with the
   instruction text in `memory_prompt`), so the records written under an
-  edited `memory.consolidation_prompt` or `memory.consolidation_fork_prompt`
-  can be found afterwards. The stamp records the consolidation instructions,
+  edited `memory.consolidation_fork_prompt` can be found afterwards.
+  Records from before the standalone prompt was removed keep their old
+  stamp; they are not migrated. The stamp records the consolidation instructions,
   not the system prompt and window a fork runs under, so an edit to the
   system prompt isn't identifiable this way; nor does it cover the
   compaction, appraisal or critique prompts. `memory_prompt` holds
