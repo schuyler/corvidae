@@ -519,13 +519,17 @@ def parse_channel_config(config: dict) -> ParsedChannels:
                 f"Channel config for {channel_id!r} must be a mapping, got {type(overrides).__name__!r}"
             )
         _check_reasoning_keys(overrides, f"channels.{channel_id}")
-        # The identity is agent-wide (#316): point a stale key at both homes.
+        # The identity is agent-wide (#316). Rescue a stale key rather than
+        # refuse the config (PRD principle 5): skip it, say where it belongs.
         if _REMOVED_CHANNEL_PROMPT_KEY in overrides:
-            raise ValueError(
-                f"channels.{channel_id}.{_REMOVED_CHANNEL_PROMPT_KEY} was removed: a channel can't "
-                f"replace the agent's identity. Put the identity in agent.system_prompt "
-                f"and this channel's register in channels.{channel_id}.register_prompt"
+            logger.warning(
+                "channels.%s.%s is ignored: a channel can't replace the agent's "
+                "identity. Put the identity in agent.system_prompt and this "
+                "channel's register in channels.%s.register_prompt",
+                channel_id, _REMOVED_CHANNEL_PROMPT_KEY, channel_id,
+                extra={"channel_id": channel_id},
             )
+            overrides = {k: v for k, v in overrides.items() if k != _REMOVED_CHANNEL_PROMPT_KEY}
         _check_register_prompt(
             overrides.get("register_prompt"), f"channels.{channel_id}.register_prompt"
         )
