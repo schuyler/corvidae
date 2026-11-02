@@ -572,10 +572,11 @@ class TestBuildPromptRun8Interleave:
         return cw
 
     def test_run8_sequence_satisfies_both_invariants(self):
-        """RED at HEAD: fails on I2. The hoist puts the tool result right
-        after its call, leaving assistant("42") as the prompt's last
-        message — the shape that earned the run-8 400 (enable_thinking
-        rejects a trailing assistant message as a prefill)."""
+        """Both run-8 invariants hold: every call is followed by one tool
+        message per id, and the prompt doesn't end on assistant("42") — the
+        shape that earned the run-8 400 (enable_thinking rejects a trailing
+        assistant message as a prefill). Since #346 the result renders as a
+        framed late result after "42"."""
         cw = self._run8_window()
         prompt = cw.build_prompt(frozenset())
 
@@ -736,6 +737,21 @@ class TestBuildPromptInterruptedCycle:
             ("system", None, f"[result of the earlier shell call]\n\n{self.RESULT}"),
         ]
         assert prompt[4]["tool_calls"][0]["id"] == "c2"
+
+    def test_call_without_a_function_name_does_not_break_the_prompt(self):
+        """A stored call missing ``function`` (a non-conforming provider) must
+        not make every later build_prompt on the channel raise; a late result
+        for it is framed with a generic name."""
+        cw = ContextWindow("signal:lex")
+        cw.system_prompt = "sys"
+        cw.append({"role": "assistant", "content": "", "tool_calls": [{"id": "c1"}]})
+        cw.append({"role": "user", "content": "hi"})
+        cw.append({"role": "assistant", "content": "hello"})
+        cw.append({"role": "tool", "tool_call_id": "c1", "content": "done"})
+
+        prompt = cw.build_prompt(frozenset())
+
+        assert prompt[-1] == {"role": "system", "content": "[result of the earlier tool call]\n\ndone"}
 
 
 def test_context_window_has_no_mid_window_removal():

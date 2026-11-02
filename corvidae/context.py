@@ -111,9 +111,9 @@ _UNSENT_MARKER_SUBJECTS = {
     "progress": "Your progress text beginning «{excerpt}» was not shown",
     "thinking": "Your reasoning on your latest turn was not shown",
 }
-#: The progress marker quotes this much of the text: build_prompt moves a
-#: tool-calls block to its last result, so the marker renders before the
-#: block and its position alone can't say which text it means. The final
+#: The progress marker quotes this much of the text: build_prompt moves an
+#: uninterrupted tool-calls block to its last result, so the marker can render
+#: before the block and its position alone can't say which text it means. The final
 #: and thinking markers quote nothing (the final sits right above it;
 #: reasoning must not outlive reasoning_history: drop in a marker).
 _UNSENT_MARKER_EXCERPT_CHARS = 40
@@ -267,9 +267,9 @@ class ContextWindow:
             if m.get("role") == "tool" and m.get("tool_call_id") and m["tool_call_id"] not in result_at:
                 result_at[m["tool_call_id"]] = i
 
-        # Per call id: the call message's index, its interruption point (the
-        # first user/assistant row after it, else the window end), and its
-        # function name for the late-result frame.
+        # Per call id: its call message's index and its function name for the
+        # late-result frame. Per call message index: its interruption point
+        # (the first user/assistant row after it, else the window end).
         call_index: dict[str, int] = {}
         call_name: dict[str, str] = {}
         interrupt_at: dict[int, int] = {}
@@ -283,7 +283,8 @@ class ContextWindow:
             )
             for c in calls:
                 call_index.setdefault(c["id"], i)
-                call_name.setdefault(c["id"], c["function"]["name"])
+                # A provider that omits the name must not wedge every prompt.
+                call_name.setdefault(c["id"], (c.get("function") or {}).get("name") or "tool")
 
         # A result row renders as an interrupted-result frame when it is the
         # first row for its id and sits at or after its call's interruption.
