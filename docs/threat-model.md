@@ -228,7 +228,7 @@ Five places:
 - A tool result whose call compaction dropped (#79) is rendered by
   `ContextWindow.build_prompt` as a framed `role: system` message, since a
   `tool` message with no call breaks strict chat templates. The result can
-  be untrusted (a `web_fetch` page, an MCP reply). Unlike the two above it
+  be untrusted (a `web_fetch` page, an MCP reply). Unlike the first three it
   is render-only: the stored row stays `role: tool`.
 - A tool result that arrived after the conversation moved on past its call
   (a user message or an agent turn in between, #346) is rendered the same

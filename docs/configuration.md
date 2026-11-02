@@ -215,12 +215,8 @@ block, which is off-distribution. With it off, the template drops `<think>`
 before its own last-query boundary, and corvidae's boundary is never later
 than the template's, so nothing corvidae stripped is rendered.
 
-Two known gaps, both narrow:
+One known gap, a narrow one:
 
-- `build_prompt` moves a tool-call message to where its last result
-  arrived. If a user message interrupts a tool chain, a call made before
-  it can render after it in the prompt. Corvidae has already stripped that
-  call, and the template renders it with an empty `<think>` block.
 - Compaction runs before the stripping pass, so its first token estimate
   after a new user message still counts the previous exchange's reasoning.
 

@@ -995,8 +995,8 @@ appends a message produced by `_build_conversation_message`, which emits
 `role: "user"`, `"tool"`, or `"system"` and never `"assistant"`; compaction's
 `replace_with_summary` always retains at least one message
 (`retain_count >= 1`), so it cannot strand step 4's append; and
-`build_prompt`'s deferral never leaves an assistant `tool_calls` message
-last — its call+results block always ends on a `tool` message, real or
+`build_prompt` never leaves an assistant `tool_calls` message last — a
+call block, deferred or in place, always ends on a `tool` message, real or
 placeholder. This matters because llama.cpp reads a trailing assistant
 message as a prefill and rejects it under `enable_thinking`.
 
@@ -1553,9 +1553,7 @@ default priority) returned non-None first. The caller does not use the return va
    (`len(messages) - retain_count`) is then moved so no tool cycle
    straddles it (`_clean_cut`), because a straddle drops a call while
    keeping its results, and makes the dropped prefix render differently
-   from the start of the full window, which a compaction fork needs. (An
-   interrupted cycle, #346, no longer renders differently, since its block
-   stays in place; it is still snapped, which is conservative but correct.)
+   from the start of the full window, which a compaction fork needs.
    First choice: back up with `snap_cut_to_tool_boundary` to keep the
    cycle, if that drops some dialog (not just the previous summary) and
    the window after compaction (system prompt, a 2000-token summary

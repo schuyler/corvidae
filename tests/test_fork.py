@@ -114,9 +114,9 @@ def test_fork_cut_leaves_unanswered_call_abandoned():
 
 
 def test_fork_cut_after_result_renders_the_result():
-    """A call whose result is before the cut renders that result (R3). The
-    reply came between call and result, so the call keeps its pending
-    placeholder and the result renders framed after the reply (#346)."""
+    """A result before the cut is rendered (R3). The reply came between
+    call and result, so the call keeps its pending placeholder and the
+    result renders framed after the reply (#346)."""
     from corvidae.context import TOOL_RESULT_PENDING
 
     conv = _straddle_window()
