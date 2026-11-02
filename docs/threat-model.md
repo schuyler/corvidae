@@ -681,11 +681,10 @@ restart.
 
 What each kind of unlock costs:
 
-- **The system prompt.** In the tree, a per-channel `system_prompt`
-  replaces the agent-level one, and an injection that talks the model into
-  an edit rewrites the persona and its instructions on that channel. Under
-  the PRD the prompt has two layers, locked separately (PRD §3.3.8,
-  §3.5.6). An unlocked register lets an injection rewrite how the agent
+- **The system prompt.** The prompt has two layers (PRD §3.3.8): the
+  agent-wide identity, then a per-channel register (#316). Neither is
+  settable through `set_settings` in the tree; under the PRD they are
+  locked separately (§3.5.6). An unlocked register lets an injection rewrite how the agent
   speaks on that channel. An unlocked identity is agent-wide: an injection
   on any channel rewrites who the agent is on every channel, from each
   one's next compaction or conversation start. Lock the identity unless
@@ -958,9 +957,8 @@ database.
 Where the tree stands: memory is still compartmented per channel by default
 (`memory.channel_groups`, #168), and there is no send, note or read tool
 (#234, #235), so most of the costs above arrive with those changes; goals
-already cross channels (finding 10). A per-channel `system_prompt` still
-replaces the agent-level one, so the identity layering isn't built either
-(#316).
+already cross channels (finding 10). The identity and register layers
+are built (#316), but not their runtime overrides and separate locks.
 
 ### Smaller things
 

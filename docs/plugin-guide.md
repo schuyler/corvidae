@@ -811,9 +811,11 @@ Channels are created on-demand when messages arrive, or pre-registered in `agent
 ```yaml
 channels:
   irc:#general:
-    system_prompt: "You are the channel bot."
+    register_prompt: "This is #general; keep it brief."
     max_context_tokens: 16000
 ```
+
+A transport can ship a default register for its channels by implementing `resolve_register_prompt(channel)`: open with `if not self.owns(channel): return None` and return the register text. `corvidae.channels._registers.shipped_register(*names)` joins fragments from `corvidae/channels/registers/`. The Agent asks only when no `register_prompt` is configured for the channel, and appends the answer after `agent.system_prompt`.
 
 The `irc` transport is provided by `IRCPlugin` (registered via the `corvidae` entry point group). Its config block:
 
