@@ -16,11 +16,11 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # Fragments that operators are told to list in a channel's system_prompt.
 FRAGMENTS = [
-    "prompts/chat.md",
-    "prompts/signal_dm.md",
-    "prompts/discord_group.md",
     "prompts/memory_calibration.md",
 ]
+
+# Registers shipped inside the package (issue #316); sent to the model whole.
+SHIPPED_REGISTERS = ["chat", "signal_dm", "discord_group", "irc"]
 
 
 @pytest.mark.parametrize("path", FRAGMENTS)
@@ -31,6 +31,17 @@ def test_fragment_has_no_documentation_header(path: str) -> None:
     assert not text.lstrip().startswith("#"), f"{path} starts with a heading"
     # No horizontal rule separating a doc header from the prompt.
     assert "---" not in text.splitlines(), f"{path} contains a bare --- line"
+
+
+@pytest.mark.parametrize("name", SHIPPED_REGISTERS)
+def test_shipped_register_has_no_documentation_header(name: str) -> None:
+    """A shipped register starts with prompt text and has no `---` rule."""
+    from importlib import resources
+
+    text = resources.files("corvidae.channels").joinpath(f"registers/{name}.md").read_text()
+    assert text.strip(), f"registers/{name}.md is empty"
+    assert not text.lstrip().startswith("#"), f"registers/{name}.md starts with a heading"
+    assert "---" not in text.splitlines(), f"registers/{name}.md contains a bare --- line"
 
 
 def test_memory_calibration_sends_only_instructions() -> None:
