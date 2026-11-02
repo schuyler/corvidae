@@ -7,7 +7,9 @@ import pytest
 from unittest.mock import patch
 
 # This import fails until corvidae/context.py exists — that is the intended red state.
-from corvidae.context import ContextWindow, MessageType, DEFAULT_CHARS_PER_TOKEN, ORPHAN_RESULT_LABEL
+from corvidae.context import (
+    ContextWindow, MessageType, DEFAULT_CHARS_PER_TOKEN, ORPHAN_RESULT_LABEL, TOOL_RESULT_PENDING,
+)
 
 
 class TestMessageType:
@@ -416,13 +418,14 @@ class TestBuildPromptToolResultPlacement:
 
 
 class TestBuildPromptResumedTurnOrdering:
-    """R1 (design §"the interleaved turn's prompt is well-formed"): the
-    prompt reorders a tool result to sit immediately after the call that
-    produced it, even when other messages arrived between them in real time.
-    Stored arrival order (self.messages) is untouched — only the prompt.
+    """A tool call renders where it was made (PRD §3.3.5). When the
+    conversation moved on before its result arrived, the call keeps its
+    pending placeholder and the result renders where it arrived, framed and
+    attributed to the call (#346). Stored arrival order (self.messages) is
+    untouched — only the prompt.
     """
 
-    def test_interleaved_arrival_reorders_result_next_to_its_call(self):
+    def test_interleaved_arrival_keeps_call_in_place_and_frames_result(self):
         cw = ContextWindow("test:scope")
         cw.system_prompt = "sys"
         cw.append({"role": "user", "content": "M1"})
@@ -436,18 +439,19 @@ class TestBuildPromptResumedTurnOrdering:
 
         prompt = cw.build_prompt(frozenset())
 
-        # The tool_calls message is deferred to the arrival index of its
-        # result, not hoisted up to the call — keeps the prompt from ending
+        # The call stays before M2 with its pending placeholder; the result
+        # renders at its arrival position, framed, so the prompt never ends
         # on an assistant message.
         assert [(m["role"], m.get("content")) for m in prompt] == [
             ("system", "sys"),
             ("user", "M1"),
+            ("assistant", ""),
+            ("tool", TOOL_RESULT_PENDING),
             ("user", "M2"),
             ("assistant", "answer to M2"),
-            ("assistant", ""),
-            ("tool", "fetched"),
+            ("system", "[result of the earlier f call]\n\nfetched"),
         ]
-        # Stored order is untouched — only the prompt view is reordered.
+        # Stored order is untouched — only the prompt view changes.
         assert cw.messages[-1]["role"] == "tool"
 
     def test_ordinary_cycle_prompt_order_is_unaffected(self):
@@ -584,31 +588,33 @@ class TestBuildPromptRun8Interleave:
 
         assert prompt[-1]["role"] != "assistant"
 
-    def test_run8_sequence_emits_the_call_block_at_the_result(self):
-        """RED at HEAD: the hoist emits the call block at M1's position
-        instead of deferring it to the arrival index of its result."""
+    def test_run8_sequence_keeps_the_call_in_place_and_frames_the_result(self):
+        """#346: the call block stays at M1's position with its pending
+        placeholder; the result renders after "42", framed and attributed to
+        the web_fetch call, so the prompt still doesn't end on "42"."""
         cw = self._run8_window()
         prompt = cw.build_prompt(frozenset())
 
         assert [(m["role"], m.get("content")) for m in prompt] == [
             ("system", "sys"),
             ("user", "fetch https://example.com/token"),
+            ("assistant", ""),
+            ("tool", TOOL_RESULT_PENDING),
             ("user", "what is 6*7"),
             ("assistant", "42"),
-            ("assistant", ""),
-            ("tool", "TOKEN-EELGRASS-71"),
+            ("system", "[result of the earlier web_fetch call]\n\nTOKEN-EELGRASS-71"),
         ]
 
     def test_run8_sequence_drops_no_message(self):
-        """Regression anchor (green at HEAD): fences deferral against
-        becoming a drop — every stored message's content survives into
-        the prompt, whatever position it lands at."""
+        """Regression anchor: fences the rendering against becoming a drop —
+        every stored message's content survives into the prompt, whatever
+        position it lands at (a framed result wraps its content)."""
         cw = self._run8_window()
         prompt = cw.build_prompt(frozenset())
 
-        prompt_contents = [m.get("content") for m in prompt]
+        prompt_contents = [m.get("content") or "" for m in prompt]
         for stored in cw.messages:
-            assert stored.get("content") in prompt_contents
+            assert any(stored.get("content") in c for c in prompt_contents)
 
 
 class TestBuildPromptCallBlockInvariant:
@@ -632,6 +638,104 @@ class TestBuildPromptCallBlockInvariant:
         prompt = cw.build_prompt(frozenset())
 
         assert prompt[-1]["role"] == "tool"
+
+
+class TestBuildPromptInterruptedCycle:
+    """#346: a background tool call whose result was queued behind a user
+    message. The user turn ran first and was answered; then the result
+    arrived. The prompt must show the call where it was made, attribute the
+    late result to it, and keep the earlier prompt as a cache prefix.
+    """
+
+    SHELL_CALL = {
+        "id": "c1", "type": "function",
+        "function": {"name": "shell", "arguments": '{"command": "git commit -m x"}'},
+    }
+    QUESTION = "Would you say the trifecta applies to you too?"
+    ANSWER = "Yes. I have all three: ..."
+    RESULT = "[main 751a6da] x"
+
+    def _window(self, with_result: bool = True) -> "ContextWindow":
+        """The message_log rows 5185-5189 from the issue."""
+        cw = ContextWindow("signal:lex")
+        cw.system_prompt = "sys"
+        cw.append({"role": "assistant", "content": "", "tool_calls": [self.SHELL_CALL]})
+        cw.append({"role": "user", "content": self.QUESTION})
+        cw.append({"role": "system", "content": "[CONTEXT from memory]"}, MessageType.CONTEXT)
+        cw.append({"role": "assistant", "content": self.ANSWER})
+        if with_result:
+            cw.append({"role": "tool", "tool_call_id": "c1", "content": self.RESULT})
+        return cw
+
+    def test_call_renders_before_the_user_question(self):
+        """R1: the call shows where it was made, ahead of the question and
+        the answer that came after it."""
+        prompt = self._window().build_prompt(frozenset())
+
+        assert [(m["role"], m.get("content")) for m in prompt[:5]] == [
+            ("system", "sys"),
+            ("assistant", ""),
+            ("tool", TOOL_RESULT_PENDING),
+            ("user", self.QUESTION),
+            ("system", "[CONTEXT from memory]"),
+        ]
+        assert prompt[1]["tool_calls"][0]["id"] == "c1"
+        assert prompt[2]["tool_call_id"] == "c1"
+
+    def test_late_result_is_an_attributed_frame_at_the_tail(self):
+        """R2: the result renders after the answer as a framed non-tool
+        message naming the tool, with no wording about replying; the prompt
+        ends on it. Exact equality also proves there is no tool_call_id."""
+        prompt = self._window().build_prompt(frozenset())
+
+        assert prompt[-2] == {"role": "assistant", "content": self.ANSWER}
+        assert prompt[-1] == {
+            "role": "system",
+            "content": f"[result of the earlier shell call]\n\n{self.RESULT}",
+        }
+
+    def test_prompt_before_the_result_is_a_prefix_of_the_prompt_after(self):
+        """R3: the turn that sees the result reuses the previous prompt as
+        its cache prefix (the id was pending before, not after)."""
+        before = self._window(with_result=False).build_prompt(
+            frozenset({"c1"}), mid_conversation_system_role="user",
+        )
+        after = self._window().build_prompt(
+            frozenset(), mid_conversation_system_role="user",
+        )
+
+        assert after[: len(before)] == before
+        assert len(after) == len(before) + 1
+
+    def test_later_call_is_not_moved_past_an_earlier_calls_late_result(self):
+        """R1 (design decision 2b): results are buffered while any call is
+        pending, so c1's late result can land inside c2's ordinary cycle.
+        c2 still renders where it was made, with its own result, ahead of
+        c1's framed result."""
+        cw = ContextWindow("signal:lex")
+        cw.system_prompt = "sys"
+        cw.append({"role": "assistant", "content": "", "tool_calls": [self.SHELL_CALL]})
+        cw.append({"role": "user", "content": "what's the weather?"})
+        cw.append({
+            "role": "assistant", "content": "",
+            "tool_calls": [{"id": "c2", "type": "function",
+                            "function": {"name": "web_fetch", "arguments": "{}"}}],
+        })
+        cw.append({"role": "tool", "tool_call_id": "c1", "content": self.RESULT})
+        cw.append({"role": "tool", "tool_call_id": "c2", "content": "sunny"})
+
+        prompt = cw.build_prompt(frozenset())
+
+        assert [(m["role"], m.get("tool_call_id"), m.get("content")) for m in prompt] == [
+            ("system", None, "sys"),
+            ("assistant", None, ""),
+            ("tool", "c1", TOOL_RESULT_PENDING),
+            ("user", None, "what's the weather?"),
+            ("assistant", None, ""),
+            ("tool", "c2", "sunny"),
+            ("system", None, f"[result of the earlier shell call]\n\n{self.RESULT}"),
+        ]
+        assert prompt[4]["tool_calls"][0]["id"] == "c2"
 
 
 def test_context_window_has_no_mid_window_removal():

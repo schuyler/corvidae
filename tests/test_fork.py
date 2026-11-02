@@ -114,10 +114,15 @@ def test_fork_cut_leaves_unanswered_call_abandoned():
 
 
 def test_fork_cut_after_result_renders_the_result():
-    """A call whose result is before the cut renders that result (R3)."""
+    """A call whose result is before the cut renders that result (R3). The
+    reply came between call and result, so the call keeps its pending
+    placeholder and the result renders framed after the reply (#346)."""
+    from corvidae.context import TOOL_RESULT_PENDING
+
     conv = _straddle_window()
     prompt = build_fork_prompt(conv, 4, INSTRUCTION, frozenset(), "system")
-    assert _tool_content(prompt, "c1") == "late"
+    assert _tool_content(prompt, "c1") == TOOL_RESULT_PENDING
+    assert prompt[-2] == {"role": "system", "content": "[result of the earlier shell call]\n\nlate"}
 
 
 def test_fork_without_cut_unchanged_and_pure():
