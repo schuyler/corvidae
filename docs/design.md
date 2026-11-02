@@ -335,6 +335,21 @@ on the records it writes ([cognition.md](cognition.md#record-stamps)).
 `model` and ignores `extra_body`, so the encoder `embedding_meta` records
 can't be switched by an override.
 
+`chat` sends `defang_control_tokens(messages)`, not `messages` (#356).
+llama-server tokenizes request text with special-token parsing, so a
+literal `<|endoftext|>` in any message becomes the real control token. The
+model copies it while quoting the text, and generation stops with empty
+content. A fetched `<|im_start|>system` would inject template structure.
+`defang_control_tokens` walks the messages and rewrites every string match
+of `<\|[^|<>\s]{1,40}\|>` to `<` + U+200B + the rest. It returns new
+containers, so the window and the stored history keep the original text. It
+is a pure function of the messages, so the prompt prefix stays cache-stable.
+Every chat role and caller (main loop, forks, compaction, memory) goes
+through `chat`. `embed` and `tools` schemas are not rewritten. The model
+can still emit a control token from its own knowledge; this only keeps
+input text from supplying one. Added tokens without the `<|…|>` shape
+(Qwen's `<think>`, `<tool_call>`) are not covered.
+
 Retry parameters: `max_retries` (default 3, set to 0 to disable), `retry_base_delay`
 (base exponential backoff delay in seconds), `retry_max_delay` (cap on backoff delay).
 Retries apply to transient HTTP status codes (429, 500, 502, 503, 504) and connection

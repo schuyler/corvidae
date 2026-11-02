@@ -16,8 +16,10 @@ provide usage data, the fields are logged as `None`.
 
 import asyncio
 import logging
+import re
 import time
 import uuid
+from typing import Any
 
 import aiohttp
 
@@ -32,6 +34,35 @@ MODEL_NOT_LOADED_MIN_DELAY = 1.0
 MODEL_NOT_LOADED_MARKER = "model is not loaded"
 
 logger = logging.getLogger(__name__)
+
+# Text shaped like a chat-template control token (<|endoftext|>, <|im_start|>).
+# llama-server tokenizes request content with parse_special, so a literal one
+# in any message becomes the real token: the model copies it and generation
+# stops, or it injects template structure (#356).
+CONTROL_TOKEN_RE = re.compile(r"<(\|[^|<>\s]{1,40}\|>)")
+# A zero-width space after the "<" keeps the text readable but untokenizable
+# as the control token.
+CONTROL_TOKEN_DEFANGED = "<\u200b\\1"
+
+
+def defang_control_tokens(value: Any) -> Any:
+    """Return value with every control-token-shaped string made inert.
+
+    Walks dicts and lists and rewrites string values, returning new
+    containers so the caller's messages (the window, the stored history)
+    are never mutated. A pure function of its input, so the same messages
+    always produce the same prompt and the KV-cache prefix stays stable.
+    """
+    # Strings: rewrite matches; unmatched text comes back unchanged.
+    if isinstance(value, str):
+        return CONTROL_TOKEN_RE.sub(CONTROL_TOKEN_DEFANGED, value)
+    # Containers: rebuild with each value defanged; keys are framework-built.
+    if isinstance(value, dict):
+        return {key: defang_control_tokens(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [defang_control_tokens(item) for item in value]
+    # Anything else (numbers, None, booleans) carries no text.
+    return value
 
 
 class LLMHTTPError(aiohttp.ClientResponseError):
@@ -263,9 +294,11 @@ class LLMClient:
             },
         )
 
+        # Every chat role and caller passes through here, so this is the one
+        # place control-token strings are made inert before they leave (#356).
         payload = {
             "model": self.request_model(extra_body),
-            "messages": messages,
+            "messages": defang_control_tokens(messages),
         }
         if tools:
             payload["tools"] = tools
