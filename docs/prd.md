@@ -992,6 +992,13 @@ deciding only what to newly append and in what order.
    vetoed final is (item 2) so the agent knows it stayed silent, and is
    recorded in the outcome log. In conversational registers it errs toward
    silence: a missed reply costs the user one re-prompt.
+6. A final with no text and no tool calls is a decline (item 5): it is
+   withheld, never sent. A generation that stopped before its reasoning
+   finished is not a decline but a failed generation. The agent rescues
+   the turn before giving up; if the rescue fails too, the turn fails like
+   an LLM error, with an `error` emission naming the channel and a warning
+   in the log (principle 5). No text in the window, whoever wrote it, can
+   leave a channel unable to answer (principle 9).
 
 **Outcome log.** One `exchange_log` row per trace (origin, originating
 rowid, retrieval profile, probe score, both appraisal stages, provenance
