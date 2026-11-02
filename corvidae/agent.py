@@ -112,12 +112,26 @@ MAX_TURNS_FALLBACK_MESSAGE = "(max tool-calling rounds reached)"
 
 
 
+class GenerationCutOff(Exception):
+    """The model's reply was cut off mid-reasoning on both attempts."""
+
+    def __init__(self, channel_id: str) -> None:
+        super().__init__(f"reply cut off mid-reasoning twice on channel {channel_id}")
+        self.channel_id = channel_id
+
+
 def _describe_llm_failure(exc: Exception) -> str:
     """Map an LLM failure to a calm, human-readable cause for the user.
 
     Keeps Python type names out of user-facing text while still telling the
     user which class of failure happened.
     """
+    # A repeated cut-off: name what happened and the remedy.
+    if isinstance(exc, GenerationCutOff):
+        return (
+            f"the model's reply on {exc.channel_id} was cut off mid-reasoning "
+            "twice (resend or rephrase your message)"
+        )
     # A timeout is the most common transient failure: say so plainly.
     if isinstance(exc, TimeoutError):
         return "the model request timed out"
@@ -609,6 +623,22 @@ class Agent(CorvidaePlugin):
         """
         try:
             result = await run_agent_turn(self._client, messages, tool_schemas, extra_body=llm_overrides)
+            # A reply cut off mid-reasoning (no tool calls) is re-run once with
+            # the same messages; run_agent_turn appended the failed message, so
+            # drop it first. A second cut-off raises into the LLM-error path.
+            if result.reasoning_unfinished and not result.tool_calls:
+                logger.warning(
+                    "reply cut off mid-reasoning on channel %s "
+                    "(completion_tokens %s, reasoning tail %r); re-running once",
+                    channel.id,
+                    (result.usage or {}).get("completion_tokens"),
+                    (result.message.get("reasoning_content") or "")[-200:],
+                    extra={"channel": channel.id},
+                )
+                messages.pop()
+                result = await run_agent_turn(self._client, messages, tool_schemas, extra_body=llm_overrides)
+                if result.reasoning_unfinished and not result.tool_calls:
+                    raise GenerationCutOff(channel.id)
         except Exception as exc:
             unreachable = is_backend_unreachable(exc)
             if item is not None and item.retry:
@@ -1215,7 +1245,12 @@ class Agent(CorvidaePlugin):
                 channel, result,
                 fallback=MAX_TURNS_FALLBACK_MESSAGE if result.tool_calls else None,
             )
-            unsent = not await self._gate_send(channel, display_text, "final", item)
+            if not result.tool_calls and not (display_text or "").strip():
+                # An empty final is a decline (PRD §3.7 output gate items 5
+                # and 6): withhold it without consulting the gate.
+                unsent = True
+            else:
+                unsent = not await self._gate_send(channel, display_text, "final", item)
 
         # 8. Append assistant message and fire persistence event, attaching
         # the resolved rowid to the window copy (same rule as step 4). A

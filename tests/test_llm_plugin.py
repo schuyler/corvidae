@@ -158,6 +158,20 @@ def test_llm_plugin_create_client_uses_defaults_for_optional_params():
     assert isinstance(client, LLMClient)
 
 
+def test_llm_plugin_create_client_rejects_non_bool_raw_reasoning():
+    """raw_reasoning is passed through when boolean; a string is rejected
+    naming the key, the value and the accepted values (#355)."""
+    from corvidae.llm_plugin import LLMPlugin
+
+    cfg = {"base_url": "http://localhost:8080", "model": "my-model"}
+    assert LLMPlugin()._create_client({**cfg, "raw_reasoning": True}).raw_reasoning is True
+    with pytest.raises(ValueError) as exc:
+        LLMPlugin()._create_client({**cfg, "raw_reasoning": "false"}, role="background")
+    assert "llm.background.raw_reasoning" in str(exc.value)
+    assert "true or false" in str(exc.value)
+    assert "'false'" in str(exc.value)
+
+
 # ---------------------------------------------------------------------------
 # 7. LLMPlugin.on_start creates and starts main_client from config
 # ---------------------------------------------------------------------------

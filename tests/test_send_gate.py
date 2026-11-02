@@ -630,3 +630,69 @@ class TestReplay:
 
             texts = [c.kwargs["update"].content.text for c in acp.conn.session_update.await_args_list]
             assert texts == ["visible-user", "visible-answer"]
+
+
+# ---------------------------------------------------------------------------
+# Empty finals and cut-off reasoning (#355)
+# ---------------------------------------------------------------------------
+
+
+class TestEmptyFinalAndCutOff:
+    async def test_empty_final_is_a_withheld_decline(self, env):
+        """An empty final with no tool calls is not sent and not gated; the row
+        is UNSENT and a final marker follows. No reasoning marker, so it is
+        never classed as cut off."""
+        plugin, channel, db = env
+        gate = SpyGate()
+        plugin.pm.register(gate, name="spy_gate")
+        client = _client(_make_text_response(""))
+        plugin._client = client
+        plugin._mark_started()
+
+        await _say(plugin, channel)
+
+        assert sent_texts(plugin.pm, OutboundMessage) == []
+        assert gate.emissions() == []
+        assert client.chat.await_count == 1
+        rows = await _rows(db, channel.id)
+        assert [t for m, t in rows if m.get("role") == "assistant"] == ["unsent"]
+        markers = _markers(channel.conversation.messages)
+        assert [unsent_marker_emission(m["content"]) for m in markers] == ["final"]
+
+    async def test_cut_off_reply_is_rerun_once(self, env):
+        """An unfinished reply is re-run with identical messages; the second
+        reply is sent."""
+        plugin, channel, db = env
+        cut = _make_text_response("", reasoning="half a thought")
+        cut["reasoning_unfinished"] = True
+        client = _client(cut, _make_text_response("second try"))
+        plugin._client = client
+        plugin._mark_started()
+
+        await _say(plugin, channel)
+
+        assert client.chat.await_count == 2
+        first, second = (c.args[0] for c in client.chat.await_args_list)
+        assert first == second
+        assert sent_texts(plugin.pm, OutboundMessage) == ["second try"]
+
+    async def test_cut_off_twice_sends_an_error(self, env):
+        """Two unfinished replies end in one error message naming the cut-off
+        and the remedy."""
+        plugin, channel, db = env
+
+        def cut():
+            r = _make_text_response("", reasoning="half a thought")
+            r["reasoning_unfinished"] = True
+            return r
+
+        plugin._client = _client(cut(), cut())
+        plugin._mark_started()
+
+        await _say(plugin, channel)
+
+        texts = sent_texts(plugin.pm, OutboundMessage)
+        assert len(texts) == 1
+        assert "cut off mid-reasoning twice" in texts[0]
+        assert "resend or rephrase" in texts[0]
+        assert channel.id in texts[0]

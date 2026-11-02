@@ -158,6 +158,42 @@ class TestLLMClientChat:
         assert payload["messages"][0] == original[0]
         assert messages == original
 
+    async def test_chat_defangs_bare_think_and_tool_call_tags(self):
+        """Bare <think>/<tool_call> tags in messages go out inert (#355)."""
+        client = LLMClient(base_url=BASE_URL, model=MODEL)
+        client.session = _make_mock_session(_make_mock_response())
+        tags = ["<think>", "</think>", "<tool_call>", "</tool_call>"]
+        messages = [{"role": "user", "content": " ".join(tags)}]
+
+        await client.chat(messages)
+
+        # None of the four tags survives intact in the outgoing payload.
+        sent = json.dumps(client.session.post.call_args[1]["json"]["messages"], ensure_ascii=False)
+        for tag in tags:
+            assert tag not in sent
+
+    async def test_chat_raw_reasoning_parse(self):
+        """With raw_reasoning, the reply's <think> block is split out and a
+        missing </think> is flagged as a cut-off (#355)."""
+        client = LLMClient(base_url=BASE_URL, model=MODEL, raw_reasoning=True)
+        body = lambda content: {"choices": [{"message": {"role": "assistant", "content": content}}]}
+
+        # Finished reasoning: split into reasoning_content and content.
+        client.session = _make_mock_session(_make_mock_response(json_body=body("<think>\nr\n</think>\n\nhi")))
+        done = await client.chat(MESSAGES)
+        msg = done["choices"][0]["message"]
+        assert (msg["content"], msg["reasoning_content"]) == ("hi", "r")
+        assert "reasoning_unfinished" not in done
+
+        # No </think>: all reasoning, empty content, flagged outside the message.
+        client.session = _make_mock_session(_make_mock_response(json_body=body("<think>\nstill going")))
+        cut = await client.chat(MESSAGES)
+        msg = cut["choices"][0]["message"]
+        assert msg["content"] == ""
+        assert msg["reasoning_content"] == "still going"
+        assert cut["reasoning_unfinished"] is True
+        assert "reasoning_unfinished" not in msg
+
     async def test_chat_raises_on_http_error(self):
         from aiohttp import ClientResponseError
 

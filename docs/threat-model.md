@@ -962,11 +962,11 @@ are built (#316), but not their runtime overrides and separate locks.
 
 ### Smaller things
 
-- Control-token strings (`<|im_start|>`, `<|endoftext|>`) in untrusted
+- Control-token strings (`<|im_start|>`, `<|endoftext|>`) and bare
+  `<think>`/`</think>`/`<tool_call>`/`</tool_call>` tags in untrusted
   text are made inert in every chat request (`LLMClient.chat`, #356), so a
   fetched page can't inject chat-template structure or end every reply
-  that quotes it. Not covered: added tokens without the `<|…|>` shape
-  (Qwen's `<think>`, `<tool_call>`), which can still reach the model as
+  that quotes it. Not covered: other added tokens without the `<|…|>` shape, which can still reach the model as
   real tokens from fetched text; MCP tool descriptions in `tools`
   (finding 6); and the model emitting a control token on its own.
 
