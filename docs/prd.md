@@ -407,9 +407,6 @@ one is a bug even if its tests pass.
        logs a warning naming the channel and the rows hidden. The rescue
        holds across a restart, and `message_log` keeps every row
        (principle 4).
-    3. An item replayed after a crash (§3.4.8) that stops the process
-       again is not replayed again; the window says it was interrupted,
-       and the log names it.
 
 ### 3.2 Transports
 
