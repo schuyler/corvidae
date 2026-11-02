@@ -623,16 +623,33 @@ class Agent(CorvidaePlugin):
         """
         try:
             result = await run_agent_turn(self._client, messages, tool_schemas, extra_body=llm_overrides)
+            # A final reply that reopened reasoning after its answer is
+            # discarded and re-run once when llm.main.reasoning_reopened is
+            # "rerun"; the client already cut and logged it, and a second
+            # reopen is simply the cut text (#348).
+            if (
+                result.reasoning_reopened
+                and not result.tool_calls
+                and getattr(self._client, "reasoning_reopened", "truncate") == "rerun"
+            ):
+                logger.warning(
+                    "reply on channel %s reopened reasoning after its answer; "
+                    "discarding the cut reply and re-running once",
+                    channel.id,
+                    extra={"channel": channel.id},
+                )
+                messages.pop()
+                result = await run_agent_turn(self._client, messages, tool_schemas, extra_body=llm_overrides)
             # A reply cut off mid-reasoning (no tool calls) is re-run once with
             # the same messages; run_agent_turn appended the failed message, so
             # drop it first. A second cut-off raises into the LLM-error path.
             if result.reasoning_unfinished and not result.tool_calls:
                 logger.warning(
                     "reply cut off mid-reasoning on channel %s "
-                    "(completion_tokens %s, reasoning tail %r); re-running once",
+                    "(completion_tokens %s, response %r); re-running once",
                     channel.id,
                     (result.usage or {}).get("completion_tokens"),
-                    (result.message.get("reasoning_content") or "")[-200:],
+                    (result.message.get("reasoning_content") or ""),
                     extra={"channel": channel.id},
                 )
                 messages.pop()

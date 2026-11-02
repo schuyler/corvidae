@@ -16,6 +16,7 @@ Config:
         retry_max_delay: 60.0
         model_not_loaded_wait: 60.0  # seconds to wait out an unloaded model
         raw_reasoning: false  # endpoint returns <think>…</think> inline in content
+        reasoning_reopened: truncate  # truncate | rerun: a reply that reopens reasoning after its answer
         timeout: ...        # optional
       background:     # optional — absent means use llm.main
         (same keys)
@@ -119,6 +120,24 @@ def _raw_reasoning(cfg: dict, role: str) -> bool:
         raise ValueError(
             f"llm.{role}.raw_reasoning must be true or false, got {value!r}"
         )
+    return value
+
+
+def _reasoning_reopened(cfg: dict, role: str) -> str:
+    """Validate llm.<role>.reasoning_reopened: "truncate" (default) or "rerun".
+
+    An invalid value never fails startup: it is logged and read as truncate.
+    """
+    value = cfg.get("reasoning_reopened", "truncate")
+    # Only the two known strings pass; anything else (incl. non-strings) falls back.
+    if value not in ("truncate", "rerun") or not isinstance(value, str):
+        logger.warning(
+            "llm.%s.reasoning_reopened is %r; accepted values are "
+            "truncate, rerun; falling back to truncate — fix the value in "
+            "agent.yaml and reload or restart",
+            role, value,
+        )
+        return "truncate"
     return value
 
 
@@ -353,6 +372,7 @@ class LLMPlugin(CorvidaePlugin):
             query_prefix=cfg.get("query_prefix", ""),
             model_not_loaded_wait=_model_not_loaded_wait(cfg, role),
             raw_reasoning=_raw_reasoning(cfg, role),
+            reasoning_reopened=_reasoning_reopened(cfg, role),
         )
         pm = getattr(self, "pm", None)
         if pm is not None:

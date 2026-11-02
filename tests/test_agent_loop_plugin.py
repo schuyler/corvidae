@@ -495,6 +495,7 @@ class TestOnMessagePersistenceAndLoop:
             query_prefix="",
             model_not_loaded_wait=60.0,
             raw_reasoning=False,
+            reasoning_reopened="truncate",
         )
 
         await db.close()
@@ -538,6 +539,7 @@ class TestOnMessagePersistenceAndLoop:
             query_prefix="",
             model_not_loaded_wait=60.0,
             raw_reasoning=False,
+            reasoning_reopened="truncate",
         )
 
         await db.close()
@@ -581,6 +583,7 @@ class TestOnMessagePersistenceAndLoop:
             query_prefix="",
             model_not_loaded_wait=60.0,
             raw_reasoning=False,
+            reasoning_reopened="truncate",
         )
 
         await db.close()
@@ -624,6 +627,7 @@ class TestOnMessagePersistenceAndLoop:
             query_prefix="",
             model_not_loaded_wait=60.0,
             raw_reasoning=False,
+            reasoning_reopened="truncate",
         )
 
         await db.close()

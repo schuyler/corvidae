@@ -59,6 +59,8 @@ class AgentTurnResult:
             provider returned none.
         reasoning_unfinished: True when the client flagged the reply as cut
             off mid-reasoning (raw reasoning mode only).
+        reasoning_reopened: True when the client cut the reply at a reasoning
+            block reopened after its answer (raw reasoning mode only).
     """
 
     message: dict
@@ -68,6 +70,7 @@ class AgentTurnResult:
     logprobs: dict | None = None
     usage: dict | None = None
     reasoning_unfinished: bool = False
+    reasoning_reopened: bool = False
 
 
 async def run_agent_turn(
@@ -139,6 +142,7 @@ async def run_agent_turn(
     )
     return AgentTurnResult(message=msg, tool_calls=tool_calls, text=text, latency_ms=latency_ms, logprobs=logprobs, usage=usage,
         reasoning_unfinished=bool(response.get("reasoning_unfinished")),
+        reasoning_reopened=bool(response.get("reasoning_reopened")),
     )
 
 
