@@ -55,6 +55,16 @@ def _exc_type_names(exc: BaseException) -> str:
     return type(exc).__name__
 
 
+def _server_endpoint(cfg: dict) -> str:
+    """The server's command (stdio) or url (sse, streamable_http), for logs.
+
+    Called from failure logging, so it must not raise: a retry-round config
+    that fails validation may lack the key, and then the endpoint is "?".
+    """
+    key = "command" if cfg.get("transport") == "stdio" else "url"
+    return str(cfg.get(key, "?"))
+
+
 def _resolve_headers(name: str, headers: dict | None) -> dict[str, str] | None:
     """Return ``headers`` with every ${VAR} replaced from the environment.
 
@@ -353,9 +363,19 @@ class McpClientPlugin(CorvidaePlugin):
                     continue
                 try:
                     await self._connect_server(server_name, server_cfg)
-                except Exception:
+                except (Exception, asyncio.CancelledError) as exc:
+                    # A real cancel (shutdown) goes to the outer handler. A
+                    # cancel with no one cancelling this task is a failed
+                    # connect that surfaced as CancelledError (#385).
+                    if (
+                        isinstance(exc, asyncio.CancelledError)
+                        and asyncio.current_task().cancelling()
+                    ):
+                        raise
                     logger.warning(
-                        "MCP server failed to connect, skipping",
+                        "MCP server %r (%s) failed to connect (%s), skipping",
+                        server_name, _server_endpoint(server_cfg),
+                        _exc_type_names(exc),
                         extra={"server": server_name},
                         exc_info=True,
                     )
@@ -519,15 +539,23 @@ class McpClientPlugin(CorvidaePlugin):
                 continue
             try:
                 await self._connect_server(name, cfg)
-            except Exception as exc:
+            except (Exception, asyncio.CancelledError) as exc:
+                # A real cancel propagates; a cancel with no one cancelling
+                # this task is a failed connect surfacing as CancelledError
+                # (#385) and is handled like any other connect failure.
+                if (
+                    isinstance(exc, asyncio.CancelledError)
+                    and asyncio.current_task().cancelling()
+                ):
+                    raise
                 # The loop knows its next delay; a tool-call retry does not.
                 when = (
                     f"retrying in {self._next_delay:g}s" if from_loop
                     else "the background retry will try again"
                 )
                 logger.warning(
-                    "MCP server %r reconnect failed (%s); %s",
-                    name, _exc_type_names(exc), when,
+                    "MCP server %r (%s) reconnect failed (%s); %s",
+                    name, _server_endpoint(cfg), _exc_type_names(exc), when,
                     extra={"server": name},
                     exc_info=True,
                 )
@@ -580,8 +608,9 @@ class McpClientPlugin(CorvidaePlugin):
         Note: config errors (ValueError, KeyError, McpHeaderEnvError) are
         raised by _parse_server_config before anything opens; on_start
         reports them and never queues the server for retry. Any other
-        exception is a connect failure, logged by the caller and retried. A
-        handshake that exceeds connect_timeout_seconds is logged by the
+        exception is a connect failure, logged by the caller and retried; so
+        is a CancelledError that nobody requested, which the callers check
+        with ``cancelling()``. A handshake that exceeds connect_timeout_seconds is logged by the
         owner and returns without registering the server.
         """
         # Validate config before anything opens, so a config error raises
@@ -671,7 +700,11 @@ class McpClientPlugin(CorvidaePlugin):
         Teardown errors are logged here, not raised, so they cannot break
         on_stop's other servers. Anything raised before ``ready`` resolves
         (including the SDK imports) resolves it with that exception and
-        closes the stack, so _connect_server never waits forever.
+        closes the stack, so _connect_server never waits forever. A
+        transport that cancels this task from inside on failure (anyio) is
+        not a real cancel: when the stack's close then raises, ``ready``
+        resolves with that error and the task returns instead of raising
+        CancelledError.
         """
         name = owner.name
         stack = owner.stack
@@ -723,7 +756,26 @@ class McpClientPlugin(CorvidaePlugin):
         except BaseException as exc:
             # Runs outside the timeout block, so the cancel the timeout used
             # has already become TimeoutError and teardown is not cancelled.
-            await self._close_failed_server(name, stack)
+            cleanup_exc = await self._close_failed_server(stack)
+            # A transport that fails (anyio task group on ConnectError)
+            # cancels this task from inside; once the stack has closed,
+            # cancelling() is 0 for that and stays nonzero for a real cancel.
+            # The cleanup exception is then the real failure (#385).
+            internal_cancel = (
+                isinstance(exc, asyncio.CancelledError)
+                and asyncio.current_task().cancelling() == 0
+                and cleanup_exc is not None
+            )
+            if internal_cancel:
+                if not ready.done():
+                    ready.set_exception(cleanup_exc)
+                return
+            if cleanup_exc is not None:
+                logger.warning(
+                    "MCP server cleanup after failed connect raised",
+                    extra={"server": name},
+                    exc_info=cleanup_exc,
+                )
             # Our own bound expired: log it once, without the traceback of
             # the cancelled handshake, and report "not registered". Any other
             # failure (including a TimeoutError raised inside the handshake)
@@ -773,19 +825,20 @@ class McpClientPlugin(CorvidaePlugin):
                     exc_info=True,
                 )
 
-    async def _close_failed_server(self, name: str, stack: AsyncExitStack) -> None:
-        """Tear down a server whose connect failed, logging (never raising)
-        cleanup errors so they cannot mask the connect failure itself."""
+    async def _close_failed_server(
+        self, stack: AsyncExitStack
+    ) -> Exception | None:
+        """Tear down a server whose connect failed. Returns the exception
+        the teardown raised, or None; never raises it. The caller decides
+        whether it is a cleanup error to log or the connect failure itself
+        (a transport that cancels the owner re-raises its error from here)."""
         try:
             await stack.aclose()
         # Transport cleanup raises types outside this codebase's control
         # (anyio, mcp), as in the owner's shutdown.
-        except Exception:
-            logger.warning(
-                "MCP server cleanup after failed connect raised",
-                extra={"server": name},
-                exc_info=True,
-            )
+        except Exception as exc:
+            return exc
+        return None
 
     def _build_tool_list(self) -> list[Tool]:
         """Build the cached Tool list from all connected servers.

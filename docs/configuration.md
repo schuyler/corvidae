@@ -745,7 +745,7 @@ case adds the sum of the configured bounds to startup time. A server that
 failed to connect at startup is retried in the background on the transports'
 backoff ladder (10 s, doubling to 300 s, reset when a retry succeeds), with no
 tool call needed, so a daemon whose servers were all down recovers without a
-restart; each failed retry logs a WARNING naming the server, the error and the
+restart; each failed retry logs a WARNING naming the server, its endpoint, the error and the
 next delay. An MCP tool call also retries pending servers as a fast path,
 unless a retry is already running. A server skipped for a config error is logged
 once, naming `mcp.servers.<name>.<key>` and the rejected value, and never

@@ -2172,6 +2172,20 @@ servers. A `CancelledError` delivered to `on_start` stops and awaits the
 owners already started before it propagates, and a cancelled or failed
 mid-connect owner is awaited before `_connect_server` returns.
 
+A transport can cancel its own owner. When a streamable-HTTP POST fails
+(say `ConnectError` from an unreachable server), the SDK's anyio task group
+cancels its host scope, so the owner sees a `CancelledError` while its stack
+is still open. Once the stack is closed, `asyncio.current_task().cancelling()`
+tells the two apart: anyio uncancels its own cancel when its scope exits,
+leaving 0, while a cancel from outside leaves it at 1 or more. With 0 and an
+exception from the teardown, which is the real failure
+(`ExceptionGroup[ConnectError]`), the owner resolves `ready` with that
+exception, and the server is skipped and queued like any failed connect
+(#385). As a backstop, `on_start` and `_retry_round` treat a `CancelledError`
+that arrives while their own task isn't being cancelled as a connect failure,
+and re-raise a real cancel. The connect-failure warnings name the server, its
+endpoint (URL or command) and the unwrapped exception type.
+
 ### Tool naming
 
 Each tool is named `{tool_prefix}__{mcp_tool_name}`. `tool_prefix` defaults to
