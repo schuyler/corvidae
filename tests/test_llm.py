@@ -126,6 +126,38 @@ class TestLLMClientChat:
         payload = call_args[1]["json"]
         assert "tools" not in payload
 
+    async def test_chat_defangs_control_token_strings(self):
+        """Control-token strings in any message field reach the payload inert
+        (#356); the caller's messages are untouched and a message with no
+        match goes out unchanged."""
+        client = LLMClient(base_url=BASE_URL, model=MODEL)
+        client.session = _make_mock_session(_make_mock_response())
+        token = "<|endoftext|>"
+        messages = [
+            {"role": "system", "content": "plain prompt"},
+            {"role": "user", "content": f"bos_token is {token}"},
+            {
+                "role": "assistant",
+                "content": "",
+                "reasoning_content": f"the error quotes '{token}'",
+                "tool_calls": [{
+                    "id": "c1",
+                    "type": "function",
+                    "function": {"name": "shell", "arguments": json.dumps({"cmd": f"echo {token}"})},
+                }],
+            },
+        ]
+        original = json.loads(json.dumps(messages))
+
+        await client.chat(messages)
+
+        payload = client.session.post.call_args[1]["json"]
+        sent = json.dumps(payload["messages"], ensure_ascii=False)
+        assert token not in sent
+        assert sent.count("<\u200b|endoftext|>") == 3
+        assert payload["messages"][0] == original[0]
+        assert messages == original
+
     async def test_chat_raises_on_http_error(self):
         from aiohttp import ClientResponseError
 
