@@ -11,7 +11,9 @@ llm:
     #   id_slot: 0                      # example: llama.cpp KV cache slot for parallelism
     #   reasoning_format: none          # example: llama.cpp returns reasoning inline (pair with raw_reasoning)
     # raw_reasoning: false             # endpoint returns <think>…</think> inline: corvidae splits it and re-runs a
-    #                                   # reply cut off mid-reasoning; only where the template forces thinking open
+    #                                   # reply cut off mid-reasoning; only where the template forces thinking open.
+    #                                   # Calls sending response_format drop reasoning_format and aren't split
+    #                                   # (server default must be a parsed mode, not --reasoning-format none)
     # max_retries: 3                   # max retry attempts on transient errors (429, 500, 502, 503, 504)
     # retry_base_delay: 2.0            # base delay in seconds for exponential backoff
     # retry_max_delay: 60.0            # maximum delay cap in seconds

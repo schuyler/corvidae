@@ -194,6 +194,67 @@ class TestLLMClientChat:
         assert cut["reasoning_unfinished"] is True
         assert "reasoning_unfinished" not in msg
 
+    async def test_chat_raw_reasoning_schema_call_runs_parsed(self):
+        """A raw client's call carrying response_format drops
+        reasoning_format and returns the reply unsplit (#360)."""
+        # The server's parsed-mode JSON reply, which has no </think>.
+        reply = {"choices": [{"message": {"role": "assistant", "content": '{"a":2}'}}]}
+        schema = {"type": "json_schema", "json_schema": {"name": "x", "schema": {}}}
+
+        # Call-level response_format on a client configured for raw mode (R1, R2).
+        client = LLMClient(
+            base_url=BASE_URL, model=MODEL, raw_reasoning=True,
+            extra_body={"reasoning_format": "none"},
+        )
+        client.session = _make_mock_session(_make_mock_response(json_body=reply))
+        response = await client.chat(MESSAGES, extra_body={"response_format": schema})
+        sent = client.session.post.call_args[1]["json"]
+        assert sent["response_format"] == schema
+        assert "reasoning_format" not in sent
+        assert response["choices"][0]["message"]["content"] == '{"a":2}'
+        assert "reasoning_unfinished" not in response
+
+        # Instance-level response_format is decided on the merged payload (R4).
+        client = LLMClient(
+            base_url=BASE_URL, model=MODEL, raw_reasoning=True,
+            extra_body={"reasoning_format": "none", "response_format": schema},
+        )
+        client.session = _make_mock_session(
+            _make_mock_response(json_body={"choices": [{"message": {"role": "assistant", "content": '{"a":2}'}}]})
+        )
+        response = await client.chat(MESSAGES)
+        assert "reasoning_format" not in client.session.post.call_args[1]["json"]
+        assert response["choices"][0]["message"]["content"] == '{"a":2}'
+        assert "reasoning_unfinished" not in response
+
+    async def test_chat_raw_reasoning_plain_call_keeps_reasoning_format(self):
+        """A raw client's call without response_format still sends
+        reasoning_format: none (#360, R3)."""
+        client = LLMClient(
+            base_url=BASE_URL, model=MODEL, raw_reasoning=True,
+            extra_body={"reasoning_format": "none"},
+        )
+        # Own reply dict: the raw split mutates the message in place.
+        reply = {"choices": [{"message": {"role": "assistant", "content": "r\n</think>\nhi"}}]}
+        client.session = _make_mock_session(_make_mock_response(json_body=reply))
+        response = await client.chat(MESSAGES)
+        assert client.session.post.call_args[1]["json"]["reasoning_format"] == "none"
+        assert response["choices"][0]["message"]["content"] == "hi"
+
+    async def test_chat_non_raw_schema_call_unchanged(self):
+        """A non-raw client sends reasoning_format with response_format
+        as configured and returns content as-is (#360, R5)."""
+        schema = {"type": "json_schema", "json_schema": {"name": "x", "schema": {}}}
+        client = LLMClient(
+            base_url=BASE_URL, model=MODEL, extra_body={"reasoning_format": "none"},
+        )
+        reply = {"choices": [{"message": {"role": "assistant", "content": '{"a":2}'}}]}
+        client.session = _make_mock_session(_make_mock_response(json_body=reply))
+        response = await client.chat(MESSAGES, extra_body={"response_format": schema})
+        sent = client.session.post.call_args[1]["json"]
+        assert (sent["reasoning_format"], sent["response_format"]) == ("none", schema)
+        assert response["choices"][0]["message"]["content"] == '{"a":2}'
+
     async def test_chat_raises_on_http_error(self):
         from aiohttp import ClientResponseError
 

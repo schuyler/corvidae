@@ -196,7 +196,11 @@ class LLMClient:
             raw_reasoning: The endpoint returns reasoning inline in
                           ``content``, closed by ``</think>``; chat() splits
                           it into ``reasoning_content`` and flags a reply
-                          with no ``</think>`` as cut off (#355).
+                          with no ``</think>`` as cut off (#355). A call
+                          that sends ``response_format`` runs in the
+                          server's parsed mode instead: ``reasoning_format``
+                          is dropped from it and its reply is not split
+                          (#360).
         """
         self.base_url = base_url.rstrip("/")
         self.model = model
@@ -336,6 +340,17 @@ class LLMClient:
         if extra_body:
             payload.update(extra_body)  # call-level override wins
 
+        # Raw mode is decided per call (#360): a call that sends
+        # response_format needs the server's parsed mode, since llama-server
+        # can't apply a JSON-schema grammar with reasoning_format: none (400).
+        # Such a call drops reasoning_format from this payload only and is
+        # not split below. shortcut: relies on the server's own default being
+        # a parsed mode; a server started with --reasoning-format none still
+        # rejects schema calls. Upgrade to an explicit override if one appears.
+        raw = self.raw_reasoning and "response_format" not in payload
+        if self.raw_reasoning and not raw:
+            payload.pop("reasoning_format", None)
+
         # Mint a per-call id pairing the observer request with its response,
         # and announce the call (summarized — counts, not payloads).
         request_id = uuid.uuid4().hex[:12]
@@ -366,7 +381,7 @@ class LLMClient:
         # Raw mode: split the reply's reasoning out and flag a cut-off at the
         # response's top level, so the flag is never persisted or sent back.
         choices = response.get("choices")
-        if self.raw_reasoning and choices and isinstance(choices[0].get("message"), dict):
+        if raw and choices and isinstance(choices[0].get("message"), dict):
             if split_raw_reasoning(choices[0]["message"]):
                 response["reasoning_unfinished"] = True
 
