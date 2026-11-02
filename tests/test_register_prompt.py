@@ -27,7 +27,6 @@ from corvidae.channel import (
 from corvidae.channels.acp import AcpPlugin
 from corvidae.channels.cli import CLIPlugin
 from corvidae.channels.discord import DiscordPlugin
-from corvidae.channels.irc import IRCPlugin
 from corvidae.channels.signal import SignalPlugin
 from corvidae.channels.web import WebPlugin
 from corvidae.hooks import AgentSpec, hookimpl
@@ -144,6 +143,15 @@ async def _default(plugin, transport: str, scope: str):
     return await plugin.resolve_register_prompt(channel=Channel(transport=transport, scope=scope))
 
 
+def _irc_plugin():
+    """An IRCPlugin, imported at test time: tests/test_irc_plugin.py imports
+    the module under a mocked pydle at collection, and importing it here
+    first would bypass that mock."""
+    from corvidae.channels.irc import IRCPlugin
+
+    return IRCPlugin()
+
+
 class TestShippedDefaults:
     async def test_signal_gets_chat_and_signal_dm(self):
         assert await _default(SignalPlugin(), "signal", "aci-1") == _shipped("chat", "signal_dm")
@@ -156,14 +164,14 @@ class TestShippedDefaults:
 
     @pytest.mark.parametrize("scope", ["#lex", "somenick"])
     async def test_irc_gets_chat_and_irc(self, scope):
-        assert await _default(IRCPlugin(), "irc", scope) == _shipped("chat", "irc")
+        assert await _default(_irc_plugin(), "irc", scope) == _shipped("chat", "irc")
 
     @pytest.mark.parametrize(
         "plugin, transport",
-        [(SignalPlugin(), "discord"), (DiscordPlugin(), "signal"), (IRCPlugin(), "signal")],
+        [(SignalPlugin, "discord"), (DiscordPlugin, "signal"), (_irc_plugin, "signal")],
     )
     async def test_a_transport_does_not_answer_for_another(self, plugin, transport):
-        assert await _default(plugin, transport, "x") is None
+        assert await _default(plugin(), transport, "x") is None
 
     @pytest.mark.parametrize("cls", [WebPlugin, CLIPlugin, AcpPlugin])
     def test_web_cli_acp_ship_no_default(self, cls):
