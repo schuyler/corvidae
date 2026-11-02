@@ -13,27 +13,20 @@ def _make_channel(channel_id: str = "test:scope1") -> object:
 
 
 class TestCompactCarriesForwardSummaries:
-    """Tests for compaction handling of prior summaries in the older portion."""
+    """Compaction hands the view call the live window prefix, summaries
+    included (the prior-summaries split was removed with the standalone
+    summarizer; #380/#388, R5)."""
 
-    async def test_compact_carries_forward_prior_summaries(self):
-        """resolve_compaction must carry forward existing SUMMARY entries
-        from the older portion into the new summary.
+    async def test_prior_summary_is_in_the_prefix_the_view_receives(self):
+        """resolve_compaction passes ``_view_summary`` the conversation and the
+        cut, and the prefix ``conversation.messages[:cut]`` still holds the
+        existing SUMMARY row, so repeated compaction carries it forward
+        (the "death spiral" guard) by rendering it, not by a split.
 
-        This prevents the "death spiral" where repeated compaction of
-        tool-only messages loses all accumulated user context.
-
-        Setup: 10 messages that trigger compaction, with the first message
-        (index 0, which ends up in 'older') typed as SUMMARY. The summarizer
-        must receive the SUMMARY content as prior context.
+        Token math: 10 msgs x 35 chars -> int(350/3.5)=100 >= 40 triggers.
         """
         conv = ContextWindow("chan1")
         conv.system_prompt = ""
-
-        # Build 10 messages. The first one is typed SUMMARY to simulate a
-        # pre-existing summary entry in the older portion.
-        # Token math: 10 msgs x 35 chars → int(350/3.5)=100 ≥ 40 → triggers; len=10>5.
-        # retain_count=2 → older = messages[0:8], retained = messages[-2:].
-        # The SUMMARY-typed message at index 0 falls in older and must be carried forward.
         conv.messages = [
             {"role": "assistant", "content": "a" * 35, "_message_type": MessageType.SUMMARY},
         ] + [
@@ -41,74 +34,28 @@ class TestCompactCarriesForwardSummaries:
             for _ in range(9)
         ]
 
-        captured_new = []
-        captured_prior = []
+        seen: dict = {}
 
-        async def capture_summarize(messages, prior_summaries=None, max_tokens=None):
-            captured_new.extend(messages)
-            if prior_summaries:
-                captured_prior.extend(prior_summaries)
+        async def capture_view(channel, conversation, cut):
+            # Snapshot the prefix the view call would render.
+            seen["conversation"] = conversation
+            seen["cut"] = cut
+            seen["prefix"] = list(conversation.messages[:cut])
             return "carried forward summary"
 
         from corvidae.compaction import CompactionPlugin
         plugin = CompactionPlugin(pm=None)
         channel = _make_channel()
 
-        with patch.object(plugin, "_summarize", side_effect=capture_summarize):
+        with patch.object(plugin, "_view_summary", side_effect=capture_view):
             await plugin.resolve_compaction(
                 channel=channel, conversation=conv, max_tokens=50
             )
 
-        # The SUMMARY-typed dict must be passed as prior_summaries
-        assert len(captured_prior) == 1, (
-            f"Expected 1 prior summary, got {len(captured_prior)}"
-        )
-        # Prior summary content should be preserved
-        assert captured_prior[0]["content"] == "a" * 35
-        # _message_type must be stripped from both new messages and prior summaries
-        for msg in captured_new + captured_prior:
-            assert "_message_type" not in msg, (
-                f"_message_type key must be stripped: {msg!r}"
-            )
-
-    async def test_compact_filters_non_message_non_summary_from_older(self):
-        """resolve_compaction must exclude CONTEXT-typed entries from both
-        the new messages and prior summaries passed to the summarizer.
-        """
-        conv = ContextWindow("chan1")
-        conv.system_prompt = ""
-
-        conv.messages = [
-            {"role": "user", "content": "a" * 35, "_message_type": MessageType.CONTEXT},
-            {"role": "user", "content": "a" * 35, "_message_type": MessageType.MESSAGE},
-        ] + [
-            {"role": "user", "content": "a" * 35, "_message_type": MessageType.MESSAGE}
-            for _ in range(8)
-        ]
-
-        captured_new = []
-        captured_prior = []
-
-        async def capture_summarize(messages, prior_summaries=None, max_tokens=None):
-            captured_new.extend(messages)
-            if prior_summaries:
-                captured_prior.extend(prior_summaries)
-            return "filtered summary"
-
-        from corvidae.compaction import CompactionPlugin
-        plugin = CompactionPlugin(pm=None)
-        channel = _make_channel()
-
-        with patch.object(plugin, "_summarize", side_effect=capture_summarize):
-            await plugin.resolve_compaction(
-                channel=channel, conversation=conv, max_tokens=50
-            )
-
-        # CONTEXT-typed messages should be filtered out
-        for msg in captured_new:
-            assert msg["content"] == "a" * 35  # all should be MESSAGE-type content
-        # No prior summaries (the CONTEXT entry shouldn't appear as one)
-        assert len(captured_prior) == 0
+        assert seen["conversation"] is conv
+        assert any(
+            m.get("_message_type") == MessageType.SUMMARY for m in seen["prefix"]
+        ), "the existing summary row must be in the prefix the view renders"
 
 
 # ---------------------------------------------------------------------------
@@ -137,15 +84,11 @@ class TestOnCompactionHookFired:
             for _ in range(10)
         ]
 
-        mock_client = AsyncMock()
-        mock_client.chat = AsyncMock(
-            return_value={"choices": [{"message": {"content": "hook test summary"}}]}
-        )
-        plugin._llm_client = mock_client
-
-        await plugin.resolve_compaction(
-            channel=channel, conversation=conv, max_tokens=50
-        )
+        # The summary comes from the view-call seam; no LLM is involved.
+        with patch.object(plugin, "_view_summary", AsyncMock(return_value="hook test summary")):
+            await plugin.resolve_compaction(
+                channel=channel, conversation=conv, max_tokens=50
+            )
 
         mock_pm.ahook.on_compaction.assert_awaited_once()
         call_kwargs = mock_pm.ahook.on_compaction.call_args.kwargs
@@ -246,7 +189,7 @@ class TestDeathSpiralPrevention:
 
     async def test_tool_only_compaction_carries_forward_prior_summary(self):
         """When compacting only tool outputs, the prior summary must be
-        passed to the summarizer so user context is preserved.
+        in the prefix the view call renders so user context is preserved.
 
         Simulates the death spiral: [SUMMARY, tool, tool, tool, tool, tool, ...retained]
         where the second compaction only sees tool outputs as new messages.
@@ -313,127 +256,37 @@ class TestDeathSpiralPrevention:
             },
         ]
 
-        captured_new = []
-        captured_prior = []
+        captured_prefix: list[dict] = []
 
-        async def capture_summarize(messages, prior_summaries=None, max_tokens=None):
-            captured_new.extend(messages)
-            if prior_summaries:
-                captured_prior.extend(prior_summaries)
+        async def capture_view(channel, conversation, cut):
+            # The prefix the view call renders: the summary must be in it.
+            captured_prefix.extend(conversation.messages[:cut])
             return "User asked to investigate duplicate responses. Reading source files."
 
         from corvidae.compaction import CompactionPlugin
         plugin = CompactionPlugin(pm=None)
         channel = _make_channel()
 
-        with patch.object(plugin, "_summarize", side_effect=capture_summarize):
+        with patch.object(plugin, "_view_summary", side_effect=capture_view):
             result = await plugin.resolve_compaction(
                 channel=channel, conversation=conv, max_tokens=50
             )
 
         assert result is True, "Compaction should have been performed"
 
-        # The prior SUMMARY must be passed to the summarizer
-        assert len(captured_prior) == 1, (
-            f"Expected 1 prior summary (the earlier compaction result), "
-            f"got {len(captured_prior)}"
-        )
-        assert "duplicate LLM responses" in captured_prior[0]["content"], (
+        # The prior SUMMARY is in the prefix the view renders
+        summaries = [
+            m for m in captured_prefix
+            if m.get("_message_type") == MessageType.SUMMARY
+        ]
+        assert len(summaries) == 1
+        assert "duplicate LLM responses" in summaries[0]["content"], (
             "Prior summary content must include the user context about the bug investigation"
         )
 
-        # New messages should not include the SUMMARY (it was separated to prior_summaries)
-        for msg in captured_new:
-            assert msg.get("content", "") != captured_prior[0]["content"], (
-                "SUMMARY content should not be duplicated in new messages"
-            )
 
-    async def test_no_prior_summaries_passes_none(self):
-        """First compaction (no prior summaries) should pass None for prior_summaries."""
-        conv = ContextWindow("chan1")
-        conv.system_prompt = ""
-
-        # All MESSAGE type, no summaries
-        conv.messages = [
-            {"role": "user", "content": "a" * 35, "_message_type": MessageType.MESSAGE}
-            for _ in range(10)
-        ]
-
-        captured_prior = None
-
-        async def capture_summarize(messages, prior_summaries=None, max_tokens=None):
-            nonlocal captured_prior
-            captured_prior = prior_summaries
-            return "first summary"
-
-        from corvidae.compaction import CompactionPlugin
-        plugin = CompactionPlugin(pm=None)
-        channel = _make_channel()
-
-        with patch.object(plugin, "_summarize", side_effect=capture_summarize):
-            await plugin.resolve_compaction(
-                channel=channel, conversation=conv, max_tokens=50
-            )
-
-        assert captured_prior == [], (
-            f"First compaction should have empty prior_summaries, got {captured_prior}"
-        )
-
-
-class TestSummarizeTruncation:
-    """Tests for _summarize message truncation when input is large."""
-
-    async def test_summarize_truncates_large_input(self):
-        """_summarize must truncate to head + marker + tail when given >100 messages."""
-        from corvidae.compaction import CompactionPlugin
-
-        plugin = CompactionPlugin(pm=None)
-        plugin._llm_client = AsyncMock()
-
-        # Build 200 messages so truncation kicks in.
-        messages = [{"role": "user", "content": f"msg {i}"} for i in range(200)]
-
-        captured_payload = {}
-
-        async def fake_chat(payload):
-            captured_payload["payload"] = payload
-            return {"choices": [{"message": {"content": "summary"}}]}
-
-        plugin._llm_client.chat = fake_chat
-        await plugin._summarize(messages, max_tokens=20000)
-
-        user_msg = captured_payload["payload"][1]  # index 0 is system prompt
-        import json
-        sent = json.loads(user_msg["content"])
-
-        # head (50) + marker (1) + tail (50) = 101 entries
-        assert len(sent) == 101
-        assert sent[50]["content"] == "[...100 messages omitted...]"
-        assert sent[0]["content"] == "msg 0"
-        assert sent[-1]["content"] == "msg 199"
-
-    async def test_summarize_does_not_truncate_small_input(self):
-        """_summarize must not truncate when given ≤100 messages."""
-        from corvidae.compaction import CompactionPlugin
-
-        plugin = CompactionPlugin(pm=None)
-        plugin._llm_client = AsyncMock()
-
-        messages = [{"role": "user", "content": f"msg {i}"} for i in range(50)]
-
-        captured_payload = {}
-
-        async def fake_chat(payload):
-            captured_payload["payload"] = payload
-            return {"choices": [{"message": {"content": "summary"}}]}
-
-        plugin._llm_client.chat = fake_chat
-        await plugin._summarize(messages, max_tokens=20000)
-
-        import json
-        sent = json.loads(captured_payload["payload"][1]["content"])
-        assert len(sent) == 50
-        assert all("messages omitted" not in m.get("content", "") for m in sent)
+class TestResolveCompactionSignature:
+    """Signature of the resolve_compaction hookimpl."""
 
     def test_resolve_compaction_hookimpl_has_no_client_parameter(self):
         """resolve_compaction hookimpl must NOT have a 'client' parameter.
@@ -487,31 +340,20 @@ class TestSizingUnifiesAcrossSites:
 
     async def test_compaction_succeeds_despite_large_reasoning_content(self):
         """resolve_compaction must trigger and complete without raising
-        when content is small but reasoning_content is large, and the
-        payload it sends to the LLM must stay within budget.
-        """
-        import json
-
+        when content is small but reasoning_content is large (the trigger
+        sizes what is stored, not just visible content). The summary call
+        itself is the view seam, covered by tests/test_compaction_fork.py."""
         from corvidae.compaction import CompactionPlugin
-        from corvidae.context import count_tokens
 
         conv = self._reasoning_shaped_conversation()
         plugin = CompactionPlugin(pm=None)
-        plugin._llm_client = AsyncMock()
-
-        captured_payload = {}
-
-        async def fake_chat(payload):
-            captured_payload["payload"] = payload
-            return {"choices": [{"message": {"content": "summary"}}]}
-
-        plugin._llm_client.chat = fake_chat
         channel = _make_channel()
 
         max_tokens = 4000
-        result = await plugin.resolve_compaction(
-            channel=channel, conversation=conv, max_tokens=max_tokens
-        )
+        with patch.object(plugin, "_view_summary", AsyncMock(return_value="summary")):
+            result = await plugin.resolve_compaction(
+                channel=channel, conversation=conv, max_tokens=max_tokens
+            )
 
         # Content alone is tiny (16 short strings) -- a content-only trigger
         # check would never fire even though the persisted messages are
@@ -522,73 +364,6 @@ class TestSizingUnifiesAcrossSites:
             "compaction must trigger and succeed when size is hidden in "
             "reasoning_content, not just visible content"
         )
-
-        # The payload actually sent to the LLM inside _summarize must be
-        # bounded by a budget derived from max_tokens -- proving the fix
-        # bounds what gets sent, not just that the call returned.
-        system_msg, user_msg = captured_payload["payload"]
-        sent_tokens = count_tokens(system_msg["content"]) + count_tokens(user_msg["content"])
-        summary_response_reserve = 2000
-        assert sent_tokens <= max_tokens - summary_response_reserve, (
-            f"summarize payload ({sent_tokens} tokens) exceeds the budget "
-            f"derived from max_tokens={max_tokens}"
-        )
-
-        # Documentary: content-only sizing of the same messages radically
-        # understates the real payload -- this is the blind spot that lets
-        # reasoning_content-heavy channels overflow undetected.
-        sent_messages = json.loads(user_msg["content"])
-        content_only = sum(count_tokens(m.get("content") or "") for m in sent_messages)
-        assert content_only < sent_tokens / 2, (
-            "content-only sizing should badly understate the real, "
-            "reasoning_content-inclusive payload size"
-        )
-
-
-class TestCompactionPromptHonored:
-    """agent.compaction_prompt applies to every compaction, including the
-    prior-summary branch (GitHub issue #51's related bug)."""
-
-    async def _system_content(self, prompt: str | None, prior: list[dict] | None) -> str:
-        """Run _summarize with a capturing client; return the system message."""
-        from corvidae.compaction import CompactionPlugin
-
-        plugin = CompactionPlugin(pm=None)
-        if prompt is not None:
-            plugin._summary_prompt = prompt
-        captured = {}
-
-        async def fake_chat(payload):
-            captured["payload"] = payload
-            return {"choices": [{"message": {"content": "summary"}}]}
-
-        plugin._llm_client = AsyncMock()
-        plugin._llm_client.chat = fake_chat
-        await plugin._summarize(
-            [{"role": "user", "content": "new"}], prior, max_tokens=20000,
-        )
-        system = captured["payload"][0]
-        assert system["role"] == "system"
-        return system["content"]
-
-    async def test_custom_prompt_used_on_first_compaction(self):
-        assert await self._system_content("CUSTOM PROMPT", None) == "CUSTOM PROMPT"
-
-    async def test_custom_prompt_used_with_prior_summaries(self):
-        prior = [{"role": "assistant", "content": "[Summary] earlier facts"}]
-        content = await self._system_content("CUSTOM PROMPT", prior)
-        assert content.startswith("CUSTOM PROMPT")
-        # The carry-forward instruction and the prior summary still follow.
-        assert "PRIOR SUMMARIES" in content
-        assert content.endswith("[Summary] earlier facts")
-
-    async def test_default_prompt_used_with_prior_summaries(self):
-        from corvidae.compaction import CompactionPlugin
-
-        prior = [{"role": "assistant", "content": "[Summary] earlier facts"}]
-        content = await self._system_content(None, prior)
-        assert content.startswith(CompactionPlugin.DEFAULT_SUMMARY_PROMPT)
-        assert content.endswith("[Summary] earlier facts")
 
 
 class TestCooldownWithoutPriorFailure:
@@ -615,7 +390,7 @@ class TestCooldownWithoutPriorFailure:
 
         # Pretend the machine booted five seconds ago.
         with patch("corvidae.compaction.time.monotonic", return_value=5.0), \
-                patch.object(plugin, "_summarize", AsyncMock(return_value="summary")):
+                patch.object(plugin, "_view_summary", AsyncMock(return_value="summary")):
             result = await plugin.resolve_compaction(
                 channel=_make_channel(), conversation=conv, max_tokens=50
             )

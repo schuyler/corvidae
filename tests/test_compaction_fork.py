@@ -1,6 +1,7 @@
 """Compaction as a fork of the dropped prefix (GitHub issue #51, phase 2):
 the cut moved off straddling tool cycles without stalling, the
-before_compaction hook, the fork summary and its standalone fallback."""
+before_compaction hook, the fork summary and its fallback, the background
+view call (#380, #388, PRD §3.3.2, §3.8.5)."""
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -8,10 +9,12 @@ import pytest
 
 from corvidae.compaction import CompactionPlugin
 from corvidae.context import ContextWindow, MessageType
-from corvidae.fork import ForkRefused
+from corvidae.fork import ForkRefused, build_fork_prompt
 from corvidae.hooks import create_plugin_manager, hookimpl
 
-from helpers import FakeForkAgent, build_plugin_and_channel
+from helpers import (
+    FakeForkAgent, RecordingClient, build_plugin_and_channel, recording_llm_plugin,
+)
 from llm_response_fixtures import _make_text_response
 
 MAX_TOKENS = 20000
@@ -73,8 +76,8 @@ class _Order:
 
 
 async def _compact(conv, agent=None, summary="sum", max_tokens=MAX_TOKENS):
-    """Run one compaction with a patched standalone summarizer; returns
-    (result, order recorder, summarize mock)."""
+    """Run one compaction with a patched background-view summarizer (the seam
+    behind a fork miss); returns (result, order recorder, view mock)."""
     pm = create_plugin_manager()
     order = _Order(conv)
     pm.register(order, name="order")
@@ -84,7 +87,7 @@ async def _compact(conv, agent=None, summary="sum", max_tokens=MAX_TOKENS):
     summarize = AsyncMock(side_effect=summary) if isinstance(summary, Exception) else AsyncMock(return_value=summary)
     channel = MagicMock()
     channel.id = "test:scope"
-    with patch.object(plugin, "_summarize", summarize):
+    with patch.object(plugin, "_view_summary", summarize):
         result = await plugin.resolve_compaction(channel=channel, conversation=conv, max_tokens=max_tokens)
     return result, order, summarize
 
@@ -174,7 +177,7 @@ async def test_large_system_prompt_does_not_stall_compaction():
         else:
             conv.messages.append(_msg("user" if step % 2 else "assistant", "word " * 60, step))
         before, count = conv.token_estimate(), len(conv.messages)
-        with patch.object(plugin, "_summarize", AsyncMock(return_value="s " * 600)):
+        with patch.object(plugin, "_view_summary", AsyncMock(return_value="s " * 600)):
             if await plugin.resolve_compaction(channel=channel, conversation=conv, max_tokens=8192):
                 rounds.append((count - len(conv.messages) + 1, before / 8192))
     assert rounds
@@ -214,30 +217,72 @@ async def test_fork_produces_summary():
     }
 
 
-@pytest.mark.parametrize("agent", [
-    FakeForkAgent({"compaction"}, error=ForkRefused("tool call")),
-    FakeForkAgent({"compaction"}, error=RuntimeError("http 500")),
-    FakeForkAgent({"compaction"}, text=""),
-    FakeForkAgent(set(), text="forks off"),
-])
-async def test_fork_miss_falls_back_to_standalone(agent):
-    conv = _straddling_window()
-    seen = {}
-
-    async def summarize(*args, **kwargs):
-        from corvidae.attribution import get_attribution
-        seen.update(get_attribution())
-        return "standalone summary"
-
+def _view_rig(agent, text="view summary", bg_error=None):
+    """A CompactionPlugin on a pm holding ``agent`` and a role-recording LLM
+    plugin; returns (plugin, channel, main client, background client, llm)."""
     pm = create_plugin_manager()
+    main = RecordingClient("MAIN SHOULD NOT BE CALLED")
+    background = RecordingClient(text, error=bg_error)
+    llm = recording_llm_plugin(main, background)
+    pm.register(llm, name="llm")
     pm.register(agent, name="agent")
     plugin = CompactionPlugin(pm=pm)
     channel = MagicMock()
     channel.id = "test:scope"
-    with patch.object(plugin, "_summarize", side_effect=summarize):
-        assert await plugin.resolve_compaction(channel=channel, conversation=conv, max_tokens=MAX_TOKENS)
-    assert conv.messages[0]["content"].endswith("standalone summary")
-    assert (seen["stage"], seen["mode"]) == ("compaction", "standalone")
+    channel.pending_tool_call_ids = set()
+    return plugin, channel, main, background, llm
+
+
+@pytest.mark.parametrize("agent", [
+    pytest.param(FakeForkAgent({"compaction"}, error=ForkRefused("tool call")), id="fork_raises"),
+    pytest.param(FakeForkAgent(set(), text="forks off"), id="forks_off"),
+])
+async def test_fork_miss_summarizes_from_background_view(agent):
+    """R5: on a fork miss, or with forks off, the summary is written from the
+    same view (system prompt, the window prefix at the cut, the compaction
+    fork instruction) as a plain call on llm.background with no tools."""
+    conv = _straddling_window()
+    plugin, channel, main, background, llm = _view_rig(agent, text="background summary")
+    # The view the fork would have sent, rendered before the window changes.
+    expected = build_fork_prompt(conv, 6, CompactionPlugin.DEFAULT_FORK_PROMPT, frozenset(), "system")
+
+    assert await plugin.resolve_compaction(channel=channel, conversation=conv, max_tokens=MAX_TOKENS)
+
+    [call] = background.chat_calls
+    assert call["messages"][0] == {"role": "system", "content": conv.system_prompt}
+    assert call["messages"] == expected
+    assert call["messages"][-1] == {"role": "user", "content": CompactionPlugin.DEFAULT_FORK_PROMPT}
+    assert call["tools"] is None
+    assert "background" in llm.roles
+    assert main.chat_calls == []
+    assert (call["attribution"]["stage"], call["attribution"]["mode"]) == ("compaction", "standalone")
+    assert conv.messages[0]["content"] == "[Summary of earlier conversation]\nbackground summary"
+
+
+@pytest.mark.parametrize("tail_has_user,role", [
+    pytest.param(True, "assistant", id="tail_has_user"),
+    pytest.param(False, "user", id="tool_only_tail"),
+])
+async def test_view_summary_role(tail_has_user, role):
+    """R5: the role rule is unchanged for a summary written from the view:
+    ``assistant``, or ``user`` only when the retained tail has no user
+    message (#56). With forks off the background view wrote it."""
+    conv = _straddling_window()
+    if not tail_has_user:
+        conv.messages[-1] = _msg("assistant", "next", 10)
+    plugin, channel, main, background, _ = _view_rig(FakeForkAgent(set()), text="view reply")
+
+    assert await plugin.resolve_compaction(channel=channel, conversation=conv, max_tokens=MAX_TOKENS)
+
+    # One request on background: the view, headed by the system prompt and
+    # ending in the compaction fork instruction.
+    [call] = background.chat_calls
+    assert call["messages"][0]["role"] == "system"
+    assert call["messages"][-1]["content"] == CompactionPlugin.DEFAULT_FORK_PROMPT
+    assert main.chat_calls == []
+    # The persisted summary is that reply, in the rule's role.
+    assert conv.messages[0]["content"] == "[Summary of earlier conversation]\nview reply"
+    assert conv.messages[0]["role"] == role
 
 
 async def test_fork_through_real_agent_is_prefix_of_main_render():
@@ -259,34 +304,5 @@ async def test_fork_through_real_agent_is_prefix_of_main_render():
         assert await plugin.resolve_compaction(channel=channel, conversation=conv, max_tokens=MAX_TOKENS)
         assert client.chat.call_args.args[0] == full[:7] + [{"role": "user", "content": "Sum it up."}]
         assert conv.messages[0]["content"].endswith("real fork")
-    finally:
-        await db.close()
-
-
-async def test_default_forks_on_and_failing_fork_still_summarizes_standalone():
-    """#320 R4: with no ``agent.forks`` config the fork is attempted (the
-    default is on), and when it fails compaction still writes the
-    standalone summary."""
-    agent, channel, db = await build_plugin_and_channel()
-    try:
-        # No ``forks`` key anywhere in the agent config: the default decides.
-        await agent.on_init(agent.pm, {"agent": {}})
-        client = MagicMock()
-        client.chat = AsyncMock(side_effect=RuntimeError("http 500"))
-        agent._client = client
-        agent._mark_started()
-        conv = _straddling_window()
-        channel.conversation = conv
-
-        plugin = CompactionPlugin(pm=agent.pm)
-        await plugin.on_init(agent.pm, {"agent": {}})
-        summarize = AsyncMock(return_value="standalone summary")
-        with patch.object(plugin, "_summarize", summarize):
-            assert await plugin.resolve_compaction(
-                channel=channel, conversation=conv, max_tokens=MAX_TOKENS)
-        # The fork was tried, then the standalone summary was used.
-        client.chat.assert_awaited()
-        summarize.assert_awaited_once()
-        assert conv.messages[0]["content"].endswith("standalone summary")
     finally:
         await db.close()

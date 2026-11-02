@@ -126,23 +126,58 @@ async def drain_task_queue(plugin):
 
 
 class FakeForkAgent:
-    """Stands in for Agent in fork tests (GitHub issue #51).
+    """Stands in for Agent in fork and view tests (GitHub issues #51, #380, #388).
 
     Forks are enabled for ``stages``; each fork is recorded with its
     attribution and answers ``text``, or raises ``error``. ``fail_marker``
     limits the error to instructions containing it.
+
+    It is also view-capable (``view_agent`` duck-types on ``view_inputs``):
+    ``view_inputs`` returns ``ViewInputs("IDENTITY\n\nREGISTER", max_tokens,
+    "system", <policy bound via apply_reasoning_history>)``. ``max_tokens``
+    and ``reasoning_history`` ("drop" | "exchange" | "keep") are settable per
+    test; ``mid_conversation_system_role`` is the role compaction renders
+    mid-conversation system messages with. ``view_calls`` records the channel
+    ids view_inputs was asked about.
     """
 
-    def __init__(self, stages, text="", error=None, fail_marker=None, model=None):
+    #: The system prompt every fake view starts with.
+    SYSTEM_PROMPT = "IDENTITY\n\nREGISTER"
+
+    def __init__(self, stages, text="", error=None, fail_marker=None, model=None,
+                 max_tokens=100_000, reasoning_history="drop"):
         self.stages = set(stages)
         self.model = model
         self.text = text
         self.error = error
         self.fail_marker = fail_marker
         self.calls = []
+        self.max_tokens = max_tokens
+        self.reasoning_history = reasoning_history
+        self.mid_conversation_system_role = "system"
+        self.view_calls: list[str] = []
+        # Settable per test (a long prompt makes the system prompt alone
+        # exceed a small budget).
+        self.system_prompt = self.SYSTEM_PROMPT
 
     def fork_enabled(self, stage):
         return stage in self.stages
+
+    async def view_inputs(self, channel_id):
+        """The channel's ViewInputs: a fixed prompt, this agent's budget, the
+        system mid role and the reasoning policy bound to ``reasoning_history``."""
+        from corvidae.channel import ReasoningHistory
+        from corvidae.fork import ViewInputs
+        from corvidae.thinking import apply_reasoning_history
+
+        self.view_calls.append(channel_id)
+        policy = ReasoningHistory(self.reasoning_history)
+        return ViewInputs(
+            self.system_prompt,
+            self.max_tokens,
+            "system",
+            lambda messages: apply_reasoning_history(messages, policy),
+        )
 
     async def fork(self, channel, instruction, *, cut=None, extra_body=None):
         from corvidae.attribution import get_attribution
@@ -160,6 +195,59 @@ class FakeForkAgent:
         return ForkResult(
             text=self.text, message={"role": "assistant", "content": self.text}, **extra
         )
+
+
+class RecordingClient:
+    """An LLMClient stand-in for view calls: records every chat request with
+    its attribution, answers ``text`` (or raises ``error``)."""
+
+    def __init__(self, text="", error=None, model="stub-model"):
+        self.text = text
+        self.error = error
+        self.model = model
+        self.chat_calls: list[dict] = []
+
+    def request_model(self, extra_body=None):
+        """The model a call is sent with, as LLMClient.request_model does."""
+        return (extra_body or {}).get("model", self.model)
+
+    async def chat(self, messages, tools=None, extra_body=None):
+        from corvidae.attribution import get_attribution
+
+        self.chat_calls.append({
+            "messages": messages, "tools": tools, "extra_body": extra_body,
+            "attribution": dict(get_attribution()),
+        })
+        if self.error is not None:
+            raise self.error
+        return {"choices": [{"message": {"role": "assistant", "content": self.text}}]}
+
+    async def embed(self, texts, kind=None):
+        return [[1.0, 0.0, 0.0, 0.0] for _ in texts]
+
+
+def recording_llm_plugin(main, background=None):
+    """A real LLMPlugin whose ``get_client`` records the role it is asked for
+    (``plugin.roles``) and serves ``main`` / ``background`` clients; an
+    unconfigured role falls back to main, as LLMPlugin does."""
+    from corvidae.llm_plugin import LLMPlugin
+
+    class _RecordingLLMPlugin(LLMPlugin):
+        """LLMPlugin that logs each requested role."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.roles: list[str] = []
+
+        def get_client(self, role: str = "main"):
+            self.roles.append(role)
+            return super().get_client(role)
+
+    plugin = _RecordingLLMPlugin()
+    plugin._clients["main"] = main
+    if background is not None:
+        plugin._clients["background"] = background
+    return plugin
 
 
 def window_of(channel_id, rowids, summary=False, contents=None):

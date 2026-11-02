@@ -22,7 +22,9 @@ from corvidae.context import MessageType, count_tokens, message_tokens
 from corvidae.hooks import resolve_single_result
 from corvidae.trace import mint_trace_id
 from corvidae.turn import AgentTurnResult
-from helpers import build_plugin_and_channel, drain
+from helpers import (
+    RecordingClient, build_plugin_and_channel, drain, recording_llm_plugin,
+)
 from llm_response_fixtures import _make_text_response
 
 pytestmark = pytest.mark.timeout(15)
@@ -98,9 +100,14 @@ class Rig:
 
 
 async def make_rig(*, max_tokens: int = MAX_TOKENS, compaction: bool = True,
-                   system_prompt: str = SYSTEM_PROMPT) -> Rig:
+                   system_prompt: str = SYSTEM_PROMPT,
+                   background: RecordingClient | None = None) -> Rig:
     """Build the Agent graph, optionally with a real CompactionPlugin, and
-    initialise the channel's conversation with one throwaway exchange."""
+    initialise the channel's conversation with one throwaway exchange.
+
+    With ``background`` the real ``_view_summary`` runs against that client
+    (registered as llm.background); otherwise the view seam is mocked so the
+    summary never goes to a real client."""
     plugin, channel, db = await build_plugin_and_channel(agent_defaults={
         "system_prompt": system_prompt,
         "max_context_tokens": max_tokens,
@@ -114,8 +121,12 @@ async def make_rig(*, max_tokens: int = MAX_TOKENS, compaction: bool = True,
     if compaction:
         comp = CompactionPlugin(plugin.pm)
         # The summary must never go to a fork or a real client in these tests.
+        # Forks are off for compaction here, so every summary is the view call.
         comp._fork_summary = AsyncMock(return_value=None)
-        comp._summarize = AsyncMock(return_value="a summary")
+        if background is None:
+            comp._view_summary = AsyncMock(return_value="a summary")
+        else:
+            plugin.pm.register(recording_llm_plugin(client, background), name="llm")
         plugin.pm.register(comp, name="compaction")
         rig.compaction = comp
     # Initialise the conversation, then clear it so each test seeds its own.
@@ -154,7 +165,7 @@ async def test_too_few_rows_with_huge_ones_ends_within_budget(rig_factory):
     await rig.seed([350, 350, 350, 350])  # 4 rows + new message = 5 <= min
     await rig.send()
     assert rig.seen["estimate"] <= MAX_TOKENS
-    rig.compaction._summarize.assert_not_awaited()
+    rig.compaction._view_summary.assert_not_awaited()
 
 
 async def test_failure_cooldown_ends_within_budget(rig_factory):
@@ -164,7 +175,7 @@ async def test_failure_cooldown_ends_within_budget(rig_factory):
     await rig.seed([100] * 10)
     await rig.send()
     assert rig.seen["estimate"] <= MAX_TOKENS
-    rig.compaction._summarize.assert_not_awaited()
+    rig.compaction._view_summary.assert_not_awaited()
 
 
 async def test_too_soon_since_last_compaction_ends_within_budget(rig_factory):
@@ -174,29 +185,35 @@ async def test_too_soon_since_last_compaction_ends_within_budget(rig_factory):
     rig.compaction._last_compaction_msg_count[rig.channel.id] = 8
     await rig.send()
     assert rig.seen["estimate"] <= MAX_TOKENS
-    rig.compaction._summarize.assert_not_awaited()
+    rig.compaction._view_summary.assert_not_awaited()
 
 
 async def test_empty_summary_ends_within_budget(rig_factory):
     """11: the summary comes back empty: window unchanged by compaction,
     the fallback brings it within budget."""
     rig = await rig_factory()
-    rig.compaction._summarize = AsyncMock(return_value="")
+    rig.compaction._view_summary = AsyncMock(return_value="")
     await rig.seed([100] * 10)
     await rig.send()
-    rig.compaction._summarize.assert_awaited()
+    rig.compaction._view_summary.assert_awaited()
     assert rig.seen["estimate"] <= MAX_TOKENS
 
 
-async def test_summary_call_raising_ends_within_budget(rig_factory):
-    """12: the summary call raises (the agent's except path): still within
-    budget."""
-    rig = await rig_factory()
-    rig.compaction._summarize = AsyncMock(side_effect=RuntimeError("boom"))
+async def test_background_view_failure_ends_within_budget(rig_factory, caplog):
+    """12 / R5: forks are off and the background view call raises (the
+    agent's except path): the call was really made, the window still ends
+    within budget, and the fallback warning names the channel."""
+    background = RecordingClient(error=RuntimeError("background down"))
+    rig = await rig_factory(background=background)
     await rig.seed([100] * 10)
-    await rig.send()
-    rig.compaction._summarize.assert_awaited()
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        await rig.send()
+    # The failure came from the view call, not an earlier exit.
+    assert background.chat_calls, "the background view call was never awaited"
     assert rig.seen["estimate"] <= MAX_TOKENS
+    warnings = fallback_warnings(caplog)
+    assert warnings and rig.channel.id in warnings[0]
 
 
 async def test_no_compaction_plugin_ends_within_budget(rig_factory):

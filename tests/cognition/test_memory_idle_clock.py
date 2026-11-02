@@ -25,6 +25,7 @@ from corvidae_cognition import retention as retention_module
 from corvidae_cognition import memory as memory_module
 from corvidae_cognition.memory import MemoryPlugin
 from fake_clock import FakeClock, install_kernel_clock
+from helpers import FakeForkAgent
 
 CONSOLIDATION_JSON = json.dumps({
     "summary": "I helped kestrel debug the weather station's wifi dropouts.",
@@ -151,6 +152,12 @@ async def make_env(retention_runs):
         for role in ("main", "background", "embedding"):
             llm._clients[role] = stub
         llm.embedding_dimensions = 4
+
+        # A view-capable agent with forks off: an out-of-window range is
+        # written from the rendered view on llm.background (#380, #388).
+        # (A caller passing its own pm may already hold a real Agent.)
+        if pm.get_plugin("agent") is None:
+            pm.register(FakeForkAgent(set()), name="agent")
 
         if with_idle:
             clock, tracker = install_kernel_clock(pm)

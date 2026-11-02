@@ -21,6 +21,7 @@ from corvidae.llm_plugin import LLMPlugin
 from corvidae_cognition.memory import MemoryPlugin
 from corvidae.persistence import PersistencePlugin, init_db
 
+from helpers import FakeForkAgent
 from .test_memory_retrieval import DIMS, StubEmbedClient, bow_embed
 
 
@@ -74,6 +75,10 @@ async def build_stack(db_path):
     llm._clients["background"] = stub
     llm._clients["embedding"] = stub
     llm.embedding_dimensions = DIMS
+
+    # A view-capable agent with forks off: a range outside the live window
+    # is written from the rendered view on llm.background (#380, #388).
+    pm.register(FakeForkAgent(set()), name="agent")
 
     funnel = FunnelPlugin()
     pm.register(funnel, name="funnel")

@@ -9,7 +9,6 @@ Coverage:
     - Per-plugin error isolation: one failing on_config_reload doesn't block
       others
     - LLMPlugin.on_config_reload: new client created, old client closed
-    - CompactionPlugin.on_config_reload: _llm_client cache invalidated
     - RuntimeSettingsPlugin.on_config_reload: blocklist reset then re-applied
     - Agent.on_config_reload: system_prompt unchanged, chars_per_token updated
 """
@@ -1042,33 +1041,9 @@ async def test_llm_plugin_on_config_reload_no_change_no_swap():
 
 
 # ---------------------------------------------------------------------------
-# 14. CompactionPlugin.on_config_reload invalidates _llm_client cache
+# 14. CompactionPlugin.on_config_reload re-reads thresholds (the cached
+#     _llm_client and its invalidation were removed with _summarize, #380/#388)
 # ---------------------------------------------------------------------------
-
-
-async def test_compaction_plugin_on_config_reload_invalidates_llm_client():
-    """CompactionPlugin.on_config_reload must set _llm_client = None
-    so it is re-resolved from LLMPlugin on next use (I1 from design review Fix #1)."""
-    from corvidae.compaction import CompactionPlugin
-
-    plugin = CompactionPlugin(pm=None)
-    await plugin.on_init(
-        pm=None,
-        config={"agent": {}, "llm": {"main": {"base_url": "http://localhost", "model": "m"}}},
-    )
-
-    # Simulate a cached LLM client
-    plugin._llm_client = MagicMock(name="stale_client")
-
-    new_config = {
-        "agent": {"compaction_threshold": 0.9},
-        "llm": {"main": {"base_url": "http://localhost", "model": "m"}},
-    }
-    await plugin.on_config_reload(config=new_config)
-
-    assert plugin._llm_client is None, (
-        "CompactionPlugin.on_config_reload must reset _llm_client to None"
-    )
 
 
 async def test_compaction_plugin_on_config_reload_updates_threshold():

@@ -2,11 +2,12 @@
 
 Compaction trigger: before_compaction forks the record from the dropped
 prefix and stashes it; the on_compaction task consumes it instead of the
-standalone call, and a fork miss there is the standalone call (the range has
-left the window). Idle trigger: a range wholly in the live window forks the
-full window, and a miss skips (watermark unchanged, retried on the next
-trigger, #320, PRD §3.8.5); a range not wholly in a live window is windowless
-work and runs standalone. Everything after the LLM call is unchanged.
+view call, and a fork miss there is the background view call (the range has
+left the window, #380, #388). Idle trigger: a range wholly in the live window
+forks the full window, and a miss skips (watermark unchanged, retried on the
+next trigger, #320, PRD §3.8.5); a range not wholly in a live window is
+written from the rendered view on llm.background. Everything after the LLM
+call is unchanged.
 """
 
 import json
@@ -53,11 +54,16 @@ async def env():
 
 
 def _use(memory, agent):
+    # build_consolidation_env registers a default forks-off view-capable
+    # agent under "agent"; swap it for this test's.
+    if memory.pm.get_plugin("agent") is not None:
+        memory.pm.unregister(name="agent")
     memory.pm.register(agent, name="agent")
     return agent
 
 
-def _standalone(stub):
+def _view_requests(stub):
+    """The background view requests the consolidation stage sent."""
     return [c for c in stub.chat_calls if c["attribution"].get("stage") == "consolidation"]
 
 
@@ -76,7 +82,7 @@ async def test_compaction_fork_record_is_stashed_and_consumed(env):
     assert call["cut"] == 3
     assert call["instruction"].startswith(DEFAULT_CONSOLIDATION_FORK_PROMPT)
     assert (call["attribution"]["stage"], call["attribution"]["trigger"]) == ("consolidation", "compaction")
-    assert _standalone(stub) == []
+    assert _view_requests(stub) == []
     [record] = await fetch_memories(db)
     assert record["summary"] == json.loads(FORK_JSON)["summary"]
     assert (record["msg_id_start"], record["msg_id_end"]) == (ids[0], ids[2])
@@ -93,21 +99,23 @@ async def test_compaction_fork_record_is_stashed_and_consumed(env):
     # consolidation failed): the fork can't see it all.
     (FakeForkAgent({"consolidation"}, text=FORK_JSON), True),
 ])
-async def test_compaction_fork_miss_is_standalone(env, agent, drop_first_row):
+async def test_compaction_fork_miss_uses_the_view(env, agent, drop_first_row):
     memory, stub, channel, db, ids = env
     _use(memory, agent)
     if drop_first_row:
         channel.conversation.messages.pop(0)
     await _compaction(memory, channel, ids[:3], cut=2 if drop_first_row else 3)
     assert memory._fork_stash == {}
-    [call] = _standalone(stub)
+    # One view request headed by the system prompt, attributed standalone.
+    [call] = _view_requests(stub)
+    assert call["messages"][0] == {"role": "system", "content": FakeForkAgent.SYSTEM_PROMPT}
     assert call["attribution"]["mode"] == "standalone"
     assert len(await fetch_memories(db)) == 1
 
 
 async def test_stash_from_a_different_watermark_is_discarded(env):
     """The watermark moved between fork and task: the stashed record covers
-    the wrong range, so the task makes the standalone call."""
+    the wrong range, so the task makes the view call."""
     memory, stub, channel, db, ids = env
     _use(memory, FakeForkAgent({"consolidation"}, text=FORK_JSON))
     await memory.before_compaction(channel=channel, compacted_ids=ids[:3], cut=3)
@@ -116,7 +124,7 @@ async def test_stash_from_a_different_watermark_is_discarded(env):
     await mem_db.commit()
     await memory.on_compaction(channel=channel, summary_msg={}, retain_count=1, compacted_ids=ids[:3])
     await memory.wait_for_background_tasks()
-    assert len(_standalone(stub)) == 1
+    assert len(_view_requests(stub)) == 1
     assert (await fetch_memories(db))[0]["msg_id_start"] == ids[1]
 
 
@@ -135,15 +143,15 @@ async def test_summary_rows_in_range_do_not_block_the_fork(env):
     assert len(agent.calls) == 1
 
 
-@pytest.mark.parametrize("live_window,error,forked,standalone", [
+@pytest.mark.parametrize("live_window,error,forked,view", [
     (True, None, True, 0),
-    # No live window: windowless work stays standalone.
+    # No live window: the range is written from the view on llm.background.
     (False, None, False, 1),
-    # A fork failure on an in-window range skips: no standalone call and no
+    # A fork failure on an in-window range skips: no view call and no
     # memory row (#320); test_idle_in_window_miss_skips covers the details.
     (True, RuntimeError("down"), False, 0),
 ])
-async def test_idle_trigger_forks_the_full_window(env, live_window, error, forked, standalone):
+async def test_idle_trigger_forks_the_full_window(env, live_window, error, forked, view):
     memory, stub, channel, db, ids = env
     agent = _use(memory, FakeForkAgent({"consolidation"}, text=FORK_JSON, error=error))
     if not live_window:
@@ -151,8 +159,8 @@ async def test_idle_trigger_forks_the_full_window(env, live_window, error, forke
     await memory._consolidate_range(channel.id, ids[-1], "idle")
     if live_window:
         assert (agent.calls[0]["cut"], agent.calls[0]["attribution"]["trigger"]) == (None, "idle")
-    assert len(_standalone(stub)) == standalone
-    assert len(await fetch_memories(db)) == (1 if (forked or standalone) else 0)
+    assert len(_view_requests(stub)) == view
+    assert len(await fetch_memories(db)) == (1 if (forked or view) else 0)
 
 
 @pytest.mark.parametrize("agent,reason", [
@@ -162,8 +170,8 @@ async def test_idle_trigger_forks_the_full_window(env, live_window, error, forke
     (None, "forks are not enabled for consolidation"),  # no agent plugin
 ])
 async def test_idle_in_window_miss_skips(env, caplog, agent, reason):
-    """#320: an in-window range that cannot fork is skipped, not summarized
-    standalone; the watermark stays and a warning names the range."""
+    """#320: an in-window range that cannot fork is skipped, not written from
+    the background view; the watermark stays and a warning names the range."""
     memory, stub, channel, db, ids = env
     if agent is not None:
         _use(memory, agent)
@@ -189,7 +197,6 @@ async def test_idle_skip_is_retried(env):
     await memory._consolidate_range(channel.id, ids[-1], "idle")
     assert await fetch_memories(db) == []
     # Swap in a working fork and run again.
-    memory.pm.unregister(name="agent")
     agent = _use(memory, FakeForkAgent({"consolidation"}, text=FORK_JSON))
     await memory._consolidate_range(channel.id, ids[-1], "idle")
     assert len(agent.calls) == 1 and stub.chat_calls == []
@@ -210,30 +217,36 @@ def _range_partly_trimmed(memory, channel, ids):
 
 
 @pytest.mark.parametrize("break_window", [_no_window, _no_registry_channel, _range_partly_trimmed])
-async def test_idle_out_of_window_is_standalone(env, break_window):
-    """#320 R5: a range that is not wholly in a live window is windowless
-    work: no fork even with a working agent, one standalone call, a record."""
+async def test_idle_out_of_window_uses_the_view(env, break_window):
+    """#320 R5, #380 R1: a range that is not wholly in a live window is
+    windowless work: no fork even with a working agent, one view request
+    (system prompt first) on llm.background, a record."""
     memory, stub, channel, db, ids = env
     agent = _use(memory, FakeForkAgent({"consolidation"}, text=FORK_JSON))
     break_window(memory, channel, ids)
     await memory._consolidate_range(channel.id, ids[-1], "idle")
     assert agent.calls == []
-    assert len(_standalone(stub)) == 1
+    [call] = _view_requests(stub)
+    assert call["messages"][0] == {"role": "system", "content": FakeForkAgent.SYSTEM_PROMPT}
     assert len(await fetch_memories(db)) == 1
 
 
-async def test_compaction_trigger_without_stash_is_standalone(env, caplog):
-    """#320 R3: the fork at compaction fails, so nothing is stashed and the
-    on_compaction task makes the one standalone call, with a warning."""
+async def test_compaction_trigger_without_stash_uses_the_view(env, caplog):
+    """#320 R3, #380 R1: the fork at compaction fails, so nothing is stashed
+    and the on_compaction task makes the one background view call, with a
+    warning that says so."""
     memory, stub, channel, db, ids = env
     _use(memory, FakeForkAgent({"consolidation"}, error=RuntimeError("down")))
     with caplog.at_level(logging.WARNING, logger="corvidae.memory"):
         await _compaction(memory, channel, ids[:3], cut=3)
     assert memory._fork_stash == {}
-    assert len(_standalone(stub)) == 1
+    # One request: headed by the system prompt, ending in the instruction.
+    [call] = _view_requests(stub)
+    assert call["messages"][0] == {"role": "system", "content": FakeForkAgent.SYSTEM_PROMPT}
+    assert call["messages"][-1]["content"].startswith(DEFAULT_CONSOLIDATION_FORK_PROMPT)
     assert len(await fetch_memories(db)) == 1
     assert any(r.levelno == logging.WARNING and channel.id in r.getMessage()
-               and "standalone" in r.getMessage() for r in caplog.records)
+               and "background view" in r.getMessage() for r in caplog.records)
 
 
 @pytest.mark.parametrize("summary,watermark_index,expected", [
@@ -256,7 +269,7 @@ async def test_range_boundary_sentence(env, summary, watermark_index, expected):
 
 async def test_forks_send_the_record_schema(env):
     """#199: compaction and idle forks carry the same response_format as the
-    standalone call."""
+    background view call."""
     memory, stub, channel, db, ids = env
     agent = _use(memory, FakeForkAgent({"consolidation"}, text=FORK_JSON))
     await _compaction(memory, channel, ids[:3], cut=3)

@@ -1,9 +1,10 @@
 """Tests for harness/consolidate_replay.py and the selection helpers it
 shares with MemoryPlugin.
 
-Pins R2 — replay must reproduce the daemon's consolidation call, not an
+Pins R2 / R10 — replay must reproduce the daemon's consolidation call, not an
 approximation. The same rows get selected, the same dialog survives
-filtering, and the same two-message payload is assembled. It also pins the
+filtering, and the replay builds the daemon's catch-up request through the
+one shared builder (build_catchup_segments, #380). It also pins the
 reason the selection is split in two: `_consolidate_range` needs the raw
 row endpoints for `memory.msg_id_start`/`msg_id_end`, the importance prior,
 and the valence lookup, so a helper that returns only dialog would silently
@@ -19,7 +20,21 @@ import sqlite3
 import aiosqlite
 import pytest
 
-from corvidae_cognition.memory import _dialog_transcript
+
+
+def _view_inputs(max_tokens: int = 100_000):
+    """The replay's ViewInputs: a fixed identity + register prompt, a budget
+    well above the test ranges, the system mid role and a no-op policy."""
+    from corvidae.fork import ViewInputs
+
+    return ViewInputs("IDENTITY\n\nREGISTER", max_tokens, "system", lambda messages: None)
+
+
+def _prompt_file(tmp_path) -> str:
+    """A system-prompt file for CLI tests (--system-prompt-file is required)."""
+    path = tmp_path / "system_prompt.txt"
+    path.write_text("IDENTITY\n\nREGISTER")
+    return str(path)
 
 
 # ---------------------------------------------------------------------------
@@ -56,12 +71,13 @@ def _seed_db_sync(path, rows, channel_id="irc:#s-compact"):
     db = sqlite3.connect(path)
     db.execute(
         "CREATE TABLE message_log ("
-        "id INTEGER PRIMARY KEY, channel_id TEXT, message TEXT, message_type TEXT)"
+        "id INTEGER PRIMARY KEY, channel_id TEXT, message TEXT, "
+        "timestamp REAL, message_type TEXT)"
     )
     db.executemany(
-        "INSERT INTO message_log (id, channel_id, message, message_type) "
-        "VALUES (?, ?, ?, ?)",
-        [(r[0], channel_id, r[1], r[2]) for r in rows],
+        "INSERT INTO message_log (id, channel_id, message, timestamp, message_type) "
+        "VALUES (?, ?, ?, ?, ?)",
+        [(r[0], channel_id, r[1], float(r[0]), r[2]) for r in rows],
     )
     db.commit()
     db.close()
@@ -72,13 +88,14 @@ async def _seed_db(path, rows, channel_id="irc:#s-compact"):
     db = await aiosqlite.connect(path)
     await db.execute(
         "CREATE TABLE message_log ("
-        "id INTEGER PRIMARY KEY, channel_id TEXT, message TEXT, message_type TEXT)"
+        "id INTEGER PRIMARY KEY, channel_id TEXT, message TEXT, "
+        "timestamp REAL, message_type TEXT)"
     )
     for row_id, message, message_type in rows:
         await db.execute(
-            "INSERT INTO message_log (id, channel_id, message, message_type) "
-            "VALUES (?, ?, ?, ?)",
-            (row_id, channel_id, message, message_type),
+            "INSERT INTO message_log (id, channel_id, message, timestamp, message_type) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (row_id, channel_id, message, float(row_id), message_type),
         )
     await db.commit()
     return db
@@ -203,9 +220,9 @@ async def test_fetch_range_rows_excludes_other_channels(tmp_path):
 
     db = await _seed_db(tmp_path / "t.db", [_row(1, "user", "mine")])
     await db.execute(
-        "INSERT INTO message_log (id, channel_id, message, message_type) "
-        "VALUES (?, ?, ?, ?)",
-        (2, "irc:#chat", json.dumps({"role": "user", "content": "theirs"}), "message"),
+        "INSERT INTO message_log (id, channel_id, message, timestamp, message_type) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (2, "irc:#chat", json.dumps({"role": "user", "content": "theirs"}), 2.0, "message"),
     )
     await db.commit()
     try:
@@ -253,46 +270,63 @@ def test_parse_range_is_inclusive_and_translates_to_half_open():
 
 
 # ---------------------------------------------------------------------------
-# Payload assembly — identical to _summarize_range's two-message call
+# Payload assembly — the daemon's own catch-up request (R10, #380)
 # ---------------------------------------------------------------------------
 
 
-async def test_build_messages_matches_what_the_plugin_actually_sends():
-    """R2: pinned against the production code path, not a hand-copied shape.
+async def test_replay_builds_the_daemons_catchup_request(tmp_path):
+    """R10: pinned against the production code path, not a hand-copied shape.
 
-    If _summarize_range grows a third message or reorders roles, this fails —
-    which a hand-written expected-payload literal would not."""
-    from corvidae_cognition.memory import MemoryPlugin
-    from harness.consolidate_replay import build_messages
-
-    dialog = [
-        {"role": "user", "content": "hello"},
-        {"role": "assistant", "content": "hi"},
-    ]
-    client = _FakeClient()
-    plugin = MemoryPlugin()
-    plugin._consolidation_prompt = "SYSTEM TEXT"
-    plugin._llm = lambda: _FakeLLMPlugin(client)
-
-    await plugin._summarize_range(dialog)
-
-    assert client.calls[0] == build_messages("SYSTEM TEXT", dialog)
-
-
-async def test_replay_sends_the_same_extra_body_as_the_daemon(tmp_path):
-    """#245: since #199 _summarize_range constrains output with a
-    response_format schema; replay must send it too, or prompt-variant
-    comparisons measure unconstrained output the daemon never produces."""
-    from corvidae_cognition.memory import MemoryPlugin
+    The daemon consolidates an out-of-window range through its catch-up (a
+    request to llm.background); the replay over the same snapshot database,
+    ViewInputs and fork prompt must send the same messages and extra_body.
+    If either side grows its own request builder, this fails."""
+    from corvidae_cognition.memory import DEFAULT_CONSOLIDATION_FORK_PROMPT
     from harness.consolidate_replay import run_replay
 
-    # Daemon side: what _summarize_range sends.
-    daemon_client = _FakeClient()
-    plugin = MemoryPlugin()
-    plugin._llm = lambda: _FakeLLMPlugin(daemon_client)
-    await plugin._summarize_range([{"role": "user", "content": "hi"}])
+    from .test_memory_consolidation import build_consolidation_env, seed_dialog
 
-    # Replay side: what run_replay sends for the same dialog.
+    # Daemon side: a file DB (the replay opens it read-only) with real rows.
+    db_path = tmp_path / "t.db"
+    memory, persistence, stub, channel, db = await build_consolidation_env(
+        db_path=str(db_path)
+    )
+    try:
+        ids = await seed_dialog(persistence, channel, [
+            ("user", "hello"), ("assistant", "hi"), ("user", "bye"),
+        ])
+        await memory._consolidate_range(channel.id, ids[-1], "idle")
+        [daemon_call] = [c for c in stub.chat_calls if c["messages"][0]["role"] == "system"]
+        # Let a read-only connection see everything the daemon wrote.
+        await db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+        # Replay side: the same inputs the daemon's fake agent supplies.
+        replay_client = _FakeClient()
+        await run_replay(
+            db_path=db_path,
+            channel_id=channel.id,
+            after_id=0,
+            through_id=ids[-1],
+            prompt_text=DEFAULT_CONSOLIDATION_FORK_PROMPT,
+            trials=1,
+            out_dir=tmp_path / "out",
+            client=replay_client,
+            inputs=_view_inputs(),
+        )
+    finally:
+        await db.close()
+
+    assert replay_client.calls[0] == daemon_call["messages"]
+    assert replay_client.extra_bodies[0] == daemon_call["extra_body"]
+
+
+async def test_replay_sends_the_record_schema_extra_body(tmp_path):
+    """#245: replay constrains output with the same response_format schema the
+    daemon's catch-up sends, or prompt-variant comparisons measure
+    unconstrained output the daemon never produces."""
+    from corvidae_cognition.memory import CONSOLIDATION_EXTRA_BODY
+    from harness.consolidate_replay import run_replay
+
     db_path = tmp_path / "t.db"
     db = await _seed_db(db_path, [_row(1, "user", "hi")])
     await db.close()
@@ -306,30 +340,10 @@ async def test_replay_sends_the_same_extra_body_as_the_daemon(tmp_path):
         trials=1,
         out_dir=tmp_path / "out",
         client=replay_client,
+        inputs=_view_inputs(),
     )
 
-    assert daemon_client.extra_bodies[0]
-    assert replay_client.extra_bodies == daemon_client.extra_bodies
-
-
-async def test_replay_uses_the_same_llm_role_as_the_daemon():
-    """D3 reads llm.background; the daemon's consolidation call must agree.
-
-    Characterization test — expected green while the rest of this file is red.
-    It pins existing daemon behavior rather than pending work: if
-    _summarize_range ever asked for a different role, the replay tool would
-    keep asking for `background` and silently exercise a different path than
-    production."""
-    from corvidae_cognition.memory import MemoryPlugin
-
-    client = _FakeClient()
-    llm = _FakeLLMPlugin(client)
-    plugin = MemoryPlugin()
-    plugin._llm = lambda: llm
-
-    await plugin._summarize_range([{"role": "user", "content": "hi"}])
-
-    assert llm.roles_requested == ["background"]
+    assert replay_client.extra_bodies == [CONSOLIDATION_EXTRA_BODY]
 
 
 # ---------------------------------------------------------------------------
@@ -341,7 +355,10 @@ def test_missing_db_exits_naming_the_path(tmp_path, capsys):
     from harness.consolidate_replay import main
 
     missing = tmp_path / "nope.db"
-    rc = main(["--db", str(missing), "--channel", "irc:#s-compact", "--range", "1:2"])
+    rc = main([
+        "--db", str(missing), "--channel", "irc:#s-compact", "--range", "1:2",
+        "--system-prompt-file", _prompt_file(tmp_path),
+    ])
 
     assert rc != 0
     assert str(missing) in capsys.readouterr().err
@@ -353,7 +370,10 @@ def test_unknown_channel_lists_the_channels_present(tmp_path, capsys):
     db_path = tmp_path / "t.db"
     _seed_db_sync(db_path, [_row(1, "user", "hi")])
 
-    rc = main(["--db", str(db_path), "--channel", "irc:#absent", "--range", "0:9"])
+    rc = main([
+        "--db", str(db_path), "--channel", "irc:#absent", "--range", "0:9",
+        "--system-prompt-file", _prompt_file(tmp_path),
+    ])
 
     err = capsys.readouterr().err
     assert rc != 0
@@ -369,7 +389,10 @@ def test_empty_range_distinguishes_no_rows_from_all_filtered(tmp_path, capsys):
     db_path = tmp_path / "t.db"
     _seed_db_sync(db_path, [_row(5, "assistant", "recap", message_type="summary")])
 
-    rc = main(["--db", str(db_path), "--channel", "irc:#s-compact", "--range", "5:5"])
+    rc = main([
+        "--db", str(db_path), "--channel", "irc:#s-compact", "--range", "5:5",
+        "--system-prompt-file", _prompt_file(tmp_path),
+    ])
 
     err = capsys.readouterr().err
     assert rc != 0
@@ -398,6 +421,7 @@ def test_unreachable_server_exits_naming_the_base_url(tmp_path, capsys):
     rc = main([
         "--db", str(db_path), "--channel", "irc:#s-compact",
         "--range", "1:2", "--config", str(config), "--out", str(tmp_path / "o"),
+        "--system-prompt-file", _prompt_file(tmp_path),
     ])
 
     err = capsys.readouterr().err
@@ -449,6 +473,7 @@ async def test_trials_writes_one_record_per_trial(tmp_path):
         trials=3,
         out_dir=out,
         client=client,
+        inputs=_view_inputs(),
     )
 
     records = [
@@ -460,8 +485,10 @@ async def test_trials_writes_one_record_per_trial(tmp_path):
     assert [r["summary"] for r in records] == ["summary 1", "summary 2", "summary 3"]
 
 
-async def test_input_transcript_is_written_beside_the_output(tmp_path):
-    """R4: scoring needs the input next to the summary, without re-querying."""
+async def test_input_messages_are_written_beside_the_output(tmp_path):
+    """R4: scoring needs the input next to the summary, without re-querying.
+    There is no transcript any more: input.txt holds the request messages
+    as JSON, exactly what was sent."""
     from harness.consolidate_replay import run_replay
 
     db_path = tmp_path / "t.db"
@@ -479,11 +506,10 @@ async def test_input_transcript_is_written_beside_the_output(tmp_path):
         trials=1,
         out_dir=out,
         client=client,
+        inputs=_view_inputs(),
     )
 
-    expected = _dialog_transcript(
-        [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "yo"}]
-    )
-    assert (out / "input.txt").read_text() == expected
-    # and it is exactly what was sent
-    assert client.calls[0][1]["content"] == expected
+    written = json.loads((out / "input.txt").read_text())
+    assert written == client.calls[0]
+    assert written[0] == {"role": "system", "content": "IDENTITY\n\nREGISTER"}
+    assert "hi" in json.dumps(written) and "yo" in json.dumps(written)

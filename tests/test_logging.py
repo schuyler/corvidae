@@ -668,17 +668,13 @@ class TestCompactionLogging:
         # 80% of 100 = 80 → compaction triggers (2500 >> 80).
         conv.messages = [{"role": "user", "content": "x" * 100} for _ in range(25)]
 
-        mock_client = AsyncMock()
-        mock_client.chat = AsyncMock(
-            return_value={"choices": [{"message": {"content": "summary"}}]}
-        )
-
         mock_channel = MagicMock()
         mock_channel.id = "test:chan1"
 
         plugin = CompactionPlugin(None)
-        plugin._llm_client = mock_client
-        with caplog.at_level(logging.WARNING, logger="corvidae.compaction"):
+        # The summary comes from the view-call seam; no LLM is involved.
+        with patch.object(plugin, "_view_summary", AsyncMock(return_value="summary")), \
+                caplog.at_level(logging.WARNING, logger="corvidae.compaction"):
             await plugin.resolve_compaction(
                 channel=mock_channel, conversation=conv, max_tokens=100
             )

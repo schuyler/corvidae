@@ -32,7 +32,7 @@ from .test_memory_consolidation import (
 )
 from .test_memory_dedup import EMBED_CONFIG_DEDUP, build_dedup_env
 from .test_memory_dedup import seed_dialog as dedup_seed_dialog
-from .test_memory_fork import DIALOG, FORK_JSON, _compaction, _Registry
+from .test_memory_fork import DIALOG, FORK_JSON, _compaction, _Registry, _use
 
 # The memory table exactly as it was before issue #299 (no stamp columns).
 PRE_CHANGE_MEMORY_DDL = """
@@ -112,23 +112,27 @@ async def prompt_text(db, prompt_hash: str):
 # ---------------------------------------------------------------------------
 
 
-async def test_standalone_record_stamped_with_overridden_prompt(tmp_path):
-    """R1: a standalone record carries mode, the model sent, and the exact prompt."""
-    config = config_with(EMBED_CONFIG, consolidation_prompt="PROMPT-S")
+async def test_catchup_record_stamped_standalone(tmp_path):
+    """R1/R8: a catch-up record (a range that left the window, written from
+    the view on llm.background) carries mode standalone, the background
+    request model, and exactly the fork instruction (no range sentence)."""
+    config = config_with(EMBED_CONFIG, consolidation_fork_prompt="PROMPT-F")
     memory, persistence, stub, channel, db = await build_consolidation_env(
         config, db_path=str(tmp_path / "s.db")
     )
     try:
         # Background role answers with a distinct model name.
-        memory._llm()._clients["background"] = ModelStub("configured", sent_model="bg-x")
+        memory._llm()._clients["background"] = ModelStub("configured", sent_model="bg-model")
         await drive_idle_consolidation(memory, persistence, channel, db)
 
         [(_, prompt_hash, mode, model)] = await stamps_of(db)
         assert mode == "standalone"
-        assert model == "bg-x"
-        assert prompt_hash == sha("PROMPT-S")
-        # The side table resolves the hash to exactly the configured text.
-        assert await prompt_text(db, prompt_hash) == "PROMPT-S"
+        assert model == "bg-model"
+        assert prompt_hash == sha("PROMPT-F")
+        # The side table resolves the hash to exactly the fork instruction.
+        text = await prompt_text(db, prompt_hash)
+        assert text == "PROMPT-F"
+        assert "Record the" not in text
     finally:
         await db.close()
 
@@ -150,9 +154,7 @@ async def fork_env(tmp_path):
 async def test_fork_record_stamped_with_fork_prompt_only(fork_env):
     """R1: a compaction-fork record stamps the fork prompt, not the per-range sentence."""
     memory, channel, db, ids = fork_env
-    memory.pm.register(
-        FakeForkAgent({"consolidation"}, text=FORK_JSON, model="main-y"), name="agent"
-    )
+    _use(memory, FakeForkAgent({"consolidation"}, text=FORK_JSON, model="main-y"))
     await _compaction(memory, channel, ids[:3], cut=3)
 
     [(_, prompt_hash, mode, model)] = await stamps_of(db)
@@ -167,9 +169,7 @@ async def test_fork_record_stamped_with_fork_prompt_only(fork_env):
 async def test_idle_fork_record_stamped(fork_env):
     """R1: an idle-trigger fork of the live window gets the same fork stamp."""
     memory, channel, db, ids = fork_env
-    memory.pm.register(
-        FakeForkAgent({"consolidation"}, text=FORK_JSON, model="main-y"), name="agent"
-    )
+    _use(memory, FakeForkAgent({"consolidation"}, text=FORK_JSON, model="main-y"))
     await memory._consolidate_range(channel.id, ids[-1], "idle")
 
     [(_, prompt_hash, mode, model)] = await stamps_of(db)
@@ -179,8 +179,9 @@ async def test_idle_fork_record_stamped(fork_env):
 
 
 async def test_raw_transcript_fallback_is_stamped_standalone(tmp_path):
-    """R1: the degraded raw-transcript record is still stamped as the standalone call."""
-    config = config_with(EMBED_CONFIG, consolidation_prompt="PROMPT-S")
+    """R1: the degraded raw-transcript record is still stamped as the view
+    call: the fork instruction, mode standalone and the background model."""
+    config = config_with(EMBED_CONFIG, consolidation_fork_prompt="PROMPT-F")
     memory, persistence, stub, channel, db = await build_consolidation_env(
         config, db_path=str(tmp_path / "s.db")
     )
@@ -194,14 +195,14 @@ async def test_raw_transcript_fallback_is_stamped_standalone(tmp_path):
 
         [(_, prompt_hash, mode, model)] = await stamps_of(db)
         assert (mode, model) == ("standalone", "bg-x")
-        assert prompt_hash == sha("PROMPT-S")
+        assert prompt_hash == sha("PROMPT-F")
     finally:
         await db.close()
 
 
 async def test_prompt_text_stored_once(tmp_path):
     """R1: the instruction text is stored once however many records share it."""
-    config = config_with(EMBED_CONFIG, consolidation_prompt="PROMPT-S")
+    config = config_with(EMBED_CONFIG, consolidation_fork_prompt="PROMPT-F")
     memory, persistence, stub, channel, db = await build_consolidation_env(
         config, db_path=str(tmp_path / "s.db")
     )
@@ -213,7 +214,7 @@ async def test_prompt_text_stored_once(tmp_path):
 
         stamps = await stamps_of(db)
         assert len(stamps) == 3
-        assert {s[1] for s in stamps} == {sha("PROMPT-S")}
+        assert {s[1] for s in stamps} == {sha("PROMPT-F")}
         async with db.execute("SELECT COUNT(*) FROM memory_prompt") as cursor:
             assert (await cursor.fetchone())[0] == 1
     finally:
@@ -222,7 +223,7 @@ async def test_prompt_text_stored_once(tmp_path):
 
 async def test_dedup_survivor_keeps_its_own_stamp():
     """R1: a near-dup merge leaves the superseded row's stamp and stamps the survivor anew."""
-    config = config_with(EMBED_CONFIG_DEDUP, consolidation_prompt="P1")
+    config = config_with(EMBED_CONFIG_DEDUP, consolidation_fork_prompt="P1")
     memory, persistence, stub, channel, db = await build_dedup_env(config)
     try:
         if not memory._vec_available:
@@ -239,7 +240,7 @@ async def test_dedup_survivor_keeps_its_own_stamp():
         await memory.wait_for_background_tasks()
 
         # The operator edits the prompt between the two consolidations.
-        memory._consolidation_prompt = "P2"
+        memory._consolidation_fork_prompt = "P2"
         second = await dedup_seed_dialog(persistence, channel, [("user", "c"), ("assistant", "d")])
         await memory.on_compaction(channel=channel, summary_msg={}, retain_count=0, compacted_ids=second)
         await memory.wait_for_background_tasks()
@@ -257,7 +258,7 @@ async def test_dedup_survivor_keeps_its_own_stamp():
 
 async def test_empty_prompt_is_stored(tmp_path):
     """R1: an empty configured prompt is a real prompt: hashed and stored as ''."""
-    config = config_with(EMBED_CONFIG, consolidation_prompt="")
+    config = config_with(EMBED_CONFIG, consolidation_fork_prompt="")
     memory, persistence, stub, channel, db = await build_consolidation_env(
         config, db_path=str(tmp_path / "s.db")
     )
@@ -273,7 +274,6 @@ async def test_empty_prompt_is_stored(tmp_path):
 
 
 @pytest.mark.parametrize("key,value", [
-    ("consolidation_prompt", None),
     ("consolidation_fork_prompt", 3),
 ])
 async def test_non_str_prompt_rejected_at_init(key, value):
