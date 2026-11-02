@@ -202,9 +202,11 @@ class TestLLMClientChat:
         body = lambda content: {"choices": [{"message": {"role": "assistant", "content": content}}]}
 
         # Positive fixtures: a second <think> block, and a stray </think>.
-        for content in (
-            "<think>a</think>Answer.\n<think>b</think>Imagined.",
-            "<think>a</think>Answer.\nb</think>Imagined.",
+        # A stray close has no start marker, so the cut lands at the tag and
+        # the line before it ("b") stays in the content: no answer text is lost.
+        for content, kept in (
+            ("<think>a</think>Answer.\n<think>b</think>Imagined.", "Answer."),
+            ("<think>a</think>Answer.\nb</think>Imagined.", "Answer.\nb"),
         ):
             client.session = _make_mock_session(_make_mock_response(json_body=body(content)))
             resp = await client.chat(MESSAGES)
@@ -213,7 +215,7 @@ class TestLLMClientChat:
             assert resp["reasoning_reopened"] is True
             assert "reasoning_reopened" not in msg
             # The tail is dropped from both fields; the answer survives.
-            assert (msg["content"], msg["reasoning_content"]) == ("Answer.", "a")
+            assert (msg["content"], msg["reasoning_content"]) == (kept, "a")
             for field in (msg["content"], msg["reasoning_content"]):
                 assert "Imagined" not in field
                 assert "b</think>" not in field
@@ -245,7 +247,9 @@ class TestLLMClientChat:
 
         texts = [r.getMessage() for r in caplog.records if r.name == "corvidae.llm"]
         assert any(
-            "test:chan" in t and "Imagined." in t and "cut" in t for t in texts
+            "test:chan" in t and "<think>a</think>Answer." in t
+            and "Imagined." in t and "cut" in t
+            for t in texts
         ), texts
 
     async def test_chat_raw_reasoning_schema_call_runs_parsed(self):

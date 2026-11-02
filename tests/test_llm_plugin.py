@@ -176,6 +176,7 @@ def test_llm_plugin_create_client_reasoning_reopened_default_and_rerun():
     """R3 (#348): key unset -> truncate; "rerun" is passed through."""
     from corvidae.llm_plugin import LLMPlugin
 
+    # Unset key defaults to truncate; a valid value passes through.
     cfg = {"base_url": "http://localhost:8080", "model": "my-model"}
     assert LLMPlugin()._create_client(cfg).reasoning_reopened == "truncate"
     assert LLMPlugin()._create_client({**cfg, "reasoning_reopened": "rerun"}).reasoning_reopened == "rerun"
@@ -187,6 +188,8 @@ def test_llm_plugin_create_client_invalid_reasoning_reopened_warns_and_falls_bac
     truncate."""
     from corvidae.llm_plugin import LLMPlugin
 
+    # An invalid string: no raise, fallback, and a warning naming key, value
+    # and accepted values.
     cfg = {"base_url": "http://localhost:8080", "model": "my-model"}
     with caplog.at_level("WARNING", logger="corvidae.llm_plugin"):
         client = LLMPlugin()._create_client({**cfg, "reasoning_reopened": "sometimes"}, role="background")
