@@ -351,12 +351,17 @@ class LLMClient:
         if self.raw_reasoning and not raw:
             payload.pop("reasoning_format", None)
 
+        # The model this request is actually sent with: extra_body can
+        # override the configured one, and the usage record must name the
+        # model the server was asked for, not the role's default (#297).
+        sent_model = payload["model"]
+
         # Mint a per-call id pairing the observer request with its response,
         # and announce the call (summarized — counts, not payloads).
         request_id = uuid.uuid4().hex[:12]
         await self._fire_observer(
             "request",
-            model=self.model,
+            model=sent_model,
             request_id=request_id,
             message_count=len(messages),
             tool_count=len(tools) if tools else 0,
@@ -370,7 +375,7 @@ class LLMClient:
         logger.info(
             "chat completion returned",
             extra={
-                "model": self.model,
+                "model": sent_model,
                 "latency_ms": round(elapsed * 1000, 1),
                 "prompt_tokens": usage.get("prompt_tokens"),
                 "completion_tokens": usage.get("completion_tokens"),
@@ -452,12 +457,17 @@ class LLMClient:
         """POST with transient-error retries; shared by chat() and embed().
 
         Fires exactly one observer ``response`` callback per call — with
-        usage on success, with the error string on terminal failure.
+        usage on success, with the error string on terminal failure. The
+        callback names ``payload["model"]``, the model actually sent (#297),
+        and passes llama-server's ``timings`` (cache hits) through verbatim.
 
         Returns:
             (parsed JSON response, elapsed seconds of the final attempt).
         """
         start = time.monotonic()
+        # The model this request asks for; chat() may have overridden the
+        # configured one through extra_body.
+        sent_model = payload.get("model", self.model)
         # Transient-error attempts, and the separate not-loaded wait budget.
         attempt = 0
         not_loaded_attempt = 0
@@ -507,7 +517,7 @@ class LLMClient:
                             logger.warning(
                                 "LLM model not loaded, waiting",
                                 extra={
-                                    "model": self.model,
+                                    "model": sent_model,
                                     "attempt": not_loaded_attempt + 1,
                                     "delay": delay,
                                 },
@@ -532,7 +542,7 @@ class LLMClient:
                             # Name the model this request asked for: extra_body
                             # can override the client's configured model.
                             raise LLMHTTPError(
-                                exc, body=error_body, model=payload.get("model", self.model)
+                                exc, body=error_body, model=sent_model
                             ) from exc
 
                 except (aiohttp.ClientConnectionError, asyncio.TimeoutError) as exc:
@@ -557,25 +567,28 @@ class LLMClient:
             # single response callback with the error before re-raising.
             await self._fire_observer(
                 "response",
-                model=self.model,
+                model=sent_model,
                 request_id=request_id,
                 usage=None,
                 latency_ms=(time.monotonic() - start) * 1000,
                 error=str(exc),
+                timings=None,
             )
             raise
 
         elapsed = time.monotonic() - start
 
-        # Success: fire the single response callback with usage verbatim
-        # (None when the API omitted it) and the already-computed latency.
+        # Success: fire the single response callback with usage and
+        # llama-server's timings verbatim (None when the API omitted them)
+        # and the already-computed latency.
         await self._fire_observer(
             "response",
-            model=self.model,
+            model=sent_model,
             request_id=request_id,
             usage=response.get("usage"),
             latency_ms=elapsed * 1000,
             error=None,
+            timings=response.get("timings"),
         )
 
         return response, elapsed

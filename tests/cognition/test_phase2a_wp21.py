@@ -798,6 +798,7 @@ class TestUsageLogAttributionWiring:
                 latency_ms=1.0,
                 attribution=attribution,
                 error=None,
+                timings=None,
             )
             return _make_text_response("hi")
 

@@ -202,7 +202,7 @@ owner's plugin name after the prefix.
 | `before_compaction` | broadcast, awaited | `CompactionPlugin`, after the summary succeeded and before `replace_with_summary()`; the window still holds `messages[:cut]`, so a plugin can fork over the dropped prefix (see [Forks](#forks)); failures logged, never block compaction |
 | `on_compaction` | broadcast | `CompactionPlugin`, after `replace_with_summary()`; side effects only (persistence) |
 | `on_llm_request` | broadcast | `LLMClient.chat()` via LLMPlugin's injected observer, before the retry loop; side effects only (observability) |
-| `on_llm_response` | broadcast | `LLMClient.chat()` via the observer, exactly once per call (success or terminal failure); side effects only (metrics, usage log) |
+| `on_llm_response` | broadcast | `LLMClient.chat()` via the observer, exactly once per call (success or terminal failure); names the model the request was sent with (an `extra_body` override wins, #297) and carries llama-server's `timings` verbatim; side effects only (metrics, usage log) |
 | `on_metrics` | broadcast | any plugin via `pm.ahook.on_metrics(...)`; built-in emission from `MetricsPlugin.on_llm_response`; never emit from inside an `on_metrics` implementation (recursion) |
 | `on_config_reload` | broadcast | `ConfigWatcherPlugin`, when `agent.yaml`'s mtime changes; per-plugin error isolation |
 
@@ -452,7 +452,7 @@ CREATE TABLE usage_log (
     ts REAL NOT NULL,
     request_id TEXT NOT NULL,
     role TEXT NOT NULL,
-    model TEXT NOT NULL,
+    model TEXT NOT NULL,        -- the model the request was sent with, after any extra_body override (#297)
     stage TEXT,
     channel_id TEXT,
     trace_id TEXT,              -- NULL when the call ran outside any trace
@@ -461,7 +461,9 @@ CREATE TABLE usage_log (
     prompt_tokens INTEGER,
     completion_tokens INTEGER,
     total_tokens INTEGER,
-    cached_tokens INTEGER,
+    cached_tokens INTEGER,      -- usage.prompt_tokens_details.cached_tokens, where the provider reports it
+    cache_n INTEGER,            -- llama-server timings.cache_n: prompt tokens reused from cache (PRD §3.13.10)
+    prompt_n INTEGER,           -- llama-server timings.prompt_n: prompt tokens prefilled; NULL from other providers
     latency_ms REAL,
     error TEXT
 );

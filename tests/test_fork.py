@@ -371,7 +371,8 @@ async def test_usage_log_mode_column_upgrades_and_records(db):
     pm.register(UsageLogPlugin(pm), name="usage_log")
     for rid, attribution in [("f", {"mode": "fork"}), ("s", {"mode": "standalone"}), ("t", {})]:
         await pm.ahook.on_llm_response(role="main", model="m", request_id=rid, usage={},
-                                       latency_ms=1.0, attribution=attribution, error=None)
+                                       latency_ms=1.0, attribution=attribution, error=None,
+                                       timings=None)
     async with db.execute("SELECT request_id, mode FROM usage_log ORDER BY id") as cursor:
         assert await cursor.fetchall() == [("old", None), ("f", "fork"), ("s", "standalone"), ("t", None)]
 

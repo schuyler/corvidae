@@ -1030,6 +1030,7 @@ class AgentSpec:
         latency_ms: float,
         attribution: dict,
         error: str | None,
+        timings: dict | None,
     ) -> None:
         """Fired exactly once per LLM call, after it succeeds or terminally fails.
 
@@ -1041,13 +1042,18 @@ class AgentSpec:
 
         Args:
             role: The LLMPlugin role that made the call ("main", "background").
-            model: The model name configured for the client.
+            model: The model name the request was sent with: the client's
+                configured model unless an ``extra_body`` overrode it (#297).
             request_id: The id minted for the matching on_llm_request.
             usage: The response's "usage" field verbatim, or None (missing
                 usage or terminal failure).
             latency_ms: Wall-clock latency of the final attempt in ms.
             attribution: Snapshot of corvidae.attribution.get_attribution().
             error: None on success; exception string on terminal failure.
+            timings: The response's "timings" field verbatim, or None.
+                llama-server reports it: ``cache_n`` is prompt tokens reused
+                from cache, ``prompt_n`` prompt tokens prefilled (PRD
+                §3.13.10). Other providers omit it.
         """
 
     @hookspec
