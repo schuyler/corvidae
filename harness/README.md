@@ -366,9 +366,10 @@ segments' id ranges; replay those ranges one at a time. That includes the
 range of some legacy `standalone` records, written before catch-up was
 segmented, so such a record's range can be rejected even though the daemon
 wrote it as one record. `--prompt-file` defaults to
+`memory.consolidation_fork_prompt` from `--config`, then to
 `DEFAULT_CONSOLIDATION_FORK_PROMPT` (the text in
-`prompts/memory_consolidation_fork.md`) and replaces
-`memory.consolidation_fork_prompt` for the run; `--trials` defaults to 1.
+`prompts/memory_consolidation_fork.md`), as the daemon resolves it, and
+replaces that instruction for the run when given; `--trials` defaults to 1.
 
 `--config` wants the *rendered* Buster config, not a fresh one: model,
 timeout, and `extra_body` all have to match what the daemon was running, or

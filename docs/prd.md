@@ -529,7 +529,8 @@ Per transport:
    otherwise snap forward to drop the cycle whole if half the retention
    budget survives, otherwise keep the walk's cut. Only MESSAGE rows are
    summarized; SUMMARY and CONTEXT rows survive. Prior summaries carry
-   forward as part of the view the new summary is written from. Compaction is never
+   forward as part of the view the new summary is written from, and each
+   summary stays bounded in length however many rounds carry it forward. Compaction is never
    skipped. The summary is written by a fork of the window at the cut; on a
    miss (or with forks off) from the rendered view (§3.8) of the same
    prefix, sent on the `background` role; and when that fails too, a
@@ -546,7 +547,8 @@ Per transport:
    tail with no `user` message gets a `user`-role summary instead, because
    strict chat templates reject a prompt with no user query. The one
    exception is a neutral third-person summary, written without the
-   agent's view (replays and evals); it paraphrases other people's
+   agent's view (evals, and any path built without it; a replay sends the
+   request the running agent would, so it is not one); it paraphrases other people's
    messages and tool output and persists as `user`, under the same
    data-not-instructions framing the funnel uses, for the reason
    `docs/threat-model.md` finding 3 gives for CONTEXT. The role is
@@ -817,7 +819,8 @@ only through the funnel.
 2. A record is a first-person summary with epistemic framing preserved,
    dated by when the conversation happened, embedded, and linked to its
    `message_log` id range. It carries the instructions, mode (`fork |
-   standalone`, the latter being the view on the `background` role) and
+   standalone`, the latter being the view call on the `background` role, not the
+   windowless standalone work of §3.8 item 5) and
    model of the call that produced it, so the records a
    given prompt wrote can be found; a record no consolidation call
    produced is marked as such. It is scored by a pluggable importance
@@ -858,8 +861,9 @@ only through the funnel.
    not on traffic.
 7. Consolidation keeps topically distinct conversations in one range
    separate: the record names identifying detail from each, and no fact
-   from one is attributed to the other. Every consolidation instruction runs
-   under the channel's system prompt, so the agent writes in its own voice
+   from one is attributed to the other. Every consolidation that has a channel (the live fork and the catch-up
+   view) runs under that channel's system prompt; windowless work
+   (seeding, imports, evals) has none. So the agent writes in its own voice
    and the record is its private memory, not a message to anyone on the
    channel. Topic structure is the `topic` subject
    type's job (below), not a retrieval dimension, and the harness
@@ -1162,7 +1166,8 @@ design, not requirement. The requirements are outcomes:
    miss it makes the view call, then keeps §3.3's can't-fail fallback. A
    range that has left the window, such as catch-up consolidation, is
    written by the view call, and a replay sends the request the running
-   agent would. Seeding and imports have no window and run standalone.
+   agent would. Seeding and imports have no window and run standalone (a windowless call,
+   unlike the view call, which is also `mode = standalone` in `usage_log`).
    Subagents never fork.
 
 ### 3.9 Scheduler
@@ -1425,7 +1430,7 @@ record that holds the reasoning.
 | Compaction is memory formation, not forgetting | §3.3; §3.7 Memory 1 |
 | Two forks off one prefix for compaction and consolidation, not one combined call: merging saves one think per compaction but couples two plugins through a JSON contract; merge only if measurement shows the second think dominates | §3.8 |
 | Compaction forks from the dropped prefix, not a described cut: a misplaced boundary in a summary is a quiet, compounding failure nothing downstream detects | §3.3.2; §3.8 |
-| Every background call with a live window forks it; a judgment miss skips, never falls back to standalone; #73's cache probes measure whether the backend reuses the prefix, and they and its fork-vs-standalone comparisons gate nothing | §3.8; #180 |
+| Every background call with a live window forks it; a miss skips, never falls back to standalone (live-window judgment, and consolidation of a range still in the window); #73's cache probes measure whether the backend reuses the prefix, and they and its fork-vs-standalone comparisons gate nothing | §3.8; #180 |
 | §3.8 states fork outcomes; backend-specific fork design (prefix parity, fork-by-default, cost model, rollout gate) is not a requirement | #188 |
 | Demote, don't delete; usage-weighted retention; near-duplicate merge at consolidation | §3.7 Memory 3, 6; diverges from the Persyn spec's culling |
 | Operator-only `redact` is the one deletion path; it stays in the kernel | principle 4; §3.7 Memory 8 |

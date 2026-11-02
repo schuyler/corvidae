@@ -229,7 +229,10 @@ register, from `Agent.view_inputs`, which also resolves the channel after a
 restart) and ends with `memory.consolidation_fork_prompt` plus the range
 sentence. It goes on `llm.background` with no tools and the record
 schema. Each segment is its own record and its own watermark advance; a
-failure leaves earlier segments stored and retries the rest. Because the
+failure leaves earlier segments stored and retries the rest. A segment
+with no dialog that is followed by another folds its id span into the next
+segment's record (no record or commit of its own); a no-dialog last
+segment advances the watermark without a record. Because the
 instruction runs under the agent's own prompt, the default tells the agent
 the record is its private memory, not a message to anyone on the channel.
 `memory.consolidation_prompt` is removed: a config that still sets it logs a

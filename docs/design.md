@@ -1728,7 +1728,10 @@ segment is one `view_call` on `llm.background`, one record, and one commit
 that is a compare-and-set on the previous segment's end; a lost
 compare-and-set discards the rest, and a failure leaves earlier segments
 committed and the failure log says through which id. An unusable reply is
-retried once, then degrades to the raw transcript, as before. Records are
+retried once, then degrades to the raw transcript, as before. A segment
+with no dialog that is followed by another segment folds its id span into
+the next segment's record (no record or commit of its own); a no-dialog
+last segment advances the watermark without a record. Records are
 stamped `(memory.consolidation_fork_prompt, "standalone", the background
 request model)`. A view that `llm.background` rejects for length is a
 transport error: the watermark stays and the next trigger retries.
@@ -1778,7 +1781,7 @@ shows). `Agent.fork` always sets it, so it is None only when a
 ```yaml
 agent:
   forks:
-    enabled: true                 # default; false: live-window stages skip, compaction goes standalone
+    enabled: true                 # default; false: live-window stages skip, compaction uses llm.background
     reasoning_budget_tokens: 2048 # per fork; null = server default
     stages: null                  # null = every stage; or a list of names
 ```
@@ -1818,12 +1821,14 @@ instruction and reply; the window is append-only, so a fork's prefix is
 still cached as long as no compaction has run since. A view call (compaction's fallback, catch-up consolidation)
 costs its own cold prefill on the background slot: at most the channel's
 budget per catch-up segment, and for compaction's fallback the whole
-uncapped prefix at the cut. A standalone call
-costs its own cold prefill of a rebuilt prompt. It doesn't evict the main
-window when the server keeps `cache-ram`: on Lex (one slot,
+uncapped prefix at the cut. The consolidation and compaction prompts that
+described the conversation to a model are gone; what still makes a
+standalone call of a rebuilt prompt (the importance prior's rubric call
+and evals) pays the same cold prefill. Neither kind
+evicts the main window when the server keeps `cache-ram`: on Lex (one slot,
 `cache-ram = 32768`) #73's K1 measured the main turn after background
 calls fully cached, restored from host RAM. Without `cache-ram`, a
-standalone call on a single slot evicts the main window and the next main
+view or standalone call on a single slot evicts the main window and the next main
 turn re-prefills it. Either way only one call runs on the slot at a time,
 so a background call delays a waiting main turn by its own slot time;
 today only the global `agent.forks.reasoning_budget_tokens` bounds a
