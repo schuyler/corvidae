@@ -58,13 +58,28 @@ def _resolved_register(config: dict, transport: str, scope: str, agent: dict | N
 
 class TestIdentityCannotBeReplaced:
     @pytest.mark.parametrize("key", ["irc:#lex", "signal:*"])
-    def test_channel_system_prompt_is_rejected_with_the_remedy(self, key):
-        with pytest.raises(ValueError) as exc:
-            parse_channel_config({"channels": {key: {"system_prompt": "X"}}})
-        message = str(exc.value)
-        assert f"channels.{key}.system_prompt" in message
-        assert "agent.system_prompt" in message
-        assert f"channels.{key}.register_prompt" in message
+    def test_channel_system_prompt_is_skipped_with_a_warning(self, key, caplog):
+        """A stale channel system_prompt doesn't stop startup or a reload
+        (PRD principle 5): the key is skipped with a WARNING naming it and
+        where its text belongs, and the rest of the entry still applies."""
+        registry = ChannelRegistry(dict(AGENT))
+        with caplog.at_level(logging.WARNING, logger="corvidae.channel"):
+            load_channel_config(
+                {"channels": {key: {"system_prompt": "X", "max_turns": 3}}}, registry
+            )
+        scope = "a" if key.endswith("*") else key.split(":", 1)[1]
+        transport = key.split(":", 1)[0]
+        resolved = registry.resolve_config(registry.get_or_create(transport, scope))
+        assert resolved["system_prompt"] == "AGENT"
+        assert resolved["register_prompt"] is None
+        assert resolved["max_turns"] == 3
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert any(
+            f"channels.{key}.system_prompt" in w
+            and "agent.system_prompt" in w
+            and f"channels.{key}.register_prompt" in w
+            for w in warnings
+        ), warnings
 
     def test_identity_resolves_from_the_agent_only(self):
         registry = ChannelRegistry(dict(AGENT))

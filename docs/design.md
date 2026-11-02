@@ -287,7 +287,7 @@ reaches only conversations that start after the reload.
 
 **System prompt layers (#316).** A conversation's system prompt is the
 identity (`agent.system_prompt`, never set per channel; a channel-level
-`system_prompt` key is rejected at load) followed by a blank line and the
+`system_prompt` key is skipped at load with a WARNING) followed by a blank line and the
 channel's register. `ChannelConfig.resolve` returns the register as
 `register_prompt`, or None when no layer sets it; `Agent` then asks the
 owning transport through `resolve_register_prompt`. An explicit `""` or
