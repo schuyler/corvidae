@@ -829,7 +829,7 @@ class TestOnMessageCompactionAndConfig:
 
     async def test_on_message_per_channel_config(self):
         """Two channels with different configs behave according to their
-        resolved config (different system prompts)."""
+        resolved config (different registers appended to the agent identity)."""
         db = await aiosqlite.connect(":memory:")
         await init_db(db)
 
@@ -852,8 +852,8 @@ class TestOnMessageCompactionAndConfig:
         pm.register(plugin, name="agent")
         plugin._registry = registry
 
-        cfg_a = ChannelConfig(system_prompt="Channel A prompt.")
-        cfg_b = ChannelConfig(system_prompt="Channel B prompt.")
+        cfg_a = ChannelConfig(register_prompt="Channel A prompt.")
+        cfg_b = ChannelConfig(register_prompt="Channel B prompt.")
 
         channel_a = registry.get_or_create("test", "a", config=cfg_a)
         channel_b = registry.get_or_create("test", "b", config=cfg_b)
@@ -868,8 +868,8 @@ class TestOnMessageCompactionAndConfig:
         await drain(plugin, channel_a)
         await drain(plugin, channel_b)
 
-        assert channel_a.conversation.system_prompt == "Channel A prompt."
-        assert channel_b.conversation.system_prompt == "Channel B prompt."
+        assert channel_a.conversation.system_prompt == "Default system prompt.\n\nChannel A prompt."
+        assert channel_b.conversation.system_prompt == "Default system prompt.\n\nChannel B prompt."
 
         await db.close()
 
@@ -1060,13 +1060,13 @@ class TestConversationInitPromptResolution:
         await db.close()
 
     async def test_mixed_config_agent_list_channel_string(self, tmp_path):
-        """Agent-level list + channel string override: channel string wins.
+        """Agent-level list identity + channel register string: the register
+        is appended after the identity, never replacing it.
 
-        resolve_config() gives the channel string; Agent should
-        pass it through as a string, not attempt file reads.
+        The identity list is read from files; the channel register string is
+        used as-is, not treated as a file path.
         """
-        # Create a file that would be read if the agent list were used — it
-        # should NOT be read because the channel override wins.
+        # The identity file is read and the register string follows it.
         soul = tmp_path / "soul.md"
         soul.write_text("Agent level content.")
 
@@ -1075,7 +1075,7 @@ class TestConversationInitPromptResolution:
             "max_context_tokens": 8000,
             "reasoning_history": "drop",
         }
-        channel_cfg = ChannelConfig(system_prompt="Channel string wins.")
+        channel_cfg = ChannelConfig(register_prompt="Channel string is appended.")
         plugin, channel, db = await build_plugin_and_channel(
             agent_defaults=agent_defaults,
             channel_config=channel_cfg,
@@ -1091,15 +1091,14 @@ class TestConversationInitPromptResolution:
         await drain(plugin, channel)
 
         assert channel.conversation is not None
-        assert channel.conversation.system_prompt == "Channel string wins."
+        assert channel.conversation.system_prompt == "Agent level content.\n\nChannel string is appended."
 
         await db.close()
 
     async def test_mixed_config_agent_string_channel_list(self, tmp_path):
-        """Agent-level string + channel list override: channel list wins.
-
-        Agent should read the channel's file list and set
-        conv.system_prompt to the concatenated content.
+        """Agent-level string identity + channel register file list: the
+        register files are read (against the base dir) and appended after
+        the identity.
         """
         f = tmp_path / "channel.md"
         f.write_text("Channel list content.")
@@ -1109,7 +1108,7 @@ class TestConversationInitPromptResolution:
             "max_context_tokens": 8000,
             "reasoning_history": "drop",
         }
-        channel_cfg = ChannelConfig(system_prompt=["channel.md"])
+        channel_cfg = ChannelConfig(register_prompt=["channel.md"])
         plugin, channel, db = await build_plugin_and_channel(
             agent_defaults=agent_defaults,
             channel_config=channel_cfg,
@@ -1125,7 +1124,7 @@ class TestConversationInitPromptResolution:
         await drain(plugin, channel)
 
         assert channel.conversation is not None
-        assert channel.conversation.system_prompt == "Channel list content."
+        assert channel.conversation.system_prompt == "Agent string.\n\nChannel list content."
 
         await db.close()
 

@@ -36,7 +36,7 @@ class TestChannelConfigResolve:
     def test_resolve_channel_overrides_win(self):
         """Channel-level values override agent defaults for all three fields."""
         cfg = ChannelConfig(
-            system_prompt="Channel prompt.",
+            register_prompt="Channel prompt.",
             max_context_tokens=4000,
             reasoning_history="drop",
         )
@@ -46,29 +46,34 @@ class TestChannelConfigResolve:
             "reasoning_history": "keep",
         }
         result = cfg.resolve(agent_defaults)
-        assert result["system_prompt"] == "Channel prompt."
+        # The channel value is a register, appended after identity: it never
+        # replaces the agent's system prompt.
+        assert result["register_prompt"] == "Channel prompt."
+        assert result["system_prompt"] == "Agent prompt."
         assert result["max_context_tokens"] == 4000
         assert result["reasoning_history"] == "drop"
 
     def test_resolve_partial_override(self):
         """Only some fields overridden; rest fall back to agent defaults."""
-        cfg = ChannelConfig(system_prompt="Custom prompt.")
+        cfg = ChannelConfig(register_prompt="Custom prompt.")
         agent_defaults = {
             "system_prompt": "Agent prompt.",
             "max_context_tokens": 16000,
             "reasoning_history": "keep",
         }
         result = cfg.resolve(agent_defaults)
-        assert result["system_prompt"] == "Custom prompt."
+        assert result["register_prompt"] == "Custom prompt."
+        assert result["system_prompt"] == "Agent prompt."
         assert result["max_context_tokens"] == 16000
         assert result["reasoning_history"] == "keep"
 
     def test_resolve_empty_string_is_not_none(self):
-        """Empty string system_prompt is an intentional override, not a fallback."""
-        cfg = ChannelConfig(system_prompt="")
-        agent_defaults = {"system_prompt": "Agent prompt."}
+        """Empty string register_prompt is an intentional override, not a fallback."""
+        cfg = ChannelConfig(register_prompt="")
+        agent_defaults = {"system_prompt": "Agent prompt.", "register_prompt": "Agent register."}
         result = cfg.resolve(agent_defaults)
-        assert result["system_prompt"] == ""
+        assert result["register_prompt"] == ""
+        assert result["system_prompt"] == "Agent prompt."
 
     def test_resolve_zero_max_context_tokens_is_not_none(self):
         """Zero max_context_tokens is an intentional override."""
@@ -164,7 +169,7 @@ class TestChannel:
     def test_channel_default_config(self):
         """Default config has all None fields."""
         ch = Channel(transport="irc", scope="#general")
-        assert ch.config.system_prompt is None
+        assert ch.config.register_prompt is None
         assert ch.config.max_context_tokens is None
         assert ch.config.reasoning_history is None
 
@@ -202,19 +207,19 @@ class TestChannelRegistry:
     def test_get_or_create_with_config(self):
         """Config is applied to new channel."""
         registry = ChannelRegistry({})
-        cfg = ChannelConfig(system_prompt="Custom.", max_context_tokens=2000)
+        cfg = ChannelConfig(register_prompt="Custom.", max_context_tokens=2000)
         ch = registry.get_or_create("irc", "#lex", config=cfg)
-        assert ch.config.system_prompt == "Custom."
+        assert ch.config.register_prompt == "Custom."
         assert ch.config.max_context_tokens == 2000
 
     def test_get_or_create_ignores_config_for_existing_channel(self):
         """Config passed to get_or_create for an existing channel is ignored."""
         registry = ChannelRegistry({})
-        cfg1 = ChannelConfig(system_prompt="First.")
+        cfg1 = ChannelConfig(register_prompt="First.")
         ch1 = registry.get_or_create("irc", "#lex", config=cfg1)
-        cfg2 = ChannelConfig(system_prompt="Second.")
+        cfg2 = ChannelConfig(register_prompt="Second.")
         ch2 = registry.get_or_create("irc", "#lex", config=cfg2)
-        assert ch2.config.system_prompt == "First."
+        assert ch2.config.register_prompt == "First."
 
     def test_get_existing(self):
         """`get()` returns channel by string ID."""
@@ -233,10 +238,11 @@ class TestChannelRegistry:
         """Delegates to `channel.config.resolve()` with registry defaults."""
         agent_defaults = {"system_prompt": "Agent.", "max_context_tokens": 12000}
         registry = ChannelRegistry(agent_defaults)
-        cfg = ChannelConfig(system_prompt="Channel.")
+        cfg = ChannelConfig(register_prompt="Channel.")
         ch = registry.get_or_create("irc", "#lex", config=cfg)
         result = registry.resolve_config(ch)
-        assert result["system_prompt"] == "Channel."
+        assert result["register_prompt"] == "Channel."
+        assert result["system_prompt"] == "Agent."
         assert result["max_context_tokens"] == 12000
 
     def test_all(self):
@@ -280,7 +286,7 @@ class TestLoadChannelConfig:
         """Pre-registers channels from config."""
         config = {
             "channels": {
-                "irc:#lex": {"system_prompt": "IRC prompt.", "max_context_tokens": 8000},
+                "irc:#lex": {"register_prompt": "IRC prompt.", "max_context_tokens": 8000},
                 "signal:+15551234567": {"reasoning_history": "exchange"},
             }
         }
@@ -289,7 +295,7 @@ class TestLoadChannelConfig:
 
         irc = registry.get("irc:#lex")
         assert irc is not None
-        assert irc.config.system_prompt == "IRC prompt."
+        assert irc.config.register_prompt == "IRC prompt."
         assert irc.config.max_context_tokens == 8000
 
         signal = registry.get("signal:+15551234567")
@@ -361,7 +367,7 @@ class TestLoadChannelConfig:
         msg = str(excinfo.value)
         assert f"channels.{key}.max_turn" in msg
         assert "5" in msg
-        for accepted in ("system_prompt", "max_context_tokens", "max_turns",
+        for accepted in ("register_prompt", "max_context_tokens", "max_turns",
                          "reasoning_history", "tools"):
             assert accepted in msg
 
@@ -468,24 +474,24 @@ class TestLoadChannelConfig:
         load_channel_config(config, registry)
         ch = registry.get("irc:#lex")
         assert ch is not None
-        assert ch.config.system_prompt is None
+        assert ch.config.register_prompt is None
 
 
 # ---------------------------------------------------------------------------
-# Section 6.5 — system_prompt list passthrough (Phase 2.5)
+# Section 6.5 — register_prompt / system_prompt list passthrough (Phase 2.5)
 # ---------------------------------------------------------------------------
 
 
 class TestChannelConfigListSystemPrompt:
-    def test_resolve_list_system_prompt_passthrough(self):
-        """ChannelConfig with a list system_prompt preserves the list through resolve().
+    def test_resolve_list_register_prompt_passthrough(self):
+        """ChannelConfig with a list register_prompt preserves the list through resolve().
 
         The list is NOT resolved to a string at this layer — that happens later
         in Agent._process_queue_item via resolve_system_prompt().
         """
-        cfg = ChannelConfig(system_prompt=["a.md", "b.md"])
+        cfg = ChannelConfig(register_prompt=["a.md", "b.md"])
         result = cfg.resolve({})
-        assert result["system_prompt"] == ["a.md", "b.md"]
+        assert result["register_prompt"] == ["a.md", "b.md"]
 
     def test_resolve_list_agent_default_passthrough(self):
         """Agent-level list system_prompt is passed through when the channel

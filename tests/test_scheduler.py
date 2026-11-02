@@ -510,7 +510,7 @@ class TestKernelClock:
 class TestChannelResolution:
     async def test_resolve_channel_hook_used_for_unknown_id(self, memdb):
         e = Env(memdb, sched_config())
-        alias = ChannelConfig(system_prompt="alias prompt")
+        alias = ChannelConfig(register_prompt="alias prompt")
 
         class FakeTransport:
             @hookimpl
@@ -530,7 +530,7 @@ class TestChannelResolution:
         default-configured channel is cached, and the next pass fires it
         once the transport answers."""
         e = Env(memdb, sched_config())
-        alias = ChannelConfig(system_prompt="alias prompt")
+        alias = ChannelConfig(register_prompt="alias prompt")
 
         class DeferringTransport:
             transport = "signal"
