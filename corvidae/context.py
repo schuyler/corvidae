@@ -98,6 +98,9 @@ TOOL_RESULT_PENDING = "[still running — the result will arrive in a later mess
 TOOL_RESULT_ABANDONED = "[did not complete — no result was returned]"
 #: Frame for a tool result whose call is no longer in the window (#79).
 ORPHAN_RESULT_LABEL = "result of an earlier tool call that is no longer shown"
+#: Frame for a tool result that arrived after the conversation moved on
+#: past its call (#346). Formatted with the call's function name.
+INTERRUPTED_RESULT_LABEL = "result of the earlier {name} call"
 
 #: Label the not-sent marker opens with. The Agent appends the marker (a
 #: CONTEXT system row) right after the assistant row whose emission a
@@ -229,18 +232,27 @@ class ContextWindow:
         returning — internal tags must never reach the LLM
         (bootstrap-mapping §4.8).
 
-        An assistant tool_calls message is deferred to the arrival index of
-        the last of its results, so call+results emit as one contiguous
-        block there (synthesizing a placeholder for any call with no result
-        yet). If any call in the message is unanswered, the block emits in
-        place instead. A tool message whose call is not in the window
-        (compaction dropped the call, whether it was answered or still in
-        flight, #79) keeps its place but renders as a framed system
-        notification without ``tool_call_id``, like an untargeted
-        notification: strict chat templates reject a tool result with no
-        preceding call. It depends only on whether the call is in the
-        window; calls precede their results, so a fork's prefix renders it
-        identically.
+        A tool call renders where it was made, followed by its results
+        (#346). A call's cycle is interrupted at the first user or
+        assistant row after it; results before that point are gathered
+        into the call's block. A block whose calls are all answered
+        before the interruption is deferred to its last result, so an
+        uninterrupted cycle emits as one contiguous block there (a
+        placeholder stands in for any call with no result yet). Otherwise
+        the block emits in place at the call, holding the gathered results
+        and a placeholder per remaining call: TOOL_RESULT_PENDING when that
+        call's result appears later in the window (so the prefix does not
+        change when it arrives), else pending/abandoned by
+        ``pending_tool_call_ids``. A block is also not deferred past a row
+        that renders as an interrupted-result frame. A result at or after
+        its call's interruption point renders at its own position as a
+        system message framed with INTERRUPTED_RESULT_LABEL and the call's
+        tool name, without ``tool_call_id``. A tool message whose call is
+        not in the window (compaction dropped the call, whether it was
+        answered or still in flight, #79) renders likewise, framed with
+        ORPHAN_RESULT_LABEL: strict chat templates reject a tool result
+        with no preceding call. Both frames depend only on the window, so
+        a fork's prefix renders them identically.
 
         mid_conversation_system_role renders every system message after the
         leading one under that role (``agent.mid_conversation_system_role``).
@@ -248,34 +260,81 @@ class ContextWindow:
         "user" satisfies them. Only the returned copy changes — the window
         and the DB keep ``role: system``.
         """
-        result_at = {}
-        for i, m in enumerate(self.messages):
+        msgs = self.messages
+        # First result row per tool_call_id; later duplicates are dropped.
+        result_at: dict[str, int] = {}
+        for i, m in enumerate(msgs):
             if m.get("role") == "tool" and m.get("tool_call_id") and m["tool_call_id"] not in result_at:
                 result_at[m["tool_call_id"]] = i
 
-        emit_at = {}
-        for i, msg in enumerate(self.messages):
+        # Per call id: the call message's index, its interruption point (the
+        # first user/assistant row after it, else the window end), and its
+        # function name for the late-result frame.
+        call_index: dict[str, int] = {}
+        call_name: dict[str, str] = {}
+        interrupt_at: dict[int, int] = {}
+        for i, msg in enumerate(msgs):
             calls = msg.get("tool_calls") or []
             if not calls:
                 continue
-            if all(c["id"] in result_at for c in calls):
-                emit_at[i] = max(result_at[c["id"]] for c in calls)
+            interrupt_at[i] = next(
+                (k for k in range(i + 1, len(msgs)) if msgs[k].get("role") in ("user", "assistant")),
+                len(msgs),
+            )
+            for c in calls:
+                call_index.setdefault(c["id"], i)
+                call_name.setdefault(c["id"], c["function"]["name"])
+
+        # A result row renders as an interrupted-result frame when it is the
+        # first row for its id and sits at or after its call's interruption.
+        def is_late(j: int) -> bool:
+            m = msgs[j]
+            cid = m.get("tool_call_id")
+            return (
+                m.get("role") == "tool"
+                and cid in call_index
+                and result_at.get(cid) == j
+                and j >= interrupt_at[call_index[cid]]
+            )
+
+        # Where each call block emits: at its last result when every call has
+        # a result before the interruption and no frame sits in between,
+        # otherwise at the call itself.
+        emit_at: dict[int, int] = {}
+        for i, msg in enumerate(msgs):
+            calls = msg.get("tool_calls") or []
+            if not calls:
+                continue
+            gathered = [
+                result_at[c["id"]] for c in calls
+                if c["id"] in result_at and result_at[c["id"]] < interrupt_at[i]
+            ]
+            last = max(gathered) if gathered else i
+            if len(gathered) == len(calls) and not any(is_late(k) for k in range(i + 1, last)):
+                emit_at[i] = last
             else:
                 emit_at[i] = i
         anchored = {j: i for i, j in emit_at.items()}
-        claimed = {c["id"] for m in self.messages for c in (m.get("tool_calls") or [])}
+        claimed = set(call_index)
 
         def block(i: int) -> list[dict]:
-            msg = self.messages[i]
+            msg = msgs[i]
             out = [_visible(msg)]
             for call in msg.get("tool_calls") or []:
-                result = self.messages[result_at[call["id"]]] if call["id"] in result_at else None
-                out.append(_visible(result) if result is not None else {
+                cid = call["id"]
+                j = result_at.get(cid)
+                if j is not None and j < interrupt_at[i]:
+                    # Result arrived before the interruption: a real tool message.
+                    out.append(_visible(msgs[j]))
+                    continue
+                # No result in the block: a result later in the window means
+                # "pending" (stable once it arrives), else the live choice.
+                out.append({
                     "role": "tool",
-                    "tool_call_id": call["id"],
+                    "tool_call_id": cid,
                     "content": (
                         TOOL_RESULT_PENDING
-                        if call["id"] in pending_tool_call_ids
+                        if j is not None or cid in pending_tool_call_ids
                         else TOOL_RESULT_ABANDONED
                     ),
                 })
@@ -285,9 +344,19 @@ class ContextWindow:
         for i, msg in enumerate(self.messages):
             if i in anchored:
                 out += block(anchored[i])
-            if msg.get("role") == "tool" and msg.get("tool_call_id") in claimed:
-                continue
             if i in emit_at:
+                continue
+            # Late result: the conversation moved on, so frame it at its own
+            # position as an event attributed to its call (#346).
+            if is_late(i):
+                label = INTERRUPTED_RESULT_LABEL.format(name=call_name[msg["tool_call_id"]])
+                out.append({
+                    "role": "system",
+                    "content": f"[{label}]\n\n{msg.get('content', '')}",
+                })
+                continue
+            # Gathered into its call's block, or a later duplicate: dropped.
+            if msg.get("role") == "tool" and msg.get("tool_call_id") in claimed:
                 continue
             # Orphaned result: its call is gone, so frame it as a notification.
             if msg.get("role") == "tool":
