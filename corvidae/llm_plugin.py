@@ -15,6 +15,7 @@ Config:
         retry_base_delay: 2.0
         retry_max_delay: 60.0
         model_not_loaded_wait: 60.0  # seconds to wait out an unloaded model
+        raw_reasoning: false  # endpoint returns <think>…</think> inline in content
         timeout: ...        # optional
       background:     # optional — absent means use llm.main
         (same keys)
@@ -108,6 +109,17 @@ def _model_not_loaded_wait(cfg: dict, role: str) -> float:
             f"of seconds, got {value!r}"
         )
     return float(value)
+
+
+def _raw_reasoning(cfg: dict, role: str) -> bool:
+    """Validate llm.<role>.raw_reasoning: a boolean, default false."""
+    value = cfg.get("raw_reasoning", False)
+    # A string such as "false" would otherwise read as true.
+    if not isinstance(value, bool):
+        raise ValueError(
+            f"llm.{role}.raw_reasoning must be true or false, got {value!r}"
+        )
+    return value
 
 
 async def _close_after(client: LLMClient, delay: float = 5.0) -> None:
@@ -340,6 +352,7 @@ class LLMPlugin(CorvidaePlugin):
             document_prefix=cfg.get("document_prefix", ""),
             query_prefix=cfg.get("query_prefix", ""),
             model_not_loaded_wait=_model_not_loaded_wait(cfg, role),
+            raw_reasoning=_raw_reasoning(cfg, role),
         )
         pm = getattr(self, "pm", None)
         if pm is not None:

@@ -35,11 +35,12 @@ MODEL_NOT_LOADED_MARKER = "model is not loaded"
 
 logger = logging.getLogger(__name__)
 
-# Text shaped like a chat-template control token (<|endoftext|>, <|im_start|>).
-# llama-server tokenizes request content with parse_special, so a literal one
-# in any message becomes the real token: the model copies it and generation
-# stops, or it injects template structure (#356).
-CONTROL_TOKEN_RE = re.compile(r"<(\|[^|<>\s]{1,40}\|>)")
+# Text shaped like a chat-template control token (<|endoftext|>, <|im_start|>)
+# or a bare reasoning/tool-call tag (<think>, </think>, <tool_call>,
+# </tool_call>). llama-server tokenizes request content with parse_special, so
+# a literal one in any message becomes the real token: the model copies it and
+# generation stops, or it injects template structure (#356, #355).
+CONTROL_TOKEN_RE = re.compile(r"<(\|[^|<>\s]{1,40}\|>|/?(?:think|tool_call)>)")
 # A zero-width space after the "<" keeps the text readable but untokenizable
 # as the control token.
 CONTROL_TOKEN_DEFANGED = "<\u200b\\1"
@@ -63,6 +64,28 @@ def defang_control_tokens(value: Any) -> Any:
         return [defang_control_tokens(item) for item in value]
     # Anything else (numbers, None, booleans) carries no text.
     return value
+
+
+def split_raw_reasoning(message: dict) -> bool:
+    """Split a raw reply's <think> block into reasoning_content, in place.
+
+    Returns True when the reply is cut off: it opened reasoning and never
+    closed it. A server's parsed reasoning cannot tell a cut-off from a
+    decline (both arrive as empty content); a missing </think> in the raw
+    text can. shortcut: assumes the chat template forces thinking open, so
+    set llm.<role>.raw_reasoning only on endpoints whose template does;
+    elsewhere every reply without a </think> would read as cut off.
+    """
+    # Drop an optional opening tag and the whitespace after it.
+    text = message["content"].lstrip()
+    if text.startswith("<think>"):
+        text = text[len("<think>"):].lstrip()
+    reasoning, closed, rest = text.partition("</think>")
+    # Reasoning is everything before the close; the rest is the reply.
+    message["reasoning_content"] = reasoning.strip("\n")
+    message["content"] = rest.lstrip()
+    # No close tag means the reasoning never finished.
+    return not closed
 
 
 class LLMHTTPError(aiohttp.ClientResponseError):
@@ -144,6 +167,7 @@ class LLMClient:
         document_prefix: str = "",
         query_prefix: str = "",
         model_not_loaded_wait: float = 60.0,
+        raw_reasoning: bool = False,
     ) -> None:
         """Initialize the LLM client.
 
@@ -169,6 +193,10 @@ class LLMClient:
                           server reports the model is not loaded (a
                           llama-server router with --no-models-autoload).
                           Independent of max_retries. 0 disables.
+            raw_reasoning: The endpoint returns reasoning inline in
+                          ``content``, closed by ``</think>``; chat() splits
+                          it into ``reasoning_content`` and flags a reply
+                          with no ``</think>`` as cut off (#355).
         """
         self.base_url = base_url.rstrip("/")
         self.model = model
@@ -183,6 +211,7 @@ class LLMClient:
         self.document_prefix = document_prefix
         self.query_prefix = query_prefix
         self.model_not_loaded_wait = model_not_loaded_wait
+        self.raw_reasoning = raw_reasoning
         self.session: aiohttp.ClientSession | None = None
         self.observer: object | None = None
 
@@ -333,6 +362,13 @@ class LLMClient:
                 "total_tokens": usage.get("total_tokens"),
             },
         )
+
+        # Raw mode: split the reply's reasoning out and flag a cut-off at the
+        # response's top level, so the flag is never persisted or sent back.
+        choices = response.get("choices")
+        if self.raw_reasoning and choices and isinstance(choices[0].get("message"), dict):
+            if split_raw_reasoning(choices[0]["message"]):
+                response["reasoning_unfinished"] = True
 
         return response
 

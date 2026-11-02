@@ -57,6 +57,8 @@ class AgentTurnResult:
         usage: The response's top-level usage envelope verbatim (prompt_tokens,
             completion_tokens, prompt_tokens_details, ...), or None when the
             provider returned none.
+        reasoning_unfinished: True when the client flagged the reply as cut
+            off mid-reasoning (raw reasoning mode only).
     """
 
     message: dict
@@ -65,6 +67,7 @@ class AgentTurnResult:
     latency_ms: float
     logprobs: dict | None = None
     usage: dict | None = None
+    reasoning_unfinished: bool = False
 
 
 async def run_agent_turn(
@@ -134,7 +137,9 @@ async def run_agent_turn(
             "reasoning_content_length": len(msg["reasoning_content"]) if "reasoning_content" in msg else None,
         },
     )
-    return AgentTurnResult(message=msg, tool_calls=tool_calls, text=text, latency_ms=latency_ms, logprobs=logprobs, usage=usage)
+    return AgentTurnResult(message=msg, tool_calls=tool_calls, text=text, latency_ms=latency_ms, logprobs=logprobs, usage=usage,
+        reasoning_unfinished=bool(response.get("reasoning_unfinished")),
+    )
 
 
 def _truncate(s: str, maxlen: int = LOG_TRUNCATION_LENGTH) -> str:

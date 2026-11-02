@@ -341,14 +341,29 @@ literal `<|endoftext|>` in any message becomes the real control token. The
 model copies it while quoting the text, and generation stops with empty
 content. A fetched `<|im_start|>system` would inject template structure.
 `defang_control_tokens` walks the messages and rewrites every string match
-of `<\|[^|<>\s]{1,40}\|>` to `<` + U+200B + the rest. It returns new
+of `<\|[^|<>\s]{1,40}\|>`, or of a bare `<think>`, `</think>`,
+`<tool_call>` or `</tool_call>` tag (#355), to `<` + U+200B + the rest. It returns new
 containers, so the window and the stored history keep the original text. It
 is a pure function of the messages, so the prompt prefix stays cache-stable.
 Every chat role and caller (main loop, forks, compaction, memory) goes
 through `chat`. `embed` and `tools` schemas are not rewritten. The model
 can still emit a control token from its own knowledge; this only keeps
-input text from supplying one. Added tokens without the `<|…|>` shape
-(Qwen's `<think>`, `<tool_call>`) are not covered.
+input text from supplying one. Other added tokens without the `<|…|>`
+shape are not covered.
+
+**Raw reasoning (#355).** llama-server's parsed mode cannot tell a reply
+cut off mid-reasoning from a decline: both arrive with empty `content`. When
+the client has `raw_reasoning` (`llm.<role>.raw_reasoning`; the operator
+also configures the server to return reasoning inline, e.g. llama.cpp's
+`extra_body.reasoning_format: none`), `chat` splits the reply itself (`split_raw_reasoning`): an optional leading
+`<think>` is dropped, the text up to the first `</think>` becomes
+`reasoning_content`, and the rest becomes `content`. A reply with no
+`</think>` is all reasoning with `content: ""`, and the response dict gets a
+top-level `reasoning_unfinished: True` (outside the message, so it is never
+persisted or sent back). `AgentTurnResult.reasoning_unfinished` carries it.
+shortcut: this
+assumes the chat template forces thinking open, so set the option only on
+such endpoints; elsewhere every non-reasoning reply reads as cut off.
 
 Retry parameters: `max_retries` (default 3, set to 0 to disable), `retry_base_delay`
 (base exponential backoff delay in seconds), `retry_max_delay` (cap on backoff delay).
@@ -891,13 +906,23 @@ per-channel `SerialQueue`. The queue's consumer calls
    registered `clock` the retry is skipped with a WARNING. Out of scope:
    background stages (they retry on their own triggers) and retries across a
    restart.
+   **Cut-off replies (#355).** A result flagged `reasoning_unfinished` with
+   no tool calls logs a WARNING (channel, completion tokens, last 200
+   characters of reasoning) and is re-run once with the same messages (the
+   failed message is dropped from the list first). A second cut-off raises
+   `GenerationCutOff` inside the same `try`, so it takes the LLM-error path
+   above (error hook, error gate, error send; no turn retry). The user-facing
+   cause names the channel and says the reply was cut off mid-reasoning twice
+   and to resend or rephrase.
 8b. **The final send gate.** When the result's tool calls will not
     dispatch (no tool calls, or `turn_counter >= max_turns`), resolves the
     display text once (the max-turns fallback on that branch) and fires
     `should_send_response(emission="final")` over it. On the max-turns
     branch, `tool_calls` is stripped from the assistant message before it
     is appended, so the row and the window copy both lose it, whatever the
-    verdict.
+    verdict. A result with no tool calls whose display text is empty or
+    whitespace is withheld as a decline (`UNSENT`, final marker) without
+    firing the gate (#355).
 9. Appends the assistant message to conversation (as `UNSENT` after a
    final veto, else `MESSAGE`); fires `persist_message`. Then sends
    `OutboundThinking` for `reasoning_content`, unless the final was vetoed
@@ -966,6 +991,10 @@ veto:
 - still fires `on_agent_response` (the agent thought it; critique can
   still object);
 - appends a not-sent marker to the window.
+
+An empty or whitespace-only final with no tool calls takes the same path
+without the gate firing: the model declined to speak, and there is nothing to
+ask a gate about.
 
 The max-turns branch strips `tool_calls` from both the persisted row and
 the window copy regardless of the verdict: those calls never dispatch, so a
