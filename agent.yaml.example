@@ -15,7 +15,7 @@ llm:
     #                                   # Calls sending response_format drop reasoning_format and aren't split
     #                                   # (server default must be a parsed mode, not --reasoning-format none)
     # reasoning_reopened: truncate     # raw_reasoning only: a reply that reopens reasoning after its answer is cut
-    #                                   # there and logged; truncate sends the cut text, rerun regenerates once
+    #                                   # there and logged; truncate sends the cut text, rerun regenerates once (main turn only)
     # max_retries: 3                   # max retry attempts on transient errors (429, 500, 502, 503, 504)
     # retry_base_delay: 2.0            # base delay in seconds for exponential backoff
     # retry_max_delay: 60.0            # maximum delay cap in seconds

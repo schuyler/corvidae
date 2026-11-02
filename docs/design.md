@@ -381,7 +381,7 @@ reopened is popped from the messages and regenerated once, and that result
 is used whatever it holds (a second reopen is already cut); then the
 cut-off check runs on it as on any reply. With `truncate` (the default)
 the cut reply is used as is. A stray `</think>` has no start marker, so the
-cut lands at the tag and the line before it survives.
+cut lands at the tag and the second block's text before it survives.
 
 Raw mode is decided per call (#360). llama-server can't apply a JSON-schema
 grammar with `reasoning_format: none` (HTTP 400), so a call whose merged
