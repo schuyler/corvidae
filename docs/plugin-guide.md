@@ -378,7 +378,7 @@ Producers that start a background task in `on_start` and inject notifications sh
 | Hook | Type | When |
 |------|------|------|
 | `on_llm_request(role, model, request_id, message_count, tool_count, attribution)` | async broadcast | Immediately before an LLM chat-completion call |
-| `on_llm_response(role, model, request_id, usage, latency_ms, attribution, error)` | async broadcast | Exactly once per LLM call, after success or terminal failure |
+| `on_llm_response(role, model, request_id, usage, latency_ms, attribution, error, timings)` | async broadcast | Exactly once per LLM call, after success or terminal failure |
 | `on_metrics(name, value, tags)` | async broadcast | Whenever any plugin emits a metric event |
 
 `on_llm_request` / `on_llm_response` fire from the `LLMClient` chokepoint
@@ -386,7 +386,12 @@ Producers that start a background task in `on_start` and inject notifications sh
 system is covered — turn-loop, compaction, and subagent calls alike.
 `request_id` pairs a request with its response. Retried transient attempts
 do not fire `on_llm_response`; one request pairs with exactly one response.
+`model` is the model the request was sent with: the role's configured
+model unless an `extra_body` (the role's or the call's) overrode it.
 `usage` is the response envelope's `usage` field verbatim (or `None`);
+`timings` is the response's `timings` field verbatim, which llama-server
+sends (`cache_n` prompt tokens reused from cache, `prompt_n` prefilled)
+and other providers omit (`None`, as on terminal failure);
 `error` is `None` on success and the exception string on terminal failure.
 The request payload is summarized (message/tool counts), never shipped
 wholesale. Observer failures are logged and never break the LLM call.
@@ -1339,7 +1344,8 @@ logged with a traceback and never breaks an LLM call.
   database): timestamp, request id, role, model, stage, channel id,
   trace id (NULL for calls outside any trace), trigger,
   mode (`fork`/`standalone` for stages that can fork, else NULL), token
-  counts, cached tokens, latency, and error.
+  counts, cached tokens, llama-server's `cache_n` and `prompt_n` (prompt
+  tokens reused from cache vs prefilled), latency, and error.
   The table is created lazily on first use (`CREATE TABLE IF NOT EXISTS`).
 - **`MetricsJsonlPlugin`** (entry point `"metrics_jsonl"`) — consumes
   `on_metrics` and appends one JSON line per event

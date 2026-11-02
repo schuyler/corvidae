@@ -136,7 +136,9 @@ fails the run immediately and legibly if not:
   assumption. The `kv_slot` probe confirms that a follow-up turn reuses the
   cached prompt prefix instead of reprocessing it, reading
   `usage_log.cached_tokens` and `usage_log.prompt_tokens` out of
-  `sessions.db` — no server introspection endpoint involved.
+  `sessions.db` — no server introspection endpoint involved. `usage_log`
+  also records llama-server's `timings.cache_n` and `timings.prompt_n`
+  per call, as `cache_n` and `prompt_n`.
 - **ngircd** (`$BUSTER_HOST:6667`) — runs as the system `ngircd.service`
   (`systemctl status ngircd`), default config. `run.sh` checks that
   `127.0.0.1:6667` accepts a connection before doing anything else.

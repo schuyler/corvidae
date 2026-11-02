@@ -197,8 +197,9 @@ warning at startup saying so.
 Each forkable stage tags its own LLM call (the summary, the record, the
 stage-2 appraisal, each critique lens) `mode = 'fork'` or `'standalone'`
 in `usage_log`, so `cached_tokens` per fork row shows whether the prefix
-was reused. Other calls the stage makes, such as consolidation's
-importance prior, leave `mode` NULL.
+was reused (on llama-server, `cache_n` and `prompt_n` also record the
+prompt tokens reused from cache and the ones prefilled). Other calls the
+stage makes, such as consolidation's importance prior, leave `mode` NULL.
 
 ### `reasoning_history: exchange` and `preserve_thinking`
 

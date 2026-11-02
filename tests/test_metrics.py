@@ -29,7 +29,7 @@ CONSOLIDATION_ATTRIBUTION = {
 
 async def _fire_response(pm, *, usage=USAGE, error=None, attribution=ATTRIBUTION,
                          role="main", model="m1", request_id="req1",
-                         latency_ms=42.0):
+                         latency_ms=42.0, timings=None):
     """Dispatch on_llm_response through the pm the way LLMPlugin's observer does."""
     await pm.ahook.on_llm_response(
         role=role,
@@ -39,6 +39,7 @@ async def _fire_response(pm, *, usage=USAGE, error=None, attribution=ATTRIBUTION
         latency_ms=latency_ms,
         attribution=attribution,
         error=error,
+        timings=timings,
     )
 
 
@@ -248,6 +249,68 @@ class TestUsageLogPlugin:
             rows = await cursor.fetchall()
 
         assert rows == [("req-old", None), ("req-new", "compaction")]
+
+
+    async def test_cache_counts_written_from_timings(self, db):
+        """PRD §3.13.10: llama-server's timings.cache_n (prompt tokens reused
+        from cache) and timings.prompt_n (prompt tokens prefilled) land in
+        usage_log, so context switches are measurable."""
+        pm, plugin = await self._setup(db)
+        await _fire_response(
+            pm, request_id="req-timings",
+            timings={"cache_n": 803, "prompt_n": 17, "predicted_n": 10},
+        )
+
+        async with db.execute(
+            "SELECT cache_n, prompt_n FROM usage_log WHERE request_id = ?",
+            ("req-timings",),
+        ) as cursor:
+            row = await cursor.fetchone()
+
+        assert row == (803, 17)
+
+    async def test_cache_counts_null_without_timings(self, db):
+        pm, plugin = await self._setup(db)
+        await _fire_response(pm, request_id="req-notimings")
+
+        async with db.execute(
+            "SELECT cache_n, prompt_n FROM usage_log WHERE request_id = ?",
+            ("req-notimings",),
+        ) as cursor:
+            row = await cursor.fetchone()
+
+        assert row == (None, None)
+
+    async def test_table_predating_cache_columns_is_upgraded_in_place(self, db):
+        """A usage_log table created before cache_n/prompt_n existed gets
+        both columns on next write, with prior rows preserved."""
+        await db.execute(
+            "CREATE TABLE usage_log (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "ts REAL NOT NULL, request_id TEXT NOT NULL, role TEXT NOT NULL, "
+            "model TEXT NOT NULL, stage TEXT, channel_id TEXT, trace_id TEXT, "
+            "prompt_tokens INTEGER, completion_tokens INTEGER, "
+            "total_tokens INTEGER, latency_ms REAL, error TEXT)"
+        )
+        await db.execute(
+            "INSERT INTO usage_log (ts, request_id, role, model) "
+            "VALUES (1.0, 'req-old', 'main', 'm1')"
+        )
+        await db.commit()
+
+        pm, plugin = await self._setup(db)
+        await _fire_response(
+            pm, request_id="req-new", timings={"cache_n": 5, "prompt_n": 6}
+        )
+
+        async with db.execute(
+            "SELECT ts, request_id, role, model, cache_n, prompt_n "
+            "FROM usage_log ORDER BY id"
+        ) as cursor:
+            rows = await cursor.fetchall()
+
+        # The old row keeps its values; only the new columns read NULL.
+        assert rows[0] == (1.0, "req-old", "main", "m1", None, None)
+        assert rows[1][1:] == ("req-new", "main", "m1", 5, 6)
 
 
 class TestMetricsJsonlPlugin:

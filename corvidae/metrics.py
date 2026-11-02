@@ -48,6 +48,8 @@ CREATE TABLE IF NOT EXISTS usage_log (
     completion_tokens INTEGER,
     total_tokens INTEGER,
     cached_tokens INTEGER,
+    cache_n INTEGER,
+    prompt_n INTEGER,
     latency_ms REAL,
     error TEXT
 )
@@ -147,6 +149,10 @@ class UsageLogPlugin(CorvidaePlugin):
                 )
             # fork | standalone for stages that can fork (#51); NULL otherwise.
             await add_column_if_missing(db, "usage_log", "mode", "TEXT")
+            # llama-server's timings.cache_n / prompt_n: prompt tokens reused
+            # from cache vs prefilled, per call (PRD §3.13.10).
+            await add_column_if_missing(db, "usage_log", "cache_n", "INTEGER")
+            await add_column_if_missing(db, "usage_log", "prompt_n", "INTEGER")
             await db.commit()
             self._table_ready = True
         return db
@@ -162,7 +168,8 @@ class UsageLogPlugin(CorvidaePlugin):
 
     @hookimpl
     async def on_llm_response(
-        self, role, model, request_id, usage, latency_ms, attribution, error
+        self, role, model, request_id, usage, latency_ms, attribution, error,
+        timings,
     ) -> None:
         """Insert one row for this LLM call. Fail-soft."""
         try:
@@ -173,11 +180,13 @@ class UsageLogPlugin(CorvidaePlugin):
                 )
                 return
             usage = usage or {}
+            timings = timings or {}
             await db.execute(
                 "INSERT INTO usage_log (ts, request_id, role, model, stage, "
                 "channel_id, trace_id, trigger, mode, prompt_tokens, "
-                "completion_tokens, total_tokens, cached_tokens, latency_ms, error) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "completion_tokens, total_tokens, cached_tokens, cache_n, "
+                "prompt_n, latency_ms, error) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     time.time(),
                     request_id,
@@ -192,6 +201,8 @@ class UsageLogPlugin(CorvidaePlugin):
                     usage.get("completion_tokens"),
                     usage.get("total_tokens"),
                     (usage.get("prompt_tokens_details") or {}).get("cached_tokens"),
+                    timings.get("cache_n"),
+                    timings.get("prompt_n"),
                     latency_ms,
                     error,
                 ),
