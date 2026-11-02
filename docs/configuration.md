@@ -46,7 +46,7 @@ irc:
 
 channels:
   irc:#general:
-    system_prompt: "You are the channel bot."
+    register_prompt: "This is #general; keep it brief."
     max_context_tokens: 16000
     max_turns: 10
     reasoning_history: drop
@@ -129,7 +129,8 @@ These values apply to all channels. Per-channel overrides in the `channels` sect
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `agent.system_prompt` | string or list of strings | `"You are a helpful assistant."` | System prompt prepended to each LLM call. A list of strings is treated as file paths; each file is read and concatenated with double newlines. Relative paths are resolved against `_base_dir`. |
+| `agent.system_prompt` | string or list of strings | `"You are a helpful assistant."` | The agent's identity: the head of every channel's system prompt. No channel setting replaces it. A list of strings is treated as file paths; each file is read and concatenated with double newlines. Relative paths are resolved against `_base_dir`. |
+| `agent.register_prompt` | string or list of strings | unset | A register for every channel that doesn't set its own, appended after the identity. Replaces the transports' shipped defaults. Same format as `agent.system_prompt`. See [Registers](#registers). |
 | `agent.max_context_tokens` | integer | `24000` | Token budget for conversation history. `CompactionPlugin` compacts when the estimated token count exceeds `compaction_threshold` × this value. A hard ceiling: a window still over it after compaction loses its oldest rows from memory (the log keeps them). |
 | `agent.max_turns` | integer | `10` | Maximum consecutive tool-calling turns per exchange before tool dispatch is suppressed. The counter resets when an item starts a new exchange with no tool cycle in flight: a user message, or a notification that originates its own trace (a scheduler reminder or heartbeat). |
 | `agent.reasoning_history` | `drop` \| `exchange` \| `keep` | `drop` | `drop` strips `reasoning_content` from every in-memory assistant message. `exchange` strips it only from completed exchanges (assistant messages before the last `role: user` message), so a tool chain in progress keeps its reasoning — the trained distribution for Qwen-family models. `keep` never strips it. Applied to the whole window before each LLM call, so history reloaded after a restart follows it too. The DB record always keeps reasoning. Any other value, or the removed `keep_thinking_in_history` key, fails at startup. Use `exchange` with the server's `preserve_thinking` off (see below). |
@@ -609,27 +610,32 @@ Keys are `transport:scope` identifiers (e.g., `irc:#general`, `cli:local`), or t
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `system_prompt` | string or list of strings | `agent.system_prompt` | System prompt for this channel. Same format as `agent.system_prompt`. |
+| `register_prompt` | string or list of strings | `agent.register_prompt`, else the transport's shipped default | This channel's register, appended after `agent.system_prompt`. Replaces the shipped default; `""` or `[]` means no register. Same format as `agent.system_prompt`. See [Registers](#registers). |
 | `max_context_tokens` | integer | `agent.max_context_tokens` | Token budget for this channel's conversation history. A hard ceiling: a window still over it after compaction loses its oldest rows from memory (the log keeps them). |
 | `max_turns` | integer | `agent.max_turns` | Maximum consecutive tool-calling turns for this channel. Must be an integer; a wrong type is rejected when the file is parsed (a `Config error` at startup, a logged reload error on reload), not at turn time. |
 | `reasoning_history` | `drop` \| `exchange` \| `keep` | `agent.reasoning_history` | Controls `reasoning_content` retention for this channel. |
 | `tools.disabled` | list of strings | `[]` | Tools this channel cannot use, on top of the global `tools.disabled`. The channel can only narrow; it can't re-enable a globally disabled tool, and `set_settings` can't change the list. `shell` and `task_pipeline` disable together. See [Per-channel tool sets](#per-channel-tool-sets). |
 
-Any other key in an entry, exact or transport-wide, is rejected: at startup as `Config error: ... — check <path>`, on reload by refusing the whole reload (see [Error handling](#error-handling)). The message names `channels.<id>.<key>`, the rejected value and the accepted keys above. In particular `max_tokens` is not a channel key; it exists only as a `set_settings` runtime override. An operator `agent.yaml` that carries a stray key will fail to start after upgrading until the key is removed.
+Any other key in an entry, exact or transport-wide, is rejected: at startup as `Config error: ... — check <path>`, on reload by refusing the whole reload (see [Error handling](#error-handling)). The message names `channels.<id>.<key>`, the rejected value and the accepted keys above. In particular `max_tokens` is not a channel key; it exists only as a `set_settings` runtime override, and `system_prompt` is no longer one: the identity is agent-wide, and the error points at `agent.system_prompt` and `channels.<id>.register_prompt`. An operator `agent.yaml` that carries a stray key will fail to start after upgrading until the key is removed.
 
 Channels not listed here are created on-demand when a message arrives and use matching transport-wide entries, then `agent` defaults.
 
 ```yaml
 channels:
   irc:#general:
-    system_prompt: "You are the channel bot."
+    register_prompt: "This is #general; keep it brief."
     max_context_tokens: 8000
   cli:local:
-    system_prompt:
-      - prompts/base.txt
+    register_prompt:
       - prompts/cli-addendum.txt
     reasoning_history: keep
 ```
+
+### Registers
+
+Every channel's system prompt is the agent's identity (`agent.system_prompt`) followed by a blank line and the channel's register, if it has one. The register resolves like any channel setting: the exact entry, then transport-wide entries from most to least specific, then `agent.register_prompt`, then the default the channel's transport ships, then none. Each layer replaces the ones below it; nothing is merged. An explicit `""` or `[]` at any layer means no register, which is how to switch a shipped default off.
+
+Signal, Discord and IRC ship defaults (texting-length turns and only the formatting the transport shows; see [prompt-guide.md](prompt-guide.md#chat-register-fragments)). Web, CLI and ACP ship none. A register file that can't be read logs a WARNING naming the channel and the path, and the conversation starts on the identity alone. Like the identity, the register is fixed when a conversation starts.
 
 ### Transport-wide entries
 
@@ -638,22 +644,22 @@ Some channels can't be listed ahead of time. Signal DMs are keyed on each contac
 ```yaml
 channels:
   signal:*:                        # every Signal DM, current and future
-    system_prompt: [prompts/SOUL.md, prompts/chat.md, prompts/signal_dm.md]
+    max_turns: 6
   discord:*:                       # Discord server channels and threads (and DMs, below)
-    system_prompt: [prompts/SOUL.md, prompts/chat.md, prompts/discord_group.md]
+    register_prompt: [prompts/my_server.md]   # replaces the shipped Discord register
     tools:
       disabled: [shell, web_fetch]
   discord:dm:*:                    # Discord DMs: more specific than discord:*
-    system_prompt: [prompts/SOUL.md, prompts/chat.md]
+    register_prompt: []            # no register in DMs
   signal:8f2c1c9a-3e21-4b77-9c3f-1a2b3c4d5e6f:
-    max_turns: 20                  # one contact keeps the Signal prompt, with more turns
+    max_turns: 20                  # one contact keeps the Signal settings, with more turns
 ```
 
 A transport-wide entry accepts the same keys as an exact one. Each setting resolves in this order, last wins: built-in default, `agent:`, matching transport-wide entries from least to most specific (so `discord:dm:*` beats `discord:*` whatever order they're written in), the channel's exact entry, then `set_settings` runtime overrides. A Signal phone-number alias counts as an exact entry. `tools.disabled` is the exception: it's the union of the global list and every matching entry, so a more specific entry can narrow further but can't re-enable a tool.
 
 The accepted key forms are `transport:*` and `transport:<scope-prefix>*`. A `*` anywhere else in a key ending in `*`, or a key with no `transport:` before the `*`, is rejected at startup, and on reload, naming the key. Only a trailing `*` is special, so an exact key like `irc:#c*t` still works; the one casualty is an IRC channel whose name itself ends in `*`, which now reads as a transport-wide key. Matching is on channel ids, so `signal:+1*` would match only phone-number alias entries, never a conversation (Signal conversations are keyed on ACIs). A transport-wide key is never a channel itself. This is a prefix match, not the glob syntax `memory.channel_groups` uses: `*` means "the rest of the id" and only at the end, and `?` has no meaning.
 
-Transport-wide entries reload like `agent:` does: a running channel sees the new values at its next use. `max_turns`, `max_context_tokens` and `reasoning_history` apply from the next turn, and `tools.disabled` follows the rules under [Per-channel tool sets](#per-channel-tool-sets). A conversation's system prompt is fixed when it starts and survives compaction, so a prompt edit reaches only channels created after the reload, or everything after a restart. Removing a transport-wide entry also takes effect live. Each running channel whose matching entries change is logged at INFO.
+Transport-wide entries reload like `agent:` does: a running channel sees the new values at its next use. `max_turns`, `max_context_tokens` and `reasoning_history` apply from the next turn, and `tools.disabled` follows the rules under [Per-channel tool sets](#per-channel-tool-sets). A conversation's system prompt (identity and register) is fixed when it starts and survives compaction, so a register edit reaches only channels created after the reload, or everything after a restart. Removing a transport-wide entry also takes effect live. Each running channel whose matching entries change is logged at INFO.
 
 ### Per-channel tool sets
 
@@ -776,9 +782,9 @@ No restart is required for the changes listed below. Changes that require restar
 | `agent.immutable_settings` | `RuntimeSettingsPlugin` resets its blocklist and re-applies the new list. Constructor-supplied immutable keys are always retained. |
 | New channel entries in `channels:` | `load_channel_config` registers newly added channels. |
 | `channels.<id>.tools.disabled` on a registered channel | Updated in place. Dispatch refuses a newly disabled tool at once; the schemas follow at the next compaction or conversation start, never mid-conversation (on `internal:heartbeat`, whose window is trimmed without compaction, at the next restart). See [Per-channel tool sets](#per-channel-tool-sets). A reload with a malformed entry changes no channel. |
-| Transport-wide entries (`channels.<transport>:*`) | Replaced and re-matched against every running channel. Scalar keys apply from the next turn, `tools.disabled` as above, the system prompt only to conversations that start after the reload. See [Transport-wide entries](#transport-wide-entries). |
+| Transport-wide entries (`channels.<transport>:*`) | Replaced and re-matched against every running channel. Scalar keys apply from the next turn, `tools.disabled` as above, the register only to conversations that start after the reload. See [Transport-wide entries](#transport-wide-entries). |
 | `web.token` | A changed token logs out every browser (their sockets close and the page says the session expired). A token removed from config falls back to `CORVIDAE_WEB_TOKEN` as the daemon started with it, else a fresh generated one, which is logged. Changing `CORVIDAE_WEB_TOKEN` itself needs a restart. |
-| `agent` defaults | `ChannelRegistry.agent_defaults` is updated. `max_turns`, `max_context_tokens` and `reasoning_history` are resolved every turn, so running channels pick them up at their next turn; `system_prompt` reaches only conversations that start after the reload. |
+| `agent` defaults | `ChannelRegistry.agent_defaults` is updated. `max_turns`, `max_context_tokens` and `reasoning_history` are resolved every turn, so running channels pick them up at their next turn; `system_prompt` and `register_prompt` reach only conversations that start after the reload. |
 
 ### What requires restart
 

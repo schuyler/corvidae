@@ -1627,9 +1627,10 @@ class TestPackaging:
         base = Path(str(resources.files("corvidae.channels")))
         pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())
         patterns = pyproject["tool"]["setuptools"]["package-data"]["corvidae.channels"]
+        # Only web_static is checked here; the list also ships registers/*.md.
         covered = {
             p for p in set().union(*(glob.glob(pat, root_dir=base) for pat in patterns))
-            if (base / p).is_file()
+            if (base / p).is_file() and p.startswith("web_static/")
         }
         static = base / "web_static"
         actual = {str(p.relative_to(base)) for p in static.rglob("*") if p.is_file()}

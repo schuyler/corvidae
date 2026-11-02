@@ -229,20 +229,19 @@ agent:
 # memory.channel_groups, which uses glob patterns. Resolution, last wins:
 # agent defaults, transport-wide (less specific first), exact entry,
 # set_settings. tools.disabled is the union of every layer.
+#
+# A channel's register_prompt (string, or list of file paths) is appended
+# after agent.system_prompt; no channel setting replaces the identity.
+# Signal, Discord and IRC ship default registers (chat-app norms); a
+# register_prompt here replaces the default, and "" or [] switches it off.
+# agent.register_prompt, if set, replaces the defaults everywhere.
 channels:
   cli:local:
-    system_prompt: "You are a helpful assistant running in CLI mode."
-  # Chat register for chat apps (docs/prompt-guide.md, "Chat register fragments"):
-  # signal:*:                       # every Signal DM, current and future
-  #   system_prompt: [prompts/SOUL.md, prompts/chat.md, prompts/signal_dm.md]
-  # discord:*:                      # Discord server channels and threads
-  #   system_prompt: [prompts/SOUL.md, prompts/chat.md, prompts/discord_group.md]
-  # discord:dm:*:                   # Discord DMs; beats discord:* (more specific)
-  #   system_prompt: [prompts/SOUL.md, prompts/chat.md]
+    register_prompt: "This is a terminal session; longer, structured answers are fine."
   # acp:*:                          # every ACP session (ids are minted per session)
   #   max_turns: 30
   # irc:#lex:
-  #   system_prompt: "You are Sherman, an IRC bot in #lex."
+  #   register_prompt: "This is #lex, a small channel of regulars; keep it brief."
   #   max_context_tokens: 8000
   #   tools:
   #     disabled: [shell, web_fetch]  # on top of tools.disabled; task_pipeline goes with
@@ -250,4 +249,4 @@ channels:
   #                                   # On reload: refused at once, schemas change at
   #                                   # the next compaction or conversation start.
   # signal:8f2c1c9a-3e21-4b77-9c3f-1a2b3c4d5e6f:   # ACI-keyed form (signal:<aci>) is recommended
-  #   system_prompt: "You are Sherman, a Signal DM bot."
+  #   register_prompt: []           # this contact gets no register at all

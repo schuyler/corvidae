@@ -32,6 +32,7 @@ import aiohttp
 from collections.abc import Callable
 from dataclasses import dataclass, field, fields as dc_fields, replace
 from enum import Enum
+from pathlib import Path
 
 from corvidae.clock import Clock, Timer
 from corvidae.llm import LLMHTTPError, is_backend_unreachable
@@ -316,6 +317,35 @@ class Agent(CorvidaePlugin):
         if channel.pending_tool_call_ids:
             return
         self._idle.note_settled(channel.id)
+
+    async def _resolve_register(
+        self, channel: Channel, configured: str | list[str] | None, base_dir: Path
+    ) -> str:
+        """The register text for a starting conversation on ``channel``.
+
+        A configured ``register_prompt`` (any layer) replaces the owning
+        transport's shipped default; an explicit empty one switches it off.
+        Unconfigured, the transport's default applies, else none. A file
+        that can't be read degrades to no register, with a warning.
+        """
+        # Not configured anywhere: ask the owning transport for its default.
+        if configured is None:
+            return await self.pm.ahook.resolve_register_prompt(channel=channel) or ""
+        # Explicitly empty: no register, without resolving an empty list.
+        if not configured:
+            return ""
+        try:
+            return resolve_system_prompt(configured, base_dir)
+        except (OSError, UnicodeDecodeError) as exc:
+            # Rescue: start the conversation on the identity alone.
+            logger.warning(
+                "channel %s: register_prompt %r could not be read (%s: %s); "
+                "starting with no register — check the path in agent.yaml "
+                "(relative paths resolve against the config directory)",
+                channel.id, configured, type(exc).__name__, exc,
+                extra={"channel": channel.id},
+            )
+            return ""
 
     @hookimpl
     async def on_init(self, pm, config: dict) -> None:
@@ -1001,7 +1031,10 @@ class Agent(CorvidaePlugin):
             from pathlib import Path
             if base_dir is None:
                 base_dir = Path(".")
-            conv.system_prompt = resolve_system_prompt(resolved_cfg["system_prompt"], base_dir)
+            # Identity first, then the channel's register (#316).
+            identity = resolve_system_prompt(resolved_cfg["system_prompt"], base_dir)
+            register = await self._resolve_register(channel, resolved_cfg["register_prompt"], base_dir)
+            conv.system_prompt = f"{identity}\n\n{register}" if register else identity
             # The tool set is fixed for the conversation, like the system
             # prompt it sits beside at the head of the prompt (principle 2).
             conv.tool_view = self._build_tool_view(channel)

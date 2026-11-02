@@ -1524,7 +1524,7 @@ class TestChannelConfigKeys:
         """`channels: discord:<id>` / `discord:dm:<id>` register channels whose
         ids round-trip, and an inbound DM lands on the pre-registered one."""
         channels = {
-            "discord:123": {"system_prompt": "guild prompt"},
+            "discord:123": {"register_prompt": "guild prompt"},
             "discord:dm:456": {"max_turns": 7},
         }
         h = await _start_plugin(
@@ -1536,7 +1536,7 @@ class TestChannelConfigKeys:
             dm_ch = h.registry.get("discord:dm:456")
             assert guild_ch is not None and guild_ch.id == "discord:123"
             assert dm_ch is not None and dm_ch.id == "discord:dm:456"
-            assert guild_ch.config.system_prompt == "guild prompt"
+            assert guild_ch.config.register_prompt == "guild prompt"
 
             await _deliver(h, make_dm("hi", author_id=456))
             landed = h.on_message.await_args_list[0].kwargs["channel"]

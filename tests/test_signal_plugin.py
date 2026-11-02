@@ -617,7 +617,7 @@ class TestChannelScopeAndIdentity:
     async def test_alias_system_prompt_applies_via_direct_number_match(self, tmp_path):
         """A `channels:` alias keyed by E.164 lands its config on the ACI channel
         when the envelope carries a matching sourceNumber."""
-        channels_config = {f"signal:{OTHER_NUMBER}": {"system_prompt": "alias prompt"}}
+        channels_config = {f"signal:{OTHER_NUMBER}": {"register_prompt": "alias prompt"}}
         # The sender is allowlisted: a refused one gets no registered
         # channel at all (#103), so identity is pinned on an allowed one.
         h = await _start_plugin(
@@ -631,7 +631,7 @@ class TestChannelScopeAndIdentity:
             channel = h.pm.ahook.on_message.await_args.kwargs["channel"]
             assert channel.id == f"signal:{OTHER_ACI}"
             resolved = h.registry.resolve_config(channel)
-            assert resolved["system_prompt"] == "alias prompt"
+            assert resolved["register_prompt"] == "alias prompt"
         finally:
             await _stop_plugin(h)
 
@@ -644,7 +644,7 @@ class TestChannelScopeAndIdentity:
         number must also be configured in allow: for this to resolve; an
         unauthorized sender never gets a reply, so an override that never
         resolves for them is harmless."""
-        channels_config = {f"signal:{OTHER_NUMBER}": {"system_prompt": "alias prompt"}}
+        channels_config = {f"signal:{OTHER_NUMBER}": {"register_prompt": "alias prompt"}}
         h = await _start_plugin(
             tmp_path,
             signal_overrides={"allow": [OTHER_NUMBER]},
@@ -663,7 +663,7 @@ class TestChannelScopeAndIdentity:
             channel = h.pm.ahook.on_message.await_args.kwargs["channel"]
             assert channel.id == f"signal:{OTHER_ACI}"
             resolved = h.registry.resolve_config(channel)
-            assert resolved["system_prompt"] == "alias prompt"
+            assert resolved["register_prompt"] == "alias prompt"
         finally:
             await _stop_plugin(h)
 
@@ -673,7 +673,7 @@ class TestChannelScopeAndIdentity:
         byte-identical to the one get_or_create produces from the ACI alone,
         and it is not the alias id. Two ids here would fork the history that
         sessions.db, the jsonl logs, and memory are all keyed on."""
-        channels_config = {f"signal:{OTHER_NUMBER}": {"system_prompt": "alias prompt"}}
+        channels_config = {f"signal:{OTHER_NUMBER}": {"register_prompt": "alias prompt"}}
         # The sender is allowlisted: a refused one gets no registered
         # channel at all (#103), so identity is pinned on an allowed one.
         h = await _start_plugin(
@@ -698,7 +698,7 @@ class TestChannelScopeAndIdentity:
             assert inbound_channel.id != alias_channel.id
             assert OTHER_NUMBER not in inbound_channel.id
             # The alias entry's config landed on the channel traffic uses.
-            assert h.registry.resolve_config(inbound_channel)["system_prompt"] == "alias prompt"
+            assert h.registry.resolve_config(inbound_channel)["register_prompt"] == "alias prompt"
         finally:
             await _stop_plugin(h)
 
@@ -706,7 +706,7 @@ class TestChannelScopeAndIdentity:
         """The same sender maps to the same channel whether or not a given
         message carries sourceNumber -- an identity change must not fork
         the history."""
-        channels_config = {f"signal:{OTHER_NUMBER}": {"system_prompt": "alias prompt"}}
+        channels_config = {f"signal:{OTHER_NUMBER}": {"register_prompt": "alias prompt"}}
         # The sender is allowlisted: a refused one gets no registered
         # channel at all (#103), so identity is pinned on an allowed one.
         h = await _start_plugin(
@@ -1366,7 +1366,7 @@ class TestResolveChannel:
         resolve_channel must route through the alias resolver (ACI as
         scope, no source_number) so the E.164 alias's ChannelConfig lands
         on the channel, not a bare default one."""
-        channels_config = {f"signal:{OTHER_NUMBER}": {"system_prompt": "alias prompt"}}
+        channels_config = {f"signal:{OTHER_NUMBER}": {"register_prompt": "alias prompt"}}
         h = await _start_plugin(
             tmp_path,
             signal_overrides={"allow": [OTHER_NUMBER]},
@@ -1387,7 +1387,7 @@ class TestResolveChannel:
             assert channel.id == f"signal:{OTHER_ACI}"
             assert h.registry.get(channel.id) is channel
             resolved = h.registry.resolve_config(channel)
-            assert resolved["system_prompt"] == "alias prompt"
+            assert resolved["register_prompt"] == "alias prompt"
         finally:
             await _stop_plugin(h)
 
@@ -1716,7 +1716,7 @@ class TestResolveChannelBeforeConnect:
         """PRD §3.2.7: before the first connect the E.164 alias cannot be
         matched to an ACI, so resolve_channel returns None and caches
         nothing, rather than a default-configured channel."""
-        channels_config = {f"signal:{OTHER_NUMBER}": {"system_prompt": "alias prompt"}}
+        channels_config = {f"signal:{OTHER_NUMBER}": {"register_prompt": "alias prompt"}}
         h = await _start_plugin(
             tmp_path,
             signal_overrides={"allow": [OTHER_NUMBER]},
@@ -1746,7 +1746,7 @@ class TestResolveChannelBeforeConnect:
     async def test_alias_outside_allow_does_not_block(self, tmp_path):
         """An E.164 channels: key that is not in allow: is never resolved
         (it is inert), so it must not hold resolve_channel back."""
-        channels_config = {f"signal:{OTHER_NUMBER}": {"system_prompt": "alias prompt"}}
+        channels_config = {f"signal:{OTHER_NUMBER}": {"register_prompt": "alias prompt"}}
         h = await _start_plugin(
             tmp_path, signal_overrides={"allow": [AUTH_ACI]},
             channels=channels_config, wait_connect=False,
@@ -1762,7 +1762,7 @@ class TestResolveChannelBeforeConnect:
         """Once an attempt has completed, a batch failure (retried only on
         the next connect) must not defer reminders indefinitely: the
         channel is created and the reduced config is logged at WARNING."""
-        channels_config = {f"signal:{OTHER_NUMBER}": {"system_prompt": "alias prompt"}}
+        channels_config = {f"signal:{OTHER_NUMBER}": {"register_prompt": "alias prompt"}}
         h = await _start_plugin(
             tmp_path,
             signal_overrides={"allow": [OTHER_NUMBER]},

@@ -1130,6 +1130,30 @@ class AgentSpec:
             or cannot build it yet.
         """
 
+    @hookspec(firstresult=True)
+    async def resolve_register_prompt(self, channel: "Channel") -> "str | None":
+        """Return the default register text for a channel (#316).
+
+        Grammar class: resolve (firstresult=True).
+
+        The register is appended after the agent-wide identity in the
+        channel's system prompt. Agent asks for it once per conversation,
+        only when no ``register_prompt`` is configured for the channel at
+        any layer (exact entry, transport-wide entry, ``agent:``).
+
+        Who answers: the transport that owns the channel (SignalPlugin,
+        DiscordPlugin, IRCPlugin ship defaults). Every implementation
+        returns None for channels it does not own. No answer means a blank
+        register. ``channel`` has no default — see the arg-binding guard
+        (tests/test_hook_arg_binding.py).
+
+        Args:
+            channel: The Channel whose conversation is starting.
+
+        Returns:
+            The register text, or None for no default.
+        """
+
     @hookspec
     async def persist_message(
         self, channel: "Channel", message: dict, message_type: "MessageType"

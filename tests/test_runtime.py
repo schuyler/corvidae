@@ -69,7 +69,7 @@ class TestDeepMerge:
         """Nested dicts are merged recursively, not replaced wholesale."""
         from corvidae.runtime import deep_merge
 
-        base = {"channels": {"irc:#lex": {"system_prompt": "old"}}}
+        base = {"channels": {"irc:#lex": {"register_prompt": "old"}}}
         overrides = {"channels": {"cli:local": {}}}
         result = deep_merge(base, overrides)
 
@@ -817,7 +817,7 @@ class TestRuntimeStart:
 
         config_data = {
             "llm": {"main": {"base_url": "http://localhost:8080", "model": "m"}},
-            "channels": {"irc:#lex": {"system_prompt": "test"}},
+            "channels": {"irc:#lex": {"register_prompt": "test"}},
         }
 
         with tempfile.NamedTemporaryFile(

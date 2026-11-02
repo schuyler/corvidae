@@ -30,6 +30,7 @@ from corvidae.channel import Channel, ChannelRegistry
 from corvidae.channels.split import split_message
 from corvidae.trace import mint_trace_id
 from corvidae.hooks import TransportPlugin, get_dependency, hookimpl
+from corvidae.channels._registers import shipped_register
 from corvidae.outbound import OutboundMessage, OutboundProgress
 
 logger = logging.getLogger("corvidae.discord_plugin")
@@ -561,6 +562,17 @@ class DiscordPlugin(TransportPlugin):
     # -----------------------------------------------------------------
     # Authorization gate
     # -----------------------------------------------------------------
+
+    @hookimpl
+    async def resolve_register_prompt(self, channel: Channel) -> str | None:
+        """Default register: chat norms for DMs, plus group manners for
+        server channels and threads."""
+        if not self.owns(channel):
+            return None
+        # DM scopes are "dm:<user id>"; everything else is a server channel.
+        if channel.scope.startswith("dm:"):
+            return shipped_register("chat")
+        return shipped_register("chat", "discord_group")
 
     @hookimpl
     async def should_process_message(

@@ -29,9 +29,9 @@ AGENT = {"system_prompt": "AGENT", "max_turns": 10, "max_context_tokens": 8000}
 # chat register, Discord DMs their own, web and ACP keep the agent default.
 CHAT_CONFIG = {
     "channels": {
-        "signal:*": {"system_prompt": "SIGNAL"},
-        "discord:*": {"system_prompt": "DISCORD-GROUP", "max_turns": 4},
-        "discord:dm:*": {"system_prompt": "DISCORD-DM"},
+        "signal:*": {"register_prompt": "SIGNAL"},
+        "discord:*": {"register_prompt": "DISCORD-GROUP", "max_turns": 4},
+        "discord:dm:*": {"register_prompt": "DISCORD-DM"},
     }
 }
 
@@ -57,13 +57,17 @@ class TestCoverage:
     def test_unseen_signal_dm_gets_the_signal_entry(self):
         """R1: a contact who first writes after the config is loaded."""
         registry = _registry(CHAT_CONFIG)
-        assert _resolved(registry, "signal", "0b1e-new-aci")["system_prompt"] == "SIGNAL"
+        resolved = _resolved(registry, "signal", "0b1e-new-aci")
+        assert resolved["register_prompt"] == "SIGNAL"
+        # The register is appended after identity, never a replacement.
+        assert resolved["system_prompt"] == "AGENT"
 
     def test_unlisted_discord_server_channel_gets_the_discord_entry(self):
         """R2: server channels and threads key on a numeric id."""
         registry = _registry(CHAT_CONFIG)
         resolved = _resolved(registry, "discord", "123456789")
-        assert resolved["system_prompt"] == "DISCORD-GROUP"
+        assert resolved["register_prompt"] == "DISCORD-GROUP"
+        assert resolved["system_prompt"] == "AGENT"
         assert resolved["max_turns"] == 4
 
     def test_discord_dm_gets_its_own_prompt_and_inherits_the_rest(self):
@@ -71,22 +75,22 @@ class TestCoverage:
         come from the less specific entry."""
         registry = _registry(CHAT_CONFIG)
         resolved = _resolved(registry, "discord", "dm:42")
-        assert resolved["system_prompt"] == "DISCORD-DM"
+        assert resolved["register_prompt"] == "DISCORD-DM"
         assert resolved["max_turns"] == 4
 
     def test_more_specific_wins_whatever_the_config_order(self):
         """R3: specificity, not the order keys appear in agent.yaml."""
         config = {
             "channels": {
-                "discord:dm:*": {"system_prompt": "DISCORD-DM"},
-                "discord:*": {"system_prompt": "DISCORD-GROUP", "max_turns": 4},
+                "discord:dm:*": {"register_prompt": "DISCORD-DM"},
+                "discord:*": {"register_prompt": "DISCORD-GROUP", "max_turns": 4},
             }
         }
         registry = _registry(config)
         resolved = _resolved(registry, "discord", "dm:42")
-        assert resolved["system_prompt"] == "DISCORD-DM"
+        assert resolved["register_prompt"] == "DISCORD-DM"
         assert resolved["max_turns"] == 4
-        assert _resolved(registry, "discord", "77")["system_prompt"] == "DISCORD-GROUP"
+        assert _resolved(registry, "discord", "77")["register_prompt"] == "DISCORD-GROUP"
 
     def test_web_keeps_the_agent_default(self):
         """R4."""
@@ -98,9 +102,9 @@ class TestCoverage:
         registry = _registry(CHAT_CONFIG)
         assert _resolved(registry, "acp", "sess-1")["system_prompt"] == "AGENT"
 
-        config = {"channels": {**CHAT_CONFIG["channels"], "acp:*": {"system_prompt": "ACP"}}}
+        config = {"channels": {**CHAT_CONFIG["channels"], "acp:*": {"register_prompt": "ACP"}}}
         registry = _registry(config)
-        assert _resolved(registry, "acp", "sess-2")["system_prompt"] == "ACP"
+        assert _resolved(registry, "acp", "sess-2")["register_prompt"] == "ACP"
 
     def test_wide_key_is_never_registered_as_a_channel(self):
         """R8: today ``signal:*`` would become a channel with scope ``*``."""
@@ -109,7 +113,7 @@ class TestCoverage:
 
     def test_prefix_matches_on_the_whole_id(self):
         """``signal:*`` is about Signal, not every transport named signal-ish."""
-        registry = _registry({"channels": {"signal:*": {"system_prompt": "SIGNAL"}}})
+        registry = _registry({"channels": {"signal:*": {"register_prompt": "SIGNAL"}}})
         assert _resolved(registry, "signalx", "a")["system_prompt"] == "AGENT"
 
 
@@ -123,14 +127,14 @@ class TestPrecedence:
         """R6: the exact entry overrides what it sets and nothing else."""
         config = {
             "channels": {
-                "signal:*": {"system_prompt": "SIGNAL", "max_turns": 3},
+                "signal:*": {"register_prompt": "SIGNAL", "max_turns": 3},
                 "signal:aci-1": {"max_turns": 7},
             }
         }
         registry = _registry(config)
         resolved = registry.resolve_config(registry.get("signal:aci-1"))
         assert resolved["max_turns"] == 7
-        assert resolved["system_prompt"] == "SIGNAL"
+        assert resolved["register_prompt"] == "SIGNAL"
 
     def test_every_scalar_key_resolves_through_a_wide_entry(self):
         """R7: a wide entry accepts every key an exact entry does. One
@@ -141,7 +145,7 @@ class TestPrecedence:
         from corvidae.channel import ReasoningHistory
 
         values = {
-            "system_prompt": "WIDE",
+            "register_prompt": "WIDE",
             "max_context_tokens": 4000,
             "reasoning_history": "keep",
             "max_turns": 2,
@@ -150,7 +154,7 @@ class TestPrecedence:
         assert scalar_fields == set(values), "a new ChannelConfig field needs a case here"
         registry = _registry({"channels": {"signal:*": values}})
         resolved = _resolved(registry, "signal", "aci-15")
-        assert resolved["system_prompt"] == "WIDE"
+        assert resolved["register_prompt"] == "WIDE"
         assert resolved["max_context_tokens"] == 4000
         assert resolved["reasoning_history"] is ReasoningHistory.KEEP
         assert resolved["max_turns"] == 2
@@ -171,12 +175,12 @@ class TestPrecedence:
     def test_signal_alias_config_beats_the_wide_entry(self):
         """D7: an E.164 alias's ChannelConfig arrives as ``config=`` and is
         the exact layer for the ACI channel."""
-        registry = _registry({"channels": {"signal:*": {"system_prompt": "SIGNAL", "max_turns": 3}}})
+        registry = _registry({"channels": {"signal:*": {"register_prompt": "SIGNAL", "max_turns": 3}}})
         alias = ChannelConfig(max_turns=9)
         channel = registry.get_or_create("signal", "aci-4", config=alias)
         resolved = registry.resolve_config(channel)
         assert resolved["max_turns"] == 9
-        assert resolved["system_prompt"] == "SIGNAL"
+        assert resolved["register_prompt"] == "SIGNAL"
 
     def test_existing_exact_keys_with_a_star_inside_still_load(self):
         """R10: IRC allows ``*`` in channel names; only a trailing ``*``
@@ -252,7 +256,7 @@ class TestValidation:
     def test_malformed_wide_key_is_rejected_with_key_and_accepted_forms(self, key):
         registry = ChannelRegistry(dict(AGENT))
         with pytest.raises(ValueError) as excinfo:
-            load_channel_config({"channels": {key: {"system_prompt": "x"}}}, registry)
+            load_channel_config({"channels": {key: {"register_prompt": "x"}}}, registry)
         message = str(excinfo.value)
         assert repr(key) in message
         # The remedy: the accepted forms.
@@ -295,24 +299,24 @@ class TestValidation:
 
     def test_invalid_exact_entry_keeps_the_previous_wide_entries(self):
         """D4: a valid wide entry beside an invalid exact one is not applied."""
-        registry = _registry({"channels": {"signal:*": {"system_prompt": "OLD"}}})
+        registry = _registry({"channels": {"signal:*": {"register_prompt": "OLD"}}})
         with pytest.raises(ValueError, match=r"channels\.irc:#lex"):
             load_channel_config(
                 {
                     "channels": {
-                        "signal:*": {"system_prompt": "NEW"},
+                        "signal:*": {"register_prompt": "NEW"},
                         "irc:#lex": {"reasoning_history": "sometimes"},
                     }
                 },
                 registry,
             )
-        assert _resolved(registry, "signal", "aci-17")["system_prompt"] == "OLD"
+        assert _resolved(registry, "signal", "aci-17")["register_prompt"] == "OLD"
 
     def test_invalid_reload_keeps_the_previous_wide_entries(self):
-        registry = _registry({"channels": {"signal:*": {"system_prompt": "SIGNAL"}}})
+        registry = _registry({"channels": {"signal:*": {"register_prompt": "SIGNAL"}}})
         with pytest.raises(ValueError):
             load_channel_config({"channels": {"signal:*": {"max_turns": 1}, "x*": {}}}, registry)
-        assert _resolved(registry, "signal", "aci-9")["system_prompt"] == "SIGNAL"
+        assert _resolved(registry, "signal", "aci-9")["register_prompt"] == "SIGNAL"
 
 
 # ---------------------------------------------------------------------------
@@ -325,7 +329,7 @@ class TestReload:
         """R9."""
         registry = _registry({})
         load_channel_config(CHAT_CONFIG, registry)
-        assert _resolved(registry, "signal", "aci-10")["system_prompt"] == "SIGNAL"
+        assert _resolved(registry, "signal", "aci-10")["register_prompt"] == "SIGNAL"
 
     def test_edited_scalar_applies_to_a_live_channel(self):
         """D5: scalars are re-resolved every turn, as agent: values are."""
@@ -401,7 +405,7 @@ class TestThroughTheAgent:
             load_channel_config(CHAT_CONFIG, registry)
             signal = registry.get_or_create("signal", "aci-20")
             web = registry.get_or_create("web", "default")
-            assert await _system_sent(plugin, signal) == "SIGNAL"
+            assert await _system_sent(plugin, signal) == "AGENT\n\nSIGNAL"
             assert await _system_sent(plugin, web) == "AGENT"
         finally:
             await _teardown(plugin, db)
@@ -412,14 +416,14 @@ class TestThroughTheAgent:
         plugin, _, db = await build_plugin_and_channel(agent_defaults=dict(AGENT))
         try:
             registry = plugin._registry
-            load_channel_config({"channels": {"signal:*": {"system_prompt": "OLD"}}}, registry)
+            load_channel_config({"channels": {"signal:*": {"register_prompt": "OLD"}}}, registry)
             live = registry.get_or_create("signal", "aci-21")
-            assert await _system_sent(plugin, live) == "OLD"
+            assert await _system_sent(plugin, live) == "AGENT\n\nOLD"
 
-            load_channel_config({"channels": {"signal:*": {"system_prompt": "NEW"}}}, registry)
-            assert await _system_sent(plugin, live) == "OLD"
+            load_channel_config({"channels": {"signal:*": {"register_prompt": "NEW"}}}, registry)
+            assert await _system_sent(plugin, live) == "AGENT\n\nOLD"
             fresh = registry.get_or_create("signal", "aci-22")
-            assert await _system_sent(plugin, fresh) == "NEW"
+            assert await _system_sent(plugin, fresh) == "AGENT\n\nNEW"
         finally:
             await _teardown(plugin, db)
 

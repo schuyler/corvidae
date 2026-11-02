@@ -90,6 +90,7 @@ class AgentSpec:
     async def transform_display_text(self, channel: Channel, text: str, result_message: dict) -> str | None
     async def resolve_conversation(self, channel: Channel) -> list[dict] | None
     async def resolve_channel(self, channel_id: str) -> Channel | None
+    async def resolve_register_prompt(self, channel: Channel) -> str | None
     async def persist_message(self, channel: Channel, message: dict, message_type: MessageType) -> int | None
     async def before_compaction(self, channel: Channel, compacted_ids: list[int], cut: int) -> None
     async def on_compaction(self, channel: Channel, summary_msg: dict, retain_count: int, compacted_ids: list[int]) -> None
@@ -195,6 +196,7 @@ owner's plugin name after the prefix.
 | `after_persist_assistant` | broadcast | `_process_queue_item`, after assistant message is persisted; plugins may mutate the in-memory dict |
 | `transform_display_text` | firstresult=True wrapper chain | `_resolve_display_text`, before the reply is sent; return transformed text or None to leave unchanged |
 | `resolve_conversation` | firstresult=True | `_process_queue_item`, when `channel.conversation is None`; return list of tagged message dicts or None to defer |
+| `resolve_register_prompt` | firstresult=True | `Agent`, when a conversation starts on a channel with no `register_prompt` configured at any layer; the owning transport returns its default register text, others return None. `SignalPlugin`, `DiscordPlugin` and `IRCPlugin` implement it, from fragments shipped in `corvidae/channels/registers/`. No answer means no register |
 | `resolve_channel` | firstresult=True | `SchedulerPlugin`, for a persisted channel id the registry does not hold (e.g. a reminder due after a restart); a transport returns the live Channel for ids it owns, created with transport-specific config, or None to defer. `SignalPlugin` and `DiscordPlugin` implement it. A transport may also return None for an id it owns but cannot build yet (Signal before its first alias resolution). For an id whose prefix names a transport that implements the hook, the scheduler retries; for other ids, callers fall back to `registry.get_or_create` from the split id |
 | `persist_message` | broadcast (imperative) | `_process_queue_item` after every `conv.append()`, and `FunnelPlugin` for the CONTEXT it persists; every implementation runs (persistence, JSONL logging). `PersistencePlugin` returns the `message_log` rowid and the caller resolves the list with `resolve_single_result` into `_db_id` |
 | `before_compaction` | broadcast, awaited | `CompactionPlugin`, after the summary succeeded and before `replace_with_summary()`; the window still holds `messages[:cut]`, so a plugin can fork over the dropped prefix (see [Forks](#forks)); failures logged, never block compaction |
@@ -213,7 +215,7 @@ owner's plugin name after the prefix.
 ```python
 @dataclass
 class ChannelConfig:
-    system_prompt: str | list[str] | None = None
+    register_prompt: str | list[str] | None = None   # appended after agent.system_prompt
     max_context_tokens: int | None = None
     reasoning_history: str | None = None   # drop | exchange | keep
     max_turns: int | None = None
@@ -283,11 +285,22 @@ conversation's system prompt is set once, when its `ContextWindow` is
 created (compaction and forks keep it), so a prompt edit at any layer
 reaches only conversations that start after the reload.
 
+**System prompt layers (#316).** A conversation's system prompt is the
+identity (`agent.system_prompt`, never set per channel; a channel-level
+`system_prompt` key is rejected at load) followed by a blank line and the
+channel's register. `ChannelConfig.resolve` returns the register as
+`register_prompt`, or None when no layer sets it; `Agent` then asks the
+owning transport through `resolve_register_prompt`. An explicit `""` or
+`[]` is no register. A register file that can't be read (`OSError`,
+`UnicodeDecodeError`) is logged at WARNING and the conversation starts on
+the identity alone.
+
 **resolve_system_prompt(value, base_dir)** — if `value` is a string,
 returns it directly. If a list of paths, reads each file and
 concatenates with `\n\n`. Relative paths resolve against `base_dir`
 (the directory containing `agent.yaml`). Called at conversation init
 time, so editing prompt files takes effect on the next new conversation.
+Used for both the identity and a configured register.
 
 ## LLM Client
 
@@ -3010,9 +3023,8 @@ funnel:
 
 channels:
   "irc:#channel":
-    system_prompt:              # per-channel override
-      - prompts/SOUL.md
-      - prompts/IRC.md
+    register_prompt:            # appended after agent.system_prompt
+      - prompts/lex.md
     max_context_tokens: 8000
     max_turns: 5
 
@@ -3041,7 +3053,7 @@ logging:                        # optional, falls back to defaults
   file: corvidae.log            # omit for stderr; CLI mode defaults to corvidae.log
 ```
 
-When `system_prompt` is a list, each path is read and concatenated.
+When `system_prompt` or `register_prompt` is a list, each path is read and concatenated.
 Relative paths resolve against the directory containing `agent.yaml`.
 
 ## Plugin Registration Order

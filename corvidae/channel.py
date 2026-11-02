@@ -115,14 +115,32 @@ def validate_agent_config(agent: dict) -> None:
             section.
     """
     _check_reasoning_keys(agent, "agent")
+    _check_register_prompt(agent.get("register_prompt"), "agent.register_prompt")
     parse_forks_config(agent)
 
 
 #: The keys a ``channels:`` entry (exact or transport-wide) accepts; any other
 #: key is rejected (#205). Keep in step with the ChannelConfig fields below.
 CHANNEL_ENTRY_KEYS: tuple[str, ...] = (
-    "system_prompt", "max_context_tokens", "max_turns", "reasoning_history", "tools",
+    "register_prompt", "max_context_tokens", "max_turns", "reasoning_history", "tools",
 )
+
+#: Channel key replaced by ``register_prompt`` (#316): the identity is
+#: agent-wide, so no channel setting may replace it.
+_REMOVED_CHANNEL_PROMPT_KEY = "system_prompt"
+
+
+def _check_register_prompt(value: object, where: str) -> None:
+    """Raise ValueError unless value is None, a string, or a list of strings."""
+    # None means "not configured"; a string is literal text; a list names files.
+    if value is None or isinstance(value, str):
+        return
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        return
+    raise ValueError(
+        f"{where} must be a string (the register text) or a list of file paths "
+        f"(strings), got {_short_repr(value)} ({type(value).__name__})"
+    )
 
 #: Longest repr of a rejected value printed in an error message.
 _MAX_VALUE_REPR = 60
@@ -137,7 +155,9 @@ class ChannelConfig:
     or the entry that sets it is rejected as an unknown key.
     """
 
-    system_prompt: str | list[str] | None = None
+    # The channel's register, appended after the agent-wide identity (#316).
+    # None means "not configured": the owning transport's default applies.
+    register_prompt: str | list[str] | None = None
     max_context_tokens: int | None = None
     reasoning_history: str | None = None
     max_turns: int | None = None
@@ -161,11 +181,17 @@ class ChannelConfig:
         2. agent_defaults from YAML
         3. ChannelConfig fields (per-channel YAML)
         4. runtime_overrides (set by tool at runtime)
+
+        ``system_prompt`` (the identity) comes from agent_defaults only: no
+        channel setting replaces it (#316). ``register_prompt`` stays None
+        when no layer sets it, so the caller can fall back to the owning
+        transport's shipped default.
         """
         resolved = {
-            "system_prompt": (
-                self.system_prompt if self.system_prompt is not None
-                else agent_defaults.get("system_prompt", "You are a helpful assistant.")
+            "system_prompt": agent_defaults.get("system_prompt", "You are a helpful assistant."),
+            "register_prompt": (
+                self.register_prompt if self.register_prompt is not None
+                else agent_defaults.get("register_prompt")
             ),
             "max_context_tokens": (
                 self.max_context_tokens if self.max_context_tokens is not None
@@ -204,7 +230,7 @@ class ChannelConfig:
 
 #: ChannelConfig fields resolved by ChannelConfig.resolve (disabled_tools
 #: is unioned by Channel.disabled_tools instead).
-_SCALAR_FIELDS = ("system_prompt", "max_context_tokens", "reasoning_history", "max_turns")
+_SCALAR_FIELDS = ("register_prompt", "max_context_tokens", "reasoning_history", "max_turns")
 
 #: The suffix that turns a ``channels:`` key into a transport-wide entry.
 WIDE_SUFFIX = "*"
@@ -348,7 +374,7 @@ class ChannelRegistry:
             logger.info(
                 "channel %s: transport-wide entries now %s; a narrowed tools.disabled "
                 "is refused at dispatch at once (widening waits for compaction), "
-                "other keys apply at the next turn, the system prompt at the next "
+                "other keys apply at the next turn, the register prompt at the next "
                 "new conversation",
                 channel.id, ", ".join(e.key for e in matches) or "(none)",
                 extra={"channel_id": channel.id, "wide_keys": [e.key for e in matches],
@@ -493,6 +519,16 @@ def parse_channel_config(config: dict) -> ParsedChannels:
                 f"Channel config for {channel_id!r} must be a mapping, got {type(overrides).__name__!r}"
             )
         _check_reasoning_keys(overrides, f"channels.{channel_id}")
+        # The identity is agent-wide (#316): point a stale key at both homes.
+        if _REMOVED_CHANNEL_PROMPT_KEY in overrides:
+            raise ValueError(
+                f"channels.{channel_id}.{_REMOVED_CHANNEL_PROMPT_KEY} was removed: a channel can't "
+                f"replace the agent's identity. Put the identity in agent.system_prompt "
+                f"and this channel's register in channels.{channel_id}.register_prompt"
+            )
+        _check_register_prompt(
+            overrides.get("register_prompt"), f"channels.{channel_id}.register_prompt"
+        )
         # Reject keys no layer reads, so a typo or a wished-for key is loud.
         unknown = sorted(k for k in overrides if k not in CHANNEL_ENTRY_KEYS)
         if unknown:
@@ -508,7 +544,7 @@ def parse_channel_config(config: dict) -> ParsedChannels:
         for int_key in ("max_turns", "max_context_tokens"):
             _check_int_key(overrides.get(int_key), f"channels.{channel_id}.{int_key}")
         channel_config = ChannelConfig(
-            system_prompt=overrides.get("system_prompt"),
+            register_prompt=overrides.get("register_prompt"),
             max_context_tokens=overrides.get("max_context_tokens"),
             reasoning_history=overrides.get("reasoning_history"),
             max_turns=overrides.get("max_turns"),

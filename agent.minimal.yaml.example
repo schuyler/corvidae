@@ -23,7 +23,7 @@ agent:
 
 channels:
   cli:local:
-    system_prompt: "You are a helpful assistant running in CLI mode."
+    register_prompt: "This is a terminal session; longer, structured answers are fine."
 
 plugins:
   disabled:

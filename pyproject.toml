@@ -74,7 +74,7 @@ include = ["corvidae*"]
 
 # The web transport's browser UI ships inside the package.
 [tool.setuptools.package-data]
-"corvidae.channels" = ["web_static/*", "web_static/vendor/*"]
+"corvidae.channels" = ["web_static/*", "web_static/vendor/*", "registers/*.md"]
 
 [build-system]
 requires = ["setuptools>=75"]

@@ -18,6 +18,7 @@ from corvidae.channel import Channel, ChannelConfig, ChannelRegistry
 from corvidae.channels.split import split_message
 from corvidae.trace import mint_trace_id
 from corvidae.hooks import TransportPlugin, get_dependency, hookimpl
+from corvidae.channels._registers import shipped_register
 from corvidae.outbound import OutboundMessage, OutboundProgress
 
 logger = logging.getLogger("corvidae.signal_plugin")
@@ -693,6 +694,14 @@ class SignalPlugin(TransportPlugin):
             return True
         await self._await_allow_resolution()
         return source_uuid in self._resolved_aliases.values()
+
+    @hookimpl
+    async def resolve_register_prompt(self, channel: Channel) -> str | None:
+        """Default register for Signal channels (one-on-one chats): chat
+        norms plus plain text, since Signal shows Markdown literally."""
+        if not self.owns(channel):
+            return None
+        return shipped_register("chat", "signal_dm")
 
     @hookimpl
     async def should_process_message(

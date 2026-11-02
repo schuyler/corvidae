@@ -123,7 +123,7 @@ def _write_smoke_config(path: Path, *, base_url: str, session_db: Path) -> None:
         },
         "channels": {
             "cli:local": {
-                "system_prompt": "CLI channel present so config looks real; ACP mode must ignore it.",
+                "register_prompt": "CLI channel present so config looks real; ACP mode must ignore it.",
             }
         },
         "plugins": {

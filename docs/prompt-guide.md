@@ -20,7 +20,7 @@ The **system message** is fixed for the lifetime of a channel's conversation. **
 
 ### Where it comes from
 
-The system prompt is set in `agent.yaml`. There are two forms:
+The system prompt has two layers: the agent's **identity**, `agent.system_prompt`, which heads every channel's prompt, then the channel's **register**, `register_prompt`, appended after a blank line. No channel setting replaces the identity.
 
 **Inline string:**
 ```yaml
@@ -33,51 +33,38 @@ agent:
 agent:
   system_prompt:
     - prompts/SOUL.md
-    - prompts/IRC.md
+    - prompts/memory_calibration.md
 ```
 
-When given a list, Corvidae reads each file and joins them with double newlines (`\n\n`) into a single string. Relative paths are resolved against the directory containing `agent.yaml` (the `_base_dir`). Absolute paths are used as-is. If `_base_dir` is unavailable, paths resolve against the current working directory.
+When given a list, Corvidae reads each file and joins them with double newlines (`\n\n`) into a single string. Relative paths are resolved against the directory containing `agent.yaml` (the `_base_dir`). Absolute paths are used as-is. If `_base_dir` is unavailable, paths resolve against the current working directory. `register_prompt` takes the same two forms.
 
 This resolution happens in `corvidae/channel.py:resolve_system_prompt()`.
 
-### Per-channel overrides
+### Per-channel registers
 
-Any channel can override the agent-level default:
+A channel's register comes from, first match wins:
+
+1. The channel's own `register_prompt` entry
+2. The most specific matching transport-wide entry that sets `register_prompt` (`discord:dm:*` before `discord:*`)
+3. `agent.register_prompt`
+4. The default the channel's transport ships (the `resolve_register_prompt` hook); see [Chat register fragments](#chat-register-fragments)
+5. None
 
 ```yaml
 channels:
   irc:#general:
-    system_prompt: "You are the #general channel bot."
-  cli:local:
-    system_prompt:
-      - prompts/SOUL.md
-      - prompts/cli-addendum.txt
-```
-
-A transport-wide entry (a key ending in `*`) sets the prompt for every channel of a transport, including ones that don't exist yet, such as each new Signal contact or ACP session:
-
-```yaml
-channels:
-  signal:*:
-    system_prompt: [prompts/SOUL.md, prompts/chat.md, prompts/signal_dm.md]
+    register_prompt: "This is #general; keep it brief."
   discord:dm:*:
-    system_prompt: [prompts/SOUL.md, prompts/chat.md]
+    register_prompt: []          # switch the shipped Discord DM register off
 ```
 
-The lookup priority is:
+Each layer replaces the ones below it; to keep a shipped default and add a line, copy its text into your own file. An explicit `""` or `[]` means no register. A register file that can't be read logs a WARNING and the conversation starts on the identity alone. See [configuration.md](configuration.md#registers) for the key forms and reload behaviour.
 
-1. Per-channel `system_prompt` (if set)
-2. The most specific matching transport-wide entry that sets `system_prompt` (`discord:dm:*` before `discord:*`)
-3. Agent-level `system_prompt` (fallback)
-4. Built-in default: `"You are a helpful assistant."`
-
-See [configuration.md](configuration.md#transport-wide-entries) for the key forms and reload behaviour.
-
-Runtime overrides (via the `set_settings` tool) can change sampling parameters, `max_turns`, `max_context_tokens`, `reasoning_history` and dotted plugin tunables. The `system_prompt` key is always blocked, and any other undotted key, such as `messages`, is refused, so the model can't replace the conversation through the request body. Plugin prompt tunables (`critique.prompt.*`, `appraisal.stage2_prompt`) are still writable unless listed in `agent.immutable_settings`, but no live stage reads them any more: stage 2 and the lenses run only as forks, and skip on a miss (#320); see [threat-model.md](threat-model.md), findings 1 and 2.
+Runtime overrides (via the `set_settings` tool) can change sampling parameters, `max_turns`, `max_context_tokens`, `reasoning_history` and dotted plugin tunables. The `system_prompt` key is always blocked, `register_prompt` is refused, and any other undotted key, such as `messages`, is refused, so the model can't replace the conversation through the request body. Plugin prompt tunables (`critique.prompt.*`, `appraisal.stage2_prompt`) are still writable unless listed in `agent.immutable_settings`, but no live stage reads them any more: stage 2 and the lenses run only as forks, and skip on a miss (#320); see [threat-model.md](threat-model.md), findings 1 and 2.
 
 ### When it is resolved
 
-The system prompt is resolved **on the first message to a channel**. It is stored in `channel.conversation.system_prompt` (a `ContextWindow` attribute) and does not change for the lifetime of that conversation: compaction and forks keep it, and a hot reload doesn't touch it. Restarting the daemon re-reads the config and creates a fresh `ContextWindow`. History reloaded after the restart keeps the old prompt's replies, which the model tends to imitate until compaction drops them.
+The system prompt (identity and register) is resolved **on the first message to a channel**. It is stored in `channel.conversation.system_prompt` (a `ContextWindow` attribute) and does not change for the lifetime of that conversation: compaction and forks keep it, and a hot reload doesn't touch it. Restarting the daemon re-reads the config and creates a fresh `ContextWindow`. History reloaded after the restart keeps the old prompt's replies, which the model tends to imitate until compaction drops them.
 
 ---
 
@@ -160,7 +147,7 @@ After the LLM responds, two steps affect what `build_prompt()` returns on the **
 
 The full sequence for processing a queue item (`agent.py:_process_queue_item`):
 
-1. **Lazy-init conversation** — on first message, resolve config, call `resolve_system_prompt()`, restore persisted history via the `resolve_conversation` hook (the return value is assigned directly to `conv.messages`).
+1. **Lazy-init conversation** — on first message, resolve config, build the system prompt from the identity and the channel's register (`resolve_system_prompt()`, `resolve_register_prompt` hook), restore persisted history via the `resolve_conversation` hook (the return value is assigned directly to `conv.messages`).
 2. **Append user message** — add to `conv.messages` as `MessageType.MESSAGE`.
 3. **Persist** — fire `persist_message` hook for the user message.
 4. **Compact if needed** — fire `resolve_compaction` hook. `CompactionPlugin` summarizes old messages if the token budget is near full (runs `trylast=True`, returns `True` to stop the chain). A `tryfirst` handler may trim the window and return None, which lets `CompactionPlugin` still run after it; cognition's HeartbeatPlugin does this on `internal:heartbeat` to keep its last `heartbeat.keep_beats` beats.
@@ -179,7 +166,7 @@ A typical prompt for a CLI session with a composable system prompt:
 
 ```
 [system]    You are Sherman, a helpful and knowledgeable agent. ...
-            (SOUL.md content joined with IRC.md content if using a file list)
+            (the identity, then a blank line and the channel's register, if any)
 
 [user]      Hello, what can you help me with?
 [assistant] I can help with ...
@@ -200,20 +187,21 @@ A typical prompt for a CLI session with a composable system prompt:
 
 ## Chat register fragments
 
-Chat apps have their own social norms: short turns, one thought at a time, and no formatting the transport can't show. An instruction-tuned model's default is a structured, paragraph-length answer, and an adjective like "concise" in a persona doesn't move it far. These fragments describe the behaviour concretely and show a few example exchanges, which steer the register much better than adjectives. Like the memory fragment below, they're persona, not architecture, and nothing loads them unless you list them:
+Chat apps have their own social norms: short turns, one thought at a time, and no formatting the transport can't show. An instruction-tuned model's default is a structured, paragraph-length answer, and an adjective like "concise" in a persona doesn't move it far. These fragments describe the behaviour concretely and show a few example exchanges, which steer the register much better than adjectives. They ship inside the package, in `corvidae/channels/registers/`, and the transports use them as their default registers:
 
-| File | For | What it adds |
-|------|-----|--------------|
-| `prompts/chat.md` | any chat channel | Texting norms: match the other person's length, answer first, no headers or bold, gist before detail, plus example exchanges. |
-| `prompts/signal_dm.md` | Signal DMs | Plain text only: Signal shows Markdown as literal asterisks and pound signs. |
-| `prompts/discord_group.md` | Discord server channels | Group manners: short turns so the bot doesn't take over the channel; code blocks are fine. |
-| `prompts/memory_calibration.md` | channels on a deployment running `MemoryPlugin` | Epistemic calibration; see [Memory calibration fragment](#memory-calibration-fragment). |
+| Transport | Default register | What it adds |
+|-----------|------------------|--------------|
+| Signal | `chat.md` + `signal_dm.md` | Texting norms (match the other person's length, answer first, no headers or bold, gist before detail, example exchanges); plain text only, since Signal shows Markdown as literal asterisks and pound signs. |
+| Discord DMs (`discord:dm:*`) | `chat.md` | Texting norms. |
+| Discord server channels | `chat.md` + `discord_group.md` | Texting norms; group manners, short turns so the bot doesn't take over the channel; code blocks are fine. |
+| IRC | `chat.md` + `irc.md` | Texting norms; plain, line-based text, shorter in channels than in private messages. |
+| Web, CLI, ACP | none | Longer answers are the point there. |
 
-Pair them per transport with transport-wide entries (see the example under [Per-channel overrides](#per-channel-overrides)): `signal:*` gets `chat.md` + `signal_dm.md`, `discord:*` gets `chat.md` + `discord_group.md`, `discord:dm:*` gets `chat.md` alone. Leave them off the web UI, the CLI and ACP sessions, where longer answers are the point. The examples in `chat.md` avoid any reference to earlier conversation, because a model that copies that habit starts inventing shared history. In group channels the model can't yet see who is speaking (#204), so `discord_group.md` doesn't ask it to address people by name.
+A `register_prompt` anywhere in config replaces the default (see [Per-channel registers](#per-channel-registers)). The examples in `chat.md` avoid any reference to earlier conversation, because a model that copies that habit starts inventing shared history. In group channels the model can't yet see who is speaking (#204), so `discord_group.md` doesn't ask it to address people by name.
 
 ## Memory calibration fragment
 
-`prompts/memory_calibration.md` is a documented system-prompt fragment for deployments running `MemoryPlugin` (bootstrap-mapping §3.1): assert only strongly-banded memories, hedge moderate ones, frame unretrieved claims as inference, and treat "I have no memory of that" as a correct answer when retrieval comes back empty. It is **not** auto-injected — epistemic hedging vocabulary is persona, not architecture (bootstrap-mapping §5, divergence 9). To enable it, add the file to a channel's `system_prompt` file list, for example `system_prompt: [prompts/chat.md, prompts/memory_calibration.md]`, and let the behavioral suite judge it. The file holds only the instructions the model receives; this section is where its purpose and opt-in rule are documented, because `resolve_system_prompt` sends every listed file whole.
+`prompts/memory_calibration.md` is a documented system-prompt fragment for deployments running `MemoryPlugin` (bootstrap-mapping §3.1): assert only strongly-banded memories, hedge moderate ones, frame unretrieved claims as inference, and treat "I have no memory of that" as a correct answer when retrieval comes back empty. It is **not** auto-injected — epistemic hedging vocabulary is persona, not architecture (bootstrap-mapping §5, divergence 9). To enable it, add the file to `agent.system_prompt`, for example `system_prompt: [prompts/SOUL.md, prompts/memory_calibration.md]`, so every channel gets it, and let the behavioral suite judge it. The file holds only the instructions the model receives; this section is where its purpose and opt-in rule are documented, because `resolve_system_prompt` sends every listed file whole.
 
 Retrieval quality depends on `llm.embedding.document_prefix` and `llm.embedding.query_prefix` matching the embedding model's card — mismatched prefixes degrade cosine similarity and cause the system to fall back to FTS5 keyword search.
 
@@ -224,6 +212,7 @@ Retrieval quality depends on `llm.embedding.document_prefix` and `llm.embedding.
 | Component | File | What it does |
 |-----------|------|--------------|
 | `resolve_system_prompt()` | `corvidae/channel.py` | Reads file list or returns literal string |
+| `resolve_register_prompt` hook | `corvidae/hooks.py`; Signal, Discord, IRC transports | A transport's default register for its channels |
 | `ChannelConfig.resolve()` | `corvidae/channel.py` | Merges agent defaults, channel overrides, runtime overrides |
 | `ChannelRegistry.resolve_config()` | `corvidae/channel.py` | Overlays matching transport-wide entries on the agent defaults, then calls `ChannelConfig.resolve()` |
 | `ContextWindow` | `corvidae/context.py` | Holds messages and system prompt in memory |

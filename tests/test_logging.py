@@ -703,7 +703,7 @@ class TestChannelLogging:
         """load_channel_config must emit one INFO log per registered channel."""
         config = {
             "channels": {
-                "irc:#lex": {"system_prompt": "IRC prompt."},
+                "irc:#lex": {"register_prompt": "IRC prompt."},
                 "signal:+15551234567": {},
             }
         }

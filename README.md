@@ -94,7 +94,7 @@ other tenants.
 - SQLite conversation persistence with an append-only message log
 - `<thinking>` block handling: stripped from display, optionally retained in DB
 - MCP (Model Context Protocol) client: connects to external tool servers over stdio or SSE
-- Per-channel config overrides for system prompt, token budget, turn limits, and more
+- One identity on every channel, with a per-channel register (chat-app defaults ship for Signal, Discord and IRC); per-channel token budget, turn limits, and more
 - Runtime settings tool: the LLM can adjust its own parameters mid-session (with optional immutable keys)
 - Plugin system via apluggy (async pluggy) with setuptools entry points
 
