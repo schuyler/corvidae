@@ -696,3 +696,105 @@ class TestEmptyFinalAndCutOff:
         assert "cut off mid-reasoning twice" in texts[0]
         assert "resend or rephrase" in texts[0]
         assert channel.id in texts[0]
+
+
+# ---------------------------------------------------------------------------
+# Reasoning reopened after the answer (#348)
+# ---------------------------------------------------------------------------
+
+
+def _reopened(text: str) -> dict:
+    """A response as the client returns it after cutting a reopened-reasoning
+    reply: truncated content plus the top-level flag."""
+    response = _make_text_response(text)
+    response["reasoning_reopened"] = True
+    return response
+
+
+class TestReasoningReopened:
+    async def test_rerun_mode_reruns_once_and_sends_second(self, env, caplog):
+        """R2-rerun/R5: a flagged final is discarded and re-run with identical
+        messages; the second reply is sent; the agent warns with the channel."""
+        # Arrange: a flagged first reply, a clean second one, rerun mode.
+        plugin, channel, db = env
+        client = _client(_reopened("Answer."), _make_text_response("second try"))
+        client.reasoning_reopened = "rerun"
+        plugin._client = client
+        plugin._mark_started()
+
+        # Act: one user message drives the turn.
+        with caplog.at_level("WARNING", logger="corvidae.agent"):
+            await _say(plugin, channel)
+
+        # Two calls with identical messages; only the second reply is sent.
+        assert client.chat.await_count == 2
+        first, second = (c.args[0] for c in client.chat.await_args_list)
+        assert first == second
+        assert sent_texts(plugin.pm, OutboundMessage) == ["second try"]
+        # The discarded first reply is neither stored nor in the window.
+        rows = await _rows(db, channel.id)
+        assert [m["content"] for m, _t in rows if m.get("role") == "assistant"] == ["second try"]
+        window = [m for m in channel.conversation.messages if m.get("role") == "assistant"]
+        assert [m["content"] for m in window] == ["second try"]
+        # The agent's own warning names the channel and the rerun.
+        texts = [r.getMessage() for r in caplog.records if r.name == "corvidae.agent"]
+        assert any(channel.id in t and "re-running" in t for t in texts), texts
+
+    async def test_truncate_mode_sends_cut_reply_once(self, env):
+        """R3/R6: truncate mode makes one call and sends and stores only the
+        text before the second block, in the row and the window."""
+        # Arrange: one flagged (already truncated) reply, truncate mode.
+        plugin, channel, db = env
+        client = _client(_reopened("Answer."))
+        client.reasoning_reopened = "truncate"
+        plugin._client = client
+        plugin._mark_started()
+
+        # Act: one user message drives the turn.
+        await _say(plugin, channel)
+
+        # One call; the truncated text is what goes out.
+        assert client.chat.await_count == 1
+        assert sent_texts(plugin.pm, OutboundMessage) == ["Answer."]
+        # Stored row and window copy both carry the truncated content.
+        rows = await _rows(db, channel.id)
+        assert [m["content"] for m, _t in rows if m.get("role") == "assistant"] == ["Answer."]
+        window = [m for m in channel.conversation.messages if m.get("role") == "assistant"]
+        assert [m["content"] for m in window] == ["Answer."]
+
+    async def test_rerun_that_reopens_again_is_truncated_not_failed(self, env):
+        """R4: two flagged replies in a row send the second one's pre-block
+        text."""
+        # Arrange: both replies flagged, rerun mode.
+        plugin, channel, db = env
+        client = _client(_reopened("Answer."), _reopened("Second answer."))
+        client.reasoning_reopened = "rerun"
+        plugin._client = client
+        plugin._mark_started()
+
+        # Act: one user message drives the turn.
+        await _say(plugin, channel)
+
+        # One rerun only; the second reply's truncated text is sent.
+        assert client.chat.await_count == 2
+        assert sent_texts(plugin.pm, OutboundMessage) == ["Second answer."]
+
+    async def test_cut_off_warning_logs_full_reasoning(self, env, caplog):
+        """R12: the cut-off warning carries the whole reasoning text, not a
+        200-char tail."""
+        # Arrange: a cut-off reply whose reasoning is longer than 200 chars,
+        # with a marker the old 200-char tail would miss.
+        plugin, channel, db = env
+        long_reasoning = "x" * 250 + "MIDDLE" + "y" * 250
+        cut = _make_text_response("", reasoning=long_reasoning)
+        cut["reasoning_unfinished"] = True
+        plugin._client = _client(cut, _make_text_response("second try"))
+        plugin._mark_started()
+
+        # Act: one user message drives the turn.
+        with caplog.at_level("WARNING", logger="corvidae.agent"):
+            await _say(plugin, channel)
+
+        # The cut-off warning carries the marker, so the full text was logged.
+        texts = [r.getMessage() for r in caplog.records if r.name == "corvidae.agent"]
+        assert any(long_reasoning in t for t in texts), texts

@@ -172,6 +172,36 @@ def test_llm_plugin_create_client_rejects_non_bool_raw_reasoning():
     assert "'false'" in str(exc.value)
 
 
+def test_llm_plugin_create_client_reasoning_reopened_default_and_rerun():
+    """R3 (#348): key unset -> truncate; "rerun" is passed through."""
+    from corvidae.llm_plugin import LLMPlugin
+
+    # Unset key defaults to truncate; a valid value passes through.
+    cfg = {"base_url": "http://localhost:8080", "model": "my-model"}
+    assert LLMPlugin()._create_client(cfg).reasoning_reopened == "truncate"
+    assert LLMPlugin()._create_client({**cfg, "reasoning_reopened": "rerun"}).reasoning_reopened == "rerun"
+
+
+def test_llm_plugin_create_client_invalid_reasoning_reopened_warns_and_falls_back(caplog):
+    """R7 (#348): an invalid value does not raise; the warning names the key,
+    the rejected value and the accepted values; the client falls back to
+    truncate."""
+    from corvidae.llm_plugin import LLMPlugin
+
+    # An invalid string: no raise, fallback, and a warning naming key, value
+    # and accepted values.
+    cfg = {"base_url": "http://localhost:8080", "model": "my-model"}
+    with caplog.at_level("WARNING", logger="corvidae.llm_plugin"):
+        client = LLMPlugin()._create_client({**cfg, "reasoning_reopened": "sometimes"}, role="background")
+    assert client.reasoning_reopened == "truncate"
+    text = " ".join(r.getMessage() for r in caplog.records if r.name == "corvidae.llm_plugin")
+    for needle in ("llm.background.reasoning_reopened", "'sometimes'", "truncate", "rerun"):
+        assert needle in text
+
+    # A non-string value also falls back without raising.
+    assert LLMPlugin()._create_client({**cfg, "reasoning_reopened": 3}).reasoning_reopened == "truncate"
+
+
 # ---------------------------------------------------------------------------
 # 7. LLMPlugin.on_start creates and starts main_client from config
 # ---------------------------------------------------------------------------

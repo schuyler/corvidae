@@ -23,6 +23,8 @@ from typing import Any
 
 import aiohttp
 
+from corvidae.attribution import get_attribution
+
 TRANSIENT_STATUS_CODES = {429, 500, 502, 503, 504}
 ERROR_BODY_CHARS = 2000
 # Minimum sleep between "model is not loaded" retries, so a zero backoff
@@ -86,6 +88,24 @@ def split_raw_reasoning(message: dict) -> bool:
     message["content"] = rest.lstrip()
     # No close tag means the reasoning never finished.
     return not closed
+
+
+def cut_reopened_reasoning(message: dict) -> str | None:
+    """Cut a split reply's content at a reopened reasoning block, in place.
+
+    Searches the post-split ``content`` for the first ``<think>`` or
+    ``</think>``. When one is found, ``content`` becomes the text before it
+    (trailing whitespace stripped) and the tail from the tag on is returned;
+    ``reasoning_content`` is untouched. Returns None when there is no tag.
+    """
+    # Find the earliest reasoning tag of either spelling in the reply text.
+    content = message["content"]
+    match = re.search(r"</?think>", content)
+    if match is None:
+        return None
+    # Keep the answer before the tag; hand the dropped tail back to the caller.
+    message["content"] = content[: match.start()].rstrip()
+    return content[match.start():]
 
 
 class LLMHTTPError(aiohttp.ClientResponseError):
@@ -168,6 +188,7 @@ class LLMClient:
         query_prefix: str = "",
         model_not_loaded_wait: float = 60.0,
         raw_reasoning: bool = False,
+        reasoning_reopened: str = "truncate",
     ) -> None:
         """Initialize the LLM client.
 
@@ -202,6 +223,12 @@ class LLMClient:
                           server's parsed mode instead: ``reasoning_format``
                           is dropped from it and its reply is not split
                           (#360).
+            reasoning_reopened: What the agent does with a final reply that
+                          reopens reasoning after its answer (raw mode
+                          only): "truncate" (default) or "rerun". chat()
+                          always cuts such a reply at the second block and
+                          flags it; only the agent's turn loop acts on
+                          "rerun" (#348).
         """
         self.base_url = base_url.rstrip("/")
         self.model = model
@@ -217,6 +244,7 @@ class LLMClient:
         self.query_prefix = query_prefix
         self.model_not_loaded_wait = model_not_loaded_wait
         self.raw_reasoning = raw_reasoning
+        self.reasoning_reopened = reasoning_reopened
         self.session: aiohttp.ClientSession | None = None
         self.observer: object | None = None
 
@@ -388,8 +416,23 @@ class LLMClient:
         # response's top level, so the flag is never persisted or sent back.
         choices = response.get("choices")
         if raw and choices and isinstance(choices[0].get("message"), dict):
-            if split_raw_reasoning(choices[0]["message"]):
+            message = choices[0]["message"]
+            # Keep the completion as received, for the warning below.
+            raw_content = message["content"]
+            if split_raw_reasoning(message):
                 response["reasoning_unfinished"] = True
+            # A reply that reopens reasoning after its answer is cut at the
+            # second block and flagged; the tail survives only in the log.
+            if cut_reopened_reasoning(message) is not None:
+                response["reasoning_reopened"] = True
+                channel_id = get_attribution().get("channel_id") or "(none)"
+                logger.warning(
+                    "reply on channel %s from model %s reopened reasoning "
+                    "after its answer and was cut at the second block; "
+                    "full raw completion: %r",
+                    channel_id, sent_model, raw_content,
+                    extra={"channel": channel_id},
+                )
 
         return response
 

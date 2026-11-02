@@ -194,6 +194,64 @@ class TestLLMClientChat:
         assert cut["reasoning_unfinished"] is True
         assert "reasoning_unfinished" not in msg
 
+    async def test_chat_raw_reasoning_reopened_flag_and_truncate(self):
+        """R1/R2-truncate/R6 (#348): a reply that reopens reasoning after its
+        answer is flagged at top level and cut before the second block; normal
+        and cut-off replies are not flagged."""
+        client = LLMClient(base_url=BASE_URL, model=MODEL, raw_reasoning=True)
+        body = lambda content: {"choices": [{"message": {"role": "assistant", "content": content}}]}
+
+        # Positive fixtures: a second <think> block, and a stray </think>.
+        # A stray close has no start marker, so the cut lands at the tag and
+        # the line before it ("b") stays in the content: no answer text is lost.
+        for content, kept in (
+            ("<think>a</think>Answer.\n<think>b</think>Imagined.", "Answer."),
+            ("<think>a</think>Answer.\nb</think>Imagined.", "Answer.\nb"),
+        ):
+            client.session = _make_mock_session(_make_mock_response(json_body=body(content)))
+            resp = await client.chat(MESSAGES)
+            msg = resp["choices"][0]["message"]
+            # Flagged outside the message, so it is never persisted or sent back.
+            assert resp["reasoning_reopened"] is True
+            assert "reasoning_reopened" not in msg
+            # The tail is dropped from both fields; the answer survives.
+            assert (msg["content"], msg["reasoning_content"]) == (kept, "a")
+            for field in (msg["content"], msg["reasoning_content"]):
+                assert "Imagined" not in field
+                assert "b</think>" not in field
+                assert "<think>b" not in field
+
+        # Negatives: a normal reply and a cut-off reply carry no flag.
+        for content in ("<think>\nr\n</think>\n\nhi", "<think>\nstill going"):
+            client.session = _make_mock_session(_make_mock_response(json_body=body(content)))
+            resp = await client.chat(MESSAGES)
+            assert "reasoning_reopened" not in resp
+
+    async def test_chat_raw_reasoning_reopened_logs_full_completion(self, caplog):
+        """R5 (#348): the warning names the channel, the action and carries the
+        full raw completion, including the dropped tail."""
+        from corvidae.attribution import reset_attribution, set_attribution
+
+        raw = "<think>a</think>Answer.\n<think>b</think>Imagined."
+        client = LLMClient(base_url=BASE_URL, model=MODEL, raw_reasoning=True)
+        client.session = _make_mock_session(_make_mock_response(json_body={
+            "choices": [{"message": {"role": "assistant", "content": raw}}],
+        }))
+        # Attribution supplies the channel id the warning must name.
+        token = set_attribution(channel_id="test:chan")
+        try:
+            with caplog.at_level("WARNING", logger="corvidae.llm"):
+                await client.chat(MESSAGES)
+        finally:
+            reset_attribution(token)
+
+        texts = [r.getMessage() for r in caplog.records if r.name == "corvidae.llm"]
+        assert any(
+            "test:chan" in t and "<think>a</think>Answer." in t
+            and "Imagined." in t and "cut" in t
+            for t in texts
+        ), texts
+
     async def test_chat_raw_reasoning_schema_call_runs_parsed(self):
         """A raw client's call carrying response_format drops
         reasoning_format and returns the reply unsplit (#360)."""

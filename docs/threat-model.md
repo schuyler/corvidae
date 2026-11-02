@@ -81,6 +81,11 @@ Assets, roughly in order of how bad it is to lose them:
    of every conversation, including end-to-end-encrypted Signal ones.
    Discord conversations are not end-to-end encrypted to begin with:
    Discord the company can read them whatever corvidae does.
+   The daemon log belongs here too: an anomalous model response (a reply
+   cut off mid-reasoning, or one that reopens reasoning after its answer)
+   can be logged at warning level with its text, and that text can carry
+   anything the model held in context, including secrets a tool read
+   (#348). Treat the daemon log as you treat `sessions.db`.
 4. `agent.yaml`: operator intent, hot-reloaded within seconds of a write
    (default poll 2s).
 5. The LLM server, if it is shared with anything else, and each model
