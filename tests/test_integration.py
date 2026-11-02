@@ -882,10 +882,10 @@ class TestGroupCPersistence:
         long_text = "x" * 300
         response_text = "y" * 300
 
-        # Patch _summarize to return a canned summary without making an LLM call.
+        # Patch _view_summary to return a canned summary without making an LLM call.
         # This keeps the side_effect list deterministic: one response per user message,
         # no ordering dependency on when compaction happens to trigger.
-        async def fake_summarize(self, messages, prior_summaries=None, max_tokens=None):
+        async def fake_summarize(self, channel, conversation, cut):
             return "test summary"
 
         # We need >5 messages to trigger compaction.
@@ -901,7 +901,7 @@ class TestGroupCPersistence:
             ]
         )
 
-        with patch.object(CompactionPlugin, "_summarize", fake_summarize):
+        with patch.object(CompactionPlugin, "_view_summary", fake_summarize):
             for i in range(6):
                 await h1.inject_message("test:c2", "user", long_text)
                 await h1.drain_all()
@@ -1145,7 +1145,7 @@ class TestGroupDMultiChannel:
 
         long_text = "a_msg_" + ("x" * 50)
 
-        async def fake_summarize(self_inner, messages, prior_summaries=None, max_tokens=None):
+        async def fake_summarize(self_inner, channel, conversation, cut):
             return "channel A summary"
 
         import json as _json
@@ -1158,7 +1158,7 @@ class TestGroupDMultiChannel:
 
         with patch("corvidae.context.count_tokens", side_effect=lambda t: len(t)), \
              patch("corvidae.compaction.message_tokens", side_effect=_message_tokens), \
-             patch.object(CompactionPlugin, "_summarize", fake_summarize):
+             patch.object(CompactionPlugin, "_view_summary", fake_summarize):
             # Phase 1: Build up channel A's conversation history (5 round-trips).
             # After 5 user messages + 5 assistant responses, the token estimate
             # is 686 tokens (JSON-serialized message size, mocked as len(text)),

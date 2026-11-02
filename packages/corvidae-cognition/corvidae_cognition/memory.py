@@ -70,18 +70,31 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 import aiosqlite
 
 from corvidae.attribution import reset_attribution, set_attribution
-from corvidae.context import MessageType
-from corvidae.fork import fork_agent, quote, window_db_ids
+from corvidae.context import ContextWindow, MessageType, count_tokens, message_tokens
+from corvidae.fork import (
+    ForkRefused,
+    ViewInputs,
+    build_fork_prompt,
+    fork_agent,
+    quote,
+    snap_cut_forward,
+    snap_cut_to_tool_boundary,
+    view_agent,
+    view_call,
+    window_db_ids,
+)
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 from corvidae.persistence import (
     add_column_if_missing,
     decode_message_row,
+    decodable_summaries,
     parse_message_type,
+    view_rows,
 )
 
 if TYPE_CHECKING:
@@ -128,26 +141,6 @@ VEC_OVERFETCH = 4
 # deployment with slow disks or long retention runs needs a longer wait.
 WRITE_BUSY_TIMEOUT_MS = 5000
 
-# Default consolidation prompt. prompts/memory_consolidation.md is the
-# documented copy of this text; memory.consolidation_prompt in config
-# overrides it with a literal string.
-DEFAULT_CONSOLIDATION_PROMPT = (
-    "You are consolidating a conversation segment into the agent's "
-    "long-term autobiographical memory. Write a FIRST-PERSON summary from "
-    "the agent's point of view (the assistant is \"I\").\n\n"
-    "Preserve epistemic framing: distinguish what I was told from what I "
-    "inferred or speculated (\"Schuyler told me...\", \"I speculated "
-    "that...\", \"I suggested...\"). Keep concrete details that would "
-    "matter later: names, decisions, commitments, corrections, and "
-    "outcomes. Omit filler.\n\n"
-    "Respond with a single JSON object, nothing else:\n"
-    "{\n"
-    '  "summary": "<first-person summary, a few sentences>",\n'
-    '  "topic_tags": ["<short topic tag>", ...],\n'
-    '  "participants": ["<sender name>", ...]\n'
-    "}"
-)
-
 # JSON schema for the consolidation record (#199). Mirrors what
 # _record_from_text reads: only ``summary`` is required, since the parser
 # tolerates missing tags and participants and a grammar that forced them
@@ -170,19 +163,22 @@ CONSOLIDATION_EXTRA_BODY = {
     }
 }
 
-# Default fork instruction for consolidation (GitHub issue #51). With
-# agent.forks on, the record is written by a fork of the live window: this
-# text is appended to it as a user turn, followed by a sentence naming where
-# the range starts. prompts/memory_consolidation_fork.md is the documented
-# copy; memory.consolidation_fork_prompt (static config, not a runtime
-# tunable) overrides it. The agent's own system prompt is above it, so it
-# doesn't need to explain who "I" is.
+# Default instruction for consolidation (GitHub issue #51). With agent.forks
+# on, the record is written by a fork of the live window; a range that has
+# left the window is written from a rebuilt view of it on llm.background
+# (#380). Either way this text is appended as a user turn, followed by a
+# sentence naming where the range starts. prompts/memory_consolidation_fork.md
+# is the documented copy; memory.consolidation_fork_prompt (static config,
+# not a runtime tunable) overrides it. The agent's own system prompt is above
+# it, so it doesn't need to explain who "I" is.
 DEFAULT_CONSOLIDATION_FORK_PROMPT = (
     "[Memory consolidation] Pause the conversation here and write a record "
     "of part of it for your long-term autobiographical memory, in the first "
-    "person, as yourself.\n\n"
+    "person, as yourself. This record is your private memory, not a message "
+    "to anyone on the channel: no one there will read it, so write it for "
+    "yourself.\n\n"
     "Keep what you were told apart from what you inferred or speculated "
-    "(\"Schuyler told me...\", \"I speculated that...\", \"I suggested...\"). "
+    "(\"so-and-so told me...\", \"I speculated that...\", \"I suggested...\"). "
     "Keep concrete details that would matter later: names, decisions, "
     "commitments, corrections, and outcomes. Omit filler. Do not call tools.\n\n"
     "Respond with a single JSON object, nothing else:\n"
@@ -192,6 +188,9 @@ DEFAULT_CONSOLIDATION_FORK_PROMPT = (
     '  "participants": ["<sender name>", ...]\n'
     "}"
 )
+
+# How a consolidation range gets its record (MemoryPlugin._live_record).
+LiveOutcome = Literal["record", "skip", "catch_up"]
 
 # Bound on fork records waiting for their on_compaction task (keyed by
 # (channel_id, range end)). An entry is consumed by the task that follows
@@ -343,6 +342,18 @@ def _decodes_to_object(raw: bytes | str) -> bool:
         return False
 
 
+def _dialog_ids(rows: list[tuple]) -> set[int]:
+    """Row ids of the message-type rows that decode.
+
+    A corrupt row never loads into a window, so a view or fork must not be
+    required to find it there (dialog_from_rows warned about it).
+    """
+    return {
+        row_id for row_id, raw, mtype in rows
+        if mtype == "message" and _decodes_to_object(raw)
+    }
+
+
 def dialog_from_rows(rows: list[tuple], channel_id: str) -> list[dict]:
     """The consolidation working set: real user/assistant dialog only.
 
@@ -373,6 +384,219 @@ def dialog_from_rows(rows: list[tuple], channel_id: str) -> list[dict]:
                 isinstance(content, str) and content.strip():
             dialog.append(message)
     return dialog
+
+
+@dataclass(frozen=True)
+class CatchupSegment:
+    """One window segment of a catch-up range: its rows, where its watermark
+    lands, and the finished background request."""
+
+    rows: list[tuple[int, bytes, str]]  # the segment's range rows (summary rows included), fetch_range_rows shape
+    end_id: int                         # rows[-1][0]: the watermark after this segment commits
+    messages: list[dict]                # the finished background request
+
+
+def _segment_run(
+    view: list[dict], own_ids: set[int], inputs: ViewInputs, fork_prompt: str
+) -> list[list[int]]:
+    """Cut one run's view into segments that each fit the channel's budget.
+
+    ``view`` is the run's messages (the summary in force first, if any);
+    ``own_ids`` the ids of the run's range rows. Returns, per segment, the
+    view indices of its own rows. A candidate segment fits when the system
+    prompt, the instruction on its untrimmed view and its own rows (plus a
+    context tool call whose results open the segment) total at most the
+    budget. A tool cycle straddling a cut goes whole into the next segment;
+    a unit that alone overflows becomes its own segment.
+    """
+    own_pos = [k for k, m in enumerate(view) if m.get("_db_id") in own_ids]
+    sys_tokens = count_tokens(inputs.system_prompt)
+    toks = [message_tokens(m) for m in view]
+    # Where each tool call sits in the view, to find calls below a segment's start.
+    call_at = {c["id"]: k for k, m in enumerate(view) for c in m.get("tool_calls") or []}
+
+    def fits(a: int, b: int) -> bool:
+        """Whether own rows ``own_pos[a:b]`` fit the budget as one segment."""
+        idx = own_pos[a:b]
+        end = idx[-1] + 1
+        # A call below the segment's start whose results are own rows counts
+        # as an own row: the fit must keep the call and its results together.
+        ctx_calls = {
+            call_at[view[k]["tool_call_id"]] for k in idx
+            if view[k].get("role") == "tool"
+            and call_at.get(view[k].get("tool_call_id"), end) < idx[0]
+        }
+        own_tokens = sum(toks[k] for k in idx) + sum(toks[k] for k in ctx_calls)
+        dialog = {
+            view[k]["_db_id"] for k in idx if view[k].get("_message_type") == MessageType.MESSAGE
+        }
+        instruction = {
+            "role": "user",
+            "content": fork_prompt + "\n\n" + _fork_range_sentence(view[:end], dialog),
+        }
+        return sys_tokens + message_tokens(instruction) + own_tokens <= inputs.max_tokens
+
+    segments: list[list[int]] = []
+    a = 0
+    while a < len(own_pos):
+        # Grow the segment: ``b`` is the exclusive end (an index into
+        # ``own_pos``) of the longest run of own rows from ``a`` that fits.
+        b = a
+        while b < len(own_pos) and fits(a, b + 1):
+            b += 1
+        if b == len(own_pos):
+            segments.append(own_pos[a:])
+            break
+        # The cut falls before own row b: back up to a straddling tool
+        # cycle's call (the cycle goes whole into the next segment).
+        first = own_pos[a]
+        sub = view[first:]
+        count = 0
+        if b > a:
+            boundary = first + snap_cut_to_tool_boundary(sub, own_pos[b] - first)
+            count = sum(1 for k in own_pos[a:b] if k < boundary)
+        if count == 0:
+            # One row or cycle alone overflows: it is its own segment.
+            boundary = first + snap_cut_forward(sub, 1)
+            count = sum(1 for k in own_pos[a:] if k < boundary)
+        # ``count`` own rows leave as this segment; the next starts after them.
+        segments.append(own_pos[a:a + count])
+        a += count
+    return segments
+
+
+def _measured_size(messages: list[dict]) -> int:
+    """A request's size as sent: the system prompt by ``count_tokens``, every
+    later message by ``message_tokens``."""
+    return count_tokens(messages[0]["content"]) + sum(message_tokens(m) for m in messages[1:])
+
+
+async def build_catchup_segments(
+    db: aiosqlite.Connection, channel_id: str, after_id: int, through_id: int,
+    inputs: ViewInputs, fork_prompt: str,
+) -> list[CatchupSegment]:
+    """The background requests for a range that has left the live window.
+
+    The range is (after_id, through_id]. Each non-summary range row has a
+    summary in force (the newest decodable summary dated before it); a run of
+    rows under the same summary is one window, rebuilt as that summary plus
+    the rows reload would load under it, capped at the run's last row. A run
+    is cut into segments that each fit ``inputs.max_tokens`` (see
+    ``_segment_run``); each segment's view is trimmed oldest-first to the
+    budget, put under ``inputs.apply_reasoning_history``, and ends with the
+    consolidation instruction. The request body is always
+    ``CONSOLIDATION_EXTRA_BODY`` with no tools. The daemon and the replay
+    harness both call this, so they cannot diverge (R10).
+    """
+    # 1. Read once: the range rows with timestamps, every decodable summary,
+    # then the view rows.
+    async with db.execute(
+        "SELECT id, CAST(message AS BLOB), message_type, timestamp FROM message_log "
+        "WHERE channel_id = ? AND id > ? AND id <= ? ORDER BY id",
+        (channel_id, after_id, through_id),
+    ) as cursor:
+        fetched = await cursor.fetchall()
+    range_rows = [row[:3] for row in fetched]
+    row_ts = {row[0]: row[3] for row in fetched}
+    summaries = await decodable_summaries(db, channel_id)
+
+    # 2-3. A run is a maximal sequence of non-summary range rows with the
+    # same summary in force; summary rows attach to a segment by id span.
+    runs: list[tuple[tuple | None, list[tuple]]] = []
+    for row in range_rows:
+        if row[2] == "summary":
+            continue
+        in_force = next((sm for sm in summaries if sm[1] < row_ts[row[0]]), None)
+        if runs and (runs[-1][0] and runs[-1][0][0]) == (in_force and in_force[0]):
+            runs[-1][1].append(row)
+        else:
+            runs.append((in_force, [row]))
+    if not runs:
+        return []
+    after_ts = None if any(r[0] is None for r in runs) else min(r[0][1] for r in runs)
+    view = await view_rows(db, channel_id, after_ts, through_id)
+
+    # 4-5. Each run's view, then its segments (own-row view indices).
+    plans: list[tuple[list[dict], list[int], set[int]]] = []
+    for in_force, run_rows in runs:
+        last_id = run_rows[-1][0]
+        if in_force is not None:
+            # Rows reload would load under the summary, in id order.
+            body = sorted(
+                (m for ts, m in view if ts > in_force[1] and m["_db_id"] <= last_id),
+                key=lambda m: m["_db_id"],
+            )
+            run_view = [in_force[2]] + body
+        else:
+            run_view = [m for _, m in view if m["_db_id"] <= last_id]
+        own_ids = {r[0] for r in run_rows}
+        for own in _segment_run(run_view, own_ids, inputs, fork_prompt):
+            plans.append((run_view, own, own_ids))
+
+    # 6. Spans: segment k ends at the last range row before segment k+1's
+    # first non-summary row; the last ends at the last range row.
+    all_ids = [row[0] for row in range_rows]
+    firsts = [min(run_view[k]["_db_id"] for k in own) for run_view, own, _ in plans]
+    ends = [
+        max(i for i in all_ids if i < nxt) for nxt in firsts[1:]
+    ] + [all_ids[-1]]
+
+    # 7. One request per segment.
+    segments: list[CatchupSegment] = []
+    start_after = after_id
+    for (run_view, own, _), end_id in zip(plans, ends):
+        seg_rows = [r for r in range_rows if start_after < r[0] <= end_id]
+        start_after = end_id
+        seg_ids = {r[0] for r in seg_rows if r[2] != "summary"}
+        window = ContextWindow(channel_id)
+        window.system_prompt = inputs.system_prompt
+        # Shallow copies: the policy's in-place stripping must not alter rows
+        # a later segment reuses as context.
+        window.messages = [dict(m) for m in run_view[:own[-1] + 1]]
+        dialog_ids = _dialog_ids(seg_rows)
+
+        def instruction() -> str:
+            """The consolidation instruction over the window as it stands."""
+            return fork_prompt + "\n\n" + _fork_range_sentence(window.messages, dialog_ids)
+
+        # I0: the instruction's size on the untrimmed window, reserved by
+        # fitting the window to what is left. Then the live loop's order:
+        # fit, then the reasoning_history policy.
+        reserve = message_tokens({"role": "user", "content": instruction()})
+        dropped, truncated = window.fit_to_budget(inputs.max_tokens - reserve)
+        inputs.apply_reasoning_history(window.messages)
+
+        # 8. Warnings: rows the view lost, truncation, residual overage.
+        lost = sorted(
+            m["_db_id"] for m in dropped if m.get("_db_id") in seg_ids
+        )
+        if lost:
+            logger.warning(
+                "catch-up view for channel %s dropped its own rows (message ids %s) "
+                "to fit max_context_tokens %d; they are committed without reaching a "
+                "view — raise max_context_tokens or the background role's context",
+                channel_id, ", ".join(map(str, lost)), inputs.max_tokens,
+            )
+        if truncated:
+            logger.warning(
+                "catch-up view for channel %s truncated message id %s to fit "
+                "max_context_tokens %d — raise max_context_tokens or the "
+                "background role's context",
+                channel_id, window.messages[-1].get("_db_id"), inputs.max_tokens,
+            )
+        messages = build_fork_prompt(
+            window, None, instruction(), frozenset(), inputs.mid_role
+        )
+        measured = _measured_size(messages)
+        if measured > inputs.max_tokens:
+            logger.warning(
+                "catch-up view for channel %s, message ids %d-%d measures %d tokens, "
+                "over max_context_tokens %d; sending it anyway — raise "
+                "max_context_tokens or the background role's context",
+                channel_id, seg_rows[0][0], end_id, measured, inputs.max_tokens,
+            )
+        segments.append(CatchupSegment(seg_rows, end_id, messages))
+    return segments
 
 
 def _retrieval_choice(retrieval_cfg: dict, key: str, choices: tuple[str, ...]) -> str:
@@ -622,26 +846,20 @@ class RecordStamp:
 DIRECT_STAMP = RecordStamp(None, "direct", None)
 
 
-def resolve_consolidation_prompts(memory_cfg: dict) -> tuple[str, str]:
-    """The (standalone, fork) consolidation instructions for a memory config.
+def resolve_consolidation_fork_prompt(memory_cfg: dict) -> str:
+    """The consolidation instruction for a memory config.
 
-    Each is the configured value or the default when the key is absent. A
-    present non-string value raises ValueError naming the key: stamping a
-    default or "" would record text the call never sent.
+    The configured ``consolidation_fork_prompt`` or the default when the key
+    is absent. A present non-string value raises ValueError naming the key:
+    stamping a default or "" would record text the call never sent.
     """
-    resolved = []
-    for key, default in (
-        ("consolidation_prompt", DEFAULT_CONSOLIDATION_PROMPT),
-        ("consolidation_fork_prompt", DEFAULT_CONSOLIDATION_FORK_PROMPT),
-    ):
-        value = memory_cfg.get(key, default)
-        if not isinstance(value, str):
-            raise ValueError(
-                f"memory.{key} must be a string; got {value!r}. "
-                f"Set it to the instruction text or remove the key to use the default."
-            )
-        resolved.append(value)
-    return resolved[0], resolved[1]
+    value = memory_cfg.get("consolidation_fork_prompt", DEFAULT_CONSOLIDATION_FORK_PROMPT)
+    if not isinstance(value, str):
+        raise ValueError(
+            f"memory.consolidation_fork_prompt must be a string; got {value!r}. "
+            f"Set it to the instruction text or remove the key to use the default."
+        )
+    return value
 
 
 MEMORY_INDEX_DDL = (
@@ -773,7 +991,6 @@ class MemoryPlugin(CorvidaePlugin):
         self._embedding_cfg: dict | None = None
         self._memory_cfg: dict = {}
         self._idle_consolidate_after: float = DEFAULT_IDLE_CONSOLIDATE_AFTER
-        self._consolidation_prompt: str = DEFAULT_CONSOLIDATION_PROMPT
         self._consolidation_fork_prompt: str = DEFAULT_CONSOLIDATION_FORK_PROMPT
         # Fork records made in before_compaction, waiting for the
         # on_compaction task: (channel_id, range_end) -> (watermark, record).
@@ -850,10 +1067,18 @@ class MemoryPlugin(CorvidaePlugin):
         self._retention_max_delay = float(
             retention_cfg.get("max_delay", DEFAULT_RETENTION_MAX_DELAY)
         )
-        # Non-str prompts are refused here (startup fails loudly).
-        self._consolidation_prompt, self._consolidation_fork_prompt = (
-            resolve_consolidation_prompts(self._memory_cfg)
-        )
+        # A non-str prompt is refused here (startup fails loudly).
+        self._consolidation_fork_prompt = resolve_consolidation_fork_prompt(self._memory_cfg)
+        # The standalone prompt is gone; say so once at startup (O2).
+        if "consolidation_prompt" in self._memory_cfg:
+            logger.warning(
+                "memory.consolidation_prompt is no longer used and is ignored: "
+                "catch-up records are now written from the agent's own view "
+                "with memory.consolidation_fork_prompt. Move any custom "
+                "instruction there (it is sent as a user instruction after "
+                "the conversation, not as a system prompt) and remove "
+                "memory.consolidation_prompt from agent.yaml."
+            )
         retrieval_cfg = self._memory_cfg.get("retrieval", {}) or {}
         self._retrieval_k = retrieval_cfg.get("k", DEFAULT_RETRIEVAL_K)
         bands = retrieval_cfg.get("bands", {}) or {}
@@ -967,8 +1192,8 @@ class MemoryPlugin(CorvidaePlugin):
         Runs inline (the hook is awaited before replace_with_summary), so
         it costs the response path one more generation. Fail-soft: any
         miss (range not in the window, fork failed) leaves no stash and the
-        on_compaction task makes the standalone call: after the drop the
-        range has left the window, so it is windowless work (#320).
+        on_compaction task uses the background view: after the drop the
+        range has left the window, so it is rebuilt from message_log (#320).
         """
         if not compacted_ids:
             return
@@ -1003,7 +1228,7 @@ class MemoryPlugin(CorvidaePlugin):
         except Exception:
             logger.warning(
                 "consolidation fork at compaction failed for channel %s; "
-                "the on_compaction task makes the standalone call", channel.id,
+                "the on_compaction task uses the background view", channel.id,
                 exc_info=True, extra={"channel_id": channel.id},
             )
         finally:
@@ -1029,12 +1254,7 @@ class MemoryPlugin(CorvidaePlugin):
         render with the window unchanged between them.
         """
         prefix = conv.messages if cut is None else conv.messages[:cut]
-        # A corrupt row never loaded into the window, so the fork must not
-        # be required to find it there (dialog_from_rows warned about it).
-        dialog_ids = {
-            row_id for row_id, raw, mtype in rows
-            if mtype == "message" and _decodes_to_object(raw)
-        }
+        dialog_ids = _dialog_ids(rows)
         if not dialog_ids <= window_db_ids(prefix):
             return None
         return prefix, dialog_ids
@@ -1047,7 +1267,7 @@ class MemoryPlugin(CorvidaePlugin):
         ``contained`` is :meth:`_range_in_window`'s result, so the range is
         known to be in the window. A fork failure or an unusable reply
         raises: the caller decides between a skip (idle, in-window range)
-        and the standalone call (compaction).
+        and the catch-up view (compaction).
         """
         prefix, dialog_ids = contained
         instruction = (
@@ -1328,19 +1548,26 @@ class MemoryPlugin(CorvidaePlugin):
     # ------------------------------------------------------------------
 
     async def _consolidate_range(self, channel_id: str, range_end: int, trigger: str) -> None:
-        """Consolidate message_log rows (watermark, range_end] into one record.
+        """Consolidate message_log rows (watermark, range_end] into records.
+
+        A range wholly in the live window is one record (a fork, or a skip).
+        A range that has left it is written from the agent's rebuilt view on
+        llm.background, one record per segment (split at summary boundaries
+        and wherever a segment would exceed the channel's budget); each
+        segment commits and moves the watermark by itself.
 
         Overlap safety (trap #6): both triggers WILL race to the same
         range. The watermark is read optimistically before the LLM work,
         then re-checked under the DB lock in the same atomic section as the
         insert + watermark advance; any concurrent advance discards this
-        task's record.
+        task's record (and, for a multi-segment range, the rest of it).
         """
         attribution_token = set_attribution(
             stage="consolidation", channel_id=channel_id, trigger=trigger
         )
-        # The message-id range, for the failure log; narrowed once rows load.
+        # The message-id range and what is already stored, for the failure log.
         range_desc = f"up to {range_end}"
+        stored = "nothing was stored"
         try:
             db = await self._ensure_schema()
             if db is None:
@@ -1358,128 +1585,194 @@ class MemoryPlugin(CorvidaePlugin):
             if not dialog:
                 # Pure CONTEXT/system segments advance the watermark
                 # without producing a record.
-                async with self._db_lock, self._write_txn() as wdb:
-                    current = await self._get_watermark(wdb, channel_id)
-                    if current == watermark:
-                        await self._set_watermark(wdb, channel_id, range_end)
+                await self._commit(
+                    channel_id, rows, dialog, watermark, range_end, None, trigger
+                )
                 return
 
             # The first-person record: a fork of the live window for a range
             # in it (stashed at compaction, or run now for idle), a skip when
-            # that fork misses, else one standalone background-model call
-            # for windowless work (#320).
-            record = await self._consolidation_record(
-                channel_id, rows, dialog, watermark, range_end, trigger
+            # that fork misses, else the rebuilt view on llm.background.
+            outcome, record = await self._live_record(
+                channel_id, rows, watermark, range_end, trigger
             )
-            if record is None:
+            if outcome == "skip":
+                return
+            if outcome == "record":
+                await self._commit(
+                    channel_id, rows, dialog, watermark, range_end, record, trigger
+                )
                 return
 
-            # The appraisal-driven prior (WP2.5) scores over the consolidated
-            # message-id range; pass the real channel when the registry has
-            # one, else a stub with empty runtime_overrides (sanctioned by
-            # WP2.3's duck-typed resolver) so config/default surfaces apply.
-            msg_id_range = (rows[0][0], rows[-1][0])
-            registry = self.pm.get_plugin("registry")
-            channel = registry.get(channel_id) if registry is not None else None
-            if channel is None:
-                channel = _StubChannel(channel_id)
-            importance = await self.importance_prior.score(
-                dialog, msg_id_range=msg_id_range, channel=channel
-            )
-
-            # Valence: mean stage-2 valence over the range (NULL when none) —
-            # the §4.9-classifier deletion made real: affect is the appraisal
-            # already computed. Fail-soft when appraisal is absent.
-            valence: float | None = None
-            appraisal_plugin = self.pm.get_plugin("appraisal")
-            if appraisal_plugin is not None:
-                try:
-                    valence = await appraisal_plugin.mean_valence(
-                        channel_id, msg_id_range
-                    )
-                except Exception:
-                    logger.warning(
-                        "mean-valence lookup failed; storing NULL valence",
-                        exc_info=True, extra={"channel_id": channel_id},
-                    )
-
-            # Date the record from when its source conversation happened,
-            # not from when consolidation ran — imported history would
-            # otherwise be dated at import time (issue #52).
-            created_at = await source_timestamp(db, rows[-1][0])
-
-            # Embed the summary; failure stores embedded=0 for later
-            # backfill (trap #10 — degrade, never block).
-            embedding: list[float] | None = None
-            if self._embedding_enabled():
-                try:
-                    client = self._llm().get_client("embedding")
-                    embedding = (await client.embed([record["summary"]], kind="document"))[0]
-                except Exception:
-                    logger.warning(
-                        "memory embedding failed; storing record with "
-                        "embedded=0 for backfill", exc_info=True,
-                    )
-
-            # Atomic commit section: insert, vec row, near-dup merge and
-            # watermark advance are one transaction on the write connection,
-            # so they land together or not at all (#221). The lock keeps
-            # memory's own writers (goal retirement) out meanwhile.
-            async with self._db_lock, self._write_txn() as wdb:
-                current = await self._get_watermark(wdb, channel_id)
-                if current != watermark:
-                    # Design (OPT-1a-2): a concurrent consolidation task won
-                    # the compare-and-set and advanced the watermark.  Discarding
-                    # here is intentional — attempting to consolidate the
-                    # non-overlapping tail would require re-fetching messages and
-                    # risk producing spurious records.  Any rows beyond the
-                    # winner's range_end remain unconsolidated, but the idle
-                    # trigger provides eventual coverage: the next idle cycle
-                    # will see the updated watermark and pick them up.
-                    logger.debug(
-                        "watermark moved during consolidation; discarding",
-                        extra={"channel_id": channel_id},
-                    )
-                    return
-                memory_id = await self._insert_record(
-                    wdb,
-                    channel_id=channel_id,
-                    summary=record["summary"],
-                    created_at=created_at,
-                    importance=importance,
-                    valence=valence,
-                    topic_tags=record["topic_tags"],
-                    participants=record["participants"],
-                    msg_id_start=rows[0][0],
-                    msg_id_end=rows[-1][0],
-                    embedding=embedding,
-                    stamp=record["stamp"],
+            # Catch-up: one view, one record and one commit per segment. Each
+            # commit expects the previous segment's end as the watermark.
+            client, stamp, segments = await self._catch_up(channel_id, watermark, range_end)
+            expected = watermark
+            if not segments:
+                # The range has dialog but yielded no request: nothing is
+                # stored and the watermark stays, so say so rather than go quiet.
+                logger.warning(
+                    "catch-up built no segments for %s (message ids %s); "
+                    "the range is retried on the next trigger",
+                    channel_id, range_desc,
                 )
-                await self._set_watermark(wdb, channel_id, range_end)
-            logger.info(
-                "memory consolidated",
-                extra={
-                    "channel_id": channel_id,
-                    "memory_id": memory_id,
-                    "msg_id_start": rows[0][0],
-                    "msg_id_end": rows[-1][0],
-                    "embedded": embedding is not None,
-                    "trigger": trigger,
-                },
-            )
+            # Rows of no-dialog segments waiting to fold into the next commit.
+            carried: list[tuple] = []
+            for i, segment in enumerate(segments):
+                seg_dialog = dialog_from_rows(segment.rows, channel_id)
+                if not seg_dialog and i < len(segments) - 1:
+                    # A no-dialog segment followed by another is not committed
+                    # alone: its ids fold into the next record's span, so memory
+                    # id spans tile (watermark, range_end] with no gap.
+                    carried.extend(segment.rows)
+                    continue
+                commit_rows = carried + list(segment.rows)
+                carried = []
+                seg_record = (
+                    await self._view_record(client, channel_id, segment, seg_dialog, stamp)
+                    if seg_dialog else None
+                )
+                committed = await self._commit(
+                    channel_id, commit_rows, seg_dialog, expected,
+                    segment.end_id, seg_record, trigger,
+                )
+                if not committed:
+                    # A concurrent task won; the rest is discarded (OPT-1a-2).
+                    return
+                expected = segment.end_id
+                stored = f"message ids through {expected} are stored"
         except asyncio.CancelledError:
             raise
         except Exception:
             # Fail-soft: the write transaction rolled back and the watermark
-            # did not advance, so a later trigger retries this range.
+            # did not advance past what is stored, so a later trigger retries.
             logger.warning(
                 "consolidation failed for %s (trigger=%s, message ids %s); "
-                "nothing was stored and the range will be retried on the "
+                "%s and the rest of the range will be retried on the "
                 "next trigger",
-                channel_id, trigger, range_desc, exc_info=True,
+                channel_id, trigger, range_desc, stored, exc_info=True,
             )
         finally:
             reset_attribution(attribution_token)
+
+    async def _commit(
+        self, channel_id: str, rows: list[tuple], dialog: list[dict],
+        expected_wm: int, new_wm: int, record: dict | None, trigger: str,
+    ) -> bool:
+        """Store ``record`` for ``rows`` and move the watermark, atomically.
+
+        With no record only the watermark moves (a range with no dialog).
+        The write is a compare-and-set on ``expected_wm``: False when another
+        task already moved the watermark, True once committed.
+        """
+        db = await self._ensure_schema()
+        if db is None:
+            return False
+
+        if record is None:
+            # Pure CONTEXT/system segments advance the watermark
+            # without producing a record.
+            async with self._db_lock, self._write_txn() as wdb:
+                current = await self._get_watermark(wdb, channel_id)
+                if current != expected_wm:
+                    return False
+                await self._set_watermark(wdb, channel_id, new_wm)
+            return True
+
+        # The appraisal-driven prior (WP2.5) scores over the consolidated
+        # message-id range; pass the real channel when the registry has
+        # one, else a stub with empty runtime_overrides (sanctioned by
+        # WP2.3's duck-typed resolver) so config/default surfaces apply.
+        msg_id_range = (rows[0][0], rows[-1][0])
+        registry = self.pm.get_plugin("registry")
+        channel = registry.get(channel_id) if registry is not None else None
+        if channel is None:
+            channel = _StubChannel(channel_id)
+        importance = await self.importance_prior.score(
+            dialog, msg_id_range=msg_id_range, channel=channel
+        )
+
+        # Valence: mean stage-2 valence over the range (NULL when none) —
+        # the §4.9-classifier deletion made real: affect is the appraisal
+        # already computed. Fail-soft when appraisal is absent.
+        valence: float | None = None
+        appraisal_plugin = self.pm.get_plugin("appraisal")
+        if appraisal_plugin is not None:
+            try:
+                valence = await appraisal_plugin.mean_valence(
+                    channel_id, msg_id_range
+                )
+            except Exception:
+                logger.warning(
+                    "mean-valence lookup failed; storing NULL valence",
+                    exc_info=True, extra={"channel_id": channel_id},
+                )
+
+        # Date the record from when its source conversation happened,
+        # not from when consolidation ran — imported history would
+        # otherwise be dated at import time (issue #52).
+        created_at = await source_timestamp(db, rows[-1][0])
+
+        # Embed the summary; failure stores embedded=0 for later
+        # backfill (trap #10 — degrade, never block).
+        embedding: list[float] | None = None
+        if self._embedding_enabled():
+            try:
+                client = self._llm().get_client("embedding")
+                embedding = (await client.embed([record["summary"]], kind="document"))[0]
+            except Exception:
+                logger.warning(
+                    "memory embedding failed; storing record with "
+                    "embedded=0 for backfill", exc_info=True,
+                )
+
+        # Atomic commit section: insert, vec row, near-dup merge and
+        # watermark advance are one transaction on the write connection,
+        # so they land together or not at all (#221). The lock keeps
+        # memory's own writers (goal retirement) out meanwhile.
+        async with self._db_lock, self._write_txn() as wdb:
+            current = await self._get_watermark(wdb, channel_id)
+            if current != expected_wm:
+                # Design (OPT-1a-2): a concurrent consolidation task won
+                # the compare-and-set and advanced the watermark.  Discarding
+                # here is intentional — attempting to consolidate the
+                # non-overlapping tail would require re-fetching messages and
+                # risk producing spurious records.  Any rows beyond the
+                # winner's range_end remain unconsolidated, but the idle
+                # trigger provides eventual coverage: the next idle cycle
+                # will see the updated watermark and pick them up.
+                logger.debug(
+                    "watermark moved during consolidation; discarding",
+                    extra={"channel_id": channel_id},
+                )
+                return False
+            memory_id = await self._insert_record(
+                wdb,
+                channel_id=channel_id,
+                summary=record["summary"],
+                created_at=created_at,
+                importance=importance,
+                valence=valence,
+                topic_tags=record["topic_tags"],
+                participants=record["participants"],
+                msg_id_start=rows[0][0],
+                msg_id_end=rows[-1][0],
+                embedding=embedding,
+                stamp=record["stamp"],
+            )
+            await self._set_watermark(wdb, channel_id, new_wm)
+        logger.info(
+            "memory consolidated",
+            extra={
+                "channel_id": channel_id,
+                "memory_id": memory_id,
+                "msg_id_start": rows[0][0],
+                "msg_id_end": rows[-1][0],
+                "embedded": embedding is not None,
+                "trigger": trigger,
+            },
+        )
+        return True
 
     async def _insert_record(
         self, db: aiosqlite.Connection, *, channel_id: str, summary: str,
@@ -1687,32 +1980,31 @@ class MemoryPlugin(CorvidaePlugin):
             extra={"channel_id": channel_id}, **kwargs,
         )
 
-    async def _consolidation_record(
-        self, channel_id: str, rows: list[tuple], dialog: list[dict],
-        watermark: int, range_end: int, trigger: str,
-    ) -> dict | None:
-        """Produce the record for (watermark, range_end], or None to skip.
+    async def _live_record(
+        self, channel_id: str, rows: list[tuple], watermark: int, range_end: int,
+        trigger: str,
+    ) -> tuple[LiveOutcome, dict | None]:
+        """How to produce the record for (watermark, range_end].
 
         Compaction trigger: the record before_compaction stashed, if it was
         built against this same watermark (otherwise it covers a different
-        range and is dropped). Idle trigger: a range wholly in the channel's
-        live window forks it, and a miss (forks off, fork failed, unusable
-        reply) skips with a warning (PRD §3.8.5, #320). Everything else (no
-        channel, no window, a range not wholly in it, a compaction trigger
-        with no matching stash) is windowless work and is the standalone call.
+        range and is dropped); no stash means ``catch_up``. Idle trigger: a
+        range wholly in the channel's live window forks it, and a miss
+        (forks off, fork failed, unusable reply) is a ``skip`` with a warning
+        (PRD §3.8.5, #320). A range not wholly in the window (no channel, no
+        window, rows that left it) is ``catch_up``: the rebuilt view.
         """
-        record: dict | None = None
         if trigger == "compaction":
             stashed = self._fork_stash.pop((channel_id, range_end), None)
             if stashed is not None and stashed[0] == watermark:
-                record = stashed[1]
+                return "record", stashed[1]
         elif trigger == "idle":
             registry = self.pm.get_plugin("registry")
             channel = registry.get(channel_id) if registry is not None else None
             conv = getattr(channel, "conversation", None)
             contained = self._range_in_window(conv, rows, None) if conv is not None else None
             if contained is not None:
-                # Live-window work: fork or skip, never standalone (PRD §3.8.5).
+                # Live-window work: fork or skip, never the rebuilt view (PRD §3.8.5).
                 agent = fork_agent(self.pm, "consolidation")
                 if agent is None:
                     self._skip_consolidation(
@@ -1720,57 +2012,85 @@ class MemoryPlugin(CorvidaePlugin):
                         "forks are not enabled for consolidation "
                         "(agent.forks.enabled / agent.forks.stages)",
                     )
-                    return None
+                    return "skip", None
                 # No await between the containment check and the render.
                 try:
-                    return await self._fork_record(agent, channel, contained, None)
+                    return "record", await self._fork_record(agent, channel, contained, None)
                 except Exception as exc:
                     self._skip_consolidation(
                         channel_id, rows, watermark,
                         f"the fork failed or its reply was unusable ({type(exc).__name__})",
                         exc_info=True,
                     )
-                    return None
-        if record is not None:
-            return record
-        token = set_attribution(mode="standalone")
-        try:
-            return await self._summarize_range(dialog)
-        finally:
-            reset_attribution(token)
+                    return "skip", None
+        return "catch_up", None
 
-    async def _summarize_range(self, dialog: list[dict]) -> dict:
-        """One llm.background call producing the first-person record.
+    async def _catch_up(
+        self, channel_id: str, watermark: int, range_end: int
+    ) -> tuple[object, RecordStamp, list[CatchupSegment]]:
+        """The background client, record stamp and view segments for a range
+        that has left the window. Makes no commits.
 
-        Returns {"summary", "topic_tags", "participants", "stamp"}.
-        A malformed reply is retried once; if both attempts are unusable it
-        degrades to the raw transcript rather than losing the range.
+        Raises:
+            RuntimeError: no agent plugin can supply the channel's view
+                inputs, or the database is not open.
+            ValueError, ChannelNotReady: from ``view_inputs`` (a malformed
+                channel id; a transport that cannot build the channel yet).
         """
+        agent = view_agent(self.pm)
+        if agent is None:
+            raise RuntimeError(
+                f"no agent plugin can supply view inputs for channel {channel_id}; "
+                "the catch-up range stays unconsolidated until it is registered"
+            )
+        inputs = await agent.view_inputs(channel_id)
+        # Bound once (R3): the stamp's model and the requests share a client.
         client = self._llm().get_client("background")
-        # Captured before the first attempt: the stamp describes the call sent.
         stamp = RecordStamp(
-            self._consolidation_prompt, "standalone",
+            self._consolidation_fork_prompt, "standalone",
             client.request_model(CONSOLIDATION_EXTRA_BODY),
         )
-        messages = [
-            {"role": "system", "content": self._consolidation_prompt},
-            {"role": "user", "content": _dialog_transcript(dialog)},
-        ]
+        db = await self._ensure_schema()
+        if db is None:
+            raise RuntimeError(f"memory database not open; cannot build views for channel {channel_id}")
+        segments = await build_catchup_segments(
+            db, channel_id, watermark, range_end, inputs, self._consolidation_fork_prompt
+        )
+        return client, stamp, segments
+
+    async def _view_record(
+        self, client: Any, channel_id: str, segment: CatchupSegment,
+        seg_dialog: list[dict], stamp: RecordStamp,
+    ) -> dict:
+        """One view call producing the first-person record for ``segment``.
+
+        Returns {"summary", "topic_tags", "participants", "stamp"}. An
+        unusable reply (unparseable, or a tool call) is retried once; if both
+        attempts are unusable it degrades to the raw transcript rather than
+        losing the range. Transport errors propagate.
+        """
+        span = f"{segment.rows[0][0]}-{segment.end_id}"
         for attempt in range(2):
-            response = await client.chat(
-                messages, extra_body=CONSOLIDATION_EXTRA_BODY
-            )
-            text = response["choices"][0]["message"]["content"]
             try:
-                return {**_record_from_text(text), "stamp": stamp}
-            except ValueError as exc:
-                logger.warning(
-                    "consolidation reply unusable (attempt %d/2): %s",
-                    attempt + 1, exc,
+                result = await view_call(
+                    client, channel_id, segment.messages,
+                    extra_body=CONSOLIDATION_EXTRA_BODY,
                 )
-        # The call is already paid for; keep the range as its raw transcript.
+                return {**_record_from_text(result.text), "stamp": stamp}
+            except (ValueError, ForkRefused) as exc:
+                logger.warning(
+                    "consolidation reply unusable for channel %s, message ids %s "
+                    "(attempt %d/2): %s",
+                    channel_id, span, attempt + 1, exc,
+                )
+        # The calls are already paid for; keep the range as its raw transcript.
+        logger.warning(
+            "consolidation of channel %s, message ids %s: both replies unusable; "
+            "storing the raw transcript as the record",
+            channel_id, span,
+        )
         return {
-            "summary": _dialog_transcript(dialog),
+            "summary": _dialog_transcript(seg_dialog),
             "topic_tags": [],
             "participants": [],
             "stamp": stamp,

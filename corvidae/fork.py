@@ -31,9 +31,16 @@ from __future__ import annotations
 import json
 import re
 
+from collections.abc import Callable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
+from corvidae.attribution import reset_attribution, set_attribution
 from corvidae.context import ContextWindow
+
+if TYPE_CHECKING:
+    from corvidae.agent import Agent
+    from corvidae.llm import LLMClient
 
 #: Default per-fork reasoning budget. A fork keeps the main reasoning effort
 #: (it is rendered into the system block, so changing it breaks the cached
@@ -75,6 +82,24 @@ class ForkResult:
     message: dict
     usage: dict | None = None
     model: str | None = None
+
+
+@dataclass(frozen=True)
+class ViewInputs:
+    """Everything channel-specific a rendered view needs, from the Agent.
+
+    Attributes:
+        system_prompt: Heads the view (the channel's identity + register).
+        max_tokens: The channel's context budget (``max_context_tokens``).
+        mid_role: ``build_prompt``'s ``mid_conversation_system_role``.
+        apply_reasoning_history: The channel's ``reasoning_history`` policy,
+            bound; mutates a message list in place.
+    """
+
+    system_prompt: str
+    max_tokens: int
+    mid_role: str
+    apply_reasoning_history: Callable[[list[dict]], None]
 
 
 @dataclass(frozen=True)
@@ -284,13 +309,71 @@ def quote(text: str | None, limit: int = QUOTE_CHARS) -> str:
     return flat[:limit] + ("…" if len(flat) > limit else "")
 
 
+async def view_call(
+    client: "LLMClient",
+    channel_id: str,
+    messages: list[dict],
+    *,
+    extra_body: dict | None = None,
+) -> ForkResult:
+    """Send a rendered view (a :func:`build_fork_prompt` render) on ``client``.
+
+    No tools and no ``tool_choice`` are sent. The caller binds the client
+    once (``llm.get_client("background")``) and has already set the
+    attribution stage, channel id and trigger; this sets mode ``standalone``
+    around the call.
+
+    Raises:
+        ForkRefused: the reply carries structured tool calls or text that
+            looks like a tool call. Transport errors propagate.
+    """
+    # Attribute the call as a standalone (non-fork) request.
+    token = set_attribution(mode="standalone")
+    try:
+        response = await client.chat(messages, tools=None, extra_body=extra_body)
+    finally:
+        reset_attribution(token)
+
+    # A view never dispatches tools: tool calls, structured or written out,
+    # are a failed reply.
+    message = response["choices"][0]["message"]
+    if message.get("tool_calls"):
+        raise ForkRefused(
+            f"view call on {channel_id} answered with "
+            f"{len(message['tool_calls'])} tool call(s)"
+        )
+    if looks_like_tool_call(message.get("content") or ""):
+        raise ForkRefused(f"view call on {channel_id} wrote a tool call as text")
+    return ForkResult(
+        text=message.get("content") or "",
+        message=message,
+        usage=response.get("usage"),
+        model=client.request_model(extra_body),
+    )
+
+
+def view_agent(pm) -> "Agent | None":
+    """Return the Agent plugin when it can supply view inputs, else None.
+
+    Duck-typed like :func:`fork_agent`, but ignores ``agent.forks``: the
+    view call runs on ``llm.background``, so it works with forks off.
+    """
+    if pm is None:
+        return None
+    agent = pm.get_plugin("agent")
+    if not callable(getattr(agent, "view_inputs", None)):
+        return None
+    return agent
+
+
 def fork_agent(pm, stage: str):
     """Return the Agent plugin when ``stage`` runs as a fork, else None.
 
     Duck-typed (``pm.get_plugin("agent")``), the same pattern the
     cognition plugins use for each other, so plugins don't import
     Agent. A disabled agent plugin degrades to a miss: a live-window
-    stage skips (PRD §3.8.5); compaction writes its standalone summary.
+    stage skips (PRD §3.8.5); compaction makes the view call on
+    ``llm.background`` instead of a fork.
     """
     if pm is None:
         return None

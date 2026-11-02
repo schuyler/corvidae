@@ -729,6 +729,8 @@ class TestAppraisalPrior:
         llm._clients["background"] = StubClient(consolidation_json)
         cfg = {"daemon": {"session_db": db_path}, "memory": {}}
         memory = MemoryPlugin()
+        # A view-capable agent with forks off: the range is written from the background view.
+        pm.register(FakeForkAgent(set()), name="agent")
         pm.register(memory, name="memory")
         await memory.on_init(pm=pm, config=cfg)
         await memory.on_start(config=cfg)
@@ -851,6 +853,8 @@ class TestAppraisalPrior:
 
         cfg = {"daemon": {"session_db": db_path}, "memory": {}}
         memory = MemoryPlugin()
+        # A view-capable agent with forks off: the range is written from the background view.
+        pm.register(FakeForkAgent(set()), name="agent")
         pm.register(memory, name="memory")
         await memory.on_init(pm=pm, config=cfg)
         await memory.on_start(config=cfg)

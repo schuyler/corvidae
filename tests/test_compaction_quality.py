@@ -177,25 +177,25 @@ class TestDeathSpiralCompaction:
         return conv
 
     async def test_death_spiral_carries_forward_prior_summary(self):
-        """When compacting tool-only messages, the prior summary must be carried forward.
+        """When compacting tool-only messages, the prior summary must be in the
+        prefix the view call renders.
 
         This is the core death spiral fix: the first compaction's summary (containing
-        all user instructions) must be passed to _summarize() as prior context.
+        all user instructions) heads the window prefix ``_view_summary`` receives,
+        so the agent's own view carries it forward (the prior_summaries split is gone).
         """
         conv = self._build_death_spiral_conversation()
         plugin = CompactionPlugin(pm=None)
         channel = _make_channel()
 
-        captured_prior = []
-        captured_new = []
+        captured_prefix: list[dict] = []
 
-        async def mock_summarize(messages, prior_summaries=None, max_tokens=None):
-            captured_new.extend(messages)
-            if prior_summaries:
-                captured_prior.extend(prior_summaries)
+        async def mock_view_summary(channel, conversation, cut):
+            # The prefix the view renders.
+            captured_prefix.extend(conversation.messages[:cut])
             return "Carried-forward summary preserving user instructions"
 
-        with patch.object(plugin, "_summarize", side_effect=mock_summarize):
+        with patch.object(plugin, "_view_summary", side_effect=mock_view_summary):
             # Use a small max_tokens to ensure compaction triggers
             # (conversation has many long messages from the fixture)
             result = await plugin.resolve_compaction(
@@ -206,32 +206,33 @@ class TestDeathSpiralCompaction:
         # (may or may not succeed depending on token math, but the key
         # thing is that if it runs, it carries forward the summary)
         if result is True:
-            assert len(captured_prior) == 1, (
-                f"Expected 1 prior summary to be carried forward, got {len(captured_prior)}"
+            summaries = [
+                m for m in captured_prefix
+                if m.get("_message_type") == MessageType.SUMMARY
+            ]
+            assert len(summaries) == 1, (
+                f"Expected the prior summary in the view's prefix, got {len(summaries)}"
             )
             # The carried-forward summary should contain user context
-            prior_content = captured_prior[0].get("content", "")
+            prior_content = summaries[0].get("content", "")
             assert "Corvidae" in prior_content or "user" in prior_content.lower(), (
                 "Prior summary should contain user context about the Corvidae project"
             )
-            # _message_type must be stripped
-            assert "_message_type" not in captured_prior[0]
-            for msg in captured_new:
-                assert "_message_type" not in msg
 
     async def test_death_spiral_does_not_lose_user_instructions(self):
         """The new summary must NOT say 'no user instructions'.
 
-        Even though the compacted messages are all tool outputs, the carried-forward
-        prior summary ensures user instructions are preserved.
+        Even though the compacted messages are all tool outputs, the prior
+        summary in the rendered prefix ensures user instructions are preserved.
         """
         conv = self._build_death_spiral_conversation()
         plugin = CompactionPlugin(pm=None)
         channel = _make_channel()
 
-        async def mock_summarize(messages, prior_summaries=None, max_tokens=None):
-            # Simulate what a good LLM would do: preserve prior context
-            if prior_summaries:
+        async def mock_view_summary(channel, conversation, cut):
+            # Simulate what a good LLM would do: preserve prior context it can see
+            prefix = conversation.messages[:cut]
+            if any(m.get("_message_type") == MessageType.SUMMARY for m in prefix):
                 return (
                     "User is working on Corvidae agent framework, investigating "
                     "duplicate LLM response bug on branch yozlet/first-fixes. "
@@ -239,7 +240,7 @@ class TestDeathSpiralCompaction:
                 )
             return "No user instructions found."
 
-        with patch.object(plugin, "_summarize", side_effect=mock_summarize):
+        with patch.object(plugin, "_view_summary", side_effect=mock_view_summary):
             result = await plugin.resolve_compaction(
                 channel=channel, conversation=conv, max_tokens=200,
             )
@@ -254,7 +255,7 @@ class TestDeathSpiralCompaction:
             summary_content = summary_msgs[0]["content"]
             assert "no user instructions" not in summary_content.lower(), (
                 "New summary must not claim 'no user instructions' — "
-                "the carried-forward prior summary ensures user context is preserved"
+                "the prior summary in the rendered prefix preserves user context"
             )
 
 
@@ -262,7 +263,7 @@ class TestFirstCompactionAgainstFixture:
     """Test that the first compaction segment from the fixture is handled correctly."""
 
     async def test_first_compaction_no_prior_summaries(self):
-        """First compaction has no prior summaries — should pass empty list."""
+        """First compaction has no prior summary in the view's prefix."""
         fixture = _load_fixture()
         seg = fixture["compaction_segments"][0]
 
@@ -276,22 +277,22 @@ class TestFirstCompactionAgainstFixture:
         plugin = CompactionPlugin(pm=None)
         channel = _make_channel()
 
-        captured_prior = None
+        captured_prefix: list[dict] | None = None
 
-        async def mock_summarize(messages, prior_summaries=None, max_tokens=None):
-            nonlocal captured_prior
-            captured_prior = prior_summaries
+        async def mock_view_summary(channel, conversation, cut):
+            nonlocal captured_prefix
+            captured_prefix = list(conversation.messages[:cut])
             return "First compaction summary"
 
-        with patch.object(plugin, "_summarize", side_effect=mock_summarize):
+        with patch.object(plugin, "_view_summary", side_effect=mock_view_summary):
             result = await plugin.resolve_compaction(
                 channel=channel, conversation=conv, max_tokens=500,
             )
 
         if result is True:
-            assert captured_prior == [], (
-                "First compaction should have no prior summaries"
-            )
+            assert not any(
+                m.get("_message_type") == MessageType.SUMMARY for m in captured_prefix
+            ), "First compaction should have no prior summary in the prefix"
 
 
 # ---------------------------------------------------------------------------

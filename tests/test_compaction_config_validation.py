@@ -218,3 +218,29 @@ class TestBadConfigDoesNotBlockCompaction:
         })
         assert plugin._compaction_threshold == 0.3
         assert plugin._compaction_retention == 0.7
+
+
+# ---------------------------------------------------------------------------
+# O2: agent.compaction_prompt was removed with the standalone summarizer
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("value", ["Summarize it.", None])
+async def test_removed_compaction_prompt_warns_naming_replacement(caplog, value):
+    """A config that still sets agent.compaction_prompt (whatever its value)
+    gets exactly one startup WARNING naming the key, saying it is ignored and
+    naming its replacement, agent.compaction_fork_prompt (#380, #388, O2)."""
+    plugin = CompactionPlugin(pm=None)
+    config = {"agent": {"compaction_prompt": value}}
+
+    with caplog.at_level(logging.WARNING, logger="corvidae.compaction"):
+        await plugin.on_init(None, config)
+
+    warnings = [
+        r.getMessage() for r in caplog.records
+        if r.levelno == logging.WARNING and "agent.compaction_prompt" in r.getMessage()
+    ]
+    assert len(warnings) == 1, [r.getMessage() for r in caplog.records]
+    assert "ignored" in warnings[0]
+    assert "agent.compaction_fork_prompt" in warnings[0]
+

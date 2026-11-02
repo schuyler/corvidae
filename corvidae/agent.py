@@ -32,6 +32,7 @@ import aiohttp
 from collections.abc import Callable
 from dataclasses import dataclass, field, fields as dc_fields, replace
 from enum import Enum
+from functools import partial
 from pathlib import Path
 
 from corvidae.clock import Clock, Timer
@@ -46,6 +47,7 @@ from corvidae.channel import (
     ChannelConfig,
     ChannelRegistry,
     INFERENCE_KEYS,
+    resolve_persisted_channel,
     resolve_system_prompt,
 )
 from corvidae.context import (
@@ -65,11 +67,13 @@ from corvidae.fork import (
     ForkResult,
     ForksConfig,
     ForkUnavailable,
+    ViewInputs,
     build_fork_prompt,
     looks_like_tool_call,
     parse_forks_config,
 )
 from corvidae.idle import IdleTracker
+from corvidae.thinking import apply_reasoning_history
 from corvidae.hooks import (
     CorvidaePlugin,
     get_dependency,
@@ -1072,16 +1076,9 @@ class Agent(CorvidaePlugin):
 
         # 1. Lazy-initialize conversation on the channel
         if channel.conversation is None:
-            resolved_cfg = self._registry.resolve_config(channel)
             conv = ContextWindow(channel.id, chars_per_token=self._chars_per_token)
-            base_dir = self._base_dir
-            from pathlib import Path
-            if base_dir is None:
-                base_dir = Path(".")
             # Identity first, then the channel's register (#316).
-            identity = resolve_system_prompt(resolved_cfg["system_prompt"], base_dir)
-            register = await self._resolve_register(channel, resolved_cfg["register_prompt"], base_dir)
-            conv.system_prompt = f"{identity}\n\n{register}" if register else identity
+            conv.system_prompt = await self.channel_system_prompt(channel)
             # The tool set is fixed for the conversation, like the system
             # prompt it sits beside at the head of the prompt (principle 2).
             conv.tool_view = self._build_tool_view(channel)
@@ -1361,6 +1358,54 @@ class Agent(CorvidaePlugin):
             for k, v in channel.runtime_overrides.items()
             if k in INFERENCE_KEYS
         }
+
+    async def channel_system_prompt(self, channel: Channel) -> str:
+        """The channel's identity, then a blank line and its register.
+
+        The identity alone when the register is empty. This is the block a
+        new conversation starts with, shared with the background views so
+        the two cannot drift.
+        """
+        resolved_cfg = self._registry.resolve_config(channel)
+        base_dir = self._base_dir if self._base_dir is not None else Path(".")
+        # Identity first, then the channel's register (#316).
+        identity = resolve_system_prompt(resolved_cfg["system_prompt"], base_dir)
+        register = await self._resolve_register(channel, resolved_cfg["register_prompt"], base_dir)
+        return f"{identity}\n\n{register}" if register else identity
+
+    @property
+    def mid_conversation_system_role(self) -> str:
+        """The parsed ``agent.mid_conversation_system_role`` (read-only)."""
+        return self._mid_conversation_system_role
+
+    async def view_inputs(self, channel_id: str) -> ViewInputs:
+        """Everything channel-specific a rendered view of ``channel_id`` needs.
+
+        Raises:
+            ValueError: ``channel_id`` is not ``transport:scope``.
+            ChannelNotReady: the owning transport cannot build the channel
+                yet; the caller retries later.
+        """
+        # Resolve the channel the way the scheduler does (live, restored
+        # after a restart, or asked of its transport).
+        channel = await resolve_persisted_channel(self.pm, self._registry, channel_id)
+        if channel is None:
+            raise ValueError(
+                f"channel id {channel_id!r} is not transport:scope; "
+                "cannot build a view for it; check the channel id recorded "
+                "in message_log for this range"
+            )
+        resolved = self._registry.resolve_config(channel)
+        policy = resolved["reasoning_history"]
+        # The live conversation's own prompt is the one the agent had (D17).
+        conv = channel.conversation
+        system_prompt = conv.system_prompt if conv is not None else await self.channel_system_prompt(channel)
+        return ViewInputs(
+            system_prompt=system_prompt,
+            max_tokens=resolved["max_context_tokens"],
+            mid_role=self._mid_conversation_system_role,
+            apply_reasoning_history=partial(apply_reasoning_history, policy=policy),
+        )
 
     def fork_enabled(self, stage: str) -> bool:
         """Whether ``stage`` runs as a fork (agent.forks.enabled and stages)."""

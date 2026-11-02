@@ -40,6 +40,23 @@ def completed_exchange_end(messages: list[dict]) -> int:
     return 0
 
 
+def apply_reasoning_history(messages: list[dict], policy: ReasoningHistory) -> None:
+    """Apply a ``reasoning_history`` policy to ``messages`` in place.
+
+    Only assistant messages are touched: "drop" strips ``reasoning_content``
+    from all of them, "exchange" strips it from those before the last user
+    message, "keep" changes nothing. Shared by ThinkingPlugin and the
+    rebuilt catch-up view so the live window and the view agree (R7).
+    """
+    # "drop" strips the entire window; "exchange" strips only what
+    # precedes the last user message.
+    if policy == ReasoningHistory.DROP:
+        strip_reasoning_content(messages)
+    elif policy == ReasoningHistory.EXCHANGE:
+        end = completed_exchange_end(messages)
+        strip_reasoning_content(messages[:end])
+
+
 class ThinkingPlugin(CorvidaePlugin):
     """Plugin that handles <think> block and reasoning_content stripping.
 
@@ -78,13 +95,8 @@ class ThinkingPlugin(CorvidaePlugin):
         conv = channel.conversation
         if policy is None or conv is None:
             return
-        # "drop" strips the entire window; "exchange" strips only what
-        # precedes the last user message.
-        if policy == ReasoningHistory.DROP:
-            strip_reasoning_content(conv.messages)
-        elif policy == ReasoningHistory.EXCHANGE:
-            end = completed_exchange_end(conv.messages)
-            strip_reasoning_content(conv.messages[:end])
+        # The shared policy implementation (also used by the catch-up view).
+        apply_reasoning_history(conv.messages, policy)
 
     @hookimpl
     async def after_persist_assistant(self, channel, message) -> None:

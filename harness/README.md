@@ -323,34 +323,62 @@ by hand (the same `sed` `harness/chat.sh` uses) and run
 
 ## Replaying consolidation prompts
 
-`harness/consolidate_replay.py` re-runs the daemon's consolidation
-summarization over a message range you already recorded, so you can compare
-`memory.consolidation_prompt` variants against identical input. A live session
-can't do that — running the second variant changes the history it would have
-been scored against.
+`harness/consolidate_replay.py` re-runs the daemon's catch-up consolidation
+over a message range you already recorded, so you can compare
+`memory.consolidation_fork_prompt` variants against identical input. A live
+session can't do that — running the second variant changes the history it
+would have been scored against.
 
 ```
 uv run python harness/consolidate_replay.py \
     --db harness/fixtures/s-compact-20260909.db \
     --channel 'irc:#s-compact' --range 76:163 \
-    --prompt-file prompts/memory_consolidation.md \
+    --system-prompt-file /path/to/identity-and-register.txt \
+    --prompt-file prompts/memory_consolidation_fork.md \
     --trials 5 --config /path/to/buster/agent.yaml
 ```
 
+The replay builds the daemon's exact request for a range that has left the
+live window: the agent's rebuilt view (the summary in force, the rows after
+its boundary, trimmed to the budget) under the channel's system prompt,
+followed by the consolidation instruction, sent as a plain call on the
+`llm.background` role. It calls the same function the daemon does,
+`build_catchup_segments` in
+`packages/corvidae-cognition/corvidae_cognition/memory.py`, so a result here
+is a result about production rather than about a lookalike that drifted.
+
 `--range` is inclusive at both ends, matching how a `memory` row's
-`msg_id_start`/`msg_id_end` read. Rows are selected and filtered by the same
-functions the daemon uses — `fetch_range_rows` and `dialog_from_rows` in
-`packages/corvidae-cognition/corvidae_cognition/memory.py` — and sent as the same two-message call
-`_summarize_range` builds, so a result here is a result about production
-rather than about a lookalike that drifted.
+`msg_id_start`/`msg_id_end` read.
+
+`--system-prompt-file` is required: the channel's resolved identity followed
+by a blank line and its register (what `Agent.channel_system_prompt`
+returns), because the replay has no running agent to ask. The budget
+(`max_context_tokens`), `reasoning_history` and
+`mid_conversation_system_role` come from the `agent:` section of `--config`.
+That is a shortcut (`view_inputs_from_config`): it skips per-channel and
+transport-wide entries, so a channel that overrides those in `channels:`
+replays under the agent-level values. Move to resolving them through the
+channel's layers when an operator needs it.
+
+A range the daemon would split into more than one view (it spans a summary
+boundary, or its rows exceed the budget) is rejected, and the error lists the
+segments' id ranges; replay those ranges one at a time. That includes the
+range of some legacy `standalone` records, written before catch-up was
+segmented, so such a record's range can be rejected even though the daemon
+wrote it as one record, and the range of a record whose span absorbed a
+preceding segment with no dialog (catch-up folds that span into the next
+record). `--prompt-file` defaults to
+`memory.consolidation_fork_prompt` from `--config`, then to
+`DEFAULT_CONSOLIDATION_FORK_PROMPT` (the text in
+`prompts/memory_consolidation_fork.md`), as the daemon resolves it, and
+replaces that instruction for the run when given; `--trials` defaults to 1.
 
 `--config` wants the *rendered* Buster config, not a fresh one: model,
 timeout, and `extra_body` all have to match what the daemon was running, or
 you are measuring a different setup. It defaults to `agent.yaml` in the
 current directory, which in the repo root is the local dev config — pass the
 flag explicitly rather than measuring whichever model that happens to point
-at. `--prompt-file` defaults to `DEFAULT_CONSOLIDATION_PROMPT` (the same text
-`prompts/memory_consolidation.md` holds); `--trials` defaults to 1.
+at.
 
 ### The tunnel
 

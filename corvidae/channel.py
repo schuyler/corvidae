@@ -617,6 +617,66 @@ def load_channel_config(config: dict, registry: ChannelRegistry) -> None:
     apply_channel_config(parse_channel_config(config), registry)
 
 
+class ChannelNotReady(Exception):
+    """The transport that owns a channel id cannot build its channel yet.
+
+    The caller retries later (the next trigger or timer pass).
+    """
+
+    def __init__(self, channel_id: str) -> None:
+        super().__init__(f"channel {channel_id} cannot be resolved yet")
+        self.channel_id = channel_id
+
+
+def _transport_resolves(pm, transport: str) -> bool:
+    """Whether a loaded plugin for ``transport`` implements resolve_channel,
+    so its None means "not yet" rather than "not mine". Transports set a
+    ``transport`` attribute (TransportPlugin)."""
+    return any(
+        getattr(impl.plugin, "transport", None) == transport
+        for impl in pm.hook.resolve_channel.get_hookimpls()
+    )
+
+
+async def resolve_persisted_channel(
+    pm, registry: ChannelRegistry, channel_id: str
+) -> Channel | None:
+    """Resolve a persisted channel id to a Channel.
+
+    Tries the live registry entry, then the transport's ``resolve_channel``
+    hook (Signal applies alias config), then a bare registry channel from the
+    split id (IRC, CLI, internal:*). Returns None for an id that is not
+    ``transport:scope``.
+
+    Raises:
+        ChannelNotReady: the id's transport implements resolve_channel but
+            answered nothing; it cannot apply the channel's config yet
+            (PRD §3.2.7), and a bare channel would cache the defaults for
+            the process lifetime (#76).
+    """
+    # 1. A live registry entry wins.
+    channel = registry.get(channel_id)
+    if channel is not None:
+        return channel
+    # 2. Ask the owning transport; a failing hook is logged, not fatal.
+    try:
+        channel = await pm.ahook.resolve_channel(channel_id=channel_id)
+    except Exception:
+        logger.warning("resolve_channel hook failed", exc_info=True,
+                       extra={"channel": channel_id})
+        channel = None
+    if channel is not None:
+        return channel
+    # 3. Not a transport:scope id, or a transport that must be asked later,
+    # or a transport with no opinion (bare registry channel).
+    transport, sep, scope = channel_id.partition(":")
+    if not sep or not transport or not scope:
+        return None
+    if _transport_resolves(pm, transport):
+        raise ChannelNotReady(channel_id)
+    return registry.get_or_create(transport, scope)
+
+
 def resolve_system_prompt(value: str | list[str], base_dir: Path) -> str:
     """Resolve a system_prompt config value to a string.
 

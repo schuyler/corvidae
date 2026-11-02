@@ -75,11 +75,12 @@ def _as_server_renders(prompt: list[dict]) -> list[dict]:
 
 
 async def _compact(plugin: CompactionPlugin, conv: ContextWindow, max_tokens: int):
-    """Run compaction with a stub summarizer."""
-    async def fake_summarize(messages, prior_summaries=None, max_tokens=None):
+    """Run compaction with a stub view-call summarizer (the seam that
+    replaced the standalone ``_summarize``)."""
+    async def fake_view_summary(channel, conversation, cut):
         return "summary text"
 
-    with patch.object(plugin, "_summarize", side_effect=fake_summarize):
+    with patch.object(plugin, "_view_summary", side_effect=fake_view_summary):
         return await plugin.resolve_compaction(
             channel=_channel(), conversation=conv, max_tokens=max_tokens
         )

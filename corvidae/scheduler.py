@@ -47,7 +47,12 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import aiosqlite
 
-from corvidae.channel import Channel, ChannelRegistry
+from corvidae.channel import (
+    Channel,
+    ChannelNotReady,
+    ChannelRegistry,
+    resolve_persisted_channel,
+)
 from corvidae.clock import MAX_WALL_SLEEP_SECONDS, Clock
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 from corvidae.tool import Tool, tool_to_schema
@@ -110,15 +115,6 @@ _ROW_COLUMNS = (
     "id, name, channel_id, origin, text, next_fire_at, interval_seconds, "
     "created_at, created_by, last_fired_at, enabled, disabled_reason, schedule_spec"
 )
-
-
-class ChannelNotReady(Exception):
-    """A due row's owning transport cannot build its channel yet; the row
-    stays due and the timer retries after CHANNEL_RETRY_SECONDS."""
-
-    def __init__(self, channel_id: str) -> None:
-        super().__init__(f"channel {channel_id} cannot be resolved yet")
-        self.channel_id = channel_id
 
 
 @dataclass
@@ -871,52 +867,29 @@ class SchedulerPlugin(CorvidaePlugin):
         )
 
     async def _channel_for(self, channel_id: str, schedule_id: int | None = None) -> Channel | None:
-        """Resolve a persisted channel id: live registry entry, then the
-        transport's resolve_channel (Signal applies alias config), then a
-        bare registry channel from the split id (IRC, CLI, internal:*).
+        """Resolve a persisted channel id via ``resolve_persisted_channel``.
 
-        Raises ChannelNotReady when the transport that owns the id
-        implements resolve_channel but declined: it cannot apply the
-        channel's config yet (PRD §3.2.7), and a bare channel would cache
-        the defaults for the process lifetime (#76).
+        Raises ChannelNotReady when the owning transport cannot build the
+        channel yet; the row stays held, with one warning per row.
         """
-        channel = self._registry.get(channel_id)
-        if channel is not None:
-            self._deferred_rows.discard(schedule_id)
-            return channel
         try:
-            channel = await self.pm.ahook.resolve_channel(channel_id=channel_id)
-        except Exception:
-            logger.warning("resolve_channel hook failed", exc_info=True,
-                           extra={"channel": channel_id})
-            channel = None
-        if channel is not None:
-            self._deferred_rows.discard(schedule_id)
-            return channel
-        transport, sep, scope = channel_id.partition(":")
-        if not sep or not transport or not scope:
-            return None
-        if self._transport_resolves(transport):
+            channel = await resolve_persisted_channel(self.pm, self._registry, channel_id)
+        except ChannelNotReady:
             # Warn once per row, not once per retry pass.
             if schedule_id not in self._deferred_rows:
                 self._deferred_rows.add(schedule_id)
+                transport = channel_id.partition(":")[0]
                 logger.warning(
                     "scheduler: %s transport cannot resolve %s yet; holding schedule "
                     "row %s and retrying every %ss",
                     transport, channel_id, schedule_id, CHANNEL_RETRY_SECONDS,
                     extra={"schedule_id": schedule_id, "channel": channel_id},
                 )
-            raise ChannelNotReady(channel_id)
-        return self._registry.get_or_create(transport, scope)
-
-    def _transport_resolves(self, transport: str) -> bool:
-        """Whether a loaded plugin for ``transport`` implements
-        resolve_channel, so its None means "not yet" rather than "not
-        mine". Transports set a ``transport`` attribute (TransportPlugin)."""
-        return any(
-            getattr(impl.plugin, "transport", None) == transport
-            for impl in self.pm.hook.resolve_channel.get_hookimpls()
-        )
+            raise
+        # A resolved channel clears the row's deferred mark.
+        if channel is not None:
+            self._deferred_rows.discard(schedule_id)
+        return channel
 
     # ------------------------------------------------------------------
     # Reminder operations (the tools' backing)

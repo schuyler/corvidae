@@ -192,7 +192,7 @@ class TestCompactionCarriesCompactedIds:
         plugin = CompactionPlugin()
         plugin.pm = MagicMock()
         plugin.pm.ahook.on_compaction = AsyncMock()
-        plugin._summarize = AsyncMock(return_value="a summary")
+        plugin._view_summary = AsyncMock(return_value="a summary")
         plugin._min_messages = 2
         plugin._compaction_threshold = 0.0  # always trigger
         plugin._compaction_retention = 0.0  # retain minimum
@@ -213,17 +213,21 @@ class TestCompactionCarriesCompactedIds:
         assert call_kwargs["compacted_ids"] == expected_ids
 
     async def test_summarizer_input_carries_no_underscore_keys(self):
-        """The message prep for the summarizer strips all _-prefixed keys."""
-        plugin = CompactionPlugin()
-        plugin.pm = MagicMock()
-        plugin.pm.ahook.on_compaction = AsyncMock()
-        seen: list[list[dict]] = []
+        """The background view request (a fork miss: the fork raises) carries
+        no ``_``-prefixed key on any message (R5, bootstrap-mapping §4.8)."""
+        from corvidae.fork import ForkRefused
+        from corvidae.hooks import create_plugin_manager
 
-        async def fake_summarize(messages, prior_summaries=None, max_tokens=None):
-            seen.append(messages)
-            return "a summary"
+        from helpers import FakeForkAgent, RecordingClient, recording_llm_plugin
 
-        plugin._summarize = fake_summarize
+        # A real pm holding a failing-fork agent and a recording background client.
+        pm = create_plugin_manager()
+        background = RecordingClient("a summary")
+        pm.register(recording_llm_plugin(RecordingClient("main"), background), name="llm")
+        pm.register(
+            FakeForkAgent({"compaction"}, error=ForkRefused("tool call")), name="agent"
+        )
+        plugin = CompactionPlugin(pm=pm)
         plugin._min_messages = 2
         plugin._compaction_threshold = 0.0
         plugin._compaction_retention = 0.0
@@ -235,8 +239,8 @@ class TestCompactionCarriesCompactedIds:
             conv.messages[-1]["_db_id"] = 200 + i
 
         await plugin.resolve_compaction(channel, conv, max_tokens=10)
-        assert seen, "summarizer was not called"
-        for msg in seen[0]:
+        assert background.chat_calls, "the background view call was not made"
+        for msg in background.chat_calls[0]["messages"]:
             assert not any(k.startswith("_") for k in msg)
 
 

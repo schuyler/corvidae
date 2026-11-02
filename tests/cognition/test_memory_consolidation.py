@@ -23,7 +23,7 @@ from corvidae.hooks import create_plugin_manager
 from corvidae.llm_plugin import LLMPlugin
 from corvidae_cognition.memory import MemoryPlugin, RubricPrior
 from corvidae.persistence import PersistencePlugin, init_db
-from helpers import CORRUPT_MESSAGES, insert_raw_message, skip_warnings
+from helpers import CORRUPT_MESSAGES, FakeForkAgent, insert_raw_message, skip_warnings
 
 
 CONSOLIDATION_JSON = json.dumps({
@@ -79,7 +79,8 @@ async def build_consolidation_env(config=None, db_path=":memory:"):
     WAL file DB, which memory's dedicated write connection needs) + stubbed
     llm clients + memory.
 
-    Returns (memory, persistence, llm_stub_background, channel, db).
+    Returns (memory, persistence, llm_stub_background, channel, db). The pm
+    also holds a forks-off FakeForkAgent under ``agent`` (view-capable).
     """
     config = config or EMBED_CONFIG
     db = await aiosqlite.connect(db_path)
@@ -103,6 +104,11 @@ async def build_consolidation_env(config=None, db_path=":memory:"):
     embedding_cfg = config.get("llm", {}).get("embedding")
     if embedding_cfg:
         llm.embedding_dimensions = embedding_cfg["dimensions"]
+
+    # A view-capable agent with forks off (stages=set()): a range outside the
+    # live window is written from the rendered view on llm.background, so the
+    # tests that drive such a range reach a view-capable agent (#380, #388).
+    pm.register(FakeForkAgent(set()), name="agent")
 
     memory = MemoryPlugin()
     pm.register(memory, name="memory")
@@ -348,9 +354,16 @@ class TestRubricPrior:
 class TestResponseFormat:
     """#199: consolidation and the rubric constrain output with a schema."""
 
-    async def test_standalone_consolidation_sends_record_schema(self):
+    async def test_catchup_consolidation_sends_record_schema(self):
+        """#199 on the view path: an out-of-window range written through
+        ``_consolidate_range`` sends the record schema as response_format."""
         memory, persistence, stub, channel, db = await build_consolidation_env()
-        await memory._summarize_range([{"role": "user", "content": "hi"}])
+        ids = await seed_dialog(persistence, channel, [
+            ("user", "hi"), ("assistant", "hello"),
+        ])
+        await memory._consolidate_range(channel.id, ids[-1], "idle")
+        # The view path (system prompt first), not a standalone prompt.
+        assert stub.chat_calls[0]["messages"][0]["content"] == "IDENTITY\n\nREGISTER"
         fmt = stub.chat_calls[0]["extra_body"]["response_format"]
         assert fmt["type"] == "json_schema"
         schema = fmt["json_schema"]["schema"]
@@ -677,3 +690,30 @@ async def test_unknown_message_type_is_non_dialog_for_consolidation(caplog):
         dialog = dialog_from_rows(rows, "irc:#c")
     assert [m["content"] for m in dialog] == ["kept words"]
     assert any("'bogus'" in w for w in skip_warnings(caplog, 2, "irc:#c"))
+
+
+# ---------------------------------------------------------------------------
+# O2: memory.consolidation_prompt was removed with the standalone prompt
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("value", ["Summarize it.", None])
+async def test_removed_consolidation_prompt_warns_naming_replacement(caplog, value):
+    """A config that still sets memory.consolidation_prompt (whatever its
+    value) gets exactly one startup WARNING naming the key, saying it is
+    ignored and naming its replacement, memory.consolidation_fork_prompt
+    (#380, #388, O2)."""
+    config = {**EMBED_CONFIG, "memory": {**EMBED_CONFIG["memory"], "consolidation_prompt": value}}
+    pm = create_plugin_manager()
+    memory = MemoryPlugin()
+
+    with caplog.at_level(logging.WARNING, logger="corvidae.memory"):
+        await memory.on_init(pm=pm, config=config)
+
+    warnings = [
+        r.getMessage() for r in caplog.records
+        if r.levelno == logging.WARNING and "memory.consolidation_prompt" in r.getMessage()
+    ]
+    assert len(warnings) == 1, [r.getMessage() for r in caplog.records]
+    assert "ignored" in warnings[0]
+    assert "memory.consolidation_fork_prompt" in warnings[0]

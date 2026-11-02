@@ -760,10 +760,11 @@ class MessageType(str, enum.Enum):
 (`user`, `assistant`, `tool`, `system`). `CompactionPlugin` only summarizes `MESSAGE`
 entries; `SUMMARY` and `CONTEXT` rows survive compaction. `UNSENT` rows are
 in the window and reload into it, but no transport sees them, including
-history replay. Compaction's standalone summarizer and memory
-consolidation read `MESSAGE` rows only, so they never summarize an `UNSENT`
-row as said; a fork-mode compaction summary works from the window, where the
-row's not-sent marker sits beside it (see [The output gate](#the-output-gate)).
+history replay. Memory consolidation's dialog (what a record's range sentence and degraded
+transcript are built from) reads `MESSAGE` rows only, so it never counts an
+`UNSENT` row as said; compaction's summary and a catch-up view render the
+window or its rebuilt rows, where the row's not-sent marker sits beside it
+(see [The output gate](#the-output-gate)).
 
 In-memory message dicts carry a `_message_type` metadata key (set by `append()`).
 `build_prompt()` strips it before returning messages to the LLM.
@@ -1532,7 +1533,7 @@ default priority) returned non-None first. The caller does not use the return va
 
 1. If `conversation.token_estimate()` — the same JSON-serialized
    per-message measure described above, applied consistently across the
-   trigger check, the retain-walk, and `_summarize`'s truncation below —
+   trigger check and the retain-walk below —
    is less than 80% of `max_tokens`, return `None` (skip).
 2. If `len(conversation.messages) <= 5`, return `None` (skip — too few messages to compact).
 3. Backward walk: starting from the most recent message, accumulate messages
@@ -1557,36 +1558,29 @@ default priority) returned non-None first. The caller does not use the return va
    stands. `build_prompt` renders such orphans as framed notifications
    (see `ContextWindow` above), so the cut logic need not prevent them.
 4. If `retain_count >= len(conversation.messages)`, return `None` (all messages fit — no-op).
-5. Filter the older (non-retained) messages to `MESSAGE` type only, excluding
-   any `SUMMARY` entries. Strip `_message_type` metadata before passing to LLM.
+5. The summary is written from the window prefix at the cut (`messages[:cut]`),
+   not from a filtered copy: the prefix already holds any prior summary at its
+   head, and CONTEXT rows render as they do in a main turn.
 6. With forks on for `compaction` (`agent.forks`, see [Forks](#forks)),
    fork the window at the cut with `agent.compaction_fork_prompt` (default
    `CompactionPlugin.DEFAULT_FORK_PROMPT`, `prompts/compaction_fork.md`)
-   and use the reply as the summary. The prefix already holds any prior
-   summary at its head, so no bounded copy is passed. If forks are off for
-   the stage, or the fork raises or comes back empty (logged at WARNING),
-   fall through to the standalone call (compaction is the one live-window
-   stage that keeps it, PRD §3.8.5):
-   call `_summarize(new_messages_clean, prior_summaries_clean,
-   max_tokens=max_tokens)` — sends the older messages to the LLM with a
-   system prompt asking for a concise summary, incorporating any prior
-   summaries carried forward from earlier compaction rounds. The system
-   prompt is `agent.compaction_prompt` (default `DEFAULT_SUMMARY_PROMPT`)
-   in every round; when prior summaries exist, the carry-forward
-   instruction and the bounded prior-summary text are appended to it. Resolves the
-   LLM client lazily via `get_dependency(pm, "llm", LLMPlugin)` on first
-   call (not in `on_start`, because `on_start` hooks run in LIFO order and
-   `CompactionPlugin.on_start` fires before `LLMPlugin.on_start`). The
-   carried-forward prior-summary text is itself capped to a fraction of
-   `max_tokens` (keeping the most recent portion) so it cannot grow
-   unbounded across repeated compaction rounds. Derives a token budget for
-   the messages being summarized as `max_tokens` minus the system prompt's
-   own size minus a fixed reserve for the LLM's response and JSON overhead,
-   then bounds the head and tail of the input against that budget — each
-   side capped by both a message count (50) and half the token budget —
-   inserting a `[...N messages omitted...]` marker between them when
-   anything is dropped. This method is a separate method so tests can patch
-   it via `patch.object`.
+   and use the reply as the summary. If forks are off for the stage, or the
+   fork raises or comes back empty (logged at WARNING), `_view_summary`
+   sends the same render (`build_fork_prompt` over the window at the cut,
+   the channel's pending tool-call ids, the Agent's
+   `mid_conversation_system_role`) as a plain call on `llm.background`,
+   with no tools, through `view_call` (PRD §3.8). The render is the
+   uncapped prefix: the window is over budget when compaction runs, so a
+   fork miss moves the summary's cost and quality from `llm.main` to the
+   background model, and a background endpoint with a smaller context than
+   `max_context_tokens` fails more often. If that call raises or returns
+   nothing (logged at WARNING; `RuntimeError` when no Agent can render a
+   view), compaction declines and the over-budget fallback (#308) brings the
+   window back within budget. The background client is resolved when
+   compaction runs (`get_dependency(pm, "llm", LLMPlugin)`), not in
+   `on_start`. `agent.compaction_prompt` and the standalone summarizer
+   (`_summarize`, with its prior-summary cap and head/tail truncation) are
+   gone; setting the key logs a startup warning and is otherwise ignored.
 7. Build the summary message (`[Summary of earlier conversation]\n…`).
    Its role is `assistant`, unless the retained tail holds no `user`
    message (a long tool loop); then it is `user`, because strict chat
@@ -1602,7 +1596,7 @@ default priority) returned non-None first. The caller does not use the return va
 11. Return `True`.
 
 The summary LLM call is attributed `stage="compaction"` plus
-`mode="fork"` or `mode="standalone"`.
+`mode="fork"` or, for the view call, `mode="standalone"`.
 
 **Graceful degradation:** without `CompactionPlugin`, the
 `resolve_compaction` hook returns `None` on every turn and compaction
@@ -1624,6 +1618,36 @@ written by the agent they describe.
 ```
 fork_prompt = build_prompt(window[:cut]) + [{"role": "user", "content": instruction}]
 ```
+
+That render is the **rendered view** (PRD §3.8), `build_fork_prompt` in
+`fork.py`: the system prompt, a window, and one `user` instruction. A fork
+sends the live window on `llm.main` with the channel's tools. The **view
+call** (`view_call`) sends the same kind of render on `llm.background` with
+no tools and no `tool_choice`, attributed `mode="standalone"`. It has two
+producers: compaction on a fork miss (the live window at the cut) and memory
+catch-up (a window rebuilt from `message_log`, below). It carries no cache
+benefit: it is a cold prefill on the background slot.
+
+**View API (kernel, `corvidae.fork` and the Agent).** Cognition gets
+everything channel-specific from one value, `ViewInputs` (`system_prompt`,
+`max_tokens`, `mid_role`, and `apply_reasoning_history`, the channel's
+policy bound to a callable), returned by `view_agent(pm).view_inputs(channel_id)`.
+`view_agent` is duck-typed like `fork_agent` but ignores `agent.forks`, so
+forks off still gets a view. `Agent.view_inputs` resolves a persisted channel
+id with `resolve_persisted_channel` (the registry, then the owning
+transport's `resolve_channel`, then a bare channel; it raises `ChannelNotReady`
+when a transport cannot build the channel yet, so a Signal alias unresolved
+after a restart retries on the next trigger), then fills the system prompt
+(the live conversation's own, else `Agent.channel_system_prompt`: identity,
+blank line, register), the resolved `max_context_tokens`, the
+`mid_conversation_system_role` property, and `apply_reasoning_history`
+(`thinking.py`) bound to the channel's `reasoning_history`. The conversation
+init block calls `channel_system_prompt` too, so the two can't drift.
+`persistence.view_rows` (the rows reload loads under a summary, or the
+whole history) and `decodable_summaries` (every summary row that decodes,
+newest first) are shared by `resolve_conversation` and the catch-up builder.
+`view_call` raises `ForkRefused` on a reply with tool calls (structured or
+written out); transport errors propagate.
 
 **Prefix parity.** `Agent.fork(channel, instruction, *, cut=None,
 extra_body=None)` builds with exactly what step 7 of the agent loop uses:
@@ -1652,13 +1676,15 @@ no main client raises `ForkUnavailable`.
 Every caller treats any fork exception, or an empty or unparseable reply,
 as a miss: it logs at WARNING and the live-window stage skips, with no
 standalone call (PRD §3.8.5, #320). The exceptions are compaction, whose
-summary is written standalone on a miss, and consolidation of a range that
-has left the window (the compaction trigger's task after the drop, an idle
-range not wholly in the window), which has no window to fork and runs
-standalone. A
-standalone JSON parse failure names the failing phase (consolidation,
-appraisal, or critique) and includes up to 500 characters of the provider
-text in the `ValueError`.
+summary on a miss is the background view call and then #308, and
+consolidation of a range that has left the window (the compaction trigger's
+task after the drop, an idle range not wholly in the window), which is
+written from a rebuilt view on `llm.background` (catch-up, below). Idle
+consolidation of a range wholly in the live window still skips on a miss,
+and is retried on the next idle trigger; once the range has left the window
+it reaches catch-up. A JSON parse failure names the failing phase
+(consolidation, appraisal, or critique) and includes up to 500 characters of
+the provider text in the `ValueError`.
 
 **Which process forks from where.** Plugins reach the Agent through
 `fork_agent(pm, stage)`, which returns it only when that stage is enabled.
@@ -1666,17 +1692,49 @@ Stage names are opaque to core (it never names cognition plugins).
 
 | Stage | Cut | Runs | On a miss |
 |---|---|---|---|
-| `compaction` | dropped prefix | inline in `resolve_compaction` | standalone summary (then the over-budget fallback, #308) |
-| `consolidation` (compaction trigger) | dropped prefix | inline in `before_compaction`; the record is stashed and the `on_compaction` task consumes it | standalone in the `on_compaction` task: no stash (range not in `messages[:cut]`, fork failed) or the watermark moved since the fork |
-| `consolidation` (idle trigger) | full window | in the idle task | range wholly in the live window: skip with a warning, watermark unchanged, retried on the next idle trigger; no registered channel or window, or a range row not in the window: standalone |
+| `compaction` | dropped prefix | inline in `resolve_compaction` | background view call on the same prefix (`llm.background`, no tools), then the over-budget fallback (#308) |
+| `consolidation` (compaction trigger) | dropped prefix | inline in `before_compaction`; the record is stashed and the `on_compaction` task consumes it | catch-up in the `on_compaction` task: no stash (range not in `messages[:cut]`, fork failed) or the watermark moved since the fork; the rebuilt view on `llm.background` |
+| `consolidation` (idle trigger) | full window | in the idle task | range wholly in the live window: skip with a warning, watermark unchanged, retried on the next idle trigger; no registered channel or window, or a range row not in the window: catch-up (rebuilt view on `llm.background`) |
 | `appraisal` (stage 2) | full window at run time | silent TaskQueue task | skip with a warning (forks off, originating rowid left the window or was never persisted, fork failed or unusable) |
 | `critique` (each stylistic lens) | full window at run time | silent TaskQueue task | same as appraisal; a lens whose fork misses is skipped alone; if no lens ran, no outcome is recorded |
 | `critique` (provenance) | prefix ending at the exchange's final reply | silent TaskQueue task | skip with a warning (forks off, no live window, reply not recorded or not in the window, a compaction since the reply, or a failed fork) |
 
-Seeding, imports, `consolidate_replay.py` and the `eval_*` scripts have no
-live window and always run standalone, as does consolidation of a range
-outside the window. Subagents are unchanged: workers
-with their own persona-neutral prompts.
+Seeding, imports and the `eval_*` scripts have no live window and always
+run standalone. `consolidate_replay.py` sends the daemon's own catch-up
+request. Subagents are unchanged: workers with their own persona-neutral
+prompts.
+
+**Catch-up consolidation.** A range that has left the window has no live
+prefix to fork, so `MemoryPlugin` rebuilds the agent's view of it from
+`message_log` (`build_catchup_segments`, which the replay harness calls too).
+For each non-summary range row the *summary in force* is the newest
+decodable summary row dated before it; a *run* is a maximal sequence of rows
+under the same summary, which is one window. A run's view is that summary
+plus the rows reload would load under it (in id order, through the run's
+last row). A run is then cut into *segments* that each fit the channel's
+`max_context_tokens` (system prompt, the instruction and the segment's own
+rows; a tool cycle straddling a cut goes whole into the next segment, and a
+unit that alone overflows is its own segment), so every range row lands in
+some view. Each segment's view is trimmed oldest-first with
+`ContextWindow.fit_to_budget` to the budget less the instruction's size, then
+put under the channel's `reasoning_history` policy (the live loop's order),
+and ends with the consolidation instruction (`memory.consolidation_fork_prompt`
+plus the range sentence). Row dicts are copied per segment so the policy's
+stripping can't alter rows a later segment reuses as context. Warnings, each
+naming the channel and message ids: the budget trim dropped a segment's own
+rows (they commit without reaching a view); a row was truncated; the
+finished request still measures over budget (it is sent anyway). Each
+segment is one `view_call` on `llm.background`, one record, and one commit
+that is a compare-and-set on the previous segment's end; a lost
+compare-and-set discards the rest, and a failure leaves earlier segments
+committed and the failure log says through which id. An unusable reply is
+retried once, then degrades to the raw transcript, as before. A segment
+with no dialog that is followed by another segment folds its id span into
+the next segment's record (no record or commit of its own); a no-dialog
+last segment advances the watermark without a record. Records are
+stamped `(memory.consolidation_fork_prompt, "standalone", the background
+request model)`. A view that `llm.background` rejects for length is a
+transport error: the watermark stays and the next trigger retries.
 
 The compaction and consolidation forks share one prefix: the second
 fork's prefill is just its instruction. Containment for consolidation is
@@ -1723,7 +1781,7 @@ shows). `Agent.fork` always sets it, so it is None only when a
 ```yaml
 agent:
   forks:
-    enabled: true                 # default; false: live-window stages skip, compaction goes standalone
+    enabled: true                 # default; false: live-window stages skip, compaction uses llm.background
     reasoning_budget_tokens: 2048 # per fork; null = server default
     stages: null                  # null = every stage; or a list of names
 ```
@@ -1747,10 +1805,11 @@ appraisal and each critique lens from the full window at run time;
 provenance from the prefix ending at the exchange's final reply. Each forks
 only while the rows it needs are still in the window. A miss skips the
 stage with a warning (the rescue is a retry or a skip, never a standalone
-call), except compaction, which writes a standalone summary and, if that
-fails too, leaves the window to the over-budget fallback (#308), and
-consolidation of a range that has left the window, which is windowless work
-and runs standalone. Skip-on-miss and the default are implemented (#320).
+call), except compaction, which on a miss sends the same view to
+`llm.background` and, if that fails too, leaves the window to the
+over-budget fallback (#308), and consolidation of a range that has left the
+window, which is written from its rebuilt view on `llm.background`. Skip-on-miss
+and the default are implemented (#320).
 Still targets, not enforced today: stage 2 and the lenses forking only the
 prefix ending at the reply, per-stage reasoning and reply caps (today one
 global `agent.forks.reasoning_budget_tokens` and no reply cap), the
@@ -1759,12 +1818,17 @@ not fit the slot's context as a miss.
 
 **Cost model.** A fork reuses the cached prefix and prefills only its
 instruction and reply; the window is append-only, so a fork's prefix is
-still cached as long as no compaction has run since. A standalone call
-costs its own cold prefill of a rebuilt prompt. It doesn't evict the main
-window when the server keeps `cache-ram`: on Lex (one slot,
+still cached as long as no compaction has run since. A view call (compaction's fallback, catch-up consolidation)
+costs its own cold prefill on the background slot: at most the channel's
+budget per catch-up segment, and for compaction's fallback the whole
+uncapped prefix at the cut. The consolidation and compaction prompts that
+described the conversation to a model are gone; what still makes a
+standalone call of a rebuilt prompt (the importance prior's rubric call
+and evals) pays the same cold prefill. Neither kind
+evicts the main window when the server keeps `cache-ram`: on Lex (one slot,
 `cache-ram = 32768`) #73's K1 measured the main turn after background
 calls fully cached, restored from host RAM. Without `cache-ram`, a
-standalone call on a single slot evicts the main window and the next main
+view or standalone call on a single slot evicts the main window and the next main
 turn re-prefills it. Either way only one call runs on the slot at a time,
 so a background call delays a waiting main turn by its own slot time;
 today only the global `agent.forks.reasoning_budget_tokens` bounds a
@@ -3256,7 +3320,8 @@ Plugins with `depends_on = set()` (declared but empty):
 
 "Soft-uses" means `fork_agent(pm, stage)` (`pm.get_plugin("agent")`,
 duck-typed): with the agent plugin absent or forks off, the live-window stages skip
-(compaction runs standalone).
+(compaction's view call needs the agent plugin too; without it the call
+fails and #308 applies).
 
 Transport plugins use `get_dependency(pm, "registry", ChannelRegistry)` in
 `on_start` to retrieve the shared `ChannelRegistry`. `SubagentPlugin` calls

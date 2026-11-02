@@ -85,10 +85,11 @@ TaskQueue — every TaskQueue completion wakes the main model). The task
 reads the per-channel **consolidation watermark**, fetches the working
 range, produces the record (first-person summary with epistemic framing,
 JSON out) — from a fork of the live window when the range is in it (see
-[Forks](design.md#forks)), else one standalone `llm.background` call
-(`prompts/memory_consolidation.md`); an idle range that is in the window
-but can't be forked is skipped instead, with a warning, and retried on the
-next trigger. Both calls are constrained by a
+[Forks](design.md#forks)), else from the agent's rebuilt view of the range
+sent on `llm.background` (catch-up, below); an idle range that is in the
+window but can't be forked is skipped instead, with a warning, and retried
+on the next trigger (it reaches catch-up once it has left the window). Both
+calls are constrained by a
 `response_format` JSON schema (`summary` required, `topic_tags` and
 `participants` optional), like appraisal and critique, so a model can't
 answer the transcript instead of writing a record —
@@ -212,13 +213,39 @@ encoders. Nothing in the memory path raises into the turn loop.
 
 #### Record stamps
 
+**Catch-up.** A range that has left the live window is written from the
+agent's rebuilt view (PRD §3.8), not from a prompt that describes the
+conversation. `build_catchup_segments` (shared with
+`harness/consolidate_replay.py`) takes each non-summary row's *summary in
+force* (the newest decodable summary dated before the row), groups rows
+under the same summary into runs, and rebuilds each run as that summary
+plus the rows reload would load under it. A run is cut into segments that
+each fit the channel's `max_context_tokens`, so a watermark that lagged
+across several compactions or a long unsummarized history (a heartbeat
+channel) yields several records and every range row reaches some view. Each
+view is trimmed oldest-first to the budget, put under the channel's
+`reasoning_history`, headed by the channel's system prompt (identity and
+register, from `Agent.view_inputs`, which also resolves the channel after a
+restart) and ends with `memory.consolidation_fork_prompt` plus the range
+sentence. It goes on `llm.background` with no tools and the record
+schema. Each segment is its own record and its own watermark advance; a
+failure leaves earlier segments stored and retries the rest. A segment
+with no dialog that is followed by another folds its id span into the next
+segment's record (no record or commit of its own); a no-dialog last
+segment advances the watermark without a record. Because the
+instruction runs under the agent's own prompt, the default tells the agent
+the record is its private memory, not a message to anyone on the channel.
+`memory.consolidation_prompt` is removed: a config that still sets it logs a
+startup warning naming `memory.consolidation_fork_prompt`.
+
 Every record says how it was made (#299, PRD §3.7 Memory 2), in three
 nullable `memory` columns:
 
 - `prompt_hash`: sha256 of the UTF-8 instruction text the call used. The
   text itself is stored once per hash in `memory_prompt`, however many
   records share it. An empty prompt is still a prompt and is stored as `''`.
-- `mode`: `fork`, `standalone` or `direct`.
+- `mode`: `fork`, `standalone` (the view call on `llm.background`) or
+  `direct`.
 - `model`: the model the call was sent with, after any
   `llm.<role>.extra_body.model` override, so a record says what actually
   ran rather than what `llm.<role>.model` names. `Agent.fork` always sets
@@ -231,11 +258,13 @@ What each path stamps:
 | Path | `mode` | Instruction text | `model` |
 |---|---|---|---|
 | Fork of the live window (compaction or idle) | `fork` | `memory.consolidation_fork_prompt` | `ForkResult.model` |
-| Standalone `llm.background` call | `standalone` | `memory.consolidation_prompt` | `LLMClient.request_model` of the call |
-| Raw-transcript fallback after two unusable replies | `standalone` | `memory.consolidation_prompt` | as above (the call was sent; only its reply was unusable) |
+| Catch-up: the rebuilt view on `llm.background` | `standalone` | `memory.consolidation_fork_prompt` | `LLMClient.request_model` of the background client |
+| Raw-transcript fallback after two unusable replies | `standalone` | `memory.consolidation_fork_prompt` | as above (the call was sent; only its reply was unusable) |
 | `write_record` (goal retirement) | `direct` | none: `prompt_hash` NULL, no `memory_prompt` row | NULL |
 
-A fork's instruction also carries a code-generated sentence naming where
+Catch-up records written before the view was introduced carry the removed
+`memory.consolidation_prompt` as their stamp; they are not migrated, so the
+records that prompt wrote stay findable by its hash. A fork's or view's instruction also carries a code-generated sentence naming where
 the range starts, which can quote the first new message. That sentence is
 left out of the stamp: `memory_prompt` is outside `corvidae redact`'s
 cascade, so storing conversation text there would put it where redaction
@@ -348,9 +377,8 @@ Implements five hooks and two kernel timers:
   dialog row of the range is in it) and stashes it for the task below.
 - `on_compaction` — spawns a tracked background task consolidating the
   `compacted_ids` range above the per-channel watermark, using the stashed
-  fork record when there is one for that range and watermark, else one
-  standalone `llm.background` call (after the drop the range has left the
-  window).
+  fork record when there is one for that range and watermark, else catch-up
+  (after the drop the range has left the window).
 - `before_agent_turn` — embeds the inbound user text, scores candidates
   (`similarity × exp(-age_days / half_life)`, with age from `created_at` or,
   under `memory.retrieval.recency_from: last_used`, from the last
@@ -367,7 +395,7 @@ Two kernel registrations replace the old `on_idle` hook:
   the live window when the range is wholly in it; if that fork misses
   (forks off, failed, unusable reply) the run is skipped with a warning, the
   watermark stays and the next period retries. A range not wholly in a live
-  window (no registered channel, trimmed rows) is consolidated standalone.
+  window (no registered channel, trimmed rows) goes to catch-up.
   One run per channel at a time.
 - **Retention timer** — fires at `last_run + memory.retention.interval`
   on the clock. It then prefers system quiet: it registers a system idle
@@ -892,8 +920,8 @@ consequences.
 - *Memory.* The trim leaves rows above the channel's memory watermark, and
   the idle trigger consolidates every one of them: as a fork when the range
   is wholly in the window (with forks off the run is skipped, so in-window
-  heartbeat rows wait until trimmed), standalone once any of it has been
-  trimmed out. The compaction safety net can also cover them, when the kept
+  heartbeat rows wait until trimmed), by catch-up (the view on
+  `llm.background`) once any of it has been trimmed out. The compaction safety net can also cover them, when the kept
   beats pass the compaction threshold and `on_compaction` fires.
 - *When.* The trim keeps compaction from firing, so the compaction route to
   consolidation is normally gone on this channel. If `heartbeat.after` is

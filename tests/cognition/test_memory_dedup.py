@@ -30,6 +30,8 @@ from corvidae.llm_plugin import LLMPlugin
 from corvidae_cognition.memory import MemoryPlugin
 from corvidae.persistence import PersistencePlugin, init_db
 
+from helpers import FakeForkAgent
+
 
 DIMS = 4  # small for speed; dedup uses cosine similarity only
 
@@ -140,6 +142,10 @@ async def build_dedup_env(config=None):
     embedding_cfg = config.get("llm", {}).get("embedding")
     if embedding_cfg:
         llm.embedding_dimensions = embedding_cfg["dimensions"]
+
+    # A view-capable agent with forks off: a range outside the live window
+    # is written from the rendered view on llm.background (#380, #388).
+    pm.register(FakeForkAgent(set()), name="agent")
 
     memory = MemoryPlugin()
     pm.register(memory, name="memory")

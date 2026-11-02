@@ -179,7 +179,7 @@ async def test_trimming_makes_no_llm_call(rig_factory):
         },
     )
     compaction = CompactionPlugin(rig.plugin.pm)
-    compaction._summarize = AsyncMock(return_value="summary")
+    compaction._view_summary = AsyncMock(return_value="summary")
     compaction._fork_summary = AsyncMock(return_value="summary")
     rig.plugin.pm.register(compaction, name="compaction")
 
@@ -187,7 +187,7 @@ async def test_trimming_makes_no_llm_call(rig_factory):
         await rig.beat(i, text=f"{pad} {i}")
 
     assert rig.client.chat.await_count == 51
-    assert compaction._summarize.await_count == 0
+    assert compaction._view_summary.await_count == 0
     assert compaction._fork_summary.await_count == 0
 
 
@@ -223,9 +223,16 @@ async def test_compaction_still_runs_when_the_kept_beats_exceed_the_budget(rig_f
         },
     )
     compaction = CompactionPlugin(rig.plugin.pm)
-    # No fork, so the standalone summarizer receives the rows it replaces.
+    # No fork, so the background view call renders the rows it replaces.
+    # The prefix is captured at call time (the window is replaced afterwards).
     compaction._fork_summary = AsyncMock(return_value=None)
-    compaction._summarize = AsyncMock(return_value="summary")
+    view_prefixes: list[list[dict]] = []
+
+    async def fake_view_summary(channel, conversation, cut):
+        view_prefixes.append(list(conversation.messages[:cut]))
+        return "summary"
+
+    compaction._view_summary = fake_view_summary
     rig.plugin.pm.register(compaction, name="compaction")
 
     # Four short beats, then four long ones.
@@ -235,8 +242,8 @@ async def test_compaction_still_runs_when_the_kept_beats_exceed_the_budget(rig_f
         await rig.beat(i, text=f"{pad} {i}")
 
     # Compaction ran once, at beat 8, on the trimmed window.
-    assert compaction._summarize.await_count == 1
-    summarized = [m["content"] for m in compaction._summarize.await_args.args[0]]
+    assert len(view_prefixes) == 1
+    summarized = [m["content"] for m in view_prefixes[0]]
     assert summarized and all(
         c.startswith(f"[heartbeat]\n\n{pad}") or c in {"reply 5", "reply 6", "reply 7"}
         for c in summarized
