@@ -76,8 +76,7 @@ one is a bug even if its tests pass.
    part of a call on any transformer, so context is reused, not rebuilt:
    background calls that need the conversation fork it (§3.8) rather than
    rebuilding it. This is principle 16 applied to prefill: a reused prefix
-   saves slot time on a local server and money where cached input is
-   billed at a discount.
+   is a context switch avoided.
 
 3. **Background cognition avoids blocking the main turn.** The point is
    interactivity. The agent loop is single-turn dispatch: one LLM call per
@@ -86,25 +85,19 @@ one is a bug even if its tests pass.
    as silent tasks or plugin-owned tasks, and shape the *next* turn.
    Background work runs in the gaps between main turns. Deferral is bounded
    so interactivity can't starve it: an exchange's own background work
-   (stage-2 appraisal, critique) finishes before the next main turn on the
-   slot begins, so its results are in place for the turn that reads them.
-   Other queued background work (upkeep) yields to a waiting main turn:
-   beyond any exchange-scoped work still owed and past-due upkeep, the main
-   turn waits at most for the call already running. Upkeep that is past due
-   runs next, ahead of a waiting main turn, so traffic can't starve it
-   (principle 13). The kernel enforces these orderings across a slot only
-   where admission holds calls for capacity, which takes a declared
-   concurrency or a declared rate the call would exceed (§3.13.2); elsewhere
-   the server orders calls admitted together unless a policy plugin holds
-   some (§3.13.1), and an exchange's own background work precedes only its
-   own channel's next main turn (§3.13.1). Background work that policy holds
-   holds back no other channel's main turn (§3.13.7). A declared limit, a
-   cap, policy, or §3.13.7's precedence (another exchange's continuations,
-   agency past its bound) can hold or defer a main turn beyond that (§3.13).
-   Where the pool has no spare capacity (one KV slot, or a rate limit
-   already reached) a background call can't run beside the main turn, so the
-   requirement is to keep its share of the pool small (bounded output, §3.8)
-   and out of the way; it is not a guarantee of zero delay. How a pool's
+   (stage-2 appraisal, critique) forks the exchange's prefix and runs under
+   the same lease before the lease passes on (§3.13.4), so it finishes
+   before the channel's next main turn and its results are in place for
+   the turn that reads them. Other background work (upkeep) waits its turn
+   for a head when every head is leased, and upkeep past its latency bound
+   takes the next free head ahead of work within its bound, so traffic
+   can't starve it (principle 13; §3.13.5). Where the pool has a free head,
+   background work runs beside the main turn rather than yielding to it
+   (§3.13.6). A free head is not a free slot: on a server with one slot,
+   a background call already decoding delays the main turn whatever the
+   lease, so the requirement is to keep background work's share of the
+   pool small (bounded output, §3.8) and out of the way; it is not a
+   guarantee of zero delay. How a pool's
    capacity is shared is §3.13 (principle 16). The inbound gate runs inside
    the transport read path and never calls a model.
 
@@ -185,8 +178,9 @@ one is a bug even if its tests pass.
     subagents, consolidation, appraisal, critique and forks are all
     attributed by stage, channel, trace, trigger and mode. Eval questions
     are denominated in tokens; this is an eval prerequisite. The same
-    record is what the caps of principle 16 are accounted against
-    (§3.13).
+    record names the model each call was sent with and how much of its
+    prompt came from cache, which is what a pool's warm heads are tuned
+    against (§3.13.10).
 
 12. **How the work is done.** Red/green TDD; every test under a timeout;
     docs current before a change is complete. A plan for a change takes
@@ -281,32 +275,25 @@ one is a bug even if its tests pass.
     makes it persistent and restarts. What each unlock costs is recorded
     in `docs/threat-model.md` (principle 9).
 
-16. **Compute is finite, and its shape depends on the endpoint.** Every
-    model endpoint is a resource pool, and the operator declares what bounds
-    it. A local server has a fixed KV-cache budget that the operator divides
-    between parallel slots and context per slot: Lex runs one slot to get
-    the longest window, a deployment choice rather than an architectural
-    one. A commercial API fixes context per model, bounds request and token
-    rates over time windows, and charges per token. Roles on one endpoint
-    share its pool; a role on another endpoint draws on another pool.
-    Principles 2, 3, 7 and 11 and the fork requirements (§3.8) follow from
-    this one: reuse the prefix, keep background work out of the main turn's
-    way, let cheap work gate expensive work, meter every call. Each is worth
-    what its pool's binding resource makes it worth: prefix reuse saves slot
-    time on a local server and money where cached input is discounted, and
-    yielding to the main turn matters where capacity is short and little
-    where it isn't. A rule with a reason besides cost keeps that reason on
-    any pool: background judgment forks because a rebuilt context loses the
-    support the agent had (§3.8.2), whatever the fork costs. None of these
-    rules is relaxed on a pool where it saves little; what varies is how
-    much it saves. Enforcement has two dependencies: principle 3's orderings
-    across a slot (other channels' main turns, past-due upkeep) need
-    admission to hold calls for capacity, which takes a declared concurrency
-    or a declared rate the call would exceed (§3.13.1, §3.13.2), and caps
-    that hold across a restart need the `usage_log` plugin (§3.13.10). The
-    operator caps how much of each pool the agent uses; within the caps, the
-    agent and its plugins decide how the pool is shared (§3.13). Whether the
-    agent can move a cap is a lock (principle 15).
+16. **Compute is finite, and a context switch is what it costs.** Every
+    model endpoint is a resource pool. A provider keeps a limited number of
+    conversation prefixes warm, in its slots and, on llama-server, in host
+    RAM (`--cache-ram`), and a call whose prefix isn't warm pays a full
+    prefill, the expensive part of any call. When more queues are active
+    than the pool can keep warm, each switch evicts another queue's prefix
+    and the agent thrashes. Lex runs one slot to get the longest window, a
+    deployment choice rather than an architectural one. The operator
+    declares how many warm heads each pool has; work runs under leases on
+    them, and contexts switch at call boundaries chosen to keep prefixes
+    warm, not call by call (§3.13). Principles 2, 3, 7 and 11 and the fork
+    requirements (§3.8) follow from this one: reuse the prefix, keep
+    background work out of the main turn's way, let cheap work gate
+    expensive work, meter every call. A rule with a reason besides cost
+    keeps that reason on any pool: background judgment forks because a
+    rebuilt context loses the support the agent had (§3.8.2), whatever the
+    fork costs. Money and provider rate limits are outside this principle
+    for now: corvidae meets rate limits by retrying (§3.6.2), and a spend
+    limit is the operator's to set with the provider (#296).
 
 ## 3. Requirements
 
@@ -775,7 +762,7 @@ Per transport:
     sent the note, never an inferred one. It carries the origin of the
     exchange that started the chain (§3.1.4), so the chain's kind
     (principle 13), critique eligibility (§3.7 Critique 3), budget (§3.1.3)
-    and precedence (§3.13.7) all follow how the chain started. The target's
+    and latency class (§3.13.5) all follow how the chain started. The target's
     turn still judges for itself, and may end without sending anything
     (§3.7, the right to silence).
 11. Reading another channel: any turn can read another channel's recent
@@ -1311,126 +1298,93 @@ design, not requirement. The requirements are outcomes:
    (`self` facts, and the compiled self-model), read as
    coherent drift, thrash, or flattening.
 
-### 3.13 Resource pools and queue arbitration
+### 3.13 Resource pools and context leases
 
-Principle 16 as outcomes. How policy plugins attach (hook names and
-semantics) is design. Questions this section leaves open on purpose (the
-unit of account, reserving against a cap before a call, the order within
-each level of item 7, whether the model sees its budget, coalescing,
-charging per channel or sender, how a per-channel override applies to a cap
-the whole pool shares) are tracked in #296 and are not requirements until
-decided there.
+Principle 16 as outcomes. How a replacement scheduler attaches (hook names
+and semantics) is design. Questions this section leaves open on purpose
+(the latency bound of each class, whether a lease also needs a hard limit
+on turns or time, rate limits on hosted APIs, enforcing parallelism apart
+from warm heads, whether the agent sees its pool's state, merging queued
+items) are tracked in #296 and are not requirements until decided there.
 
-1. Every LLM role, chat and embedding alike, draws on a pool. The operator
-   can declare a pool's capacity (concurrent calls, context per call, and
-   request and token rates over time windows) and its prices per token, per
-   model where an endpoint serves several. Prices come from operator config;
-   nothing fetches a price list. Capacity that isn't declared is unbounded,
-   so a pool with nothing declared admits every call at once. On a pool with
-   no declared concurrency, admission holds no call for concurrency, and the
-   server's own queue orders the calls admitted together. An exchange's own
-   background work still finishes before the channel's next main turn, kept
-   by the kernel at dispatch whatever policy is loaded (item 5); whether
-   upkeep runs before a waiting main turn is then the server's to decide
-   unless a policy plugin holds one of them (item 5; principle 3). Context
-   per call is not something admission waits on: keeping a window within it
-   is compaction's job (§3.3), and a call that can't fit fails as the server
-   fails it.
-2. Every LLM call, chat or embedding, is admitted at `LLMClient` (principle
-   11) before it is sent, whatever its path: a channel's turn, a task-queue
-   worker, a plugin's own task, a fork, a subagent. Admission starts the
-   call, holds it, or refuses it. A call that would take a pool past its
-   declared concurrency or rate is held until capacity frees; a call too
-   large ever to fit a declared rate window is not held for that window, and
-   once any other hold lapses it is sent to fail as the server fails it.
-   Held calls start in an order policy decides; only a hard cap refuses
-   (item 6).
-3. Separately from admission, policy decides whether a channel takes its
-   next queue item now or defers it. Deferring a channel's new work
-   until a deadline is a pause, so one channel can be paused while
-   others run.
-4. Policy decides from a view the kernel keeps current without calling a
-   model. Per channel: queue depth, the kinds and ages of queued items,
-   whether an item is running or a tool cycle is in flight, and how long
-   the channel has been idle (§3.1.16). Per pool: declared capacity,
-   calls in flight, held calls with their kind and age, and usage in
-   each rate window and cap period. Reading it is cheap enough to do on
-   every admission. Admission and dispatch never call a model, like the
-   inbound gate (principle 3).
-5. Policy is pluggable. Holds and deferrals compose: any number of plugins
-   can hold a call or defer a channel, and a hold wins, except that no
-   policy hold or deferral (a plugin's, the agent's, or a soft cap's) delays
-   work past its latency bound (item 7). Ordering doesn't compose: one
-   implementation orders held calls. The kernel ships a default order that
-   meets item 7, and a plugin can replace it. With no policy plugin loaded,
-   the kernel enforces only declared capacity, any caps, an exchange's own
-   background work ahead of its channel's next main turn (item 1), and its
-   default order (principle 1).
-6. Usage over a period (tokens or requests in a rate window, spend over a
-   budget period) can carry a soft cap and a hard cap. Crossing a soft cap
-   changes behaviour in a way the configuration docs state, logs a warning
-   naming the pool, the cap and the usage, and emits a metric (principle 5).
-   A provider's rate limit is declared as capacity and waited on (item 2); a
-   cap is the operator's own limit on the agent's usage. Once usage reaches
-   a hard cap, no further call is admitted against it until its period rolls
-   over; whether calls reserve against the cap in advance, so that none
-   overshoots it, is #296's question. A call refused at a hard cap fails
-   like an LLM error: a background stage skips with a warning (§3.8.5), a
-   main turn's reply names the pool, the cap and when it resets, and
-   compaction keeps its fallback that cannot fail (§3.3.2). Caps are
-   settings under principle 15: whether the agent can move one is a lock,
-   and a lock that bounds a soft cap to a range under the hard cap lets the
-   agent tune it without lifting the bound. A hard cap the agent can raise,
-   through an override or a self-edit of the configuration that declares it
-   (§3.11.11), is a bound the agent, and any text that steers it, can lift
-   (`docs/threat-model.md`).
-7. Calls admission holds (item 2) and no plugin holds start in this
-   precedence, whatever the policy; within a level, policy orders it, and a
-   call held for capacity gains priority within its level as it waits, never
-   past the order this list fixes:
-   1. an exchange's own background work that a waiting main turn must
-      wait for under principle 3, and upkeep past its latency bound
-      (past due, in principle 3's terms; principle 13);
-   2. continuations of an exchange already in flight (a tool result, a
-      turn waiting on its own compaction, a turn a note woke when its
-      chain did not start as agency, §3.5.10);
-   3. agency past its latency bound (§3.1.16, principle 13);
-   4. everything else, with a main turn that starts a new exchange
-      ahead of upkeep not yet due (principle 3).
-
-   A main turn, or an exchange's own background work, that policy holds or
-   defers (items 3 and 5) holds no other channel's work back; if work queued
-   behind it on its own channel reaches its latency bound, the hold or
-   deferral lapses (item 5). A latency bound (§3.1.16) is where work becomes
-   past due; under contention for a pool, "no later than the bound" means
-   that from then on it outranks everything below its level here. Upkeep and
-   agency past their bounds outrank everything below their level, and no
-   policy hold or deferral delays them (item 5); at a hard cap they are
-   refused (item 6). `max_turns` bounds the continuations at level 2.
-8. Deferral acts at exchange boundaries: a deferred channel still takes the
-   continuations of an exchange in flight. A hold delays a call; it doesn't
-   drop it. Only a hard cap stops an exchange mid tool cycle, and
-   `max_turns` (§3.1.3) bounds a tool loop either way. Every hold, deferral
-   or pause, whoever set it (declared capacity, a plugin, the agent, a soft
-   cap), lapses by itself: when capacity frees, when the work it waits for
-   finishes, skips, or is itself held by policy or kept waiting by the
-   kernel (item 1), a hold for capacity not counting, at a deadline, when
-   usage falls back under the cap, or when the period rolls over. A pause
+1. Every chat role draws on a pool, one per provider endpoint; roles on one
+   endpoint share it. A pool is one cost center: usage is accounted to the
+   pool, not per channel or per sender, and its declaration belongs to the
+   provider, so no per-channel override changes it. Embedding calls are
+   metered and attributed (item 10) but take no lease, since they extend
+   no conversation prefix.
+2. A pool's capacity is its number of warm context heads: how many
+   conversation prefixes the provider keeps ready to extend without a full
+   prefill. On llama-server that is its slots plus the prefixes
+   `--cache-ram` holds. The operator declares it; it can't be read from
+   the server, because it depends on the cache's size divided by each
+   context's KV size. A pool with no declared heads is unbounded: every
+   queue gets a head at once and the server's own queue orders the calls,
+   as without this section. How many calls decode at once is not enforced:
+   a server queues calls beyond its own slots.
+3. Work that calls the model runs under a lease on one of its pool's heads.
+   A queue (a channel's serial queue, a subagent's run, or a plugin's own
+   stream of upkeep such as consolidation) takes a lease when it has work
+   and a head is free, keeps it across calls until the queue drains or
+   yields (item 5), and then releases it, and the next waiting queue's
+   context is prefilled. Holding a lease across calls is what keeps a
+   prefix warm: a channel's tool cycle, its own compaction and the
+   continuations of its exchange run on the head it already has. Leases
+   go to waiting queues in FIFO order unless a scheduler plugin replaces
+   the order (item 7).
+4. A fork runs under the lease that holds its prefix. Exchange-scoped
+   background work (stage-2 appraisal, critique) forks the conversation
+   (§3.8), so it runs under the lease of the queue whose head holds that
+   prefix, before the lease is released or passed on. An exchange's own
+   background work therefore finishes before its channel's next main turn
+   and pays no prefill beyond its own tail (principle 3). A fork whose
+   prefix no longer holds a head waits for a lease like any queue.
+5. Every queue has a latency class, which sets its latency bound: how long
+   its waiting work may wait for a head. A channel's class defaults from
+   its transport (someone typing into a web UI expects an immediate reply;
+   someone texting doesn't) and the operator can override it per channel.
+   Upkeep and agency take the latency bounds §3.1.16 gives idle work
+   (principle 13). A lease holder yields at its next call boundary when a
+   waiting queue reaches its latency bound, and may yield earlier of its
+   own accord at any call boundary (consolidation between chunks, for
+   example). A yield never interrupts a call in flight; the queue that
+   yielded waits for a head again. Waiting work past its bound takes the
+   next free head ahead of work within its bound. So upkeep past its bound
+   is not starved, and a flooded channel holds a head no longer than
+   another queue's bound. Whether the agent can move a latency class is a
+   lock (principle 15).
+6. While a pool has a free head, a queue with work takes it without
+   waiting, background work included: background work runs beside a main
+   turn rather than yielding to it. Principle 3's yield applies only when
+   every head is leased.
+7. The kernel ships the order above: FIFO plus drain-or-yield. A plugin
+   can replace it (separate high- and low-latency queues, or a lightweight
+   classifier deciding what to swap in) and can defer a queue until a
+   deadline, which pauses that channel while others run. No replacement
+   order or deferral delays work past its latency bound, and every
+   deferral lapses by itself, at its deadline or at the bound. A pause
    never needs a turn to undo it, so the agent cannot pause itself into a
-   state no turn can leave, and the operator can resume any channel without
-   going through a channel's queue.
-9. Deferral and holding never drop work. Work that won't happen (a
-   refusal at a hard cap, a missed window under §3.8.2) is logged with
-   what was lost (principle 5).
-10. Usage is accounted from the per-call record principle 11 produces.
-    That record names the model each call was sent with, not only the
-    role's configured one, so per-model prices apply (#297). It is read
-    back from `usage_log` after a restart, so caps hold across a restart
-    without new state; a pool with a cap depends on the `usage_log`
-    plugin for that.
-11. Holds, deferrals, refusals and pool usage emit `on_metrics` events
-    attributed like the calls they affect (§3.10), so the wait a main
-    turn spends behind other work is measurable (#182).
+   state no turn can leave, and the operator can resume any channel
+   without going through a channel's queue. The kernel's own lease
+   decisions never call a model, like the inbound gate (principle 3); a
+   replacement that calls one draws on a pool like any other call.
+8. Policy decides from a view the kernel keeps current without calling a
+   model. Per queue: depth, the kinds and ages of waiting items, latency
+   class, whether it holds a lease, and how long the channel has been idle
+   (§3.1.16). Per pool: declared heads, which queues hold leases, and the
+   waiting queues with their ages. Reading it is cheap enough to do at
+   every call boundary.
+9. Waiting for a lease delays work; it never drops it.
+10. The per-call record principle 11 produces names the model each call
+    was sent with, not only the role's configured one (#297), and, where
+    the backend reports it, how many prompt tokens came from cache and how
+    many were prefilled (llama-server's `timings.cache_n` and `prompt_n`).
+    These are what a pool's declared heads, the latency bounds and
+    `--cache-ram` are tuned against.
+11. Lease grants, yields, waits and deferrals emit `on_metrics` events
+    attributed like the calls they affect (§3.10), so the wait a main turn
+    spends behind other work, and the prefill a switch costs, are
+    measurable (#182).
 
 ## 4. Decisions
 
@@ -1457,7 +1411,7 @@ record that holds the reasoning.
 | Silent tasks require no `tool_call_id` | principle 3; §3.7 Funnel |
 | Persona may tune its own gates; `immutable_settings` is the valve | operator directive 2, 2026-07-06 |
 | Self-modification is a design goal: every restriction on it is a lock the framework supports and the operator can lift, never architecture; the principle 9 floors and the append-only log stay fixed | principle 15; operator directive, 2026-10-31 |
-| Every model endpoint is a resource pool the operator declares and caps; single-slot is a deployment choice, not architecture; every call is admitted at `LLMClient`, and policy over pools and channel queues is pluggable | principle 16; §3.13; #296 |
+| Every model endpoint is a resource pool of warm context heads the operator declares; queues lease heads and switch at call boundaries (drain or yield, latency classes); no spend or rate caps for now; single-slot is a deployment choice, not architecture; the lease order is pluggable | principle 16; §3.13; #296; operator, 2026-11-02 |
 | Best-guess defaults first; thresholds fit from experience; closed-loop fitting is a capability the operator can permit | principle 7; operator directives 1, 3; operator directive, 2026-10-31 |
 | Engagement gate calibrates offline unless the operator permits live fitting | §3.7; principle 15 |
 | Hedging vocabulary is persona, not architecture | §3.11.5; diverges from the Persyn spec |
