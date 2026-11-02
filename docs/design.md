@@ -365,6 +365,19 @@ shortcut: this
 assumes the chat template forces thinking open, so set the option only on
 such endpoints; elsewhere every non-reasoning reply reads as cut off.
 
+Raw mode is decided per call (#360). llama-server can't apply a JSON-schema
+grammar with `reasoning_format: none` (HTTP 400), so a call whose merged
+payload carries `response_format` (e.g. the forked and standalone appraisal,
+critique and memory stages) drops `reasoning_format` from that
+request, runs in the server's parsed mode, and is not split: its JSON
+`content` is returned as-is, with no cut-off detection. Calls without
+`response_format` (main turns, the compaction summary fork) are unchanged.
+shortcut: this relies on the server's own default being a parsed mode; a
+server started with `--reasoning-format none` still rejects schema calls.
+Upgrade to an explicit per-call override if such a deployment appears.
+Forks with a schema now send a different `reasoning_format` from main turns;
+whether that changes the cached prefix on a given template is unverified.
+
 Retry parameters: `max_retries` (default 3, set to 0 to disable), `retry_base_delay`
 (base exponential backoff delay in seconds), `retry_max_delay` (cap on backoff delay).
 Retries apply to transient HTTP status codes (429, 500, 502, 503, 504) and connection
