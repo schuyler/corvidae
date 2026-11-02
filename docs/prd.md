@@ -113,7 +113,10 @@ one is a bug even if its tests pass.
    record, degrade to a partial result) and report what was reduced. Every
    human-facing error names the identifier that failed and the next step;
    exception text belongs in the log line. A plugin with no config block is
-   silent; a plugin with a malformed one is loud and aborts startup.
+   silent; a plugin with a malformed one is loud and aborts startup. Only
+   startup may stop the process, on paths the requirements name
+   (§3.1.17); after it, the most any failure costs is one turn on one
+   channel, whatever the channel holds (§3.1.18).
 
 6. **Behavioural tests are the bar.** The framework can offer any
    mechanism, and which ones a deployment runs is the operator's choice
@@ -379,6 +382,34 @@ one is a bug even if its tests pass.
     learn that a channel is idle. A plugin may give its idle work a latency
     bound: the quiet the work needs shrinks the longer it has waited, so it
     runs no later than the bound whatever the traffic (principle 13).
+17. Only startup may stop the process. Its fatal paths are these:
+    loading and validating `agent.yaml` and plugin config blocks
+    (principle 5), the plugin checks of items 10, 12 and 13, and opening
+    the database and applying its schema steps (§3.4.5). Once the Agent
+    has started, no exception stops the process: a hot reload that fails
+    changes nothing (§3.11.3), and every other failure degrades with a
+    logged warning (principle 5). Adding a fatal path is a PRD change.
+18. Nothing a channel holds can make its turns fail repeatedly. What a
+    channel holds is its window, the rows that reload into it, and its
+    queued work, and the guarantee covers any content they carry: a
+    message, a tool result, a model reply, a row a plugin injected. The
+    most one item can cost is its own turn.
+    1. Building the prompt cannot fail. Estimating the window's size,
+       bringing it within budget (§3.3.2) and rendering it for the model
+       handle every row the window can hold; a row they cannot handle is
+       left out of the prompt and logged with its id, like a corrupt row
+       on load (§3.4.3).
+    2. A channel is wedged when its turns fail a configurable number of
+       times in a row. Failures the backend causes don't count: an
+       unreachable backend is retried, and that is not a wedge. A wedged
+       channel is rescued by a fallback that cannot fail: it hides rows
+       from the window, no more than it takes for a turn to succeed, and
+       logs a warning naming the channel and the rows hidden. The rescue
+       holds across a restart, and `message_log` keeps every row
+       (principle 4).
+    3. An item replayed after a crash (§3.4.8) that stops the process
+       again is not replayed again; the window says it was interrupted,
+       and the log names it.
 
 ### 3.2 Transports
 
@@ -1399,6 +1430,7 @@ record that holds the reasoning.
 |---|---|
 | apluggy entry points, not a hand-written registration order; `depends_on` validated at startup | principle 1; §3.1.13 |
 | Single-turn dispatch; multi-turn reasoning emerges from notifications | principle 3; §3.1.2 |
+| Only startup is fatal, on named paths; after start, no channel content can fail its turns repeatedly. Enforced by a prompt build that cannot fail plus a wedge breaker, not by cataloguing per-turn call sites: catching exceptions doesn't stop a deterministic failure from recurring every turn | principle 5; §3.1.17–18; #352, #353 |
 | Tail-append CONTEXT; no mid-window mutation | principle 2; diverges from the Persyn spec's per-query memory swap |
 | Compaction is memory formation, not forgetting | §3.3; §3.7 Memory 1 |
 | Two forks off one prefix for compaction and consolidation, not one combined call: merging saves one think per compaction but couples two plugins through a JSON contract; merge only if measurement shows the second think dominates | §3.8 |
