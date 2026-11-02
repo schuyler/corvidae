@@ -797,4 +797,4 @@ class TestReasoningReopened:
 
         # The cut-off warning carries the marker, so the full text was logged.
         texts = [r.getMessage() for r in caplog.records if r.name == "corvidae.agent"]
-        assert any("MIDDLE" in t for t in texts), texts
+        assert any(long_reasoning in t for t in texts), texts
