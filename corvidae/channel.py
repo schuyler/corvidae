@@ -522,7 +522,7 @@ def parse_channel_config(config: dict) -> ParsedChannels:
         # The identity is agent-wide (#316): point a stale key at both homes.
         if _REMOVED_CHANNEL_PROMPT_KEY in overrides:
             raise ValueError(
-                f"channels.{channel_id}.system_prompt was removed: a channel can't "
+                f"channels.{channel_id}.{_REMOVED_CHANNEL_PROMPT_KEY} was removed: a channel can't "
                 f"replace the agent's identity. Put the identity in agent.system_prompt "
                 f"and this channel's register in channels.{channel_id}.register_prompt"
             )

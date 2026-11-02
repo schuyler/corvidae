@@ -32,6 +32,7 @@ import aiohttp
 from collections.abc import Callable
 from dataclasses import dataclass, field, fields as dc_fields, replace
 from enum import Enum
+from pathlib import Path
 
 from corvidae.clock import Clock, Timer
 from corvidae.llm import LLMHTTPError, is_backend_unreachable
@@ -317,7 +318,9 @@ class Agent(CorvidaePlugin):
             return
         self._idle.note_settled(channel.id)
 
-    async def _resolve_register(self, channel: Channel, configured, base_dir) -> str:
+    async def _resolve_register(
+        self, channel: Channel, configured: str | list[str] | None, base_dir: Path
+    ) -> str:
         """The register text for a starting conversation on ``channel``.
 
         A configured ``register_prompt`` (any layer) replaces the owning
