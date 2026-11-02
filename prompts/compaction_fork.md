@@ -2,15 +2,16 @@
 
 The documented copy of `CompactionPlugin.DEFAULT_FORK_PROMPT` in
 `corvidae/compaction.py`. With `agent.forks.enabled` (and `compaction` in
-`agent.forks.stages`), compaction doesn't build its own prompt. It forks
-the window at the cut: the prompt is the main turn's render of everything
-about to be dropped, followed by this text as a `user` turn (GitHub issue
-#51). The agent's own system prompt is above it, so "you" is the agent.
+`agent.forks.stages`), compaction forks the window at the cut: the prompt is
+the main turn's render of everything about to be dropped, followed by this
+text as a `user` turn (GitHub issue #51). When forks are off or the fork
+fails, the same render is sent as a plain call on `llm.background`. Either
+way the agent's own system prompt is above it, so "you" is the agent.
 
-The standalone prompt (`agent.compaction_prompt`) is still used when forks
-are off or the fork fails. Override this one with a literal string via the
+Override this text with a literal string via the
 `agent.compaction_fork_prompt` config key. It's static config, not a
 runtime tunable, so `set_settings` can't change it.
+(`agent.compaction_prompt`, the old standalone prompt, is gone and ignored.)
 
 ---
 

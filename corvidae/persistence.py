@@ -216,6 +216,70 @@ def _parse_summary_row(row: tuple, channel_id: str) -> dict | None:
     return msg
 
 
+async def view_rows(
+    db: aiosqlite.Connection,
+    channel_id: str,
+    after_ts: float | None,
+    through_id: int | None = None,
+) -> list[tuple[float, dict]]:
+    """The channel's non-summary rows as (timestamp, tagged message) pairs.
+
+    With ``after_ts`` set: rows newer than it, ordered by id (what reload
+    loads under a summary). With None: every row, ordered by timestamp then
+    id. ``through_id`` caps the row id (None: no cap). Shared by
+    ``resolve_conversation`` and the catch-up view so both read rows one way.
+    """
+    # Build the query: the summary-boundary form or the whole-history form.
+    sql = (
+        "SELECT id, CAST(message AS BLOB), message_type, timestamp FROM message_log "
+        "WHERE channel_id = ? AND message_type != 'summary'"
+    )
+    params: list = [channel_id]
+    if after_ts is not None:
+        sql += " AND timestamp > ?"
+        params.append(after_ts)
+    if through_id is not None:
+        sql += " AND id <= ?"
+        params.append(through_id)
+    sql += " ORDER BY id" if after_ts is not None else " ORDER BY timestamp, id"
+    async with db.execute(sql, params) as cursor:
+        rows = await cursor.fetchall()
+    # Parse, then re-pair each surviving message with its stored timestamp.
+    stamps = {row[0]: row[3] for row in rows}
+    return [
+        (stamps[msg["_db_id"]], msg)
+        for msg in _parse_message_rows([row[:3] for row in rows], channel_id)
+    ]
+
+
+async def decodable_summaries(
+    db: aiosqlite.Connection, channel_id: str
+) -> list[tuple[int, float, dict]]:
+    """Every summary row that decodes, as (id, timestamp, message), newest first.
+
+    Each message is tagged as a summary with its ``_db_id``. A corrupt row is
+    skipped with ``_parse_summary_row``'s warning.
+    """
+    from corvidae.context import MessageType
+
+    # Read newest first; the BLOB cast lets bad UTF-8 fail in the parser.
+    async with db.execute(
+        "SELECT id, CAST(message AS BLOB), timestamp FROM message_log "
+        "WHERE channel_id = ? AND message_type = 'summary' ORDER BY id DESC",
+        (channel_id,),
+    ) as cursor:
+        rows = await cursor.fetchall()
+    found: list[tuple[int, float, dict]] = []
+    for row in rows:
+        msg = _parse_summary_row(row, channel_id)
+        if msg is None:
+            continue
+        msg["_message_type"] = MessageType.SUMMARY
+        msg["_db_id"] = row[0]
+        found.append((row[0], row[2], msg))
+    return found
+
+
 class PersistencePlugin(CorvidaePlugin):
     """Plugin that manages SQLite database lifecycle and conversation persistence.
 
@@ -323,24 +387,10 @@ class PersistencePlugin(CorvidaePlugin):
             summary_msg["_message_type"] = MessageType.SUMMARY
             summary_msg["_db_id"] = summary_id
             # Load non-summary rows after the summary boundary
-            async with self.db.execute(
-                "SELECT id, CAST(message AS BLOB), message_type FROM message_log "
-                "WHERE channel_id = ? AND message_type != 'summary' "
-                "AND timestamp > ? ORDER BY id",
-                (channel.id, summary_ts),
-            ) as cursor:
-                rows = await cursor.fetchall()
-            loaded = _parse_message_rows(rows, channel.id)
+            loaded = [m for _, m in await view_rows(self.db, channel.id, summary_ts)]
             result = [summary_msg] + loaded
         else:
-            async with self.db.execute(
-                "SELECT id, CAST(message AS BLOB), message_type FROM message_log "
-                "WHERE channel_id = ? AND message_type != 'summary' "
-                "ORDER BY timestamp, id",
-                (channel.id,),
-            ) as cursor:
-                rows = await cursor.fetchall()
-            result = _parse_message_rows(rows, channel.id)
+            result = [m for _, m in await view_rows(self.db, channel.id, None)]
 
         if not result:
             return None

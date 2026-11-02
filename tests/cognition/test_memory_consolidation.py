@@ -362,6 +362,8 @@ class TestResponseFormat:
             ("user", "hi"), ("assistant", "hello"),
         ])
         await memory._consolidate_range(channel.id, ids[-1], "idle")
+        # The view path (system prompt first), not a standalone prompt.
+        assert stub.chat_calls[0]["messages"][0]["content"] == "IDENTITY\n\nREGISTER"
         fmt = stub.chat_calls[0]["extra_body"]["response_format"]
         assert fmt["type"] == "json_schema"
         schema = fmt["json_schema"]["schema"]

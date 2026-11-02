@@ -17,8 +17,9 @@ Algorithm:
     5. Summarize. With forks on for "compaction" (agent.forks, #51), fork
        the window at the cut and append agent.compaction_fork_prompt: the
        server reuses the cached prefix and the agent summarizes in its own
-       voice. Otherwise, or if the fork fails, the standalone call: existing
-       summaries as context + the older MESSAGE entries.
+       voice. Otherwise, or if the fork fails, the same view is sent as a
+       plain call on llm.background with no tools (_view_summary). If that
+       fails too, the over-budget fallback in the Agent applies (#308).
     6. Summary role is assistant, or user if the retained tail holds no
        user message (#56).
     7. Fire before_compaction (awaited) while the window is still whole.
@@ -27,13 +28,19 @@ Algorithm:
     10. Return True.
 """
 
-import json
 import logging
 import time
 
 from corvidae.attribution import reset_attribution, set_attribution
 from corvidae.context import DEFAULT_CHARS_PER_TOKEN, MessageType, count_tokens, message_tokens
-from corvidae.fork import fork_agent, snap_cut_forward, snap_cut_to_tool_boundary
+from corvidae.fork import (
+    build_fork_prompt,
+    fork_agent,
+    snap_cut_forward,
+    snap_cut_to_tool_boundary,
+    view_agent,
+    view_call,
+)
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 
 logger = logging.getLogger(__name__)
@@ -43,15 +50,6 @@ class CompactionPlugin(CorvidaePlugin):
     """Plugin that implements default token-budget conversation compaction."""
 
     depends_on = frozenset({"llm"})
-
-    DEFAULT_SUMMARY_PROMPT = (
-        "Please summarize the first half of this conversation, so that the second half "
-        "flows naturally verbatim. The summary should include a high-level explanation of "
-        "what the agent was working on or attempting to achieve. The agent's next prompt "
-        "will contain your summary followed by the second half of the conversation to this point.\n\n"
-        "In 1000 words or less. Preserve specific details: file paths, variable names, "
-        "error messages, discoveries made, and the current line of investigation."
-    )
 
     # The instruction a compaction fork appends to the dropped prefix.
     # prompts/compaction_fork.md is the documented copy; the static config
@@ -77,20 +75,12 @@ class CompactionPlugin(CorvidaePlugin):
     # words, ~1300-1500 tokens for English) plus JSON structure overhead.
     _SUMMARY_RESPONSE_RESERVE_TOKENS = 2000
 
-    # Cap on the carried-forward prior-summary text, as a fraction of
-    # max_tokens — bounds growth across repeated compaction rounds, since
-    # the summary length limit lives only in the (configurable) prompt text
-    # and a custom agent.compaction_prompt need not set one.
-    _PRIOR_SUMMARIES_MAX_FRACTION = 0.5
-
     def __init__(self, pm=None) -> None:
         self.pm = pm  # May be None; on_init will set it via CorvidaePlugin.on_init
         self._compaction_threshold: float = 0.8
         self._compaction_retention: float = 0.5
         self._min_messages: int = 5
         self._chars_per_token: float = DEFAULT_CHARS_PER_TOKEN
-        self._llm_client = None
-        self._summary_prompt: str = self.DEFAULT_SUMMARY_PROMPT
         self._fork_prompt: str = self.DEFAULT_FORK_PROMPT
         self._min_messages_between_compactions: int = 6
         self._last_compaction_msg_count: dict[str, int] = {}  # channel_id -> message_count at last compaction
@@ -105,8 +95,18 @@ class CompactionPlugin(CorvidaePlugin):
         self._compaction_retention = agent_config.get("compaction_retention", 0.5)
         self._min_messages = agent_config.get("min_messages_to_compact", 5)
         self._chars_per_token = agent_config.get("chars_per_token", DEFAULT_CHARS_PER_TOKEN)
-        self._summary_prompt = agent_config.get("compaction_prompt", self.DEFAULT_SUMMARY_PROMPT)
         self._fork_prompt = agent_config.get("compaction_fork_prompt", self.DEFAULT_FORK_PROMPT)
+
+        # The standalone summary prompt is gone; say so once at startup (O2).
+        if "compaction_prompt" in agent_config:
+            logger.warning(
+                "agent.compaction_prompt is no longer used and is ignored: "
+                "compaction summaries are now written from the agent's own "
+                "view with agent.compaction_fork_prompt. Move any custom "
+                "instruction there (it is sent as a user instruction after "
+                "the conversation, not as a system prompt) and remove "
+                "agent.compaction_prompt from agent.yaml."
+            )
 
         self._validate_config()
 
@@ -146,22 +146,13 @@ class CompactionPlugin(CorvidaePlugin):
 
     @hookimpl
     async def on_config_reload(self, config: dict) -> None:
-        """Re-read compaction thresholds and invalidate the cached LLM client.
-
-        Invalidates _llm_client so it is re-resolved from LLMPlugin on the
-        next compaction call (necessary after LLMPlugin swaps the client on reload).
-        """
+        """Re-read compaction thresholds and the fork prompt."""
         agent_config = config.get("agent", {})
         self._compaction_threshold = agent_config.get("compaction_threshold", 0.8)
         self._compaction_retention = agent_config.get("compaction_retention", 0.5)
         self._min_messages = agent_config.get("min_messages_to_compact", 5)
         self._chars_per_token = agent_config.get("chars_per_token", DEFAULT_CHARS_PER_TOKEN)
-        self._summary_prompt = agent_config.get("compaction_prompt", self.DEFAULT_SUMMARY_PROMPT)
         self._fork_prompt = agent_config.get("compaction_fork_prompt", self.DEFAULT_FORK_PROMPT)
-
-        # Invalidate cached LLM client so it is re-borrowed from LLMPlugin.
-        # LLMPlugin may have swapped the client during this same reload cycle.
-        self._llm_client = None
 
         self._validate_config()
 
@@ -232,30 +223,6 @@ class CompactionPlugin(CorvidaePlugin):
 
         older = conversation.messages[:cut]
 
-        # Separate existing summaries from new messages.
-        # Summaries are carried forward as context so that repeated compaction
-        # doesn't lose accumulated knowledge (the "death spiral" where
-        # compacting tool-only messages with no user input produces a summary
-        # saying "no user instructions").
-        prior_summaries = [
-            m for m in older
-            if m.get("_message_type", MessageType.MESSAGE) == MessageType.SUMMARY
-        ]
-        new_messages = [
-            m for m in older
-            if m.get("_message_type", MessageType.MESSAGE) == MessageType.MESSAGE
-        ]
-        # Strip every internal _-prefixed tag before passing to the LLM
-        # (bootstrap-mapping §4.8 — the rowid tag must not leak into requests).
-        prior_summaries_clean = [
-            {k: v for k, v in m.items() if not k.startswith("_")}
-            for m in prior_summaries
-        ]
-        new_messages_clean = [
-            {k: v for k, v in m.items() if not k.startswith("_")}
-            for m in new_messages
-        ]
-
         # Collect the message_log rowids of everything about to be removed —
         # the on_compaction payload consolidation consumes (§3.1, §4.8).
         # Messages that were never persisted carry no _db_id and are skipped.
@@ -270,13 +237,8 @@ class CompactionPlugin(CorvidaePlugin):
         try:
             summary_text = await self._fork_summary(channel, cut)
             if summary_text is None:
-                standalone_token = set_attribution(mode="standalone")
-                try:
-                    summary_text = await self._summarize(
-                        new_messages_clean, prior_summaries_clean, max_tokens=max_tokens
-                    )
-                finally:
-                    reset_attribution(standalone_token)
+                # Fork miss or forks off: the same view on llm.background.
+                summary_text = await self._view_summary(channel, conversation, cut)
         except Exception:
             # Record failure time for cooldown
             self._last_failed_compaction[channel_id] = time.monotonic()
@@ -379,7 +341,7 @@ class CompactionPlugin(CorvidaePlugin):
     async def _fork_summary(self, channel, cut: int) -> str | None:
         """The summary from a fork of the window at ``cut``, or None.
 
-        None means use the standalone summarizer: forks are off for
+        None means use the background view (_view_summary): forks are off for
         compaction, or the fork failed or came back empty (logged). The
         fork's prefix already holds any prior summary at its head, so the
         instruction carries it forward without a bounded copy.
@@ -391,118 +353,48 @@ class CompactionPlugin(CorvidaePlugin):
             result = await agent.fork(channel, self._fork_prompt, cut=cut)
         except Exception:
             logger.warning(
-                "compaction fork failed; falling back to the standalone summary",
+                "compaction fork failed; falling back to the background view",
                 exc_info=True, extra={"channel_id": channel.id},
             )
             return None
         if not result.text.strip():
             logger.warning(
-                "compaction fork returned no text; falling back to the standalone summary",
+                "compaction fork returned no text; falling back to the background view",
                 extra={"channel_id": channel.id},
             )
             return None
         return result.text
 
-    def _bound_prior_summaries_text(self, prior_summaries: list[dict], max_tokens: int) -> str:
-        """Join prior-summary content and cap it to a fixed fraction of
-        max_tokens, keeping the most recent (tail) portion. Without this, the
-        single carried-forward summary can grow across compaction rounds until
-        it alone exceeds the budget."""
-        text = "\n".join(s.get("content", "") for s in prior_summaries)
-        cap_tokens = int(max_tokens * self._PRIOR_SUMMARIES_MAX_FRACTION)
-        if count_tokens(text) <= cap_tokens:
-            return text
-        cap_chars = int(cap_tokens * DEFAULT_CHARS_PER_TOKEN)
-        return "[...earlier summary content truncated...]\n" + text[-cap_chars:]
+    async def _view_summary(self, channel, conversation, cut: int) -> str:
+        """The summary written from the live window at ``cut`` on llm.background.
 
-    async def _summarize(self, messages: list[dict], prior_summaries: list[dict] | None = None, *, max_tokens: int) -> str:
-        """Ask the LLM to summarize a list of messages.
+        Renders the window prefix exactly as the fork does (compaction fork
+        prompt, the channel's pending tool-call ids, the Agent's mid role)
+        and sends it as a plain call with no tools. The render is the
+        uncapped prefix (the window was over budget, which is why compaction
+        runs), so this call carries the summary's cost on the background
+        model.
 
-        Sends the messages to the LLM with a system prompt asking for a
-        concise summary that preserves key facts, decisions, and context.
-
-        If prior_summaries is provided, they are prepended as context so
-        the new summary can build on accumulated knowledge rather than
-        producing an independent (and potentially contradictory) summary.
-
-        This is a separate method so tests can patch it via
-        patch.object(plugin, "_summarize", ...).
-
-        Args:
-            messages: List of message dicts (role/content, no _message_type).
-            prior_summaries: Optional list of prior summary message dicts to
-                carry forward.
-            max_tokens: The channel's max context tokens, used to derive the
-                truncation budget for this summarization call.
-
-        Returns:
-            Summary text string from the LLM.
+        Raises:
+            RuntimeError: no Agent can supply a view; the over-budget
+                fallback then applies.
         """
-        # Resolve the LLM client lazily — on_start hooks run in LIFO order
-        # (last registered = first called), so CompactionPlugin.on_start fires
-        # before LLMPlugin.on_start. The client is not available until all
-        # on_start hooks have completed, so we resolve it here at compaction
-        # time instead.
-        if self._llm_client is None and self.pm is not None:
-            from corvidae.llm_plugin import LLMPlugin
-            llm = get_dependency(self.pm, "llm", LLMPlugin)
-            self._llm_client = llm.main_client
-        if self._llm_client is None:
-            raise RuntimeError("LLM client not available for compaction")
-
-        # Build system prompt before truncation — the token budget depends on
-        # its size. The configured prompt (agent.compaction_prompt) leads in
-        # every round; with prior summaries, an instruction to incorporate
-        # their (bounded) content follows it.
-        if prior_summaries:
-            system_content = (
-                self._summary_prompt + "\n\n"
-                "Below are PRIOR SUMMARIES from earlier compaction rounds, followed by "
-                "NEW MESSAGES that need to be incorporated. Your summary MUST preserve "
-                "ALL key information from the prior summaries AND add any new facts, "
-                "decisions, discoveries, or user instructions from the new messages. "
-                "Do NOT discard information from the prior summaries — carry it forward.\n\n"
-                "PRIOR SUMMARIES:\n"
-                + self._bound_prior_summaries_text(prior_summaries, max_tokens)
+        agent = view_agent(self.pm)
+        if agent is None:
+            raise RuntimeError(
+                f"no agent plugin can render a view for channel {channel.id}; "
+                "the over-budget fallback applies"
             )
-        else:
-            system_content = self._summary_prompt
-
-        budget = max(max_tokens - count_tokens(system_content) - self._SUMMARY_RESPONSE_RESERVE_TOKENS, 0)
-
-        # Cap the summarization input by both message count (cheap first
-        # filter) and half the token budget, head and tail, in one pass over
-        # the original list — avoids double-processing and head/tail overlap
-        # bookkeeping.
-        max_head_tail = 50
-        half_budget = budget // 2
-
-        head, head_tokens, i = [], 0, 0
-        while i < len(messages) and len(head) < max_head_tail:
-            t = message_tokens(messages[i])
-            if head and head_tokens + t > half_budget:
-                break
-            head.append(messages[i])
-            head_tokens += t
-            i += 1
-
-        tail, tail_tokens, j = [], 0, len(messages) - 1
-        while j >= i and len(tail) < max_head_tail:
-            t = message_tokens(messages[j])
-            if tail and tail_tokens + t > half_budget:
-                break
-            tail.append(messages[j])
-            tail_tokens += t
-            j -= 1
-        tail.reverse()
-
-        omitted = len(messages) - len(head) - len(tail)
-        if omitted > 0:
-            marker = {"role": "user", "content": f"[...{omitted} messages omitted...]"}
-            messages = head + [marker] + tail
-
-        response = await self._llm_client.chat([
-            {"role": "system", "content": system_content},
-            {"role": "user", "content": json.dumps(messages)},
-        ])
-        return response["choices"][0]["message"]["content"]
+        # The same render a fork would send, headed by the system prompt.
+        messages = build_fork_prompt(
+            conversation,
+            cut,
+            self._fork_prompt,
+            frozenset(channel.pending_tool_call_ids),
+            agent.mid_conversation_system_role,
+        )
+        # Bind the background client (falls back to main when unconfigured).
+        from corvidae.llm_plugin import LLMPlugin
+        llm = get_dependency(self.pm, "llm", LLMPlugin)
+        result = await view_call(llm.get_client("background"), channel.id, messages)
+        return result.text

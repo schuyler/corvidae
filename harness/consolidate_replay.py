@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
-"""Replay a recorded consolidation range against prompt variants.
+"""Replay a recorded consolidation range against instruction variants.
 
-Reproduces the exact call `MemoryPlugin._consolidate_range` /
-`_summarize_range` make for a given channel and message-id range, against a
-frozen snapshot database, so that `consolidation_prompt` variants can be
-compared on identical input without a live IRC session (see
-.claude/plans/consolidation-replay.md).
+Reproduces the exact request `MemoryPlugin._consolidate_range` sends for a
+range that has left the live window (its catch-up: the agent's rebuilt view
+plus the consolidation instruction, on llm.background), against a frozen
+snapshot database, so that `memory.consolidation_fork_prompt` variants can
+be compared on identical input without a live IRC session (see
+.claude/plans/consolidation-replay.md). Both build the request with
+`build_catchup_segments`.
 
     uv run python harness/consolidate_replay.py --db <snapshot.db> \\
-        --channel 'irc:#s-compact' --range 76:163 [--prompt-file F] [--trials N]
+        --channel 'irc:#s-compact' --range 76:163 \\
+        --system-prompt-file <identity+register.txt> [--prompt-file F] [--trials N]
+
+A range that the daemon would split into more than one view (it spans a
+summary boundary or exceeds the budget) is rejected, listing the segments'
+id ranges; replay those ranges one at a time.
 
 Prerequisite: an SSH tunnel to the Buster host's llama-server —
     ssh -N -L 8080:127.0.0.1:8080 "$BUSTER_HOST"
@@ -36,12 +43,16 @@ from pathlib import Path
 import aiosqlite
 import yaml
 
+from corvidae.agent import _resolve_mid_conversation_system_role
+from corvidae.channel import ChannelConfig
+from corvidae.fork import ViewInputs
 from corvidae.llm import LLMClient
+from corvidae.thinking import apply_reasoning_history
 from corvidae_cognition.memory import (
     CONSOLIDATION_EXTRA_BODY,
-    DEFAULT_CONSOLIDATION_PROMPT,
-    _dialog_transcript,
+    DEFAULT_CONSOLIDATION_FORK_PROMPT,
     _parse_json_block,
+    build_catchup_segments,
     dialog_from_rows,
     fetch_range_rows,
 )
@@ -73,20 +84,6 @@ def parse_range(s: str) -> tuple[int, int]:
 
 
 # ---------------------------------------------------------------------------
-# Call assembly (D2) — identical to _summarize_range's payload
-# (messages here; extra_body=CONSOLIDATION_EXTRA_BODY is passed in run_replay)
-# ---------------------------------------------------------------------------
-
-
-def build_messages(prompt_text: str, dialog: list[dict]) -> list[dict]:
-    """The exact two-message payload _summarize_range sends."""
-    return [
-        {"role": "system", "content": prompt_text},
-        {"role": "user", "content": _dialog_transcript(dialog)},
-    ]
-
-
-# ---------------------------------------------------------------------------
 # Source database (D7 / R7 — never written)
 # ---------------------------------------------------------------------------
 
@@ -107,14 +104,19 @@ async def _distinct_channels(db: aiosqlite.Connection) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def _build_client(config_path: Path) -> LLMClient:
-    """llm.background, falling back to llm.main (LLMPlugin.get_client's
-    documented fallback — background is the role _summarize_range uses)."""
+def _load_config(config_path: Path) -> dict:
+    """Read the agent.yaml at ``config_path``; ValueError names it when it
+    cannot be read."""
     try:
         with open(config_path) as f:
-            config = yaml.safe_load(f) or {}
+            return yaml.safe_load(f) or {}
     except OSError as e:
         raise ValueError(f"cannot read config {config_path}: {e}") from e
+
+
+def _build_client(config: dict, config_path: Path) -> LLMClient:
+    """llm.background, falling back to llm.main (LLMPlugin.get_client's
+    documented fallback — background is the role the daemon's catch-up uses)."""
     llm_config = config.get("llm") or {}
     cfg = llm_config.get("background") or llm_config.get("main")
     if cfg is None:
@@ -128,6 +130,30 @@ def _build_client(config_path: Path) -> LLMClient:
 # ---------------------------------------------------------------------------
 
 
+class RangeNotOneSegment(ValueError):
+    """The range would be sent as more than one view (or none) by the daemon."""
+
+
+def view_inputs_from_config(config: dict, system_prompt: str) -> ViewInputs:
+    """The ViewInputs the replay builds the daemon's request with.
+
+    shortcut: agent-level config only, skips exact and transport-wide channel
+    entries; upgrade per Deferred when an operator replays a channel with its
+    own entries. ``system_prompt`` is the channel's resolved identity +
+    register, supplied by the operator.
+    """
+    agent_cfg = config.get("agent") or {}
+    # ChannelConfig() with no overrides resolves over the agent: section.
+    resolved = ChannelConfig().resolve(agent_cfg)
+    policy = resolved["reasoning_history"]
+    return ViewInputs(
+        system_prompt=system_prompt,
+        max_tokens=resolved["max_context_tokens"],
+        mid_role=_resolve_mid_conversation_system_role(agent_cfg),
+        apply_reasoning_history=lambda messages: apply_reasoning_history(messages, policy),
+    )
+
+
 async def run_replay(
     *,
     db_path,
@@ -138,28 +164,45 @@ async def run_replay(
     trials: int,
     out_dir,
     client: LLMClient,
+    inputs: ViewInputs,
     prompt_path: str | None = None,
 ) -> None:
-    """Fetch the range, assemble the daemon's call, run `trials` chat()
+    """Build the daemon's catch-up request for the range, run `trials` chat()
     calls, and write input.txt/meta.json/trials.jsonl into out_dir.
 
+    ``prompt_text`` is the consolidation instruction (the fork prompt).
     A chat() failure propagates uncaught — the caller (main) turns it into
     R8's loud, base_url-naming failure. Only per-trial JSON-parse failures
     are caught and recorded, since those are a legitimate trial outcome
     (the thing under study), not an infrastructure failure.
+
+    Raises:
+        RangeNotOneSegment: the daemon would send the range as other than
+            exactly one request; the message lists the segments' id ranges.
     """
     db = await open_source_db(db_path)
     try:
         rows = await fetch_range_rows(db, channel_id, after_id, through_id)
+        # The same builder the daemon's catch-up calls.
+        segments = await build_catchup_segments(
+            db, channel_id, after_id, through_id, inputs, prompt_text
+        )
     finally:
         await db.close()
     dialog = dialog_from_rows(rows, channel_id)
-    transcript = _dialog_transcript(dialog)
-    messages = build_messages(prompt_text, dialog)
+    if len(segments) != 1:
+        spans = ", ".join(f"{seg.rows[0][0]}:{seg.end_id}" for seg in segments) or "none"
+        raise RangeNotOneSegment(
+            f"range {after_id + 1}:{through_id} for {channel_id} is {len(segments)} "
+            f"segment(s) in the daemon (id ranges: {spans}); replay one of those "
+            "ranges instead"
+        )
+    messages = segments[0].messages
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "input.txt").write_text(transcript)
+    # The request exactly as sent (there is no transcript any more).
+    (out_dir / "input.txt").write_text(json.dumps(messages, indent=2))
 
     meta = {
         "channel": channel_id,
@@ -180,7 +223,7 @@ async def run_replay(
         with (out_dir / "trials.jsonl").open("w") as f:
             for i in range(trials):
                 start = time.monotonic()
-                # Same response_format constraint _summarize_range sends (#199).
+                # Same response_format constraint the daemon sends (#199).
                 response = await client.chat(
                     messages, extra_body=CONSOLIDATION_EXTRA_BODY
                 )
@@ -209,7 +252,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument("--db", required=True, help="path to a read-only snapshot database")
     p.add_argument("--channel", required=True, help="channel_id, e.g. irc:#s-compact")
     p.add_argument("--range", required=True, help="inclusive msg_id range, e.g. 76:163")
-    p.add_argument("--prompt-file", default=None, help="defaults to DEFAULT_CONSOLIDATION_PROMPT")
+    p.add_argument("--prompt-file", default=None,
+                   help="consolidation instruction; defaults to DEFAULT_CONSOLIDATION_FORK_PROMPT "
+                        "(overrides memory.consolidation_fork_prompt)")
+    p.add_argument("--system-prompt-file", required=True,
+                   help="the channel's resolved identity + register (heads the view); "
+                        "the budget and reasoning policy come from agent: in --config")
     p.add_argument("--trials", type=int, default=1)
     p.add_argument("--out", default="harness/replay_out")
     # Default matches buster.yaml.in's convention; a missing default file is
@@ -252,15 +300,28 @@ async def _main_async(args: argparse.Namespace) -> int:
         await db.close()
 
     try:
-        client = _build_client(Path(args.config))
+        config = _load_config(Path(args.config))
+        client = _build_client(config, Path(args.config))
     except ValueError as e:
         print(str(e), file=sys.stderr)
         return 1
 
+    # The system prompt and the instruction are operator-supplied files.
     prompt_path = args.prompt_file
-    prompt_text = (
-        Path(prompt_path).read_text() if prompt_path else DEFAULT_CONSOLIDATION_PROMPT
-    )
+    try:
+        system_prompt = Path(args.system_prompt_file).read_text()
+        prompt_text = (
+            Path(prompt_path).read_text() if prompt_path else DEFAULT_CONSOLIDATION_FORK_PROMPT
+        )
+        inputs = view_inputs_from_config(config, system_prompt)
+    except (OSError, ValueError) as e:
+        print(
+            f"cannot build the view inputs ({type(e).__name__}: {e}); check "
+            f"--system-prompt-file {args.system_prompt_file}, --prompt-file and "
+            f"the agent: section of {args.config}",
+            file=sys.stderr,
+        )
+        return 1
     out_dir = Path(args.out) / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
     try:
@@ -273,8 +334,12 @@ async def _main_async(args: argparse.Namespace) -> int:
             trials=args.trials,
             out_dir=out_dir,
             client=client,
+            inputs=inputs,
             prompt_path=prompt_path,
         )
+    except RangeNotOneSegment as e:
+        print(str(e), file=sys.stderr)
+        return 1
     except Exception as e:
         print(
             f"replay against {client.base_url} failed: "

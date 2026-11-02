@@ -141,6 +141,9 @@ async def env():
 
     llm.get_client = get_client
     agent = memory.pm.get_plugin("agent")
+    # The stub embeds every record to one vector, so near-dup merge would fold
+    # consecutive segment records together; real summaries differ.
+    memory._dup_threshold = 1.1
     yield Env(memory, persistence, channel, db, agent, main, bg, roles)
     await db.close()
 
@@ -408,7 +411,9 @@ async def test_long_unsummarized_history_splits_within_budget(env, kind):
     later views, the records tiling the range, and tool cycles kept whole."""
     # Just under four rows of room (a first view's shorter range sentence
     # frees a little more), so a view holds three.
-    env.agent.max_tokens = budget = budget_for_rows(2.8)
+    # watermark_mid_cycle: tool-call rows cost more than plain rows, so give
+    # call + result + a dialog row room in the first segment.
+    env.agent.max_tokens = budget = budget_for_rows(3.4 if kind == "watermark_mid_cycle" else 2.8)
     messages, watermark_after = history(kind)
     ids = await env.rows(messages)
     watermark = 0 if watermark_after is None else ids[watermark_after]
@@ -498,7 +503,8 @@ async def test_catchup_warns_when_view_loses_rows(env, caplog, kind):
         )
     if kind == "residual_overage":
         needles = (
-            env.channel.id, str(ids[0]), str(rendered_size(call_made["messages"])), str(small),
+            env.channel.id, f"{ids[0]}-{ids[-1]}",
+            str(rendered_size(call_made["messages"])), str(small),
         )
     assert warnings_naming(caplog, *needles), (
         f"no WARNING naming {needles}; got "

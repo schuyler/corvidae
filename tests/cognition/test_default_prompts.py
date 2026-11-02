@@ -32,11 +32,11 @@ def test_consolidation_instruction_says_private_memory():
 
 
 def _prompt_strings(path: Path) -> list[tuple[str, str]]:
-    """(name, text) of every string in a module-level assignment whose
-    target name contains ``PROMPT``, read from source (no import, so
-    optional SDKs a module needs do not matter)."""
+    """(name, text) of every string in an assignment, anywhere in the module
+    (class attributes included), whose target name contains ``PROMPT``, read
+    from source (no import, so optional SDKs a module needs do not matter)."""
     found = []
-    for node in ast.parse(path.read_text()).body:
+    for node in ast.walk(ast.parse(path.read_text())):
         if isinstance(node, ast.Assign):
             names = [t.id for t in node.targets if isinstance(t, ast.Name)]
         elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
@@ -53,7 +53,7 @@ def _prompt_strings(path: Path) -> list[tuple[str, str]]:
 
 
 def test_no_shipped_default_names_an_operator():
-    """R9: no module-level ``*PROMPT*`` string in ``corvidae`` or
+    """R9: no ``*PROMPT*`` string assignment (module or class level) in ``corvidae`` or
     ``corvidae_cognition``, and no ``prompts/*.md`` copy, contains an
     operator's name. An example in a default prompt must be a placeholder."""
     sources = [
