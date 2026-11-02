@@ -30,6 +30,7 @@ Algorithm:
 
 import logging
 import time
+from typing import TYPE_CHECKING
 
 from corvidae.attribution import reset_attribution, set_attribution
 from corvidae.context import DEFAULT_CHARS_PER_TOKEN, MessageType, count_tokens, message_tokens
@@ -42,6 +43,11 @@ from corvidae.fork import (
     view_call,
 )
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
+
+if TYPE_CHECKING:
+    # Only for annotations; compaction must not import these at runtime.
+    from corvidae.channel import Channel
+    from corvidae.context import ContextWindow
 
 logger = logging.getLogger(__name__)
 
@@ -365,7 +371,7 @@ class CompactionPlugin(CorvidaePlugin):
             return None
         return result.text
 
-    async def _view_summary(self, channel, conversation, cut: int) -> str:
+    async def _view_summary(self, channel: "Channel", conversation: "ContextWindow", cut: int) -> str:
         """The summary written from the live window at ``cut`` on llm.background.
 
         Renders the window prefix exactly as the fork does (compaction fork

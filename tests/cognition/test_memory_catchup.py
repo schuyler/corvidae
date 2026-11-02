@@ -403,7 +403,9 @@ def history(kind: str) -> tuple[list[dict], int | None]:
     return messages, watermark_after
 
 
-@pytest.mark.parametrize("kind", ["plain", "tool_cycle_at_cut", "watermark_mid_cycle"])
+@pytest.mark.parametrize(
+    "kind", ["plain", "tool_cycle_at_cut", "watermark_mid_cycle", "watermark_mid_cycle_tight"]
+)
 async def test_long_unsummarized_history_splits_within_budget(env, kind):
     """A1: with no summary and a budget that holds about three rows, the
     range is cut into several views, each within budget as rendered, every
@@ -413,8 +415,14 @@ async def test_long_unsummarized_history_splits_within_budget(env, kind):
     # frees a little more), so a view holds three.
     # watermark_mid_cycle: tool-call rows cost more than plain rows, so give
     # call + result + a dialog row room in the first segment.
-    env.agent.max_tokens = budget = budget_for_rows(3.4 if kind == "watermark_mid_cycle" else 2.8)
-    messages, watermark_after = history(kind)
+    # watermark_mid_cycle_tight: the same history at the plain budget, where
+    # the lone tool result becomes a segment with no dialog; its id span must
+    # fold into the next record so the records still tile the range.
+    tight = kind == "watermark_mid_cycle_tight"
+    env.agent.max_tokens = budget = budget_for_rows(
+        3.4 if kind == "watermark_mid_cycle" else 2.8
+    )
+    messages, watermark_after = history("watermark_mid_cycle" if tight else kind)
     ids = await env.rows(messages)
     watermark = 0 if watermark_after is None else ids[watermark_after]
     if watermark_after is not None:
@@ -435,11 +443,16 @@ async def test_long_unsummarized_history_splits_within_budget(env, kind):
         assert following["msg_id_start"] == previous["msg_id_end"] + 1
     assert memories[-1]["msg_id_end"] == ids[-1]
     assert await fetch_watermark(env.db, env.channel.id) == ids[-1]
-    # Every range row is in the request for the record that covers it.
+    # Every range row is in the request for the record that covers it. In the
+    # tight case a lone tool result is not dialog (consolidation summarizes
+    # dialog only), so only its id span is required to be covered.
     marker = {row_id: f"ROW{i:02d}" for i, row_id in enumerate(ids)}
+    is_tool = {row_id: m.get("role") == "tool" for m, row_id in zip(messages, ids)}
     for call, memory in zip(calls, memories):
         text = dump(call["messages"])
         for row_id in range(memory["msg_id_start"], memory["msg_id_end"] + 1):
+            if tight and is_tool[row_id]:
+                continue
             assert marker[row_id] in text, f"row {row_id} missing from its request"
     # Older context is trimmed from later views, as the live window's would be.
     assert "ROW00" not in dump(calls[1]["messages"])

@@ -70,7 +70,7 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
-from typing import TYPE_CHECKING, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 import aiosqlite
 
@@ -439,7 +439,8 @@ def _segment_run(
     segments: list[list[int]] = []
     a = 0
     while a < len(own_pos):
-        # Grow the segment while the next own row still fits.
+        # Grow the segment: ``b`` is the exclusive end (an index into
+        # ``own_pos``) of the longest run of own rows from ``a`` that fits.
         b = a
         while b < len(own_pos) and fits(a, b + 1):
             b += 1
@@ -458,6 +459,7 @@ def _segment_run(
             # One row or cycle alone overflows: it is its own segment.
             boundary = first + snap_cut_forward(sub, 1)
             count = sum(1 for k in own_pos[a:] if k < boundary)
+        # ``count`` own rows leave as this segment; the next starts after them.
         segments.append(own_pos[a:a + count])
         a += count
     return segments
@@ -1606,14 +1608,32 @@ class MemoryPlugin(CorvidaePlugin):
             # commit expects the previous segment's end as the watermark.
             client, stamp, segments = await self._catch_up(channel_id, watermark, range_end)
             expected = watermark
-            for segment in segments:
+            if not segments:
+                # The range has dialog but yielded no request: nothing is
+                # stored and the watermark stays, so say so rather than go quiet.
+                logger.warning(
+                    "catch-up built no segments for %s (message ids %s); "
+                    "the range is retried on the next trigger",
+                    channel_id, range_desc,
+                )
+            # Rows of no-dialog segments waiting to fold into the next commit.
+            carried: list[tuple] = []
+            for i, segment in enumerate(segments):
                 seg_dialog = dialog_from_rows(segment.rows, channel_id)
+                if not seg_dialog and i < len(segments) - 1:
+                    # A no-dialog segment followed by another is not committed
+                    # alone: its ids fold into the next record's span, so memory
+                    # id spans tile (watermark, range_end] with no gap.
+                    carried.extend(segment.rows)
+                    continue
+                commit_rows = carried + list(segment.rows)
+                carried = []
                 seg_record = (
                     await self._view_record(client, channel_id, segment, seg_dialog, stamp)
                     if seg_dialog else None
                 )
                 committed = await self._commit(
-                    channel_id, segment.rows, seg_dialog, expected,
+                    channel_id, commit_rows, seg_dialog, expected,
                     segment.end_id, seg_record, trigger,
                 )
                 if not committed:
@@ -2039,7 +2059,7 @@ class MemoryPlugin(CorvidaePlugin):
         return client, stamp, segments
 
     async def _view_record(
-        self, client, channel_id: str, segment: CatchupSegment,
+        self, client: Any, channel_id: str, segment: CatchupSegment,
         seg_dialog: list[dict], stamp: RecordStamp,
     ) -> dict:
         """One view call producing the first-person record for ``segment``.

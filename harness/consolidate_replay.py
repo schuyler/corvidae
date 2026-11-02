@@ -50,7 +50,7 @@ from corvidae.llm import LLMClient
 from corvidae.thinking import apply_reasoning_history
 from corvidae_cognition.memory import (
     CONSOLIDATION_EXTRA_BODY,
-    DEFAULT_CONSOLIDATION_FORK_PROMPT,
+    resolve_consolidation_fork_prompt,
     _parse_json_block,
     build_catchup_segments,
     dialog_from_rows,
@@ -253,8 +253,8 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument("--channel", required=True, help="channel_id, e.g. irc:#s-compact")
     p.add_argument("--range", required=True, help="inclusive msg_id range, e.g. 76:163")
     p.add_argument("--prompt-file", default=None,
-                   help="consolidation instruction; defaults to DEFAULT_CONSOLIDATION_FORK_PROMPT "
-                        "(overrides memory.consolidation_fork_prompt)")
+                   help="consolidation instruction; defaults to memory.consolidation_fork_prompt "
+                        "from --config, else DEFAULT_CONSOLIDATION_FORK_PROMPT, as the daemon does")
     p.add_argument("--system-prompt-file", required=True,
                    help="the channel's resolved identity + register (heads the view); "
                         "the budget and reasoning policy come from agent: in --config")
@@ -310,8 +310,10 @@ async def _main_async(args: argparse.Namespace) -> int:
     prompt_path = args.prompt_file
     try:
         system_prompt = Path(args.system_prompt_file).read_text()
+        # No file given: the config's instruction (or the default), as the daemon uses.
         prompt_text = (
-            Path(prompt_path).read_text() if prompt_path else DEFAULT_CONSOLIDATION_FORK_PROMPT
+            Path(prompt_path).read_text() if prompt_path
+            else resolve_consolidation_fork_prompt(config.get("memory") or {})
         )
         inputs = view_inputs_from_config(config, system_prompt)
     except (OSError, ValueError) as e:
