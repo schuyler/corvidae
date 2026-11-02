@@ -382,7 +382,7 @@ Retry parameters: `max_retries` (default 3, set to 0 to disable), `retry_base_de
 (base exponential backoff delay in seconds), `retry_max_delay` (cap on backoff delay).
 Retries apply to transient HTTP status codes (429, 500, 502, 503, 504) and connection
 errors. Honors `Retry-After` response headers. `timeout` is the total HTTP timeout per
-request in seconds; `None` uses aiohttp's session default (300s).
+request in seconds; `None` sets no timeout at all.
 
 A llama-server router started with `--no-models-autoload` answers a request
 for an unloaded model with HTTP 400 `"model is not loaded"` (#55). That
@@ -1847,7 +1847,7 @@ llm:
     retry_base_delay: 2.0
     retry_max_delay: 60.0
     model_not_loaded_wait: 60.0
-    timeout: null             # optional; aiohttp default (300s) if absent
+    timeout: null             # optional; no timeout if absent
   background:                 # optional; absent means use llm.main
     base_url: "..."
     model: "..."
@@ -3026,7 +3026,7 @@ llm:
     retry_base_delay: 2.0       # base exponential backoff delay in seconds
     retry_max_delay: 60.0       # maximum retry delay cap in seconds
     model_not_loaded_wait: 60.0 # seconds to wait out an unloaded router model
-    timeout: null               # HTTP timeout per request; null = aiohttp default (300s)
+    timeout: null               # HTTP timeout per request; null = no timeout
   background:                   # optional separate LLM for subagent tasks
     base_url: "..."
     model: "..."

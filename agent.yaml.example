@@ -18,7 +18,7 @@ llm:
     # retry_base_delay: 2.0            # base delay in seconds for exponential backoff
     # retry_max_delay: 60.0            # maximum delay cap in seconds
     # model_not_loaded_wait: 60.0      # seconds to wait out "model is not loaded" (llama-server router)
-    # timeout: null                    # HTTP timeout in seconds per request (null uses aiohttp's 300s default)
+    # timeout: null                    # HTTP timeout in seconds per request (null means no timeout)
   # background:                        # optional: separate LLM for background tasks
   #   base_url: http://localhost:8080   # all fields must be specified; no inheritance from llm.main
   #   model: llama3

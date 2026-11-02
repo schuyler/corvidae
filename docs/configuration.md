@@ -81,7 +81,7 @@ The `llm.main` block is required. Every other key under `llm:` is an optional **
 | `llm.main.retry_base_delay` | float | `2.0` | Base delay in seconds for exponential backoff between retry attempts. |
 | `llm.main.retry_max_delay` | float | `60.0` | Maximum delay cap in seconds for exponential backoff. |
 | `llm.main.model_not_loaded_wait` | float | `60.0` | Total seconds to keep retrying when the server answers HTTP 400 "model is not loaded" (a llama-server router running `--no-models-autoload` with another model swapped in). Separate from `max_retries`; uses the same backoff, with at least 1 s between attempts (the last sleep is cut short to fit the remaining wait). Must be a finite, non-negative number, or startup fails. The turn waits for this long before replying, so set it a little longer than a model swap takes. `0` disables. When it runs out, the reply names the unloaded model instead of the generic error, and the turn then retries itself (5 s doubling to 60 s) until the model is loaded. |
-| `llm.main.timeout` | float | `null` | Total HTTP timeout in seconds per LLM request. `null` uses aiohttp's 300-second default. |
+| `llm.main.timeout` | float | `null` | Total HTTP timeout in seconds per LLM request. `null` means no timeout: the request waits as long as the server takes, and a connect to a host that drops packets waits until the OS gives up. |
 | `llm.background.base_url` | string | — | Base URL for the background (subagent) LLM endpoint. Optional. |
 | `llm.background.model` | string | — | Model identifier for subagent calls. Optional. |
 | `llm.background.api_key` | string | `null` | API key for the background endpoint. Same forms as `llm.main.api_key`, including `"${VAR}"`. |
