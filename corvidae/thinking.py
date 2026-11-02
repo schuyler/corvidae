@@ -30,9 +30,8 @@ def completed_exchange_end(messages: list[dict]) -> int:
     Only role "user" counts: tool results and system notifications continue
     the current exchange. In window order this boundary is never later
     than the one a Qwen-family chat template computes, so with the server's
-    preserve_thinking off the template drops everything stripped here. The
-    exception is a tool-call block that build_prompt moves past an
-    interleaving user message (docs/configuration.md).
+    preserve_thinking off the template drops everything stripped here.
+    build_prompt never moves a tool-call block past a user message (#346).
     """
     for i in range(len(messages) - 1, -1, -1):
         if messages[i].get("role") == "user":

@@ -640,13 +640,42 @@ All operations are synchronous; no database access:
 - `append(message, message_type=MessageType.MESSAGE)` — appends to in-memory list with `_message_type` tag
 - `build_prompt()` — returns `[system_msg, *messages]` with `_message_type` stripped.
   Every assistant `tool_calls` message is emitted contiguously with its results,
-  at the arrival position of its *last* result (in place, with placeholders, if
-  any call is still unanswered) — a corvidae convention, not compliance with a
-  documented rule, since the OpenAI and Anthropic formats make tool-result
-  adjacency normative but say nothing about a user turn arriving inside a tool
-  cycle. The consequence this ordering secures: the emitted prompt never ends on
-  an assistant message, which llama.cpp reads as a prefill and rejects under
-  `enable_thinking`.
+  each call followed by exactly one `tool` message (real result or
+  placeholder) — a corvidae convention, not compliance with a documented rule,
+  since the OpenAI and Anthropic formats make tool-result adjacency normative
+  but say nothing about a user turn arriving inside a tool cycle. Where the
+  block goes depends on whether the conversation moved on before the results
+  came back (#346). A call's *interruption point* is the first `user` or
+  `assistant` row after it (any assistant row, including a withheld or empty
+  one); `system` rows (CONTEXT, the not-sent marker, notifications) and `tool`
+  rows don't interrupt, since a progress-veto marker sits inside ordinary
+  cycles. The block gathers the results that arrived before that point.
+  - **Uninterrupted:** if every call has a gathered result and no row in
+    between renders as an interrupted-result frame, the block moves to the
+    arrival position of its last result, as before #346.
+  - **Otherwise in place**, at the call, holding the gathered results and a
+    placeholder for each of the rest. A result that arrived after the
+    interruption point renders where it arrived as a framed `role: system`
+    message, `[result of the earlier <tool name> call]` plus the result text,
+    no `tool_call_id`, re-roled like any other system message (below). Its
+    slot in the block shows `TOOL_RESULT_PENDING` ("the result will arrive in
+    a later message"), whatever the pending set says, so the prompt built
+    before the result arrived is an exact prefix of the one built after and
+    a restart reload renders the same. The frame states what the result
+    answers and nothing about whether to reply: whether to speak is the
+    agent's call (PRD §3.7). Before #346 the call moved past the interleaved
+    user message and reply to sit with its result; that told the model it had
+    answered first and started the tool afterwards, invalidated the KV cache
+    back to the call, and on 2026-11-01 produced an unprompted greeting.
+  - A later call whose own cycle has another call's late result inside it
+    (results are buffered while any call is pending) stays in place too, so it
+    never renders after a result it hadn't seen.
+
+  Either way the emitted prompt never ends on an assistant message, which
+  llama.cpp reads as a prefill and rejects under `enable_thinking` (run 8): a
+  block always ends on a `tool` message, and a late result renders as a
+  non-assistant frame. Only the render changes; the window and `message_log`
+  keep the `tool` row, so a reload never shows the call as abandoned.
   A `tool` message whose call is not in the window (compaction dropped the
   call, #79) renders in place as a framed notification:
   `role: system`, content `[result of an earlier tool call that is no longer
@@ -1028,9 +1057,10 @@ persists itself (`corvidae.context.unsent_marker_text`), right after the
 assistant row, so it reloads beside it. It opens `[not sent: <emission>]`
 and tells the model the channel didn't see that text and not to cite it as
 said. Only the progress marker quotes its text (40 characters): `build_prompt`
-moves a tool-calls block to its last result, so a progress marker renders
-before the block it describes and needs the excerpt to say which text it
-means. The final marker sits right below its row; the thinking marker quotes
+moves an uninterrupted tool-calls block to its last result, so a progress
+marker can render before the block it describes and needs the excerpt to say
+which text it means (in an interrupted cycle the block stays in place and the
+marker follows it). The final marker sits right below its row; the thinking marker quotes
 nothing, so reasoning never outlives `reasoning_history: drop` inside one.
 
 **Transports never see a vetoed emission, including on replay.** The web
@@ -1523,7 +1553,9 @@ default priority) returned non-None first. The caller does not use the return va
    (`len(messages) - retain_count`) is then moved so no tool cycle
    straddles it (`_clean_cut`), because a straddle drops a call while
    keeping its results, and makes the dropped prefix render differently
-   from the start of the full window, which a compaction fork needs.
+   from the start of the full window, which a compaction fork needs. (An
+   interrupted cycle, #346, no longer renders differently, since its block
+   stays in place; it is still snapped, which is conservative but correct.)
    First choice: back up with `snap_cut_to_tool_boundary` to keep the
    cycle, if that drops some dialog (not just the previous summary) and
    the window after compaction (system prompt, a 2000-token summary
@@ -3303,7 +3335,9 @@ User messages can interleave mid-batch without disrupting the pending set.
 **User message interleaving.** If a user sends a new message while tool
 results are still pending, the conversation may interleave user
 messages with tool results. The SerialQueue serializes processing (no
-races), but ordering depends on arrival time.
+races), but ordering depends on arrival time. A result that lands after
+the conversation moved on renders as a framed result attributed to its
+call (see `build_prompt` under Conversation Management, #346).
 
 **Tool sandboxing.** The `shell` tool runs commands without any
 sandbox or privilege restriction, and `task_pipeline` (which calls the

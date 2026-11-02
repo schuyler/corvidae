@@ -151,7 +151,9 @@ def build_fork_prompt(
     Pure: renders a throwaway window holding the first ``cut`` messages, so
     the channel's window is never touched. ``cut`` None means the whole
     window. The render is a prefix of the main turn's render only when no
-    tool cycle straddles ``cut`` (see :func:`snap_cut_to_tool_boundary`).
+    uninterrupted tool cycle straddles ``cut`` (see
+    :func:`snap_cut_to_tool_boundary`); an interrupted cycle's block stays in
+    place in both renders (#346).
 
     The pending set is as of the cut: ``pending_ids`` plus the id of every
     call before ``cut`` whose first result sits at or after it. Those calls
@@ -220,12 +222,14 @@ def snap_cut_forward(messages: list[dict], cut: int) -> int:
 def snap_cut_to_tool_boundary(messages: list[dict], cut: int) -> int:
     """Move ``cut`` back until no tool cycle straddles it.
 
-    build_prompt emits an assistant ``tool_calls`` message at the position
-    of its last result. If a call sits before ``cut`` and any of its results
-    at or after it, the prefix renders the call in place with placeholder
-    results while the full window renders it later with the real ones, so
-    the two prompts diverge there (and compaction would drop the call while
-    keeping its results). Backing up to the call can land inside an earlier
+    build_prompt emits an uninterrupted assistant ``tool_calls`` message at
+    the position of its last result. If a call sits before ``cut`` and any
+    of its results at or after it, the prefix renders the call in place with
+    placeholder results while the full window renders it later with the real
+    ones, so the two prompts diverge there (and compaction would drop the
+    call while keeping its results). An interrupted cycle (#346) renders in
+    place in both and doesn't diverge, but is snapped all the same:
+    conservative, not wrong. Backing up to the call can land inside an earlier
     cycle, so this repeats until stable. A call with no result anywhere
     (in flight or abandoned) renders in place either way and never
     straddles.

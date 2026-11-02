@@ -210,7 +210,7 @@ design goal (PRD principle 15). This finding records its cost, and finding
 
 ### 3. Untrusted text is promoted to the `system` role
 
-Four places:
+Five places:
 
 - Funnel-admitted CONTEXT (memories distilled from channel participants,
   critique objections) is appended as `role: system` (`funnel.py`).
@@ -230,6 +230,13 @@ Four places:
   `tool` message with no call breaks strict chat templates. The result can
   be untrusted (a `web_fetch` page, an MCP reply). Unlike the two above it
   is render-only: the stored row stays `role: tool`.
+- A tool result that arrived after the conversation moved on past its call
+  (a user message or an agent turn in between, #346) is rendered the same
+  way, framed as `[result of the earlier <tool> call]`, render-only. This is
+  far more common than the #79 case: any background `shell`, `web_fetch` or
+  MCP call that outlasts a user turn, or queues behind one, takes this path,
+  so under the default `system` role untrusted tool output reaches a system
+  turn routinely.
 
 The "retrieved data, not instructions" wrapper is the right instinct. But
 message role is a stronger signal to an instruction-tuned model than a
@@ -242,7 +249,7 @@ Fix shape: deliver CONTEXT as a `user` turn (or a tool result) with the
 same framing, and reserve `system` for text the operator wrote.
 
 Available as an opt-in: `agent.mid_conversation_system_role: user` sends
-every system message after the operator's system prompt (all four places
+every system message after the operator's system prompt (all five places
 above) as `user`, with the framing unchanged. It is applied at prompt
 build, so the stored rows keep `role: system`. The default in the tree is
 still `system`, because the evals were tuned against it; PRD §3.3.7 makes
