@@ -84,9 +84,9 @@ Assets, roughly in order of how bad it is to lose them:
 4. `agent.yaml`: operator intent, hot-reloaded within seconds of a write
    (default poll 2s).
 5. The LLM server, if it is shared with anything else, and each model
-   pool's capacity and budget (PRD principle 16): slot time the
-   operator's own turns need on a local server, and money on a metered
-   endpoint.
+   pool's warm context heads (PRD principle 16): the slot time and the
+   warm prefixes the operator's own turns need, and money on a metered
+   endpoint, which corvidae doesn't cap.
 
 Adversaries:
 
@@ -463,8 +463,9 @@ reminders, which the tree doesn't yet: a recurring reminder set because of
 injected text fires a main-model turn every interval until someone
 cancels it, which is persistence for that text with no end date. The
 operator can apply a floor on how often an agent-set reminder recurs; with
-none, the bound is the per-target pending cap and, once built, the pool
-caps of finding 14.
+none, the bound is the per-target pending cap. Latency classes (PRD
+§3.13.5), once built, keep its firings from holding a head past another
+queue's bound, but nothing bounds their total (finding 14).
 
 ### 8. Forks put background instructions after untrusted text
 
@@ -662,11 +663,11 @@ heartbeat) are code constants with no config key at all (#287, #289). There
 is no restart tool in this tree; the agent can restart only by way of
 `shell` or a tool an MCP server provides. Nor is there deferred application:
 a `reasoning_history` override applies to the whole window from the next
-call. None of these can be unlocked yet (#292). Pool caps and scheduling
-policy (PRD §3.13) aren't built at all (#296). On a channel that still has
-`write_file` or `shell`, the agent can already get around all of them by
-rewriting `agent.yaml` or a system-prompt file (finding 4), unless the files
-are read-only to the daemon.
+call. None of these can be unlocked yet (#292). Context leases, latency
+classes and scheduling policy (PRD §3.13) aren't built at all (#296). On a
+channel that still has `write_file` or `shell`, the agent can already get
+around all of them by rewriting `agent.yaml` or a system-prompt file
+(finding 4), unless the files are read-only to the daemon.
 
 The common shape: a runtime override is per channel and in memory (under
 the PRD, except the identity, which is agent-wide; see the system prompt
@@ -721,13 +722,12 @@ What each kind of unlock costs:
   `logprobs`). Unbounded, the agent can point its turns at any model the
   server offers, including one with weaker safety tuning or, on a metered
   endpoint, a more expensive one; bounding `model` to an allowed set (PRD
-  principle 15) keeps the choice without that cost; without the bound, one
-  switch can multiply what every turn on the channel costs, up to the pool's
-  hard spend cap if there is one (finding 14); reaching it refuses every
-  channel on the pool, the operator's included, until its period rolls over
-  (PRD §3.13.6). What a switch costs in latency depends on the backend: a
-  router that has to load the new model into its only slot stalls every
-  channel while it does. Large `max_tokens` or sampling extremes degrade
+  principle 15) keeps the choice without that cost. Corvidae doesn't cap
+  spend (PRD principle 16), so without the bound, one switch can multiply
+  what every turn on the channel costs, up to whatever limit the operator
+  set with the provider (finding 14). What a switch costs in latency
+  depends on the backend: a router that has to load the new model into its
+  only slot stalls every channel while it does. Large `max_tokens` or sampling extremes degrade
   replies on that channel. `logprobs` costs little: larger responses, and
   nothing from providers that don't support it; switched off where the
   operator turned it on, it drops the entropy summary from the outcome log,
@@ -757,9 +757,9 @@ What each kind of unlock costs:
   window every turn to stay within budget, down to the newest row alone
   for a budget that small (the log keeps them); the over-budget WARNING is
   the signal. A large `max_turns` lets one injected tool loop run far
-  longer before dispatch is suppressed, holding the pool: the shared
-  slot on a local server, the rate window or the budget on a metered
-  endpoint (finding 14).
+  longer before dispatch is suppressed, holding its lease on one of the
+  pool's heads until another queue reaches its latency bound (PRD
+  §3.13.5), and spending tokens throughout (finding 14).
   `reasoning_history: keep` fills the window with reasoning and brings
   compaction sooner; `drop` (the shipped default) strips the reasoning a
   tool chain in progress relies on, which degrades Qwen-family tool use
@@ -786,27 +786,24 @@ What each kind of unlock costs:
   the channel and fills the window toward compaction. A plugin tunable
   not named in this ledger falls under this entry or under the gate
   entry, by what it controls.
-- **Caps** (background-stage output caps, pool caps). The agent can lengthen
-  a stage's slot time on every exchange, which starves main turns on a
+- **Caps** (background-stage output caps). The agent can lengthen a
+  stage's slot time on every exchange, which starves main turns on a
   single-slot server (PRD principle 3) and spends tokens on every exchange
-  on a metered one. Pool caps (PRD §3.13) are caps too. A pool cap is
-  shared, so if an override can move it, one from any channel may move it
-  for every channel on the pool (how an override's scope applies to a shared
-  cap is open, #296); lock it on every channel that draws on it. An unlocked
-  soft cap lets an injection move when the agent starts saving, and an
-  unlocked hard cap lets it remove the bound the operator set on spend or
-  rate. So does a self-edit of the config that declares the cap (the
-  self-edit entry). Stage output caps still have to fit the context (PRD
-  §3.8.4).
-- **Scheduling policy** (pausing or deferring a channel, the order of held
-  calls, PRD §3.13). An injection can pause the operator's channel, move its
-  own channel ahead of others, or push upkeep back. Every hold, deferral and
-  pause lapses by itself and the operator can resume any channel (PRD
-  §3.13.8), so the damage is delay, not a wedged agent. No policy hold or
-  deferral, the agent's included, delays upkeep or agency past its latency
-  bound (PRD §3.13.5); where admission holds calls, bounded work also keeps
-  its place in the precedence PRD §3.13.7 fixes (§3.13.2); a hard cap
-  refuses it instead (PRD §3.13.6).
+  on a metered one. Stage output caps still have to fit the context (PRD
+  §3.8.4). A pool's declared heads (PRD §3.13.2) belong to the provider,
+  not to a channel, so no override moves them; a self-edit of the config
+  that declares them can (the self-edit entry), and declaring more heads
+  than the server keeps warm brings the thrashing back.
+- **Scheduling policy** (latency classes, deferring or pausing a channel,
+  the order leases are granted in, PRD §3.13). An injection that tightens
+  its own channel's latency class makes that channel preempt others at
+  every call boundary, and each preemption is a context switch someone
+  pays prefill for; loosening the operator's channel's class makes the
+  operator wait longer. It can also pause the operator's channel, move its
+  own ahead, or push upkeep back. Every deferral and pause lapses by itself
+  and the operator can resume any channel, and no replacement order delays
+  work past its latency bound (PRD §3.13.7), so the damage is delay and
+  prefill, not a wedged agent.
 - **Skills.** The skills index sits in the stable prompt region, so a
   skill written at an injection's request is offered to every future
   conversation on every channel and survives restarts. The idle scan
@@ -840,13 +837,11 @@ point rather than a rule: the system prompt, the prompts that judge and
 remember, the heartbeat and subagent prompts, framing, `model` (locked, or
 bounded to an allowed set) and the backend's slot and cache controls, the
 gate tunables (locking them also keeps closed-loop fitting from moving
-them), the tool set, `llm.*`, `plugins.disabled`, `scheduler.jobs`, skill
-writes behind confirmation, and self-edit and restart. On a metered pool,
-add a hard spend cap on the pool, locked on every channel that draws on it,
-knowing that traffic which reaches it refuses every channel on the pool, the
-operator's included, until its period rolls over; `model` matters more
-there, since on an endpoint that serves several models at different prices
-it sets the price (finding 14).
+them), the tool set, `llm.*`, `plugins.disabled`, `scheduler.jobs`, latency
+classes, skill writes behind confirmation, and self-edit and restart. On a
+metered endpoint corvidae doesn't cap spend: set a spend limit with the
+provider. `model` matters more there, since on an endpoint that serves
+several models at different prices it sets the price (finding 14).
 
 A channel with only the operator on it has the smallest exposure, and it
 is where these unlocks cost least. It isn't free. Untrusted text still
@@ -869,14 +864,19 @@ one exchange; nothing bounds the total. Cost runs away without an attacker
 too: #286 measured about 68,000 prompt tokens per heartbeat that decided to
 do nothing.
 
-Where the tree stands: nothing caps use over time. `usage_log` records every
-call, but no budget reads it, and rate limits are met only by retrying (PRD
-§3.6.2). PRD principle 16 and §3.13 require that the operator can cap each
-pool; #296 tracks the open questions, charging per sender among them.
+Where the tree stands: nothing bounds use over time, and under PRD
+principle 16 nothing in corvidae will for now. It schedules a pool's warm
+heads but doesn't cap tokens or spend; rate limits on hosted APIs are a
+future improvement (#296). `usage_log` records every call, and rate limits
+are met only by retrying (PRD §3.6.2). Once built, latency classes (PRD
+§3.13.5) bound how long a flooded channel can hold a head another queue is
+waiting for, at the price of a context switch each time it yields; they
+don't bound its total.
 
-Until then, on a metered endpoint, set a spend limit with the provider, and
-keep inbound allowlists tight on any channel with untrusted participants:
-inbound admission is the main control on total cost the tree has today.
+On a metered endpoint, set a spend limit with the provider, and keep
+inbound allowlists tight on any channel with untrusted participants:
+inbound admission is the main control on total cost the tree has. Filtering
+floods at the transport is a future improvement (#296).
 
 ### 15. One identity across channels (by design)
 
@@ -939,8 +939,7 @@ decision (2026-11-01), and these are its costs.
   another channel starts a turn there, and that turn can wake the first,
   but the whole chain shares the `max_turns` budget of the exchange that
   started it (PRD §3.1.3, §3.5.10), so the ping-pong ends when that
-  budget does. The caps of finding 14 will bound total spend once built
-  (#296).
+  budget does. Nothing in corvidae bounds total spend (finding 14).
 - **One poisoned memory reaches every prompt.** With no compartments, a
   record distilled from untrusted text on any channel is retrievable on
   all of them. The trust plugin's quarantine (#138) is the capability an
