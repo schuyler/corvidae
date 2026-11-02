@@ -10,6 +10,7 @@ mocks.
 
 import asyncio
 import logging
+import socket
 from fake_clock import clock_pm
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -185,3 +186,125 @@ class TestHeaderEnvironment:
             }
         finally:
             await plugin.on_stop()
+
+
+def _closed_port_url() -> str:
+    """A localhost URL with nothing listening: bind port 0, then close it."""
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    return f"http://127.0.0.1:{port}/mcp"
+
+
+def _two_servers(mcp_url: str, down_url: str) -> dict:
+    """A working bearer-authenticated server plus one with nothing listening."""
+    return {
+        "down": {"transport": "streamable_http", "url": down_url,
+                 "tool_prefix": "d", "connect_timeout_seconds": 2},
+        "wiki": {"transport": "streamable_http", "url": mcp_url,
+                 "tool_prefix": "w",
+                 "headers": {"Authorization": f"Bearer {TOKEN}"},
+                 "connect_timeout_seconds": 5},
+    }
+
+
+class TestUnreachableServer:
+    async def test_unreachable_server_is_pending_and_others_connect(self, mcp_url):
+        # R1: a closed-port server does not stop on_start; it is queued.
+        plugin = await _start(_two_servers(mcp_url, _closed_port_url()))
+        try:
+            assert list(plugin._pending_servers) == ["down"]
+            assert [s.name for s in plugin._servers] == ["wiki"]
+        finally:
+            await plugin.on_stop()
+
+    async def test_retry_loop_survives_unreachable_server(
+        self, mcp_url, pm, kernel_clock
+    ):
+        # R2 (loop): the loop makes a second attempt after the first fails.
+        clock, _ = kernel_clock
+        plugin = McpClientPlugin(None)
+        config = {"mcp": {"servers": _two_servers(mcp_url, _closed_port_url())}}
+        attempts: list[str] = []
+        real_connect = plugin._connect_server
+
+        async def counting(name, cfg):
+            attempts.append(name)
+            await real_connect(name, cfg)
+
+        plugin._connect_server = counting
+        await plugin.on_init(pm=pm, config=config)
+        await plugin.on_start(config=config)
+        try:
+            assert attempts.count("down") == 1
+            await clock.advance(10)
+            assert attempts.count("down") == 2
+            assert not plugin._retry_task.done()
+        finally:
+            await plugin.on_stop()
+
+    async def test_tool_call_with_unreachable_server_pending(self, mcp_url):
+        # R2 (fast path): the tool call retries the down server and still
+        # returns the working server's result.
+        plugin = await _start(_two_servers(mcp_url, _closed_port_url()))
+        try:
+            tools = {t.name: t for t in plugin._cached_tools}
+            assert await tools["w__echo"].fn(text="hello") == "hello"
+        finally:
+            await plugin.on_stop()
+
+    async def test_connect_warning_names_server_url_and_error_type(
+        self, mcp_url, caplog
+    ):
+        # R4: the warning's message line names server, URL and ConnectError.
+        down_url = _closed_port_url()
+        with caplog.at_level(logging.WARNING, logger="corvidae.mcp_client"):
+            plugin = await _start(_two_servers(mcp_url, down_url))
+        try:
+            messages = [r.getMessage() for r in caplog.records
+                        if r.levelno == logging.WARNING]
+            assert any(
+                "'down'" in m and down_url in m and "ConnectError" in m
+                for m in messages
+            ), messages
+        finally:
+            await plugin.on_stop()
+
+
+class TestBareCancelBackstop:
+    async def test_on_start_queues_server_on_uncancelled_cancellederror(
+        self, monkeypatch
+    ):
+        # Backstop (on_start): a CancelledError nobody asked for is a
+        # per-server failure, not a reason to abort startup.
+        async def boom(self, name, cfg):
+            raise asyncio.CancelledError()
+
+        monkeypatch.setattr(McpClientPlugin, "_connect_server", boom)
+        plugin = await _start({
+            "down": {"transport": "streamable_http",
+                     "url": "http://127.0.0.1:1/mcp"},
+        })
+        try:
+            assert list(plugin._pending_servers) == ["down"]
+        finally:
+            await plugin.on_stop()
+
+    async def test_retry_round_keeps_server_pending_on_uncancelled_cancellederror(
+        self, monkeypatch
+    ):
+        # Backstop (retry round): same bare CancelledError, server already
+        # pending; the round returns and the server stays pending.
+        async def boom(self, name, cfg):
+            raise asyncio.CancelledError()
+
+        plugin = McpClientPlugin(None)
+        config = {"mcp": {"servers": {}}}
+        await plugin.on_init(pm=clock_pm(), config=config)
+        plugin._pending_servers = {
+            "down": {"transport": "streamable_http",
+                     "url": "http://127.0.0.1:1/mcp"},
+        }
+        monkeypatch.setattr(McpClientPlugin, "_connect_server", boom)
+        assert await plugin._retry_round() is False
+        assert list(plugin._pending_servers) == ["down"]
