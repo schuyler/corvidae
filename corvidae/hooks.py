@@ -1012,7 +1012,8 @@ class AgentSpec:
 
         Args:
             role: The LLMPlugin role that made the call ("main", "background").
-            model: The model name configured for the client.
+            model: The model name the request is sent with: the client's
+                configured model unless an ``extra_body`` overrode it (#297).
             request_id: uuid hex minted per call; pairs request with response.
             message_count: Number of messages in the request payload.
             tool_count: Number of tool schemas in the request payload.

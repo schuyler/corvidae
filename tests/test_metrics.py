@@ -303,11 +303,14 @@ class TestUsageLogPlugin:
         )
 
         async with db.execute(
-            "SELECT request_id, cache_n, prompt_n FROM usage_log ORDER BY id"
+            "SELECT ts, request_id, role, model, cache_n, prompt_n "
+            "FROM usage_log ORDER BY id"
         ) as cursor:
             rows = await cursor.fetchall()
 
-        assert rows == [("req-old", None, None), ("req-new", 5, 6)]
+        # The old row keeps its values; only the new columns read NULL.
+        assert rows[0] == (1.0, "req-old", "main", "m1", None, None)
+        assert rows[1][1:] == ("req-new", "main", "m1", 5, 6)
 
 
 class TestMetricsJsonlPlugin:

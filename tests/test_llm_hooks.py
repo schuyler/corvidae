@@ -322,17 +322,34 @@ class TestObserverNamesModelSent:
         assert observer.requests[0]["model"] == "call-model"
         assert observer.responses[0]["model"] == "call-model"
 
-    async def test_terminal_failure_names_model_sent(self):
+    @pytest.mark.parametrize(
+        "instance_body, call_body, expected",
+        [
+            ({"model": "instance-model"}, None, "instance-model"),
+            (None, {"model": "call-model"}, "call-model"),
+            (None, None, MODEL),
+        ],
+        ids=["instance-override", "call-override", "no-override"],
+    )
+    async def test_terminal_failure_names_model_sent(self, instance_body, call_body, expected):
         from aiohttp import ClientResponseError
 
-        client = LLMClient(base_url=BASE_URL, model=MODEL)
+        client = LLMClient(base_url=BASE_URL, model=MODEL, extra_body=instance_body)
         client.session = _make_mock_session(_make_mock_response(status=400))
         observer = _RecordingObserver()
         client.observer = observer
         with pytest.raises(ClientResponseError):
-            await client.chat(MESSAGES, extra_body={"model": "call-model"})
-        assert observer.responses[0]["model"] == "call-model"
+            await client.chat(MESSAGES, extra_body=call_body)
+        assert observer.requests[0]["model"] == expected
+        assert observer.responses[0]["model"] == expected
         assert observer.responses[0]["timings"] is None
+
+    async def test_no_override_names_configured_model(self):
+        client = LLMClient(base_url=BASE_URL, model=MODEL)
+        client.session = _make_mock_session(_make_mock_response())
+        observer = await self._chat(client)
+        assert observer.requests[0]["model"] == MODEL
+        assert observer.responses[0]["model"] == MODEL
 
     async def test_embed_names_configured_model(self):
         # embed takes no extra_body, so the configured model is the one sent.
@@ -385,3 +402,40 @@ class TestObserverNamesModelSent:
 
         async with db.execute("SELECT model, cache_n, prompt_n FROM usage_log") as cursor:
             assert await cursor.fetchall() == [("call-model", 800, 20)]
+
+    @pytest.mark.parametrize(
+        "instance_body, call_body, status, expected",
+        [
+            ({"model": "instance-model"}, None, 200, "instance-model"),
+            (None, None, 200, MODEL),
+            ({"model": "instance-model"}, None, 400, "instance-model"),
+            (None, {"model": "call-model"}, 400, "call-model"),
+        ],
+        ids=["instance-ok", "no-override-ok", "instance-fail", "call-fail"],
+    )
+    async def test_usage_log_names_model_sent(self, db, instance_body, call_body, status, expected):
+        """usage_log names the model sent for each override source, on
+        success and on terminal failure, and the role's model without one."""
+        from aiohttp import ClientResponseError
+
+        from corvidae.llm_plugin import _HookObserver
+        from corvidae.metrics import UsageLogPlugin
+        from corvidae.persistence import PersistencePlugin
+
+        pm = create_plugin_manager()
+        persistence = PersistencePlugin()
+        persistence.db = db
+        pm.register(persistence, name="persistence")
+        pm.register(UsageLogPlugin(pm), name="usage_log")
+
+        client = LLMClient(base_url=BASE_URL, model=MODEL, extra_body=instance_body)
+        client.session = _make_mock_session(_make_mock_response(status=status))
+        client.observer = _HookObserver(pm, "main", MODEL)
+        if status >= 400:
+            with pytest.raises(ClientResponseError):
+                await client.chat(MESSAGES, extra_body=call_body)
+        else:
+            await client.chat(MESSAGES, extra_body=call_body)
+
+        async with db.execute("SELECT model FROM usage_log") as cursor:
+            assert await cursor.fetchall() == [(expected,)]
