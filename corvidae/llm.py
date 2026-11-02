@@ -184,7 +184,8 @@ class LLMClient:
             retry_base_delay: Base delay in seconds for exponential backoff.
             retry_max_delay: Maximum delay cap in seconds.
             timeout: Total HTTP timeout in seconds per LLM request.
-                     None uses aiohttp's session-level default (300s).
+                     None sets no timeout at all (the request is
+                     sent with ClientTimeout(total=None)).
             document_prefix: String prepended to every text when kind='document'.
                              Defaults to '' (no prefix).
             query_prefix: String prepended to every text when kind='query'.
