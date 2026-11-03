@@ -739,9 +739,9 @@ class SignalPlugin(TransportPlugin):
                 )
 
     async def _decrement_outstanding(self, channel: Channel) -> None:
-        """Give back one outstanding slot: a final reply send, an
-        error-path send, or a message that was never admitted all close out one
-        owed message. The slot that takes the count to zero also clears the
+        """Give back one outstanding slot: a message that was never admitted,
+        or one the orphan sweep found dead, closes out one owed message (a
+        reply releases every slot instead; see send_message). The slot that takes the count to zero also clears the
         indicator explicitly, rather than leaving it to expire on the client
         (issue #390). A count already at zero (a reply that answers no
         message) is left alone and sends nothing."""

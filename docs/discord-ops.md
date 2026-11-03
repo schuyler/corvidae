@@ -131,7 +131,8 @@ bot, and it will not tell them so.
   it are not even delivered with content, and are ignored.
 - **Other bots, and itself:** ignored.
 - **Typing indicator:** shown while a reply is owed, and only for allowed
-  users. There are no read receipts.
+  users. Any reply clears it, even if another message is still waiting for
+  its turn. There are no read receipts.
 - **Long replies:** split at 2000 bytes by default, keeping code blocks
   intact, and sent as several messages.
 - **Mentions in replies** never ping anyone, whatever the model writes.

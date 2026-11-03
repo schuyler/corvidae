@@ -911,8 +911,9 @@ attribute; replace the asyncio.Queue with an owned deque plus an Event if
 it ever moves.`
 
 Inside `_process_queue_item_attributed`, steps 1 to 4 below run once. Step 5
-(build, append, `persist_message`, then `on_message_persisted`, one helper,
-`_append_and_persist_message`) runs once per absorbed item, in arrival
+(append, `persist_message`, then `on_message_persisted`, one helper,
+`_append_and_persist_message`, after `_build_conversation_message` builds
+the item's message) runs once per absorbed item, in arrival
 order and each under its own item's trace, then for the owner as usual.
 Steps 5b onward run once, for the owner. The result: every message is its
 own `message_log` row with its own persisted event, all before the model
@@ -2776,8 +2777,8 @@ Signal delivers a reply to a turn of any origin on a channel it owns. A
 reminder firing on a `signal:` channel injects through `on_notify`, and
 the reply leaves through the same `send` path as a reply to a person; it
 needs no inbound message to answer. The outstanding-reply count is guarded
-at zero for such a reply (`SignalPlugin._decrement_outstanding` never goes
-below 0), so a reply that answers no message neither errors nor drives the
+at zero for such a reply (`SignalPlugin.send_message` releases only a count
+above 0), so a reply that answers no message neither errors nor drives the
 count negative. The count can't tell which message a reply answers, though:
 any reply, a reminder's included, gives back every outstanding slot, so a
 reminder reply that lands while a person's message is outstanding clears
@@ -2947,7 +2948,7 @@ against fake clients. The first real connection is the real test.
 Replies to agent-started turns on a Discord channel (a reminder, say) are
 delivered through the normal send path: `_deliver` resolves the destination
 from the channel id, so no inbound message is needed. The outstanding count
-is guarded at zero in `DiscordPlugin._decrement_outstanding`, as on Signal,
+is guarded at zero in `DiscordPlugin.send_message`, as on Signal,
 with the same early typing release (#101): any reply zeroes the count.
 Sending to a channel other than the turn's own is a separate capability,
 not provided by the transport: PRD §3.5.9 (operator allowlist that starts

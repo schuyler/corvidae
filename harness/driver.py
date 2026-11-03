@@ -1478,12 +1478,19 @@ async def probe_quiet_period(ctx: RunContext) -> ProbeResult:
 def burst_verdict(bot_lines: list[str], codewords: tuple[str, ...]) -> tuple[bool, str]:
     """Judge a burst probe from the bot's lines, oldest first.
 
-    The count's end is the last bot line containing "400"; every codeword must
-    appear in a bot line after it, so only the burst's reply can satisfy it.
-    Returns (passed, detail).
+    The count's end is the last bot line containing "400" and no codeword
+    (the burst reply may itself mention 400); every codeword must appear in a
+    bot line after it, so only the burst's reply can satisfy it. Returns
+    (passed, detail).
     """
-    # Index of the last line carrying the count's final number.
-    count_end = max((i for i, line in enumerate(bot_lines) if "400" in line), default=-1)
+    # Index of the last count line; a line carrying a codeword is the reply.
+    count_end = max(
+        (
+            i for i, line in enumerate(bot_lines)
+            if "400" in line and not any(word in line for word in codewords)
+        ),
+        default=-1,
+    )
     if count_end < 0:
         return False, "the slow count never reached 400"
     after = " ".join(bot_lines[count_end + 1:])
@@ -1494,7 +1501,7 @@ def burst_verdict(bot_lines: list[str], codewords: tuple[str, ...]) -> tuple[boo
 
 
 async def probe_burst(ctx: RunContext) -> ProbeResult:
-    channel = "#p-burst"
+    channel = BURST_CHANNEL
     if not ctx.channel_ready.get(channel):
         return _skip_result("burst", channel)
     sent: list[tuple[float, str]] = []

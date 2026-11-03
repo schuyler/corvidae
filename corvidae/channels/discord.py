@@ -621,7 +621,8 @@ class DiscordPlugin(TransportPlugin):
                 )
 
     def _decrement_outstanding(self, channel: Channel) -> None:
-        """Give back one outstanding slot (a reply sent, or a message that was never admitted)."""
+        """Give back one outstanding slot for a message that was never admitted
+        (a reply releases every slot instead; see send_message)."""
         count = self._outstanding.get(channel.id, 0)
         if count > 0:
             self._outstanding[channel.id] = count - 1

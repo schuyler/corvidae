@@ -130,9 +130,10 @@ behind an in-flight model call is `burst`'s.
 tool would not hold the queue), then four seconds later sends three lines
 back to back, each carrying a codeword and asking the bot to repeat every
 codeword. It passes when every codeword appears in bot lines after the last
-bot line containing "400" (the count's end) and `usage_log` holds exactly two
-main-role calls since the probe started (the buster profile runs cognition
-off, so those are only these turns). The four seconds and the length of the
+bot line containing "400" and no codeword (the count's end) and
+`usage_log` holds exactly two main-role calls on `#p-burst` since the probe
+started (the buster profile disables memory, appraisal and critique, so those
+are only these turns). The four seconds and the length of the
 count are guesses to tune on the first run. Known flakes: a reasoning-reopen
 or cut-off re-run makes the call count 3, and if ngircd's flood penalty
 spaces the three lines past the count's end the burst splits into 3-4 calls;

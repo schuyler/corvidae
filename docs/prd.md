@@ -412,8 +412,8 @@ one is a bug even if its tests pass.
        holds across a restart, and `message_log` keeps every row
        (principle 4).
 19. Consecutive queued messages coalesce into one turn (#398). When a
-    channel's queue reaches its next turn, every inbound message waiting
-    directly behind the one taken coalesces into that turn and is answered
+    channel's queue takes an inbound message for its next turn, every
+    inbound message waiting directly behind it coalesces into that turn and is answered
     by one model call. Each message is still persisted as its own row and
     announced (`on_message_persisted`) in arrival order. A turn in flight is
     never interrupted. Only consecutive inbound messages coalesce: a tool
@@ -446,10 +446,9 @@ The contract every transport meets:
    six bytes or `split_message` raises. Discord's splitter also keeps code
    fences balanced across chunks.
 5. Liveness (typing, read receipts) is shown only to allowed senders.
-   Typing shows while a reply is owed on the channel and stops when a reply
-   goes out or nothing is owed; it is never left on indefinitely. A reply
-   clears it even when another message on the channel is still waiting for
-   its turn.
+   Typing shows while the channel is owed a reply and stops as soon as any
+   reply goes out, even if another message is still waiting for its turn,
+   or when nothing is owed; it is never left on indefinitely.
 6. A refused sender never creates a persistent channel in the registry.
 7. Scopes use stable identifiers (principle 10). The transport implements
    `resolve_channel` for ids the registry does not hold, so a reminder due
