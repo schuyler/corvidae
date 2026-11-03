@@ -10,9 +10,11 @@ restart, through BOTH tuning surfaces (operator directive 2, 2026-07-06):
 
 Plugins call :func:`resolve_tunable` at decision time — never caching the
 resolved value at init — so both surfaces take effect immediately (trap #8).
-Dotted keys (``"critique.sample_below_rate"``) are the namespace convention for
-plugin tunables; the step-7 ``extra_body`` filter in ``agent.py`` forwards
-only ``INFERENCE_KEYS``, so no dotted key reaches the LLM request body.
+Dotted keys (``"<plugin>.<setting>"``, the plugin's own name as the
+namespace) are the convention for plugin tunables; the step-7
+``extra_body`` filter in ``agent.py``
+forwards only ``INFERENCE_KEYS``, so no dotted key reaches the LLM request
+body.
 """
 
 from typing import Any
