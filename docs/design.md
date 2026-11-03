@@ -88,6 +88,7 @@ class AgentSpec:
     async def before_agent_turn(self, channel: Channel, trace_id: str | None, meta: dict) -> None
     async def after_persist_assistant(self, channel: Channel, message: dict) -> None
     async def transform_display_text(self, channel: Channel, text: str, result_message: dict) -> str | None
+    async def transform_system_prompt(self, channel: Channel, text: str) -> str | None
     async def resolve_conversation(self, channel: Channel) -> list[dict] | None
     async def resolve_channel(self, channel_id: str) -> Channel | None
     async def resolve_register_prompt(self, channel: Channel) -> str | None
@@ -151,10 +152,10 @@ this way.
 
 Hooks marked `firstresult=True` in the hookspec (`resolve_llm_error`,
 `resolve_compaction`, `transform_tool_result`, `transform_display_text`,
-`resolve_conversation`, `resolve_channel`) use pluggy's own first-non-None-wins dispatch — the
+`transform_system_prompt`, `resolve_conversation`, `resolve_channel`) use pluggy's own first-non-None-wins dispatch — the
 first handler to return a non-None value stops the chain; no separate
 resolver function is involved. `transform_tool_result` and
-`transform_display_text` are wrapper chains: `@hookimpl(wrapper=True)`
+`transform_display_text` and `transform_system_prompt` are wrapper chains: `@hookimpl(wrapper=True)`
 implementations compose transforms over an identity seed.
 
 Pure broadcast hooks (e.g. `on_start`, `on_stop`) resolve neither way;
@@ -182,10 +183,10 @@ owner's plugin name after the prefix.
 | `on_message` | broadcast | inbound message from any transport; the transport mints and passes `trace_id` (required, no default) |
 | `send` | broadcast (imperative) | outbound delivery. `Agent` sends `OutboundMessage` (replies, error text), `OutboundThinking` (when the LLM response carries `reasoning_content`), `OutboundProgress` (intermediate text alongside tool calls) and `OutboundToolStatus` (tool call dispatched); `TaskPlugin` sends `OutboundToolStatus` on completion. Transports receive it through `TransportPlugin.send`, which filters by `owns(channel)` and dispatches by event type |
 | `register_tools` | broadcast (sync) | startup tool collection |
-| `on_agent_response` | broadcast | after agent loop produces a text response; no default implementation |
+| `on_agent_response` | broadcast | after agent loop produces a text response, including a final the gate vetoed (or an empty one): the assistant row is already in the window, tagged `UNSENT` when not sent (`final_was_unsent`), and the transport send comes after. Discord, Signal, ACP and CLI implement it to release per-turn state for an unsent final; `SilencePlugin` records declines |
 | `on_notify` | broadcast | inject a notification into a channel queue |
 | `should_process_message` | broadcast / resolve_reject_wins | `on_message`, before enqueue, carrying the transport-minted `trace_id`; no default implementation; None from empty broadcast allows all messages |
-| `should_send_response` | broadcast / resolve_reject_wins | the [output gate](#the-output-gate): before each outbound emission, with `emission` in `final`, `progress`, `thinking`, `error` and the item's `trace_id` and `meta`; a veto of `final` stores the row as `UNSENT`; `CritiquePlugin` vetoes a critique-origin `final` that is exactly `NO_REPLY`; a raising implementation fails open (logged, sent); no kernel implementation, so with none registered everything is sent |
+| `should_send_response` | broadcast / resolve_reject_wins | the [output gate](#the-output-gate): before each outbound emission, with `emission` in `final`, `progress`, `thinking`, `error` and the item's `trace_id` and `meta`; a veto of `final` stores the row as `UNSENT`; `CritiquePlugin` vetoes a critique-origin `final` that is exactly `NO_REPLY`, and `SilencePlugin` vetoes an exact `NO_REPLY` final of any origin (cognition extra); a raising implementation fails open (logged, sent); no kernel implementation, so with none registered everything is sent |
 | `on_message_admitted` | broadcast | `on_message`, after a USER message is admitted; fires exactly once per admitted message |
 | `on_message_rejected` | broadcast | `on_message`, after a USER message is vetoed; fires exactly once per rejected message |
 | `on_message_persisted` | broadcast | dequeue, after the trace-originating row is persisted; fires once per originating item regardless of outcome (`rowid` may be None) |
@@ -195,8 +196,9 @@ owner's plugin name after the prefix.
 | `before_agent_turn` | broadcast | `_process_queue_item`, before LLM call; plugins inject context into conversation log |
 | `after_persist_assistant` | broadcast | `_process_queue_item`, after assistant message is persisted; plugins may mutate the in-memory dict |
 | `transform_display_text` | firstresult=True wrapper chain | `_resolve_display_text`, before the reply is sent; return transformed text or None to leave unchanged |
+| `transform_system_prompt` | firstresult=True wrapper chain | `Agent.channel_system_prompt`, once the identity and register are composed (a new conversation, a restart, and the background views that share it); return the transformed prompt or None to leave unchanged. A raising wrapper is logged at WARNING with the channel and the untransformed prompt is used. Not re-run at compaction. `SilencePlugin` appends its instruction on conversational channels |
 | `resolve_conversation` | firstresult=True | `_process_queue_item`, when `channel.conversation is None`; return list of tagged message dicts or None to defer |
-| `resolve_register_prompt` | firstresult=True | `Agent`, when a conversation starts on a channel with no `register_prompt` configured at any layer; the owning transport returns its default register text, others return None. `SignalPlugin`, `DiscordPlugin` and `IRCPlugin` implement it, from fragments shipped in `corvidae/channels/registers/`. No answer means no register |
+| `resolve_register_prompt` | firstresult=True | `Agent`, when a conversation starts on a channel with no `register_prompt` configured at any layer; the owning transport returns its default register text, others return None. `SignalPlugin`, `DiscordPlugin` and `IRCPlugin` implement it, from fragments shipped in `corvidae/channels/registers/`. ACP, web and CLI return nothing. No answer means no register |
 | `resolve_channel` | firstresult=True | `SchedulerPlugin`, for a persisted channel id the registry does not hold (e.g. a reminder due after a restart); a transport returns the live Channel for ids it owns, created with transport-specific config, or None to defer. `SignalPlugin` and `DiscordPlugin` implement it. A transport may also return None for an id it owns but cannot build yet (Signal before its first alias resolution). For an id whose prefix names a transport that implements the hook, the scheduler retries; for other ids, callers fall back to `registry.get_or_create` from the split id |
 | `persist_message` | broadcast (imperative) | `_process_queue_item` after every `conv.append()`, and `FunnelPlugin` for the CONTEXT it persists; every implementation runs (persistence, JSONL logging). `PersistencePlugin` returns the `message_log` rowid and the caller resolves the list with `resolve_single_result` into `_db_id` |
 | `before_compaction` | broadcast, awaited | `CompactionPlugin`, after the summary succeeded and before `replace_with_summary()`; the window still holds `messages[:cut]`, so a plugin can fork over the dropped prefix (see [Forks](#forks)); failures logged, never block compaction |
@@ -288,12 +290,26 @@ reaches only conversations that start after the reload.
 **System prompt layers (#316).** A conversation's system prompt is the
 identity (`agent.system_prompt`, never set per channel; a channel-level
 `system_prompt` key is skipped at load with a WARNING) followed by a blank line and the
-channel's register. `ChannelConfig.resolve` returns the register as
+channel's register, then passed through `transform_system_prompt`
+(below). `ChannelConfig.resolve` returns the register as
 `register_prompt`, or None when no layer sets it; `Agent` then asks the
 owning transport through `resolve_register_prompt`. An explicit `""` or
 `[]` is no register. A register file that can't be read (`OSError`,
 `UnicodeDecodeError`) is logged at WARNING and the conversation starts on
 the identity alone.
+
+**`transform_system_prompt`.** `Agent.channel_system_prompt` passes the
+composed identity and register through this wrapper chain, so a plugin can
+add a section after the register whatever the register's source (a shipped
+default, a custom `register_prompt`, or none). The seed on `_SeedHooksPlugin`
+returns the text unchanged; a wrapper that raises is logged at WARNING
+naming the channel and the untransformed prompt is used. The result is fixed
+when the conversation starts or restarts and is not rebuilt at compaction.
+`TransportPlugin.conversational` (default False; IRC, Discord and Signal
+set True) is the neutral fact a plugin reads to tell a chat transport from
+one that always answers. `SilencePlugin` is the one implementation: it
+appends the `NO_REPLY` instruction on conversational channels
+([cognition.md](cognition.md#silenceplugin-packagescorvidae-cognitioncorvidae_cognitionsilencepy)).
 
 **resolve_system_prompt(value, base_dir)** — if `value` is a string,
 returns it directly. If a list of paths, reads each file and
@@ -461,7 +477,8 @@ per call), and `MetricsJsonlPlugin` (JSONL event sink, config
 `daemon.metrics_jsonl`). `outcome_log.py` owns the `exchange_log` table:
 one row per exchange, written by `OutcomeLogPlugin`'s hookimpls at
 message admission/rejection/persistence and updated in place as memory
-retrieval, appraisal, and critique record their outcomes. All sinks are
+retrieval, appraisal, critique, the gates and the silence plugin record
+their outcomes. All sinks are
 fail-soft.
 
 ```sql
@@ -955,7 +972,7 @@ per-channel `SerialQueue`. The queue's consumer calls
     branch, `tool_calls` is stripped from the assistant message before it
     is appended, so the row and the window copy both lose it, whatever the
     verdict. A result with no tool calls whose display text is empty or
-    whitespace is withheld as a decline (`UNSENT`, final marker) without
+    whitespace is left unsent as a decline (`UNSENT`, final marker) without
     firing the gate (#355).
 9. Appends the assistant message to conversation (as `UNSENT` after a
    final veto, else `MESSAGE`); fires `persist_message`. Then sends
@@ -1029,6 +1046,18 @@ veto:
 An empty or whitespace-only final with no tool calls takes the same path
 without the gate firing: the model declined to speak, and there is nothing to
 ask a gate about.
+
+**An unsent final releases transport state.** An unsent final never
+reaches `send_message`, where transports end the turn (Discord and Signal
+give back the typing slot, ACP completes the prompt, the CLI reprints its
+prompt). `on_agent_response` runs after the row is appended and tagged, so
+those four transports implement it, guard it with `owns()`, and release the
+same state when `final_was_unsent(channel)` (newest assistant row is
+`UNSENT`) is true. A sent final releases only in `send_message`, so each
+final releases once. This runs whether or not any plugin vetoed, so an empty
+final ends the turn too. Web needs nothing: it clears "working" on the idle
+tracker's settle signal. The rule for plugin authors is in
+[plugin-guide.md](plugin-guide.md#transports-with-per-turn-state).
 
 The max-turns branch strips `tool_calls` from both the persisted row and
 the window copy regardless of the verdict: those calls never dispatch, so a
@@ -2434,7 +2463,9 @@ registers `task_status` as tool closures during `on_start`.
 
 Every transport (CLI, IRC, Signal, Discord, web, ACP) subclasses
 `TransportPlugin` (`hooks.py`) and sets `transport` to the name its
-channel ids start with. The base class implements the outbound `send`
+channel ids start with. A chat transport also sets
+`conversational = True` (IRC, Discord and Signal do; the default is False),
+which a `transform_system_prompt` wrapper can read to tailor the prompt to chats. The base class implements the outbound `send`
 hook once: it drops events for channels the transport does not own
 (`owns(channel)`, by default `channel.matches_transport(self.transport)`;
 `WebPlugin` narrows it to also require that it is enabled), then
@@ -2658,7 +2689,8 @@ monitored.
   refresh loop that re-sends every 10s while the channel's outstanding
   count stays positive (Signal clients expire an unrefreshed indicator
   after several seconds; the exact figure is not verified).
-  `send_message` gives one outstanding slot back. So does the
+  `send_message` gives one outstanding slot back, and so does
+  `on_agent_response` for an unsent final. So does the
   inbound handler for any message `on_message` returns without admitting:
   the transport mints the message's trace id, records its envelope
   timestamp under that id and takes the slot before calling `on_message`,
@@ -2826,7 +2858,8 @@ slot for an allowlisted sender, and passes the id to `on_message`; a
 `finally` around that call gives the slot back unless `on_message_admitted`
 fired for the id. Admission fires before `on_message` returns, so a gate
 veto, an agent that is not ready yet, or a raise or cancellation all land
-there. `send_message` gives back the slot of an admitted message. Only an
+there. `send_message` gives back the slot of an admitted message, and
+`on_agent_response` does for an unsent final. Only an
 allowlisted sender ever took a slot, so a refused stranger @-mentioning the
 bot gives nothing back and cannot stop typing owed to an allowed user in
 the same channel; no `on_message_rejected` implementation is needed.
@@ -3116,7 +3149,8 @@ so outbound events reach it only for `acp:` channels. Tool status is
 keyed on `(channel.id, tool_name)`; the event's `tool_call_id` is not used
 yet. `session/prompt` mints the message's
 trace id and passes it to `on_message`, and completes with `end_turn`
-after tool drain, including when the final `session/update` cannot be
+after tool drain (from `send_message`, or from `on_agent_response` when
+the final was unsent), including when the final `session/update` cannot be
 delivered (logged at WARNING; #99); `session/cancel` yields `cancelled`.
 A second `session/prompt` on a session with one in flight is rejected
 with `invalidRequest` and the first is left untouched (#93). The stdio loop
@@ -3257,7 +3291,7 @@ The kernel's entry points (`[project.entry-points.corvidae]` in the root
 `compaction`, `thinking`, `runtime_settings`, `tools`, `metrics`,
 `usage_log`, `metrics_jsonl`, `scheduler`, `agent`,
 `config_watcher`. The cognition extra adds `memory`, `memory_tools`,
-`funnel`, `outcome_log`, `appraisal`, `critique` and `goals` from
+`funnel`, `outcome_log`, `appraisal`, `critique`, `goals` and `silence` from
 `packages/corvidae-cognition/pyproject.toml`.
 
 `Runtime.start()` loads them with pluggy's `load_setuptools_entrypoints`,
@@ -3329,6 +3363,7 @@ MemoryToolsPlugin   → "memory"      (MemoryPlugin)                            
 CritiquePlugin      → "task", "llm"; soft-uses "agent" for forks                  (cognition extra)
 OutcomeLogPlugin    → "persistence"                                               (cognition extra)
 AppraisalPlugin     → "persistence"; soft-uses "agent" for forks                  (cognition extra)
+SilencePlugin       → none; soft-uses "outcome_log" to record declines          (cognition extra)
 HeartbeatPlugin     → "idle", "registry"; needs "memory" only when awake          (cognition extra)
 UsageLogPlugin      → "persistence"
 SchedulerPlugin     → "registry", "persistence", "clock"
@@ -3405,6 +3440,7 @@ packages/corvidae-cognition/   # the cognition extra (docs/cognition.md)
     ├── appraisal.py      # AppraisalPlugin
     ├── critique.py       # CritiquePlugin
     ├── goals.py          # GoalsPlugin (goals table, add/update/retire_goal)
+    ├── silence.py        # SilencePlugin (NO_REPLY veto, decline record, system-prompt instruction)
     └── outcome_log.py    # OutcomeLogPlugin (exchange_log)
 ```
 

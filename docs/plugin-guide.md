@@ -315,7 +315,8 @@ Any plugin can send: `await self.pm.ahook.send(channel=channel, event=OutboundMe
 | Hook | Type | When |
 |------|------|------|
 | `register_tools(tool_registry: list)` | sync broadcast | During `on_start`, to collect tools |
-| `on_agent_response(channel, request_text: str, response_text: str, trace_id: str \| None, meta: dict, logprobs: dict \| None)` | async broadcast | After agent produces a response |
+| `on_agent_response(channel, request_text: str, response_text: str, trace_id: str \| None, meta: dict, logprobs: dict \| None)` | async broadcast | After agent produces a response. Fires for a final the output gate vetoed (or an empty one) too, after its assistant row is in the window and before the transport send; `final_was_unsent(channel)` tells the two apart |
+| `transform_system_prompt(channel, text: str) -> str \| None` | async `firstresult=True` wrapper chain | When a conversation's system prompt is composed (identity, then register): a new conversation, a restart, and the background views. Return the prompt with your section added; see below |
 | `before_agent_turn(channel, trace_id: str \| None, meta: dict)` | async broadcast | Before each LLM invocation |
 | `after_persist_assistant(channel, message: dict)` | async broadcast | After assistant message is written to DB; plugins may mutate the in-memory dict |
 | `persist_message(channel, message: dict, message_type: MessageType) -> int \| None` | async broadcast | After every `conv.append()` call; message is the untagged dict (no `_message_type` key). Persistence returns the inserted `message_log` rowid; **exactly one implementation may return non-None** (all others return None). Callers resolve with `resolve_single_result` and attach the rowid to the in-window message as `_db_id`. |
@@ -326,6 +327,8 @@ Any plugin can send: `await self.pm.ahook.send(channel=channel, event=OutboundMe
 `after_persist_assistant` — the DB row is already written when this
 hook fires. Mutations to `message` affect in-memory prompt construction
 only; they do not update the persisted record.
+
+`transform_system_prompt` — `text` is the identity and register as composed, or the identity alone when the register is empty. It runs on the composed prompt whatever the register's source, so a channel with its own `register_prompt`, or with `register_prompt: ""`, still goes through it. A wrapper that raises is logged at WARNING with the channel and the untransformed prompt is used. The result is fixed for the conversation: it is not re-run at compaction. To act only on chats, find the transport that owns the channel and read its `conversational` (`SilencePlugin` does this).
 
 `before_agent_turn` — messages injected via `channel.conversation.append()` inside this hook are passed through `persist_message` and persisted to the DB, unless they already carry a `_db_id` (i.e. their producer persisted them itself).
 
@@ -445,6 +448,7 @@ These hooks return a value. Hooks marked `firstresult=True` (sequential) stop at
 | `resolve_compaction(channel, conversation, max_tokens)` | `firstresult=True` | `bool \| None` | First non-None return stops the chain. `CompactionPlugin` uses `trylast` (returns True). Third-party plugins run at default priority. |
 | `transform_tool_result(tool_name, result, channel)` | `firstresult=True` wrapper chain | `str \| None` | Wrappers compose transforms in LIFO order. The seed returns the input unchanged. Non-wrapper hookimpls short-circuit the seed via firstresult. |
 | `transform_display_text(channel, text, result_message)` | `firstresult=True` wrapper chain | `str \| None` | Wrappers compose transforms in LIFO order. The seed returns the input text unchanged. Non-wrapper hookimpls short-circuit the seed via firstresult. |
+| `transform_system_prompt(channel, text)` | `firstresult=True` wrapper chain | `str \| None` | Wrappers compose in LIFO order, so a later wrapper's text lands after an earlier one's. The seed returns the input text unchanged. |
 | `resolve_conversation(channel)` | `firstresult=True` | `list[dict] \| None` | First non-None result wins. `PersistencePlugin` uses `trylast` as fallback. Called once when a channel's conversation is first initialized, and by `AcpPlugin` for `session/load`. |
 | `persist_message(channel, message, message_type)` | `resolve_single_result` (broadcast) | `int \| None` | Every implementation runs. `PersistencePlugin` returns the `message_log` rowid; others return None. More than one non-None is a configuration error: logged, and the first is used. |
 
@@ -583,7 +587,7 @@ here is a plugin-API change and needs a line in this guide.
 
 | Module | Names |
 |---|---|
-| `corvidae.hooks` | `CorvidaePlugin`, `TransportPlugin`, `hookimpl`, `get_dependency`, `resolve_single_result` |
+| `corvidae.hooks` | `CorvidaePlugin`, `TransportPlugin`, `hookimpl`, `get_dependency`, `resolve_single_result`, `final_was_unsent` |
 | `corvidae.fork` | `fork_agent`, `quote`, `window_db_ids`, `ViewInputs`, `view_agent`, `view_call`, `ForkRefused`, `build_fork_prompt`, `snap_cut_forward`, `snap_cut_to_tool_boundary` (see [Forking the window](#forking-the-window) and [The view call](#the-view-call)) |
 | `corvidae.attribution` | `set_attribution`, `reset_attribution` |
 | `corvidae.tuning` | `config_value`, `resolve_tunable` |
@@ -679,7 +683,7 @@ A plugin that uses another plugin when it's there and works without it
 declares `optional_depends_on` instead. A missing optional dependency is
 not an error, and optional dependencies aren't part of cycle detection.
 Look the plugin up with `pm.get_plugin(name)` and treat `None` as absent
-(it's `None` whether the plugin is disabled or not installed):
+(it's `None` whether the plugin is disabled or not installed). The declaration is documentary: it only changes the log level of a hookimpl with no spec (above) and doesn't order loading, so look the plugin up when you use it, not in `__init__`:
 
 ```python
 class ProfilerPanel(CorvidaePlugin):
@@ -847,6 +851,8 @@ channels:
 
 A transport can ship a default register for its channels by implementing `resolve_register_prompt(channel)`: open with `if not self.owns(channel): return None` and return the register text. `corvidae.channels._registers.shipped_register(*names)` joins fragments from `corvidae/channels/registers/`. The Agent asks only when no `register_prompt` is configured for the channel, and appends the answer after `agent.system_prompt`.
 
+To add a section to the system prompt on every channel, or only on some, wrap `transform_system_prompt` instead; it sees the register whatever its source (see [Extension points](#extension-points)).
+
 The `irc` transport is provided by `IRCPlugin` (registered via the `corvidae` entry point group). Its config block:
 
 ```yaml
@@ -889,7 +895,7 @@ async def resolve_channel(self, channel_id: str) -> Channel | None:
 
 ### Writing a transport
 
-Subclass `TransportPlugin` (in `corvidae.hooks`), set `transport` to the name your channel ids start with, and override the outbound methods your transport can display. They are plain methods, not hookimpls, and each takes the channel and an event from `corvidae.outbound`:
+Subclass `TransportPlugin` (in `corvidae.hooks`), set `transport` to the name your channel ids start with, set `conversational = True` if a person on the other end can let an exchange wind down (a chat), and override the outbound methods your transport can display. They are plain methods, not hookimpls, and each takes the channel and an event from `corvidae.outbound`:
 
 | Method | Event | Fields |
 |---|---|---|
@@ -911,7 +917,19 @@ class MyTransport(TransportPlugin):
         await self.client.post(channel.scope, event.text)
 ```
 
+`conversational` is a plain fact about the transport, default `False`. Plugins that tailor the system prompt to chats read it: with the `silence` plugin loaded, a conversational transport's channels get the `NO_REPLY` instruction, and a transport left at `False`, third-party ones included, never does. IRC, Discord and Signal set it; ACP, web and the CLI don't.
+
 The filter is `owns(channel)`, which by default is `channel.matches_transport(self.transport)`. Override it only to narrow it: `WebPlugin` also requires that it is enabled. Inbound hooks are not filtered for you; open each inbound hookimpl with `if not self.owns(channel): return`.
+
+### Transports with per-turn state
+
+A transport that holds state for the length of a turn (Discord's and Signal's typing slot, ACP's pending prompt, the CLI's input prompt) releases it in `send_message`, which runs when a final is sent. A final the gate vetoed, or an empty one, never gets there, so the transport also implements `on_agent_response` and releases the same state when `corvidae.hooks.final_was_unsent(channel)` is true. A sent final's row is a normal message, so it releases in `send_message` only: once per final either way. Three rules:
+
+- Open with `if not self.owns(channel): return`. `on_agent_response` reaches every transport.
+- Do the ownership check, `final_was_unsent` and the release synchronously, before the first `await`. Implementations run under `asyncio.gather` and the kernel may move on when a sibling raises.
+- If `final_was_unsent` raises, log a warning and release nothing. A stuck indicator is better than a double release.
+
+The `IRCPlugin` and web transports keep nothing per turn, so they don't need it.
 
 ### ACP transport
 
@@ -1055,7 +1073,7 @@ For `should_process_message` (broadcast, resolved with `resolve_reject_wins`), e
 
 For `should_send_response`, the Agent catches any exception, logs it at WARNING and sends the emission anyway (fail open). Because apluggy gathers a broadcast without `return_exceptions`, one raising implementation discards every sibling's verdict for that emission, so a gate that can fail should catch and log its own errors and return None.
 
-For `transform_display_text` and `transform_tool_result` (wrapper chain hooks), pluggy propagates exceptions from wrapper implementations to the call site. `transform_display_text` is wrapped in try/except in `_resolve_display_text`.
+For `transform_display_text`, `transform_system_prompt` and `transform_tool_result` (wrapper chain hooks), pluggy propagates exceptions from wrapper implementations to the call site. `transform_display_text` is wrapped in try/except in `_resolve_display_text`, and `transform_system_prompt` in `channel_system_prompt`.
 
 ## Output gating
 
