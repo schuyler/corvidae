@@ -12,6 +12,7 @@ phase-1b.md WP1b.1). Clock-frozen via unittest.mock.patch('time.time').
 
 import asyncio
 import json
+import logging
 import math
 import time
 from unittest.mock import AsyncMock, MagicMock, patch, call
@@ -436,6 +437,65 @@ class TestDemotion:
         # Should not error; redacted records are skipped
         m = await fetch_memory(db, mid)
         assert m["redacted"] == 1
+
+    async def test_failed_vec_delete_warns_and_still_demotes(self, caplog):
+        """#339: a vec-row delete that fails is a WARNING, and the row still demotes.
+
+        Dropping ``memory_vec`` makes the demotion pass's DELETE raise a real
+        ``OperationalError``. The rescue is the demotion itself: the memory row
+        is demoted with its vec row left behind. AGENTS.md requires that
+        rescue be logged at WARNING naming what was left and what happens next.
+        """
+        memory, embedder, channel, db = await build_retention_env()
+        if not memory._vec_available:
+            pytest.skip("sqlite-vec unavailable")
+
+        now = time.time()
+        old_created_at = now - 86400.0 * 300
+        mid = await seed_memory_row(
+            db, channel.id, "trivial old chatter whose vec delete will fail",
+            importance=0.1,
+            created_at=old_created_at, retrieval_count=0, last_retrieved_at=None,
+        )
+        assert await vec_row_exists(db, mid), "precondition: vec row must exist"
+        # The vec table is gone, so DELETE FROM memory_vec raises. Dropping it
+        # on the shared connection covers the in-memory test database; the
+        # write connection is that same connection for a file-less database.
+        await db.execute("DROP TABLE memory_vec")
+        await db.commit()
+
+        caplog.set_level(logging.DEBUG, logger="corvidae.retention")
+        await run_retention_job(memory, now=now)
+
+        # The rescue happened: the row is demoted despite the failed delete.
+        m = await fetch_memory(db, mid)
+        assert m["indexed"] == 0, "the failed vec delete must not stop the demotion"
+        assert m["embedded"] == 0, "the demoted row keeps embedded=0"
+
+        # It is reported at WARNING, naming the record and the remainder.
+        warnings = [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING and "vec" in r.getMessage().lower()
+        ]
+        assert warnings, (
+            "a failed vec-row delete is a rescue that leaves state behind; it must "
+            f"be logged at WARNING. got: {[r.getMessage() for r in caplog.records]}"
+        )
+        text = warnings[0].getMessage()
+        assert str(mid) in text, f"the warning must name the memory id {mid}: {text!r}"
+        assert "vec row" in text.lower(), (
+            f"the warning must say the vec row was left behind: {text!r}"
+        )
+        assert "backfill" in text.lower() or "demotion" in text.lower(), (
+            f"the warning must name the next step: {text!r}"
+        )
+
+        # And not merely at DEBUG, where the default level hides it.
+        debug_copies = [
+            r for r in caplog.records
+            if r.levelno == logging.DEBUG and "vec row delete failed" in r.getMessage()
+        ]
+        assert not debug_copies, "the same rescue must not also be logged at DEBUG"
 
 
 # ---------------------------------------------------------------------------

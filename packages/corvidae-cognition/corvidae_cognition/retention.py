@@ -109,8 +109,15 @@ async def run_retention_job(memory: "MemoryPlugin", now: float | None = None) ->
                             "DELETE FROM memory_vec WHERE memory_id = ?", (mid,)
                         )
                     except Exception:
-                        logger.debug(
-                            "vec row delete failed for memory %d", mid, exc_info=True
+                        # The demotion stands; only its vec row is left behind.
+                        # A stale vec row still matches KNN, so the next
+                        # backfill or demotion pass is what clears it.
+                        logger.warning(
+                            "retention: vec row for memory %d was left behind "
+                            "(delete failed); the row is demoted but still "
+                            "matched by vector search until the next backfill "
+                            "or demotion pass clears it",
+                            mid, exc_info=True,
                         )
         if demoted_count:
             logger.info("retention: demoted %d records", demoted_count)
