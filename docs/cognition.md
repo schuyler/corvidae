@@ -122,7 +122,18 @@ the row):
 - **The `message_fts` backfill** indexes every valid row and indexes a corrupt
   row as empty text, so it is not retried on every start.
 
-**Write connection and atomicity (#221).** That write is one SQLite
+### Corrupt `exchange_log` rows
+
+A corrupt `appraisal` value (unparseable JSON, invalid UTF-8, or JSON that
+is not an envelope object) can only come from an out-of-band write. The range
+readers (`importance_over_range`, `mean_valence`) and `corvidae redact`'s
+scrubber skip such a row with one WARNING naming the trace id and channel
+(#311). The prior and mean valence are computed over the remaining exchanges,
+and redact finishes over the others. A row the scrubber skips keeps its
+`past_claims`, and redact still exits 0, so check the log for the warning
+after a redact run on a database you suspect is damaged.
+
+**Write connection and atomicity (#221).** That section is one SQLite
 transaction (`BEGIN IMMEDIATE` ... `COMMIT`) on a dedicated connection
 only `MemoryPlugin` writes to, opened in `on_start` once the schema
 exists (lazily on first write when the persistence DB wasn't open yet)
@@ -180,30 +191,6 @@ that started the run (`"compaction"` or `"idle"`) — set once at
 attribution snapshot for that call, into `MetricsPlugin`'s emitted tags,
 the `usage_log.trigger` column, and the `memory consolidated` completion
 log line.
-
-### Corrupt `exchange_log` rows
-
-A corrupt `appraisal` value — unparseable JSON, invalid UTF-8, or JSON
-that is not an envelope object — can only come from an out-of-band write;
-the writer API validates the envelope. The range readers
-(`importance_over_range` and `mean_valence`, via `_appraisals_in_range`)
-and `corvidae redact`'s scrubber select the column as
-`CAST(appraisal AS BLOB)` and skip such a row with one WARNING per row
-naming the trace id, the channel and the next step (inspect or correct
-the row) (#311): the prior and the record's mean stage-2 valence are
-computed over the remaining exchanges, and the scrubber finishes the
-cascade over the other exchanges. A corrupt row keeps its `past_claims`,
-and its `provenance_snapshot` is dropped only when the row is at or after
-the redacted id — the same rule as every other exchange. The scrubber
-also skips an envelope whose `past_claims` entry is missing its keys,
-a shape the range readers never inspect.
-
-A skipped row means the redacted text may still be readable in its
-`past_claims`, so `corvidae redact` names every such row — trace id,
-channel, the exception — prints `ERROR: redaction incomplete`, and exits
-non-zero after finishing the rest of the cascade. The message_log rows
-are still tombstoned; only the derived surface is incomplete. A dry run
-reports the same rows and still exits 0, since it changed nothing.
 
 #### Retrieval (read path)
 

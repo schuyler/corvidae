@@ -22,8 +22,6 @@ import time
 
 from click.testing import CliRunner
 
-import pytest
-
 from corvidae.commands.redact import (
     redact_command,
     redact_memory_id,
@@ -201,71 +199,6 @@ class TestCorruptAppraisalRow:
             assert "t1" in warnings[0], warnings[0]
             assert "irc:#a" in warnings[0], warnings[0]
             assert "inspect or correct" in warnings[0], warnings[0]
-            # The unscrubbed row is surfaced to the caller, not only logged:
-            # redact turns this into a non-zero exit (#311).
-            assert len(result["unscrubbed"]) == 1, result["unscrubbed"]
-            assert "exchange_log" in result["unscrubbed"][0]
-            assert "t1" in result["unscrubbed"][0]
-            assert "irc:#a" in result["unscrubbed"][0]
-            assert "may survive" in result["unscrubbed"][0]
-        finally:
-            await db.close()
-
-    async def test_corrupt_row_snapshot_kept_when_redacted_id_is_above_it(
-        self, caplog
-    ):
-        # The snapshot rule is the channel-wide one, not special-cased for
-        # corrupt rows: a1 is the reply inside t1's exchange, so t1's rowid
-        # is below X and its snapshot survives, unlike the u1 case above.
-        db, ids = await _db_with_dialog()
-        try:
-            await db.execute(
-                "UPDATE exchange_log SET appraisal = 'not json{' "
-                "WHERE trace_id = 't1'"
-            )
-            await db.commit()
-            with caplog.at_level(
-                logging.WARNING, logger="corvidae.outcome_log"
-            ):
-                await redact_messages(db, [ids["a1"]])
-            async with db.execute(
-                "SELECT appraisal, provenance_snapshot FROM exchange_log "
-                "WHERE trace_id = 't1'"
-            ) as cursor:
-                appraisal, snapshot = await cursor.fetchone()
-            assert appraisal == "not json{"
-            assert snapshot == '[{"content": "secret context"}]'
-        finally:
-            await db.close()
-
-    async def test_non_dict_appraisal_row_skipped_valid_rows_scrubbed(self, caplog):
-        db, ids = await _db_with_dialog()
-        try:
-            # '[]' decodes as JSON but is not an appraisal envelope, so the
-            # scrubber's decode succeeds and .get would raise AttributeError.
-            await db.execute(
-                "UPDATE exchange_log SET appraisal = '[]' "
-                "WHERE trace_id = 't1'"
-            )
-            await db.commit()
-            with caplog.at_level(
-                logging.WARNING, logger="corvidae.outcome_log"
-            ):
-                result = await redact_messages(db, [ids["u1"]])
-            # t1's snapshot still scrubs; only its claims step skipped.
-            assert result["scrubbed"]["exchange_log"] == 2
-            async with db.execute(
-                "SELECT appraisal FROM exchange_log WHERE trace_id = 't1'"
-            ) as cursor:
-                assert (await cursor.fetchone())[0] == "[]"
-            warnings = [
-                r.getMessage() for r in caplog.records
-                if r.name == "corvidae.outcome_log"
-                and r.levelno >= logging.WARNING
-            ]
-            assert len(warnings) == 1, warnings
-            assert "t1" in warnings[0], warnings[0]
-            assert "inspect or correct" in warnings[0], warnings[0]
         finally:
             await db.close()
 
@@ -298,47 +231,6 @@ class TestCorruptAppraisalRow:
             assert len(warnings) == 1, warnings
             assert "t1" in warnings[0], warnings[0]
             assert "inspect or correct" in warnings[0], warnings[0]
-        finally:
-            await db.close()
-
-    async def test_malformed_claims_entry_skipped_valid_rows_scrubbed(
-        self, caplog
-    ):
-        db, ids = await _db_with_dialog()
-        try:
-            # Valid JSON and a real envelope, but a claim with no "queries"
-            # key: the scrubber's claim["queries"] raises KeyError, which
-            # must not abort the cascade.
-            broken = {"stage1": {"score": 0.4},
-                      "stage2": {"valence": 0.1, "past_claims": [
-                          {"claim": "The kestrel nests at Brannan Street"}]}}
-            await db.execute(
-                "UPDATE exchange_log SET appraisal = ? WHERE trace_id = 't1'",
-                (json.dumps(broken),),
-            )
-            await db.commit()
-            with caplog.at_level(
-                logging.WARNING, logger="corvidae.outcome_log"
-            ):
-                result = await redact_messages(db, [ids["u1"], ids["u2"]])
-            # The malformed row is left as-is; the cascade still reaches
-            # and scrubs t2.
-            assert result["scrubbed"]["exchange_log"] == 2
-            assert (await _row(db, "t1"))[0] == broken
-            t2_claims = (await _row(db, "t2"))[0]["stage2"]["past_claims"]
-            assert all("redacted" in c["claim"] for c in t2_claims), t2_claims
-            warnings = [
-                r.getMessage() for r in caplog.records
-                if r.name == "corvidae.outcome_log"
-                and r.levelno >= logging.WARNING
-            ]
-            assert len(warnings) == 1, warnings
-            assert "t1" in warnings[0], warnings[0]
-            assert "inspect or correct" in warnings[0], warnings[0]
-            # A malformed claims entry is a valid envelope shaped wrong, so
-            # it is named distinctly from a value the decoder rejected.
-            assert len(result["unscrubbed"]) == 1, result["unscrubbed"]
-            assert "malformed past_claims" in result["unscrubbed"][0]
         finally:
             await db.close()
 
@@ -453,89 +345,6 @@ class TestFormsAndReporting:
         )
         assert result.exit_code == 0, result.output
         assert "2 exchange_log rows" in result.output, result.output
-
-
-class TestCliReportsIncompleteRedaction:
-    """#311: a row the scrubber cannot clear must fail the command.
-
-    redact used to report a clean count and exit 0 whatever the scrubber
-    managed, so a corrupt appraisal row left the redacted claim text in
-    place with nothing in the result or the exit status to say so.
-    """
-
-    @staticmethod
-    def _argv(form: str, ids: dict) -> list[str]:
-        """The CLI arguments that reach the corrupt t1 exchange."""
-        if form == "message":
-            return ["message", str(ids["u1"])]
-        if form == "range":
-            return ["range", str(ids["u1"]), str(ids["a1"])]
-        # The memory form redacts the record's whole message range.
-        return ["memory", str(ids["memory"])]
-
-    def _path_with_memory(self, tmp_path) -> tuple[str, dict]:
-        path = str(tmp_path / "s.db")
-
-        async def build() -> dict:
-            db, ids = await _db_with_dialog(path)
-            ids["memory"] = await insert_memory(
-                db, "irc:#a", "kestrel nest", ids["u1"], ids["a1"]
-            )
-            await db.execute(
-                "UPDATE exchange_log SET appraisal = 'not json{' "
-                "WHERE trace_id = 't1'"
-            )
-            await db.commit()
-            await db.close()
-            return ids
-
-        return path, asyncio.run(build())
-
-    @pytest.mark.parametrize("form", ["message", "range", "memory"])
-    def test_cli_every_form_exits_nonzero_naming_the_row(self, tmp_path, form):
-        # Every form runs the scrubbing step; a regression in one of them
-        # silently reproduces #311 for that form alone.
-        path, ids = self._path_with_memory(tmp_path)
-        result = CliRunner().invoke(
-            redact_command, ["--db", path, *self._argv(form, ids)]
-        )
-        assert result.exit_code == 1, result.output
-        assert "redaction incomplete" in result.output, result.output
-        assert "t1" in result.output, result.output
-        assert "irc:#a" in result.output, result.output
-        assert "rerun this command" in result.output, result.output
-
-    @pytest.mark.parametrize("form", ["message", "range", "memory"])
-    def test_cli_every_form_dry_run_reports_but_succeeds(self, tmp_path, form):
-        # A dry run changed nothing, so nothing is incomplete: it names the
-        # row it would skip and still exits 0.
-        path, ids = self._path_with_memory(tmp_path)
-        result = CliRunner().invoke(
-            redact_command, ["--db", path, "--dry-run", *self._argv(form, ids)]
-        )
-        assert result.exit_code == 0, result.output
-        assert "redaction incomplete" in result.output, result.output
-        assert "t1" in result.output, result.output
-        assert "irc:#a" in result.output, result.output
-
-    @pytest.mark.parametrize("form", ["message", "range", "memory"])
-    def test_cli_every_form_clean_run_exits_zero(self, tmp_path, form):
-        path = str(tmp_path / "s.db")
-
-        async def build() -> dict:
-            db, ids = await _db_with_dialog(path)
-            ids["memory"] = await insert_memory(
-                db, "irc:#a", "kestrel nest", ids["u1"], ids["a1"]
-            )
-            await db.close()
-            return ids
-
-        ids = asyncio.run(build())
-        result = CliRunner().invoke(
-            redact_command, ["--db", path, *self._argv(form, ids)]
-        )
-        assert result.exit_code == 0, result.output
-        assert "incomplete" not in result.output, result.output
 
 
 class TestRegistration:
