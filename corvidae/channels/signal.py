@@ -893,9 +893,9 @@ class SignalPlugin(TransportPlugin):
         if not self.owns(channel):
             return
         # An unsent final never reaches send_message, so release here. The
-        # slot is given back in _decrement_outstanding's synchronous prefix,
-        # before its first await (the typing stop), so the check and the
-        # release still happen before this hookimpl yields.
+        # slots are given back in _release_all's synchronous prefix, before
+        # its first await (the typing stop), so the check and the release
+        # still happen before this hookimpl yields.
         try:
             unsent = final_was_unsent(channel)
         except Exception:

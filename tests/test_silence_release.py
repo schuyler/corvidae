@@ -139,7 +139,7 @@ class TestSlotRelease:
         """Two slots outstanding, one unsent final: none left. An unsent final
         releases what a sent one would, and one final answers a coalesced
         burst (#398). On Signal the indicator is cleared with exactly one
-        explicit stop, so a double release would show there."""
+        explicit stop (neither missing nor unconditional)."""
         plugin = factory()
         plugin._send_typing = AsyncMock(return_value=True)
         channel = _channel_ending_in(transport, scope, MessageType.UNSENT)

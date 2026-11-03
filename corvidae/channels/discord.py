@@ -721,7 +721,9 @@ class DiscordPlugin(TransportPlugin):
         """Close out every outstanding slot on a final, sent or unsent: one
         final answers a coalesced burst (#398). The refresh loop ends when it
         next sees no slot owed; Discord has no stop frame to send."""
-        self._outstanding[channel.id] = 0
+        # Only a channel that took a slot has an entry to clear.
+        if self._outstanding.get(channel.id, 0) > 0:
+            self._outstanding[channel.id] = 0
 
     async def send_progress(self, channel: Channel, event: OutboundProgress) -> None:
         """Deliver intermediate assistant text without closing out the

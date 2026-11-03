@@ -2984,7 +2984,7 @@ against fake clients. The first real connection is the real test.
 Replies to agent-started turns on a Discord channel (a reminder, say) are
 delivered through the normal send path: `_deliver` resolves the destination
 from the channel id, so no inbound message is needed. The outstanding count
-is guarded at zero in `DiscordPlugin.send_message`, as on Signal,
+is guarded at zero in `DiscordPlugin._release_all`, as on Signal,
 with the same early typing release (#101): any final, sent or withheld,
 zeroes the count.
 Sending to a channel other than the turn's own is a separate capability,
