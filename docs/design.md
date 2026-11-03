@@ -2679,7 +2679,8 @@ monitored.
   have no await between them, so a refresh can't land after the stop and a
   message arriving during the stop sends its start after it. A failed stop
   is logged at WARNING with the channel id and the indicator is left to
-  expire; it never delays or blocks a reply.
+  expire; it never prevents a reply from being delivered (a stop that
+  signal-cli never answers is #413).
 - *Read receipt.* Sent from `on_message_persisted` — processing start —
   not on arrival. A message can sit queued behind contended local
   inference, and a "read" marker followed by a long silence is worse than
@@ -2719,8 +2720,8 @@ at zero for such a reply (`SignalPlugin._decrement_outstanding` never goes
 below 0), so a reply that answers no message neither errors nor drives the
 count negative. The count can't tell which message a reply answers, though: a
 reminder reply that lands while a person's message is outstanding gives back
-that message's typing slot early (#101), and since that release takes the
-count to zero it also clears the indicator immediately (#390). This is
+that message's typing slot early (#101), and if that was the only owed
+reply, the release also clears the indicator immediately (#390). This is
 [PRD §3.2.10](prd.md): a transport delivers every emission on a channel it
 owns, whatever originated the turn, and liveness and reply bookkeeping
 tolerate a reply that answers no outstanding message. Sending to a channel
