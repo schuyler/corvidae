@@ -124,7 +124,7 @@ everything.
 
 Most severe first. File references are to the reviewed commit.
 
-### 1. `set_settings` could rewrite the system prompt and switch models (fixed, #206)
+### 1. `set_settings` could overwrite the request body (fixed, #206)
 
 At the reviewed commit, the one hard rule `RuntimeSettingsPlugin` enforced
 was that `system_prompt` is immutable. It checked the literal key
@@ -316,6 +316,10 @@ opt-out, deny private address ranges and non-HTTP schemes in `web_fetch`,
 root the file tools in a directory, and have `agent.yaml` and the prompt
 files owned by another user and read-only to the daemon (if the daemon
 user owns them, `shell` can `chmod` them back).
+
+The first three of those are PRD §3.5.3 item 3, which the tree does not yet
+meet: the dangerous tools are opt-out, the file tools are unrooted, and
+`web_fetch` has no scheme or address check. That gap is tracked in #444.
 
 ### 5. IRC had no sender authorization (mitigated, #77)
 
