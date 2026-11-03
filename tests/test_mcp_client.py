@@ -1574,6 +1574,100 @@ class TestConfigShapeErrors:
         assert plugin._servers_config == {}
 
 
+# ---------------------------------------------------------------------------
+# Issue #405: servers that connect at startup reach the registry
+# ---------------------------------------------------------------------------
+
+
+class TestStartupRebuildsRegistry:
+    async def test_clean_startup_rebuilds_registry_once(self, pm, kernel_clock, sdk):
+        """A server connecting in on_start triggers one registry rebuild."""
+        sdk.up.add("a")
+        plugin, tools = await _start_plugin(pm, _servers("a"))
+        try:
+            assert [t.name for t in plugin._cached_tools] == ["a__t"]
+            assert tools.rebuilds == 1
+        finally:
+            await plugin.on_stop()
+
+    async def test_startup_with_nothing_connected_does_not_rebuild(
+        self, pm, kernel_clock, sdk
+    ):
+        """No connected server means no MCP tools, so nothing to rebuild."""
+        plugin, tools = await _start_plugin(pm, _servers("a"))
+        try:
+            assert tools.rebuilds == 0
+        finally:
+            await plugin.on_stop()
+
+    async def test_slow_server_tools_reach_real_registry(self, pm, kernel_clock, sdk):
+        """The registry built before MCP finishes connecting gains its tools.
+
+        Reproduces #405: ToolCollectionPlugin.on_start collects while the MCP
+        connect is still in flight; once it lands, the registry must hold
+        the server's tools and its generation must have moved, which is
+        what the Agent watches.
+        """
+        from corvidae.tool_collection import ToolCollectionPlugin
+
+        # Real tools plugin, registered under the name the MCP plugin resolves.
+        tools = ToolCollectionPlugin(pm)
+        pm.register(tools, name="tools")
+        plugin = McpClientPlugin(None)
+        pm.register(plugin, name="mcp")
+        config = _servers("a")
+        await tools.on_init(pm=pm, config=config)
+        await plugin.on_init(pm=pm, config=config)
+
+        # Hold the connect open so the tools plugin collects first.
+        sdk.up.add("a")
+        sdk.gate = asyncio.Event()
+        mcp_start = asyncio.create_task(plugin.on_start(config=config))
+        try:
+            await sdk.entered.wait()
+            await tools.on_start(config=config)
+            assert "a__t" not in tools.registry.as_dict()
+            generation_before = tools.generation
+
+            # Let the connect finish; on_start must refresh the registry.
+            sdk.gate.set()
+            await mcp_start
+
+            assert "a__t" in tools.registry.as_dict()
+            assert tools.generation > generation_before
+        finally:
+            sdk.gate.set()
+            if not mcp_start.done():
+                await mcp_start
+            await plugin.on_stop()
+
+    async def test_startup_rebuild_error_is_logged_and_startup_completes(
+        self, pm, kernel_clock, sdk, caplog
+    ):
+        """A failed rebuild at startup warns, naming the server, and does not raise."""
+        sdk.up.add("a")
+        tools = _FakeTools()
+
+        async def boom() -> None:
+            raise RuntimeError("rebuild broke")
+
+        tools.rebuild_registry = boom
+        pm.register(tools, name="tools")
+        plugin = McpClientPlugin(None)
+        config = _servers("a")
+        await plugin.on_init(pm=pm, config=config)
+        caplog.set_level(logging.WARNING, logger="corvidae.mcp_client")
+        try:
+            await plugin.on_start(config=config)
+            # The server stays connected; only the registry is stale.
+            assert [s.name for s in plugin._servers] == ["a"]
+            msgs = [r.getMessage() for r in caplog.records
+                    if r.levelno == logging.WARNING and "rebuild" in r.getMessage()]
+            assert len(msgs) == 1 and "'a'" in msgs[0]
+        finally:
+            await plugin.on_stop()
+
+
 class TestRetryLoopSurvivesRebuildError:
     async def test_rebuild_registry_error_is_logged_and_loop_continues(
         self, pm, kernel_clock, sdk, caplog
