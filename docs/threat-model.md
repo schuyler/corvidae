@@ -988,14 +988,16 @@ are built (#316), but not their runtime overrides and separate locks.
 ### Smaller things
 
 - Untrusted text in a chat channel can talk the agent into silence. Where
-  `SilencePlugin` is loaded, the IRC, Discord and Signal registers tell the
-  model it may answer `NO_REPLY` to send nothing, and a message that says
-  "don't reply to this" may be enough. The worst case is a missed reply, and
-  every decline is a row in `exchange_log` with `outcomes.silence`
-  (`no_reply` or `empty`), so you can find them. It adds no capability: the
-  agent could already stay quiet by sending an empty final, and nothing it
-  can reach changes. If a channel must always answer, disable `silence` or
-  give it a `register_prompt` without the instruction.
+  `SilencePlugin` is loaded, the system prompt of every IRC, Discord and
+  Signal channel tells the model it may answer `NO_REPLY` to send nothing, and
+  a message that says "don't reply to this" may be enough. The worst case is
+  a missed reply. A decline is a row in `exchange_log` with
+  `outcomes.silence` (`no_reply` or `empty`) only when `outcome_log` is loaded
+  and the turn has a trace id, so look there to find them. It adds no
+  capability: the agent could already stay quiet by sending an empty final,
+  and nothing it can reach changes. A custom `register_prompt`, or an empty
+  one, does not remove the instruction. If a channel must always answer,
+  disable `silence`.
 
 - Control-token strings (`<|im_start|>`, `<|endoftext|>`) and bare
   `<think>`/`</think>`/`<tool_call>`/`</tool_call>` tags in untrusted
@@ -1018,10 +1020,10 @@ are built (#316), but not their runtime overrides and separate locks.
   account name. Not a secret, but it is a real identifier in a public
   repository.
 - No secrets in `prompts/` or `docs/`.
-- A withheld (`unsent`) row is not sent to any transport, including web
+- An `unsent` row is not sent to any transport, including web
   and ACP history replay, but it is not secret: it sits in `sessions.db`,
   the JSONL log and the window like any other row, and a fork or
-  compaction summary sees it. "Withheld" means not said to the channel,
+  compaction summary sees it. `unsent` means not said to the channel,
   not redacted.
 - The memory surfaces (`memory`, `memory_vec`, `memory_fts`,
   `message_fts`) exist only when the cognition extra has been installed.

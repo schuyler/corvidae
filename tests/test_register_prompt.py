@@ -29,7 +29,7 @@ from corvidae.channels.cli import CLIPlugin
 from corvidae.channels.discord import DiscordPlugin
 from corvidae.channels.signal import SignalPlugin
 from corvidae.channels.web import WebPlugin
-from corvidae.hooks import AgentSpec, create_plugin_manager, hookimpl
+from corvidae.hooks import AgentSpec, hookimpl
 
 from helpers import build_plugin_and_channel, drain
 from llm_response_fixtures import _make_text_response
@@ -155,8 +155,6 @@ class TestPrecedence:
 
 
 async def _default(plugin, transport: str, scope: str):
-    # Transports resolve the optional silence plugin through their pm.
-    plugin.pm = create_plugin_manager()
     return await plugin.resolve_register_prompt(channel=Channel(transport=transport, scope=scope))
 
 

@@ -3,9 +3,9 @@
 The agent may end any turn without sending anything. The plugin does three
 things:
 
-  * It owns the register fragment that tells the model how (reply with
-    exactly ``NO_REPLY``); chat transports append it to their default
-    register when this plugin is loaded.
+  * It appends an instruction telling the model how (reply with exactly
+    ``NO_REPLY``) to the system prompt of every channel whose transport is
+    conversational, through the kernel's ``transform_system_prompt`` hook.
   * It vetoes a final emission that is exactly ``NO_REPLY``, so nothing
     reaches the transport and the window records it as unsent.
   * It records every decline (a vetoed ``NO_REPLY`` or an empty final) in
@@ -17,15 +17,15 @@ With the plugin disabled there is no instruction and no veto.
 import asyncio
 import logging
 
-from corvidae.hooks import CorvidaePlugin, final_was_withheld, hookimpl
+from corvidae.hooks import CorvidaePlugin, TransportPlugin, final_was_unsent, hookimpl
 
 logger = logging.getLogger("corvidae.silence")
 
 # Same literal as critique.py's NO_REPLY_MARKER; critique is unchanged.
 NO_REPLY = "NO_REPLY"
 
-# The instruction chat transports append to their default register (S7).
-# Operators with a custom register_prompt copy this text into it (I1).
+# The instruction appended to a conversational channel's system prompt (S7);
+# it reaches custom and empty registers too (I1).
 REGISTER_FRAGMENT = (
     "You don't have to answer every message. Before replying, ask whether you "
     "have anything true, relevant and worth saying to add. When a conversation "
@@ -49,9 +49,18 @@ class SilencePlugin(CorvidaePlugin):
         # GC-dropped mid-flight and on_stop can drain them.
         self._record_tasks: set[asyncio.Task] = set()
 
-    def register_fragment(self) -> str:
-        """The silence instruction a transport appends to its register."""
-        return REGISTER_FRAGMENT
+    @hookimpl(wrapper=True)
+    def transform_system_prompt(self, channel, text):
+        """Append the instruction after the composed prompt, on chat channels only."""
+        result = yield
+        # Find the transport that delivers to this channel; only a
+        # conversational one gets the instruction (web, CLI and ACP always answer).
+        for plugin in self.pm.get_plugins():
+            if isinstance(plugin, TransportPlugin) and plugin.owns(channel):
+                if isinstance(result, str) and plugin.conversational:
+                    return f"{result}\n\n{REGISTER_FRAGMENT}"
+                break
+        return result
 
     @hookimpl
     async def on_stop(self) -> None:
@@ -88,19 +97,19 @@ class SilencePlugin(CorvidaePlugin):
         meta: dict,
         logprobs: dict | None,
     ) -> None:
-        """Record a decline: a withheld NO_REPLY or a withheld empty final."""
+        """Record a decline: a unsent NO_REPLY or a unsent empty final."""
         # Read before the first await: the kernel may move on once a sibling
         # impl raises, and the window must still show this final's row.
         try:
-            withheld = final_was_withheld(channel)
+            unsent = final_was_unsent(channel)
         except Exception:
             logger.warning(
-                "silence: could not tell whether the final on %s was withheld; "
+                "silence: could not tell whether the final on %s was unsent; "
                 "recording nothing", channel.id, exc_info=True,
                 extra={"channel": channel.id, "trace_id": trace_id},
             )
             return
-        if not withheld:
+        if not unsent:
             return
         # Only the two decline shapes count; another gate's veto is not ours.
         text = response_text.strip()

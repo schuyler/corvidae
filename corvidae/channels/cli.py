@@ -10,7 +10,7 @@ import click
 
 from corvidae.channel import ChannelRegistry
 from corvidae.trace import mint_trace_id
-from corvidae.hooks import TransportPlugin, final_was_withheld, get_dependency, hookimpl
+from corvidae.hooks import TransportPlugin, final_was_unsent, get_dependency, hookimpl
 from corvidae.outbound import (
     OutboundMessage,
     OutboundProgress,
@@ -134,7 +134,7 @@ class CLIPlugin(TransportPlugin):
         # An unsent final never reaches send_message, so release here, in
         # the same synchronous step as the check (before any await).
         try:
-            unsent = final_was_withheld(channel)
+            unsent = final_was_unsent(channel)
         except Exception:
             logger.warning(
                 "%s: could not tell whether the final on %s was left unsent; "

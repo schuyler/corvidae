@@ -6,12 +6,14 @@ Design: .claude/plans/215-silence.md. Interface pinned here:
   corvidae_cognition.silence.REGISTER_FRAGMENT: str
   corvidae_cognition.silence.SilencePlugin (entry point "silence",
       optional_depends_on = {"outcome_log"}):
-      register_fragment() -> REGISTER_FRAGMENT
+      transform_system_prompt (wrapper) — on a channel owned by a
+          conversational transport (IRC, Discord, Signal) appends a blank
+          line and REGISTER_FRAGMENT; any other channel is unchanged
       should_send_response — final emission, text equal to NO_REPLY after
           stripping, any origin -> False; anything else -> None
       on_agent_response — when the newest assistant row is UNSENT: a
           NO_REPLY response records outcomes {"silence": "no_reply"}, an
-          empty one {"silence": "empty"}, any other withheld final nothing;
+          empty one {"silence": "empty"}, any other unsent final nothing;
           a sent final records nothing. Writes go through
           outcome_log.upsert_exchange from tracked tasks that on_stop awaits.
 """
@@ -57,7 +59,7 @@ class TestVeto:
 
         assert NO_REPLY == "NO_REPLY"
         assert NO_REPLY in REGISTER_FRAGMENT
-        assert SilencePlugin().register_fragment() == REGISTER_FRAGMENT
+        assert not hasattr(SilencePlugin, "register_fragment")
 
     @pytest.mark.parametrize("text", ["NO_REPLY", "  NO_REPLY\n"])
     @pytest.mark.parametrize("origin", ["user", "heartbeat", "critique"])
@@ -75,6 +77,63 @@ class TestVeto:
     )
     async def test_anything_else_has_no_opinion(self, text, emission):
         assert await self._verdict(text=text, emission=emission) is None
+
+
+# ---------------------------------------------------------------------------
+# S3/S7/S9: the system prompt carries the instruction on conversational
+# transports only
+# ---------------------------------------------------------------------------
+
+
+async def _prompt_pm():
+    """A manager with the real SilencePlugin and every real transport; the
+    web plugin is enabled so it owns its channel."""
+    from corvidae.channels.acp import AcpPlugin
+    from corvidae.channels.cli import CLIPlugin
+    from corvidae.channels.discord import DiscordPlugin
+    from corvidae.channels.irc import IRCPlugin
+    from corvidae.channels.signal import SignalPlugin
+    from corvidae.channels.web import WebPlugin
+    from corvidae_cognition.silence import SilencePlugin
+
+    pm = create_plugin_manager()
+    silence = SilencePlugin()
+    pm.register(silence, name="silence")
+    await silence.on_init(pm=pm, config={})
+    web = WebPlugin()
+    web._enabled = True
+    for name, plugin in (
+        ("irc", IRCPlugin()), ("discord", DiscordPlugin()), ("signal", SignalPlugin()),
+        ("acp", AcpPlugin()), ("web", web), ("cli", CLIPlugin()),
+    ):
+        pm.register(plugin, name=name)
+    return pm
+
+
+class TestSystemPromptWrapper:
+    @pytest.mark.parametrize(
+        "transport, scope",
+        [("irc", "#lex"), ("discord", "dm:7"), ("signal", "aci-1")],
+    )
+    async def test_conversational_channel_gets_the_fragment(self, transport, scope):
+        from corvidae_cognition.silence import REGISTER_FRAGMENT
+
+        result = await (await _prompt_pm()).ahook.transform_system_prompt(
+            channel=Channel(transport=transport, scope=scope), text="IDENTITY"
+        )
+
+        assert result == "IDENTITY\n\n" + REGISTER_FRAGMENT
+
+    @pytest.mark.parametrize(
+        "transport, scope",
+        [("acp", "sess1"), ("web", "tab1"), ("cli", "local")],
+    )
+    async def test_always_answer_channel_is_unchanged(self, transport, scope):
+        result = await (await _prompt_pm()).ahook.transform_system_prompt(
+            channel=Channel(transport=transport, scope=scope), text="IDENTITY"
+        )
+
+        assert result == "IDENTITY"
 
 
 # ---------------------------------------------------------------------------
@@ -183,7 +242,7 @@ class TestDeclineRecord:
         "response_text, expected",
         [("NO_REPLY", "no_reply"), (" NO_REPLY\n", "no_reply"), ("", "empty")],
     )
-    async def test_withheld_decline_is_recorded(self, response_text, expected):
+    async def test_unsent_decline_is_recorded(self, response_text, expected):
         writes = await _respond(response_text, MessageType.UNSENT)
 
         assert len(writes) == 1
@@ -199,6 +258,6 @@ class TestDeclineRecord:
         decline: its newest row is MESSAGE."""
         assert await _respond("NO_REPLY", MessageType.MESSAGE) == []
 
-    async def test_other_withheld_final_records_nothing(self):
+    async def test_other_unsent_final_records_nothing(self):
         """Another gate's veto is not this plugin's decline."""
         assert await _respond("a vetoed answer", MessageType.UNSENT) == []

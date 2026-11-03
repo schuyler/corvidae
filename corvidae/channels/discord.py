@@ -29,8 +29,8 @@ from typing import Any, Optional
 from corvidae.channel import Channel, ChannelRegistry
 from corvidae.channels.split import split_message
 from corvidae.trace import mint_trace_id
-from corvidae.hooks import TransportPlugin, final_was_withheld, get_dependency, hookimpl
-from corvidae.channels._registers import shipped_register, with_silence
+from corvidae.hooks import TransportPlugin, final_was_unsent, get_dependency, hookimpl
+from corvidae.channels._registers import shipped_register
 from corvidae.outbound import OutboundMessage, OutboundProgress
 
 logger = logging.getLogger("corvidae.discord_plugin")
@@ -223,8 +223,8 @@ class DiscordPlugin(TransportPlugin):
     """Transport plugin for Discord DMs, server channels, and threads."""
 
     transport = "discord"
-    # The silence plugin is optional: its register fragment is appended when loaded.
-    optional_depends_on = frozenset({"silence"})
+    # A chat transport: a person is on the other end who may end the exchange.
+    conversational = True
 
     def __init__(self, pm=None) -> None:
         if pm is not None:
@@ -573,8 +573,8 @@ class DiscordPlugin(TransportPlugin):
             return None
         # DM scopes are "dm:<user id>"; everything else is a server channel.
         if channel.scope.startswith("dm:"):
-            return with_silence(self.pm, shipped_register("chat"))
-        return with_silence(self.pm, shipped_register("chat", "discord_group"))
+            return shipped_register("chat")
+        return shipped_register("chat", "discord_group")
 
     @hookimpl
     async def should_process_message(
@@ -696,7 +696,7 @@ class DiscordPlugin(TransportPlugin):
         # An unsent final never reaches send_message, so release here, in
         # the same synchronous step as the check (before any await).
         try:
-            unsent = final_was_withheld(channel)
+            unsent = final_was_unsent(channel)
         except Exception:
             logger.warning(
                 "%s: could not tell whether the final on %s was left unsent; "

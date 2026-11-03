@@ -1,24 +1,22 @@
-"""RED tests for issue #215, the kernel half: a withheld final releases
-transport state (S8), and the transports' default registers carry the
-silence instruction only while a plugin named "silence" is loaded
-(S3/S7/S9), with the no-plugin behaviour unchanged (S4).
+"""Kernel tests for issue #215: an unsent final releases transport state
+(S8), the kernel's ``transform_system_prompt`` hook (S7), and core's freedom
+from the silence plugin (S10), with the no-plugin behaviour unchanged (S4).
 
 Design: .claude/plans/215-silence.md. Interface pinned here:
-  corvidae.hooks.final_was_withheld(channel) -> bool
+  corvidae.hooks.final_was_unsent(channel) -> bool
       True when the newest assistant row in channel.conversation is UNSENT.
   DiscordPlugin / SignalPlugin / AcpPlugin / CLIPlugin gain an
       ``owns()``-guarded ``on_agent_response`` hookimpl that releases the
-      per-turn state a withheld final would otherwise leak.
-  IRC / Discord / Signal ``resolve_register_prompt`` append the fragment of
-      the plugin registered as "silence" (``register_fragment()``), after a
-      blank line, when there is one.
+      per-turn state an unsent final would otherwise leak.
+  Agent.channel_system_prompt passes identity + register through the
+      ``transform_system_prompt`` hook.
 
-Kernel tests must not import corvidae_cognition (tests/test_kernel_boundary.py),
-so the silence plugin is a stub exposing ``register_fragment()`` here; the
-real plugin is covered in tests/cognition/test_silence.py.
+Kernel tests must not import corvidae_cognition (tests/test_kernel_boundary.py);
+the real plugin is covered in tests/cognition/test_silence.py.
 """
 
 import asyncio
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -27,13 +25,14 @@ from llm_response_fixtures import _make_text_response
 
 from corvidae.channel import Channel
 from corvidae.channels._registers import shipped_register
+from corvidae.channel import resolve_system_prompt
 from corvidae.context import ContextWindow, MessageType
 from corvidae.hooks import create_plugin_manager, hookimpl
 from corvidae.outbound import OutboundMessage
 from corvidae.trace import mint_trace_id
 
-# The text the stub silence plugin contributes to a register.
-FRAGMENT = "STUB-SILENCE-FRAGMENT: reply with exactly NO_REPLY when nothing is left to say."
+# The root of the kernel package, searched recursively by the S10 test.
+CORVIDAE_ROOT = Path(__file__).resolve().parent.parent / "corvidae"
 
 
 # ---------------------------------------------------------------------------
@@ -41,26 +40,9 @@ FRAGMENT = "STUB-SILENCE-FRAGMENT: reply with exactly NO_REPLY when nothing is l
 # ---------------------------------------------------------------------------
 
 
-class _StubSilence:
-    """Stands in for the cognition SilencePlugin: only the fragment accessor
-    the transports look up by the name "silence"."""
-
-    def register_fragment(self) -> str:
-        """The instruction text a transport appends to its register."""
-        return FRAGMENT
-
-
-def _pm_with_silence(loaded: bool) -> object:
-    """A plugin manager, with the stub registered as "silence" when loaded."""
-    pm = create_plugin_manager()
-    if loaded:
-        pm.register(_StubSilence(), name="silence")
-    return pm
-
-
 def _channel_ending_in(transport: str, scope: str, final_type: MessageType) -> Channel:
     """A channel whose window ends with an assistant row of ``final_type``:
-    UNSENT for a withheld final, MESSAGE for a sent one."""
+    UNSENT for an unsent final, MESSAGE for a sent one."""
     channel = Channel(transport=transport, scope=scope)
     conv = ContextWindow(channel.id)
     conv.append({"role": "user", "content": "thanks, night!"})
@@ -96,42 +78,42 @@ def _irc_plugin():
 
 
 # ---------------------------------------------------------------------------
-# final_was_withheld
+# final_was_unsent
 # ---------------------------------------------------------------------------
 
 
-class TestFinalWasWithheld:
+class TestFinalWasUnsent:
     def test_true_when_newest_assistant_row_is_unsent(self):
-        from corvidae.hooks import final_was_withheld
+        from corvidae.hooks import final_was_unsent
 
         channel = _channel_ending_in("test", "s", MessageType.UNSENT)
-        assert final_was_withheld(channel) is True
+        assert final_was_unsent(channel) is True
 
     def test_false_when_newest_assistant_row_is_message(self):
-        from corvidae.hooks import final_was_withheld
+        from corvidae.hooks import final_was_unsent
 
         channel = _channel_ending_in("test", "s", MessageType.MESSAGE)
-        assert final_was_withheld(channel) is False
+        assert final_was_unsent(channel) is False
 
     def test_marker_row_after_the_final_does_not_hide_it(self):
-        """The kernel follows a withheld final with a system CONTEXT marker;
+        """The kernel follows an unsent final with a system CONTEXT marker;
         the newest *assistant* row is still the final."""
-        from corvidae.hooks import final_was_withheld
+        from corvidae.hooks import final_was_unsent
 
         channel = _channel_ending_in("test", "s", MessageType.UNSENT)
         channel.conversation.append(
             {"role": "system", "content": "marker"}, MessageType.CONTEXT
         )
-        assert final_was_withheld(channel) is True
+        assert final_was_unsent(channel) is True
 
     def test_false_without_a_conversation_or_assistant_row(self):
-        from corvidae.hooks import final_was_withheld
+        from corvidae.hooks import final_was_unsent
 
         channel = Channel(transport="test", scope="s")
-        assert final_was_withheld(channel) is False
+        assert final_was_unsent(channel) is False
         channel.conversation = ContextWindow(channel.id)
         channel.conversation.append({"role": "user", "content": "hi"})
-        assert final_was_withheld(channel) is False
+        assert final_was_unsent(channel) is False
 
 
 # ---------------------------------------------------------------------------
@@ -153,8 +135,8 @@ def _slot_transports():
 
 class TestSlotRelease:
     @pytest.mark.parametrize("factory, transport, scope", _slot_transports())
-    async def test_withheld_final_releases_exactly_one_slot(self, factory, transport, scope):
-        """Two slots outstanding, one withheld final: one left. (Starting at
+    async def test_unsent_final_releases_exactly_one_slot(self, factory, transport, scope):
+        """Two slots outstanding, one unsent final: one left. (Starting at
         one would hide a double release behind the floor at zero.)"""
         plugin = factory()
         channel = _channel_ending_in(transport, scope, MessageType.UNSENT)
@@ -186,7 +168,7 @@ class TestSlotRelease:
 
 
 class TestAcpRelease:
-    async def test_withheld_final_completes_the_prompt_with_end_turn(self):
+    async def test_unsent_final_completes_the_prompt_with_end_turn(self):
         from corvidae.channels.acp import AcpPlugin
 
         plugin = AcpPlugin()
@@ -221,7 +203,7 @@ class TestAcpRelease:
 
 
 class TestCliRelease:
-    async def test_withheld_final_prints_the_prompt_once(self, capsys):
+    async def test_unsent_final_prints_the_prompt_once(self, capsys):
         from corvidae.channels.cli import CLIPlugin
 
         plugin = CLIPlugin()
@@ -244,7 +226,7 @@ class TestCliRelease:
 
         assert capsys.readouterr().out.count("> ") == 1
 
-    async def test_withheld_final_on_a_channel_cli_does_not_own_prints_nothing(self, capsys):
+    async def test_unsent_final_on_a_channel_cli_does_not_own_prints_nothing(self, capsys):
         """The owns() guard: on_agent_response reaches every transport, and
         CLI is the one whose missing guard would show on a terminal."""
         from corvidae.channels.cli import CLIPlugin
@@ -265,7 +247,7 @@ class TestCliRelease:
 
 class _RowAtResponse:
     """Records the newest assistant row's tag each time on_agent_response
-    fires, read straight from the window (not through final_was_withheld)."""
+    fires, read straight from the window (not through final_was_unsent)."""
 
     def __init__(self):
         self.tags: list[MessageType] = []
@@ -351,7 +333,7 @@ class TestOrderingAtAgentLevel:
 
 
 # ---------------------------------------------------------------------------
-# S3/S7: registers carry the fragment while "silence" is loaded
+# S7: the system prompt passes through transform_system_prompt
 # ---------------------------------------------------------------------------
 
 
@@ -369,56 +351,79 @@ def _register_cases():
     ]
 
 
-async def _register(factory, transport, scope, loaded: bool) -> str | None:
-    """The register a transport resolves for a channel, with the stub silence
-    plugin loaded or not."""
-    plugin = factory()
-    plugin.pm = _pm_with_silence(loaded)
-    return await plugin.resolve_register_prompt(channel=Channel(transport=transport, scope=scope))
+class _AppendMarker:
+    """A stub wrapper that appends a marker to the composed system prompt."""
+
+    @hookimpl(wrapper=True)
+    def transform_system_prompt(self, channel, text):
+        result = yield
+        return result + "\n\nSTUB-MARKER"
 
 
-class TestRegisterCarriesFragment:
-    @pytest.mark.parametrize("factory, transport, scope, names", _register_cases())
-    async def test_register_contains_the_fragment_when_loaded(self, factory, transport, scope, names):
-        register = await _register(factory, transport, scope, loaded=True)
+class TestSystemPromptHook:
+    async def test_wrapper_output_ends_the_channel_system_prompt(self, agent_env):
+        plugin, channel = agent_env
+        plain = await plugin.channel_system_prompt(channel)
+        plugin.pm.register(_AppendMarker(), name="marker")
 
-        assert register is not None and FRAGMENT in register
-        # Appended after a blank line to the register the transport ships.
-        assert register == shipped_register(*names) + "\n\n" + FRAGMENT
+        prompt = await plugin.channel_system_prompt(channel)
 
-    async def test_silence_fragment_helper_reads_the_plugin_by_name(self):
-        from corvidae.channels._registers import silence_fragment
+        assert prompt == plain + "\n\nSTUB-MARKER"
 
-        assert silence_fragment(_pm_with_silence(True)) == FRAGMENT
-        assert silence_fragment(_pm_with_silence(False)) is None
+    async def test_no_wrapper_leaves_identity_plus_register(self, agent_env):
+        plugin, channel = agent_env
+        resolved = plugin._registry.resolve_config(channel)
+        identity = resolve_system_prompt(resolved["system_prompt"], Path("."))
+        register = await plugin._resolve_register(channel, resolved["register_prompt"], Path("."))
+
+        prompt = await plugin.channel_system_prompt(channel)
+
+        assert prompt == (f"{identity}\n\n{register}" if register else identity)
+
+    async def test_raising_wrapper_falls_back_to_the_untransformed_prompt(self, agent_env, caplog):
+        plugin, channel = agent_env
+        plain = await plugin.channel_system_prompt(channel)
+
+        class _Raises:
+            @hookimpl(wrapper=True)
+            def transform_system_prompt(self, channel, text):
+                raise RuntimeError("boom")
+                yield  # pragma: no cover
+
+        plugin.pm.register(_Raises(), name="raises")
+        with caplog.at_level("WARNING"):
+            prompt = await plugin.channel_system_prompt(channel)
+
+        assert prompt == plain
+        assert channel.id in caplog.text and "transform_system_prompt" in caplog.text
 
 
 # ---------------------------------------------------------------------------
-# S9: ACP, web and CLI never learn the instruction
+# S10: core names nothing from cognition
 # ---------------------------------------------------------------------------
 
 
-class TestAlwaysAnswerTransports:
-    @pytest.mark.parametrize(
-        "transport, scope",
-        [("acp", "sess1"), ("web", "tab1"), ("cli", "local")],
-    )
-    async def test_no_register_resolves_with_silence_loaded(self, transport, scope):
-        """Guard: ACP, web and CLI ship no register, so nothing carries the
-        fragment to them (passes before Green; must keep passing)."""
-        from corvidae.channels.acp import AcpPlugin
-        from corvidae.channels.cli import CLIPlugin
-        from corvidae.channels.web import WebPlugin
+class TestCoreIsUnawareOfSilence:
+    def test_no_core_file_names_the_plugin_or_its_helpers(self):
+        # Built from parts so this file's own text is not the offender.
+        banned = [
+            '"' + "silence" + '"', "'" + "silence" + "'",
+            "silence" + "_fragment", "with" + "_silence", "register" + "_fragment",
+        ]
+        offenders = [
+            f"{path.relative_to(CORVIDAE_ROOT).as_posix()}: {token}"
+            for path in sorted(CORVIDAE_ROOT.rglob("*.py"))
+            if "__pycache__" not in path.parts
+            for token in banned
+            if token in path.read_text()
+        ]
+        assert not offenders, "core must not couple to the silence plugin:\n" + "\n".join(offenders)
 
-        pm = _pm_with_silence(True)
-        for name, plugin in (("acp", AcpPlugin()), ("web", WebPlugin()), ("cli", CLIPlugin())):
-            pm.register(plugin, name=name)
+    def test_hooks_exports_the_neutral_helper_only(self):
+        import corvidae.hooks as hooks
 
-        register = await pm.ahook.resolve_register_prompt(
-            channel=Channel(transport=transport, scope=scope)
-        )
-
-        assert register is None
+        assert hasattr(hooks, "final_was_unsent")
+        assert not hasattr(hooks, "final_was_" + "withheld")
 
 
 # ---------------------------------------------------------------------------
@@ -427,13 +432,15 @@ class TestAlwaysAnswerTransports:
 
 
 class TestSilenceNotLoaded:
-    """Regression guards, expected to PASS before Green: without a plugin
-    named "silence" the registers are today's shipped text and a NO_REPLY
-    final is sent like any other reply."""
+    """Regression guards: without the silence plugin the registers are the
+    shipped text and a NO_REPLY final is sent like any other reply."""
 
     @pytest.mark.parametrize("factory, transport, scope, names", _register_cases())
     async def test_registers_equal_todays_shipped_text(self, factory, transport, scope, names):
-        register = await _register(factory, transport, scope, loaded=False)
+        plugin = factory()
+        register = await plugin.resolve_register_prompt(
+            channel=Channel(transport=transport, scope=scope)
+        )
 
         assert register == shipped_register(*names)
 

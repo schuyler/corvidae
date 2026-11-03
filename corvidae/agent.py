@@ -1371,7 +1371,21 @@ class Agent(CorvidaePlugin):
         # Identity first, then the channel's register (#316).
         identity = resolve_system_prompt(resolved_cfg["system_prompt"], base_dir)
         register = await self._resolve_register(channel, resolved_cfg["register_prompt"], base_dir)
-        return f"{identity}\n\n{register}" if register else identity
+        composed = f"{identity}\n\n{register}" if register else identity
+        # Plugins may add sections; a failing one must not cost the channel
+        # its prompt.
+        try:
+            transformed = await self.pm.ahook.transform_system_prompt(
+                channel=channel, text=composed,
+            )
+        except Exception:
+            logger.warning(
+                "transform_system_prompt hook failed for channel %s; using the "
+                "untransformed system prompt",
+                channel.id, exc_info=True, extra={"channel": channel.id},
+            )
+            return composed
+        return composed if transformed is None else transformed
 
     @property
     def mid_conversation_system_role(self) -> str:

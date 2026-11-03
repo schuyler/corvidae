@@ -318,7 +318,7 @@ def get_dependency(pm: pluggy.PluginManager, name: str, expected_type: type[T]) 
     return plugin
 
 
-def final_was_withheld(channel: Channel) -> bool:
+def final_was_unsent(channel: Channel) -> bool:
     """True when the newest assistant row in ``channel.conversation`` is UNSENT.
 
     The kernel appends a final's assistant row (tagged ``UNSENT`` when a gate
@@ -403,6 +403,10 @@ class _SeedHooksPlugin:
 
     @hookimpl(trylast=True)
     async def transform_display_text(self, text, **kwargs) -> str:
+        return text
+
+    @hookimpl(trylast=True)
+    async def transform_system_prompt(self, text, **kwargs) -> str:
         return text
 
     @hookimpl(trylast=True)
@@ -572,11 +576,16 @@ class TransportPlugin(CorvidaePlugin):
     Class attributes:
         transport: The transport name, the ``transport`` half of the
             channel ids it owns (``"irc"`` owns ``irc:#lex``).
+        conversational: True for a chat transport, where a person on the
+            other end may let an exchange wind down; plugins that tailor the
+            system prompt to conversations read it. Defaults to False, so a
+            transport opts in.
         depends_on: Every transport resolves channels through the
             registry.
     """
 
     transport: ClassVar[str]
+    conversational: ClassVar[bool] = False
     depends_on: frozenset[str] = frozenset({"registry"})
 
     def owns(self, channel: Channel) -> bool:
@@ -756,7 +765,7 @@ class AgentSpec:
         Note:
             Fires once per final, including a final a gate vetoed (and an
             empty one): the assistant row is already in the window, tagged
-            ``UNSENT`` when not sent, so ``final_was_withheld(channel)``
+            ``UNSENT`` when not sent, so ``final_was_unsent(channel)``
             tells the two apart. It fires before the transport send.
             Transports use it to release per-turn state for an unsent
             final; observability plugins use it for logging and metrics.
@@ -979,6 +988,36 @@ class AgentSpec:
             channel: The Channel being compacted.
             conversation: The ContextWindow to compact.
             max_tokens: The channel's max_context_tokens limit.
+        """
+
+    @hookspec(firstresult=True)
+    async def transform_system_prompt(self, channel: "Channel", text: str) -> str | None:
+        """Transform a channel's composed system prompt (identity, then register).
+
+        Grammar class: transform (firstresult=True wrapper chain with a
+        trylast seed on _SeedHooksPlugin). Use ``@hookimpl(wrapper=True)``
+        to wrap the chain result. The seed returns ``text`` unchanged;
+        wrappers above it compose in LIFO order, so a later wrapper's text
+        lands after an earlier one's.
+
+        Example::
+
+            @hookimpl(wrapper=True)
+            def transform_system_prompt(self, channel, text):
+                result = yield
+                return result + "\\n\\nExtra section."
+
+        Runs once per conversation start and restart, and for the background
+        views that share ``Agent.channel_system_prompt``; the result is not
+        re-resolved at compaction. A wrapper that raises is logged and the
+        untransformed prompt is used, as is a None result.
+
+        Args:
+            channel: The Channel the prompt is for.
+            text: The identity and register, as composed so far.
+
+        Returns:
+            The transformed prompt, or None to leave it unchanged.
         """
 
     @hookspec(firstresult=True)

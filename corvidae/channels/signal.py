@@ -17,8 +17,8 @@ from typing import Any, Optional
 from corvidae.channel import Channel, ChannelConfig, ChannelRegistry
 from corvidae.channels.split import split_message
 from corvidae.trace import mint_trace_id
-from corvidae.hooks import TransportPlugin, final_was_withheld, get_dependency, hookimpl
-from corvidae.channels._registers import shipped_register, with_silence
+from corvidae.hooks import TransportPlugin, final_was_unsent, get_dependency, hookimpl
+from corvidae.channels._registers import shipped_register
 from corvidae.outbound import OutboundMessage, OutboundProgress
 
 logger = logging.getLogger("corvidae.signal_plugin")
@@ -58,8 +58,8 @@ class SignalPlugin(TransportPlugin):
     """Transport plugin for a Signal DM conversation via signal-cli's daemon."""
 
     transport = "signal"
-    # The silence plugin is optional: its register fragment is appended when loaded.
-    optional_depends_on = frozenset({"silence"})
+    # A chat transport: a person is on the other end who may end the exchange.
+    conversational = True
 
     def __init__(self, pm=None) -> None:
         if pm is not None:
@@ -703,7 +703,7 @@ class SignalPlugin(TransportPlugin):
         norms plus plain text, since Signal shows Markdown literally."""
         if not self.owns(channel):
             return None
-        return with_silence(self.pm, shipped_register("chat", "signal_dm"))
+        return shipped_register("chat", "signal_dm")
 
     @hookimpl
     async def should_process_message(
@@ -879,7 +879,7 @@ class SignalPlugin(TransportPlugin):
         # An unsent final never reaches send_message, so release here, in
         # the same synchronous step as the check (before any await).
         try:
-            unsent = final_was_withheld(channel)
+            unsent = final_was_unsent(channel)
         except Exception:
             logger.warning(
                 "%s: could not tell whether the final on %s was left unsent; "
