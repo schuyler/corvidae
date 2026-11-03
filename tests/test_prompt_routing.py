@@ -30,19 +30,23 @@ import pytest
 
 from corvidae.compaction import CompactionPlugin
 from corvidae.tools.subagent import SUBAGENT_SYSTEM_PROMPT, SubagentPlugin
-from corvidae_cognition.appraisal import AppraisalPlugin
-from corvidae_cognition.critique import DEFAULT_FORK_PROMPTS, CritiquePlugin
-from corvidae_cognition.heartbeat import (
-    DEFAULT_HEARTBEAT_PROMPT,
-    GOALS_INSTRUCTION,
-    HeartbeatPlugin,
-)
-from corvidae_cognition.memory import (
-    DEFAULT_CONSOLIDATION_FORK_PROMPT,
-    RUBRIC_PROMPT,
-    RubricPrior,
-    resolve_consolidation_fork_prompt,
-)
+try:
+    from corvidae_cognition.appraisal import AppraisalPlugin
+    from corvidae_cognition.critique import DEFAULT_FORK_PROMPTS, CritiquePlugin
+    from corvidae_cognition.heartbeat import (
+        DEFAULT_HEARTBEAT_PROMPT,
+        GOALS_INSTRUCTION,
+        HeartbeatPlugin,
+    )
+    from corvidae_cognition.memory import (
+        DEFAULT_CONSOLIDATION_FORK_PROMPT,
+        RUBRIC_PROMPT,
+        RubricPrior,
+        resolve_consolidation_fork_prompt,
+    )
+    _HAS_COGNITION = True
+except ImportError:
+    _HAS_COGNITION = False
 
 
 class _FakePM:
@@ -66,6 +70,7 @@ class _CaptureClient:
         return {"choices": [{"message": {"content": '{"importance": 0.9}'}}]}
 
 
+@pytest.mark.skipif(not _HAS_COGNITION, reason="corvidae_cognition not installed")
 class TestRubricPromptRouting:
     """memory.rubric_prompt must reach the scorer's system message."""
 
@@ -97,6 +102,7 @@ class TestRubricPromptRouting:
         assert client.calls[0]["messages"][0]["content"] == RUBRIC_PROMPT
 
 
+@pytest.mark.skipif(not _HAS_COGNITION, reason="corvidae_cognition not installed")
 class TestHeartbeatPromptRouting:
     """heartbeat.prompt / heartbeat.goals_instruction at on_init."""
 
@@ -179,6 +185,7 @@ class TestCompactionPromptRouting:
         assert plugin._compaction_threshold == 0.8
 
 
+@pytest.mark.skipif(not _HAS_COGNITION, reason="corvidae_cognition not installed")
 class TestConsolidationPromptRouting:
     """memory.consolidation_fork_prompt via resolve_consolidation_fork_prompt."""
 
@@ -209,6 +216,7 @@ class TestConsolidationPromptRouting:
             resolve_consolidation_fork_prompt(cfg)
 
 
+@pytest.mark.skipif(not _HAS_COGNITION, reason="corvidae_cognition not installed")
 class TestAppraisalPromptRouting:
     """appraisal.stage2_fork_prompt at on_init / on_config_reload."""
 
@@ -226,6 +234,7 @@ class TestAppraisalPromptRouting:
         assert plugin._fork_prompt == "FIRST"
 
 
+@pytest.mark.skipif(not _HAS_COGNITION, reason="corvidae_cognition not installed")
 class TestCritiquePromptRouting:
     """critique.fork_prompt.<lens> at on_init / on_config_reload."""
 
