@@ -335,6 +335,10 @@ class TestCorruptAppraisalRow:
             assert len(warnings) == 1, warnings
             assert "t1" in warnings[0], warnings[0]
             assert "inspect or correct" in warnings[0], warnings[0]
+            # A malformed claims entry is a valid envelope shaped wrong, so
+            # it is named distinctly from a value the decoder rejected.
+            assert len(result["unscrubbed"]) == 1, result["unscrubbed"]
+            assert "malformed past_claims" in result["unscrubbed"][0]
         finally:
             await db.close()
 

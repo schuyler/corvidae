@@ -290,7 +290,8 @@ async def redact_messages(
         ``affected_messages`` is the number of supplied ids that actually
         existed and were tombstoned (in dry-run mode, would have been),
         ``affected_memories`` is the cascade count, ``scrubbed``
-        maps each registered scrubber to the rows it changed, and ``requested_messages``
+        maps each registered scrubber to the rows it changed, ``unscrubbed``
+        names every row a scrubber could not clear, and ``requested_messages``
         is the number of ids supplied. The CLI prints ``found of requested``
         so a mistyped id is visible instead of reporting a confident hit.
 
@@ -558,7 +559,12 @@ async def redact_range(
 
     message_ids = [row[0] for row in rows]
     if not message_ids:
-        return {"affected_messages": 0, "affected_memories": 0, "scrubbed": {}}
+        return {
+            "affected_messages": 0,
+            "affected_memories": 0,
+            "scrubbed": {},
+            "unscrubbed": [],
+        }
     return await redact_messages(db, message_ids, dry_run=dry_run)
 
 
