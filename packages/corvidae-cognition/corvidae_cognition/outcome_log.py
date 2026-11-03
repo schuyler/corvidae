@@ -422,13 +422,35 @@ async def redact_exchange_log(
         if row is not None:
             owners.add(row[0])
 
-    # Tombstone the owners' past_claims text.
-    for trace_id in owners:
+    # Tombstone the owners' past_claims text. Sorted so the order is stable:
+    # a corrupt row must not hide the ones after it.
+    for trace_id in sorted(owners):
         async with db.execute(
-            "SELECT appraisal FROM exchange_log WHERE trace_id = ?", (trace_id,)
+            # CAST AS BLOB so invalid UTF-8 stored as TEXT fails at this
+            # row's decode, not inside fetchone() (#232, #311).
+            "SELECT CAST(appraisal AS BLOB) FROM exchange_log "
+            "WHERE trace_id = ?",
+            (trace_id,),
         ) as cursor:
             row = await cursor.fetchone()
-        scrubbed = _scrub_past_claims(row[0], tombstone)
+        # A corrupt value (bad JSON, invalid UTF-8, deep nesting, JSON that
+        # is not an envelope object, or a claims entry missing its keys)
+        # skips with one WARNING; the cascade completes over the other
+        # exchanges (#311). The row is left as-is — only out-of-band writes
+        # can produce one, and the operator is told where it is.
+        try:
+            scrubbed = _scrub_past_claims(row[0], tombstone)
+        except (ValueError, TypeError, RecursionError, AttributeError,
+                KeyError):
+            logger.warning(
+                "skipping corrupt appraisal for exchange %s on channel %s; "
+                "its past_claims are left unscrubbed — inspect or correct "
+                "the row",
+                trace_id, channel_id,
+                exc_info=True,
+                extra={"channel": channel_id, "trace_id": trace_id},
+            )
+            continue
         if scrubbed is None:
             continue
         changed.add(trace_id)

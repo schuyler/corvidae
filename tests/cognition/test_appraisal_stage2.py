@@ -20,6 +20,7 @@ Per plans/implementation/phase-2.md WP2.5:
 
 import asyncio
 import json
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -696,6 +697,118 @@ class TestAppraisalPrior:
         mean = await env.appraisal.mean_valence(env.channel.id, (40, 42))
         assert mean == pytest.approx(0.3)
         await _teardown(env)
+
+    # #311: a corrupt exchange_log.appraisal value in the range is skipped
+    # with one WARNING per row naming the trace id, the channel and the
+    # remedy (#232's pattern); the rest of the range is still used. The
+    # writer API cannot produce a corrupt value, so tests inject one by
+    # direct SQL.
+    async def _corrupt_appraisal(self, env, key: str, value_sql: str) -> None:
+        await env.db.execute(
+            f"UPDATE exchange_log SET appraisal = {value_sql} "
+            "WHERE trace_id = ?",
+            (key,),
+        )
+        await env.db.commit()
+
+    def _corrupt_warnings(self, caplog) -> list[str]:
+        return [
+            r.getMessage() for r in caplog.records
+            if r.levelno >= logging.WARNING
+        ]
+
+    async def _invalid_utf8_appraisal(self, env, key: str) -> None:
+        # JSON '{"stage1":' followed by a lone 0x80/0xff byte: valid TEXT as
+        # far as sqlite is concerned, but refuses to decode as UTF-8. Only
+        # the CAST(... AS BLOB) makes the failure land at the row's decode
+        # instead of inside fetchall().
+        await env.db.execute(
+            "UPDATE exchange_log "
+            "SET appraisal = CAST(x'7b22737461676531223a80ff7d' AS TEXT) "
+            "WHERE trace_id = ?",
+            (key,),
+        )
+        await env.db.commit()
+
+    async def test_corrupt_appraisal_row_warns_and_rest_of_range_used(
+        self, tmp_path, caplog
+    ):
+        env = await build_env(tmp_path)
+        try:
+            # The range maximum sits AFTER the corrupt row, so a reader that
+            # stopped at it (break) would score 0.2 and find no stage 2.
+            await self._seed(env, "k1", 50, stage1={"salience": 0.2})
+            await self._seed(env, "k2", 51, stage1={"salience": 0.42})
+            await self._corrupt_appraisal(env, "k2", "'not json{'")
+            await self._seed(env, "k3", 52, stage1={"salience": 0.3},
+                             stage2={"stakes": 1.0, "valence": 1.0,
+                                     "novelty": 1.0})
+            with caplog.at_level(logging.WARNING,
+                                 logger="corvidae.appraisal"):
+                score = await env.appraisal.importance_over_range(
+                    env.channel, (45, 55))
+                mean = await env.appraisal.mean_valence(
+                    env.channel.id, (45, 55))
+            # Both valid envelopes count, including the one after the corrupt row.
+            assert score == pytest.approx(1.0)
+            assert mean == pytest.approx(1.0)
+            # One WARNING per corrupt row per reader call: importance_over_range
+            # and mean_valence each read the range.
+            warnings = self._corrupt_warnings(caplog)
+            assert len(warnings) == 2, warnings
+            assert "k2" in warnings[0], warnings[0]
+            assert env.channel.id in warnings[0], warnings[0]
+            assert "inspect or correct" in warnings[0], warnings[0]
+        finally:
+            await _teardown(env)
+
+    async def test_non_dict_appraisal_row_warns_and_is_skipped(
+        self, tmp_path, caplog
+    ):
+        env = await build_env(tmp_path)
+        try:
+            await self._seed(env, "n1", 50, stage1={"salience": 0.42})
+            await self._seed(env, "n2", 51, stage1={"salience": 0.2})
+            # '[]' decodes as JSON but is not an appraisal envelope.
+            await self._corrupt_appraisal(env, "n2", "'[]'")
+            # A valid row after the corrupt one, so a reader that stopped at
+            # it (break) would score 0.42 instead of 0.9.
+            await self._seed(env, "n3", 52, stage1={"salience": 0.9})
+            with caplog.at_level(logging.WARNING,
+                                 logger="corvidae.appraisal"):
+                score = await env.appraisal.importance_over_range(
+                    env.channel, (45, 55))
+            assert score == pytest.approx(0.9)
+            warnings = self._corrupt_warnings(caplog)
+            assert len(warnings) == 1, warnings
+            assert "n2" in warnings[0], warnings[0]
+            assert env.channel.id in warnings[0], warnings[0]
+            assert "inspect or correct" in warnings[0], warnings[0]
+        finally:
+            await _teardown(env)
+
+    async def test_invalid_utf8_appraisal_row_warns_and_is_skipped(
+        self, tmp_path, caplog
+    ):
+        env = await build_env(tmp_path)
+        try:
+            await self._seed(env, "u1", 50, stage1={"salience": 0.2})
+            await self._seed(env, "u2", 51, stage1={"salience": 0.42})
+            await self._invalid_utf8_appraisal(env, "u2")
+            await self._seed(env, "u3", 52, stage1={"salience": 0.6})
+            with caplog.at_level(logging.WARNING,
+                                 logger="corvidae.appraisal"):
+                score = await env.appraisal.importance_over_range(
+                    env.channel, (45, 55))
+            # Without CAST(... AS BLOB) the fetch itself raises and the whole
+            # range is lost, so this asserts the row is skipped, not the range.
+            assert score == pytest.approx(0.6)
+            warnings = self._corrupt_warnings(caplog)
+            assert len(warnings) == 1, warnings
+            assert "u2" in warnings[0], warnings[0]
+            assert "inspect or correct" in warnings[0], warnings[0]
+        finally:
+            await _teardown(env)
 
     # R2 (#195) end to end: consolidating channel A stores A's mean valence
     # even though a channel B exchange sits inside A's message-id range.

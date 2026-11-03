@@ -122,6 +122,23 @@ the row):
 - **The `message_fts` backfill** indexes every valid row and indexes a corrupt
   row as empty text, so it is not retried on every start.
 
+### Corrupt `exchange_log` rows
+
+A corrupt `appraisal` value — unparseable JSON, invalid UTF-8, or JSON
+that is not an envelope object — can only come from an out-of-band write;
+the writer API validates the envelope. The range readers
+(`importance_over_range` and `mean_valence`, via `_appraisals_in_range`)
+and `corvidae redact`'s scrubber select the column as
+`CAST(appraisal AS BLOB)` and skip such a row with one WARNING per row
+naming the trace id, the channel and the next step (inspect or correct
+the row) (#311): the prior and the record's mean stage-2 valence are
+computed over the remaining exchanges, and the scrubber finishes the
+cascade over the other exchanges. A corrupt row keeps its `past_claims`,
+and its `provenance_snapshot` is dropped only when the row is at or after
+the redacted id — the same rule as every other exchange. The scrubber
+also skips an envelope whose `past_claims` entry is missing its keys,
+a shape the range readers never inspect.
+
 **Write connection and atomicity (#221).** That section is one SQLite
 transaction (`BEGIN IMMEDIATE` ... `COMMIT`) on a dedicated connection
 only `MemoryPlugin` writes to, opened in `on_start` once the schema

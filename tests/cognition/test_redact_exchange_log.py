@@ -17,6 +17,7 @@ in the window at the turn). Redacting message X in channel C must scrub:
 
 import asyncio
 import json
+import logging
 import time
 
 from click.testing import CliRunner
@@ -145,6 +146,186 @@ class TestPastClaims:
             ) as cursor:
                 assert (await cursor.fetchone())[0] is None
             assert result["scrubbed"]["exchange_log"] == 2
+        finally:
+            await db.close()
+
+
+class TestCorruptAppraisalRow:
+    """#311: a corrupt appraisal value must not abort the redact cascade.
+
+    The scrubber decodes the appraisal column of every owning exchange; a
+    corrupt value (only reachable by out-of-band writes — the daemon's
+    writers always produce valid JSON) skips with a WARNING naming the
+    trace id, channel and remedy, and the other exchanges still scrub.
+    """
+
+    async def test_corrupt_row_skipped_valid_rows_scrubbed(self, caplog):
+        db, ids = await _db_with_dialog()
+        try:
+            await db.execute(
+                "UPDATE exchange_log SET appraisal = 'not json{' "
+                "WHERE trace_id = 't1'"
+            )
+            await db.commit()
+            with caplog.at_level(
+                logging.WARNING, logger="corvidae.outcome_log"
+            ):
+                # Two owners: the corrupt t1 and the valid t2, so the
+                # cascade has a valid row to continue onto after a corrupt
+                # one (a break instead of continue would leave t2 unscrubbed).
+                result = await redact_messages(db, [ids["u1"], ids["u2"]])
+            # t1's snapshot still scrubs (the corrupt appraisal only skips
+            # the claims step); t2's claims and snapshot both scrub.
+            assert result["scrubbed"]["exchange_log"] == 2
+            async with db.execute(
+                "SELECT appraisal FROM exchange_log WHERE trace_id = 't1'"
+            ) as cursor:
+                assert (await cursor.fetchone())[0] == "not json{"
+            t2_claims = (await _row(db, "t2"))[0]["stage2"]["past_claims"]
+            assert all("redacted" in c["claim"] for c in t2_claims), t2_claims
+            for word in ("kestrel", "Brannan", "Zebulon", "40"):
+                assert word not in json.dumps(t2_claims), t2_claims
+            async with db.execute(
+                "SELECT provenance_snapshot FROM exchange_log "
+                "WHERE trace_id = 't2'"
+            ) as cursor:
+                assert (await cursor.fetchone())[0] is None
+            warnings = [
+                r.getMessage() for r in caplog.records
+                if r.name == "corvidae.outcome_log"
+                and r.levelno >= logging.WARNING
+            ]
+            assert len(warnings) == 1, warnings
+            assert "t1" in warnings[0], warnings[0]
+            assert "irc:#a" in warnings[0], warnings[0]
+            assert "inspect or correct" in warnings[0], warnings[0]
+        finally:
+            await db.close()
+
+    async def test_corrupt_row_snapshot_kept_when_redacted_id_is_above_it(
+        self, caplog
+    ):
+        # The snapshot rule is the channel-wide one, not special-cased for
+        # corrupt rows: a1 is the reply inside t1's exchange, so t1's rowid
+        # is below X and its snapshot survives, unlike the u1 case above.
+        db, ids = await _db_with_dialog()
+        try:
+            await db.execute(
+                "UPDATE exchange_log SET appraisal = 'not json{' "
+                "WHERE trace_id = 't1'"
+            )
+            await db.commit()
+            with caplog.at_level(
+                logging.WARNING, logger="corvidae.outcome_log"
+            ):
+                await redact_messages(db, [ids["a1"]])
+            async with db.execute(
+                "SELECT appraisal, provenance_snapshot FROM exchange_log "
+                "WHERE trace_id = 't1'"
+            ) as cursor:
+                appraisal, snapshot = await cursor.fetchone()
+            assert appraisal == "not json{"
+            assert snapshot == '[{"content": "secret context"}]'
+        finally:
+            await db.close()
+
+    async def test_non_dict_appraisal_row_skipped_valid_rows_scrubbed(self, caplog):
+        db, ids = await _db_with_dialog()
+        try:
+            # '[]' decodes as JSON but is not an appraisal envelope, so the
+            # scrubber's decode succeeds and .get would raise AttributeError.
+            await db.execute(
+                "UPDATE exchange_log SET appraisal = '[]' "
+                "WHERE trace_id = 't1'"
+            )
+            await db.commit()
+            with caplog.at_level(
+                logging.WARNING, logger="corvidae.outcome_log"
+            ):
+                result = await redact_messages(db, [ids["u1"]])
+            # t1's snapshot still scrubs; only its claims step skipped.
+            assert result["scrubbed"]["exchange_log"] == 2
+            async with db.execute(
+                "SELECT appraisal FROM exchange_log WHERE trace_id = 't1'"
+            ) as cursor:
+                assert (await cursor.fetchone())[0] == "[]"
+            warnings = [
+                r.getMessage() for r in caplog.records
+                if r.name == "corvidae.outcome_log"
+                and r.levelno >= logging.WARNING
+            ]
+            assert len(warnings) == 1, warnings
+            assert "t1" in warnings[0], warnings[0]
+            assert "inspect or correct" in warnings[0], warnings[0]
+        finally:
+            await db.close()
+
+    async def test_invalid_utf8_appraisal_row_skipped_valid_rows_scrubbed(
+        self, caplog
+    ):
+        db, ids = await _db_with_dialog()
+        try:
+            # Valid TEXT to sqlite, but refuses to decode as UTF-8: without
+            # CAST(appraisal AS BLOB) the fetch raises and aborts the cascade.
+            await db.execute(
+                "UPDATE exchange_log "
+                "SET appraisal = CAST(x'7b22737461676531223a80ff7d' AS TEXT) "
+                "WHERE trace_id = 't1'"
+            )
+            await db.commit()
+            with caplog.at_level(
+                logging.WARNING, logger="corvidae.outcome_log"
+            ):
+                result = await redact_messages(db, [ids["u1"], ids["u2"]])
+            # t1's snapshot still scrubs; t2's claims and snapshot both scrub.
+            assert result["scrubbed"]["exchange_log"] == 2
+            t2_claims = (await _row(db, "t2"))[0]["stage2"]["past_claims"]
+            assert all("redacted" in c["claim"] for c in t2_claims), t2_claims
+            warnings = [
+                r.getMessage() for r in caplog.records
+                if r.name == "corvidae.outcome_log"
+                and r.levelno >= logging.WARNING
+            ]
+            assert len(warnings) == 1, warnings
+            assert "t1" in warnings[0], warnings[0]
+            assert "inspect or correct" in warnings[0], warnings[0]
+        finally:
+            await db.close()
+
+    async def test_malformed_claims_entry_skipped_valid_rows_scrubbed(
+        self, caplog
+    ):
+        db, ids = await _db_with_dialog()
+        try:
+            # Valid JSON and a real envelope, but a claim with no "queries"
+            # key: the scrubber's claim["queries"] raises KeyError, which
+            # must not abort the cascade.
+            broken = {"stage1": {"score": 0.4},
+                      "stage2": {"valence": 0.1, "past_claims": [
+                          {"claim": "The kestrel nests at Brannan Street"}]}}
+            await db.execute(
+                "UPDATE exchange_log SET appraisal = ? WHERE trace_id = 't1'",
+                (json.dumps(broken),),
+            )
+            await db.commit()
+            with caplog.at_level(
+                logging.WARNING, logger="corvidae.outcome_log"
+            ):
+                result = await redact_messages(db, [ids["u1"], ids["u2"]])
+            # The malformed row is left as-is; the cascade still reaches
+            # and scrubs t2.
+            assert result["scrubbed"]["exchange_log"] == 2
+            assert (await _row(db, "t1"))[0] == broken
+            t2_claims = (await _row(db, "t2"))[0]["stage2"]["past_claims"]
+            assert all("redacted" in c["claim"] for c in t2_claims), t2_claims
+            warnings = [
+                r.getMessage() for r in caplog.records
+                if r.name == "corvidae.outcome_log"
+                and r.levelno >= logging.WARNING
+            ]
+            assert len(warnings) == 1, warnings
+            assert "t1" in warnings[0], warnings[0]
+            assert "inspect or correct" in warnings[0], warnings[0]
         finally:
             await db.close()
 
