@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING
 
 from corvidae.attribution import reset_attribution, set_attribution
 from corvidae.context import DEFAULT_CHARS_PER_TOKEN, MessageType, count_tokens, message_tokens
+from corvidae.prompts import resolve_prompt
 from corvidae.fork import (
     build_fork_prompt,
     fork_agent,
@@ -101,7 +102,7 @@ class CompactionPlugin(CorvidaePlugin):
         self._compaction_retention = agent_config.get("compaction_retention", 0.5)
         self._min_messages = agent_config.get("min_messages_to_compact", 5)
         self._chars_per_token = agent_config.get("chars_per_token", DEFAULT_CHARS_PER_TOKEN)
-        self._fork_prompt = agent_config.get("compaction_fork_prompt", self.DEFAULT_FORK_PROMPT)
+        self._fork_prompt = resolve_prompt(config, "agent.compaction_fork_prompt", self.DEFAULT_FORK_PROMPT)
 
         # The standalone summary prompt is gone; say so once at startup (O2).
         if "compaction_prompt" in agent_config:
@@ -158,7 +159,7 @@ class CompactionPlugin(CorvidaePlugin):
         self._compaction_retention = agent_config.get("compaction_retention", 0.5)
         self._min_messages = agent_config.get("min_messages_to_compact", 5)
         self._chars_per_token = agent_config.get("chars_per_token", DEFAULT_CHARS_PER_TOKEN)
-        self._fork_prompt = agent_config.get("compaction_fork_prompt", self.DEFAULT_FORK_PROMPT)
+        self._fork_prompt = resolve_prompt(config, "agent.compaction_fork_prompt", self.DEFAULT_FORK_PROMPT)
 
         self._validate_config()
 

@@ -35,6 +35,7 @@ from corvidae.attribution import reset_attribution, set_attribution
 from corvidae.fork import fork_agent, quote, window_db_ids
 from corvidae.hooks import CorvidaePlugin, hookimpl
 from corvidae.task import Task
+from corvidae.prompts import resolve_prompt
 from corvidae.tuning import config_value, resolve_tunable
 from corvidae_cognition.probe import ReadOnlyProbe
 
@@ -892,7 +893,7 @@ class AppraisalPlugin(CorvidaePlugin):
             self._skip_stage2(channel, trace_id, "the exchange is not in the window")
             return None
         # Build the instruction from the static fork prompt and the exchange.
-        prompt = config_value(
+        prompt = resolve_prompt(
             self.config, "appraisal.stage2_fork_prompt", DEFAULT_STAGE2_FORK_PROMPT
         )
         instruction = (

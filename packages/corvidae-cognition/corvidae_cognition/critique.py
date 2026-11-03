@@ -58,6 +58,7 @@ from corvidae.fork import fork_agent, quote, window_db_ids
 from corvidae.hooks import CorvidaePlugin, hookimpl
 from corvidae.persistence import decode_message_row
 from corvidae.task import Task
+from corvidae.prompts import resolve_prompt
 from corvidae.tuning import config_value, resolve_tunable
 from corvidae_cognition.memory import ChannelScope
 from corvidae_cognition.probe import ReadOnlyProbe
@@ -864,7 +865,7 @@ class CritiquePlugin(CorvidaePlugin):
         evidence = await self._gather_evidence(channel, trace_id, claims)
         if evidence is None:
             return  # no evidence could be gathered; warned in _gather_evidence
-        prompt = config_value(
+        prompt = resolve_prompt(
             self.config, "critique.fork_prompt.provenance",
             DEFAULT_FORK_PROMPTS["provenance"],
         )
@@ -1173,7 +1174,7 @@ class CritiquePlugin(CorvidaePlugin):
         if fork_agent(self.pm if hasattr(self, "pm") else None, "critique") is None:
             self._skip_lens(channel, lens, trace_id, FORKS_OFF_REASON)
             return None
-        prompt = config_value(
+        prompt = resolve_prompt(
             self.config, f"critique.fork_prompt.{lens}", DEFAULT_FORK_PROMPTS[lens]
         )
         instruction = (
