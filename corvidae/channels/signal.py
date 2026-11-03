@@ -782,10 +782,13 @@ class SignalPlugin(TransportPlugin):
             await self._send_rpc("sendTyping", {"recipient": channel.scope, "stop": stop})
             return True
         except Exception as exc:
-            action = "stop" if stop else "start"
+            # Name the channel and what was being sent, and the remedy: the
+            # indicator is cosmetic, so only a persistent failure needs action.
+            action = "stop" if stop else "start or refresh"
             logger.warning(
                 "signal: failed to %s typing indicator on %s (%s): %s; "
-                "the client clears it on its own expiry",
+                "the reply is unaffected -- if this repeats, check that "
+                "signal-cli is running and its socket is reachable",
                 action, channel.id, type(exc).__name__, exc, exc_info=True,
             )
             return False
