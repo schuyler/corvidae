@@ -176,6 +176,15 @@ async def _wait_until(predicate, timeout: float = 5.0, interval: float = 0.01) -
     await asyncio.wait_for(_poll(), timeout=timeout)
 
 
+def _typing_frames(server: FakeSignalServer, *, stop: bool) -> list[dict]:
+    """Received sendTyping frames whose ``stop`` flag equals ``stop`` --
+    True is the explicit clear (issue #390), False a start or refresh."""
+    return [
+        f for f in server.requests_matching("typing")
+        if isinstance(f.get("params"), dict) and f["params"].get("stop") is stop
+    ]
+
+
 async def _drive_gate(pm, *, channel, sender: str, text: str, trace_id: str) -> bool | None:
     """Run the message gate the way Agent.on_message runs it.
 
@@ -999,6 +1008,10 @@ class TestOutboundSend:
                     break
             assert "reminder: stand up" in (_extract_text(frame) or "")
             assert h.plugin._outstanding.get(channel.id, 0) == 0
+            # Issue #390 R3: nothing was owed, so the count made no 1 -> 0
+            # transition and no typing frame (start or stop) goes out.
+            await asyncio.sleep(0.2)
+            assert not h.server.requests_matching("typing")
         finally:
             await _stop_plugin(h)
 
@@ -1153,13 +1166,110 @@ class TestLiveness:
                 channel = h.pm.ahook.on_message.await_args.kwargs["channel"]
                 await h.plugin.send(channel=channel, event=OutboundMessage(text="final reply"))
 
-                send_request = await h.server.next_request(timeout=5)
-                assert send_request.get("method") == "send"
+                await _wait_until(
+                    lambda: any(f.get("method") == "send" for f in h.server.received), timeout=5
+                )
+                send_index = next(
+                    i for i, f in enumerate(h.server.received) if f.get("method") == "send"
+                )
 
-                with pytest.raises(asyncio.TimeoutError):
-                    await h.server.next_request(timeout=TYPING_SILENCE_WINDOW)
+                # Issue #390: the indicator is cleared explicitly once the owed
+                # reply is out, rather than left to expire on the client. A
+                # refresh may race in between the send and the stop, so this
+                # asserts "a stop follows the send", not "the next frame".
+                await _wait_until(lambda: _typing_frames(h.server, stop=True), timeout=5)
+                stop_frame = _typing_frames(h.server, stop=True)[0]
+                stop_index = h.server.received.index(stop_frame)
+                assert stop_index > send_index
+                assert stop_frame["params"].get("recipient") == AUTH_ACI
+
+                # Then nothing restarts it: no start/refresh after the stop.
+                await asyncio.sleep(TYPING_SILENCE_WINDOW)
+                restarted = [
+                    f for f in h.server.received[stop_index + 1:]
+                    if "typing" in str(f.get("method", "")).lower()
+                    and f.get("params", {}).get("stop") is False
+                ]
+                assert not restarted, f"typing restarted after the stop: {restarted}"
             finally:
                 await _stop_plugin(h)
+
+    async def test_second_of_two_replies_clears_typing_first_does_not(self, tmp_path):
+        """Issue #390 R3: with two messages outstanding, the first reply must
+        not send the explicit stop (a reply is still owed); the second one,
+        taking the count 1 -> 0, must."""
+        with _fast_typing_refresh():
+            h = await _start_plugin(tmp_path)
+            try:
+                for text in ("one", "two"):
+                    await _push_text(h, text)
+                await _wait_until(lambda: h.pm.ahook.on_message.await_count >= 2, timeout=5)
+                channel = h.pm.ahook.on_message.await_args.kwargs["channel"]
+                await _wait_until(lambda: h.plugin._outstanding.get(channel.id) == 2, timeout=5)
+
+                await h.plugin.send(channel=channel, event=OutboundMessage(text="reply to one"))
+                await asyncio.sleep(TYPING_SILENCE_WINDOW)
+                assert not _typing_frames(h.server, stop=True), (
+                    "no explicit stop while a reply is still owed"
+                )
+
+                await h.plugin.send(channel=channel, event=OutboundMessage(text="reply to two"))
+                await _wait_until(lambda: _typing_frames(h.server, stop=True), timeout=5)
+                assert len(_typing_frames(h.server, stop=True)) == 1
+            finally:
+                await _stop_plugin(h)
+
+    async def test_vetoed_lone_message_clears_typing(self, tmp_path):
+        """Issue #390 R2: a lone message vetoed by a second gate took a typing
+        slot (and sent a start); giving that slot back takes the count
+        1 -> 0, so the indicator is cleared explicitly."""
+        h = await _start_plugin(tmp_path)
+        h.pm.register(_VetoGatePlugin("vetoed"), name="veto_gate")
+        try:
+            await _push_text(h, "vetoed")
+            await _wait_until(lambda: _typing_frames(h.server, stop=True), timeout=5)
+            stop_frame = _typing_frames(h.server, stop=True)[0]
+            assert stop_frame["params"].get("recipient") == AUTH_ACI
+            # The start came first.
+            start_frame = _typing_frames(h.server, stop=False)[0]
+            assert h.server.received.index(start_frame) < h.server.received.index(stop_frame)
+        finally:
+            await _stop_plugin(h)
+
+    async def test_failed_typing_stop_is_logged_and_reply_still_delivered(self, tmp_path, caplog):
+        """Issue #390 R4: if the explicit stop fails, the reply has still gone
+        out, nothing raises out of send, and a warning names the channel.
+
+        Runs at the production refresh interval so no refresh frame can
+        consume the armed failure."""
+        h = await _start_plugin(tmp_path)
+        try:
+            await _push_text(h, "hello")
+            start = await h.server.next_request(timeout=5)
+            assert "typing" in str(start.get("method", "")).lower()
+            # The start goes out before on_message is called.
+            await _wait_until(lambda: h.pm.ahook.on_message.await_count >= 1, timeout=5)
+            channel = h.pm.ahook.on_message.await_args.kwargs["channel"]
+            # Armed only after the start frame, so it hits the stop.
+            h.server.fail_next_matching("typing", "boom")
+
+            with caplog.at_level(logging.WARNING):
+                await h.plugin.send(channel=channel, event=OutboundMessage(text="the reply"))
+                await _wait_until(lambda: _typing_frames(h.server, stop=True), timeout=5)
+                await _wait_until(
+                    lambda: any(
+                        r.levelno == logging.WARNING
+                        and channel.id in r.getMessage()
+                        and "typing" in r.getMessage()
+                        for r in caplog.records
+                    ),
+                    timeout=5,
+                )
+
+            sends = [f for f in h.server.received if f.get("method") == "send"]
+            assert sends and "the reply" in (_extract_text(sends[0]) or "")
+        finally:
+            await _stop_plugin(h)
 
     async def test_rejection_decrements_the_outstanding_typing_count(self, tmp_path):
         """Typing runs while the per-channel count of outstanding admitted
@@ -1477,6 +1587,9 @@ class TestTransportMintedIds:
                     and h.plugin._outstanding.get(channel.id, 0) == 0,
                     timeout=3,
                 )
+                # The 1 -> 0 release sends an explicit stop (issue #390); wait
+                # for it so the snapshot below doesn't race it.
+                await _wait_until(lambda: _typing_frames(h.server, stop=True), timeout=3)
 
                 # Typing must go quiet: nothing new across several intervals.
                 settled = len(h.server.requests_matching("typing"))
@@ -1503,6 +1616,9 @@ class TestTransportMintedIds:
                     and h.plugin._outstanding.get(channel.id, 0) == 0,
                     timeout=3,
                 )
+                # The 1 -> 0 release sends an explicit stop (issue #390); wait
+                # for it so the snapshot below doesn't race it.
+                await _wait_until(lambda: _typing_frames(h.server, stop=True), timeout=3)
 
                 # Typing must go quiet: nothing new across several intervals.
                 settled = len(h.server.requests_matching("typing"))
