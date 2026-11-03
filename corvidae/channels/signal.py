@@ -877,9 +877,14 @@ class SignalPlugin(TransportPlugin):
 
     async def send_message(self, channel: Channel, event: OutboundMessage) -> None:
         """Deliver a final reply, split to fit and never truncated, and
-        close out one outstanding slot."""
+        close out every outstanding slot: one reply answers a coalesced burst
+        (#398), so the indicator stops once, when the count was above zero."""
         await self._deliver(channel, event.text)
-        await self._decrement_outstanding(channel)
+        # Zero the count before awaiting the stop, as _decrement_outstanding
+        # does, so a message arriving meanwhile sees 0 -> 1.
+        if self._outstanding.get(channel.id, 0) > 0:
+            self._outstanding[channel.id] = 0
+            await self._send_typing(channel, stop=True)
 
     async def send_progress(self, channel: Channel, event: OutboundProgress) -> None:
         """Deliver intermediate assistant text through the same path as

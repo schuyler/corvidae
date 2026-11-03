@@ -148,6 +148,27 @@ def _visible(msg: dict) -> dict:
     return {k: v for k, v in msg.items() if not k.startswith("_")}
 
 
+def unanswered_user_messages(messages: list[dict]) -> list[dict]:
+    """Return the user MESSAGE rows after the window's last assistant row.
+
+    These are the messages no reply has answered yet (a coalesced burst, #398),
+    in window order; all user MESSAGE rows when there is no assistant row.
+    CONTEXT rows and notification/tool rows are skipped by type and role. A
+    row with no ``_message_type`` counts as MESSAGE.
+    """
+    # Find where the last assistant row sits (-1 when there is none).
+    last_assistant = -1
+    for i, msg in enumerate(messages):
+        if msg.get("role") == "assistant":
+            last_assistant = i
+    # Keep only user-role MESSAGE rows after that point.
+    return [
+        msg for msg in messages[last_assistant + 1:]
+        if msg.get("role") == "user"
+        and msg.get("_message_type", MessageType.MESSAGE) == MessageType.MESSAGE
+    ]
+
+
 def message_tokens(msg: dict) -> int:
     """Token count of a message the way it actually gets sent: the
     JSON-serialized visible dict, not just `content`. Catches size hiding in

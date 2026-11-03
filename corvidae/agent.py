@@ -26,6 +26,7 @@ Logging:
 
 import asyncio
 import logging
+import time
 from typing import TYPE_CHECKING
 
 import aiohttp
@@ -1012,6 +1013,22 @@ class Agent(CorvidaePlugin):
                     "has_tool_call_id": item.tool_call_id is not None,
                 },
             )
+            # Coalesce a burst (#398): a USER item that is not a retry takes
+            # the plain USER items queued directly behind it into one turn.
+            # The last of them owns the turn (R7); the earlier ones are
+            # absorbed: persisted in order, but answered by the owner's reply.
+            # Tool results and notifications (NOTIFICATION) and retry copies
+            # stop the burst, so they keep their place in the queue.
+            absorbed: list[QueueItem] = []
+            queue = self.queues.get(channel.id)
+            if item.role == QueueItemRole.USER and not item.retry and queue is not None:
+                following = queue.take_while(
+                    lambda q_item: q_item.role == QueueItemRole.USER
+                    and not q_item.retry
+                )
+                if following:
+                    absorbed = [item, *following[:-1]]
+                    item = following[-1]
             # Trace resolution MUST happen here, before the
             # set_attribution call below, so the widened attribution carries
             # the id into every LLM call in the turn (including tool Tasks
@@ -1028,6 +1045,15 @@ class Agent(CorvidaePlugin):
                     item.trace_id = mint_trace_id()
                     item.originating = True
 
+            # One line per coalesced burst, after the owner's trace is known.
+            if absorbed:
+                logger.info(
+                    "coalesced %d queued messages on channel %s into one turn "
+                    "(owning trace_id %s)",
+                    len(absorbed) + 1, channel.id, item.trace_id,
+                    extra={"channel": channel.id, "trace_id": item.trace_id},
+                )
+
             # Attribute all LLM activity in this turn (including tool Tasks
             # created during dispatch, which capture the context at creation)
             # to the turn stage and this channel. Compaction re-labels itself
@@ -1037,16 +1063,68 @@ class Agent(CorvidaePlugin):
                 trace_id=item.trace_id, meta=item.meta,
             )
             try:
-                await self._process_queue_item_attributed(item, channel)
+                await self._process_queue_item_attributed(item, channel, absorbed)
             finally:
                 reset_attribution(attribution_token)
         finally:
             self._note_settled(channel)
 
+    async def _append_and_persist_message(
+        self,
+        channel: Channel,
+        conv: ContextWindow,
+        item: QueueItem,
+        conversation_message: dict,
+        request_text: str,
+    ) -> dict[str, float]:
+        """Step 4: append a message to the window, persist it, announce it.
+
+        Returns the seconds spent persisting, as a ``{"persist": s}`` phase.
+        """
+        # 4. Append message to conversation log and fire persistence event.
+        # The resolved rowid attaches to the WINDOW copy (conv.append
+        # shallow-copies, so the local dict would not update the window).
+        _t_persist_start = time.monotonic()
+        conv.append(conversation_message)
+        rowid = None
+        try:
+            results = await self.pm.ahook.persist_message(
+                channel=channel,
+                message=conversation_message,
+                message_type=MessageType.MESSAGE,
+            )
+            rowid = resolve_single_result(results, "persist_message")
+            if rowid is not None:
+                conv.messages[-1]["_db_id"] = rowid
+        except Exception:
+            logger.warning("persist_message hook failed", exc_info=True)
+        phases = {"persist": time.monotonic() - _t_persist_start}
+
+        # 4c. Fire on_message_persisted only when this item originates its
+        # trace (USER items, and notification items whose id was
+        # minted at dequeue). Mid-exchange tool-result rows, injected
+        # CONTEXT, and assistant rows never fire it — per-row firing under
+        # one id would overwrite the rowid with each successive row. Fires
+        # regardless of persistence outcome (rowid may be None).
+        if item.originating and item.trace_id is not None:
+            try:
+                await self.pm.ahook.on_message_persisted(
+                    channel=channel, trace_id=item.trace_id,
+                    rowid=rowid, text=request_text, meta=item.meta,
+                )
+            except Exception:
+                logger.warning("on_message_persisted hook failed", exc_info=True, extra={"channel": channel.id})
+        return phases
+
     async def _process_queue_item_attributed(
-        self, item: QueueItem, channel: Channel
+        self, item: QueueItem, channel: Channel, absorbed: list[QueueItem]
     ) -> None:
-        """Body of _process_queue_item, run with turn attribution set."""
+        """Body of _process_queue_item, run with turn attribution set.
+
+        ``absorbed`` holds the earlier messages of a coalesced burst (#398);
+        ``item`` is the burst's last message and owns the turn. Empty for
+        every other item.
+        """
         # A retry only runs while it is still the channel's pending one; a
         # newer successful turn may have dropped it after its timer fired.
         if item.retry:
@@ -1107,39 +1185,19 @@ class Agent(CorvidaePlugin):
         # Steps 4-6 already ran on the first attempt of a retried turn (its
         # output is in the window), so a retry goes straight to the LLM call.
         if not item.retry:
-            # 4. Append message to conversation log and fire persistence event.
-            # The resolved rowid attaches to the WINDOW copy (conv.append
-            # shallow-copies, so the local dict would not update the window).
-            _t_persist_start = _time.monotonic()
-            conv.append(conversation_message)
-            rowid = None
-            try:
-                results = await self.pm.ahook.persist_message(
-                    channel=channel,
-                    message=conversation_message,
-                    message_type=MessageType.MESSAGE,
+            # 4 + 4c. Absorbed burst messages first, in arrival order, each
+            # under its own trace (they are USER items, so each one fires
+            # on_message_persisted); then the owner's message.
+            for absorbed_item in absorbed:
+                absorbed_result = self._build_conversation_message(absorbed_item)
+                if absorbed_result is None:
+                    continue
+                await self._append_and_persist_message(
+                    channel, conv, absorbed_item, *absorbed_result,
                 )
-                rowid = resolve_single_result(results, "persist_message")
-                if rowid is not None:
-                    conv.messages[-1]["_db_id"] = rowid
-            except Exception:
-                logger.warning("persist_message hook failed", exc_info=True)
-            _phases["persist"] = _time.monotonic() - _t_persist_start
-
-            # 4c. Fire on_message_persisted only when this item originates its
-            # trace (USER items, and notification items whose id was
-            # minted at dequeue). Mid-exchange tool-result rows, injected
-            # CONTEXT, and assistant rows never fire it — per-row firing under
-            # one id would overwrite the rowid with each successive row. Fires
-            # regardless of persistence outcome (rowid may be None).
-            if item.originating and item.trace_id is not None:
-                try:
-                    await self.pm.ahook.on_message_persisted(
-                        channel=channel, trace_id=item.trace_id,
-                        rowid=rowid, text=request_text, meta=item.meta,
-                    )
-                except Exception:
-                    logger.warning("on_message_persisted hook failed", exc_info=True, extra={"channel": channel.id})
+            _phases.update(await self._append_and_persist_message(
+                channel, conv, item, conversation_message, request_text,
+            ))
 
             # 4b. Batch tool results: if this is a tool-result notification and
             # there are still pending tool calls, skip the LLM call.

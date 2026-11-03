@@ -575,7 +575,21 @@ class CritiquePlugin(CorvidaePlugin):
         conv = getattr(channel, "conversation", None)
         if conv is None or not getattr(conv, "messages", None):
             return
-        from corvidae.context import MessageType
+        from corvidae.context import MessageType, unanswered_user_messages
+
+        # Burst boundary (#398): when this trace's recorded originating row is
+        # one of the unanswered user messages, move it to the first such row
+        # so the provenance search never counts the burst's own messages as
+        # earlier evidence. A row whose persistence failed has no int _db_id.
+        recorded = self._originating_rowid.get(trace_id)
+        burst_ids = [
+            m["_db_id"]
+            for m in unanswered_user_messages(conv.messages)
+            if isinstance(m.get("_db_id"), int)
+        ]
+        if recorded is not None and recorded in burst_ids:
+            self._originating_rowid[trace_id] = burst_ids[0]
+            self._originating_rowid.move_to_end(trace_id)
 
         snapshot = [
             {"content": m.get("content") or ""}

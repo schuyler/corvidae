@@ -275,7 +275,7 @@ async def test_retry_item_is_never_merged_into_a_burst(make_env):
     [m1+m2] is one call, the retry is never merged into it and makes no call
     (a successful turn before it is dequeued cancels it), and m3 is answered
     in its own call: two calls after the in-flight one."""
-    plugin, channel, db, llm = await make_env()
+    plugin, channel, _, llm = await make_env()
     owner = await start_inflight(plugin, channel, llm)
 
     await send(plugin, channel, "m1")
@@ -315,7 +315,7 @@ async def test_burst_gets_one_max_turns_budget(make_env):
             return _make_text_response("reply0")
         return _make_tool_call_response([_make_tool_call(f"c{i}", "echo", {"x": "v"})])
 
-    plugin, channel, db, llm = await make_env(handler, config=ChannelConfig(max_turns=2))
+    plugin, channel, _, llm = await make_env(handler, config=ChannelConfig(max_turns=2))
 
     async def echo(x: str) -> str:
         """Return the argument."""
@@ -345,7 +345,7 @@ async def test_burst_during_tool_cycle_is_charged_to_the_cycle(make_env):
             ])
         return _make_text_response(f"reply{i}")
 
-    plugin, channel, db, llm = await make_env(handler)
+    plugin, channel, _, llm = await make_env(handler)
 
     async def slow_a(x: str) -> str:
         """Wait for the test, then return."""
@@ -373,7 +373,10 @@ async def test_burst_during_tool_cycle_is_charged_to_the_cycle(make_env):
 
     # Both results arrive together in a single later call.
     assert len(llm.calls) == 3
-    results = [m["content"] for m in llm.calls[2] if m.get("role") == "tool"]
+    # Background results carry task.py's "[Task <id>] " prefix; compare the rest.
+    results = [
+        m["content"].split("] ", 1)[1] for m in llm.calls[2] if m.get("role") == "tool"
+    ]
     assert sorted(results) == ["A-RESULT:1", "B-RESULT:2"]
 
 
@@ -386,7 +389,7 @@ async def test_burst_turn_carries_the_last_trace_everywhere(make_env):
     """R7 (#398): every turn hook, the model call's attribution (what usage rows
     carry) and the response see the last message's trace id; none carries an
     earlier burst message's."""
-    plugin, channel, db, llm = await make_env()
+    plugin, channel, _, llm = await make_env()
     before: list[str] = []
     gates: list[str] = []
 
@@ -400,7 +403,6 @@ async def test_burst_turn_carries_the_last_trace_everywhere(make_env):
         @hookimpl
         async def should_send_response(self, channel, text, emission, trace_id, meta):
             gates.append(trace_id)
-            return None
 
     plugin.pm.register(Spy(), name="spy")
 
@@ -428,7 +430,7 @@ async def test_drain_waits_for_burst_turn_and_channel_never_idle_early(make_env)
     signal fires for the channel between the burst's dequeue and the end of
     its turn."""
     events: list[tuple] = []
-    plugin, channel, db, llm = await make_env(log=events)
+    plugin, channel, _, llm = await make_env(log=events)
 
     class Recorder:
         """Stands in for IdleTracker: logs activity and settle signals."""

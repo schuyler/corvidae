@@ -678,9 +678,12 @@ class DiscordPlugin(TransportPlugin):
                 logger.warning("discord: failed to deliver message: %s", exc, exc_info=True)
 
     async def send_message(self, channel: Channel, event: OutboundMessage) -> None:
-        """Deliver a final reply and close out one outstanding slot."""
+        """Deliver a final reply and close out every outstanding slot: one
+        reply answers a coalesced burst (#398)."""
         await self._deliver(channel, event.text)
-        self._decrement_outstanding(channel)
+        # Zero the count; the refresh loop ends when it sees no slot owed.
+        if self._outstanding.get(channel.id, 0) > 0:
+            self._outstanding[channel.id] = 0
 
     async def send_progress(self, channel: Channel, event: OutboundProgress) -> None:
         """Deliver intermediate assistant text without closing out the
