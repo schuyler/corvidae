@@ -444,12 +444,6 @@ A job costs a main-model turn per firing on the shared backend; keep intervals i
 | `heartbeat.prompt` | string / file / list | built-in | The beat's instruction. Resolved by `resolve_prompt` (#411): a string is inline text, `{"file": path}` or a list of paths reads files relative to the config directory, absent uses the built-in default. `prompts/heartbeat.md` is the documented copy. Read at startup only. |
 | `heartbeat.goals_instruction` | string / file / list | built-in | Appended when the goals plugin is loaded: the instruction to review open and retired goals. Same resolution as `heartbeat.prompt`. `prompts/heartbeat-goals.md` is the documented copy. Read at startup only. |
 
-## `silence` — the right to silence
-
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `silence.instruction` | string / file / list | built-in | The paragraph `SilencePlugin` appends to a conversational channel's system prompt, telling the model it may reply `NO_REPLY` to send nothing (see [cognition.md](cognition.md#silenceplugin-packagescorvidae-cognitioncorvidae_cognitionsilencepy)). Same resolution as `heartbeat.prompt`. Keep the literal `NO_REPLY` in any replacement: the veto matches that token, not your wording. Read at startup only. |
-
 **Sleep.** The heartbeat sleeps whenever `heartbeat.after` is absent. To put it to sleep, delete or comment out the block and restart; it stays asleep across every restart after that, because `agent.yaml` is the record. `plugins.disabled: [heartbeat]` does the same. Reloading the config doesn't wake it or put it to sleep; restart.
 
 **Memory.** Setting `heartbeat.after` requires the `memory` plugin; with memory disabled, startup fails with a message saying so. The beat reviews the most recent memories (up to 20) of the *other* channels in its memory scope, newest first, never its own. Memory is compartmented per channel, so with no `memory.channel_groups` entry for `internal:heartbeat` it has nothing to review. Put it in a group with the channels it should look after:
@@ -465,6 +459,14 @@ memory:
 Group membership works both ways, so the other channels in the group can retrieve the memories consolidated from beats too (see [threat-model.md](threat-model.md)).
 
 **Cost.** Each beat is a main-model turn on the shared backend, and `heartbeat.keep_beats` bounds its prompt to the system prompt, the current beat and that many earlier ones. A beat waits for quiet, so it never competes with a conversation, but a short `after` keeps the system from staying quiet long enough for memory retention's 60-second quiet window; retention then runs on its `max_delay` instead.
+
+---
+
+## `silence` — the right to silence
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `silence.instruction` | string / file / list | built-in | The paragraph `SilencePlugin` appends to a conversational channel's system prompt, telling the model it may reply `NO_REPLY` to send nothing (see [cognition.md](cognition.md#silenceplugin-packagescorvidae-cognitioncorvidae_cognitionsilencepy)). Same resolution as `heartbeat.prompt`. Keep the literal `NO_REPLY` in any replacement: the veto matches that token, not your wording. Read at startup only. |
 
 ---
 
