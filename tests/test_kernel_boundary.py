@@ -28,6 +28,7 @@ ALLOWED_KERNEL_MODULES = {
     "corvidae.fork",
     "corvidae.attribution",
     "corvidae.tuning",
+    "corvidae.prompts",
     "corvidae.context",
     "corvidae.task",
     "corvidae.tool",

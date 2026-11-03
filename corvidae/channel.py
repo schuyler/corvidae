@@ -22,6 +22,7 @@ from time import time
 from typing import TYPE_CHECKING
 
 from corvidae.fork import parse_forks_config
+from corvidae.prompts import read_prompt_files
 from corvidae.tool_policy import parse_channel_tools
 # Transport/session metadata parked on Channel.runtime_overrides — never
 # merge into resolved ChannelConfig or forward to the LLM request body.
@@ -710,13 +711,7 @@ def resolve_system_prompt(value: str | list[str], base_dir: Path) -> str:
         if not value:
             _prompt_logger.warning("empty system prompt list resolved to empty string")
             return ""
-        parts = []
-        for entry in value:
-            path = Path(entry)
-            if not path.is_absolute():
-                path = base_dir / path
-            parts.append(path.read_text().strip())
-        result = "\n\n".join(parts)
+        result = read_prompt_files(value, base_dir, key="system_prompt")
         _prompt_logger.debug(
             "system prompt resolved from file list",
             extra={"file_count": len(value), "length": len(result)},

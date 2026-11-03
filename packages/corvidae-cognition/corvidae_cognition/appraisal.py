@@ -35,6 +35,7 @@ from corvidae.attribution import reset_attribution, set_attribution
 from corvidae.fork import fork_agent, quote, window_db_ids
 from corvidae.hooks import CorvidaePlugin, hookimpl
 from corvidae.task import Task
+from corvidae.prompts import resolve_prompt
 from corvidae.tuning import config_value, resolve_tunable
 from corvidae_cognition.probe import ReadOnlyProbe
 
@@ -525,12 +526,24 @@ class AppraisalPlugin(CorvidaePlugin):
     async def on_init(self, pm, config: dict) -> None:
         await super().on_init(pm, config)
         self.config = config
+        self._fork_prompt = resolve_prompt(
+            config, "appraisal.stage2_fork_prompt", DEFAULT_STAGE2_FORK_PROMPT
+        )
 
     @hookimpl
     async def on_config_reload(self, config: dict) -> None:
         # Swap the config reference; every tunable resolves through
         # resolve_tunable at decision time, so this is all reload needs.
         self.config = config
+        try:
+            self._fork_prompt = resolve_prompt(
+                config, "appraisal.stage2_fork_prompt", DEFAULT_STAGE2_FORK_PROMPT
+            )
+        except (OSError, TypeError) as exc:
+            logger.warning(
+                "appraisal: fork prompt reload failed (%s); keeping previous",
+                exc,
+            )
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
@@ -892,9 +905,7 @@ class AppraisalPlugin(CorvidaePlugin):
             self._skip_stage2(channel, trace_id, "the exchange is not in the window")
             return None
         # Build the instruction from the static fork prompt and the exchange.
-        prompt = config_value(
-            self.config, "appraisal.stage2_fork_prompt", DEFAULT_STAGE2_FORK_PROMPT
-        )
+        prompt = self._fork_prompt
         instruction = (
             f"{prompt}\n\n"
             f"The exchange began with the message «{quote(originating_text)}», "

@@ -1,0 +1,1 @@
+Also look at the goals entry in your window, if there is one, and the goals you retired below: if there's a next step on an open goal you can take now, or a goal that's done and should be retired, do it. Don't take up again a goal you retired unless something new has changed.

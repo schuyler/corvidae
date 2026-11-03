@@ -192,11 +192,45 @@ Each stage has a fork instruction:
 | `appraisal.stage2_fork_prompt` | `prompts/appraisal_fork.md` | Followed by quotes of the exchange's opening message and of the response sent, and the retrieval profile. |
 | `critique.fork_prompt.<lens>` | `prompts/critique_<lens>_fork.md` | Followed by quotes of the exchange's opening message and of the response sent; provenance also gets each claim's search hits and the CONTEXT snapshot. An override must ask for its per-claim verdicts format or every run skips. |
 
-These are static config, read with `corvidae.tuning.config_value`. They
-aren't runtime tunables: `set_settings` can write the key, but nothing reads
-the override. The standalone prompts `appraisal.stage2_prompt` and
-`critique.prompt.<lens>` are no longer read by any live stage (stage 2 and
-the lenses run only as forks); the keys remain accepted.
+These are resolved by `resolve_prompt` (#411): a string is inline text,
+`{"file": path}` or a list of paths reads files relative to the config
+directory, absent uses the built-in default. They aren't runtime tunables:
+`set_settings` can write the key, but nothing reads the override. The
+standalone prompts `appraisal.stage2_prompt` and `critique.prompt.<lens>`
+are no longer read by any live stage (stage 2 and the lenses run only as
+forks); the keys remain accepted.
+
+### Prompt key format
+
+Every prompt the framework sends on the agent's behalf goes through
+`resolve_prompt` (PRD principle 15, #411). The value can be:
+
+- **String**: inline prompt text, used verbatim. A bare string that
+  happens to name an existing file is *not* treated as a path.
+- **Object with `file` key**: `{"file": "path/to/prompt.md"}` — reads the
+  file relative to the config directory.
+- **List of strings**: each entry is a file path, read and concatenated
+  with double newlines.
+- **Absent or `null`**: the built-in default for that key.
+
+A missing or unreadable file fails at startup with the key and path named.
+On a config reload, a failed resolution keeps the previous value and logs
+the key.
+
+| Key | Default copy | Applies |
+|-----|--------------|---------|
+| `agent.compaction_fork_prompt` | `prompts/compaction_fork.md` | `agent.yaml` reload |
+| `memory.consolidation_fork_prompt` | `prompts/memory_consolidation_fork.md` | restart |
+| `appraisal.stage2_fork_prompt` | `prompts/appraisal_fork.md` | `agent.yaml` reload |
+| `critique.fork_prompt.<lens>` | `prompts/critique_<lens>_fork.md` | `agent.yaml` reload |
+| `heartbeat.prompt` | `prompts/heartbeat.md` | restart |
+| `heartbeat.goals_instruction` | `prompts/heartbeat-goals.md` | restart |
+| `tools.subagent.system_prompt` | built-in | restart |
+| `memory.rubric_prompt` | built-in | restart |
+
+Editing a prompt file does not trigger a reload; the change applies when
+the key is next resolved (on reload or at restart, per the table). Whether
+file edits trigger a reload is left to #408.
 
 Forks always run on `llm.main`, because only the main model shares the
 window's cache. If `llm.background` names a different model, enabling
@@ -406,6 +440,8 @@ A job costs a main-model turn per firing on the shared backend; keep intervals i
 |-----|------|---------|-------------|
 | `heartbeat.after` | number (seconds) | none | Seconds of system-wide quiet before a beat, and the minimum gap between beats: each beat makes the system busy, so the next one comes `after` seconds after it settles. Traffic on any channel cancels the pending beat and starts the count again. Absent, `null`, or an empty `heartbeat:` block: the heartbeat is asleep. Zero, negative, non-finite, boolean or non-numeric values fail startup with a `ValueError` naming the key and the value. Read at startup only. |
 | `heartbeat.keep_beats` | integer | `3` | Earlier beats a beat still sees in its window; older ones are dropped from the prompt (never from the log), with no LLM call. `0` starts every beat empty. Negative, fractional, boolean or string values fail startup with a `ValueError` naming the key, the value and what is accepted, even while the heartbeat sleeps. Read at startup only. |
+| `heartbeat.prompt` | string / file / list | built-in | The beat's instruction. Resolved by `resolve_prompt` (#411): a string is inline text, `{"file": path}` or a list of paths reads files relative to the config directory, absent uses the built-in default. `prompts/heartbeat.md` is the documented copy. Read at startup only. |
+| `heartbeat.goals_instruction` | string / file / list | built-in | Appended when the goals plugin is loaded: the instruction to review open and retired goals. Same resolution as `heartbeat.prompt`. `prompts/heartbeat-goals.md` is the documented copy. Read at startup only. |
 
 **Sleep.** The heartbeat sleeps whenever `heartbeat.after` is absent. To put it to sleep, delete or comment out the block and restart; it stays asleep across every restart after that, because `agent.yaml` is the record. `plugins.disabled: [heartbeat]` does the same. Reloading the config doesn't wake it or put it to sleep; restart.
 

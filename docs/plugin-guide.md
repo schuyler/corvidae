@@ -772,8 +772,11 @@ class MyPlugin(CorvidaePlugin):
   `mode="fork"`. Tag any standalone call you keep `mode="standalone"`.
 - Check containment yourself: a fork only makes sense while the rows your
   process is about are still in the window (`window_db_ids`).
-- Read the instruction from static config (`corvidae.tuning.config_value`),
+- Read the instruction from static config via `resolve_prompt` (#411),
   not `resolve_tunable`, unless you want the agent to be able to rewrite it.
+  Prompt keys accept a string (inline text), `{"file": path}`, a list of
+  paths, or absent (built-in default). Resolve in `on_init` and
+  `on_config_reload`; a failed reload keeps the previous value.
 - Stage names are opaque strings. List yours in `agent.forks.stages` (or
   leave it null for all stages).
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Callable
 
+from corvidae.prompts import resolve_prompt
 from corvidae.turn import run_agent_turn
 from corvidae.attribution import reset_attribution, set_attribution
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
@@ -128,6 +129,9 @@ class SubagentPlugin(CorvidaePlugin):
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
+        self._system_prompt = resolve_prompt(
+            config, "tools.subagent.system_prompt", SUBAGENT_SYSTEM_PROMPT
+        )
         logger.debug("SubagentPlugin started")
 
     @hookimpl
@@ -198,7 +202,7 @@ class SubagentPlugin(CorvidaePlugin):
         client = llm.get_client("background")
 
         messages = [
-            {"role": "system", "content": SUBAGENT_SYSTEM_PROMPT},
+            {"role": "system", "content": self._system_prompt},
             {"role": "user", "content": instructions},
         ]
 
