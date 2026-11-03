@@ -222,13 +222,13 @@ def _scrubbed_summary(result: dict) -> str:
     )
 
 
-def _report_unscrubbed(result: dict) -> None:
-    """Name every row a scrubber could not clear, then fail the command.
+def _report_unscrubbed(result: dict, *, fail: bool = True) -> None:
+    """Name every row a scrubber could not clear.
 
     A skipped row means redacted text may still be readable in that surface,
     so a clean-looking summary and exit 0 would misreport the redaction as
-    complete. Dry runs report the same rows and still succeed: they changed
-    nothing, so nothing is incomplete.
+    complete. ``fail`` raises ``Exit(1)``; a dry run passes ``fail=False``
+    to report the same rows and still succeed, since it changed nothing.
     """
     unscrubbed = result.get("unscrubbed") or []
     if not unscrubbed:
@@ -240,7 +240,8 @@ def _report_unscrubbed(result: dict) -> None:
     for reason in unscrubbed:
         click.echo(f"  {reason}")
     click.echo("  correct those rows, then rerun this command")
-    raise click.exceptions.Exit(1)
+    if fail:
+        raise click.exceptions.Exit(1)
 
 
 async def _load_sqlite_vec_if_needed(db: aiosqlite.Connection) -> None:
@@ -621,6 +622,7 @@ def _message_cmd(ctx, ids):
                     f"{result.get('affected_memories', 0)} memory records"
                     f"{_scrubbed_summary(result)}"
                 )
+                _report_unscrubbed(result, fail=False)
             else:
                 click.echo(
                     f"Redacted {result['affected_messages']} of {requested} "
@@ -677,6 +679,7 @@ def _memory_cmd(ctx, memory_id):
                     f"{result['affected_memories']} memory records"
                     f"{_scrubbed_summary(result)}"
                 )
+                _report_unscrubbed(result, fail=False)
             else:
                 click.echo(
                     f"Redacted {result['affected_messages']} messages, "
@@ -732,6 +735,7 @@ def _range_cmd(ctx, start_id, end_id):
                     f"{result.get('affected_memories', 0)} memory records"
                     f"{_scrubbed_summary(result)}"
                 )
+                _report_unscrubbed(result, fail=False)
             else:
                 click.echo(
                     f"Redacted {result['affected_messages']} of {requested} "

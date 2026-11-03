@@ -122,7 +122,7 @@ the row):
 - **The `message_fts` backfill** indexes every valid row and indexes a corrupt
   row as empty text, so it is not retried on every start.
 
-**Write connection and atomicity (#221).** That section is one SQLite
+**Write connection and atomicity (#221).** That write is one SQLite
 transaction (`BEGIN IMMEDIATE` ... `COMMIT`) on a dedicated connection
 only `MemoryPlugin` writes to, opened in `on_start` once the schema
 exists (lazily on first write when the persistence DB wasn't open yet)

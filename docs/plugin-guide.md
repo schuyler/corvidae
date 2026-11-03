@@ -139,10 +139,12 @@ async def redact_my_table(
     msg_ids: list[int],        # the message_log ids just tombstoned in it
     dry_run: bool,             # count what would change, write nothing
     tombstone: str,            # the operator tombstone text to write
-) -> int | None: ...
+) -> int | tuple[int, list[str]] | None: ...
 ```
 
-Every redact form (`message`, `range`, `memory`) calls each scrubber once per channel, after the message tombstones and the memory cascade have committed. Return the number of rows changed (or that would be, under `--dry-run`). Return `None` if your table isn't in this database (the daemon may never have loaded your plugin). The count is then 0, and one `SKIP` line naming your scrubber goes into the `notices` list a caller of `redact_messages` passes. The CLI doesn't print notices, so an operator sees only `0 <name> rows`. The scrubber commits its own writes. Probe for your table rather than creating it, because schema is daemon-owned. An exception propagates and aborts the command after the earlier steps have committed, so make the scrub idempotent: a re-run must finish the job and count nothing already scrubbed. The module is imported each time a redact form runs, inside its event loop, so keep it free of import-time side effects.
+Every redact form (`message`, `range`, `memory`) calls each scrubber once per channel, after the message tombstones and the memory cascade have committed. Return the number of rows changed (or that would be, under `--dry-run`), or a `(count, unscrubbed)` tuple when some rows could not be cleared: each string in `unscrubbed` names a row and is printed with the trace id or equivalent identifier, and the command then exits non-zero after finishing the rest of the cascade. A bare int is still accepted, and means no row was left uncleared. Return `None` if your table isn't in this database (the daemon may never have loaded your plugin). The count is then 0, and one `SKIP` line naming your scrubber goes into the `notices` list a caller of `redact_messages` passes. The CLI doesn't print notices, so an operator sees only `0 <name> rows`. The scrubber commits its own writes. Probe for your table rather than creating it, because schema is daemon-owned. An exception propagates and aborts the command after the earlier steps have committed, so make the scrub idempotent: a re-run must finish the job and count nothing already scrubbed. The module is imported each time a redact form runs, inside its event loop, so keep it free of import-time side effects.
+
+Report a row you cannot clear rather than skipping it silently: redaction that leaves text in place is worse than one that fails loudly, because the operator believes the text is gone.
 
 ## Hook grammar
 

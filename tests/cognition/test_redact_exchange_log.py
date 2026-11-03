@@ -22,6 +22,8 @@ import time
 
 from click.testing import CliRunner
 
+import pytest
+
 from corvidae.commands.redact import (
     redact_command,
     redact_memory_id,
@@ -457,22 +459,41 @@ class TestCliReportsIncompleteRedaction:
     place with nothing in the result or the exit status to say so.
     """
 
-    def test_cli_message_form_exits_nonzero_naming_the_row(self, tmp_path):
+    @staticmethod
+    def _argv(form: str, ids: dict) -> list[str]:
+        """The CLI arguments that reach the corrupt t1 exchange."""
+        if form == "message":
+            return ["message", str(ids["u1"])]
+        if form == "range":
+            return ["range", str(ids["u1"]), str(ids["a1"])]
+        # The memory form redacts the record's whole message range.
+        return ["memory", str(ids["memory"])]
+
+    def _path_with_memory(self, tmp_path) -> tuple[str, dict]:
         path = str(tmp_path / "s.db")
 
-        async def build() -> int:
+        async def build() -> dict:
             db, ids = await _db_with_dialog(path)
+            ids["memory"] = await insert_memory(
+                db, "irc:#a", "kestrel nest", ids["u1"], ids["a1"]
+            )
             await db.execute(
                 "UPDATE exchange_log SET appraisal = 'not json{' "
                 "WHERE trace_id = 't1'"
             )
             await db.commit()
             await db.close()
-            return ids["u1"]
+            return ids
 
-        u1 = asyncio.run(build())
+        return path, asyncio.run(build())
+
+    @pytest.mark.parametrize("form", ["message", "range", "memory"])
+    def test_cli_every_form_exits_nonzero_naming_the_row(self, tmp_path, form):
+        # Every form runs the scrubbing step; a regression in one of them
+        # silently reproduces #311 for that form alone.
+        path, ids = self._path_with_memory(tmp_path)
         result = CliRunner().invoke(
-            redact_command, ["--db", path, "message", str(u1)]
+            redact_command, ["--db", path, *self._argv(form, ids)]
         )
         assert result.exit_code == 1, result.output
         assert "redaction incomplete" in result.output, result.output
@@ -480,39 +501,34 @@ class TestCliReportsIncompleteRedaction:
         assert "irc:#a" in result.output, result.output
         assert "rerun this command" in result.output, result.output
 
-    def test_cli_dry_run_reports_nothing_incomplete(self, tmp_path):
-        # A dry run changed nothing, so nothing is incomplete: it reports
-        # the row it would skip and still succeeds.
-        path = str(tmp_path / "s.db")
-
-        async def build() -> int:
-            db, ids = await _db_with_dialog(path)
-            await db.execute(
-                "UPDATE exchange_log SET appraisal = 'not json{' "
-                "WHERE trace_id = 't1'"
-            )
-            await db.commit()
-            await db.close()
-            return ids["u1"]
-
-        u1 = asyncio.run(build())
+    @pytest.mark.parametrize("form", ["message", "range", "memory"])
+    def test_cli_every_form_dry_run_reports_but_succeeds(self, tmp_path, form):
+        # A dry run changed nothing, so nothing is incomplete: it names the
+        # row it would skip and still exits 0.
+        path, ids = self._path_with_memory(tmp_path)
         result = CliRunner().invoke(
-            redact_command, ["--db", path, "--dry-run", "message", str(u1)]
+            redact_command, ["--db", path, "--dry-run", *self._argv(form, ids)]
         )
         assert result.exit_code == 0, result.output
-        assert "redaction incomplete" not in result.output, result.output
+        assert "redaction incomplete" in result.output, result.output
+        assert "t1" in result.output, result.output
+        assert "irc:#a" in result.output, result.output
 
-    def test_cli_clean_run_still_exits_zero(self, tmp_path):
+    @pytest.mark.parametrize("form", ["message", "range", "memory"])
+    def test_cli_every_form_clean_run_exits_zero(self, tmp_path, form):
         path = str(tmp_path / "s.db")
 
-        async def build() -> int:
+        async def build() -> dict:
             db, ids = await _db_with_dialog(path)
+            ids["memory"] = await insert_memory(
+                db, "irc:#a", "kestrel nest", ids["u1"], ids["a1"]
+            )
             await db.close()
-            return ids["u1"]
+            return ids
 
-        u1 = asyncio.run(build())
+        ids = asyncio.run(build())
         result = CliRunner().invoke(
-            redact_command, ["--db", path, "message", str(u1)]
+            redact_command, ["--db", path, *self._argv(form, ids)]
         )
         assert result.exit_code == 0, result.output
         assert "incomplete" not in result.output, result.output

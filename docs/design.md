@@ -1362,7 +1362,10 @@ creates schema; schema is daemon-owned.
   reached. The CLI prints `<N> <name> rows` per scrubber, here
   `<N> exchange_log rows` (distinct exchanges changed; a re-run that
   changes nothing counts zero), and the result dict carries the counts
-  as `scrubbed: {name: N}`.
+  as `scrubbed: {name: N}`, plus `unscrubbed: [reason, ...]` naming every
+  row a scrubber could not clear. A non-empty `unscrubbed` makes the CLI
+  print those rows with `ERROR: redaction incomplete` and exit non-zero
+  after the cascade finishes; a dry run reports them and still exits 0.
 
 **Verification pass.** After each cascade, the CLI extracts a sample token
 from the original content (before tombstoning) and runs FTS `MATCH` queries

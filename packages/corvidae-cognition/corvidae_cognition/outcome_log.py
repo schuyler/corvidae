@@ -350,6 +350,17 @@ class OutcomeLogPlugin(CorvidaePlugin):
 # ------------------------------------------------------------------
 
 
+def _unscrubbable_reason(exc: BaseException) -> str:
+    """Describe why one appraisal could not be scrubbed, from what raised.
+
+    A KeyError means the envelope parsed but a claims entry is shaped wrong;
+    everything else is a value the decoder rejected outright.
+    """
+    if isinstance(exc, KeyError):
+        return f"malformed past_claims ({exc!r})"
+    return f"corrupt appraisal ({type(exc).__name__})"
+
+
 def _scrub_past_claims(appraisal_json: str | None, tombstone: str) -> str | None:
     """Return appraisal JSON with stage2.past_claims text tombstoned, or None
     when there is nothing to change.
@@ -410,7 +421,7 @@ async def redact_exchange_log(
         if await cursor.fetchone() is None:
             return None
     if not msg_ids:
-        return 0
+        return 0, []
     changed: set[str] = set()
     skipped: list[str] = []
 
@@ -457,8 +468,8 @@ async def redact_exchange_log(
                 extra={"channel": channel_id, "trace_id": trace_id},
             )
             skipped.append(
-                f"trace {trace_id} (channel {channel_id}): corrupt "
-                f"appraisal ({type(exc).__name__}), claim text may survive"
+                f"trace {trace_id} (channel {channel_id}): "
+                f"{_unscrubbable_reason(exc)}, claim text may survive"
             )
             continue
         if scrubbed is None:
