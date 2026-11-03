@@ -2688,7 +2688,8 @@ monitored.
   sends `sendTyping` immediately, covering queueing delay, and starts a
   refresh loop that re-sends every 10s while the channel's outstanding
   count stays positive (Signal clients expire an indicator after roughly
-  15s). `send_message` gives one outstanding slot back. So does the
+  15s). `send_message` gives one outstanding slot back, and so does
+  `on_agent_response` for an unsent final. So does the
   inbound handler for any message `on_message` returns without admitting:
   the transport mints the message's trace id, records its envelope
   timestamp under that id and takes the slot before calling `on_message`,
@@ -2846,7 +2847,8 @@ slot for an allowlisted sender, and passes the id to `on_message`; a
 `finally` around that call gives the slot back unless `on_message_admitted`
 fired for the id. Admission fires before `on_message` returns, so a gate
 veto, an agent that is not ready yet, or a raise or cancellation all land
-there. `send_message` gives back the slot of an admitted message. Only an
+there. `send_message` gives back the slot of an admitted message, and
+`on_agent_response` does for an unsent final. Only an
 allowlisted sender ever took a slot, so a refused stranger @-mentioning the
 bot gives nothing back and cannot stop typing owed to an allowed user in
 the same channel; no `on_message_rejected` implementation is needed.
@@ -3136,7 +3138,8 @@ so outbound events reach it only for `acp:` channels. Tool status is
 keyed on `(channel.id, tool_name)`; the event's `tool_call_id` is not used
 yet. `session/prompt` mints the message's
 trace id and passes it to `on_message`, and completes with `end_turn`
-after tool drain, including when the final `session/update` cannot be
+after tool drain (from `send_message`, or from `on_agent_response` when
+the final was unsent), including when the final `session/update` cannot be
 delivered (logged at WARNING; #99); `session/cancel` yields `cancelled`.
 A second `session/prompt` on a session with one in flight is rejected
 with `invalidRequest` and the first is left untouched (#93). The stdio loop

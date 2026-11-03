@@ -405,7 +405,7 @@ class TestSystemPromptHook:
 
 class TestCoreIsUnawareOfSilence:
     def test_no_core_file_names_the_plugin_or_its_helpers(self):
-        # Built from parts so this file's own text is not the offender.
+        # The strings S10 bans from core (tests/ is not scanned).
         banned = [
             '"' + "silence" + '"', "'" + "silence" + "'",
             "silence" + "_fragment", "with" + "_silence", "register" + "_fragment",

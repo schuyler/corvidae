@@ -37,7 +37,8 @@ REGISTER_FRAGMENT = (
 
 
 class SilencePlugin(CorvidaePlugin):
-    """The NO_REPLY veto and the decline record."""
+    """The right to silence: the instruction on conversational transports
+    (via transform_system_prompt), the NO_REPLY veto, and the decline record."""
 
     # Records through outcome_log when present; absent, nothing is recorded.
     optional_depends_on = frozenset({"outcome_log"})
@@ -97,7 +98,7 @@ class SilencePlugin(CorvidaePlugin):
         meta: dict,
         logprobs: dict | None,
     ) -> None:
-        """Record a decline: a unsent NO_REPLY or a unsent empty final."""
+        """Record a decline: an unsent NO_REPLY or an unsent empty final."""
         # Read before the first await: the kernel may move on once a sibling
         # impl raises, and the window must still show this final's row.
         try:

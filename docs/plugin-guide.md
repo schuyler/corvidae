@@ -328,6 +328,8 @@ Any plugin can send: `await self.pm.ahook.send(channel=channel, event=OutboundMe
 hook fires. Mutations to `message` affect in-memory prompt construction
 only; they do not update the persisted record.
 
+`transform_system_prompt` — `text` is the identity and register as composed, or the identity alone when the register is empty. It runs on the composed prompt whatever the register's source, so a channel with its own `register_prompt`, or with `register_prompt: ""`, still goes through it. A wrapper that raises is logged at WARNING with the channel and the untransformed prompt is used. The result is fixed for the conversation: it is not re-run at compaction. To act only on chats, find the transport that owns the channel and read its `conversational` (`SilencePlugin` does this).
+
 `before_agent_turn` — messages injected via `channel.conversation.append()` inside this hook are passed through `persist_message` and persisted to the DB, unless they already carry a `_db_id` (i.e. their producer persisted them itself).
 
 Window messages carry internal `_`-prefixed tags (`_message_type`, `_db_id`). Every serialization boundary (prompt build, compaction summarizer prep, persistence, JSONL log) strips all `_`-prefixed keys — internal tags never reach the LLM or the DB.
@@ -574,8 +576,6 @@ For common cases the standard library and ecosystem offer native async alternati
 - Subprocesses — use `asyncio.create_subprocess_shell` / `create_subprocess_exec` (see `corvidae/tools/shell.py`).
 
 As a last-resort safety net, `execute_tool_call` detects a sync callable registered as a bare `Tool(name=..., fn=sync_fn, schema=...)` (bypassing `Tool.from_function()`) and wraps the call in `asyncio.to_thread()`, logging a warning. Treat that warning as a bug to fix in the plugin, not a supported registration path.
-
-`transform_system_prompt` — `text` is the identity and register as composed, or the identity alone when the register is empty. It runs on the composed prompt whatever the register's source, so a channel with its own `register_prompt`, or with `register_prompt: ""`, still goes through it. A wrapper that raises is logged at WARNING with the channel and the untransformed prompt is used. The result is fixed for the conversation: it is not re-run at compaction. To act only on chats, find the transport that owns the channel and read its `conversational` (`SilencePlugin` does this).
 
 ## What the kernel exports to plugins
 

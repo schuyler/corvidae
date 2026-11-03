@@ -1360,7 +1360,8 @@ class Agent(CorvidaePlugin):
         }
 
     async def channel_system_prompt(self, channel: Channel) -> str:
-        """The channel's identity, then a blank line and its register.
+        """The channel's identity, then a blank line and its register,
+        passed through transform_system_prompt.
 
         The identity alone when the register is empty. This is the block a
         new conversation starts with, shared with the background views so
