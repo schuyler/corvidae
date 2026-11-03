@@ -136,12 +136,7 @@ class TestGeneralRecallBenchmark:
 
     async def _run_queries(self, fixture_path: Path):
         fixture = json.loads(fixture_path.read_text())
-        channels = sorted({m["channel_id"] for m in fixture["memories"]})
-        config = {
-            **EMBED_CONFIG,
-            "memory": {"channel_groups": {"fixture": channels}},
-        }
-        memory, db = await build_benchmark_env(config)
+        memory, db = await build_benchmark_env()
 
         if not memory._vec_available:
             pytest.skip("sqlite-vec unavailable; vector retrieval path not exercised")
@@ -153,9 +148,7 @@ class TestGeneralRecallBenchmark:
 
         recalls, mrrs = [], []
         for query in positive_queries:
-            candidates, _degraded = await memory.retrieve(
-                channels[0], query["text"], k=5
-            )
+            candidates, _degraded = await memory.retrieve(query["text"], k=5)
             ranked = [id_map[c["id"]] for c in candidates]
             recalls.append(recall_at_k(ranked, query["relevant"], k=5))
             mrrs.append(mrr(ranked, query["relevant"]))
@@ -187,12 +180,7 @@ class TestGeneralRecallBenchmark:
         """
         fixture_path = FIXTURES_DIR / "memory_retrieval_general.json"
         fixture = json.loads(fixture_path.read_text())
-        channels = sorted({m["channel_id"] for m in fixture["memories"]})
-        config = {
-            **EMBED_CONFIG,
-            "memory": {"channel_groups": {"fixture": channels}},
-        }
-        memory, db = await build_benchmark_env(config)
+        memory, db = await build_benchmark_env()
 
         if not memory._vec_available:
             pytest.skip("sqlite-vec unavailable")
@@ -205,9 +193,7 @@ class TestGeneralRecallBenchmark:
         )
 
         for query in negative_queries:
-            candidates, _degraded = await memory.retrieve(
-                channels[0], query["text"], k=5
-            )
+            candidates, _degraded = await memory.retrieve(query["text"], k=5)
             # No candidate should score high enough for the funnel; we check
             # that the fixture's corpus genuinely has no close match by
             # verifying recall@5 is 0.0 against an empty relevant set.
@@ -267,12 +253,7 @@ class TestContradictionFixture:
         """
         fixture_path = FIXTURES_DIR / "memory_retrieval_contradictions.json"
         fixture = json.loads(fixture_path.read_text())
-        channels = sorted({m["channel_id"] for m in fixture["memories"]})
-        config = {
-            **EMBED_CONFIG,
-            "memory": {"channel_groups": {"fixture": channels}},
-        }
-        memory, db = await build_benchmark_env(config)
+        memory, db = await build_benchmark_env()
 
         if not memory._vec_available:
             pytest.skip("sqlite-vec unavailable")
@@ -280,9 +261,7 @@ class TestContradictionFixture:
         id_map = await seed_fixture_memories(db, fixture["memories"])
 
         query = fixture["queries"][0]
-        candidates, _degraded = await memory.retrieve(
-            channels[0], query["text"], k=5
-        )
+        candidates, _degraded = await memory.retrieve(query["text"], k=5)
         ranked = [id_map[c["id"]] for c in candidates]
 
         # Phase 2: both conflicting records must surface AND be flagged
@@ -312,12 +291,7 @@ class TestContradictionFixture:
         """A temporally-aware retriever surfaces the most recent conflicting claim."""
         fixture_path = FIXTURES_DIR / "memory_retrieval_contradictions.json"
         fixture = json.loads(fixture_path.read_text())
-        channels = sorted({m["channel_id"] for m in fixture["memories"]})
-        config = {
-            **EMBED_CONFIG,
-            "memory": {"channel_groups": {"fixture": channels}},
-        }
-        memory, db = await build_benchmark_env(config)
+        memory, db = await build_benchmark_env()
 
         if not memory._vec_available:
             pytest.skip("sqlite-vec unavailable")
@@ -326,9 +300,7 @@ class TestContradictionFixture:
 
         # Query specifically about team projects (c2 is the most specific answer)
         query = fixture["queries"][1]
-        candidates, _degraded = await memory.retrieve(
-            channels[0], query["text"], k=5
-        )
+        candidates, _degraded = await memory.retrieve(query["text"], k=5)
         ranked = [id_map[c["id"]] for c in candidates]
 
         assert ranked and ranked[0] == "c2", (

@@ -293,7 +293,7 @@ async def test_g3_retirement_writes_memory_record(env):
 
 
 async def test_g3_retirement_record_is_retrievable(env):
-    """Under a stub encoder, retrieve(channel, evidence) returns the retirement record."""
+    """Under a stub encoder, retrieve(evidence) returns the retirement record."""
     ctx = ctx_for(env.channel)
     await add_message(env, env.channel.id, "kestrel nest evidence")
     await env.tools["add_goal"]("Find the kestrel nest", _ctx=ctx)
@@ -303,6 +303,6 @@ async def test_g3_retirement_record_is_retrievable(env):
     (memory_id,) = (await rows(env, "SELECT memory_id FROM goals WHERE id = 1"))[0]
 
     candidates, _degraded = await env.memory.retrieve(
-        env.channel.id, "kestrels carrying twigs to the nest on Brannan Street"
+        "kestrels carrying twigs to the nest on Brannan Street"
     )
     assert memory_id in [c["id"] for c in candidates]

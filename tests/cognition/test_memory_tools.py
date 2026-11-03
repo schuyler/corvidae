@@ -7,14 +7,12 @@ because corvidae/tools/memory_tools.py does not exist yet.
 Designed failure reason: missing corvidae.tools.memory_tools module.
 
 Covers:
-- search_memory: FTS keyword search, date filters, compartment scoping,
-  demoted/superseded flags, include_demoted behavior, out-of-scope errors,
-  stat non-mutation.
+- search_memory: FTS keyword search, date filters, the optional channel
+  filter, demoted/superseded flags, include_demoted behavior, stat
+  non-mutation.
 - recall_raw: verbatim role:content dialog, participants header, token cap,
-  channel_id predicate (interleaved-channel regression), out-of-scope rejection,
-  stat bump.
-- Tool compartment scoping: channel B cannot see channel A's memories;
-  group siblings CAN see each other's memories.
+  channel_id predicate (interleaved-channel regression), stat bump.
+- Whole memory (#168): both tools reach every channel's records.
 - message_fts backfill: pre-existing rows indexed once; partial-backfill
   rerun completes without uniqueness error.
 """
@@ -57,16 +55,6 @@ EMBED_CONFIG = {
         },
     },
 }
-
-GROUP_CONFIG = {
-    **EMBED_CONFIG,
-    "memory": {
-        "channel_groups": {
-            "home": ["irc:#electronics", "irc:#garden"],
-        },
-    },
-}
-
 
 def bow_embed(text: str) -> list[float]:
     vec = [0.0] * DIMS
@@ -127,12 +115,6 @@ def get_tools(memory_tools: MemoryToolsPlugin) -> dict:
     tool_list = []
     memory_tools.register_tools(tool_list)
     return {t.name: t.fn for t in tool_list}
-
-
-def make_ctx(channel: Channel):
-    ctx = MagicMock()
-    ctx.channel = channel
-    return ctx
 
 
 async def seed_memory(
@@ -209,7 +191,7 @@ class TestSearchMemory:
         )
 
         tools = get_tools(memory_tools)
-        result = await tools["search_memory"]("ESP32 wifi", _ctx=make_ctx(channel))
+        result = await tools["search_memory"]("ESP32 wifi")
 
         assert str(mid) in result or "ESP32" in result or "wifi" in result, (
             f"search_memory must find seeded content; got: {result!r}"
@@ -243,7 +225,7 @@ class TestSearchMemory:
 
         tools = get_tools(memory_tools)
         result = await tools["search_memory"](
-            "ESP32 wifi", after=yesterday, _ctx=make_ctx(channel)
+            "ESP32 wifi", after=yesterday
         )
 
         assert str(new_mid) in result or "new" in result, (
@@ -279,7 +261,7 @@ class TestSearchMemory:
 
         tools = get_tools(memory_tools)
         result = await tools["search_memory"](
-            "kestrel rain gauge", before=yesterday, _ctx=make_ctx(channel)
+            "kestrel rain gauge", before=yesterday
         )
 
         assert str(old_mid) in result or "old" in result, (
@@ -298,7 +280,7 @@ class TestSearchMemory:
 
         tools = get_tools(memory_tools)
         result = await tools["search_memory"](
-            "some query", after="not-a-date", _ctx=make_ctx(channel)
+            "some query", after="not-a-date"
         )
 
         assert "error" in result.lower() or "invalid" in result.lower(), (
@@ -318,7 +300,7 @@ class TestSearchMemory:
 
         tools = get_tools(memory_tools)
         result = await tools["search_memory"](
-            "kestrel wifi", _ctx=make_ctx(channel)
+            "kestrel wifi"
         )
 
         assert "[demoted]" in result, (
@@ -341,7 +323,7 @@ class TestSearchMemory:
 
         tools = get_tools(memory_tools)
         result = await tools["search_memory"](
-            "rain gauge", include_demoted=False, _ctx=make_ctx(channel)
+            "rain gauge", include_demoted=False
         )
 
         assert "[demoted]" not in result, (
@@ -349,21 +331,6 @@ class TestSearchMemory:
         )
         assert "rain gauge" not in result, (
             "demoted rain gauge record must not appear with include_demoted=False"
-        )
-        await db.close()
-
-    async def test_none_channel_context_returns_error(self):
-        """search_memory with _ctx.channel = None returns an error string, never unscoped."""
-        memory, memory_tools, db = await build_tools_env()
-        await seed_memory(db, "irc:#electronics", "some summary")
-
-        tools = get_tools(memory_tools)
-        ctx = MagicMock()
-        ctx.channel = None
-
-        result = await tools["search_memory"]("query", _ctx=ctx)
-        assert "error" in result.lower() or "channel" in result.lower(), (
-            f"None channel must return error string; got: {result!r}"
         )
         await db.close()
 
@@ -392,7 +359,7 @@ class TestRecallRaw:
         )
 
         tools = get_tools(memory_tools)
-        result = await tools["recall_raw"](mid, _ctx=make_ctx(channel))
+        result = await tools["recall_raw"](mid)
 
         # Header with participants
         assert "kestrel" in result, f"participants header must be present; got: {result!r}"
@@ -425,7 +392,7 @@ class TestRecallRaw:
         )
 
         tools = get_tools(memory_tools)
-        result = await tools["recall_raw"](mid, max_tokens=10, _ctx=make_ctx(channel))
+        result = await tools["recall_raw"](mid, max_tokens=10)
 
         assert "[truncated" in result or "truncated" in result.lower(), (
             f"token-capped recall must include truncation marker; got: {result!r}"
@@ -437,7 +404,7 @@ class TestRecallRaw:
 
         message_log uses a global AUTOINCREMENT id. With two channels, a record's
         [msg_id_start, msg_id_end] range contains interleaved foreign-channel rows.
-        An unfiltered BETWEEN would replay those rows — a compartment leak.
+        An unfiltered BETWEEN would replay those rows: another channel's dialog under this record.
 
         (Design review important finding #3 — bootstrap-mapping §4.12.)
         """
@@ -460,7 +427,7 @@ class TestRecallRaw:
         )
 
         tools = get_tools(memory_tools)
-        result = await tools["recall_raw"](mid_a, _ctx=make_ctx(channel_a))
+        result = await tools["recall_raw"](mid_a)
 
         # channel_b's rows must NOT appear
         assert "garden sensor data" not in result, (
@@ -492,7 +459,7 @@ class TestRecallRaw:
         )
 
         tools = get_tools(memory_tools)
-        await tools["recall_raw"](mid, _ctx=make_ctx(channel))
+        await tools["recall_raw"](mid)
 
         async with db.execute(
             "SELECT retrieval_count, last_retrieved_at FROM memory WHERE id = ?", (mid,)
@@ -519,7 +486,7 @@ class TestRecallRaw:
         )
 
         tools = get_tools(memory_tools)
-        result = await tools["recall_raw"](mid, _ctx=make_ctx(channel))
+        result = await tools["recall_raw"](mid)
 
         assert "demoted content here" in result, (
             f"recall_raw must work on demoted records; got: {result!r}"
@@ -528,229 +495,113 @@ class TestRecallRaw:
 
 
 # ---------------------------------------------------------------------------
-# WP1b.3 tool compartment scoping
+# Issue #168: the tools span the whole memory
 # ---------------------------------------------------------------------------
 
 
-class TestToolCompartmentScoping:
-    """Both tools enforce _channel_scope; group siblings are in-scope."""
+class TestToolsSpanWholeMemory:
+    """search_memory and recall_raw reach every channel's records."""
 
-    async def test_search_memory_does_not_see_other_channel_memories(self):
-        """Channel B cannot list channel A's memories via search_memory."""
+    async def test_search_memory_sees_other_channel_memories(self):
         memory, memory_tools, db = await build_tools_env()
         channel_a = Channel(transport="irc", scope="#electronics")
         channel_b = Channel(transport="irc", scope="#secret")
-
-        await seed_memory(
-            db, channel_a.id, "channel A secret wifi password hunter2"
-        )
+        await seed_memory(db, channel_a.id, "channel A wifi password hunter2")
 
         tools = get_tools(memory_tools)
         result = await tools["search_memory"](
-            "wifi password hunter2", _ctx=make_ctx(channel_b)
+            "wifi password hunter2"
         )
 
-        assert "hunter2" not in result, (
-            f"channel B must not see channel A's memories via search_memory; "
-            f"got: {result!r}"
-        )
+        assert "hunter2" in result, result
+        await db.close()
 
-    async def test_recall_raw_rejects_out_of_scope_id_no_stat_bump(self):
-        """recall_raw rejects an out-of-scope memory_id without bumping stats."""
+    async def test_search_memory_sees_other_transport_memories(self):
         memory, memory_tools, db = await build_tools_env()
-        channel_a = Channel(transport="irc", scope="#electronics")
-        channel_b = Channel(transport="irc", scope="#secret")
-
-        msg1 = await seed_message_log_row(db, channel_a.id, "user", "secret data")
-        msg2 = await seed_message_log_row(db, channel_a.id, "assistant", "secret reply")
-        mid_a = await seed_memory(
-            db, channel_a.id, "channel A memory",
-            retrieval_count=0, last_retrieved_at=None,
-            msg_id_start=msg1, msg_id_end=msg2,
-        )
-
-        tools = get_tools(memory_tools)
-        result = await tools["recall_raw"](mid_a, _ctx=make_ctx(channel_b))
-
-        assert "error" in result.lower() or "scope" in result.lower(), (
-            f"recall_raw must return error for out-of-scope id; got: {result!r}"
-        )
-        # Stats must NOT be bumped
-        async with db.execute(
-            "SELECT retrieval_count, last_retrieved_at FROM memory WHERE id = ?",
-            (mid_a,),
-        ) as c:
-            count, last = await c.fetchone()
-        assert count == 0, "out-of-scope recall_raw must not bump retrieval_count"
-        assert last is None, "out-of-scope recall_raw must not set last_retrieved_at"
-        await db.close()
-
-    async def test_group_sibling_memories_visible_in_search_memory(self):
-        """Group siblings share retrieval scope; a sibling's memory is visible."""
-        memory, memory_tools, db = await build_tools_env(config=GROUP_CONFIG)
-        channel_a = Channel(transport="irc", scope="#electronics")
-        channel_b = Channel(transport="irc", scope="#garden")  # sibling in group
-
-        sibling_mid = await seed_memory(
-            db, channel_b.id, "kestrel solar charge MQTT garden power data sibling"
-        )
+        await seed_memory(db, "signal:runtime-aci", "kestrel solar MQTT signal fact")
 
         tools = get_tools(memory_tools)
         result = await tools["search_memory"](
-            "solar charge MQTT", _ctx=make_ctx(channel_a)
+            "solar MQTT"
         )
 
-        assert "solar" in result or str(sibling_mid) in result, (
-            f"group-sibling memory must be visible via search_memory; got: {result!r}"
-        )
+        assert "signal fact" in result, result
         await db.close()
 
-    async def test_group_sibling_recall_raw_works(self):
-        """Group sibling's memory_id is in scope for recall_raw."""
-        memory, memory_tools, db = await build_tools_env(config=GROUP_CONFIG)
+    async def test_recall_raw_replays_another_channels_dialog(self):
+        """recall_raw replays the record's own channel's messages, and bumps stats."""
+        memory, memory_tools, db = await build_tools_env()
         channel_a = Channel(transport="irc", scope="#electronics")
         channel_b = Channel(transport="irc", scope="#garden")
-
-        msg1 = await seed_message_log_row(db, channel_b.id, "user", "sibling channel content")
-        msg2 = await seed_message_log_row(db, channel_b.id, "assistant", "sibling reply")
+        msg1 = await seed_message_log_row(db, channel_b.id, "user", "garden channel content")
+        msg2 = await seed_message_log_row(db, channel_b.id, "assistant", "garden reply")
+        # A row from a third channel inside the id range must stay out.
+        await seed_message_log_row(db, channel_a.id, "user", "interleaved foreign row")
+        msg3 = await seed_message_log_row(db, channel_b.id, "user", "later garden row")
         mid_b = await seed_memory(
-            db, channel_b.id, "sibling memory about garden solar",
-            msg_id_start=msg1, msg_id_end=msg2,
+            db, channel_b.id, "garden memory about solar",
+            retrieval_count=0, msg_id_start=msg1, msg_id_end=msg3,
         )
 
         tools = get_tools(memory_tools)
-        result = await tools["recall_raw"](mid_b, _ctx=make_ctx(channel_a))
+        result = await tools["recall_raw"](mid_b)
 
-        assert "error" not in result.lower(), (
-            f"group sibling recall_raw must succeed; got: {result!r}"
+        assert "error" not in result.lower(), result
+        assert "garden channel content" in result, result
+        assert "interleaved foreign row" not in result, (
+            "message_log ids are global: the channel_id predicate must stay"
         )
-        assert "sibling channel content" in result, (
-            f"recall_raw must return sibling channel's dialog; got: {result!r}"
-        )
+        async with db.execute(
+            "SELECT retrieval_count FROM memory WHERE id = ?", (mid_b,)
+        ) as c:
+            assert (await c.fetchone())[0] == 1
         await db.close()
 
-    async def test_search_memory_channel_arg_outside_scope_returns_error(self):
-        """search_memory(channel=<out-of-scope>) returns error naming visible channels."""
+    async def test_search_memory_channel_arg_narrows_to_that_channel(self):
+        """channel= is an equality filter over the whole memory, not a boundary."""
         memory, memory_tools, db = await build_tools_env()
-        channel_a = Channel(transport="irc", scope="#electronics")
+        caller = Channel(transport="irc", scope="#electronics")
+        await seed_memory(db, "signal:runtime-aci", "kestrel solar MQTT from signal")
+        await seed_memory(db, "irc:#garden", "kestrel solar MQTT from garden")
 
         tools = get_tools(memory_tools)
         result = await tools["search_memory"](
-            "query", channel="irc:#other-channel", _ctx=make_ctx(channel_a)
+            "solar MQTT", channel="signal:runtime-aci"
         )
 
-        assert "error" in result.lower() or "scope" in result.lower() or "visible" in result.lower(), (
-            f"out-of-scope channel arg must return error string naming visible channels; "
-            f"got: {result!r}"
-        )
-        # The error string should name the visible channels (the calling channel)
-        assert "irc:#electronics" in result, (
-            f"error string must name visible channels; got: {result!r}"
-        )
-        await db.close()
-
-
-GLOB_CONFIG = {
-    **EMBED_CONFIG,
-    "memory": {
-        "channel_groups": {
-            "lex": ["irc:#electronics", "signal:*"],
-        },
-    },
-}
-
-
-class TestGlobGroupToolScoping:
-    """search_memory and recall_raw honor glob group members (issue #50)."""
-
-    async def test_search_memory_sees_glob_matched_channel(self):
-        memory, memory_tools, db = await build_tools_env(config=GLOB_CONFIG)
-        caller = Channel(transport="irc", scope="#electronics")
-        await seed_memory(db, "signal:runtime-aci", "kestrel solar MQTT glob sibling")
-
-        tools = get_tools(memory_tools)
-        result = await tools["search_memory"]("solar MQTT", _ctx=make_ctx(caller))
-        assert "glob sibling" in result, result
-        await db.close()
-
-    async def test_search_memory_channel_arg_glob_member_accepted(self):
-        memory, memory_tools, db = await build_tools_env(config=GLOB_CONFIG)
-        caller = Channel(transport="irc", scope="#electronics")
-        await seed_memory(db, "signal:runtime-aci", "kestrel solar MQTT narrowed")
-
-        tools = get_tools(memory_tools)
-        result = await tools["search_memory"](
-            "solar MQTT", channel="signal:runtime-aci", _ctx=make_ctx(caller)
-        )
-        assert "narrowed" in result, result
+        assert "from signal" in result, result
+        assert "from garden" not in result, result
         await db.close()
 
     async def test_search_memory_channel_arg_is_not_a_pattern(self):
-        # channel= narrows by equality: passing the pattern itself must not
-        # turn into a GLOB query over every matching channel.
-        memory, memory_tools, db = await build_tools_env(config=GLOB_CONFIG)
+        # channel= matches by equality: a pattern must not become a GLOB
+        # over every matching channel.
+        memory, memory_tools, db = await build_tools_env()
         caller = Channel(transport="irc", scope="#electronics")
         await seed_memory(db, "signal:runtime-aci", "kestrel solar MQTT literal")
 
         tools = get_tools(memory_tools)
         result = await tools["search_memory"](
-            "solar MQTT", channel="signal:*", _ctx=make_ctx(caller)
+            "solar MQTT", channel="signal:*"
         )
+
         assert "literal" not in result, result
         await db.close()
 
-    async def test_search_memory_out_of_scope_error_names_pattern(self):
-        memory, memory_tools, db = await build_tools_env(config=GLOB_CONFIG)
+    async def test_search_memory_unknown_channel_arg_finds_nothing(self):
+        # No visible-channel list to name any more: an unknown channel is
+        # simply an empty filter, not an error.
+        memory, memory_tools, db = await build_tools_env()
         caller = Channel(transport="irc", scope="#electronics")
+        await seed_memory(db, caller.id, "kestrel solar MQTT here")
 
         tools = get_tools(memory_tools)
         result = await tools["search_memory"](
-            "query", channel="irc:#secret", _ctx=make_ctx(caller)
-        )
-        assert "outside your visible scope" in result
-        assert "signal:*" in result, result
-        await db.close()
-
-    async def test_search_memory_non_member_does_not_see_glob_group(self):
-        memory, memory_tools, db = await build_tools_env(config=GLOB_CONFIG)
-        outsider = Channel(transport="irc", scope="#secret")
-        await seed_memory(db, "signal:runtime-aci", "kestrel solar MQTT hidden")
-
-        tools = get_tools(memory_tools)
-        result = await tools["search_memory"]("solar MQTT", _ctx=make_ctx(outsider))
-        assert "hidden" not in result, result
-        await db.close()
-
-    async def test_recall_raw_glob_matched_caller(self):
-        memory, memory_tools, db = await build_tools_env(config=GLOB_CONFIG)
-        caller = Channel(transport="signal", scope="new-aci")
-
-        msg1 = await seed_message_log_row(db, "irc:#electronics", "user", "irc dialog")
-        msg2 = await seed_message_log_row(db, "irc:#electronics", "assistant", "irc reply")
-        mid = await seed_memory(
-            db, "irc:#electronics", "irc memory",
-            msg_id_start=msg1, msg_id_end=msg2,
+            "solar MQTT", channel="irc:#nowhere"
         )
 
-        tools = get_tools(memory_tools)
-        result = await tools["recall_raw"](mid, _ctx=make_ctx(caller))
-        assert "irc dialog" in result, result
-        await db.close()
-
-    async def test_recall_raw_rejects_non_member(self):
-        memory, memory_tools, db = await build_tools_env(config=GLOB_CONFIG)
-        outsider = Channel(transport="irc", scope="#secret")
-
-        msg1 = await seed_message_log_row(db, "signal:aci", "user", "signal dialog")
-        mid = await seed_memory(
-            db, "signal:aci", "signal memory",
-            msg_id_start=msg1, msg_id_end=msg1,
-        )
-
-        tools = get_tools(memory_tools)
-        result = await tools["recall_raw"](mid, _ctx=make_ctx(outsider))
-        assert "outside your scope" in result, result
-        assert "signal dialog" not in result
+        assert "visible" not in result.lower() and "scope" not in result.lower(), result
+        assert "here" not in result, result
         await db.close()
 
 
@@ -773,7 +624,7 @@ class TestStatSemantics:
         )
 
         tools = get_tools(memory_tools)
-        await tools["search_memory"]("ESP32 PlatformIO", _ctx=make_ctx(channel))
+        await tools["search_memory"]("ESP32 PlatformIO")
 
         async with db.execute(
             "SELECT retrieval_count, last_retrieved_at FROM memory WHERE id = ?", (mid,)
@@ -799,7 +650,7 @@ class TestStatSemantics:
 
         tools = get_tools(memory_tools)
         # search_memory first
-        await tools["search_memory"]("kestrel stats", _ctx=make_ctx(channel))
+        await tools["search_memory"]("kestrel stats")
         async with db.execute(
             "SELECT retrieval_count FROM memory WHERE id = ?", (mid,)
         ) as c:
@@ -808,7 +659,7 @@ class TestStatSemantics:
             )
 
         # recall_raw second
-        await tools["recall_raw"](mid, _ctx=make_ctx(channel))
+        await tools["recall_raw"](mid)
         async with db.execute(
             "SELECT retrieval_count FROM memory WHERE id = ?", (mid,)
         ) as c:
@@ -1058,7 +909,7 @@ class TestTagsFilter:
 
         tools = get_tools(memory_tools)
         result = await tools["search_memory"](
-            "kestrel", tags=["electronics"], _ctx=make_ctx(channel)
+            "kestrel", tags=["electronics"]
         )
 
         # The electronics record must appear (has matching tag)
@@ -1089,7 +940,7 @@ class TestTagsFilter:
 
         tools = get_tools(memory_tools)
         result = await tools["search_memory"](
-            "solar charge MPPT", tags=["solar"], _ctx=make_ctx(channel)
+            "solar charge MPPT", tags=["solar"]
         )
 
         assert str(matching_mid) in result or "controller" in result, (
@@ -1116,7 +967,7 @@ class TestTagsFilter:
 
         tools = get_tools(memory_tools)
         result = await tools["search_memory"](
-            "kestrel firmware", tags=None, _ctx=make_ctx(channel)
+            "kestrel firmware", tags=None
         )
 
         # Both records should appear since tags=None disables filtering
@@ -1157,7 +1008,7 @@ class TestTokenCap:
         tools = get_tools(memory_tools)
         # max_tokens=1 is extremely small — guarantees truncation
         result = await tools["search_memory"](
-            "kestrel wifi", max_tokens=1, _ctx=make_ctx(channel)
+            "kestrel wifi", max_tokens=1
         )
 
         assert "[truncated" in result or "truncated" in result.lower(), (
@@ -1182,7 +1033,7 @@ class TestTokenCap:
         tools = get_tools(memory_tools)
         # Large cap — all records must appear
         result = await tools["search_memory"](
-            "kestrel solar panel", max_tokens=100000, _ctx=make_ctx(channel)
+            "kestrel solar panel", max_tokens=100000
         )
 
         assert "[truncated" not in result, (
@@ -1217,7 +1068,7 @@ class TestSchemaAndSearchDegradation:
 
         monkeypatch.setattr(memory, "_ensure_schema", flaky)
         result = await get_tools(memory_tools)["search_memory"](
-            "kestrel", _ctx=make_ctx(channel)
+            "kestrel"
         )
 
         assert "retry probe" in result, result
@@ -1243,7 +1094,7 @@ class TestSchemaAndSearchDegradation:
             return await real()
 
         monkeypatch.setattr(memory, "_ensure_schema", flaky)
-        result = await get_tools(memory_tools)["recall_raw"](mid, _ctx=make_ctx(channel))
+        result = await get_tools(memory_tools)["recall_raw"](mid)
 
         assert "raw retry probe" in result, result
         assert len(calls) >= 3
@@ -1261,7 +1112,7 @@ class TestSchemaAndSearchDegradation:
 
         with caplog.at_level(logging.WARNING, logger="corvidae.tools.memory_tools"):
             result = await get_tools(memory_tools)["search_memory"](
-                "ESP32 wifi", _ctx=make_ctx(channel)
+                "ESP32 wifi"
             )
 
         assert "fallback probe" in result, result
@@ -1289,7 +1140,7 @@ class TestRecallRawUnsent:
         await db.commit()
         mid = await seed_memory(db, channel.id, "quiet exchange", msg_id_start=msg1_id, msg_id_end=msg2_id)
 
-        result = await get_tools(memory_tools)["recall_raw"](mid, _ctx=make_ctx(channel))
+        result = await get_tools(memory_tools)["recall_raw"](mid)
 
         assert "assistant (withheld, not sent): kept quiet" in result
         assert "\nassistant: kept quiet" not in result
@@ -1321,7 +1172,7 @@ class TestCorruptRows:
 
         with caplog.at_level(logging.WARNING):
             result = await get_tools(memory_tools)["recall_raw"](
-                mid, _ctx=make_ctx(channel)
+                mid
             )
 
         assert result.index("user: alpha question") < result.index(

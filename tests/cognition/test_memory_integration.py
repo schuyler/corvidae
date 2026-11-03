@@ -91,7 +91,7 @@ async def build_stack(db_path):
     return memory, persistence, db
 
 
-async def test_recall_across_restart_and_channel_compartments(tmp_path):
+async def test_recall_across_restart_and_channels(tmp_path):
     db_path = str(tmp_path / "sessions.db")
     channel = Channel(transport="irc", scope="#astro")
 
@@ -134,21 +134,33 @@ async def test_recall_across_restart_and_channel_compartments(tmp_path):
     assert "dome motor" in contexts[0]["content"]
     assert contexts[0]["content"].startswith("[CONTEXT from memory")
 
-    # (b) Per-channel recall: another channel sees nothing.
+    # (b) Whole-memory recall: another channel retrieves the same record.
     other = Channel(transport="irc", scope="#unrelated")
     other_conv = ContextWindow(other.id)
     other.conversation = other_conv
     other_conv.append({"role": "user", "content": "what about the dome motor jamming?"})
     await memory2.before_agent_turn(channel=other, trace_id=None, meta={})
-    assert not [m for m in other_conv.messages
-                if m.get("_message_type") == MessageType.CONTEXT]
+    other_contexts = [m for m in other_conv.messages
+                      if m.get("_message_type") == MessageType.CONTEXT]
+    assert len(other_contexts) == 1
+    assert "dome motor" in other_contexts[0]["content"]
 
-    # (c) Honest "no memory of that": the empty retrieval is logged with
-    # zero hits, so the calibration prompt has real evidence to lean on.
-    async with db2.execute(
+    await db2.close()
+
+    # (c) Honest "no memory of that": against an empty memory the retrieval
+    # is logged with zero hits, so the calibration prompt has real evidence
+    # to lean on. (Whole-memory KNN always returns the nearest record when
+    # there is one, so only an empty memory is certain to miss.)
+    memory3, _persistence3, db3 = await build_stack(str(tmp_path / "empty.db"))
+    blank = Channel(transport="irc", scope="#blank")
+    blank_conv = ContextWindow(blank.id)
+    blank.conversation = blank_conv
+    blank_conv.append({"role": "user", "content": "what about the dome motor jamming?"})
+    await memory3.before_agent_turn(channel=blank, trace_id=None, meta={})
+    async with db3.execute(
         "SELECT hit_count, admitted_count FROM retrieval_log "
         "WHERE channel_id = ? ORDER BY id DESC LIMIT 1",
-        (other.id,),
+        (blank.id,),
     ) as cursor:
         assert (await cursor.fetchone()) == (0, 0)
-    await db2.close()
+    await db3.close()

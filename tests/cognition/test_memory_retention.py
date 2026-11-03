@@ -506,10 +506,7 @@ class TestDemotionRetrievalIntegration:
         memory_tools.register_tools(tools)
         tool_fn = {t.name: t.fn for t in tools}["search_memory"]
 
-        ctx = MagicMock()
-        ctx.channel = channel
-
-        result = await tool_fn("wifi power-save", _ctx=ctx)
+        result = await tool_fn("wifi power-save")
         assert f"{mid}" in result or "demoted" in result.lower(), (
             f"demoted record {mid} must appear in search_memory output"
         )
@@ -717,10 +714,7 @@ class TestStatInflation:
         memory_tools.register_tools(tools)
         tool_fn = {t.name: t.fn for t in tools}["search_memory"]
 
-        ctx = MagicMock()
-        ctx.channel = channel
-
-        await tool_fn("ESP32 rain gauge", _ctx=ctx)
+        await tool_fn("ESP32 rain gauge")
 
         m = await fetch_memory(db, mid)
         assert m["retrieval_count"] == 0, (

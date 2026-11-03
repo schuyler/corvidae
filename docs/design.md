@@ -3283,7 +3283,6 @@ memory:
     bands:
       strong: 0.75              # assert confidently at or above this value (score or similarity, per band_on)
       moderate: 0.60            # hedge at or above this value
-  channel_groups: {}            # {group: [channel ids or * ? globs]} shared memory scopes
 
 scheduler:
   timezone: UTC                 # IANA name; resolves offset-less times (default UTC)

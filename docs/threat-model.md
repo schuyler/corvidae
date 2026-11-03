@@ -18,10 +18,12 @@ and outbound mentions disabled. The web transport binds loopback by
 default, needs a token that can't be turned off, and renders model output
 through DOMPurify under a strict CSP.
 
-Memory is compartmentalized per channel in the tree today, but that is no
-longer the design: the PRD makes the agent one identity across channels,
-with no compartments and no cross-channel allowlist. Finding 15 records what
-that costs, including a gap the operator has accepted.
+Memory spans every channel: the PRD makes the agent one identity across
+channels, with no compartments and no cross-channel allowlist, and retrieval,
+`search_memory`, `recall_raw`, near-duplicate merge, the provenance critic's
+evidence search and the heartbeat's review all reach the whole memory (#168).
+Finding 15 records what that costs, including a gap the operator has
+accepted.
 
 The weak spot is that the model's authority is unbounded and the model's
 inputs are not. Simon Willison's "lethal trifecta" is three things in one
@@ -322,10 +324,10 @@ user owns them, `shell` can `chmod` them back).
 IRC used to accept every channel message and every private message from
 anyone, and a PM from a stranger auto-created a persistent channel keyed on
 their nick: a private conversation with full tool access for anyone who
-could reach the server, whose history and memory compartment the next
-holder of that nick inherited. Glob members in `memory.channel_groups`
-(`irc:*`, or `*` alone) widened that to every channel a stranger could
-create by PM.
+could reach the server, whose history the next holder of that nick
+inherited. Memory records from any such channel were retrievable on every
+other (finding 15), so a stranger's PM could also plant text for later
+retrieval everywhere.
 
 Now IRC is default-deny like Signal. `irc.allow` lists the senders who may
 drive the agent; with none, everyone is refused, in channels and PMs. A
@@ -570,7 +572,7 @@ What it doesn't protect against, so you know:
 and shows them in a CONTEXT entry on every turn. Three things follow.
 
 - **No compartment.** Goals are agent-wide: every channel sees every goal,
-  crossing `memory.channel_groups`. A goal written from a private channel
+  as it sees every memory. A goal written from a private channel
   appears on a public one at its next turn. #220 recorded this as a
   variance from PRD principle 14; under the revised principle 14 it is what
   the PRD requires of memory too (finding 15). Nothing in a goal is scoped
@@ -611,15 +613,12 @@ human removed. What bounds it:
   heartbeat window is trimmed without compaction, so a reloaded list is
   enforced at dispatch at once but reaches the beat's tool schemas only at a
   restart.
-- **Scope.** The beat reviews only the channels grouped with
-  `internal:heartbeat` in `memory.channel_groups`, never its own earlier
-  beats. With no group it sees nothing. Group membership works both ways:
-  what a beat's turn consolidates into memory, including anything its tools
-  fetched, becomes retrievable from every channel in the group. Keep
-  channels with untrusted participants out of the heartbeat's group, or
-  disable the beat's network tools. The PRD drops `memory.channel_groups`
-  (#168), after which the beat reviews the whole memory and disabling its
-  tools is the remaining control.
+- **Scope.** The beat reviews the newest records of the whole memory, every
+  channel's and its own earlier beats' included (#168); there is no group to
+  keep a channel with untrusted participants out of. Memory spans channels
+  both ways: what a beat's turn consolidates into memory, including anything
+  its tools fetched, becomes retrievable from every channel. Disabling the
+  beat's network tools is the control that remains.
 - **Framing.** The summaries are presented as the agent's own and as data
   to review, not instructions. The framing is soft, as everywhere else.
 - **Rate.** At most one beat per `heartbeat.after` seconds of quiet, and
@@ -936,9 +935,12 @@ decision (2026-11-01), and these are its costs.
   allowlists say who may *drive* the agent, not who reads its replies.
   Everyone in a Discord guild channel or a public IRC channel reads them.
   Something said on a private Signal channel can come back in a reply
-  there: through retrieval, a goal (finding 10), a note, or the agent
+  there: through retrieval or `search_memory`/`recall_raw` (which replays
+  another channel's raw dialog), a goal (finding 10), a note, or the agent
   reading the Signal conversation because a question on the public channel
-  made it relevant. The sensitivity plugin (#138) is the capability an
+  made it relevant. The provenance critic's evidence search also quotes
+  other channels' raw dialog to the critic, so a critique objection can carry
+  it into the window. The sensitivity plugin (#138) is the capability an
   operator can load against this: it filters what enters a window
   (retrieval, notes, reads, the goals entry) by who is present, though not
   text already in the window. It is off unless loaded, and it isn't built.
@@ -997,11 +999,13 @@ does not stop what the agent knows from surfacing on that channel (first
 bullet). For a separate identity, run a second instance with its own
 database.
 
-Where the tree stands: memory is still compartmented per channel by default
-(`memory.channel_groups`, #168), and there is no send, note or read tool
-(#234, #235), so most of the costs above arrive with those changes; goals
-already cross channels (finding 10). The identity and register layers
-are built (#316), but not their runtime overrides and separate locks.
+Where the tree stands: memory spans every channel (#168), so the first
+bullet's gap is live today wherever the agent speaks in a room people you
+haven't allowed can read, and so is the poisoned-memory bullet; goals
+already cross channels (finding 10). There is no send, note or read tool
+yet (#234, #235), so the other costs above arrive with those. The identity
+and register layers are built (#316), but not their runtime overrides and
+separate locks.
 
 ### Smaller things
 
