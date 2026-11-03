@@ -445,7 +445,7 @@ class SignalPlugin(TransportPlugin):
             # actually took one (a stranger or timestamp-less envelope did not).
             if trace_id not in self._admitted:
                 if self._pop_pending(channel, trace_id) is not None:
-                    self._decrement_outstanding(channel)
+                    await self._decrement_outstanding(channel)
             self._admitted.discard(trace_id)
 
     def _pop_pending(self, channel: Channel, trace_id: str) -> int | None:
@@ -740,13 +740,20 @@ class SignalPlugin(TransportPlugin):
                     self._typing_refresh_loop(channel)
                 )
 
-    def _decrement_outstanding(self, channel: Channel) -> None:
+    async def _decrement_outstanding(self, channel: Channel) -> None:
         """Give back one outstanding slot: a final reply send, an
         error-path send, or a message that was never admitted all close out one
-        owed message."""
+        owed message. The slot that takes the count to zero also clears the
+        indicator explicitly, rather than leaving it to expire on the client
+        (issue #390). A count already at zero (a reply that answers no
+        message) is left alone and sends nothing."""
         count = self._outstanding.get(channel.id, 0)
         if count > 0:
+            # Decrement before awaiting the stop, so a message arriving while
+            # the stop is in flight sees 0 -> 1 and its start goes out after it.
             self._outstanding[channel.id] = count - 1
+            if count == 1:
+                await self._send_typing(channel, stop=True)
 
     async def _typing_refresh_loop(self, channel: Channel) -> None:
         """Re-send typing every TYPING_REFRESH_SECONDS while the channel's
@@ -765,7 +772,7 @@ class SignalPlugin(TransportPlugin):
             if self._typing_tasks.get(channel.id) is asyncio.current_task():
                 del self._typing_tasks[channel.id]
 
-    async def _send_typing(self, channel: Channel) -> bool:
+    async def _send_typing(self, channel: Channel, stop: bool = False) -> bool:
         """Send one typing-indicator request. A failure is logged and never
         blocks the reply; returns whether the send succeeded, so the
         refresh loop can stop retrying against a channel that keeps
@@ -773,11 +780,19 @@ class SignalPlugin(TransportPlugin):
         try:
             # sendTyping is one method with a boolean "stop" -- not a
             # separate stop method or an action string. False starts (or
-            # refreshes) the indicator.
-            await self._send_rpc("sendTyping", {"recipient": channel.scope, "stop": False})
+            # refreshes) the indicator; True clears it.
+            await self._send_rpc("sendTyping", {"recipient": channel.scope, "stop": stop})
             return True
         except Exception as exc:
-            logger.warning("signal: failed to send typing indicator: %s", exc, exc_info=True)
+            # Name the channel and what was being sent, and the remedy: the
+            # indicator is cosmetic, so only a persistent failure needs action.
+            action = "stop" if stop else "start or refresh"
+            logger.warning(
+                "signal: failed to %s typing indicator on %s (%s): %s; "
+                "the reply is unaffected -- if this repeats, check that "
+                "signal-cli is running and its socket is reachable",
+                action, channel.id, type(exc).__name__, exc, exc_info=True,
+            )
             return False
 
     @hookimpl
@@ -804,7 +819,7 @@ class SignalPlugin(TransportPlugin):
         which never had a pending entry, so those are a no-op."""
         if not channel.matches_transport("signal"):
             return
-        self._sweep_orphans_before(channel, trace_id)
+        await self._sweep_orphans_before(channel, trace_id)
         timestamp_ms = self._pop_pending(channel, trace_id)
         if timestamp_ms is None:
             return
@@ -815,7 +830,7 @@ class SignalPlugin(TransportPlugin):
         except Exception as exc:
             logger.warning("signal: failed to send read receipt: %s", exc, exc_info=True)
 
-    def _sweep_orphans_before(self, channel: Channel, trace_id: str) -> None:
+    async def _sweep_orphans_before(self, channel: Channel, trace_id: str) -> None:
         """Release pending entries admitted before ``trace_id`` that were
         never persisted (issue #104).
 
@@ -841,7 +856,7 @@ class SignalPlugin(TransportPlugin):
             orphans.append(pending_id)
         for orphan in orphans:
             del pending[orphan]
-            self._decrement_outstanding(channel)
+            await self._decrement_outstanding(channel)
             logger.warning(
                 "signal: message %s on %s was admitted but never persisted; "
                 "dropping its read receipt and typing slot",
@@ -876,8 +891,10 @@ class SignalPlugin(TransportPlugin):
         send_message); a sent final is released there, so exactly once."""
         if not self.owns(channel):
             return
-        # An unsent final never reaches send_message, so release here, in
-        # the same synchronous step as the check (before any await).
+        # An unsent final never reaches send_message, so release here. The
+        # slot is given back in _decrement_outstanding's synchronous prefix,
+        # before its first await (the typing stop), so the check and the
+        # release still happen before this hookimpl yields.
         try:
             unsent = final_was_unsent(channel)
         except Exception:
@@ -889,13 +906,13 @@ class SignalPlugin(TransportPlugin):
             )
             return
         if unsent:
-            self._decrement_outstanding(channel)
+            await self._decrement_outstanding(channel)
 
     async def send_message(self, channel: Channel, event: OutboundMessage) -> None:
         """Deliver a final reply, split to fit and never truncated, and
         close out one outstanding slot."""
         await self._deliver(channel, event.text)
-        self._decrement_outstanding(channel)
+        await self._decrement_outstanding(channel)
 
     async def send_progress(self, channel: Channel, event: OutboundProgress) -> None:
         """Deliver intermediate assistant text through the same path as
