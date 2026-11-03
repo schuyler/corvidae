@@ -53,7 +53,7 @@ scope, so no text crosses a channel boundary that memory wouldn't already
 cross; the PRD widens the search to every channel, matching retrieval
 (finding 15). But
 they are quoted, untrusted text in the critic's prompt, framed as data, and
-the critic's objections re-enter the window as CONTEXT (provenance objections also wake a turn whose stub tells the agent it may reply `NO_REPLY` to send nothing; that veto applies to critique-origin turns only). The number of
+the critic's objections re-enter the window as CONTEXT (provenance objections also wake a turn whose stub tells the agent it may reply `NO_REPLY` to send nothing; the veto of an exact `NO_REPLY` final covers every turn origin while `SilencePlugin` is loaded, and critique-origin turns only otherwise). The number of
 claims (5) and excerpts (5 per claim, 500 characters each) is capped, so
 one reply can't fan out into an unbounded critic prompt. Leaving sandboxing out
 of the MVP was a reasonable call, but it matters here: the attacker is not
@@ -986,6 +986,16 @@ already cross channels (finding 10). The identity and register layers
 are built (#316), but not their runtime overrides and separate locks.
 
 ### Smaller things
+
+- Untrusted text in a chat channel can talk the agent into silence. Where
+  `SilencePlugin` is loaded, the IRC, Discord and Signal registers tell the
+  model it may answer `NO_REPLY` to send nothing, and a message that says
+  "don't reply to this" may be enough. The worst case is a missed reply, and
+  every decline is a row in `exchange_log` with `outcomes.silence`
+  (`no_reply` or `empty`), so you can find them. It adds no capability: the
+  agent could already stay quiet by sending an empty final, and nothing it
+  can reach changes. If a channel must always answer, disable `silence` or
+  give it a `register_prompt` without the instruction.
 
 - Control-token strings (`<|im_start|>`, `<|endoftext|>`) and bare
   `<think>`/`</think>`/`<tool_call>`/`</tool_call>` tags in untrusted

@@ -315,7 +315,7 @@ Any plugin can send: `await self.pm.ahook.send(channel=channel, event=OutboundMe
 | Hook | Type | When |
 |------|------|------|
 | `register_tools(tool_registry: list)` | sync broadcast | During `on_start`, to collect tools |
-| `on_agent_response(channel, request_text: str, response_text: str, trace_id: str \| None, meta: dict, logprobs: dict \| None)` | async broadcast | After agent produces a response |
+| `on_agent_response(channel, request_text: str, response_text: str, trace_id: str \| None, meta: dict, logprobs: dict \| None)` | async broadcast | After agent produces a response. Fires for a final the output gate withheld (or an empty one) too, after its assistant row is in the window and before the transport send; `final_was_withheld(channel)` tells the two apart |
 | `before_agent_turn(channel, trace_id: str \| None, meta: dict)` | async broadcast | Before each LLM invocation |
 | `after_persist_assistant(channel, message: dict)` | async broadcast | After assistant message is written to DB; plugins may mutate the in-memory dict |
 | `persist_message(channel, message: dict, message_type: MessageType) -> int \| None` | async broadcast | After every `conv.append()` call; message is the untagged dict (no `_message_type` key). Persistence returns the inserted `message_log` rowid; **exactly one implementation may return non-None** (all others return None). Callers resolve with `resolve_single_result` and attach the rowid to the in-window message as `_db_id`. |
@@ -583,7 +583,7 @@ here is a plugin-API change and needs a line in this guide.
 
 | Module | Names |
 |---|---|
-| `corvidae.hooks` | `CorvidaePlugin`, `TransportPlugin`, `hookimpl`, `get_dependency`, `resolve_single_result` |
+| `corvidae.hooks` | `CorvidaePlugin`, `TransportPlugin`, `hookimpl`, `get_dependency`, `resolve_single_result`, `final_was_withheld` |
 | `corvidae.fork` | `fork_agent`, `quote`, `window_db_ids`, `ViewInputs`, `view_agent`, `view_call`, `ForkRefused`, `build_fork_prompt`, `snap_cut_forward`, `snap_cut_to_tool_boundary` (see [Forking the window](#forking-the-window) and [The view call](#the-view-call)) |
 | `corvidae.attribution` | `set_attribution`, `reset_attribution` |
 | `corvidae.tuning` | `config_value`, `resolve_tunable` |
@@ -679,7 +679,7 @@ A plugin that uses another plugin when it's there and works without it
 declares `optional_depends_on` instead. A missing optional dependency is
 not an error, and optional dependencies aren't part of cycle detection.
 Look the plugin up with `pm.get_plugin(name)` and treat `None` as absent
-(it's `None` whether the plugin is disabled or not installed):
+(it's `None` whether the plugin is disabled or not installed). The declaration is documentary: it only changes the log level of a hookimpl with no spec (above) and doesn't order loading, so look the plugin up when you use it, not in `__init__`:
 
 ```python
 class ProfilerPanel(CorvidaePlugin):
@@ -843,6 +843,18 @@ channels:
 ```
 
 A transport can ship a default register for its channels by implementing `resolve_register_prompt(channel)`: open with `if not self.owns(channel): return None` and return the register text. `corvidae.channels._registers.shipped_register(*names)` joins fragments from `corvidae/channels/registers/`. The Agent asks only when no `register_prompt` is configured for the channel, and appends the answer after `agent.system_prompt`.
+
+A chat transport can also pick up the silence instruction: declare `optional_depends_on = frozenset({"silence"})` and return `with_silence(self.pm, shipped_register(...))` (both in `corvidae.channels._registers`), which appends the `silence` plugin's fragment after a blank line while that plugin is loaded and returns the register unchanged when it isn't. A transport that returns no register gets no instruction, and so always answers.
+
+### Transports with per-turn state
+
+A transport that holds state for the length of a turn (Discord's and Signal's typing slot, ACP's pending prompt, the CLI's input prompt) releases it in `send_message`, which runs when a final is sent. A final the gate withheld, or an empty one, never gets there, so the transport also implements `on_agent_response` and releases the same state when `corvidae.hooks.final_was_withheld(channel)` is true. A sent final's row is a normal message, so it releases in `send_message` only: once per final either way. Three rules:
+
+- Open with `if not self.owns(channel): return`. `on_agent_response` reaches every transport.
+- Do the ownership check, `final_was_withheld` and the release synchronously, before the first `await`. Implementations run under `asyncio.gather` and the kernel may move on when a sibling raises.
+- If `final_was_withheld` raises, log a warning and release nothing. A stuck indicator is better than a double release.
+
+The `IRCPlugin` and web transports keep nothing per turn, so they don't need it.
 
 The `irc` transport is provided by `IRCPlugin` (registered via the `corvidae` entry point group). Its config block:
 
