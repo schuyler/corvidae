@@ -122,17 +122,6 @@ the row):
 - **The `message_fts` backfill** indexes every valid row and indexes a corrupt
   row as empty text, so it is not retried on every start.
 
-### Corrupt `exchange_log` rows
-
-A corrupt `appraisal` value (unparseable JSON, invalid UTF-8, or JSON that
-is not an envelope object) can only come from an out-of-band write. The range
-readers (`importance_over_range`, `mean_valence`) and `corvidae redact`'s
-scrubber skip such a row with one WARNING naming the trace id and channel
-(#311). The prior and mean valence are computed over the remaining exchanges,
-and redact finishes over the others. A row the scrubber skips keeps its
-`past_claims`, and redact still exits 0, so check the log for the warning
-after a redact run on a database you suspect is damaged.
-
 **Write connection and atomicity (#221).** That section is one SQLite
 transaction (`BEGIN IMMEDIATE` ... `COMMIT`) on a dedicated connection
 only `MemoryPlugin` writes to, opened in `on_start` once the schema
@@ -191,6 +180,17 @@ that started the run (`"compaction"` or `"idle"`) — set once at
 attribution snapshot for that call, into `MetricsPlugin`'s emitted tags,
 the `usage_log.trigger` column, and the `memory consolidated` completion
 log line.
+
+### Corrupt `exchange_log` rows
+
+A corrupt `appraisal` value (unparseable JSON, invalid UTF-8, or JSON that
+is not an envelope object) can only come from an out-of-band write. The range
+readers (`importance_over_range`, `mean_valence`) and `corvidae redact`'s
+scrubber skip such a row with one WARNING naming the trace id and channel
+(#311). The prior and mean valence are computed over the remaining exchanges,
+and redact finishes over the others. A row the scrubber skips keeps its
+`past_claims`, and redact still exits 0, so check the log for the warning
+after a redact run on a database you suspect is damaged.
 
 #### Retrieval (read path)
 
