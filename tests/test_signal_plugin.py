@@ -1187,7 +1187,8 @@ class TestLiveness:
                 await asyncio.sleep(TYPING_SILENCE_WINDOW)
                 restarted = [
                     f for f in h.server.received[stop_index + 1:]
-                    if f in _typing_frames(h.server, stop=False)
+                    if "typing" in str(f.get("method", "")).lower()
+                    and f.get("params", {}).get("stop") is False
                 ]
                 assert not restarted, f"typing restarted after the stop: {restarted}"
             finally:
@@ -1257,7 +1258,9 @@ class TestLiveness:
                 await _wait_until(lambda: _typing_frames(h.server, stop=True), timeout=5)
                 await _wait_until(
                     lambda: any(
-                        r.levelno == logging.WARNING and channel.id in r.getMessage()
+                        r.levelno == logging.WARNING
+                        and channel.id in r.getMessage()
+                        and "typing" in r.getMessage()
                         for r in caplog.records
                     ),
                     timeout=5,
