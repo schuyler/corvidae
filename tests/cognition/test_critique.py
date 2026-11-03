@@ -1425,3 +1425,42 @@ class TestLazyProbe:
             assert conn._connection is None
         finally:
             await _teardown(env)
+
+
+# ---------------------------------------------------------------------------
+# #398 R13: a coalesced burst's own messages are never earlier evidence
+# ---------------------------------------------------------------------------
+
+
+class TestBurstProvenanceBoundary:
+    async def test_claim_supported_only_by_an_earlier_burst_message_is_not_found(
+        self, tmp_path
+    ):
+        """R13 (#398): the burst's last message owns the trace, but a claim
+        supported only by an earlier message of the same burst is not counted
+        as found in prior history; a message from before the burst still is."""
+        env = await _provenance_env(tmp_path)
+        try:
+            # History from before the burst, then a three-message burst.
+            earlier = await _log(env, "Ana said the quarterly audit deadline is Thursday.")
+            m1 = await _log(env, "Heads up: the quarterly audit deadline is Thursday.")
+            m2 = await _log(env, "unrelated chatter")
+            m3 = await _log(env, "when is it due?")
+            # The window holds the burst's three unanswered rows; the trace is
+            # the last message's, so its recorded originating row is m3.
+            conv = ContextWindow(env.channel.id)
+            conv.messages = [
+                _row("user", "Heads up: the quarterly audit deadline is Thursday.", m1),
+                _row("user", "unrelated chatter", m2),
+                _row("user", "when is it due?", m3),
+            ]
+            env.channel.conversation = conv
+            await _begin_exchange(env, "kb", origin_rowid=m3)
+
+            await env.plugin.before_agent_turn(env.channel, "kb", {})
+            evidence = await env.plugin._gather_evidence(env.channel, "kb", [CLAIM])
+
+            # Only the pre-burst message is evidence; m1 (same burst) is not.
+            assert _candidate_rowids(evidence) == [[earlier]]
+        finally:
+            await _teardown(env)

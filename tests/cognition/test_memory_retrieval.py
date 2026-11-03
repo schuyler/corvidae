@@ -679,3 +679,60 @@ class TestRetrievalLogSimilarity:
             cols = {row[1] for row in await cursor.fetchall()}
         assert "top_similarity" in cols
         await db.close()
+
+
+# ---------------------------------------------------------------------------
+# #398: recall draws on every message of a coalesced burst (R11)
+# ---------------------------------------------------------------------------
+
+
+class TestBurstRetrieval:
+    """R11 (#398): the retrieval query covers every unanswered user message."""
+
+    async def test_embedding_path_recalls_memory_matching_only_the_first_message(self):
+        """R11 AC1: a three-message burst where only m1 matches a stored memory
+        still retrieves it. retrieval k is 1 and a distractor memory matches
+        the last message exactly, so a tail-only query retrieves the
+        distractor instead."""
+        config = {**EMBED_CONFIG, "memory": {"retrieval": {"k": 1}}}
+        memory, embedder, channel, conv, db = await build_retrieval_env(config)
+        await seed_memory(db, channel.id, "zephyr quasar nebula pulsar")
+        await seed_memory(db, channel.id, "thanks")
+
+        # Three unanswered user messages; only the first matches a memory.
+        for text in ("zephyr quasar nebula pulsar", "ok", "thanks"):
+            conv.append({"role": "user", "content": text})
+        await memory.before_agent_turn(channel=channel, trace_id=None, meta={})
+
+        # m1's text reaches the embedded query, and its memory is admitted.
+        assert "zephyr" in embedder.calls[-1][0]
+        recalled = " ".join(m["content"] for m in context_messages(conv))
+        assert "zephyr quasar nebula pulsar" in recalled
+        await db.close()
+
+    async def test_fts_fallback_recalls_memories_matching_first_and_last_message(self):
+        """R11 AC2: with no embeddings, a three-message burst whose messages each
+        hold 20+ words, where m1 and m3 each match a different stored memory
+        (m1's matching word past its 6th token), retrieves both."""
+        memory, embedder, channel, conv, db = await build_retrieval_env()
+        await seed_memory(db, channel.id, "falconry apprenticeship needs a sponsor",
+                          embedded=False)
+        await seed_memory(db, channel.id, "gazebo roof was rebuilt last spring",
+                          embedded=False)
+        embedder.fail = True
+
+        # 22 distinct filler tokens per message, one matching word in each of
+        # m1 (position 10) and m3 (position 9); m2 matches nothing.
+        m1 = " ".join([f"alpha{i}" for i in range(9)] + ["falconry"]
+                      + [f"alpha{i}" for i in range(9, 21)])
+        m2 = " ".join(f"beta{i}" for i in range(22))
+        m3 = " ".join([f"gamma{i}" for i in range(8)] + ["gazebo"]
+                      + [f"gamma{i}" for i in range(8, 21)])
+        for text in (m1, m2, m3):
+            conv.append({"role": "user", "content": text})
+        await memory.before_agent_turn(channel=channel, trace_id=None, meta={})
+
+        recalled = " ".join(m["content"] for m in context_messages(conv))
+        assert "falconry apprenticeship" in recalled
+        assert "gazebo roof" in recalled
+        await db.close()

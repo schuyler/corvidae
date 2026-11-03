@@ -60,3 +60,71 @@ async def test_serial_queue_is_empty_false_with_multiple_items():
     q._queue.put_nowait("item3")
 
     assert q.is_empty is False
+
+
+# ---------------------------------------------------------------------------
+# SerialQueue.take_while (#398 coalescing)
+# ---------------------------------------------------------------------------
+
+
+async def test_take_while_takes_head_run_and_leaves_rest_in_order():
+    """R4 (#398): take_while removes the head items while the predicate holds,
+    stops at the first failure, and leaves that item and everything after it
+    queued in their original order."""
+    q = SerialQueue()
+    # No consumer: items stay queued so the test controls the queue.
+    for item in ["u1", "u2", "n1", "u3"]:
+        q._queue.put_nowait(item)
+
+    taken = q.take_while(lambda i: i.startswith("u"))
+
+    # Only the leading run is taken; "u3" sits behind "n1" and stays put.
+    assert taken == ["u1", "u2"]
+    assert [q._queue.get_nowait() for _ in range(q._queue.qsize())] == ["n1", "u3"]
+
+
+async def test_take_while_returns_empty_when_head_fails_predicate():
+    """R4 (#398): a head item failing the predicate takes nothing and stays."""
+    q = SerialQueue()
+    q._queue.put_nowait("n1")
+    q._queue.put_nowait("u1")
+
+    assert q.take_while(lambda i: i.startswith("u")) == []
+    assert q._queue.qsize() == 2
+
+
+async def test_take_while_on_empty_queue_returns_empty():
+    """R1 (#398): an empty queue yields an empty list (no burst)."""
+    q = SerialQueue()
+    assert q.take_while(lambda i: True) == []
+
+
+async def test_take_while_keeps_drain_waiting_for_the_current_item():
+    """R8 (#398): items taken inside the consumer's current item are marked
+    done at once, yet drain() still waits for the current item to finish."""
+    in_process = asyncio.Event()
+    release = asyncio.Event()
+    taken_holder: list[list[str]] = []
+
+    async def process(item):
+        # The consumer takes the rest of the queue mid-item, then blocks.
+        taken_holder.append(q.take_while(lambda i: True))
+        in_process.set()
+        await release.wait()
+
+    q = SerialQueue()
+    q.start(process)
+    for item in ["a", "b", "c"]:
+        await q.enqueue(item)
+    # Bounded wait: a missing take_while must fail the test, not hang it.
+    await asyncio.wait_for(in_process.wait(), timeout=2)
+    assert taken_holder == [["b", "c"]]
+
+    # drain() must not complete while the consumer still holds "a".
+    drain_task = asyncio.create_task(q.drain())
+    await asyncio.sleep(0.05)
+    assert not drain_task.done()
+
+    release.set()
+    await asyncio.wait_for(drain_task, timeout=2)
+    await q.stop()

@@ -1219,6 +1219,37 @@ class TestLiveness:
             finally:
                 await _stop_plugin(h)
 
+    async def test_one_reply_to_a_burst_clears_typing(self, tmp_path):
+        """R10 (#398): three messages outstanding, answered by one coalesced
+        reply: the one reply sends the explicit stop, zeroes the outstanding
+        count, and no refresh follows."""
+        with _fast_typing_refresh():
+            h = await _start_plugin(tmp_path)
+            try:
+                for text in ("one", "two", "three"):
+                    await _push_text(h, text)
+                await _wait_until(lambda: h.pm.ahook.on_message.await_count >= 3, timeout=5)
+                channel = h.pm.ahook.on_message.await_args.kwargs["channel"]
+                await _wait_until(lambda: h.plugin._outstanding.get(channel.id) == 3, timeout=5)
+
+                # A single reply answers the whole burst.
+                await h.plugin.send(channel=channel, event=OutboundMessage(text="one reply"))
+                assert h.plugin._outstanding.get(channel.id, 0) == 0
+                await _wait_until(lambda: _typing_frames(h.server, stop=True), timeout=5)
+                stop_frame = _typing_frames(h.server, stop=True)[0]
+                stop_index = h.server.received.index(stop_frame)
+
+                # Then nothing restarts the indicator.
+                await asyncio.sleep(TYPING_SILENCE_WINDOW)
+                restarted = [
+                    f for f in h.server.received[stop_index + 1:]
+                    if "typing" in str(f.get("method", "")).lower()
+                    and f.get("params", {}).get("stop") is False
+                ]
+                assert not restarted, f"typing refreshed after the burst's reply: {restarted}"
+            finally:
+                await _stop_plugin(h)
+
     async def test_vetoed_lone_message_clears_typing(self, tmp_path):
         """Issue #390 R2: a lone message vetoed by a second gate took a typing
         slot (and sent a start); giving that slot back takes the count
