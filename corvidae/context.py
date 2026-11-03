@@ -184,6 +184,19 @@ def well_formed_calls(msg: object) -> list[dict]:
     return [c for c in calls if isinstance(c, dict) and isinstance(c.get("id"), str)]
 
 
+def result_call_id(msg: object) -> str | None:
+    """The ``tool_call_id`` of a tool-result row, or None when it has none.
+
+    Only a non-empty string can match a call: the field arrives from
+    ``message_log`` unvalidated, and an unhashable value (a list, a dict)
+    would raise at set membership (#392).
+    """
+    if not isinstance(msg, dict) or msg.get("role") != "tool":
+        return None
+    call_id = msg.get("tool_call_id")
+    return call_id if isinstance(call_id, str) and call_id else None
+
+
 def message_tokens(msg: dict) -> int:
     """Token count of a message the way it actually gets sent: the
     JSON-serialized visible dict, not just `content`. Catches size hiding in
@@ -298,10 +311,8 @@ class ContextWindow:
         """
         result_at = {}
         for i, m in enumerate(self.messages):
-            if not isinstance(m, dict) or m.get("role") != "tool":
-                continue
-            call_id = m.get("tool_call_id")
-            if isinstance(call_id, str) and call_id and call_id not in result_at:
+            call_id = result_call_id(m)
+            if call_id is not None and call_id not in result_at:
                 result_at[call_id] = i
 
         # Only well-formed calls are placed or claimed; the rest are dropped
@@ -361,7 +372,11 @@ class ContextWindow:
                 )
             if i in anchored:
                 out += block(anchored[i])
-            if msg.get("role") == "tool" and msg.get("tool_call_id") in claimed:
+            # A result whose call is in the window was emitted inside its
+            # call's block above. Compare through result_call_id: the raw
+            # field can be unhashable (#392).
+            call_id = result_call_id(msg)
+            if call_id is not None and call_id in claimed:
                 continue
             if i in emit_at:
                 continue
@@ -386,9 +401,16 @@ class ContextWindow:
 
     @staticmethod
     def _malformed_call_count(msg: dict) -> int:
-        """How many of ``msg``'s tool calls have no usable id."""
-        raw = msg.get("tool_calls")
-        if not raw:
+        """How many of ``msg``'s tool calls have no usable id.
+
+        A truthy or falsy non-list value (``""``, ``0``, ``{}``, a string) is
+        one unusable call: testing truthiness would let ``""`` through
+        unwarned (#392).
+        """
+        if "tool_calls" not in msg:
+            return 0
+        raw = msg["tool_calls"]
+        if raw is None:
             return 0
         if not isinstance(raw, list):
             return 1
@@ -400,7 +422,7 @@ class ContextWindow:
         only, and no ``tool_calls`` key at all when none survive (an empty
         list is not the same as an absent one to a chat template)."""
         out = _visible(msg)
-        if not out.get("tool_calls"):
+        if "tool_calls" not in out:
             return out
         kept = well_formed_calls(msg)
         if kept:
@@ -489,9 +511,11 @@ class ContextWindow:
         del self.messages[:cut]
 
         # The newest row alone may still not fit: truncate it in memory only.
+        # A row that is not a mapping has no content to truncate; it stands
+        # as it is and the caller reports the overage (#392).
         truncated = False
         newest = self.messages[-1]
-        if fixed + message_tokens(newest) > max_tokens:
+        if isinstance(newest, dict) and fixed + message_tokens(newest) > max_tokens:
             content = str(newest.get("content") or "")
             total = len(content)
             room = max_tokens - fixed

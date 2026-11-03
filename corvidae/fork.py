@@ -203,7 +203,7 @@ def build_fork_prompt(
     pending_at_cut = {
         c["id"]
         for m in prefix.messages
-        for c in m.get("tool_calls") or []
+        for c in well_formed_calls(m)
         if result_at.get(c["id"], -1) >= cut
     }
     prompt = prefix.build_prompt(pending_ids | pending_at_cut, mid_conversation_system_role=mid_role)

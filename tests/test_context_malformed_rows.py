@@ -17,7 +17,12 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from corvidae.channel import Channel  # noqa: F401 (fixture type hint)
-from corvidae.context import ContextWindow, MessageType, message_tokens
+from corvidae.context import (
+    ORPHAN_RESULT_LABEL,
+    ContextWindow,
+    MessageType,
+    message_tokens,
+)
 from corvidae.fork import snap_cut_forward, snap_cut_to_tool_boundary
 from corvidae.outbound import OutboundMessage
 from corvidae.trace import mint_trace_id
@@ -79,8 +84,10 @@ def test_fit_to_budget_accepts_a_tool_call_with_no_id() -> None:
         {"role": "user", "content": "hi"},
     ])
     dropped, truncated = conv.fit_to_budget(1)
-    assert isinstance(dropped, list)
-    assert isinstance(truncated, bool)
+    # The budget only fits the newest row, so the call row is the one dropped.
+    assert [m["content"] for m in dropped] == [""]
+    assert truncated is False
+    assert [m["content"] for m in conv.messages] == ["hi"]
 
 
 @pytest.mark.parametrize(
@@ -93,14 +100,18 @@ def test_fit_to_budget_accepts_a_tool_call_with_no_id() -> None:
     ],
 )
 def test_snap_cuts_accept_malformed_tool_calls(tool_calls) -> None:
-    """Both snaps return an index instead of raising."""
+    """Both snaps return a usable cut instead of raising.
+
+    A call with no usable id is not a call, so it never straddles a cut:
+    the snaps leave the cut where it was rather than moving it around it.
+    """
     messages = [
         {"role": "assistant", "content": "", "tool_calls": tool_calls},
         {"role": "tool", "tool_call_id": "call-1", "content": "r"},
         {"role": "user", "content": "hi"},
     ]
-    assert isinstance(snap_cut_forward(messages, 1), int)
-    assert isinstance(snap_cut_to_tool_boundary(messages, 2), int)
+    assert snap_cut_forward(messages, 1) == 1
+    assert snap_cut_to_tool_boundary(messages, 2) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -247,3 +258,78 @@ async def test_turn_completes_with_a_malformed_row_in_the_window() -> None:
         if task_plugin:
             await task_plugin.on_stop()
         await db.close()
+
+
+# ---------------------------------------------------------------------------
+# Review follow-ups: the same row classes on the paths the first pass missed
+# ---------------------------------------------------------------------------
+
+
+def test_fit_to_budget_leaves_a_non_mapping_newest_row_alone() -> None:
+    """The truncation branch must not assume the newest row has `.get`.
+
+    It runs after the head has already been dropped, so raising here loses
+    rows and then fails the same way on every later turn (#392 review).
+    """
+    conv = make_window([
+        {"role": "user", "content": "a" * 5000},
+        ["not", "a", "message"],
+    ])
+    dropped, truncated = conv.fit_to_budget(1)
+    assert truncated is False
+    assert conv.messages == [["not", "a", "message"]]
+
+
+def test_build_prompt_accepts_an_unhashable_tool_call_id() -> None:
+    """`tool_call_id` arrives from message_log unvalidated; a list cannot be
+    a set member, and the membership test must not raise (#392 review)."""
+    conv = make_window([
+        {"role": "tool", "tool_call_id": ["a"], "content": "r"},
+        {"role": "user", "content": "hi"},
+    ])
+    prompt = conv.build_prompt()
+    # Its call is not in the window, so it renders as a framed orphan result.
+    assert any(ORPHAN_RESULT_LABEL in m.get("content", "") for m in prompt)
+
+
+def test_build_prompt_filters_a_falsy_non_list_tool_calls() -> None:
+    """An empty-string `tool_calls` is still malformed: render without it and
+    say so, rather than passing it to a chat template (#392 review)."""
+    conv = make_window([
+        {"role": "assistant", "content": "text", "tool_calls": ""},
+        {"role": "user", "content": "hi"},
+    ])
+    prompt = conv.build_prompt()
+    rendered = [m for m in prompt if m.get("content") == "text"]
+    assert rendered, prompt
+    assert "tool_calls" not in rendered[0]
+
+
+def test_warn_over_budget_accepts_a_non_mapping_dropped_row() -> None:
+    """The over-budget warning reads `_db_id` off every dropped row (#392)."""
+    from corvidae.agent import Agent
+
+    conv = make_window([
+        ["not", "a", "message"],
+        {"role": "user", "content": "x" * 4000},
+    ])
+    dropped, truncated = conv.fit_to_budget(50)
+
+    channel = type("C", (), {"id": "test:malformed"})()
+    # Must not raise; the non-mapping row simply carries no id.
+    Agent._warn_over_budget(None, channel, conv, 15000, dropped, truncated)
+
+
+def test_build_fork_prompt_accepts_a_tool_call_with_no_id() -> None:
+    """A fork renders the same prefix the main turn does, so it needs the
+    same tolerance: a compaction fork and the background view both go
+    through it (#392 review)."""
+    from corvidae.fork import build_fork_prompt
+
+    conv = make_window([
+        {"role": "assistant", "content": "", "tool_calls": [CALL_NO_ID]},
+        {"role": "user", "content": "hi"},
+    ])
+    prompt = build_fork_prompt(conv, None, "summarize", frozenset(), "system")
+    assert prompt[0]["role"] == "system"
+    assert prompt[-1] == {"role": "user", "content": "summarize"}

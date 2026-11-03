@@ -567,7 +567,10 @@ class Agent(CorvidaePlugin):
     ) -> None:
         """Log the one WARNING for a fit_to_budget application (#308)."""
         # Message_log id range of the dropped rows, when they carry ids.
-        ids = [m["_db_id"] for m in dropped if isinstance(m.get("_db_id"), int)]
+        ids = [
+            m["_db_id"] for m in dropped
+            if isinstance(m, dict) and isinstance(m.get("_db_id"), int)
+        ]
         if not dropped:
             what = "dropped no rows"
         elif ids:

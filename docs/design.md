@@ -703,14 +703,17 @@ All operations are synchronous; no database access:
   Every row the window can hold is renderable (PRD §3.1.18.1, #392), because
   these steps run unwrapped on every turn and an exception here is a
   deterministic per-turn failure that wedges the channel. A row that is not a
-  message object is left out; a malformed `tool_calls` entry (no `id`, a
-  non-list value, a non-dict entry) is filtered out by
-  `well_formed_calls()`, and the row renders without it, or is left out
-  entirely when that was its whole payload. Each omission logs one WARNING
-  naming the channel and the row (`message_log` id, or the window position
-  when the row was never persisted). `snap_cut_forward`,
-  `snap_cut_to_tool_boundary` and `_first_result_index` read `tool_calls`
-  through the same helper, so the cut snaps and the render agree on which
+  message object is left out; a malformed `tool_calls` value (no `id`, a
+  non-list value including a falsy one such as `""`, a non-dict entry) is
+  filtered out by `well_formed_calls()`, and the row renders without it, or is
+  left out entirely when that was its whole payload. A `tool_call_id` that is
+  not a non-empty string — `message_log` never validates the field — is read
+  through `result_call_id()`, so an unhashable value renders as an orphan
+  result instead of raising. Each omission logs one WARNING naming the channel
+  and the row (`message_log` id, or the window position when the row was never
+  persisted). `snap_cut_forward`, `snap_cut_to_tool_boundary`,
+  `_first_result_index` and `build_fork_prompt` read `tool_calls` through the
+  same helper, so the cut snaps, the render and a fork's prefix agree on which
   calls exist.
 - `corvidae.context.unanswered_user_messages(messages)` (a module function,
   not a method) — the user-role MESSAGE rows after the window's last
@@ -740,7 +743,9 @@ All operations are synchronous; no database access:
   would drop the newest row, in which case the orphaned result renders as a
   framed notification. The newest row is always kept; if it alone exceeds
   the budget its content is truncated in memory only, with a visible
-  marker. Returns `(dropped, truncated)`.
+  marker. A newest row that is not a message object has no content to
+  truncate, so it stands as it is and the caller reports the overage.
+  Returns `(dropped, truncated)`.
 - The window only grows at the tail (`append`) and truncates at the head
   (`replace_with_summary`, `fit_to_budget`). Nothing is inserted, removed or mutated
   mid-window, so there is no method for removing entries by type; stale
