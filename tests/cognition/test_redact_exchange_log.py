@@ -199,6 +199,13 @@ class TestCorruptAppraisalRow:
             assert "t1" in warnings[0], warnings[0]
             assert "irc:#a" in warnings[0], warnings[0]
             assert "inspect or correct" in warnings[0], warnings[0]
+            # The unscrubbed row is surfaced to the caller, not only logged:
+            # redact turns this into a non-zero exit (#311).
+            assert len(result["unscrubbed"]) == 1, result["unscrubbed"]
+            assert "exchange_log" in result["unscrubbed"][0]
+            assert "t1" in result["unscrubbed"][0]
+            assert "irc:#a" in result["unscrubbed"][0]
+            assert "may survive" in result["unscrubbed"][0]
         finally:
             await db.close()
 
@@ -440,6 +447,75 @@ class TestFormsAndReporting:
         )
         assert result.exit_code == 0, result.output
         assert "2 exchange_log rows" in result.output, result.output
+
+
+class TestCliReportsIncompleteRedaction:
+    """#311: a row the scrubber cannot clear must fail the command.
+
+    redact used to report a clean count and exit 0 whatever the scrubber
+    managed, so a corrupt appraisal row left the redacted claim text in
+    place with nothing in the result or the exit status to say so.
+    """
+
+    def test_cli_message_form_exits_nonzero_naming_the_row(self, tmp_path):
+        path = str(tmp_path / "s.db")
+
+        async def build() -> int:
+            db, ids = await _db_with_dialog(path)
+            await db.execute(
+                "UPDATE exchange_log SET appraisal = 'not json{' "
+                "WHERE trace_id = 't1'"
+            )
+            await db.commit()
+            await db.close()
+            return ids["u1"]
+
+        u1 = asyncio.run(build())
+        result = CliRunner().invoke(
+            redact_command, ["--db", path, "message", str(u1)]
+        )
+        assert result.exit_code == 1, result.output
+        assert "redaction incomplete" in result.output, result.output
+        assert "t1" in result.output, result.output
+        assert "irc:#a" in result.output, result.output
+        assert "rerun this command" in result.output, result.output
+
+    def test_cli_dry_run_reports_nothing_incomplete(self, tmp_path):
+        # A dry run changed nothing, so nothing is incomplete: it reports
+        # the row it would skip and still succeeds.
+        path = str(tmp_path / "s.db")
+
+        async def build() -> int:
+            db, ids = await _db_with_dialog(path)
+            await db.execute(
+                "UPDATE exchange_log SET appraisal = 'not json{' "
+                "WHERE trace_id = 't1'"
+            )
+            await db.commit()
+            await db.close()
+            return ids["u1"]
+
+        u1 = asyncio.run(build())
+        result = CliRunner().invoke(
+            redact_command, ["--db", path, "--dry-run", "message", str(u1)]
+        )
+        assert result.exit_code == 0, result.output
+        assert "redaction incomplete" not in result.output, result.output
+
+    def test_cli_clean_run_still_exits_zero(self, tmp_path):
+        path = str(tmp_path / "s.db")
+
+        async def build() -> int:
+            db, ids = await _db_with_dialog(path)
+            await db.close()
+            return ids["u1"]
+
+        u1 = asyncio.run(build())
+        result = CliRunner().invoke(
+            redact_command, ["--db", path, "message", str(u1)]
+        )
+        assert result.exit_code == 0, result.output
+        assert "incomplete" not in result.output, result.output
 
 
 class TestRegistration:

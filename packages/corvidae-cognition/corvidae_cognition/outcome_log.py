@@ -385,7 +385,7 @@ async def redact_exchange_log(
     msg_ids: list[int],
     dry_run: bool,
     tombstone: str,
-) -> int | None:
+) -> tuple[int, list[str]] | None:
     """Scrub exchange_log text derived from redacted messages in one channel.
 
     For each redacted id X: the exchange that owns X (in the channel, the
@@ -394,10 +394,14 @@ async def redact_exchange_log(
     its provenance_snapshot, since any later window may have carried X's
     text as CONTEXT. Exchanges with a NULL message_rowid are not reached.
 
+    Returns ``(rows changed, skipped)`` where ``skipped`` names each row this
+    scrubber could not clear — redact reports them and exits non-zero, since
+    the redacted text may survive in them. Returns None when the table is
+    absent and there is nothing to scrub.
+
     Registered as the ``exchange_log`` scrubber in the ``corvidae.redact``
     entry-point group, which ``corvidae redact`` runs per channel over the
-    ids it tombstoned (#160). Returns the number of exchanges changed (or
-    that would be, in dry-run mode), or None when the table is absent.
+    ids it tombstoned (#160).
     """
     # A DB whose daemon never ran outcome_log has no table to scrub.
     async with db.execute(
@@ -408,6 +412,7 @@ async def redact_exchange_log(
     if not msg_ids:
         return 0
     changed: set[str] = set()
+    skipped: list[str] = []
 
     # Find each redacted id's owning exchange, once per exchange.
     owners: set[str] = set()
@@ -435,20 +440,25 @@ async def redact_exchange_log(
             row = await cursor.fetchone()
         # A corrupt value (bad JSON, invalid UTF-8, deep nesting, JSON that
         # is not an envelope object, or a claims entry missing its keys)
-        # skips with one WARNING; the cascade completes over the other
-        # exchanges (#311). The row is left as-is — only out-of-band writes
-        # can produce one, and the operator is told where it is.
+        # cannot be scrubbed, so its claim text may still hold the redacted
+        # exchange. The row is left as-is and named in ``skipped``: the
+        # cascade continues over the other exchanges, but redact reports
+        # this row and exits non-zero rather than reporting success (#311).
         try:
             scrubbed = _scrub_past_claims(row[0], tombstone)
         except (ValueError, TypeError, RecursionError, AttributeError,
-                KeyError):
+                KeyError) as exc:
             logger.warning(
-                "skipping corrupt appraisal for exchange %s on channel %s; "
-                "its past_claims are left unscrubbed — inspect or correct "
-                "the row",
-                trace_id, channel_id,
+                "could not scrub appraisal for exchange %s on channel %s "
+                "(%s); its past_claims are left unscrubbed — inspect or "
+                "correct the row",
+                trace_id, channel_id, type(exc).__name__,
                 exc_info=True,
                 extra={"channel": channel_id, "trace_id": trace_id},
+            )
+            skipped.append(
+                f"trace {trace_id} (channel {channel_id}): corrupt "
+                f"appraisal ({type(exc).__name__}), claim text may survive"
             )
             continue
         if scrubbed is None:
@@ -476,4 +486,4 @@ async def redact_exchange_log(
             snapshot_args,
         )
         await db.commit()
-    return len(changed)
+    return len(changed), skipped
