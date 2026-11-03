@@ -345,3 +345,72 @@ def test_keep_beats_defaults_to_three_and_accepts_zero():
     assert parse_keep_beats({}) == 3
     assert parse_keep_beats({"heartbeat": {"keep_beats": None}}) == 3
     assert parse_keep_beats({"heartbeat": {"keep_beats": 0}}) == 0
+
+
+# ---------------------------------------------------------------------------
+# heartbeat.memory_limit / heartbeat.retired_goal_limit
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("bad", [-1, 2.5, True, "20"])
+async def test_rejects_a_bad_memory_limit(make_env, bad):
+    """A negative, fractional, boolean or string memory_limit fails startup,
+    naming the key, the rejected value, what is accepted and where to fix it."""
+    with pytest.raises(ValueError) as exc:
+        await make_env({"heartbeat": {"memory_limit": bad}}, with_memory=False)
+    message = str(exc.value)
+    assert "heartbeat.memory_limit" in message
+    assert f"got {bad!r}" in message
+    assert "whole number" in message
+    assert "0 or more" in message
+    assert "agent.yaml" in message
+
+
+@pytest.mark.parametrize("bad", [-1, 2.5, True, "20"])
+async def test_rejects_a_bad_retired_goal_limit(make_env, bad):
+    """A negative, fractional, boolean or string retired_goal_limit fails
+    startup, naming the key, the rejected value, what is accepted and where
+    to fix it."""
+    with pytest.raises(ValueError) as exc:
+        await make_env({"heartbeat": {"retired_goal_limit": bad}}, with_memory=False)
+    message = str(exc.value)
+    assert "heartbeat.retired_goal_limit" in message
+    assert f"got {bad!r}" in message
+    assert "whole number" in message
+    assert "0 or more" in message
+    assert "agent.yaml" in message
+
+
+def test_review_limits_default_to_twenty_and_accept_zero():
+    """Absent or null limits are 20; 0 is a valid count (reviews none)."""
+    from corvidae_cognition.heartbeat import (
+        parse_memory_limit,
+        parse_retired_goal_limit,
+    )
+
+    assert parse_memory_limit({}) == 20
+    assert parse_memory_limit({"heartbeat": {"memory_limit": None}}) == 20
+    assert parse_memory_limit({"heartbeat": {"memory_limit": 0}}) == 0
+    assert parse_memory_limit({"heartbeat": {"memory_limit": 5}}) == 5
+    assert parse_retired_goal_limit({}) == 20
+    assert parse_retired_goal_limit({"heartbeat": {"retired_goal_limit": None}}) == 20
+    assert parse_retired_goal_limit({"heartbeat": {"retired_goal_limit": 0}}) == 0
+    assert parse_retired_goal_limit({"heartbeat": {"retired_goal_limit": 7}}) == 7
+
+
+async def test_beat_obeys_memory_limit(make_env):
+    """A beat reviews only the newest ``heartbeat.memory_limit`` memories:
+    the limit bounds the notification, so it bounds the beat's prompt."""
+    config = {"heartbeat": {"after": AFTER, "memory_limit": 2}}
+    env = await make_env(config)
+    now = env.clock.now()
+    await env.seed_memory("irc:#lex", "oldest: the first plan.", now - 7200)
+    await env.seed_memory("irc:#lex", "middle: the second plan.", now - 600)
+    await env.seed_memory("irc:#lex", "newest: the third plan.", now - 60)
+
+    await env.clock.advance(AFTER)
+    assert len(env.beats) == 1
+    text = env.beats[0]["text"]
+    assert "newest: the third plan." in text
+    assert "middle: the second plan." in text
+    assert "oldest: the first plan." not in text
