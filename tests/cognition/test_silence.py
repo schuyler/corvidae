@@ -1,5 +1,6 @@
-"""RED tests for issue #215, the cognition half: SilencePlugin (the NO_REPLY
-veto, S1; the decline record, S5).
+"""Tests for issue #215, the cognition half: SilencePlugin (the instruction
+on conversational transports, S3/S7/S9; the NO_REPLY veto, S1; the decline
+record, S5).
 
 Design: .claude/plans/215-silence.md. Interface pinned here:
   corvidae_cognition.silence.NO_REPLY == "NO_REPLY"

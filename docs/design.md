@@ -2465,7 +2465,7 @@ Every transport (CLI, IRC, Signal, Discord, web, ACP) subclasses
 `TransportPlugin` (`hooks.py`) and sets `transport` to the name its
 channel ids start with. A chat transport also sets
 `conversational = True` (IRC, Discord and Signal do; the default is False),
-which plugins that tailor the system prompt read through `transform_system_prompt`. The base class implements the outbound `send`
+which a `transform_system_prompt` wrapper can read to tailor the prompt to chats. The base class implements the outbound `send`
 hook once: it drops events for channels the transport does not own
 (`owns(channel)`, by default `channel.matches_transport(self.transport)`;
 `WebPlugin` narrows it to also require that it is enabled), then
