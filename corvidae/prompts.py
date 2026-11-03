@@ -147,7 +147,7 @@ def _resolve_value(value: Any, key: str, base: Path) -> str:
             )
         return read_prompt_files([path], base, key=key)
     raise ValueError(
-        f"prompt key {key!r}: expected str, list[str], or {{'file': str}}, "
+        f"prompt key {key!r}: expected a string, a list of file paths, or {{'file': path}}, "
         f"got {value!r}"
     )
 
