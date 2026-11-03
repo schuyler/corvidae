@@ -682,8 +682,17 @@ undotted key outside its allowlist, and can't change a channel's disabled
 tools. The static keys are read from operator config alone (through
 `tuning.config_value` or their plugin's config section): an override under a
 dotted name (`agent.request_logprobs`) is accepted but has no effect, and an
-undotted one is refused by the allowlist. Several prompts (subagent,
-heartbeat) are code constants with no config key at all (#287, #289). There
+undotted one is refused by the allowlist. Every prompt the framework sends on the agent's behalf now has a config
+key resolved by `resolve_prompt` (#411, #287): `heartbeat.prompt`,
+`heartbeat.goals_instruction`, `tools.subagent.system_prompt`,
+`memory.rubric_prompt`, and the fork prompts. Each is a new override point:
+on a channel with `write_file`, the agent can rewrite the prompt file the
+key points at. The change applies when the key is next resolved: on an
+`agent.yaml` reload for compaction, appraisal, and critique; at restart
+for the rest. Editing a prompt file does not trigger a reload. `set_settings`
+cannot change these keys: `resolve_prompt` reads static config only. The
+cost is the same as the system-prompt entry: the agent redefines its own
+instructions for that scope. Lock the files read-only to the daemon. There
 is no restart tool in this tree; the agent can restart only by way of
 `shell` or a tool an MCP server provides. Nor is there deferred application:
 a `reasoning_history` override applies to the whole window from the next
