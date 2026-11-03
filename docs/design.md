@@ -2719,7 +2719,8 @@ monitored.
   `send_message` gives back *every* outstanding slot: one reply answers a
   coalesced burst (#398), so the count goes to zero, and when it was above
   zero the transport sends one explicit stop (below). A message still
-  queued behind that reply shows no indicator until its own turn. The
+  queued behind that reply shows no indicator, through its own turn,
+  unless another message arrives. The
   inbound handler gives back one slot for any message `on_message`
   returns without admitting: the transport mints the message's trace id, records its envelope
   timestamp under that id and takes the slot before calling `on_message`,
@@ -2751,8 +2752,9 @@ monitored.
   `on_message_persisted` also fires for notification-originated turns,
   whose ids were never recorded, so those are a no-op. An admitted message
   whose turn dies before persistence (conversation init raised, the item
-  was dropped) would otherwise keep its entry and its typing slot forever,
-  and the slot would keep the indicator refreshing (#104). The cleanup
+  was dropped) would otherwise keep its entry and its typing slot until some
+  later reply cleared the count, and the slot would keep the indicator
+  refreshing meanwhile (#104). The cleanup
   relies on ordering. Entries are inserted in enqueue order, and the
   channel's serial queue processes items in that order. So when an id is
   persisted, every entry recorded before it belongs to a message whose

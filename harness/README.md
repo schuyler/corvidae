@@ -129,8 +129,8 @@ behind an in-flight model call is `burst`'s.
 `burst` asks for the numbers 1 to 400 on one line (a slow model call; a slow
 tool would not hold the queue), then four seconds later sends three lines
 back to back, each carrying a codeword and asking the bot to repeat every
-codeword. It passes when every codeword appears in bot lines after the last
-bot line containing "400" and no codeword (the count's end) and
+codeword. It passes when every codeword appears in bot lines after the
+first bot line containing "400" (the count's end) and
 `usage_log` holds exactly two main-role calls on `#p-burst` since the probe
 started (the buster profile disables memory, appraisal and critique, so those
 are only these turns). The four seconds and the length of the

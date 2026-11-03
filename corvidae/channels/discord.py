@@ -688,5 +688,5 @@ class DiscordPlugin(TransportPlugin):
 
     async def send_progress(self, channel: Channel, event: OutboundProgress) -> None:
         """Deliver intermediate assistant text without closing out the
-        outstanding slot (the final reply still owes one)."""
+        outstanding slots (the final reply still owes them)."""
         await self._deliver(channel, event.text)

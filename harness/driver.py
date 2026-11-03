@@ -1478,19 +1478,13 @@ async def probe_quiet_period(ctx: RunContext) -> ProbeResult:
 def burst_verdict(bot_lines: list[str], codewords: tuple[str, ...]) -> tuple[bool, str]:
     """Judge a burst probe from the bot's lines, oldest first.
 
-    The count's end is the last bot line containing "400" and no codeword
-    (the burst reply may itself mention 400); every codeword must appear in a
-    bot line after it, so only the burst's reply can satisfy it. Returns
-    (passed, detail).
+    The count is the bot's first reply, so its end is the first bot line
+    containing "400" (a later reply may mention 400 too); every codeword must
+    appear in a bot line after it, so only the burst's reply can satisfy it.
+    Returns (passed, detail).
     """
-    # Index of the last count line; a line carrying a codeword is the reply.
-    count_end = max(
-        (
-            i for i, line in enumerate(bot_lines)
-            if "400" in line and not any(word in line for word in codewords)
-        ),
-        default=-1,
-    )
+    # Index of the count's last line: the first line carrying "400".
+    count_end = next((i for i, line in enumerate(bot_lines) if "400" in line), -1)
     if count_end < 0:
         return False, "the slow count never reached 400"
     after = " ".join(bot_lines[count_end + 1:])
@@ -1532,7 +1526,7 @@ async def probe_burst(ctx: RunContext) -> ProbeResult:
     def bot_lines() -> list[str]:
         return [m.text for m in ctx.client.messages.get(channel, []) if m.nick == ctx.bot_nick]
 
-    # Wait for every codeword in a bot line after the last "400" line.
+    # Wait for every codeword in a bot line after the first "400" line (the count's end).
     await ctx.client.wait_until(
         channel,
         lambda _msgs: burst_verdict(bot_lines(), BURST_CODEWORDS)[0],

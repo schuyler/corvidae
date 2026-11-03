@@ -297,10 +297,9 @@ one is a bug even if its tests pass.
 
 ### 3.1 Kernel: agent loop, queues, traces
 
-1. One serial queue per channel. There is never more than one model call
-   in flight per channel (a coalesced turn, item 19, carries several items
-   in one call). Queues are visible to other plugins by
-   reference.
+1. One serial queue per channel. A channel never has two turns in flight;
+   a coalesced turn (item 19) answers several messages in one call. Queues
+   are visible to other plugins by reference.
 2. Single-turn dispatch. Each tool call becomes a `Task` on the shared
    task queue; the next LLM call waits until the last result of a batch
    clears the channel's pending set. User messages may interleave
