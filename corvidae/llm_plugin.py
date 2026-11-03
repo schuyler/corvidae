@@ -235,7 +235,7 @@ class LLMPlugin(CorvidaePlugin):
             if client is not None:
                 await client.stop()
 
-    @hookimpl
+    @hookimpl(tryfirst=True)
     async def on_config_reload(self, config: dict) -> None:
         """Re-read llm config and swap the main client if it changed.
 
@@ -243,6 +243,11 @@ class LLMPlugin(CorvidaePlugin):
         and swapped in, with the old one closed after a delay so in-flight
         requests complete. Other roles (background, embedding, ...) are
         restart-only for now — changes to them are logged and ignored.
+
+        ``tryfirst`` because Agent.on_config_reload re-borrows the client
+        from this plugin: the swap has to land before anything reads it, and
+        ConfigWatcher dispatches in registration order, which is not
+        deterministic (#382).
         """
         llm_config = config.get("llm", {}) or {}
         new_main_config = llm_config.get("main")
