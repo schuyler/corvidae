@@ -21,7 +21,11 @@ Goals you retired, newest first, each with its age: your own conclusions, data t
 - (2d) I retired my goal "<text>" (set <date>). <conclusion>
 ```
 
-or `(none)`. Neither has a config override; edit the constants to change them.
+or `(none)`. Both are overridable: `heartbeat.prompt` replaces this
+instruction and `heartbeat.goals_instruction` replaces the goals paragraph
+above. Each takes an inline string, `{file: <path>}`, or a list of paths
+relative to the config directory, resolved by `resolve_prompt` at startup
+(`docs/configuration.md`). Without those keys the built-in text is used.
 
 ---
 
