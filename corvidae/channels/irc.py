@@ -18,7 +18,7 @@ from corvidae.channel import Channel, ChannelRegistry
 from corvidae.channels.split import split_message
 from corvidae.trace import mint_trace_id
 from corvidae.hooks import TransportPlugin, get_dependency, hookimpl
-from corvidae.channels._registers import shipped_register
+from corvidae.channels._registers import shipped_register, with_silence
 from corvidae.outbound import OutboundMessage, OutboundProgress
 
 
@@ -169,6 +169,8 @@ class IRCPlugin(TransportPlugin):
     """IRC transport plugin following CLIPlugin pattern."""
 
     transport = "irc"
+    # The silence plugin is optional: its register fragment is appended when loaded.
+    optional_depends_on = frozenset({"silence"})
 
     def __init__(self, pm=None):
         if pm is not None:
@@ -379,7 +381,7 @@ class IRCPlugin(TransportPlugin):
         norms plus plain, line-based text."""
         if not self.owns(channel):
             return None
-        return shipped_register("chat", "irc")
+        return with_silence(self.pm, shipped_register("chat", "irc"))
 
     @hookimpl
     async def should_process_message(

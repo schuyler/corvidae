@@ -10,7 +10,7 @@ import click
 
 from corvidae.channel import ChannelRegistry
 from corvidae.trace import mint_trace_id
-from corvidae.hooks import TransportPlugin, get_dependency, hookimpl
+from corvidae.hooks import TransportPlugin, final_was_withheld, get_dependency, hookimpl
 from corvidae.outbound import (
     OutboundMessage,
     OutboundProgress,
@@ -116,6 +116,35 @@ class CLIPlugin(TransportPlugin):
                 # Transport-minted id; the Agent uses it verbatim (#95).
                 trace_id=mint_trace_id(),
             )
+
+    @hookimpl
+    async def on_agent_response(
+        self,
+        channel,
+        request_text: str,
+        response_text: str,
+        trace_id: str | None,
+        meta: dict,
+        logprobs: dict | None,
+    ) -> None:
+        """Release per-turn state for an unsent final (it never reaches
+        send_message); a sent final is released there, so exactly once."""
+        if not self.owns(channel):
+            return
+        # An unsent final never reaches send_message, so release here, in
+        # the same synchronous step as the check (before any await).
+        try:
+            unsent = final_was_withheld(channel)
+        except Exception:
+            logger.warning(
+                "%s: could not tell whether the final on %s was left unsent; "
+                "releasing nothing (the turn may stay open until the next final)",
+                type(self).__name__, channel.id, exc_info=True,
+                extra={"channel": channel.id, "trace_id": trace_id},
+            )
+            return
+        if unsent:
+            self._prompt()
 
     async def send_message(self, channel, event: OutboundMessage) -> None:
         """Print agent response to stdout.

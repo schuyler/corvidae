@@ -317,6 +317,27 @@ def get_dependency(pm: pluggy.PluginManager, name: str, expected_type: type[T]) 
     return plugin
 
 
+def final_was_withheld(channel: Channel) -> bool:
+    """True when the newest assistant row in ``channel.conversation`` is UNSENT.
+
+    The kernel appends a final's assistant row (tagged ``UNSENT`` when a gate
+    vetoed it, or it was empty) before it fires ``on_agent_response``, so inside that hook
+    this says whether the final reached the transport. A channel with no
+    conversation, or no assistant row, is False.
+    """
+    # Imported here: corvidae.context imports from this module's package at load.
+    from corvidae.context import MessageType
+
+    conversation = channel.conversation
+    if conversation is None:
+        return False
+    # Walk newest-first; the first assistant row is the final in question.
+    for message in reversed(conversation.messages):
+        if message.get("role") == "assistant":
+            return message.get("_message_type") == MessageType.UNSENT
+    return False
+
+
 def validate_dependencies(pm: pluggy.PluginManager) -> None:
     """Verify all declared plugin dependencies are registered and acyclic.
 
@@ -735,8 +756,12 @@ class AgentSpec:
             logprobs: The response's logprobs envelope, or None.
 
         Note:
-            Extension point for observability plugins (logging, metrics,
-            analytics). No built-in plugin implements this hook.
+            Fires once per final, including a final a gate vetoed (and an
+            empty one): the assistant row is already in the window, tagged
+            ``UNSENT`` when not sent, so ``final_was_withheld(channel)``
+            tells the two apart. It fires before the transport send.
+            Transports use it to release per-turn state for an unsent
+            final; observability plugins use it for logging and metrics.
             Implementations receive the final response after tool dispatch
             is complete.
         """

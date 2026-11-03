@@ -29,8 +29,8 @@ from typing import Any, Optional
 from corvidae.channel import Channel, ChannelRegistry
 from corvidae.channels.split import split_message
 from corvidae.trace import mint_trace_id
-from corvidae.hooks import TransportPlugin, get_dependency, hookimpl
-from corvidae.channels._registers import shipped_register
+from corvidae.hooks import TransportPlugin, final_was_withheld, get_dependency, hookimpl
+from corvidae.channels._registers import shipped_register, with_silence
 from corvidae.outbound import OutboundMessage, OutboundProgress
 
 logger = logging.getLogger("corvidae.discord_plugin")
@@ -223,6 +223,8 @@ class DiscordPlugin(TransportPlugin):
     """Transport plugin for Discord DMs, server channels, and threads."""
 
     transport = "discord"
+    # The silence plugin is optional: its register fragment is appended when loaded.
+    optional_depends_on = frozenset({"silence"})
 
     def __init__(self, pm=None) -> None:
         if pm is not None:
@@ -571,8 +573,8 @@ class DiscordPlugin(TransportPlugin):
             return None
         # DM scopes are "dm:<user id>"; everything else is a server channel.
         if channel.scope.startswith("dm:"):
-            return shipped_register("chat")
-        return shipped_register("chat", "discord_group")
+            return with_silence(self.pm, shipped_register("chat"))
+        return with_silence(self.pm, shipped_register("chat", "discord_group"))
 
     @hookimpl
     async def should_process_message(
@@ -676,6 +678,35 @@ class DiscordPlugin(TransportPlugin):
                 await target.send(chunk, allowed_mentions=_sdk().AllowedMentions.none())
             except Exception as exc:
                 logger.warning("discord: failed to deliver message: %s", exc, exc_info=True)
+
+    @hookimpl
+    async def on_agent_response(
+        self,
+        channel,
+        request_text: str,
+        response_text: str,
+        trace_id: str | None,
+        meta: dict,
+        logprobs: dict | None,
+    ) -> None:
+        """Release per-turn state for an unsent final (it never reaches
+        send_message); a sent final is released there, so exactly once."""
+        if not self.owns(channel):
+            return
+        # An unsent final never reaches send_message, so release here, in
+        # the same synchronous step as the check (before any await).
+        try:
+            unsent = final_was_withheld(channel)
+        except Exception:
+            logger.warning(
+                "%s: could not tell whether the final on %s was left unsent; "
+                "releasing nothing (the turn may stay open until the next final)",
+                type(self).__name__, channel.id, exc_info=True,
+                extra={"channel": channel.id, "trace_id": trace_id},
+            )
+            return
+        if unsent:
+            self._decrement_outstanding(channel)
 
     async def send_message(self, channel: Channel, event: OutboundMessage) -> None:
         """Deliver a final reply and close out one outstanding slot."""

@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from importlib import resources
 
+import apluggy as pluggy
+
 
 def shipped_register(*names: str) -> str:
     """Join the named shipped fragments into one register.
@@ -21,3 +23,20 @@ def shipped_register(*names: str) -> str:
     base = resources.files("corvidae.channels").joinpath("registers")
     # Read through importlib.resources so it also works from a wheel.
     return "\n\n".join(base.joinpath(f"{name}.md").read_text().strip() for name in names)
+
+
+def silence_fragment(pm: pluggy.PluginManager) -> str | None:
+    """The silence plugin's register fragment, or None when it isn't loaded.
+
+    Looked up by name so the kernel never imports ``corvidae_cognition``.
+    """
+    plugin = pm.get_plugin("silence")
+    if plugin is None:
+        return None
+    return plugin.register_fragment()
+
+
+def with_silence(pm: pluggy.PluginManager, register: str) -> str:
+    """``register`` plus the silence fragment (after a blank line) when loaded."""
+    fragment = silence_fragment(pm)
+    return register if fragment is None else f"{register}\n\n{fragment}"
