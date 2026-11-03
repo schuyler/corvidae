@@ -754,10 +754,15 @@ class RubricPrior:
     block memory formation.
     """
 
-    def __init__(self, get_client: Callable[[], object]) -> None:
+    def __init__(
+        self,
+        get_client: Callable[[], object],
+        get_prompt: Callable[[], str] | None = None,
+    ) -> None:
         # A callable, not a client, so the current background client is
         # resolved at call time (clients can be swapped on config reload).
         self._get_client = get_client
+        self._get_prompt = get_prompt or (lambda: RUBRIC_PROMPT)
 
     async def score(
         self,
@@ -770,7 +775,7 @@ class RubricPrior:
         try:
             client = self._get_client()
             response = await client.chat([
-                {"role": "system", "content": self._rubric_prompt},
+                {"role": "system", "content": self._get_prompt()},
                 {"role": "user", "content": _dialog_transcript(messages)},
             ], extra_body=RUBRIC_EXTRA_BODY)
             text = response["choices"][0]["message"]["content"]
@@ -1027,7 +1032,8 @@ class MemoryPlugin(CorvidaePlugin):
         self._db_lock = asyncio.Lock()
         # Pluggable importance prior; replaced by later phases (§3.1).
         self.importance_prior: ImportancePrior = RubricPrior(
-            lambda: self._llm().get_client("background")
+            lambda: self._llm().get_client("background"),
+            lambda: self._rubric_prompt,
         )
 
     # ------------------------------------------------------------------

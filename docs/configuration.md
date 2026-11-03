@@ -192,11 +192,13 @@ Each stage has a fork instruction:
 | `appraisal.stage2_fork_prompt` | `prompts/appraisal_fork.md` | Followed by quotes of the exchange's opening message and of the response sent, and the retrieval profile. |
 | `critique.fork_prompt.<lens>` | `prompts/critique_<lens>_fork.md` | Followed by quotes of the exchange's opening message and of the response sent; provenance also gets each claim's search hits and the CONTEXT snapshot. An override must ask for its per-claim verdicts format or every run skips. |
 
-These are static config, read with `corvidae.tuning.config_value`. They
-aren't runtime tunables: `set_settings` can write the key, but nothing reads
-the override. The standalone prompts `appraisal.stage2_prompt` and
-`critique.prompt.<lens>` are no longer read by any live stage (stage 2 and
-the lenses run only as forks); the keys remain accepted.
+These are resolved by `resolve_prompt` (#411): a string is inline text,
+`{"file": path}` or a list of paths reads files relative to the config
+directory, absent uses the built-in default. They aren't runtime tunables:
+`set_settings` can write the key, but nothing reads the override. The
+standalone prompts `appraisal.stage2_prompt` and `critique.prompt.<lens>`
+are no longer read by any live stage (stage 2 and the lenses run only as
+forks); the keys remain accepted.
 
 Forks always run on `llm.main`, because only the main model shares the
 window's cache. If `llm.background` names a different model, enabling

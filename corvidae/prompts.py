@@ -43,6 +43,31 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+def read_prompt_files(paths: list[str], base_dir: Path | None) -> str:
+    """Read prompt files and concatenate them.
+
+    Shared by :func:`resolve_prompt` and ``channel.resolve_system_prompt``
+    so the file-reading logic lives in one place (#411).
+
+    Args:
+        paths: File paths to read. Relative paths resolve against base_dir.
+        base_dir: Base directory for relative paths. None means CWD.
+
+    Returns:
+        The concatenated text, files joined by double newlines.
+
+    Raises:
+        FileNotFoundError: If any file does not exist.
+    """
+    parts: list[str] = []
+    for entry in paths:
+        path = Path(entry)
+        if not path.is_absolute() and base_dir is not None:
+            path = base_dir / path
+        parts.append(path.read_text().strip())
+    return "\n\n".join(parts)
+
+
 def resolve_prompt(
     config: dict,
     key: str,
