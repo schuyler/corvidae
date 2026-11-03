@@ -505,7 +505,6 @@ class TestToolsSpanWholeMemory:
     async def test_search_memory_sees_other_channel_memories(self):
         memory, memory_tools, db = await build_tools_env()
         channel_a = Channel(transport="irc", scope="#electronics")
-        channel_b = Channel(transport="irc", scope="#secret")
         await seed_memory(db, channel_a.id, "channel A wifi password hunter2")
 
         tools = get_tools(memory_tools)
@@ -560,7 +559,6 @@ class TestToolsSpanWholeMemory:
     async def test_search_memory_channel_arg_narrows_to_that_channel(self):
         """channel= is an equality filter over the whole memory, not a boundary."""
         memory, memory_tools, db = await build_tools_env()
-        caller = Channel(transport="irc", scope="#electronics")
         await seed_memory(db, "signal:runtime-aci", "kestrel solar MQTT from signal")
         await seed_memory(db, "irc:#garden", "kestrel solar MQTT from garden")
 
@@ -577,31 +575,39 @@ class TestToolsSpanWholeMemory:
         # channel= matches by equality: a pattern must not become a GLOB
         # over every matching channel.
         memory, memory_tools, db = await build_tools_env()
-        caller = Channel(transport="irc", scope="#electronics")
         await seed_memory(db, "signal:runtime-aci", "kestrel solar MQTT literal")
 
         tools = get_tools(memory_tools)
+        # Positive control: the exact id finds the record...
+        exact = await tools["search_memory"](
+            "solar MQTT", channel="signal:runtime-aci"
+        )
+        assert "literal" in exact, exact
+        # ...and the pattern, which a GLOB would match, finds nothing.
         result = await tools["search_memory"](
             "solar MQTT", channel="signal:*"
         )
 
-        assert "literal" not in result, result
+        assert result == "No memories found matching your query.", result
         await db.close()
 
     async def test_search_memory_unknown_channel_arg_finds_nothing(self):
         # No visible-channel list to name any more: an unknown channel is
         # simply an empty filter, not an error.
         memory, memory_tools, db = await build_tools_env()
-        caller = Channel(transport="irc", scope="#electronics")
-        await seed_memory(db, caller.id, "kestrel solar MQTT here")
+        await seed_memory(db, "irc:#electronics", "kestrel solar MQTT here")
 
         tools = get_tools(memory_tools)
+        # Positive control: the channel that has the record finds it...
+        assert "here" in await tools["search_memory"](
+            "solar MQTT", channel="irc:#electronics"
+        )
+        # ...and an unknown channel is an empty filter, not an error.
         result = await tools["search_memory"](
             "solar MQTT", channel="irc:#nowhere"
         )
 
-        assert "visible" not in result.lower() and "scope" not in result.lower(), result
-        assert "here" not in result, result
+        assert result == "No memories found matching your query.", result
         await db.close()
 
 

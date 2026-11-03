@@ -423,12 +423,12 @@ exchanges (message ids are global), logging a failed lookup and falling back to
 the rubric prior and NULL valence. Configuration is documented in
 [configuration.md](configuration.md) (`memory.*`, `llm.embedding`).
 
-`recent(channel_id, limit)` is the one read API for other plugins: the
-newest `limit` records (indexed, not redacted) owned by the *other*
-channels in `channel_id`'s scope, as `{summary, channel_id, age_seconds}`
-dicts, newest first, with ages from the kernel clock. The caller's own
-records are left out. `HeartbeatPlugin` uses it. It raises `RuntimeError`
-while the memory DB is not open.
+`recent(limit)` is the one read API for other plugins: the newest `limit`
+records (indexed, not redacted) of the whole memory, every channel's, as
+`{summary, channel_id, age_seconds}` dicts, newest first, with ages from the
+kernel clock. Nothing is left out by owner, so a caller sees its own records
+too. `HeartbeatPlugin` uses it. It raises `RuntimeError` while the memory DB
+is not open.
 
 **Without this plugin:** no memory records form and no retrieval happens;
 compaction remains plain lossy summarization.
@@ -918,7 +918,7 @@ any channel cancels the pending beat. The result is at most one beat per
 `after` seconds, never two at once, and none during a conversation. Under
 traffic that never stops it never beats; that is accepted until #214.
 
-**What a beat is.** The plugin reads `MemoryPlugin.recent("internal:heartbeat", 20)`,
+**What a beat is.** The plugin reads `MemoryPlugin.recent(20)`,
 re-checks that the system is still quiet (a message may have landed
 during the read), and calls `on_notify` on `internal:heartbeat` with
 `source="heartbeat"` and `meta={"origin": "heartbeat"}`. The text is the

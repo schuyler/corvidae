@@ -50,11 +50,9 @@ under prompt injection or with a poisoned model. The provenance check is
 model-driven at both ends (#155). Stage-2 appraisal, reading the exchange,
 decides which claims to check, so injected text can talk it out of listing
 a claim. The provenance critic is shown excerpts of earlier raw-log
-messages. In the tree those excerpts are limited to the channel's memory
-scope, so no text crosses a channel boundary that memory wouldn't already
-cross; the PRD widens the search to every channel, matching retrieval
-(finding 15). But
-they are quoted, untrusted text in the critic's prompt, framed as data, and
+messages, from every channel, matching retrieval (finding 15, #168), so
+text from one channel can reach the critic's prompt while it judges another's
+reply. They are quoted, untrusted text in the critic's prompt, framed as data, and
 the critic's objections re-enter the window as CONTEXT (provenance objections also wake a turn whose stub tells the agent it may reply `NO_REPLY` to send nothing; the veto of an exact `NO_REPLY` final covers every turn origin while `SilencePlugin` is loaded, and critique-origin turns only otherwise). The number of
 claims (5) and excerpts (5 per claim, 500 characters each) is capped, so
 one reply can't fan out into an unbounded critic prompt. Leaving sandboxing out

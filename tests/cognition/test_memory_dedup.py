@@ -430,6 +430,8 @@ class TestSubThresholdNoDup:
 
 
 # ---------------------------------------------------------------------------
+# WP1b.2 embedding-failed: skips dup detection, inserts with embedded=0
+# ---------------------------------------------------------------------------
 
 
 class TestEmbeddingFailedSkipsDup:
@@ -569,9 +571,6 @@ class TestSupersededRawRangeIntact:
                 )
 
         await db.close()
-
-
-# ---------------------------------------------------------------------------
 
 
 # ---------------------------------------------------------------------------
