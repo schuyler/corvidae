@@ -143,12 +143,12 @@ def _resolve_value(value: Any, key: str, base: Path) -> str:
         if path is None:
             raise ValueError(
                 f"prompt key {key!r}: dict value must have a 'file' key, "
-                f"got keys {list(value.keys())!r}"
+                f"got {value!r}"
             )
         return read_prompt_files([path], base, key=key)
     raise ValueError(
         f"prompt key {key!r}: expected str, list[str], or {{'file': str}}, "
-        f"got {type(value).__name__!r}"
+        f"got {value!r}"
     )
 
 
