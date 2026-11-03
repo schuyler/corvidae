@@ -183,7 +183,10 @@ log line.
 #### Retrieval (read path)
 
 `before_agent_turn` runs when the window tail is a plain user MESSAGE
-(notification-triggered turns skip retrieval entirely). The inbound text is embedded and matched against `memory_vec`
+(notification-triggered turns skip retrieval entirely). The query is every
+unanswered user message in the window (`unanswered_user_messages`), joined
+by blank lines: a coalesced burst (#398) is retrieved for as a whole, and
+one message is just itself. The query is embedded and matched against `memory_vec`
 (sqlite-vec exact KNN, cosine distance); candidates are filtered to
 `indexed=1 AND redacted=0` and channel-compartmentalized (`channel_id`
 match, or shared scope via `memory.channel_groups`, whose members may be
@@ -205,7 +208,9 @@ reconsolidation), and every retrieval writes a `retrieval_log` row
 hit/admitted counts, degradation flag).
 
 **Graceful degradation:** encoder down → FTS5 keyword retrieval over
-`memory_fts` (flagged `degraded_to_fts=1`); sqlite-vec unloadable → FTS5
+`memory_fts` (flagged `degraded_to_fts=1`; the FTS query caps each
+blank-line-separated paragraph at 20 tokens, so every message of a burst
+keeps its own 20 and a single message is capped at 20 as before); sqlite-vec unloadable → FTS5
 with one clear startup warning; no `llm.embedding` role → records stored
 with `embedded=0`, retrieval FTS5-only; a stored encoder differing from
 config → ERROR and embeddings disabled rather than silently mixing
@@ -712,7 +717,13 @@ model makes both language judgments; the code only fetches evidence:
    - rows from before the exchange's originating row. The exchange's own
      rows, the reply included, are already indexed when the check runs;
      the judge sees them in the window instead, and the reply is no record
-     of itself.
+     of itself. For a coalesced burst (#398) the boundary is the burst's
+     first row, so the burst's own earlier messages never count as prior
+     evidence. That applies only when the turn's own row is among the
+     unanswered messages; a notification-born turn keeps its recorded row.
+     The stylistic lenses' instruction still quotes the last burst message
+     as where the exchange began, as appraisal's does (accepted: stage 2
+     forks the whole window, so it sees every burst message).
    - `message` and `summary` rows. CONTEXT (injected data, including
      earlier critique) and `unsent` rows are never a record of something
      said.

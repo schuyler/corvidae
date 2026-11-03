@@ -434,3 +434,25 @@ def test_every_harness_template_allows_the_driver_nick():
             f"{path}: irc.allow must include the driver nick "
             f"{derive_driver_nick(irc['nick'])!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# burst probe verdict (#398)
+# ---------------------------------------------------------------------------
+
+
+def test_burst_verdict_requires_codewords_after_the_count_ends() -> None:
+    """Codewords echoed before the count's last "400" line don't count."""
+    from harness.driver import burst_verdict
+
+    words = ("AAA-1", "BBB-2")
+    # Codewords only before the count's end: fails and names both.
+    passed, detail = burst_verdict(["AAA-1 BBB-2", "1 2 3 400"], words)
+    assert not passed
+    assert "AAA-1" in detail and "BBB-2" in detail
+    # Every codeword after the count's end passes, across several bot lines.
+    passed, _ = burst_verdict(["1 2 3 400", "AAA-1", "BBB-2"], words)
+    assert passed
+    # No count at all fails with a reason naming 400.
+    passed, detail = burst_verdict(["hello"], words)
+    assert not passed and "400" in detail

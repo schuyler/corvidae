@@ -42,6 +42,15 @@ SLOW_SERVER_DELAY_S = 13
 SLOW_SERVER_TOKEN = "TOKEN-EELGRASS-71"
 MAX_FILLERS = 12
 
+# burst probe (#398). The slow turn is a long single-line generation (a slow
+# *model call*; a slow tool would not hold the queue). The codewords avoid the
+# substring "400" so they cannot be mistaken for the count's end.
+BURST_CHANNEL = "#p-burst"
+BURST_CODEWORDS = ("QUINCE-3318", "HERON-5527", "TALLOW-9042")
+# Seconds between the count request and the burst: long enough that the count
+# is still generating, short enough that it has started.
+BURST_DELAY_S = 4
+
 # memory_role probe (buster-memrole profile). The seeded fact shares
 # "weather station" with both questions, so FTS retrieval admits it; the
 # first question's answer is not in it, so only a reply to the person
@@ -1466,10 +1475,79 @@ async def probe_quiet_period(ctx: RunContext) -> ProbeResult:
     return result(*quiet_period_verdict(True, True, True, consolidated_b, stray))
 
 
+def burst_verdict(bot_lines: list[str], codewords: tuple[str, ...]) -> tuple[bool, str]:
+    """Judge a burst probe from the bot's lines, oldest first.
+
+    The count's end is the last bot line containing "400"; every codeword must
+    appear in a bot line after it, so only the burst's reply can satisfy it.
+    Returns (passed, detail).
+    """
+    # Index of the last line carrying the count's final number.
+    count_end = max((i for i, line in enumerate(bot_lines) if "400" in line), default=-1)
+    if count_end < 0:
+        return False, "the slow count never reached 400"
+    after = " ".join(bot_lines[count_end + 1:])
+    missing = [word for word in codewords if word not in after]
+    if missing:
+        return False, f"codewords missing after the count: {', '.join(missing)}"
+    return True, "every codeword appeared after the count"
+
+
+async def probe_burst(ctx: RunContext) -> ProbeResult:
+    channel = "#p-burst"
+    if not ctx.channel_ready.get(channel):
+        return _skip_result("burst", channel)
+    sent: list[tuple[float, str]] = []
+    t0 = time.monotonic()
+    ts0 = time.time()
+
+    # Second deliberate departure from send-then-await (the first is
+    # interleave): queueing a burst behind an in-flight model call is this
+    # probe's subject, so it calls _send directly and does not await.
+    await _send(
+        ctx, channel,
+        "Write the numbers from 1 to 400 separated by single spaces, on one "
+        "line, and nothing else.",
+        sent,
+    )
+    # Timing assumption: the count takes longer than BURST_DELAY_S plus the
+    # three sends on the Buster host, so the burst queues behind it. The three
+    # lines go out back to back; if ngircd's flood penalty spaces them past the
+    # count's end the burst splits (3-4 calls): lengthen the count then.
+    await asyncio.sleep(BURST_DELAY_S)
+    for word in BURST_CODEWORDS:
+        await _send(
+            ctx, channel,
+            f"The codeword is {word}. Repeat every codeword you have been given.",
+            sent,
+        )
+
+    def bot_lines() -> list[str]:
+        return [m.text for m in ctx.client.messages.get(channel, []) if m.nick == ctx.bot_nick]
+
+    # Wait for every codeword in a bot line after the last "400" line.
+    await ctx.client.wait_until(
+        channel,
+        lambda _msgs: burst_verdict(bot_lines(), BURST_CODEWORDS)[0],
+        TOOL_TURN_TIMEOUT_S,
+    )
+    duration = time.monotonic() - t0
+    replied, detail = burst_verdict(bot_lines(), BURST_CODEWORDS)
+
+    # Buster runs cognition off, so main-role calls are only these turns: the
+    # count and one call for the whole burst. Known flake: a reasoning-reopen
+    # or cut-off re-run makes it 3.
+    calls = count_main_calls_since(ctx.session_db, f"irc:{channel}", ts0)
+    passed = replied and calls == 2
+    details = f"{detail}; main-role calls since probe start: {calls} (want 2)"
+    return ProbeResult("burst", passed, details, duration, _transcript(ctx, channel, sent))
+
+
 PROBES: list[Callable[[RunContext], "asyncio.Future[ProbeResult]"]] = [
     probe_smoke_echo,
     probe_tool_loop,
     probe_interleave,
+    probe_burst,
     probe_compaction,
     probe_restart_recovery,
     probe_kv_slot,
@@ -1478,7 +1556,7 @@ PROBES: list[Callable[[RunContext], "asyncio.Future[ProbeResult]"]] = [
 ]
 
 ALL_CHANNELS = [
-    "#p-smoke", "#p-toolloop", "#p-interleave", "#p-compact", "#p-restart", "#p-slots",
+    "#p-smoke", "#p-toolloop", "#p-interleave", BURST_CHANNEL, "#p-compact", "#p-restart", "#p-slots",
     REMIND_CHANNEL, REMIND_RESTART_CHANNEL,
 ]
 

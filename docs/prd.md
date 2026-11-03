@@ -297,8 +297,9 @@ one is a bug even if its tests pass.
 
 ### 3.1 Kernel: agent loop, queues, traces
 
-1. One serial queue per channel. The LLM is never called with two items
-   from one channel in flight. Queues are visible to other plugins by
+1. One serial queue per channel. There is never more than one model call
+   in flight per channel (a coalesced turn, item 19, carries several items
+   in one call). Queues are visible to other plugins by
    reference.
 2. Single-turn dispatch. Each tool call becomes a `Task` on the shared
    task queue; the next LLM call waits until the last result of a batch
@@ -318,7 +319,9 @@ one is a bug even if its tests pass.
    `meta` dict ride every hook, every `Task`, every completion
    notification, and every usage-log row. A falsy id is a `ValueError`;
    omitting it is a hook-call error. Core never stamps meaning into `meta`;
-   `meta["origin"]` is a plugin-side convention.
+   `meta["origin"]` is a plugin-side convention. A message coalesced into
+   another's turn (item 19) keeps its own trace through admission and
+   persistence only; the owning trace carries the turn's hooks.
 5. The inbound gate (`should_process_message`) resolves reject-wins over
    every implementation. After resolution core fires exactly one of
    `on_message_admitted` / `on_message_rejected`, before `on_message`
@@ -393,7 +396,8 @@ one is a bug even if its tests pass.
     channel holds is its window, the rows that reload into it, and its
     queued work, and the guarantee covers any content they carry: a
     message, a tool result, a model reply, a row a plugin injected. The
-    most one item can cost is its own turn.
+    most one item can cost is its own turn, shared with any messages
+    coalesced into it (item 19).
     1. Building the prompt cannot fail. Estimating the window's size,
        bringing it within budget (§3.3.2) and rendering it for the model
        handle every row the window can hold; a row they cannot handle is
@@ -407,6 +411,17 @@ one is a bug even if its tests pass.
        logs a warning naming the channel and the rows hidden. The rescue
        holds across a restart, and `message_log` keeps every row
        (principle 4).
+19. Consecutive queued messages coalesce into one turn (#398). When a
+    channel's queue reaches its next turn, every inbound message waiting
+    directly behind the one taken coalesces into that turn and is answered
+    by one model call. Each message is still persisted as its own row and
+    announced (`on_message_persisted`) in arrival order. A turn in flight is
+    never interrupted. Only consecutive inbound messages coalesce: a tool
+    result, a notification or a retry stops the run and keeps its place, and
+    notifications never coalesce. A coalesced burst is one exchange for
+    `max_turns` (item 3). The last message's trace owns the turn: every
+    turn hook, usage row and reply carries it, and the earlier messages'
+    traces get admission and persistence only.
 
 ### 3.2 Transports
 
@@ -430,11 +445,11 @@ The contract every transport meets:
    chunks concatenate back to the original text; the limit is at least
    six bytes or `split_message` raises. Discord's splitter also keeps code
    fences balanced across chunks.
-5. Liveness (typing, read receipts) is shown only to allowed senders. A
-   slot taken for a message is released when that message's reply goes
-   out, keyed by trace id so a notification-born reply cannot release a
-   slot another message is owed, and in a `finally` if the message was
-   never admitted. One refresh loop per channel; `on_stop` cancels it.
+5. Liveness (typing, read receipts) is shown only to allowed senders.
+   Typing shows while a reply is owed on the channel and stops when a reply
+   goes out or nothing is owed; it is never left on indefinitely. A reply
+   clears it even when another message on the channel is still waiting for
+   its turn.
 6. A refused sender never creates a persistent channel in the registry.
 7. Scopes use stable identifiers (principle 10). The transport implements
    `resolve_channel` for ids the registry does not hold, so a reminder due
@@ -1366,8 +1381,8 @@ Principle 16 as outcomes. How a replacement scheduler attaches (hook names
 and semantics) is design. Questions this section leaves open on purpose
 (the latency bound of each class, whether a lease also needs a hard limit
 on turns or time, rate limits on hosted APIs, enforcing parallelism apart
-from warm heads, whether the agent sees its pool's state, merging queued
-items) are tracked in #296 and are not requirements until decided there.
+from warm heads, whether the agent sees its pool's state) are tracked in
+#296 and are not requirements until decided there.
 
 1. Every chat role draws on a pool, one per provider endpoint; roles on one
    endpoint share it. A pool is one cost center: usage is accounted to the
@@ -1520,3 +1535,4 @@ record that holds the reasoning.
 | Identity is agent-wide and heads every prompt written in the agent's voice; channel register is appended after it and never replaces it; the subagent's prompt is persona-neutral (§3.5.7) | operator directive, 2026-11-01; #380; #388 |
 | The operator decides the trust boundary; inbound transports default-deny; channels are not a boundary; safety features layer in as plugins | #167; operator directive, 2026-11-01 |
 | Corvidae is a testbed first and a robust harness second | #167 |
+| Consecutive queued messages coalesce into one turn owned by the last message's trace; typing clears on any reply; notifications never coalesce | §3.1.19; #398, #296; owner, 2026-11-03 |

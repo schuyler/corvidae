@@ -14,7 +14,7 @@ is the run's pass/fail.
 
 ## What it checks
 
-Eight IRC channels, one probe each, every pass criterion mechanical (planted
+Nine IRC channels, one probe each, every pass criterion mechanical (planted
 tokens grepped from replies, or facts read straight out of `sessions.db`):
 
 | Probe | Channel | Checks |
@@ -22,6 +22,7 @@ tokens grepped from replies, or facts read straight out of `sessions.db`):
 | `smoke_echo` | `#p-smoke` | Basic round trip |
 | `tool_loop` | `#p-toolloop` | Multi-hop tool use through the task queue |
 | `interleave` | `#p-interleave` | A second message gets answered while a slow tool call is in flight |
+| `burst` | `#p-burst` | Three messages sent during a slow model call get one reply after it, one model call for all three (#398) |
 | `compaction` | `#p-compact` | A capacity-limited channel compacts under paced filler load, confirmed by a real summary row |
 | `restart_recovery` | `#p-restart` | Conversation history survives a daemon restart |
 | `kv_slot` | `#p-slots` | A follow-up turn reuses the cached prompt prefix instead of reprocessing it |
@@ -117,12 +118,25 @@ directory when it finishes, so the next `chat.sh` renders the default profile
 again instead of starting Buster under this one.
 
 The harness introduces concurrency only where concurrency is the thing under
-test. Every probe but `interleave` sends one line and waits for the bot's
+test. Every probe but `interleave` and `burst` sends one line and waits for the bot's
 reply before sending the next; an unawaited send turns queue depth into an
 uncontrolled variable, which would make a probe like `compaction` measure
-queue depth rather than compaction. `interleave` is the single deliberate
-exception: sending the second message while the first's tool call is still
-in flight is its subject.
+queue depth rather than compaction. `interleave` and `burst` are the two
+deliberate exceptions: sending the second message while the first's tool call
+is still in flight is `interleave`'s subject, and queueing three messages
+behind an in-flight model call is `burst`'s.
+
+`burst` asks for the numbers 1 to 400 on one line (a slow model call; a slow
+tool would not hold the queue), then four seconds later sends three lines
+back to back, each carrying a codeword and asking the bot to repeat every
+codeword. It passes when every codeword appears in bot lines after the last
+bot line containing "400" (the count's end) and `usage_log` holds exactly two
+main-role calls since the probe started (the buster profile runs cognition
+off, so those are only these turns). The four seconds and the length of the
+count are guesses to tune on the first run. Known flakes: a reasoning-reopen
+or cut-off re-run makes the call count 3, and if ngircd's flood penalty
+spaces the three lines past the count's end the burst splits into 3-4 calls;
+lengthen the count then.
 
 ## llama-server and ngircd
 

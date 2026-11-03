@@ -723,7 +723,8 @@ class AgentSpec:
 
         Args:
             channel: The Channel where the conversation occurred.
-            request_text: The original user message that triggered the loop.
+            request_text: The text of the message that owns the turn (for a
+                coalesced burst of queued messages, the last message).
                 For a tool-using exchange this is the last tool-result
                 turn's text, never the exchange's true originating text.
             response_text: The final text produced by the agent loop.
