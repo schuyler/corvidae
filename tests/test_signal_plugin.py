@@ -1194,10 +1194,12 @@ class TestLiveness:
             finally:
                 await _stop_plugin(h)
 
-    async def test_second_of_two_replies_clears_typing_first_does_not(self, tmp_path):
-        """Issue #390 R3: with two messages outstanding, the first reply must
-        not send the explicit stop (a reply is still owed); the second one,
-        taking the count 1 -> 0, must."""
+    async def test_first_of_two_replies_clears_typing_second_sends_nothing(self, tmp_path):
+        """R10 (#398), superseding #390 R3: a reply releases every outstanding
+        slot, so with two messages outstanding the first reply sends the
+        explicit stop and the second, finding the count already at zero,
+        sends no further stop. Accepted consequence: a message still owed a
+        reply shows no indicator until its own turn."""
         with _fast_typing_refresh():
             h = await _start_plugin(tmp_path)
             try:
@@ -1207,14 +1209,13 @@ class TestLiveness:
                 channel = h.pm.ahook.on_message.await_args.kwargs["channel"]
                 await _wait_until(lambda: h.plugin._outstanding.get(channel.id) == 2, timeout=5)
 
+                # The first reply clears the indicator although "two" is owed.
                 await h.plugin.send(channel=channel, event=OutboundMessage(text="reply to one"))
-                await asyncio.sleep(TYPING_SILENCE_WINDOW)
-                assert not _typing_frames(h.server, stop=True), (
-                    "no explicit stop while a reply is still owed"
-                )
-
-                await h.plugin.send(channel=channel, event=OutboundMessage(text="reply to two"))
                 await _wait_until(lambda: _typing_frames(h.server, stop=True), timeout=5)
+
+                # The second reply finds nothing outstanding: no second stop.
+                await h.plugin.send(channel=channel, event=OutboundMessage(text="reply to two"))
+                await asyncio.sleep(TYPING_SILENCE_WINDOW)
                 assert len(_typing_frames(h.server, stop=True)) == 1
             finally:
                 await _stop_plugin(h)
@@ -1306,12 +1307,12 @@ class TestLiveness:
         """Typing runs while the per-channel count of outstanding admitted
         messages is positive. A second gate plugin can veto a message the
         transport already counted in, so a rejection on the channel has to
-        give that count back: three inbound messages, one vetoed, must stop
-        typing after the second reply rather than sitting at a permanently
-        positive count waiting for a third that will never come.
+        give that count back: three inbound messages, one vetoed, leave a
+        count of two, not three. A reply then releases every outstanding slot
+        (R10, #398) and typing stops.
 
-        Runs at the shortened refresh interval; both observation windows
-        below span several of those intervals."""
+        Runs at the shortened refresh interval; the observation window below
+        spans several of those intervals."""
         with _fast_typing_refresh():
             h = await _start_plugin(tmp_path)
             h.pm.register(_VetoGatePlugin("vetoed"), name="veto_gate")
@@ -1328,25 +1329,15 @@ class TestLiveness:
                 # on_message returned without admitting it.
                 await _wait_until(lambda: h.plugin._outstanding.get(channel.id) == 2, timeout=5)
 
+                # A reply releases every outstanding slot (R10, #398), so the
+                # count of 2 asserted above is what discriminates here: without
+                # the decrement on rejection it would have stayed at 3.
                 await h.plugin.send(channel=channel, event=OutboundMessage(text="reply to one"))
-                # One reply is still owed, so typing must keep refreshing. This
-                # is what makes the assertion below discriminating: a transport
-                # that simply stopped typing on any send would pass that one.
-                await asyncio.sleep(0.5)
-                before = len(h.server.requests_matching("typing"))
-                await asyncio.sleep(TYPING_SILENCE_WINDOW)
-                assert len(h.server.requests_matching("typing")) > before, (
-                    "typing must keep refreshing while a reply is still owed"
-                )
-
-                await h.plugin.send(channel=channel, event=OutboundMessage(text="reply to two"))
                 await asyncio.sleep(0.5)
                 settled = len(h.server.requests_matching("typing"))
                 await asyncio.sleep(TYPING_SILENCE_WINDOW)
                 assert len(h.server.requests_matching("typing")) == settled, (
-                    "typing must stop once the rejection and both replies have "
-                    "cleared the outstanding count; without a decrement on "
-                    "rejection the count never reaches zero and typing leaks"
+                    "typing must stop once a reply has cleared the outstanding count"
                 )
             finally:
                 await _stop_plugin(h)

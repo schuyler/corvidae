@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -272,9 +272,9 @@ async def test_only_adjacent_messages_merge_around_a_notification(make_env, kind
 
 async def test_retry_item_is_never_merged_into_a_burst(make_env):
     """R4 (#398), retry variant: m1, m2, a retry item, m3 queued during a turn;
-    [m1+m2] is one call, the retry makes no call (the successful call
-    supersedes it), and m3 is answered in its own call: two calls after the
-    in-flight one."""
+    [m1+m2] is one call, the retry is never merged into it and makes no call
+    (a successful turn before it is dequeued cancels it), and m3 is answered
+    in its own call: two calls after the in-flight one."""
     plugin, channel, db, llm = await make_env()
     owner = await start_inflight(plugin, channel, llm)
 
@@ -388,13 +388,19 @@ async def test_burst_turn_carries_the_last_trace_everywhere(make_env):
     earlier burst message's."""
     plugin, channel, db, llm = await make_env()
     before: list[str] = []
+    gates: list[str] = []
 
     class Spy:
-        """Records the trace id each before_agent_turn call sees."""
+        """Records the trace id each before_agent_turn and send-gate call sees."""
 
         @hookimpl
         async def before_agent_turn(self, channel, trace_id, meta):
             before.append(trace_id)
+
+        @hookimpl
+        async def should_send_response(self, channel, text, emission, trace_id, meta):
+            gates.append(trace_id)
+            return None
 
     plugin.pm.register(Spy(), name="spy")
 
@@ -406,6 +412,9 @@ async def test_burst_turn_carries_the_last_trace_everywhere(make_env):
     assert before[1:] == [last]
     assert llm.traces[1:] == [last]
     assert responses[1:] == [last]
+    # The send gate sees the burst's turn under the last trace only.
+    assert last in gates
+    assert not set(gates) & set(traces[:-1])
 
 
 # ---------------------------------------------------------------------------
@@ -425,9 +434,11 @@ async def test_drain_waits_for_burst_turn_and_channel_never_idle_early(make_env)
         """Stands in for IdleTracker: logs activity and settle signals."""
 
         def note_activity(self, channel_id: str) -> None:
+            """Record that the channel had an inbound item."""
             events.append(("activity", channel_id))
 
         def note_settled(self, channel_id: str) -> None:
+            """Record that the channel reported itself settled."""
             events.append(("settled", channel_id))
 
     plugin._idle = Recorder()

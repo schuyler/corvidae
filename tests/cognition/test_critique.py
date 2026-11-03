@@ -1433,6 +1433,8 @@ class TestLazyProbe:
 
 
 class TestBurstProvenanceBoundary:
+    """R13 (#398): the provenance search excludes every row of the burst."""
+
     async def test_claim_supported_only_by_an_earlier_burst_message_is_not_found(
         self, tmp_path
     ):

@@ -122,7 +122,9 @@ async def test_take_while_keeps_drain_waiting_for_the_current_item():
 
     # drain() must not complete while the consumer still holds "a".
     drain_task = asyncio.create_task(q.drain())
-    await asyncio.sleep(0.05)
+    # A few deterministic yields give drain() every chance to finish early.
+    for _ in range(5):
+        await asyncio.sleep(0)
     assert not drain_task.done()
 
     release.set()
