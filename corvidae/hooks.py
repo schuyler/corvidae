@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, ClassVar, TypeVar
 
 import apluggy as pluggy
 
+from corvidae.context import MessageType
 from corvidae.outbound import (
     Outbound,
     OutboundMessage,
@@ -321,13 +322,10 @@ def final_was_withheld(channel: Channel) -> bool:
     """True when the newest assistant row in ``channel.conversation`` is UNSENT.
 
     The kernel appends a final's assistant row (tagged ``UNSENT`` when a gate
-    vetoed it, or it was empty) before it fires ``on_agent_response``, so inside that hook
-    this says whether the final reached the transport. A channel with no
+    vetoed it, or it was empty) before it fires ``on_agent_response``, so
+    inside that hook this says whether the final reached the transport. A channel with no
     conversation, or no assistant row, is False.
     """
-    # Imported here: corvidae.context imports from this module's package at load.
-    from corvidae.context import MessageType
-
     conversation = channel.conversation
     if conversation is None:
         return False

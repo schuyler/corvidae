@@ -54,11 +54,6 @@ class SilencePlugin(CorvidaePlugin):
         return REGISTER_FRAGMENT
 
     @hookimpl
-    async def on_init(self, pm, config: dict) -> None:
-        """Store pm (via the base class) so the plugin can find outcome_log."""
-        await super().on_init(pm, config)
-
-    @hookimpl
     async def on_stop(self) -> None:
         """Let in-flight outcome writes land rather than abandoning them."""
         while self._record_tasks:
