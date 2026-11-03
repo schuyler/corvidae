@@ -34,5 +34,6 @@ plugins:
     - critique
     - outcome_log
     - gates
+    - silence
     - heartbeat
     - goals

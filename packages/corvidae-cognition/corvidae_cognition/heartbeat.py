@@ -43,6 +43,7 @@ import math
 from typing import Any
 
 from corvidae.context import MessageType
+from corvidae.prompts import resolve_prompt
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 from corvidae.idle import IdleTracker, IdleWatch
 from corvidae_cognition.memory import MemoryPlugin, _format_age
@@ -232,7 +233,12 @@ def parse_after(config: dict) -> float | None:
     return float(value)
 
 
-def frame_beat(memories: list[dict], retired: list[dict] | None = None) -> str:
+def frame_beat(
+    memories: list[dict],
+    retired: list[dict] | None = None,
+    prompt: str = DEFAULT_HEARTBEAT_PROMPT,
+    goals_instruction: str = GOALS_INSTRUCTION,
+) -> str:
     """The beat's notification text: the prompt, then the memories as data.
 
     ``retired`` is None when the goals plugin isn't loaded, and the text is
@@ -246,7 +252,7 @@ def frame_beat(memories: list[dict], retired: list[dict] | None = None) -> str:
         ]
     else:
         lines = ["(none)"]
-    text = f"{DEFAULT_HEARTBEAT_PROMPT}\n\n{MEMORY_HEADER}\n" + "\n".join(lines)
+    text = f"{prompt}\n\n{MEMORY_HEADER}\n" + "\n".join(lines)
     if retired is None:
         return text
     # Goals loaded: the review covers open goals and retired conclusions.
@@ -254,7 +260,7 @@ def frame_beat(memories: list[dict], retired: list[dict] | None = None) -> str:
         f"- ({_format_age(g['age_seconds'])}) {g['summary']}" for g in retired
     ] or ["(none)"]
     return (
-        f"{text}\n\n{GOALS_INSTRUCTION}\n\n{RETIRED_GOALS_HEADER}\n"
+        f"{text}\n\n{goals_instruction}\n\n{RETIRED_GOALS_HEADER}\n"
         + "\n".join(goal_lines)
     )
 
@@ -302,6 +308,9 @@ class HeartbeatPlugin(CorvidaePlugin):
                 "heartbeat.after to keep the heartbeat asleep"
             )
         self._memory = memory
+        # Prompt overrides (#411): file, inline, or built-in default.
+        self._prompt = resolve_prompt(config, "heartbeat.prompt", DEFAULT_HEARTBEAT_PROMPT)
+        self._goals_instruction = resolve_prompt(config, "heartbeat.goals_instruction", GOALS_INSTRUCTION)
 
     @hookimpl(tryfirst=True)
     async def resolve_compaction(self, channel: Any, conversation: Any, max_tokens: int) -> None:
@@ -390,7 +399,7 @@ class HeartbeatPlugin(CorvidaePlugin):
         await self.pm.ahook.on_notify(
             channel=channel,
             source="heartbeat",
-            text=frame_beat(memories, retired),
+            text=frame_beat(memories, retired, self._prompt, self._goals_instruction),
             tool_call_id=None,
             meta={"origin": "heartbeat"},
         )

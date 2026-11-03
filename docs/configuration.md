@@ -58,9 +58,9 @@ channels:
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `plugins.disabled` | list of strings | `[]` | Entry-point plugin names to block from loading. `Runtime.start()` calls `pm.set_blocked(name)` for each entry before entry points are loaded; blocked plugins are never instantiated. Names must match the entry-point name from `[project.entry-points.corvidae]` in `pyproject.toml` (e.g. `memory`, `funnel`, `appraisal`, `critique`, `outcome_log`, `memory_tools`, `goals`, `subagent`, `mcp`, `cli`). Only entry-point plugins can be disabled this way — manually registered plugins cannot be blocked via config. A null `plugins:` or `disabled:` means nothing is disabled; any other non-list value (a bare string, say) or a non-string entry fails startup with a `Config error` naming the key and value. |
+| `plugins.disabled` | list of strings | `[]` | Entry-point plugin names to block from loading. `Runtime.start()` calls `pm.set_blocked(name)` for each entry before entry points are loaded; blocked plugins are never instantiated. Names must match the entry-point name from `[project.entry-points.corvidae]` in `pyproject.toml` (e.g. `memory`, `funnel`, `appraisal`, `critique`, `outcome_log`, `memory_tools`, `goals`, `silence`, `subagent`, `mcp`, `cli`). Only entry-point plugins can be disabled this way — manually registered plugins cannot be blocked via config. A null `plugins:` or `disabled:` means nothing is disabled; any other non-list value (a bare string, say) or a non-string entry fails startup with a `Config error` naming the key and value. |
 
-`agent.minimal.yaml.example` disables `memory`, `memory_tools`, `funnel`, `appraisal`, `critique`, `outcome_log`, `gates`, `heartbeat` and `goals` — the cognition plugin set — leaving the core agent loop, multi-turn tool calling, compaction, and persistence/restart recovery intact. See the [Plugin Guide](plugin-guide.md#plugin-disable) for the hook-level mechanics.
+`agent.minimal.yaml.example` disables `memory`, `memory_tools`, `funnel`, `appraisal`, `critique`, `outcome_log`, `gates`, `silence`, `heartbeat` and `goals` — the cognition plugin set — leaving the core agent loop, multi-turn tool calling, compaction, and persistence/restart recovery intact. See the [Plugin Guide](plugin-guide.md#plugin-disable) for the hook-level mechanics.
 
 A misspelled entry is not an error — `pm.set_blocked` on a name that matches nothing simply blocks nothing, and the daemon starts normally with the plugin still loaded. To confirm a disable took effect, check the `"plugins loaded"` line the daemon logs at startup: it carries `loaded` (the plugins that actually registered) and `blocked` (this list, verbatim). A name present in `blocked` but still showing up in `loaded` is a typo.
 
@@ -132,7 +132,7 @@ These values apply to all channels. Per-channel overrides in the `channels` sect
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `agent.system_prompt` | string or list of strings | `"You are a helpful assistant."` | The agent's identity: the head of every channel's system prompt. No channel setting replaces it. A list of strings is treated as file paths; each file is read and concatenated with double newlines. Relative paths are resolved against `_base_dir`. |
-| `agent.register_prompt` | string or list of strings | unset | A register for every channel that doesn't set its own, appended after the identity. Replaces the transports' shipped defaults. Same format as `agent.system_prompt`. See [Registers](#registers). |
+| `agent.register_prompt` | string or list of strings | unset | A register for every channel that doesn't set its own, appended after the identity. Replaces the transports' shipped defaults; see [Registers](#registers). On a conversational transport the silence plugin still appends its instruction after it. Same format as `agent.system_prompt`. |
 | `agent.max_context_tokens` | integer | `24000` | Token budget for conversation history; also bounds each catch-up consolidation view. `CompactionPlugin` compacts when the estimated token count exceeds `compaction_threshold` × this value. A hard ceiling: a window still over it after compaction loses its oldest rows from memory (the log keeps them). |
 | `agent.max_turns` | integer | `10` | Maximum consecutive tool-calling turns per exchange before tool dispatch is suppressed. The counter resets when an item starts a new exchange with no tool cycle in flight: a user message, or a notification that originates its own trace (a scheduler reminder or heartbeat). |
 | `agent.reasoning_history` | `drop` \| `exchange` \| `keep` | `drop` | `drop` strips `reasoning_content` from every in-memory assistant message. `exchange` strips it only from completed exchanges (assistant messages before the last `role: user` message), so a tool chain in progress keeps its reasoning — the trained distribution for Qwen-family models. `keep` never strips it. Applied to the whole window before each LLM call, so history reloaded after a restart follows it too. The DB record always keeps reasoning. Any other value, or the removed `keep_thinking_in_history` key, fails at startup. Use `exchange` with the server's `preserve_thinking` off (see below). |
@@ -192,11 +192,46 @@ Each stage has a fork instruction:
 | `appraisal.stage2_fork_prompt` | `prompts/appraisal_fork.md` | Followed by quotes of the exchange's opening message and of the response sent, and the retrieval profile. |
 | `critique.fork_prompt.<lens>` | `prompts/critique_<lens>_fork.md` | Followed by quotes of the exchange's opening message and of the response sent; provenance also gets each claim's search hits and the CONTEXT snapshot. An override must ask for its per-claim verdicts format or every run skips. |
 
-These are static config, read with `corvidae.tuning.config_value`. They
-aren't runtime tunables: `set_settings` can write the key, but nothing reads
-the override. The standalone prompts `appraisal.stage2_prompt` and
-`critique.prompt.<lens>` are no longer read by any live stage (stage 2 and
-the lenses run only as forks); the keys remain accepted.
+These are resolved by `resolve_prompt` (#411): a string is inline text,
+`{"file": path}` or a list of paths reads files relative to the config
+directory, absent uses the built-in default. They aren't runtime tunables:
+`set_settings` can write the key, but nothing reads the override. The
+standalone prompts `appraisal.stage2_prompt` and `critique.prompt.<lens>`
+are no longer read by any live stage (stage 2 and the lenses run only as
+forks); the keys remain accepted.
+
+### Prompt key format
+
+Every prompt the framework sends on the agent's behalf goes through
+`resolve_prompt` (PRD principle 15, #411). The value can be:
+
+- **String**: inline prompt text, used verbatim. A bare string that
+  happens to name an existing file is *not* treated as a path.
+- **Object with `file` key**: `{"file": "path/to/prompt.md"}` — reads the
+  file relative to the config directory.
+- **List of strings**: each entry is a file path, read and concatenated
+  with double newlines.
+- **Absent or `null`**: the built-in default for that key.
+
+A missing or unreadable file fails at startup with the key and path named.
+On a config reload, a failed resolution keeps the previous value and logs
+the key.
+
+| Key | Default copy | Applies |
+|-----|--------------|---------|
+| `agent.compaction_fork_prompt` | `prompts/compaction_fork.md` | `agent.yaml` reload |
+| `memory.consolidation_fork_prompt` | `prompts/memory_consolidation_fork.md` | restart |
+| `appraisal.stage2_fork_prompt` | `prompts/appraisal_fork.md` | `agent.yaml` reload |
+| `critique.fork_prompt.<lens>` | `prompts/critique_<lens>_fork.md` | `agent.yaml` reload |
+| `heartbeat.prompt` | `prompts/heartbeat.md` | restart |
+| `heartbeat.goals_instruction` | `prompts/heartbeat-goals.md` | restart |
+| `tools.subagent.system_prompt` | built-in | restart |
+| `memory.rubric_prompt` | built-in | restart |
+| `silence.instruction` | built-in (`REGISTER_FRAGMENT`) | restart |
+
+Editing a prompt file does not trigger a reload; the change applies when
+the key is next resolved (on reload or at restart, per the table). Whether
+file edits trigger a reload is left to #408.
 
 Forks always run on `llm.main`, because only the main model shares the
 window's cache. If `llm.background` names a different model, enabling
@@ -406,6 +441,8 @@ A job costs a main-model turn per firing on the shared backend; keep intervals i
 |-----|------|---------|-------------|
 | `heartbeat.after` | number (seconds) | none | Seconds of system-wide quiet before a beat, and the minimum gap between beats: each beat makes the system busy, so the next one comes `after` seconds after it settles. Traffic on any channel cancels the pending beat and starts the count again. Absent, `null`, or an empty `heartbeat:` block: the heartbeat is asleep. Zero, negative, non-finite, boolean or non-numeric values fail startup with a `ValueError` naming the key and the value. Read at startup only. |
 | `heartbeat.keep_beats` | integer | `3` | Earlier beats a beat still sees in its window; older ones are dropped from the prompt (never from the log), with no LLM call. `0` starts every beat empty. Negative, fractional, boolean or string values fail startup with a `ValueError` naming the key, the value and what is accepted, even while the heartbeat sleeps. Read at startup only. |
+| `heartbeat.prompt` | string / file / list | built-in | The beat's instruction. Resolved by `resolve_prompt` (#411): a string is inline text, `{"file": path}` or a list of paths reads files relative to the config directory, absent uses the built-in default. `prompts/heartbeat.md` is the documented copy. Read at startup only. |
+| `heartbeat.goals_instruction` | string / file / list | built-in | Appended when the goals plugin is loaded: the instruction to review open and retired goals. Same resolution as `heartbeat.prompt`. `prompts/heartbeat-goals.md` is the documented copy. Read at startup only. |
 
 **Sleep.** The heartbeat sleeps whenever `heartbeat.after` is absent. To put it to sleep, delete or comment out the block and restart; it stays asleep across every restart after that, because `agent.yaml` is the record. `plugins.disabled: [heartbeat]` does the same. Reloading the config doesn't wake it or put it to sleep; restart.
 
@@ -422,6 +459,14 @@ memory:
 Group membership works both ways, so the other channels in the group can retrieve the memories consolidated from beats too (see [threat-model.md](threat-model.md)).
 
 **Cost.** Each beat is a main-model turn on the shared backend, and `heartbeat.keep_beats` bounds its prompt to the system prompt, the current beat and that many earlier ones. A beat waits for quiet, so it never competes with a conversation, but a short `after` keeps the system from staying quiet long enough for memory retention's 60-second quiet window; retention then runs on its `max_delay` instead.
+
+---
+
+## `silence` — the right to silence
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `silence.instruction` | string / file / list | built-in | The paragraph `SilencePlugin` appends to a conversational channel's system prompt, telling the model it may reply `NO_REPLY` to send nothing (see [cognition.md](cognition.md#silenceplugin-packagescorvidae-cognitioncorvidae_cognitionsilencepy)). Same resolution as `heartbeat.prompt`. Keep the literal `NO_REPLY` in any replacement: the veto matches that token, not your wording. Read at startup only. |
 
 ---
 
@@ -620,7 +665,7 @@ Keys are `transport:scope` identifiers (e.g., `irc:#general`, `cli:local`), or t
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `register_prompt` | string or list of strings | `agent.register_prompt`, else the transport's shipped default | This channel's register, appended after `agent.system_prompt`. Replaces the shipped default; `""` or `[]` means no register. Same format as `agent.system_prompt`. See [Registers](#registers). |
+| `register_prompt` | string or list of strings | `agent.register_prompt`, else the transport's shipped default | This channel's register, appended after `agent.system_prompt`. Replaces the shipped default; `""` or `[]` means no register. On a conversational transport (IRC, Discord, Signal) the `silence` plugin still appends its instruction to a custom register, or to `""`; see [Registers](#registers). Same format as `agent.system_prompt`. |
 | `max_context_tokens` | integer | `agent.max_context_tokens` | Token budget for this channel's conversation history. A hard ceiling: a window still over it after compaction loses its oldest rows from memory (the log keeps them). Also the budget for this channel's catch-up consolidation views. |
 | `max_turns` | integer | `agent.max_turns` | Maximum consecutive tool-calling turns for this channel. Must be an integer; a wrong type is rejected when the file is parsed (a `Config error` at startup, a logged reload error on reload), not at turn time. |
 | `reasoning_history` | `drop` \| `exchange` \| `keep` | `agent.reasoning_history` | Controls `reasoning_content` retention for this channel. |
@@ -645,7 +690,7 @@ channels:
 
 Every channel's system prompt is the agent's identity (`agent.system_prompt`) followed by a blank line and the channel's register, if it has one. The register resolves like any channel setting: the exact entry, then transport-wide entries from most to least specific, then `agent.register_prompt`, then the default the channel's transport ships, then none. Each layer replaces the ones below it; nothing is merged. An explicit `""` or `[]` at any layer means no register, which is how to switch a shipped default off.
 
-Signal, Discord and IRC ship defaults (texting-length turns and only the formatting the transport shows; see [prompt-guide.md](prompt-guide.md#chat-register-fragments)). Web, CLI and ACP ship none. A register file that can't be read logs a WARNING naming the channel and the path, and the conversation starts on the identity alone. Like the identity, the register is fixed when a conversation starts.
+Signal, Discord and IRC ship defaults (texting-length turns and only the formatting the transport shows; see [prompt-guide.md](prompt-guide.md#chat-register-fragments)). Web, CLI and ACP ship none. A `register_prompt` replaces the whole default. While the `silence` plugin is loaded, a conversational transport's system prompt then gets one more paragraph after the register, which lets the agent reply `NO_REPLY` to send nothing ([cognition.md](cognition.md#silenceplugin-packagescorvidae-cognitioncorvidae_cognitionsilencepy) has the text). It is added whatever the register's source, so a custom register and `register_prompt: ""` still get it; to opt a channel out, disable the plugin (`plugins.disabled: [silence]`). A register file that can't be read logs a WARNING naming the channel and the path, and the conversation starts on the identity alone. Like the identity, the register is fixed when a conversation starts.
 
 ### Transport-wide entries
 

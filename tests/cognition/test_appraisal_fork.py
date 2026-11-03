@@ -29,7 +29,9 @@ async def _run(tmp_path, agent, window_rowids=(41, 42), rowid=41, config=None, o
         env.pm.register(agent, name="agent")
     env.channel.conversation = window_of(env.channel.id, list(window_rowids)) if window_rowids else None
     if config:
-        env.appraisal.config = {**env.appraisal.config, **config}
+        new_config = {**env.appraisal.config, **config}
+        env.appraisal.config = new_config
+        await env.appraisal.on_config_reload(new_config)
     env.channel.runtime_overrides.update(overrides or {})
     await env.outcome.record_exchange("k", env.channel.id, origin="user")
     await env.appraisal.on_message_persisted(

@@ -53,7 +53,7 @@ scope, so no text crosses a channel boundary that memory wouldn't already
 cross; the PRD widens the search to every channel, matching retrieval
 (finding 15). But
 they are quoted, untrusted text in the critic's prompt, framed as data, and
-the critic's objections re-enter the window as CONTEXT (provenance objections also wake a turn whose stub tells the agent it may reply `NO_REPLY` to send nothing; that veto applies to critique-origin turns only). The number of
+the critic's objections re-enter the window as CONTEXT (provenance objections also wake a turn whose stub tells the agent it may reply `NO_REPLY` to send nothing; the veto of an exact `NO_REPLY` final covers every turn origin while `SilencePlugin` is loaded, and critique-origin turns only otherwise). The number of
 claims (5) and excerpts (5 per claim, 500 characters each) is capped, so
 one reply can't fan out into an unbounded critic prompt. Leaving sandboxing out
 of the MVP was a reasonable call, but it matters here: the attacker is not
@@ -682,8 +682,17 @@ undotted key outside its allowlist, and can't change a channel's disabled
 tools. The static keys are read from operator config alone (through
 `tuning.config_value` or their plugin's config section): an override under a
 dotted name (`agent.request_logprobs`) is accepted but has no effect, and an
-undotted one is refused by the allowlist. Several prompts (subagent,
-heartbeat) are code constants with no config key at all (#287, #289). There
+undotted one is refused by the allowlist. Every prompt the framework sends on the agent's behalf now has a config
+key resolved by `resolve_prompt` (#411, #287): `heartbeat.prompt`,
+`heartbeat.goals_instruction`, `tools.subagent.system_prompt`,
+`memory.rubric_prompt`, `silence.instruction`, and the fork prompts. Each is a new override point:
+on a channel with `write_file`, the agent can rewrite the prompt file the
+key points at. The change applies when the key is next resolved: on an
+`agent.yaml` reload for compaction, appraisal, and critique; at restart
+for the rest. Editing a prompt file does not trigger a reload. `set_settings`
+cannot change these keys: `resolve_prompt` reads static config only. The
+cost is the same as the system-prompt entry: the agent redefines its own
+instructions for that scope. Lock the files read-only to the daemon. There
 is no restart tool in this tree; the agent can restart only by way of
 `shell` or a tool an MCP server provides. Nor is there deferred application:
 a `reasoning_history` override applies to the whole window from the next
@@ -996,6 +1005,18 @@ are built (#316), but not their runtime overrides and separate locks.
 
 ### Smaller things
 
+- Untrusted text in a chat channel can talk the agent into silence. Where
+  `SilencePlugin` is loaded, the system prompt of every IRC, Discord and
+  Signal channel tells the model it may answer `NO_REPLY` to send nothing, and
+  a message that says "don't reply to this" may be enough. The worst case is
+  a missed reply. A decline is a row in `exchange_log` with
+  `outcomes.silence` (`no_reply` or `empty`) only when `outcome_log` is loaded
+  and the turn has a trace id, so look there to find them. It adds no
+  capability: the agent could already stay quiet by sending an empty final,
+  and nothing it can reach changes. A custom `register_prompt`, or an empty
+  one, does not remove the instruction. If a channel must always answer,
+  disable `silence`.
+
 - Control-token strings (`<|im_start|>`, `<|endoftext|>`) and bare
   `<think>`/`</think>`/`<tool_call>`/`</tool_call>` tags in untrusted
   text are made inert in every chat request (`LLMClient.chat`, #356), so a
@@ -1017,10 +1038,10 @@ are built (#316), but not their runtime overrides and separate locks.
   account name. Not a secret, but it is a real identifier in a public
   repository.
 - No secrets in `prompts/` or `docs/`.
-- A withheld (`unsent`) row is not sent to any transport, including web
+- An `unsent` row is not sent to any transport, including web
   and ACP history replay, but it is not secret: it sits in `sessions.db`,
   the JSONL log and the window like any other row, and a fork or
-  compaction summary sees it. "Withheld" means not said to the channel,
+  compaction summary sees it. `unsent` means not said to the channel,
   not redacted.
 - The memory surfaces (`memory`, `memory_vec`, `memory_fts`,
   `message_fts`) exist only when the cognition extra has been installed.

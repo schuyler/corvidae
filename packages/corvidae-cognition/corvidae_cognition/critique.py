@@ -58,6 +58,7 @@ from corvidae.fork import fork_agent, quote, window_db_ids
 from corvidae.hooks import CorvidaePlugin, hookimpl
 from corvidae.persistence import decode_message_row
 from corvidae.task import Task
+from corvidae.prompts import resolve_prompt
 from corvidae.tuning import config_value, resolve_tunable
 from corvidae_cognition.memory import ChannelScope
 from corvidae_cognition.probe import ReadOnlyProbe
@@ -475,10 +476,27 @@ class CritiquePlugin(CorvidaePlugin):
     async def on_init(self, pm, config: dict) -> None:
         await super().on_init(pm, config)
         self.config = config
+        self._fork_prompts = self._resolve_fork_prompts(config)
 
     @hookimpl
     async def on_config_reload(self, config: dict) -> None:
         self.config = config
+        try:
+            self._fork_prompts = self._resolve_fork_prompts(config)
+        except (OSError, TypeError) as exc:
+            logger.warning(
+                "critique: fork prompt reload failed (%s); keeping previous",
+                exc,
+            )
+
+    def _resolve_fork_prompts(self, config: dict) -> dict[str, str]:
+        """Resolve all lens fork prompts at startup/reload."""
+        return {
+            lens: resolve_prompt(
+                config, f"critique.fork_prompt.{lens}", DEFAULT_FORK_PROMPTS[lens]
+            )
+            for lens in DEFAULT_FORK_PROMPTS
+        }
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
@@ -878,10 +896,7 @@ class CritiquePlugin(CorvidaePlugin):
         evidence = await self._gather_evidence(channel, trace_id, claims)
         if evidence is None:
             return  # no evidence could be gathered; warned in _gather_evidence
-        prompt = config_value(
-            self.config, "critique.fork_prompt.provenance",
-            DEFAULT_FORK_PROMPTS["provenance"],
-        )
+        prompt = self._fork_prompts["provenance"]
         snapshot = await self._read_provenance_snapshot(trace_id)
         instruction = (
             f"{prompt}\n\nThe exchange began with the message "
@@ -1187,9 +1202,7 @@ class CritiquePlugin(CorvidaePlugin):
         if fork_agent(self.pm if hasattr(self, "pm") else None, "critique") is None:
             self._skip_lens(channel, lens, trace_id, FORKS_OFF_REASON)
             return None
-        prompt = config_value(
-            self.config, f"critique.fork_prompt.{lens}", DEFAULT_FORK_PROMPTS[lens]
-        )
+        prompt = self._fork_prompts[lens]
         instruction = (
             f"{prompt}\n\nThe exchange began with the message "
             f"«{quote(originating_text)}», and the response you sent began "

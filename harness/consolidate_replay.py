@@ -313,7 +313,7 @@ async def _main_async(args: argparse.Namespace) -> int:
         # No file given: the config's instruction (or the default), as the daemon uses.
         prompt_text = (
             Path(prompt_path).read_text() if prompt_path
-            else resolve_consolidation_fork_prompt(config.get("memory") or {})
+            else resolve_consolidation_fork_prompt(config)
         )
         inputs = view_inputs_from_config(config, system_prompt)
     except (OSError, ValueError) as e:

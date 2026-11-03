@@ -446,8 +446,9 @@ The contract every transport meets:
    fences balanced across chunks.
 5. Liveness (typing, read receipts) is shown only to allowed senders.
    Typing shows while the channel is owed a reply and stops as soon as any
-   reply goes out, even if another message is still waiting for its turn,
-   or when nothing is owed; it is never left on indefinitely.
+   turn ends with a final, sent or withheld, even if another message is
+   still waiting for its turn, or when nothing is owed; it is never left on
+   indefinitely.
 6. A refused sender never creates a persistent channel in the registry.
 7. Scopes use stable identifiers (principle 10). The transport implements
    `resolve_channel` for ids the registry does not hold, so a reminder due
@@ -1533,4 +1534,4 @@ record that holds the reasoning.
 | Identity is agent-wide and heads every prompt written in the agent's voice; channel register is appended after it and never replaces it; the subagent's prompt is persona-neutral (§3.5.7) | operator directive, 2026-11-01; #380; #388 |
 | The operator decides the trust boundary; inbound transports default-deny; channels are not a boundary; safety features layer in as plugins | #167; operator directive, 2026-11-01 |
 | Corvidae is a testbed first and a robust harness second | #167 |
-| Consecutive queued messages coalesce into one turn owned by the last message's trace; typing clears on any reply; notifications never coalesce | §3.1.19; #398, #296; owner, 2026-11-03 |
+| Consecutive queued messages coalesce into one turn owned by the last message's trace; typing clears on any final, sent or withheld; notifications never coalesce | §3.1.19; #398, #296; owner, 2026-11-03 |

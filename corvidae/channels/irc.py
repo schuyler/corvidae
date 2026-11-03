@@ -169,6 +169,8 @@ class IRCPlugin(TransportPlugin):
     """IRC transport plugin following CLIPlugin pattern."""
 
     transport = "irc"
+    # A chat transport: a person is on the other end who may end the exchange.
+    conversational = True
 
     def __init__(self, pm=None):
         if pm is not None:

@@ -75,6 +75,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 import aiosqlite
 
 from corvidae.attribution import reset_attribution, set_attribution
+from corvidae.prompts import resolve_prompt
 from corvidae.context import ContextWindow, MessageType, count_tokens, message_tokens
 from corvidae.fork import (
     ForkRefused,
@@ -763,10 +764,15 @@ class RubricPrior:
     block memory formation.
     """
 
-    def __init__(self, get_client: Callable[[], object]) -> None:
+    def __init__(
+        self,
+        get_client: Callable[[], object],
+        get_prompt: Callable[[], str] | None = None,
+    ) -> None:
         # A callable, not a client, so the current background client is
         # resolved at call time (clients can be swapped on config reload).
         self._get_client = get_client
+        self._get_prompt = get_prompt or (lambda: RUBRIC_PROMPT)
 
     async def score(
         self,
@@ -779,7 +785,7 @@ class RubricPrior:
         try:
             client = self._get_client()
             response = await client.chat([
-                {"role": "system", "content": RUBRIC_PROMPT},
+                {"role": "system", "content": self._get_prompt()},
                 {"role": "user", "content": _dialog_transcript(messages)},
             ], extra_body=RUBRIC_EXTRA_BODY)
             text = response["choices"][0]["message"]["content"]
@@ -856,22 +862,14 @@ class RecordStamp:
 DIRECT_STAMP = RecordStamp(None, "direct", None)
 
 
-def resolve_consolidation_fork_prompt(memory_cfg: dict) -> str:
+def resolve_consolidation_fork_prompt(config: dict) -> str:
     """The consolidation instruction for a memory config.
 
-    The configured ``consolidation_fork_prompt`` or the default when the key
-    is absent. A present non-string value raises ValueError naming the key:
-    stamping a default or "" would record text the call never sent.
+    Routes through :func:`resolve_prompt` so the key accepts inline text,
+    a file reference, or a list of files (PRD principle 15, #411).
     """
-    value = memory_cfg.get("consolidation_fork_prompt", DEFAULT_CONSOLIDATION_FORK_PROMPT)
-    if not isinstance(value, str):
-        raise ValueError(
-            f"memory.consolidation_fork_prompt must be a string; got {value!r}. "
-            f"Set it to the instruction text or remove the key to use the default."
-        )
-    return value
-
-
+    return resolve_prompt(config, "memory.consolidation_fork_prompt",
+                          DEFAULT_CONSOLIDATION_FORK_PROMPT)
 MEMORY_INDEX_DDL = (
     "CREATE INDEX IF NOT EXISTS idx_memory_channel ON memory (channel_id, created_at)"
 )
@@ -1044,7 +1042,8 @@ class MemoryPlugin(CorvidaePlugin):
         self._db_lock = asyncio.Lock()
         # Pluggable importance prior; replaced by later phases (§3.1).
         self.importance_prior: ImportancePrior = RubricPrior(
-            lambda: self._llm().get_client("background")
+            lambda: self._llm().get_client("background"),
+            lambda: self._rubric_prompt,
         )
 
     # ------------------------------------------------------------------
@@ -1078,7 +1077,8 @@ class MemoryPlugin(CorvidaePlugin):
             retention_cfg.get("max_delay", DEFAULT_RETENTION_MAX_DELAY)
         )
         # A non-str prompt is refused here (startup fails loudly).
-        self._consolidation_fork_prompt = resolve_consolidation_fork_prompt(self._memory_cfg)
+        self._consolidation_fork_prompt = resolve_consolidation_fork_prompt(config)
+        self._rubric_prompt = resolve_prompt(config, "memory.rubric_prompt", RUBRIC_PROMPT)
         # The standalone prompt is gone; say so once at startup (O2).
         if "consolidation_prompt" in self._memory_cfg:
             logger.warning(
