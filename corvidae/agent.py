@@ -1240,7 +1240,9 @@ class Agent(CorvidaePlugin):
 
         # 5b. Hard ceiling (#308, PRD §3.3.2): whatever compaction did or
         # skipped, a window over max_context_tokens loses its oldest rows from
-        # memory (message_log keeps them). Pure list arithmetic, so not wrapped.
+        # memory (message_log keeps them). Not wrapped: fit_to_budget cannot
+        # raise on any row the window can hold (§3.1.18.1, #392), so a wrapper
+        # here would only hide a defect in that guarantee.
         # Outside the retry guard: a retried turn (#281) is a main-turn call
         # too, and tool results may have joined its window since.
         max_ctx = resolved["max_context_tokens"]

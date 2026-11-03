@@ -699,6 +699,19 @@ All operations are synchronous; no database access:
   because memory retrieval keys on a plain `user` tail, and because the
   rewrite must stay a pure function of each message for the prompt prefix
   to stay cache-stable.
+
+  Every row the window can hold is renderable (PRD §3.1.18.1, #392), because
+  these steps run unwrapped on every turn and an exception here is a
+  deterministic per-turn failure that wedges the channel. A row that is not a
+  message object is left out; a malformed `tool_calls` entry (no `id`, a
+  non-list value, a non-dict entry) is filtered out by
+  `well_formed_calls()`, and the row renders without it, or is left out
+  entirely when that was its whole payload. Each omission logs one WARNING
+  naming the channel and the row (`message_log` id, or the window position
+  when the row was never persisted). `snap_cut_forward`,
+  `snap_cut_to_tool_boundary` and `_first_result_index` read `tool_calls`
+  through the same helper, so the cut snaps and the render agree on which
+  calls exist.
 - `corvidae.context.unanswered_user_messages(messages)` (a module function,
   not a method) — the user-role MESSAGE rows after the window's last
   assistant row, in order (all of them when there is no assistant row). A
@@ -714,7 +727,9 @@ All operations are synchronous; no database access:
   by its JSON-serialized visible fields (role, content, `tool_calls`,
   `reasoning_content`, etc.), not just the `content` string, so a message
   whose size is mostly in tool-call arguments or reasoning content is still
-  counted accurately.
+  counted accurately. It never raises on a row's content (§3.1.18.1, #392):
+  a value JSON cannot encode is counted by its `str()`, and a row that is not
+  a mapping is counted by its `repr`, so both still contribute to the budget.
 - `replace_with_summary(summary_msg, retain_count)` — replaces older messages
   with a summary in-memory, retaining the `retain_count` most-recent entries.
   Raises `ValueError` if `retain_count` exceeds `len(messages)`.
