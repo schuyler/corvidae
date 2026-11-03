@@ -278,9 +278,13 @@ class McpClientPlugin(CorvidaePlugin):
         on_stop   — signals every owner task to close its session and
                     transport, and awaits them together within a bound
 
-    Ordering: main.py calls Agent.on_start explicitly after the
-    broadcast, so MCP connections are guaranteed to complete before
-    register_tools fires.
+    Ordering: the on_start broadcast runs every implementation
+    concurrently, so ToolCollectionPlugin can collect register_tools
+    before the connects finish. on_start therefore rebuilds the shared
+    registry once its servers are connected (#405), as the retry path
+    does for a server that reconnects later. Runtime calls Agent.on_start
+    explicitly after the broadcast, so the Agent's first read of the
+    registry already includes the startup servers' tools.
     """
 
     depends_on = frozenset({"clock"})
@@ -396,6 +400,14 @@ class McpClientPlugin(CorvidaePlugin):
             "McpClientPlugin started",
             extra={"servers": len(self._servers), "tools": len(self._cached_tools)},
         )
+        # ToolCollectionPlugin.on_start may already have collected while these
+        # connects were in flight (the broadcast runs implementations
+        # concurrently; trylast orders starts, not finishes), so push the
+        # connected servers' tools into the shared registry now (#405).
+        if self._servers:
+            await self._rebuild_shared_registry(
+                [server.name for server in self._servers], "connected"
+            )
         # Retry what failed in the background, so a daemon whose servers all
         # failed recovers without waiting for an MCP tool call.
         if self._pending_servers:
@@ -568,24 +580,38 @@ class McpClientPlugin(CorvidaePlugin):
 
         if reconnected:
             self._cached_tools = self._build_tool_list()
-            # Refresh the shared registry so later tool consumers (e.g.
-            # subagents) see the reconnected server's tools.
-            tools_plugin = self.pm.get_plugin("tools") if self.pm is not None else None
-            rebuild = getattr(tools_plugin, "rebuild_registry", None)
-            if inspect.iscoroutinefunction(rebuild):
-                try:
-                    await rebuild()
-                except Exception:
-                    # Servers are connected; only the shared registry is
-                    # stale. Keep the retry loop alive.
-                    logger.warning(
-                        "Tool registry rebuild failed after MCP server(s) "
-                        "%s reconnected; their tools reach the registry on "
-                        "the next successful rebuild",
-                        ", ".join(repr(n) for n in connected_names),
-                        exc_info=True,
-                    )
+            # Refresh the shared registry so the Agent and later tool
+            # consumers (e.g. subagents) see the reconnected server's tools.
+            await self._rebuild_shared_registry(connected_names, "reconnected")
         return reconnected
+
+    async def _rebuild_shared_registry(self, names: list[str], event: str) -> None:
+        """Ask ToolCollectionPlugin to re-collect tools after servers connect.
+
+        The tools plugin may have built the registry before these servers
+        finished connecting (the on_start broadcast runs concurrently, #405),
+        so their tools reach it only through this rebuild. The Agent notices
+        the generation change on its next turn (#109/#271). A failed rebuild
+        is logged, never raised: the servers are connected, only the shared
+        registry is stale.
+
+        Args:
+            names: The servers that just connected, for the warning.
+            event: "connected" or "reconnected", for the warning.
+        """
+        tools_plugin = self.pm.get_plugin("tools") if self.pm is not None else None
+        rebuild = getattr(tools_plugin, "rebuild_registry", None)
+        if not inspect.iscoroutinefunction(rebuild):
+            return
+        try:
+            await rebuild()
+        except Exception:
+            logger.warning(
+                "Tool registry rebuild failed after MCP server(s) %s %s; "
+                "their tools reach the registry on the next successful rebuild",
+                ", ".join(repr(n) for n in names), event,
+                exc_info=True,
+            )
 
     async def _connect_server(self, name: str, cfg: dict) -> None:
         """Connect to one MCP server and register its tools.

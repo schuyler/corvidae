@@ -2179,9 +2179,20 @@ their tool lists, and exposes them to the agent loop via `register_tools`.
   owned by a long-lived task (see "Owner tasks") so they stay alive for the
   daemon's lifetime. After all connections, calls `_build_tool_list()` and caches the
   result. Connection failures per server are caught, logged as warnings, and
-  skipped; a failed server does not abort startup.
+  skipped; a failed server does not abort startup. When at least one server
+  connected, it then calls `ToolCollectionPlugin.rebuild_registry()` (#405).
+  The `on_start` broadcast runs implementations concurrently, and `trylast`
+  on `ToolCollectionPlugin.on_start` orders when it starts, not when it
+  finishes, so the first registry build usually runs while the connects are
+  still in flight and collects no MCP tools. The rebuild adds them before the
+  broadcast returns, so `Agent.on_start`, which `Runtime` runs after the
+  broadcast, sees them. A failed rebuild logs a WARNING naming the servers
+  and does not abort startup.
 - `register_tools` — extends `tool_registry` with the cached `Tool` instances
-  (sync; called after `on_start` completes).
+  (sync). It runs on every `rebuild_registry`: the tools plugin's own build
+  in `on_start` (possibly before any server has connected, which gives an
+  empty list), the rebuild at the end of this plugin's `on_start`, and the
+  rebuild after a retry reconnects a server.
 - `on_stop` — signals every server's owner task to close its session and
   transport, and awaits them all together (see "Owner tasks").
 
