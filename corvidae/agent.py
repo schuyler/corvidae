@@ -571,6 +571,22 @@ class Agent(CorvidaePlugin):
             return None
         return conversation_message, request_text
 
+    def _warn_compaction_failed(self, channel: Channel, exc: BaseException) -> None:
+        """Log the one WARNING for a compaction attempt that failed (#400).
+
+        Names the channel and the exception type, as PRD §3.3.2 and AGENTS.md
+        require: the traceback alone does not say which channel stopped
+        compacting, which is what a reader needs when one channel repeats it.
+        """
+        logger.warning(
+            "compaction failed for channel %s (%s); skipping this turn — the "
+            "window stays as it is and compaction is retried on a later turn "
+            "(see the traceback for where)",
+            channel.id, type(exc).__name__,
+            exc_info=True,
+            extra={"channel": channel.id},
+        )
+
     def _warn_over_budget(
         self, channel: Channel, conv: ContextWindow, max_ctx: int,
         dropped: list[dict], truncated: bool,
@@ -1250,13 +1266,15 @@ class Agent(CorvidaePlugin):
                     channel=channel, conversation=conv,
                     max_tokens=resolved["max_context_tokens"],
                 )
-            except Exception:
-                logger.warning("compaction failed, skipping", exc_info=True)
+            except Exception as exc:
+                self._warn_compaction_failed(channel, exc)
             _phases["compact"] = time.monotonic() - _t_compact_start
 
         # 5b. Hard ceiling (#308, PRD §3.3.2): whatever compaction did or
         # skipped, a window over max_context_tokens loses its oldest rows from
-        # memory (message_log keeps them). Pure list arithmetic, so not wrapped.
+        # memory (message_log keeps them). Not wrapped: fit_to_budget cannot
+        # raise on any row the window can hold (§3.1.18.1, #392), so a wrapper
+        # here would only hide a defect in that guarantee.
         # Outside the retry guard: a retried turn (#281) is a main-turn call
         # too, and tool results may have joined its window since.
         max_ctx = resolved["max_context_tokens"]
