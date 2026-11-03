@@ -27,7 +27,7 @@ Logging:
 import asyncio
 import logging
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import aiohttp
 from collections.abc import Callable
@@ -1074,12 +1074,12 @@ class Agent(CorvidaePlugin):
         channel: Channel,
         conv: ContextWindow,
         item: QueueItem,
-        conversation_message: dict,
+        conversation_message: dict[str, Any],
         request_text: str,
-    ) -> dict[str, float]:
+    ) -> float:
         """Step 4: append a message to the window, persist it, announce it.
 
-        Returns the seconds spent persisting, as a ``{"persist": s}`` phase.
+        Returns the seconds spent persisting, for the turn's phase timing.
         """
         # 4. Append message to conversation log and fire persistence event.
         # The resolved rowid attaches to the WINDOW copy (conv.append
@@ -1097,8 +1097,13 @@ class Agent(CorvidaePlugin):
             if rowid is not None:
                 conv.messages[-1]["_db_id"] = rowid
         except Exception:
-            logger.warning("persist_message hook failed", exc_info=True)
-        phases = {"persist": time.monotonic() - _t_persist_start}
+            logger.warning(
+                "persist_message hook failed for a message on channel %s "
+                "(trace_id %s); it stays in the window but not in the log",
+                channel.id, item.trace_id, exc_info=True,
+                extra={"channel": channel.id, "trace_id": item.trace_id},
+            )
+        persist_seconds = time.monotonic() - _t_persist_start
 
         # 4c. Fire on_message_persisted only when this item originates its
         # trace (USER items, and notification items whose id was
@@ -1114,7 +1119,7 @@ class Agent(CorvidaePlugin):
                 )
             except Exception:
                 logger.warning("on_message_persisted hook failed", exc_info=True, extra={"channel": channel.id})
-        return phases
+        return persist_seconds
 
     async def _process_queue_item_attributed(
         self, item: QueueItem, channel: Channel, absorbed: list[QueueItem]
@@ -1136,8 +1141,7 @@ class Agent(CorvidaePlugin):
                     extra={"channel": channel.id, "trace_id": item.trace_id},
                 )
                 return
-        import time as _time
-        _t0 = _time.monotonic()
+        _t0 = time.monotonic()
         _phases: dict[str, float] = {}
 
         # Build the conversation message based on item role
@@ -1150,7 +1154,7 @@ class Agent(CorvidaePlugin):
         # any conversation is initialised or the turn's tools are read.
         self._refresh_tools_if_changed()
 
-        _t_conv_init_start = _time.monotonic()
+        _t_conv_init_start = time.monotonic()
 
         # 1. Lazy-initialize conversation on the channel
         if channel.conversation is None:
@@ -1165,7 +1169,7 @@ class Agent(CorvidaePlugin):
                 conv.messages = history
             channel.conversation = conv
         conv = channel.conversation
-        _phases["conv_init"] = _time.monotonic() - _t_conv_init_start
+        _phases["conv_init"] = time.monotonic() - _t_conv_init_start
 
         # 2. Reset turn_counter when this item originates a new trace
         # (USER items, and notifications whose id was minted at dequeue in
@@ -1188,16 +1192,19 @@ class Agent(CorvidaePlugin):
             # 4 + 4c. Absorbed burst messages first, in arrival order, each
             # under its own trace (they are USER items, so each one fires
             # on_message_persisted); then the owner's message.
+            # Persist time covers every row the turn writes, burst included.
+            persist_seconds = 0.0
             for absorbed_item in absorbed:
                 absorbed_result = self._build_conversation_message(absorbed_item)
                 if absorbed_result is None:
                     continue
-                await self._append_and_persist_message(
+                persist_seconds += await self._append_and_persist_message(
                     channel, conv, absorbed_item, *absorbed_result,
                 )
-            _phases.update(await self._append_and_persist_message(
+            persist_seconds += await self._append_and_persist_message(
                 channel, conv, item, conversation_message, request_text,
-            ))
+            )
+            _phases["persist"] = persist_seconds
 
             # 4b. Batch tool results: if this is a tool-result notification and
             # there are still pending tool calls, skip the LLM call.
@@ -1221,7 +1228,7 @@ class Agent(CorvidaePlugin):
                     return
 
             # 5. Compact if approaching context limit
-            _t_compact_start = _time.monotonic()
+            _t_compact_start = time.monotonic()
             try:
                 await self.pm.ahook.resolve_compaction(
                     channel=channel, conversation=conv,
@@ -1229,7 +1236,7 @@ class Agent(CorvidaePlugin):
                 )
             except Exception:
                 logger.warning("compaction failed, skipping", exc_info=True)
-            _phases["compact"] = _time.monotonic() - _t_compact_start
+            _phases["compact"] = time.monotonic() - _t_compact_start
 
         # 5b. Hard ceiling (#308, PRD §3.3.2): whatever compaction did or
         # skipped, a window over max_context_tokens loses its oldest rows from
@@ -1244,7 +1251,7 @@ class Agent(CorvidaePlugin):
 
         if not item.retry:
             # 6. Let plugins inject context before the LLM call
-            _t_before_turn_start = _time.monotonic()
+            _t_before_turn_start = time.monotonic()
             msg_count_before = len(conv.messages)
             try:
                 await self.pm.ahook.before_agent_turn(
@@ -1272,10 +1279,10 @@ class Agent(CorvidaePlugin):
                         msg["_db_id"] = rowid
                 except Exception:
                     logger.warning("persist_message hook failed", exc_info=True)
-            _phases["before_turn"] = _time.monotonic() - _t_before_turn_start
+            _phases["before_turn"] = time.monotonic() - _t_before_turn_start
 
         # 7. Build prompt and call run_agent_turn (single LLM invocation)
-        _t_llm_start = _time.monotonic()
+        _t_llm_start = time.monotonic()
         messages = conv.build_prompt(
             frozenset(channel.pending_tool_call_ids),
             mid_conversation_system_role=self._mid_conversation_system_role,
@@ -1377,7 +1384,7 @@ class Agent(CorvidaePlugin):
         # marker reloads beside the row it describes).
         for emission, text in unsent_markers:
             await self._append_unsent_marker(channel, emission, text)
-        _phases["llm"] = _time.monotonic() - _t_llm_start
+        _phases["llm"] = time.monotonic() - _t_llm_start
 
         # 10. Dispatch tool calls or send text response
         await self._handle_response(
@@ -1386,7 +1393,7 @@ class Agent(CorvidaePlugin):
         )
 
         # 11. Log phase timing breakdown
-        _total = _time.monotonic() - _t0
+        _total = time.monotonic() - _t0
         _phases["other"] = max(0, _total - sum(_phases.values()))
         logger.info(
             "queue item timing",
