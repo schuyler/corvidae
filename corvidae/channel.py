@@ -711,7 +711,7 @@ def resolve_system_prompt(value: str | list[str], base_dir: Path) -> str:
         if not value:
             _prompt_logger.warning("empty system prompt list resolved to empty string")
             return ""
-        result = read_prompt_files(value, base_dir)
+        result = read_prompt_files(value, base_dir, key="system_prompt")
         _prompt_logger.debug(
             "system prompt resolved from file list",
             extra={"file_count": len(value), "length": len(result)},

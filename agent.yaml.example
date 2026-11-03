@@ -95,6 +95,7 @@ agent:
 # Autobiographical memory (optional; see docs/configuration.md)
 # memory:
 #   half_life_days: 30                # retrieval recency decay (e-folding time, days)
+#   rubric_prompt: "Rate importance"  # or a file path; the importance rubric
 #   retrieval:
 #     band_on: score                  # score | similarity: what strong/moderate/weak is applied to
 #     recency_from: created           # created | last_used: where ranking age is measured from
@@ -136,6 +137,8 @@ agent:
 #   disabled: []                    # tool names to drop entirely, e.g. [shell, write_file]
 #                                   # or [set_settings]; shell and task_pipeline go
 #                                   # together; see docs/threat-model.md
+#   subagent:
+#     system_prompt: "You are..."  # or a file path; the subagent's system prompt
 
 # IRC transport connection settings (optional — omit to disable IRC)
 # irc:

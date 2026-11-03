@@ -73,7 +73,7 @@ class TestDictFile:
 
     def test_dict_without_file_key_raises_type_error(self, base_dir):
         cfg = _cfg(base_dir, **{"heartbeat.prompt": {"template": "prompts/a.md"}})
-        with pytest.raises(TypeError, match="heartbeat.prompt"):
+        with pytest.raises(ValueError, match="heartbeat.prompt"):
             resolve_prompt(cfg, "heartbeat.prompt", "DEFAULT")
 
     def test_absolute_path(self, base_dir):
@@ -145,10 +145,10 @@ class TestDottedKeys:
 class TestTypeErrors:
     def test_integer_value_raises(self, base_dir):
         cfg = _cfg(base_dir, **{"heartbeat.prompt": 42})
-        with pytest.raises(TypeError, match="heartbeat.prompt"):
+        with pytest.raises(ValueError, match="heartbeat.prompt"):
             resolve_prompt(cfg, "heartbeat.prompt", "DEFAULT")
 
     def test_boolean_value_raises(self, base_dir):
         cfg = _cfg(base_dir, **{"heartbeat.prompt": True})
-        with pytest.raises(TypeError, match="heartbeat.prompt"):
+        with pytest.raises(ValueError, match="heartbeat.prompt"):
             resolve_prompt(cfg, "heartbeat.prompt", "DEFAULT")

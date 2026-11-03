@@ -43,7 +43,11 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-def read_prompt_files(paths: list[str], base_dir: Path | None) -> str:
+def read_prompt_files(
+    paths: list[str],
+    base_dir: Path | None,
+    key: str | None = None,
+) -> str:
     """Read prompt files and concatenate them.
 
     Shared by :func:`resolve_prompt` and ``channel.resolve_system_prompt``
@@ -52,19 +56,28 @@ def read_prompt_files(paths: list[str], base_dir: Path | None) -> str:
     Args:
         paths: File paths to read. Relative paths resolve against base_dir.
         base_dir: Base directory for relative paths. None means CWD.
+        key: Optional config key name for error messages.
 
     Returns:
         The concatenated text, files joined by double newlines.
 
     Raises:
-        FileNotFoundError: If any file does not exist.
+        FileNotFoundError: If any file does not exist. The message names
+            the key (if provided) and the absolute path.
     """
     parts: list[str] = []
     for entry in paths:
-        path = Path(entry)
+        path = Path(str(entry))
         if not path.is_absolute() and base_dir is not None:
             path = base_dir / path
-        parts.append(path.read_text().strip())
+        try:
+            text = path.read_text()
+        except OSError as exc:
+            prefix = f"prompt key {key!r}: " if key else ""
+            raise FileNotFoundError(
+                f"{prefix}cannot read {path}: {exc}"
+            ) from exc
+        parts.append(text.strip())
     return "\n\n".join(parts)
 
 
@@ -121,44 +134,22 @@ def _resolve_value(value: Any, key: str, base: Path) -> str:
     if isinstance(value, str):
         return value
     if isinstance(value, list):
-        return _read_file_list(value, key, base)
+        if not value:
+            logger.warning("prompt key %r: empty file list resolves to empty string", key)
+            return ""
+        return read_prompt_files(value, base, key=key)
     if isinstance(value, dict):
         path = value.get("file")
         if path is None:
-            raise TypeError(
+            raise ValueError(
                 f"prompt key {key!r}: dict value must have a 'file' key, "
                 f"got keys {list(value.keys())!r}"
             )
-        return _read_one_file(Path(str(path)), key, base)
-    raise TypeError(
+        return read_prompt_files([path], base, key=key)
+    raise ValueError(
         f"prompt key {key!r}: expected str, list[str], or {{'file': str}}, "
         f"got {type(value).__name__!r}"
     )
 
 
-def _read_file_list(paths: list, key: str, base: Path) -> str:
-    """Read a list of file paths, concatenate with double newlines."""
-    if not paths:
-        logger.warning("prompt key %r: empty file list resolves to empty string", key)
-        return ""
-    parts = []
-    for entry in paths:
-        parts.append(_read_one_file(Path(str(entry)), key, base))
-    return "\n\n".join(parts)
 
-
-def _read_one_file(raw_path: Path, key: str, base: Path) -> str:
-    """Read a single prompt file, resolved against base if relative."""
-    if not raw_path.is_absolute():
-        raw_path = base / raw_path
-    try:
-        text = raw_path.read_text()
-    except OSError as exc:
-        raise FileNotFoundError(
-            f"prompt key {key!r}: cannot read {raw_path}: {exc}"
-        ) from exc
-    logger.debug(
-        "prompt key %r: resolved from file %s (%d chars)",
-        key, raw_path, len(text),
-    )
-    return text.strip()

@@ -200,6 +200,38 @@ standalone prompts `appraisal.stage2_prompt` and `critique.prompt.<lens>`
 are no longer read by any live stage (stage 2 and the lenses run only as
 forks); the keys remain accepted.
 
+### Prompt key format
+
+Every prompt the framework sends on the agent's behalf goes through
+`resolve_prompt` (PRD principle 15, #411). The value can be:
+
+- **String**: inline prompt text, used verbatim. A bare string that
+  happens to name an existing file is *not* treated as a path.
+- **Object with `file` key**: `{"file": "path/to/prompt.md"}` — reads the
+  file relative to the config directory.
+- **List of strings**: each entry is a file path, read and concatenated
+  with double newlines.
+- **Absent or `null`**: the built-in default for that key.
+
+A missing or unreadable file fails at startup with the key and path named.
+On a config reload, a failed resolution keeps the previous value and logs
+the key.
+
+| Key | Default copy | Applies |
+|-----|--------------|---------|
+| `agent.compaction_fork_prompt` | `prompts/compaction_fork.md` | `agent.yaml` reload |
+| `memory.consolidation_fork_prompt` | `prompts/memory_consolidation_fork.md` | restart |
+| `appraisal.stage2_fork_prompt` | `prompts/appraisal_fork.md` | `agent.yaml` reload |
+| `critique.fork_prompt.<lens>` | `prompts/critique_<lens>_fork.md` | `agent.yaml` reload |
+| `heartbeat.prompt` | `prompts/heartbeat.md` | restart |
+| `heartbeat.goals_instruction` | `prompts/heartbeat-goals.md` | restart |
+| `tools.subagent.system_prompt` | built-in | restart |
+| `memory.rubric_prompt` | built-in | restart |
+
+Editing a prompt file does not trigger a reload; the change applies when
+the key is next resolved (on reload or at restart, per the table). Whether
+file edits trigger a reload is left to #408.
+
 Forks always run on `llm.main`, because only the main model shares the
 window's cache. If `llm.background` names a different model, enabling
 forks moves those stages' cost onto the main model, and the daemon logs a
