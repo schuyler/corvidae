@@ -430,74 +430,6 @@ class TestSubThresholdNoDup:
 
 
 # ---------------------------------------------------------------------------
-# WP1b.2 compartment boundary (regression guard — passes in current code)
-# ---------------------------------------------------------------------------
-
-
-class TestSiblingChannelCompartmentBoundary:
-    """Near-dup on a channel outside the caller's scope must NOT be merged.
-
-    channel_a (irc:#test) is in no group, so its scope is itself and
-    irc:#garden's record is out of reach (compartment boundary). Both
-    records stay indexed=1. Merges inside a shared group are covered by
-    TestScopeAwareMerge (GitHub issue #58).
-    """
-
-    async def test_sibling_channel_not_merged(self):
-        """Near-identical records on an ungrouped and a grouped channel: both stay indexed."""
-        config = {
-            **EMBED_CONFIG_DEDUP,
-            "memory": {
-                **EMBED_CONFIG_DEDUP["memory"],
-                "channel_groups": {
-                    "home": ["irc:#electronics", "irc:#garden"],
-                },
-            },
-        }
-        memory, persistence, stub, channel_a, db = await build_dedup_env(config)
-        if not memory._vec_available:
-            pytest.skip("sqlite-vec unavailable")
-
-        channel_b = Channel(transport="irc", scope="#garden")
-
-        # Identical summary, but different channels
-        summary = "kestrel solar charge controller MQTT power data"
-        stub.chat_text = json.dumps({
-            "summary": summary,
-            "topic_tags": ["solar", "mqtt"],
-            "participants": ["kestrel"],
-        })
-
-        rowids_a = await seed_dialog(persistence, channel_a, [
-            ("user", "solar data on channel a"), ("assistant", "MQTT topic"),
-        ])
-        await memory.on_compaction(
-            channel=channel_a, summary_msg={}, retain_count=0, compacted_ids=rowids_a
-        )
-        await memory.wait_for_background_tasks()
-
-        rowids_b = await seed_dialog(persistence, channel_b, [
-            ("user", "solar data on channel b"), ("assistant", "same MQTT topic"),
-        ])
-        await memory.on_compaction(
-            channel=channel_b, summary_msg={}, retain_count=0, compacted_ids=rowids_b
-        )
-        await memory.wait_for_background_tasks()
-
-        memories = await fetch_all_memories(db)
-        indexed = [m for m in memories if m["indexed"] == 1]
-        assert len(indexed) == 2, (
-            f"sibling-channel near-dup must NOT be merged (compartment boundary); "
-            f"expected 2 indexed, got {len(indexed)}"
-        )
-        superseded = [m for m in memories if m["superseded_by"] is not None]
-        assert len(superseded) == 0, (
-            "no record should be superseded when the near-dup is on a sibling channel"
-        )
-        await db.close()
-
-
-# ---------------------------------------------------------------------------
 # WP1b.2 embedding-failed: skips dup detection, inserts with embedded=0
 # ---------------------------------------------------------------------------
 
@@ -642,16 +574,8 @@ class TestSupersededRawRangeIntact:
 
 
 # ---------------------------------------------------------------------------
-# GitHub issue #58: scope-aware near-duplicate merge
+# GitHub issue #168: near-duplicate merge anywhere in memory
 # ---------------------------------------------------------------------------
-
-
-def _with_groups(groups: dict) -> dict:
-    """EMBED_CONFIG_DEDUP with memory.channel_groups set."""
-    return {
-        **EMBED_CONFIG_DEDUP,
-        "memory": {**EMBED_CONFIG_DEDUP["memory"], "channel_groups": groups},
-    }
 
 
 async def _consolidate(memory, persistence, channel, texts) -> list[int]:
@@ -673,41 +597,12 @@ def _same_summary(stub) -> None:
     stub.fixed_embeddings[summary[:20]] = [1.0, 0.0, 0.0, 0.0]
 
 
-class TestSameReach:
-    """ChannelScope.same_reach: do two scopes see exactly the same channels?"""
+class TestMergeAnywhere:
+    """A near-duplicate merges wherever it lives: no scope, no group config."""
 
-    async def _memory(self, groups):
-        memory = MemoryPlugin()
-        await memory.on_init(pm=MagicMock(), config={"memory": {"channel_groups": groups}})
-        return memory
-
-    async def test_literal_group_members_share_reach(self):
-        memory = await self._memory({"home": ["irc:#a", "irc:#b"]})
-        assert memory._channel_scope("irc:#a").same_reach(memory._channel_scope("irc:#b"))
-
-    async def test_global_pattern_shares_reach(self):
-        memory = await self._memory({"all": ["*"]})
-        assert memory._channel_scope("irc:#a").same_reach(memory._channel_scope("signal:+1555"))
-
-    async def test_pattern_and_literal_share_reach(self):
-        memory = await self._memory({"home": ["irc:#lex", "signal:*"]})
-        assert memory._channel_scope("irc:#lex").same_reach(memory._channel_scope("signal:+1555"))
-
-    async def test_non_transitive_groups_differ(self):
-        memory = await self._memory({"g1": ["irc:#a", "irc:#b"], "g2": ["irc:#a", "irc:#c"]})
-        assert not memory._channel_scope("irc:#a").same_reach(memory._channel_scope("irc:#c"))
-
-    async def test_ungrouped_channels_differ(self):
-        memory = await self._memory({})
-        assert not memory._channel_scope("irc:#a").same_reach(memory._channel_scope("irc:#b"))
-
-
-class TestScopeAwareMerge:
-    async def test_shared_group_merges_across_channels(self):
-        """Same fact on two channels of one group: merged; survivor keeps its own range."""
-        memory, persistence, stub, _, db = await build_dedup_env(
-            _with_groups({"home": ["irc:#electronics", "irc:#garden"]})
-        )
+    async def test_merges_across_channels_without_any_config(self):
+        """Same fact on two channels: merged; survivor keeps its own range."""
+        memory, persistence, stub, _, db = await build_dedup_env()
         if not memory._vec_available:
             pytest.skip("sqlite-vec unavailable")
         _same_summary(stub)
@@ -721,8 +616,7 @@ class TestScopeAwareMerge:
             ("user", "solar data again"), ("assistant", "same MQTT topic"),
         ])
 
-        memories = await fetch_all_memories(db)
-        old, new = memories
+        old, new = await fetch_all_memories(db)
         assert old["channel_id"] == "irc:#electronics"
         assert old["superseded_by"] == new["id"]
         assert new["indexed"] == 1 and new["superseded_by"] is None
@@ -732,8 +626,8 @@ class TestScopeAwareMerge:
         assert (old["msg_id_start"], old["msg_id_end"]) == (rows_a[0], rows_a[-1])
         await db.close()
 
-    async def test_global_group_merges_across_transports(self):
-        memory, persistence, stub, _, db = await build_dedup_env(_with_groups({"all": ["*"]}))
+    async def test_merges_across_transports(self):
+        memory, persistence, stub, _, db = await build_dedup_env()
         if not memory._vec_available:
             pytest.skip("sqlite-vec unavailable")
         _same_summary(stub)
@@ -749,57 +643,9 @@ class TestScopeAwareMerge:
         assert [m["superseded_by"] is not None for m in memories] == [True, False]
         await db.close()
 
-    async def test_non_transitive_groups_not_merged(self):
-        """#c and #a share a group, but #a also sees #b: merging would hide the fact from #c later."""
-        memory, persistence, stub, _, db = await build_dedup_env(
-            _with_groups({"g1": ["irc:#a", "irc:#b"], "g2": ["irc:#a", "irc:#c"]})
-        )
-        if not memory._vec_available:
-            pytest.skip("sqlite-vec unavailable")
-        _same_summary(stub)
-
-        await _consolidate(memory, persistence, Channel(transport="irc", scope="#c"), [
-            ("user", "solar data"), ("assistant", "MQTT topic"),
-        ])
-        await _consolidate(memory, persistence, Channel(transport="irc", scope="#a"), [
-            ("user", "solar data again"), ("assistant", "same MQTT topic"),
-        ])
-
-        memories = await fetch_all_memories(db)
-        assert all(m["superseded_by"] is None for m in memories)
-        assert sum(m["indexed"] for m in memories) == 2
-        await db.close()
-
-    async def test_out_of_scope_record_ignored(self):
-        """An identical record outside the caller's scope is neither merged nor blocks a merge."""
-        memory, persistence, stub, _, db = await build_dedup_env(
-            _with_groups({"home": ["irc:#a", "irc:#b"]})
-        )
-        if not memory._vec_available:
-            pytest.skip("sqlite-vec unavailable")
-        _same_summary(stub)
-
-        # Out-of-scope record, then an in-scope one, then the new record.
-        await _consolidate(memory, persistence, Channel(transport="irc", scope="#other"), [
-            ("user", "solar data"), ("assistant", "MQTT topic"),
-        ])
-        await _consolidate(memory, persistence, Channel(transport="irc", scope="#a"), [
-            ("user", "solar data a"), ("assistant", "MQTT topic a"),
-        ])
-        await _consolidate(memory, persistence, Channel(transport="irc", scope="#b"), [
-            ("user", "solar data b"), ("assistant", "MQTT topic b"),
-        ])
-
-        other, rec_a, rec_b = await fetch_all_memories(db)
-        assert other["superseded_by"] is None and other["indexed"] == 1
-        assert rec_a["superseded_by"] == rec_b["id"]
-        await db.close()
-
-    async def test_nearer_different_reach_candidate_is_skipped(self):
-        """A nearer in-scope record with a different reach is passed over for a farther valid one."""
-        memory, persistence, stub, _, db = await build_dedup_env(
-            _with_groups({"g1": ["irc:#a", "irc:#b"], "g2": ["irc:#a", "irc:#c"]})
-        )
+    async def test_nearest_candidate_wins_whatever_its_channel(self):
+        """The nearest record over the threshold merges, even on another channel."""
+        memory, persistence, stub, _, db = await build_dedup_env()
         if not memory._vec_available:
             pytest.skip("sqlite-vec unavailable")
         b = Channel(transport="irc", scope="#b")
@@ -812,17 +658,18 @@ class TestScopeAwareMerge:
             })
             stub.fixed_embeddings[summary] = vector
 
-        # Old record on #b: similarity 0.99 to the new one (above 0.95).
-        produce("old fact on b", [0.99, (1 - 0.99 ** 2) ** 0.5, 0.0, 0.0])
+        # Both older records are over the threshold against the new vector
+        # [1, 0, 0, 0] (0.97 and 0.99) but under it against each other
+        # (~0.93), so neither merges when it is written.
+        produce("farther fact on b", [0.97, -(1 - 0.97 ** 2) ** 0.5, 0.0, 0.0])
         await _consolidate(memory, persistence, b, [("user", "x1"), ("assistant", "y1")])
-        # Record on #a: similarity 1.0, in #b's scope, but #a also sees #c.
-        produce("fact on a", [1.0, 0.0, 0.0, 0.0])
+        produce("nearer fact on a", [0.99, (1 - 0.99 ** 2) ** 0.5, 0.0, 0.0])
         await _consolidate(memory, persistence, a, [("user", "x2"), ("assistant", "y2")])
-        # New record on #b.
+        # New record on #b: its nearest neighbour is the one on #a.
         produce("new fact on b", [1.0, 0.0, 0.0, 0.0])
         await _consolidate(memory, persistence, b, [("user", "x3"), ("assistant", "y3")])
 
-        old_b, rec_a, new_b = await fetch_all_memories(db)
-        assert rec_a["superseded_by"] is None and rec_a["indexed"] == 1
-        assert old_b["superseded_by"] == new_b["id"]
+        far_b, near_a, new_b = await fetch_all_memories(db)
+        assert far_b["superseded_by"] is None and far_b["indexed"] == 1
+        assert near_a["superseded_by"] == new_b["id"]
         await db.close()

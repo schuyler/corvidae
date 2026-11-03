@@ -99,8 +99,6 @@ agent:
 #   retrieval:
 #     band_on: score                  # score | similarity: what strong/moderate/weak is applied to
 #     recency_from: created           # created | last_used: where ranking age is measured from
-#   channel_groups:                   # channels in a group share memory; members may use * and ?
-#     home: ["irc:#lex", "signal:*"]  # signal:* covers Signal channels created at runtime
 #   consolidation_fork_prompt: "..."  # instruction for consolidation, forked or sent on llm.background over the
 #                                     # agent's rebuilt view; replaces the removed consolidation_prompt
 #                                     # (still set: startup warning, ignored)
@@ -203,8 +201,7 @@ agent:
 # so nothing reaches anyone). It reviews recent memory and acts only if
 # something warrants it; prompt: prompts/heartbeat.md. Absent = asleep:
 # delete or comment out the block and restart to put it to sleep. Needs
-# memory, and reviews only channels grouped with internal:heartbeat in
-# memory.channel_groups, e.g.  lex: [internal:heartbeat, "irc:#lex"]
+# memory; it reviews the newest records of the whole memory, every channel's.
 # heartbeat:
 #   after: 3600                        # seconds of quiet before a beat; also the gap between beats
 #   keep_beats: 3                      # earlier beats a beat still sees; 0 = each beat starts empty
@@ -243,8 +240,8 @@ agent:
 # Keys are "transport:scope", or transport-wide "transport:*" /
 # "transport:<scope-prefix>*" covering every channel whose id starts with
 # the text before the "*", including ones created later (each new Signal
-# contact, each ACP session). Only a trailing "*" is special here, unlike
-# memory.channel_groups, which uses glob patterns. Resolution, last wins:
+# contact, each ACP session). Only a trailing "*" is special here.
+# Resolution, last wins:
 # agent defaults, transport-wide (less specific first), exact entry,
 # set_settings. tools.disabled is the union of every layer.
 #

@@ -192,15 +192,12 @@ async def run_live_evaluation(args) -> None:
         await run_retention_job(memory_plugin)
 
     # Run the queries through the real retrieval path.
-    channels = sorted({m["channel_id"] for m in memories})
-    # Group all fixture channels so retrieval sees the whole corpus.
-    memory_plugin._channel_groups = {"fixture": channels}
-
+    # Retrieval spans the whole memory, whatever channel wrote each record.
     recalls, mrrs = [], []
     positive = [q for q in queries if q["relevant"]]
     for query in positive:
         candidates, degraded = await memory_plugin.retrieve(
-            channels[0], query["text"], k=args.k
+            query["text"], k=args.k
         )
         # Map retrieved summaries back to fixture ids by exact-summary match
         # (live consolidation rewrites summaries, so fall back to reporting raw).

@@ -372,12 +372,13 @@ class HeartbeatPlugin(CorvidaePlugin):
         without a beat leaves the activity epoch unchanged, so the tracker
         re-arms after one period, which is the retry.
         """
-        # Review input: the newest memories of the channels grouped with ours,
-        # and the retired goals' conclusions when the goals plugin is loaded.
+        # Review input: the newest memories of the whole memory (the beat's
+        # own included), and the retired goals' conclusions when the goals
+        # plugin is loaded.
         goals = self.pm.get_plugin("goals")
         retired = None
         try:
-            memories = await self._memory.recent(HEARTBEAT_CHANNEL, RECENT_MEMORY_LIMIT)
+            memories = await self._memory.recent(RECENT_MEMORY_LIMIT)
             if goals is not None:
                 retired = await goals.retired_goals(RETIRED_GOAL_LIMIT)
         except Exception as exc:
