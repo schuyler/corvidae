@@ -19,9 +19,11 @@ real plugin is covered in tests/cognition/test_silence.py.
 """
 
 import asyncio
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from helpers import build_plugin_and_channel, drain, sent_texts
+from llm_response_fixtures import _make_text_response
 
 from corvidae.channel import Channel
 from corvidae.channels._registers import shipped_register
@@ -29,8 +31,6 @@ from corvidae.context import ContextWindow, MessageType
 from corvidae.hooks import create_plugin_manager, hookimpl
 from corvidae.outbound import OutboundMessage
 from corvidae.trace import mint_trace_id
-from helpers import build_plugin_and_channel, drain, sent_texts
-from llm_response_fixtures import _make_text_response
 
 # The text the stub silence plugin contributes to a register.
 FRAGMENT = "STUB-SILENCE-FRAGMENT: reply with exactly NO_REPLY when nothing is left to say."
@@ -50,7 +50,7 @@ class _StubSilence:
         return FRAGMENT
 
 
-def _pm_with_silence(loaded: bool):
+def _pm_with_silence(loaded: bool) -> object:
     """A plugin manager, with the stub registered as "silence" when loaded."""
     pm = create_plugin_manager()
     if loaded:
@@ -71,10 +71,20 @@ def _channel_ending_in(transport: str, scope: str, final_type: MessageType) -> C
 
 def _on_agent_response_kwargs(channel: Channel) -> dict:
     """The arguments the kernel passes when a final is produced."""
-    return dict(
-        channel=channel, request_text="thanks, night!", response_text="NO_REPLY",
-        trace_id=mint_trace_id(), meta={}, logprobs=None,
-    )
+    return {
+        "channel": channel, "request_text": "thanks, night!", "response_text": "NO_REPLY",
+        "trace_id": mint_trace_id(), "meta": {}, "logprobs": None,
+    }
+
+
+async def _dispatch(plugin: object, channel: Channel) -> None:
+    """Fire on_agent_response through a plugin manager, as the kernel does,
+    so a transport method missing @hookimpl is never called."""
+    # A fresh manager holding only this transport: the hook reaches it only
+    # if the method is a registered hookimpl.
+    pm = create_plugin_manager()
+    pm.register(plugin)
+    await pm.ahook.on_agent_response(**_on_agent_response_kwargs(channel))
 
 
 def _irc_plugin():
@@ -150,7 +160,7 @@ class TestSlotRelease:
         channel = _channel_ending_in(transport, scope, MessageType.UNSENT)
         plugin._outstanding[channel.id] = 2
 
-        await plugin.on_agent_response(**_on_agent_response_kwargs(channel))
+        await _dispatch(plugin, channel)
 
         assert plugin._outstanding[channel.id] == 1
 
@@ -163,7 +173,7 @@ class TestSlotRelease:
         channel = _channel_ending_in(transport, scope, MessageType.MESSAGE)
         plugin._outstanding[channel.id] = 2
 
-        await plugin.on_agent_response(**_on_agent_response_kwargs(channel))
+        await _dispatch(plugin, channel)
         assert plugin._outstanding[channel.id] == 2  # a sent final waits for send_message
         await plugin.send_message(channel, OutboundMessage(text="hello"))
 
@@ -184,7 +194,7 @@ class TestAcpRelease:
         future = asyncio.get_running_loop().create_future()
         plugin._active_prompts["sess1"] = future
 
-        await plugin.on_agent_response(**_on_agent_response_kwargs(channel))
+        await _dispatch(plugin, channel)
 
         assert future.done()
         assert future.result().stop_reason == "end_turn"
@@ -197,7 +207,7 @@ class TestAcpRelease:
         future = asyncio.get_running_loop().create_future()
         plugin._active_prompts["sess1"] = future
 
-        await plugin.on_agent_response(**_on_agent_response_kwargs(channel))
+        await _dispatch(plugin, channel)
         assert not future.done()  # the text has not been streamed yet
         await plugin.send_message(channel, OutboundMessage(text="hello"))
 
@@ -218,7 +228,7 @@ class TestCliRelease:
         plugin._interactive = True
         channel = _channel_ending_in("cli", "local", MessageType.UNSENT)
 
-        await plugin.on_agent_response(**_on_agent_response_kwargs(channel))
+        await _dispatch(plugin, channel)
 
         assert capsys.readouterr().out.count("> ") == 1
 
@@ -229,7 +239,7 @@ class TestCliRelease:
         plugin._interactive = True
         channel = _channel_ending_in("cli", "local", MessageType.MESSAGE)
 
-        await plugin.on_agent_response(**_on_agent_response_kwargs(channel))
+        await _dispatch(plugin, channel)
         await plugin.send_message(channel, OutboundMessage(text="hello"))
 
         assert capsys.readouterr().out.count("> ") == 1
@@ -243,7 +253,7 @@ class TestCliRelease:
         plugin._interactive = True
         channel = _channel_ending_in("irc", "#lex", MessageType.UNSENT)
 
-        await plugin.on_agent_response(**_on_agent_response_kwargs(channel))
+        await _dispatch(plugin, channel)
 
         assert capsys.readouterr().out == ""
 
@@ -289,15 +299,15 @@ async def agent_env():
     await db.close()
 
 
-def _client(*responses):
-    from unittest.mock import MagicMock
-
+def _client(*responses: object) -> MagicMock:
+    """A mock LLM client that returns ``responses`` in order."""
     client = MagicMock()
     client.chat = AsyncMock(side_effect=list(responses))
     return client
 
 
-async def _say(plugin, channel, text="thanks, night!"):
+async def _say(plugin: object, channel: Channel, text: str = "thanks, night!") -> None:
+    """Deliver one user message and run the channel's queue to completion."""
     await plugin.on_message(channel=channel, sender="user", text=text, trace_id=mint_trace_id())
     await drain(plugin, channel)
 

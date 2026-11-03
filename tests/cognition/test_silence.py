@@ -20,15 +20,14 @@ import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from helpers import build_plugin_and_channel, drain, sent_texts
+from llm_response_fixtures import _make_text_response
 
 from corvidae.channel import Channel
 from corvidae.context import ContextWindow, MessageType, unsent_marker_emission
 from corvidae.hooks import create_plugin_manager, resolve_reject_wins
 from corvidae.outbound import OutboundMessage
 from corvidae.trace import mint_trace_id
-from helpers import build_plugin_and_channel, drain, sent_texts
-from llm_response_fixtures import _make_text_response
-
 
 # ---------------------------------------------------------------------------
 # The veto (S1)
@@ -50,7 +49,11 @@ class TestVeto:
         return resolve_reject_wins(results)
 
     def test_constants(self):
-        from corvidae_cognition.silence import NO_REPLY, REGISTER_FRAGMENT, SilencePlugin
+        from corvidae_cognition.silence import (
+            NO_REPLY,
+            REGISTER_FRAGMENT,
+            SilencePlugin,
+        )
 
         assert NO_REPLY == "NO_REPLY"
         assert NO_REPLY in REGISTER_FRAGMENT
@@ -165,7 +168,8 @@ async def _respond(response_text: str, final_type: MessageType) -> list[dict]:
     pm.register(silence, name="silence")
     await silence.on_init(pm=pm, config={})
 
-    await silence.on_agent_response(
+    # Dispatch through the manager so a method missing @hookimpl never runs.
+    await pm.ahook.on_agent_response(
         channel=_channel_ending_in(final_type), request_text="thanks, night!",
         response_text=response_text, trace_id="t-s5", meta={}, logprobs=None,
     )

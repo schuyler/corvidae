@@ -46,11 +46,15 @@ async def _reply(system: str, history: list[dict], user: str) -> str:
     base_url, model, api_key = _llm_config()
     messages = [{"role": "system", "content": system}, *history, {"role": "user", "content": user}]
     async with aiohttp.ClientSession() as session:
-        return (await call_llm(session, base_url, model, api_key, messages)).strip()
+        # A reasoning model may return null content; treat it as empty.
+        return ((await call_llm(session, base_url, model, api_key, messages)) or "").strip()
 
 
 def _chat_system() -> str:
     """Identity plus the chat register plus the silence fragment."""
+    # Skip on missing LLM config before importing the plugin, so the skip
+    # wins over an import error.
+    _llm_config()
     from corvidae_cognition.silence import REGISTER_FRAGMENT
 
     return IDENTITY + "\n\n" + shipped_register("chat") + "\n\n" + REGISTER_FRAGMENT
