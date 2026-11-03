@@ -685,7 +685,7 @@ dotted name (`agent.request_logprobs`) is accepted but has no effect, and an
 undotted one is refused by the allowlist. Every prompt the framework sends on the agent's behalf now has a config
 key resolved by `resolve_prompt` (#411, #287): `heartbeat.prompt`,
 `heartbeat.goals_instruction`, `tools.subagent.system_prompt`,
-`memory.rubric_prompt`, and the fork prompts. Each is a new override point:
+`memory.rubric_prompt`, `silence.instruction`, and the fork prompts. Each is a new override point:
 on a channel with `write_file`, the agent can rewrite the prompt file the
 key points at. The change applies when the key is next resolved: on an
 `agent.yaml` reload for compaction, appraisal, and critique; at restart

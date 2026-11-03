@@ -86,9 +86,10 @@ class TestVeto:
 # ---------------------------------------------------------------------------
 
 
-async def _prompt_pm():
+async def _prompt_pm(config: dict | None = None):
     """A manager with the real SilencePlugin and every real transport; the
-    web plugin is enabled so it owns its channel."""
+    web plugin is enabled so it owns its channel. ``config`` reaches the
+    plugin's on_init."""
     from corvidae.channels.acp import AcpPlugin
     from corvidae.channels.cli import CLIPlugin
     from corvidae.channels.discord import DiscordPlugin
@@ -100,7 +101,7 @@ async def _prompt_pm():
     pm = create_plugin_manager()
     silence = SilencePlugin()
     pm.register(silence, name="silence")
-    await silence.on_init(pm=pm, config={})
+    await silence.on_init(pm=pm, config=config or {})
     web = WebPlugin()
     web._enabled = True
     for name, plugin in (
@@ -135,6 +136,32 @@ class TestSystemPromptWrapper:
         )
 
         assert result == "IDENTITY"
+
+
+class TestInstructionOverride:
+    """PRD principle 15: the instruction is a prompt the operator can change,
+    through the silence.instruction key and corvidae.prompts.resolve_prompt."""
+
+    async def test_inline_string_replaces_the_instruction(self):
+        pm = await _prompt_pm({"silence": {"instruction": "CUSTOM INSTRUCTION"}})
+
+        result = await pm.ahook.transform_system_prompt(
+            channel=Channel(transport="irc", scope="#lex"), text="IDENTITY"
+        )
+
+        assert result == "IDENTITY\n\nCUSTOM INSTRUCTION"
+
+    async def test_file_reference_is_read_relative_to_the_config_dir(self, tmp_path):
+        (tmp_path / "silence.md").write_text("FROM A FILE\n")
+        pm = await _prompt_pm(
+            {"_base_dir": str(tmp_path), "silence": {"instruction": {"file": "silence.md"}}}
+        )
+
+        result = await pm.ahook.transform_system_prompt(
+            channel=Channel(transport="signal", scope="aci-1"), text="IDENTITY"
+        )
+
+        assert result == "IDENTITY\n\nFROM A FILE"
 
 
 # ---------------------------------------------------------------------------

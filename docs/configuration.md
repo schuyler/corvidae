@@ -227,6 +227,7 @@ the key.
 | `heartbeat.goals_instruction` | `prompts/heartbeat-goals.md` | restart |
 | `tools.subagent.system_prompt` | built-in | restart |
 | `memory.rubric_prompt` | built-in | restart |
+| `silence.instruction` | built-in (`REGISTER_FRAGMENT`) | restart |
 
 Editing a prompt file does not trigger a reload; the change applies when
 the key is next resolved (on reload or at restart, per the table). Whether
@@ -442,6 +443,12 @@ A job costs a main-model turn per firing on the shared backend; keep intervals i
 | `heartbeat.keep_beats` | integer | `3` | Earlier beats a beat still sees in its window; older ones are dropped from the prompt (never from the log), with no LLM call. `0` starts every beat empty. Negative, fractional, boolean or string values fail startup with a `ValueError` naming the key, the value and what is accepted, even while the heartbeat sleeps. Read at startup only. |
 | `heartbeat.prompt` | string / file / list | built-in | The beat's instruction. Resolved by `resolve_prompt` (#411): a string is inline text, `{"file": path}` or a list of paths reads files relative to the config directory, absent uses the built-in default. `prompts/heartbeat.md` is the documented copy. Read at startup only. |
 | `heartbeat.goals_instruction` | string / file / list | built-in | Appended when the goals plugin is loaded: the instruction to review open and retired goals. Same resolution as `heartbeat.prompt`. `prompts/heartbeat-goals.md` is the documented copy. Read at startup only. |
+
+## `silence` — the right to silence
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `silence.instruction` | string / file / list | built-in | The paragraph `SilencePlugin` appends to a conversational channel's system prompt, telling the model it may reply `NO_REPLY` to send nothing (see [cognition.md](cognition.md#silenceplugin-packagescorvidae-cognitioncorvidae_cognitionsilencepy)). Same resolution as `heartbeat.prompt`. Keep the literal `NO_REPLY` in any replacement: the veto matches that token, not your wording. Read at startup only. |
 
 **Sleep.** The heartbeat sleeps whenever `heartbeat.after` is absent. To put it to sleep, delete or comment out the block and restart; it stays asleep across every restart after that, because `agent.yaml` is the record. `plugins.disabled: [heartbeat]` does the same. Reloading the config doesn't wake it or put it to sleep; restart.
 

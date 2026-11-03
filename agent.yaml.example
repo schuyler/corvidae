@@ -209,6 +209,11 @@ agent:
 #   after: 3600                        # seconds of quiet before a beat; also the gap between beats
 #   keep_beats: 3                      # earlier beats a beat still sees; 0 = each beat starts empty
 
+# Right to silence (cognition). The paragraph added to chat channels' system
+# prompts; keep the literal NO_REPLY in any replacement. Read at startup.
+# silence:
+#   instruction: {file: prompts/silence.md}   # or an inline string; absent = built-in
+
 # ACP stdio transport (optional — does not enable ACP by itself).
 # Start with: uv sync --extra acp --extra cognition && uv run corvidae acp
 # For bb: customAcpAgents → `uv run corvidae acp` (see docs/plugin-guide.md).

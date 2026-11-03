@@ -18,14 +18,16 @@ import asyncio
 import logging
 
 from corvidae.hooks import CorvidaePlugin, TransportPlugin, final_was_unsent, hookimpl
+from corvidae.prompts import resolve_prompt
 
 logger = logging.getLogger("corvidae.silence")
 
 # Same literal as critique.py's NO_REPLY_MARKER; critique is unchanged.
 NO_REPLY = "NO_REPLY"
 
-# The instruction appended to a conversational channel's system prompt (S7);
-# it reaches custom and empty registers too (I1).
+# The built-in instruction appended to a conversational channel's system
+# prompt (S7); it reaches custom and empty registers too (I1). Operators
+# override it with the silence.instruction key (PRD principle 15).
 REGISTER_FRAGMENT = (
     "You don't have to answer every message. Before replying, ask whether you "
     "have anything true, relevant and worth saying to add. When a conversation "
@@ -49,6 +51,18 @@ class SilencePlugin(CorvidaePlugin):
         # Strong refs to fire-and-forget outcome writes, so a write is never
         # GC-dropped mid-flight and on_stop can drain them.
         self._record_tasks: set[asyncio.Task] = set()
+        # The instruction in effect; on_init resolves silence.instruction.
+        self._instruction: str = REGISTER_FRAGMENT
+
+    @hookimpl
+    async def on_init(self, pm, config: dict) -> None:
+        """Store pm and resolve the instruction (file, inline, or built-in).
+
+        Read at startup only: the instruction lands in a conversation's
+        system prompt when it starts, and a restart rebuilds every one.
+        """
+        await super().on_init(pm, config)
+        self._instruction = resolve_prompt(config, "silence.instruction", REGISTER_FRAGMENT)
 
     @hookimpl(wrapper=True)
     def transform_system_prompt(self, channel, text):
@@ -59,7 +73,7 @@ class SilencePlugin(CorvidaePlugin):
         for plugin in self.pm.get_plugins():
             if isinstance(plugin, TransportPlugin) and plugin.owns(channel):
                 if isinstance(result, str) and plugin.conversational:
-                    return f"{result}\n\n{REGISTER_FRAGMENT}"
+                    return f"{result}\n\n{self._instruction}"
                 break
         return result
 
