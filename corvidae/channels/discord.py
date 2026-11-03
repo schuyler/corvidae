@@ -623,7 +623,9 @@ class DiscordPlugin(TransportPlugin):
                 )
 
     def _decrement_outstanding(self, channel: Channel) -> None:
-        """Give back one outstanding slot (a reply sent, or a message that was never admitted)."""
+        """Give back one outstanding slot for a message that was never admitted
+        (a final, sent or unsent, releases every slot instead; see
+        _release_all)."""
         count = self._outstanding.get(channel.id, 0)
         if count > 0:
             self._outstanding[channel.id] = count - 1
@@ -706,14 +708,24 @@ class DiscordPlugin(TransportPlugin):
             )
             return
         if unsent:
-            self._decrement_outstanding(channel)
+            # An unsent final releases what a sent one would: every slot.
+            self._release_all(channel)
 
     async def send_message(self, channel: Channel, event: OutboundMessage) -> None:
-        """Deliver a final reply and close out one outstanding slot."""
+        """Deliver a final reply and close out every outstanding slot: one
+        reply answers a coalesced burst (#398)."""
         await self._deliver(channel, event.text)
-        self._decrement_outstanding(channel)
+        self._release_all(channel)
+
+    def _release_all(self, channel: Channel) -> None:
+        """Close out every outstanding slot on a final, sent or unsent: one
+        final answers a coalesced burst (#398). The refresh loop ends when it
+        next sees no slot owed; Discord has no stop frame to send."""
+        # Only a channel that took a slot has an entry to clear.
+        if self._outstanding.get(channel.id, 0) > 0:
+            self._outstanding[channel.id] = 0
 
     async def send_progress(self, channel: Channel, event: OutboundProgress) -> None:
         """Deliver intermediate assistant text without closing out the
-        outstanding slot (the final reply still owes one)."""
+        outstanding slots (the final reply still owes them)."""
         await self._deliver(channel, event.text)

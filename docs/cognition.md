@@ -184,7 +184,10 @@ log line.
 #### Retrieval (read path)
 
 `before_agent_turn` runs when the window tail is a plain user MESSAGE
-(notification-triggered turns skip retrieval entirely). The inbound text is embedded and matched against `memory_vec`
+(notification-triggered turns skip retrieval entirely). The query is every
+unanswered user message in the window (`unanswered_user_messages`), joined
+by blank lines: a coalesced burst (#398) is retrieved for as a whole, and
+one message is just itself. The query is embedded and matched against `memory_vec`
 (sqlite-vec exact KNN, cosine distance); candidates are filtered to
 `indexed=1 AND redacted=0` and channel-compartmentalized (`channel_id`
 match, or shared scope via `memory.channel_groups`, whose members may be
@@ -206,7 +209,9 @@ reconsolidation), and every retrieval writes a `retrieval_log` row
 hit/admitted counts, degradation flag).
 
 **Graceful degradation:** encoder down → FTS5 keyword retrieval over
-`memory_fts` (flagged `degraded_to_fts=1`); sqlite-vec unloadable → FTS5
+`memory_fts` (flagged `degraded_to_fts=1`; the FTS query caps each
+blank-line-separated paragraph at 20 tokens, so every message of a burst
+keeps its own 20 and a single message is capped at 20 as before); sqlite-vec unloadable → FTS5
 with one clear startup warning; no `llm.embedding` role → records stored
 with `embedded=0`, retrieval FTS5-only; a stored encoder differing from
 config → ERROR and embeddings disabled rather than silently mixing
@@ -713,7 +718,13 @@ model makes both language judgments; the code only fetches evidence:
    - rows from before the exchange's originating row. The exchange's own
      rows, the reply included, are already indexed when the check runs;
      the judge sees them in the window instead, and the reply is no record
-     of itself.
+     of itself. For a coalesced burst (#398) the boundary is the burst's
+     first row, so the burst's own earlier messages never count as prior
+     evidence. That applies only when the turn's own row is among the
+     unanswered messages; a notification-born turn keeps its recorded row.
+     The stylistic lenses' instruction still quotes the last burst message
+     as where the exchange began, as appraisal's does (accepted: stage 2
+     forks the whole window, so it sees every burst message).
    - `message` and `summary` rows. CONTEXT (injected data, including
      earlier critique) and `unsent` rows are never a record of something
      said.
@@ -895,7 +906,7 @@ The hook runs on the composed prompt whatever the register's source, so a channe
 
 A `NO_REPLY` that was actually sent (say another gate's veto raised and the send failed open) is not recorded, and neither is a final some other gate vetoed. A turn with two finals, a reply and then a declined follow-up, gets the flag. Without `outcome_log` there is nowhere to write and declines go unrecorded; the veto still works. A write that fails logs a warning naming the trace and channel. A decline with no trace id logs a warning and records nothing.
 
-**Ending the turn.** An unsent final never reaches `send_message`, which is where Discord and Signal give back the message's typing slot, ACP completes the prompt and the CLI prints its next `> `. Those four transports now do the same in an `on_agent_response` of their own when the final was unsent (see [the plugin guide](plugin-guide.md#transports-with-per-turn-state)). That runs whether or not this plugin is loaded, so an empty final no longer keeps the typing indicator refreshing or an ACP prompt hanging. On Signal, the slot that takes the count to zero sends an explicit typing stop, so the indicator clears at once; Discord has no stop, so its indicator lingers until the client times it out.
+**Ending the turn.** An unsent final never reaches `send_message`, which is where Discord and Signal give back every outstanding typing slot, ACP completes the prompt and the CLI prints its next `> `. Those four transports now do the same in an `on_agent_response` of their own when the final was unsent (see [the plugin guide](plugin-guide.md#transports-with-per-turn-state)). That runs whether or not this plugin is loaded, so an empty final no longer keeps the typing indicator refreshing or an ACP prompt hanging. On Signal, a release that takes the count to zero sends an explicit typing stop, so the indicator clears at once; Discord has no stop, so its indicator lingers until the client times it out.
 
 **Disabling it.** `plugins.disabled: [silence]` removes the instruction and the veto; `agent.minimal.yaml.example` does this. A restart rebuilds every conversation's system prompt, so disabling the plugin drops the instruction everywhere at once. The windows still hold earlier `NO_REPLY` rows, though, and with no veto the model may imitate them and send the literal text. If that matters, start those conversations fresh.
 

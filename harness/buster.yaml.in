@@ -71,6 +71,7 @@ irc:
     - "#p-smoke"
     - "#p-toolloop"
     - "#p-interleave"
+    - "#p-burst"            # burst probe: coalescing (#398)
     - "#p-compact"
     - "#p-restart"
     - "#p-slots"

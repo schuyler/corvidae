@@ -189,7 +189,7 @@ owner's plugin name after the prefix.
 | `should_send_response` | broadcast / resolve_reject_wins | the [output gate](#the-output-gate): before each outbound emission, with `emission` in `final`, `progress`, `thinking`, `error` and the item's `trace_id` and `meta`; a veto of `final` stores the row as `UNSENT`; `CritiquePlugin` vetoes a critique-origin `final` that is exactly `NO_REPLY`, and `SilencePlugin` vetoes an exact `NO_REPLY` final of any origin (cognition extra); a raising implementation fails open (logged, sent); no kernel implementation, so with none registered everything is sent |
 | `on_message_admitted` | broadcast | `on_message`, after a USER message is admitted; fires exactly once per admitted message |
 | `on_message_rejected` | broadcast | `on_message`, after a USER message is vetoed; fires exactly once per rejected message |
-| `on_message_persisted` | broadcast | dequeue, after the trace-originating row is persisted; fires once per originating item regardless of outcome (`rowid` may be None) |
+| `on_message_persisted` | broadcast | dequeue, after the trace-originating row is persisted; fires once per originating item regardless of outcome (`rowid` may be None). Each message of a coalesced burst fires it under its own trace, in arrival order, before the turn's model call |
 | `resolve_llm_error` | firstresult=True | `_run_turn`, after LLM exception; return error string or None for default |
 | `resolve_compaction` | firstresult=True | `_process_queue_item`, step 6; the first non-None return stops the chain (`CompactionPlugin` is `trylast`, so a default-priority replacement runs first); the caller ignores the value |
 | `transform_tool_result` | firstresult=True wrapper chain | `dispatch_tool_call` (both subagent and main agent paths), after tool execution; return replacement string or None for default |
@@ -507,7 +507,7 @@ CREATE TABLE exchange_log (
     trace_id TEXT PRIMARY KEY,      -- one exchange = what one trace covers (see plugin-guide.md's Traces section)
     channel_id TEXT NOT NULL,
     origin TEXT,                    -- convention: 'user'|'reminder'|'critique'|'heartbeat'|'task'
-    message_rowid INTEGER,          -- message_log.id of the originating message
+    message_rowid INTEGER,          -- message_log.id of the originating message (a coalesced burst's absorbed traces keep theirs; no response completes those rows)
     created_at REAL NOT NULL,
     retrieval_top_score REAL,       -- written by MemoryPlugin retrieval (decayed score)
     retrieval_top_similarity REAL,  -- written by MemoryPlugin retrieval (raw similarity, same candidate)
@@ -699,6 +699,13 @@ All operations are synchronous; no database access:
   because memory retrieval keys on a plain `user` tail, and because the
   rewrite must stay a pure function of each message for the prompt prefix
   to stay cache-stable.
+- `corvidae.context.unanswered_user_messages(messages)` (a module function,
+  not a method) — the user-role MESSAGE rows after the window's last
+  assistant row, in order (all of them when there is no assistant row). A
+  coalesced burst (#398) is exactly these rows when its turn reaches
+  `before_agent_turn`; CONTEXT rows and notification rows are skipped by
+  type and role, so hook order doesn't matter. Cognition's memory and
+  critique plugins read the burst through it.
 - `token_estimate()` — sums the token count of every message via tiktoken
   (`cl100k_base`), with a character-based fallback when tiktoken is
   unavailable. Special-token strings such as `<|endoftext|>` count as plain
@@ -888,7 +895,58 @@ or `None`) proceeds to enqueue.
 
 `on_message` and `on_notify` both enqueue a `QueueItem` onto a
 per-channel `SerialQueue`. The queue's consumer calls
-`_process_queue_item`, which delegates to four helper methods:
+`_process_queue_item`, which delegates to four helper methods. Before them
+comes the coalescing dequeue described next.
+
+**Coalescing (#398, PRD §3.1.19).** Messages that queue up behind a turn
+coalesce into one turn when the queue reaches them. At dequeue, a USER item
+that is not a retry calls `SerialQueue.take_while` with the predicate
+"USER role and not `retry`". That removes the items directly behind it for
+as long as they match and returns them in queue order; the first item that
+fails the predicate (a tool result, a notification, a retry copy) stays
+queued, unmoved, so those keep their place. When the call returns
+anything, the last item taken owns the turn, and the item that was
+dequeued plus the other taken items are *absorbed*: `absorbed = [item,
+*following[:-1]]`, `item = following[-1]`. One INFO log names the channel,
+the burst size and the owning trace id. Turn attribution, trace
+resolution, `before_agent_turn`, the model call, the gates,
+`on_agent_response` and every usage row use the owner's trace; absorbed
+traces see admission and persistence only. The queue is never touched while
+a turn runs, so a reply in flight is not interrupted; coalescing happens
+only when the consumer asks for its next item.
+
+`take_while` is synchronous (no awaits), so nothing can enqueue between its
+peek and its take. It removes each item with `get_nowait()` and calls
+`task_done()` for it at once. The consumer's own item is not marked done
+until the turn ends, so `SerialQueue.drain()` (`Queue.join`) still waits for
+the whole burst's turn, and `_note_settled` runs once, at the end of the
+turn, after which the queue holds none of the burst's items; no idle signal
+fires between the dequeue and the end of the turn. Peeking reads
+`asyncio.Queue._queue`, the deque that asyncio's own `LifoQueue` and
+`PriorityQueue` override. `shortcut: relies on a CPython-private
+attribute; replace the asyncio.Queue with an owned deque plus an Event if
+it ever moves.`
+
+Inside `_process_queue_item_attributed`, steps 1 to 4 below run once. Step 5
+(append, `persist_message`, then `on_message_persisted`, one helper,
+`_append_and_persist_message`, after `_build_conversation_message` builds
+the item's message) runs once per absorbed item, in arrival
+order and each under its own item's trace, then for the owner as usual.
+Steps 5b onward run once, for the owner. The result: every message is its
+own `message_log` row with its own persisted event, all before the model
+call; `turn_counter` resets once, on the owner, so a burst is one exchange
+for `max_turns`; a burst that arrives mid-tool-cycle is charged to that
+cycle and leaves the pending set alone. A retry (below) copies the owner;
+the absorbed rows are already in the window and the log, and a retry skips
+the persist step, so nothing is persisted twice. A coalesced turn that
+fails before the model call (conversation init raising, say) drops every
+absorbed item, not one.
+
+`on_agent_response`'s `request_text` is the text of the message that owns
+the turn: for a coalesced burst, the last message. An absorbed trace's
+`exchange_log` row (when the outcome log is loaded) is written at
+persistence and no response ever completes it, because no reply carries
+that trace.
 
 1. **`_build_conversation_message`** — converts a `QueueItem` into a
    conversation message dict and `request_text`. Returns `None` on
@@ -1049,8 +1107,8 @@ ask a gate about.
 
 **An unsent final releases transport state.** An unsent final never
 reaches `send_message`, where transports end the turn (Discord and Signal
-give back the typing slot, ACP completes the prompt, the CLI reprints its
-prompt). `on_agent_response` runs after the row is appended and tagged, so
+give back every outstanding typing slot, ACP completes the prompt, the CLI
+reprints its prompt). `on_agent_response` runs after the row is appended and tagged, so
 those four transports implement it, guard it with `owns()`, and release the
 same state when `final_was_unsent(channel)` (newest assistant row is
 `UNSENT`) is true. A sent final releases only in `send_message`, so each
@@ -2689,10 +2747,14 @@ monitored.
   refresh loop that re-sends every 10s while the channel's outstanding
   count stays positive (Signal clients expire an unrefreshed indicator
   after several seconds; the exact figure is not verified).
-  `send_message` gives one outstanding slot back, and so does
-  `on_agent_response` for an unsent final. So does the
-  inbound handler for any message `on_message` returns without admitting:
-  the transport mints the message's trace id, records its envelope
+  A final gives back *every* outstanding slot, whether it is sent
+  (`send_message`) or withheld (`on_agent_response` when the final was
+  unsent, #417): one final answers a coalesced burst (#398), so the count
+  goes to zero, and when it was above zero the transport sends one explicit
+  stop (below). A message still queued behind that final shows no
+  indicator, through its own turn, unless another message arrives. The
+  inbound handler gives back one slot for any message `on_message`
+  returns without admitting: the transport mints the message's trace id, records its envelope
   timestamp under that id and takes the slot before calling `on_message`,
   and a `finally` releases both unless `on_message_admitted` fired for the
   id. Admission and rejection fire before `on_message` returns, so a gate
@@ -2703,8 +2765,8 @@ monitored.
   A refresh loop still asleep from an earlier
   turn is reused rather than doubled, so a channel has at most one, and
   `on_stop` cancels it. The release that takes the count from 1 to 0 —
-  the last owed reply, or a lone message that was vetoed or never admitted
-  — sends `sendTyping` with `stop: true`, so the indicator clears at once
+  the last owed reply (a reply to a burst zeroes the count in one step), or
+  a lone message that was vetoed or never admitted — sends `sendTyping` with `stop: true`, so the indicator clears at once
   instead of lingering until the client expires it (#390). A release at a
   count already at zero sends nothing. The count is decremented before the
   stop is awaited, and the refresh loop's count check and its frame write
@@ -2722,8 +2784,9 @@ monitored.
   `on_message_persisted` also fires for notification-originated turns,
   whose ids were never recorded, so those are a no-op. An admitted message
   whose turn dies before persistence (conversation init raised, the item
-  was dropped) would otherwise keep its entry and its typing slot forever,
-  and the slot would keep the indicator refreshing (#104). The cleanup
+  was dropped) would otherwise keep its entry and its typing slot until some
+  later reply cleared the count, and the slot would keep the indicator
+  refreshing meanwhile (#104). The cleanup
   relies on ordering. Entries are inserted in enqueue order, and the
   channel's serial queue processes items in that order. So when an id is
   persisted, every entry recorded before it belongs to a message whose
@@ -2748,12 +2811,15 @@ Signal delivers a reply to a turn of any origin on a channel it owns. A
 reminder firing on a `signal:` channel injects through `on_notify`, and
 the reply leaves through the same `send` path as a reply to a person; it
 needs no inbound message to answer. The outstanding-reply count is guarded
-at zero for such a reply (`SignalPlugin._decrement_outstanding` never goes
-below 0), so a reply that answers no message neither errors nor drives the
-count negative. The count can't tell which message a reply answers, though: a
-reminder reply that lands while a person's message is outstanding gives back
-that message's typing slot early (#101), and if that was the only owed
-reply, the release also clears the indicator immediately (#390). This is
+at zero for such a reply (`SignalPlugin._release_all` stops only a count
+above 0), so a reply that answers no message neither errors nor drives the
+count negative. The count can't tell which message a final answers, though:
+any final, sent or withheld, a reminder's or a declining critique or
+heartbeat turn's included, gives back every outstanding slot, so one that
+lands while a person's message is outstanding clears the typing indicator
+early (#101), and the release also sends the explicit
+stop (#390). Since a reply to a coalesced burst already zeroes the count
+(#398), the early clear is total rather than one slot. This is
 [PRD §3.2.10](prd.md): a transport delivers every emission on a channel it
 owns, whatever originated the turn, and liveness and reply bookkeeping
 tolerate a reply that answers no outstanding message. Sending to a channel
@@ -2858,8 +2924,11 @@ slot for an allowlisted sender, and passes the id to `on_message`; a
 `finally` around that call gives the slot back unless `on_message_admitted`
 fired for the id. Admission fires before `on_message` returns, so a gate
 veto, an agent that is not ready yet, or a raise or cancellation all land
-there. `send_message` gives back the slot of an admitted message, and
-`on_agent_response` does for an unsent final. Only an
+there. A final, sent (`send_message`) or withheld (`on_agent_response`
+for an unsent final, #417), gives back every outstanding slot (one final
+answers a coalesced burst, #398): the count goes to zero and the refresh
+loop ends when it next sees no slot owed. Discord has no stop frame, so
+nothing else is sent. Only an
 allowlisted sender ever took a slot, so a refused stranger @-mentioning the
 bot gives nothing back and cannot stop typing owed to an allowed user in
 the same channel; no `on_message_rejected` implementation is needed.
@@ -2915,8 +2984,9 @@ against fake clients. The first real connection is the real test.
 Replies to agent-started turns on a Discord channel (a reminder, say) are
 delivered through the normal send path: `_deliver` resolves the destination
 from the channel id, so no inbound message is needed. The outstanding count
-is guarded at zero in `DiscordPlugin._decrement_outstanding`, as on Signal,
-with the same early typing-slot release (#101).
+is guarded at zero in `DiscordPlugin._release_all`, as on Signal,
+with the same early typing release (#101): any final, sent or withheld,
+zeroes the count.
 Sending to a channel other than the turn's own is a separate capability,
 not provided by the transport: PRD §3.5.9 (operator allowlist that starts
 empty, plus a budget); see the scheduler's "Not in phase one: a
@@ -3393,7 +3463,7 @@ corvidae/
 ├── tool.py               # Tool, ToolRegistry, tool_to_schema, ToolContext
 ├── tool_collection.py    # ToolCollectionPlugin (collects tools at startup)
 ├── channel.py            # Channel, ChannelConfig, ChannelRegistry, resolve_system_prompt
-├── queue.py              # SerialQueue (is_empty property)
+├── queue.py              # SerialQueue (is_empty property, take_while for coalescing)
 ├── llm.py                # LLMClient
 ├── llm_plugin.py         # LLMPlugin (LLM client lifecycle)
 ├── turn.py               # run_agent_turn(), AgentTurnResult

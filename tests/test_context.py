@@ -676,3 +676,57 @@ class TestCountTokensNeverRaises:
         warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
         assert len(warnings) == 1
         assert "RuntimeError" in warnings[0] and "11-char" in warnings[0]
+
+
+# ---------------------------------------------------------------------------
+# unanswered_user_messages (#398 coalescing)
+# ---------------------------------------------------------------------------
+
+
+def _window_rows(*specs):
+    """Build a window from (role, content, message_type) triples."""
+    window = ContextWindow("test:chan")
+    for role, content, mtype in specs:
+        window.append({"role": role, "content": content}, message_type=mtype)
+    return window.messages
+
+
+class TestUnansweredUserMessages:
+    """R11/R13 (#398): the user rows after the window's last assistant row."""
+
+    @staticmethod
+    def _fn():
+        """Resolve lazily so each test fails on its own missing attribute."""
+        import corvidae.context as context
+
+        return context.unanswered_user_messages
+
+    def test_returns_user_rows_after_last_assistant_in_order(self):
+        """R11: only rows after the last assistant row, in window order."""
+        rows = _window_rows(
+            ("user", "old", MessageType.MESSAGE),
+            ("assistant", "answer", MessageType.MESSAGE),
+            ("user", "m1", MessageType.MESSAGE),
+            ("user", "m2", MessageType.MESSAGE),
+        )
+        assert [m["content"] for m in self._fn()(rows)] == ["m1", "m2"]
+
+    def test_returns_all_user_rows_when_no_assistant_row(self):
+        """R11: with no assistant row every user message is unanswered."""
+        rows = _window_rows(
+            ("user", "m1", MessageType.MESSAGE),
+            ("user", "m2", MessageType.MESSAGE),
+        )
+        assert [m["content"] for m in self._fn()(rows)] == ["m1", "m2"]
+
+    def test_skips_context_notification_and_tool_rows(self):
+        """R11: CONTEXT rows and non-user (notification, tool) rows are skipped."""
+        rows = _window_rows(
+            ("user", "m1", MessageType.MESSAGE),
+            ("system", "[recall]", MessageType.CONTEXT),
+            ("user", "ctx-as-user", MessageType.CONTEXT),
+            ("system", "[scheduler]\n\ntick", MessageType.MESSAGE),
+            ("tool", "result", MessageType.MESSAGE),
+            ("user", "m2", MessageType.MESSAGE),
+        )
+        assert [m["content"] for m in self._fn()(rows)] == ["m1", "m2"]

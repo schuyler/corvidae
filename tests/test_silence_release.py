@@ -17,7 +17,7 @@ the real plugin is covered in tests/cognition/test_silence.py.
 
 import asyncio
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
 from helpers import build_plugin_and_channel, drain, sent_texts
@@ -135,23 +135,30 @@ def _slot_transports():
 
 class TestSlotRelease:
     @pytest.mark.parametrize("factory, transport, scope", _slot_transports())
-    async def test_unsent_final_releases_exactly_one_slot(self, factory, transport, scope):
-        """Two slots outstanding, one unsent final: one left. (Starting at
-        one would hide a double release behind the floor at zero.)"""
+    async def test_unsent_final_releases_every_slot(self, factory, transport, scope):
+        """Two slots outstanding, one unsent final: none left. An unsent final
+        releases what a sent one would, and one final answers a coalesced
+        burst (#398). On Signal the indicator is cleared with exactly one
+        explicit stop (neither missing nor unconditional)."""
         plugin = factory()
+        plugin._send_typing = AsyncMock(return_value=True)
         channel = _channel_ending_in(transport, scope, MessageType.UNSENT)
         plugin._outstanding[channel.id] = 2
 
         await _dispatch(plugin, channel)
 
-        assert plugin._outstanding[channel.id] == 1
+        assert plugin._outstanding[channel.id] == 0
+        if transport == "signal":
+            assert plugin._send_typing.await_args_list == [call(channel, stop=True)]
 
     @pytest.mark.parametrize("factory, transport, scope", _slot_transports())
     async def test_sent_final_releases_once_in_kernel_order(self, factory, transport, scope):
         """on_agent_response (row MESSAGE) then send_message, as the kernel
-        orders them: two slots become one, not zero."""
+        orders them: on_agent_response releases nothing, send_message
+        releases every slot (#398), and Signal sends exactly one stop."""
         plugin = factory()
         plugin._deliver = AsyncMock()
+        plugin._send_typing = AsyncMock(return_value=True)
         channel = _channel_ending_in(transport, scope, MessageType.MESSAGE)
         plugin._outstanding[channel.id] = 2
 
@@ -159,7 +166,9 @@ class TestSlotRelease:
         assert plugin._outstanding[channel.id] == 2  # a sent final waits for send_message
         await plugin.send_message(channel, OutboundMessage(text="hello"))
 
-        assert plugin._outstanding[channel.id] == 1
+        assert plugin._outstanding[channel.id] == 0
+        if transport == "signal":
+            assert plugin._send_typing.await_args_list == [call(channel, stop=True)]
 
 
 # ---------------------------------------------------------------------------

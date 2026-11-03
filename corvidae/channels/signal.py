@@ -741,12 +741,13 @@ class SignalPlugin(TransportPlugin):
                 )
 
     async def _decrement_outstanding(self, channel: Channel) -> None:
-        """Give back one outstanding slot: a final reply send, an
-        error-path send, or a message that was never admitted all close out one
-        owed message. The slot that takes the count to zero also clears the
+        """Give back one outstanding slot: a message that was never admitted,
+        or one the orphan sweep found dead, closes out one owed message (a
+        final, sent or unsent, releases every slot instead; see
+        _release_all). The slot that takes the count to zero also clears the
         indicator explicitly, rather than leaving it to expire on the client
-        (issue #390). A count already at zero (a reply that answers no
-        message) is left alone and sends nothing."""
+        (issue #390). A count already at zero is left alone and sends
+        nothing."""
         count = self._outstanding.get(channel.id, 0)
         if count > 0:
             # Decrement before awaiting the stop, so a message arriving while
@@ -892,9 +893,9 @@ class SignalPlugin(TransportPlugin):
         if not self.owns(channel):
             return
         # An unsent final never reaches send_message, so release here. The
-        # slot is given back in _decrement_outstanding's synchronous prefix,
-        # before its first await (the typing stop), so the check and the
-        # release still happen before this hookimpl yields.
+        # slots are given back in _release_all's synchronous prefix, before
+        # its first await (the typing stop), so the check and the release
+        # still happen before this hookimpl yields.
         try:
             unsent = final_was_unsent(channel)
         except Exception:
@@ -906,13 +907,27 @@ class SignalPlugin(TransportPlugin):
             )
             return
         if unsent:
-            await self._decrement_outstanding(channel)
+            # An unsent final releases what a sent one would: every slot.
+            await self._release_all(channel)
 
     async def send_message(self, channel: Channel, event: OutboundMessage) -> None:
         """Deliver a final reply, split to fit and never truncated, and
-        close out one outstanding slot."""
+        close out every outstanding slot: one reply answers a coalesced burst
+        (#398), so the indicator stops once, when the count was above zero."""
         await self._deliver(channel, event.text)
-        await self._decrement_outstanding(channel)
+        await self._release_all(channel)
+
+    async def _release_all(self, channel: Channel) -> None:
+        """Close out every outstanding slot on a final, sent or unsent: one
+        final answers a coalesced burst (#398). When the count was above zero
+        the indicator is cleared explicitly, once (#390); at zero nothing is
+        sent."""
+        # Zero the count before awaiting the stop, as _decrement_outstanding
+        # does, so a message arriving meanwhile sees 0 -> 1 and the release
+        # happens in this coroutine's synchronous prefix.
+        if self._outstanding.get(channel.id, 0) > 0:
+            self._outstanding[channel.id] = 0
+            await self._send_typing(channel, stop=True)
 
     async def send_progress(self, channel: Channel, event: OutboundProgress) -> None:
         """Deliver intermediate assistant text through the same path as

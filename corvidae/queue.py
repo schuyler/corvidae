@@ -62,6 +62,32 @@ class SerialQueue:
         """
         self._queue.put_nowait(item)
 
+    def take_while(self, predicate: Callable[[QueueItem], bool]) -> list[QueueItem]:
+        """Remove and return the head items for as long as ``predicate`` holds.
+
+        Stops at the first item that fails the predicate; that item stays
+        queued, unmoved. Synchronous (no awaits), so nothing can interleave
+        between a peek and its take. Each taken item is marked done at once:
+        the consumer's current item is not, so drain() still waits for the
+        turn that owns the taken items to finish.
+
+        Args:
+            predicate: Called with the item at the head of the queue.
+
+        Returns:
+            The taken items, in queue order (empty when the head fails).
+        """
+        taken: list[QueueItem] = []
+        # Peek at the head without removing it; stop at the first failure.
+        # shortcut: relies on a CPython-private attribute (asyncio.Queue._queue,
+        # the deque its LifoQueue/PriorityQueue subclasses override); replace
+        # the asyncio.Queue with an owned deque + Event if it ever moves.
+        while self._queue._queue and predicate(self._queue._queue[0]):
+            # get_nowait keeps asyncio's own bookkeeping consistent.
+            taken.append(self._queue.get_nowait())
+            self._queue.task_done()
+        return taken
+
     def start(self, process_fn: Callable) -> None:
         """Launch the consumer task.
 

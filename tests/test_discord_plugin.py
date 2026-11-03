@@ -969,6 +969,27 @@ class TestTyping:
         finally:
             await h.plugin.on_stop()
 
+    async def test_one_reply_to_a_burst_stops_typing(self, fast_typing):
+        """R10 (#398): three messages outstanding, answered by one coalesced
+        reply: the reply zeroes the outstanding count and no further typing
+        refreshes go out."""
+        h = await _start_plugin(discord_overrides={"allow": [AUTH_ID]})
+        try:
+            for text in ("one", "two", "three"):
+                h.plugin._enqueue(make_dm(text), BOT_ID)
+            ch = h.registry.get_or_create("discord", f"dm:{AUTH_ID}")
+            await _wait_until(lambda: h.plugin._outstanding.get(ch.id) == 3)
+
+            # A single reply answers the whole burst.
+            await h.plugin.send(channel=ch, event=OutboundMessage(text="one reply"))
+            assert h.plugin._outstanding.get(ch.id, 0) == 0
+            await asyncio.sleep(TYPING_REFRESH_FOR_TESTS * 3)  # let in-flight refresh settle
+            settled = h.messageable.typing_count
+            await asyncio.sleep(TYPING_REFRESH_FOR_TESTS * 6)
+            assert h.messageable.typing_count == settled
+        finally:
+            await h.plugin.on_stop()
+
     async def test_reply_with_no_outstanding_message_is_delivered(self):
         """An agent-started turn answers no inbound message: the reply is
         still delivered and the outstanding count stays at zero (design.md,

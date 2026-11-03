@@ -887,7 +887,8 @@ every channel sharing the server's slot, so those costs apply even there.
 
 ### 14. Untrusted traffic spends the operator's compute
 
-Every admitted message costs at least one main turn, and with cognition
+Every admitted message costs at least one main turn (or a share of one: see
+the next paragraph), and with cognition
 loaded, background calls on top, among them: stage-2 appraisal per exchange,
 the critique lenses when appraisal selects them, and consolidation as the
 window fills or the channel goes quiet. On a local server that is slot time
@@ -898,6 +899,14 @@ can do the same from inside the operator's own channel. `max_turns` bounds
 one exchange; nothing bounds the total. Cost runs away without an attacker
 too: #286 measured about 68,000 prompt tokens per heartbeat that decided to
 do nothing.
+
+Queued messages coalesce into one turn (PRD §3.1.19, #398), so one turn can
+carry several untrusted messages, in a group channel possibly from several
+senders. No text reaches the model that would not have reached it anyway:
+each message was admitted and would have been in the next prompt regardless.
+What changes is the cost of a poisoned message (PRD §3.1.18: the most one
+item can cost is its own turn): it now extends to the messages coalesced
+with it, which share that turn and its reply.
 
 Where the tree stands: nothing bounds use over time, and under PRD
 principle 16 nothing in corvidae will for now. It schedules a pool's warm

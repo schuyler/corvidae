@@ -724,8 +724,18 @@ def _fts_match_query(text: str) -> str | None:
 
     Raw user text can be FTS5 syntax-invalid; quote each word token and OR
     them. Returns None when the text has no word tokens.
+
+    The 20-token cap applies per blank-line-separated paragraph, so a
+    coalesced burst (messages joined by blank lines, #398) keeps each
+    message's tokens; single-paragraph text is capped at 20 as always.
+    shortcut: a message or ``memory_search`` query that itself contains blank
+    lines gets 20 tokens per paragraph, and there is no total cap (a 100-message
+    burst gives ~2000 OR terms); add a cap if bursts that size ever appear.
     """
-    tokens = re.findall(r"\w+", text)[:20]
+    # Cap each paragraph's tokens separately, then pool them all.
+    tokens: list[str] = []
+    for paragraph in re.split(r"\n\s*\n", text):
+        tokens.extend(re.findall(r"\w+", paragraph)[:20])
     if not tokens:
         return None
     return " OR ".join(f'"{token}"' for token in tokens)
@@ -2118,7 +2128,7 @@ class MemoryPlugin(CorvidaePlugin):
             if conv is None or not conv.messages:
                 return
             tail = conv.messages[-1]
-            from corvidae.context import MessageType
+            from corvidae.context import MessageType, unanswered_user_messages
             if (
                 tail.get("role") != "user"
                 or tail.get("_message_type", MessageType.MESSAGE) != MessageType.MESSAGE
@@ -2131,7 +2141,14 @@ class MemoryPlugin(CorvidaePlugin):
             if db is None:
                 return
 
-            candidates, degraded = await self.retrieve(channel.id, tail["content"])
+            # Query with every unanswered user message (a coalesced burst),
+            # joined by blank lines so the FTS cap applies to each message.
+            query = "\n\n".join(
+                m["content"]
+                for m in unanswered_user_messages(conv.messages)
+                if isinstance(m.get("content"), str)
+            )
+            candidates, degraded = await self.retrieve(channel.id, query)
 
             # Drop weak-banded candidates unless nothing else matched.
             non_weak = [c for c in candidates if c["band"] != "weak"]
