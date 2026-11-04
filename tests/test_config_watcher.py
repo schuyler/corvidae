@@ -1354,48 +1354,86 @@ def _make_watcher(config_path: Path):
     return watcher
 
 
-def _keys_read_in_hook(hook) -> set[str]:
-    """Dotted config keys a reload hook reads, from its source.
+class _RecordingConfig(dict):
+    """A config dict that records every key read, including nested ones.
 
-    Handles the two shapes used in this codebase: ``config.get("a")`` followed
-    by ``cfg.get("b")`` on the result (resolved by the local alias), and
-    ``config["a"]["b"]``. Deliberately shallow -- it needs to catch a key the
-    author declared live but never re-reads, not to be a static analyser.
+    A source scan cannot see a key a hook reads through a helper
+    (`_resolve_mid_conversation_system_role(agent_config)`), so the guard
+    drives the hook instead and observes what it actually reads (#408
+    review).
     """
-    import inspect
-    import re
 
-    source = inspect.getsource(hook)
-    # Top-level sections read straight off config, and the local alias each
-    # is bound to: `agent_config = config.get("agent")` -> {"agent_config": "agent"}.
-    sections = dict(re.findall(r'(\w+) = config\.get\("([a-z_]+)"', source))
-    keys: set[str] = set()
-    for alias, section in sections.items():
-        for leaf in re.findall(rf'{alias}\.get\("([a-z_.]+)"', source):
-            keys.add(f"{section}.{leaf}")
-    for section, leaf in re.findall(r'config\["([a-z_]+)"\]\["([a-z_.]+)"\]', source):
-        keys.add(f"{section}.{leaf}")
-    # A prompt key is named in full as resolve_prompt's second argument.
-    keys |= set(re.findall(r'resolve_prompt\(config, "([a-z_.]+)"', source))
-    return keys
+    def __init__(self, data: dict, prefix: str = "", log: set[str] | None = None):
+        super().__init__(data)
+        self._prefix = prefix
+        self.reads = log if log is not None else set()
+
+    def get(self, key, default=None):
+        dotted = f"{self._prefix}.{key}" if self._prefix else key
+        self.reads.add(dotted)
+        value = super().get(key, default)
+        if isinstance(value, dict):
+            return _RecordingConfig(value, dotted, self.reads)
+        return value
+
+    def __getitem__(self, key):
+        dotted = f"{self._prefix}.{key}" if self._prefix else key
+        self.reads.add(dotted)
+        value = super().__getitem__(key)
+        if isinstance(value, dict):
+            return _RecordingConfig(value, dotted, self.reads)
+        return value
 
 
-# Keys that are deliberately never called "live", because their consumers do
-# not re-read them on reload. Used to keep the registry honest.
-_NON_CONFIG_PREFIXES = ("_config_path", "_cli_overrides", "_base_dir")
-
-
-def _leaf_keys(node, prefix: str = "") -> set[str]:
-    """Dotted leaf keys of a nested config dict."""
-    leaves: set[str] = set()
-    if isinstance(node, dict):
-        for key, value in node.items():
-            dotted = f"{prefix}.{key}" if prefix else str(key)
-            if isinstance(value, dict) and value:
-                leaves |= _leaf_keys(value, dotted)
-            else:
-                leaves.add(dotted)
+async def _keys_read_by_hook(plugin, config: dict) -> set[str]:
+    """Dotted keys the plugin's on_config_reload actually reads."""
+    recorder = _RecordingConfig(config)
+    await plugin.on_config_reload(recorder)
+    # A section read like `config.get("funnel")` is also recorded; keep it
+    # only when nothing was read beneath it, since a parent that led to
+    # leaves is not itself a key an operator sets.
+    reads = {k for k in recorder.reads if not k.startswith("_")}
+    leaves = {
+        k for k in reads
+        if not any(other.startswith(k + ".") for other in reads)
+    }
     return leaves
+
+
+def _make_watcher(config_path: Path):
+    """A ConfigWatcherPlugin wired to a plugin manager, not started."""
+    from corvidae.config_watcher import ConfigWatcherPlugin
+    from corvidae.hooks import create_plugin_manager
+
+    from corvidae.compaction import CompactionPlugin
+
+    pm = create_plugin_manager()
+    watcher = ConfigWatcherPlugin()
+    pm.register(watcher, name="config_watcher")
+    # Compaction is the plugin whose live keys the warning test relies on.
+    pm.register(CompactionPlugin(), name="compaction")
+    watcher.pm = pm
+    watcher._config_path = config_path
+    watcher._cli_overrides = {}
+    return watcher
+
+
+def _make_watcher(config_path: Path):
+    """A ConfigWatcherPlugin wired to a plugin manager, not started."""
+    from corvidae.config_watcher import ConfigWatcherPlugin
+    from corvidae.hooks import create_plugin_manager
+
+    from corvidae.compaction import CompactionPlugin
+
+    pm = create_plugin_manager()
+    watcher = ConfigWatcherPlugin()
+    pm.register(watcher, name="config_watcher")
+    # Compaction is the plugin whose live keys the warning test relies on.
+    pm.register(CompactionPlugin(), name="compaction")
+    watcher.pm = pm
+    watcher._config_path = config_path
+    watcher._cli_overrides = {}
+    return watcher
 
 
 class TestRestartOnlyWarning:
@@ -1474,6 +1512,23 @@ class TestRestartOnlyWarning:
         assert not [m for m in messages if "compaction_threshold" in m], messages
 
 
+# A config with every section the declared hooks below read, so the
+# recorder observes each key they take. Values are defaults-shaped.
+_FULL_SECTION_CFG = {
+    "agent": {
+        "chars_per_token": 4,
+        "request_logprobs": False,
+        "mid_conversation_system_role": "system",
+        "compaction_threshold": 0.8,
+        "compaction_retention": 0.5,
+        "min_messages_to_compact": 5,
+        "compaction_fork_prompt": "x",
+        "forks": {},
+    },
+    "funnel": {"default_budget": 512, "budgets": {}},
+}
+
+
 class TestReloadableKeyRegistry:
     """R3: the declared live keys are the ones the hook actually re-reads.
 
@@ -1484,7 +1539,7 @@ class TestReloadableKeyRegistry:
     async def test_compaction_declares_what_its_hook_re_reads(self):
         from corvidae.compaction import CompactionPlugin
 
-        hook_keys = _keys_read_in_hook(CompactionPlugin.on_config_reload)
+        hook_keys = await _keys_read_by_hook(CompactionPlugin(None), _FULL_SECTION_CFG)
         assert hook_keys, "could not find any config keys in the hook"
         missing = {
             k for k in hook_keys
@@ -1498,7 +1553,11 @@ class TestReloadableKeyRegistry:
     async def test_agent_declares_what_its_hook_re_reads(self):
         from corvidae.agent import Agent
 
-        hook_keys = _keys_read_in_hook(Agent.on_config_reload)
+        agent_plugin = Agent()
+        # The hook re-borrows the LLM client at the end; only reads matter.
+        agent_plugin.pm = MagicMock()
+        agent_plugin.pm.get_plugin.return_value = None
+        hook_keys = await _keys_read_by_hook(agent_plugin, _FULL_SECTION_CFG)
         missing = {
             k for k in hook_keys
             if not any(k == d or k.startswith(d + ".") for d in Agent.reloadable_keys)
@@ -1514,7 +1573,7 @@ class TestReloadableKeyRegistry:
         pytest.importorskip("corvidae_cognition")
         from corvidae_cognition.funnel import FunnelPlugin
 
-        hook_keys = _keys_read_in_hook(FunnelPlugin.on_config_reload)
+        hook_keys = await _keys_read_by_hook(FunnelPlugin(None), _FULL_SECTION_CFG)
         missing = {
             k for k in hook_keys
             if not any(k == d or k.startswith(d + ".") for d in FunnelPlugin.reloadable_keys)
