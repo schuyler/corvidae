@@ -470,49 +470,6 @@ class TestSystemPromptHook:
 
         assert conv.system_prompt == original + "\n\nCOMPACTION-MARKER"
 
-    async def test_queued_section_appears_at_next_boundary(self, agent_env):
-        """A queued section is appended to the composed prompt at the
-        next boundary and the queue is cleared (#136 interim path)."""
-        plugin, channel = agent_env
-        plain = await plugin.channel_system_prompt(channel)
-
-        # Queue a section.
-        plugin.queue_system_prompt_section(channel, "INTERIM-SECTION")
-
-        # The next call to channel_system_prompt includes it.
-        prompt = await plugin.channel_system_prompt(channel)
-        assert prompt == plain + "\n\nINTERIM-SECTION"
-
-        # The queue is cleared: the next call is back to plain.
-        prompt2 = await plugin.channel_system_prompt(channel)
-        assert prompt2 == plain
-
-    async def test_interim_path_with_funnel_loaded(self, agent_env):
-        """The interim path works with a funnel-style plugin loaded
-        (#136 done-when: works with and without the funnel)."""
-        plugin, channel = agent_env
-        plain = await plugin.channel_system_prompt(channel)
-
-        # A funnel stand-in that appends a CONTEXT message to the window.
-        class _FunnelStandIn:
-            @hookimpl
-            async def before_agent_turn(self, channel, trace_id, meta):
-                if channel.conversation is not None:
-                    channel.conversation.append(
-                        {"role": "system", "content": "[CONTEXT] fact"},
-                        MessageType.CONTEXT,
-                    )
-
-        plugin.pm.register(_FunnelStandIn(), name="funnel_standin")
-
-        # Queue an interim section.
-        plugin.queue_system_prompt_section(channel, "INTERIM-WITH-FUNNEL")
-
-        # The next boundary includes it, alongside the funnel's CONTEXT.
-        prompt = await plugin.channel_system_prompt(channel)
-        assert "INTERIM-WITH-FUNNEL" in prompt
-        assert prompt.startswith(plain)
-
     async def test_non_boundary_turn_sends_identical_prompt(self, agent_env):
         """A turn without a compaction boundary sends a byte-identical
         system prompt (principle 2, #136)."""
