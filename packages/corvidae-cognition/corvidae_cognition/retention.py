@@ -116,8 +116,7 @@ async def run_retention_job(memory: "MemoryPlugin", now: float | None = None) ->
                         # itself. Retrieval joins `m.indexed = 1` on both KNN
                         # queries, so the stale row is never returned; what it
                         # costs is the vec-rows <= indexed invariant and one
-                        # dead over-fetch slot. Clean it up by hand:
-                        # DELETE FROM memory_vec WHERE memory_id = ?.
+                        # dead over-fetch slot.
                         logger.warning(
                             "retention: vec row for memory %d was left behind "
                             "(delete failed) and no later pass clears it; the "
@@ -125,7 +124,9 @@ async def run_retention_job(memory: "MemoryPlugin", now: float | None = None) ->
                             "(both KNN queries join indexed = 1). The vec "
                             "table now holds one more row than there are "
                             "indexed memories. Clean it with DELETE FROM "
-                            "memory_vec WHERE memory_id = %d",
+                            "memory_vec WHERE memory_id = %d, in a sqlite3 "
+                            "that has the sqlite-vec extension loaded "
+                            "(memory_vec is a vec0 virtual table)",
                             mid, mid, exc_info=True,
                         )
         if demoted_count:

@@ -492,6 +492,12 @@ class TestDemotion:
         assert "delete from memory_vec" in text.lower(), (
             f"the warning must give the remedy that actually works: {text!r}"
         )
+        # `memory_vec` is a vec0 virtual table, so the statement fails under a
+        # stock sqlite3 unless sqlite-vec is loaded (#198, redact.py:229). A
+        # remedy that cannot run as printed is not a remedy.
+        assert "sqlite-vec" in text.lower(), (
+            f"the printed remedy must say it needs the extension loaded: {text!r}"
+        )
         assert "backfill" not in text.lower() and "demotion pass" not in text.lower(), (
             f"the warning must not name a pass that cannot clear the row: {text!r}"
         )
@@ -502,13 +508,12 @@ class TestDemotion:
         assert "matched by vector search" not in text.lower(), (
             f"the warning must not claim the demoted row still matches: {text!r}"
         )
-
-        # And not merely at DEBUG, where the default level hides it.
-        debug_copies = [
-            r for r in caplog.records
-            if r.levelno == logging.DEBUG and "vec row delete failed" in r.getMessage()
-        ]
-        assert not debug_copies, "the same rescue must not also be logged at DEBUG"
+        # The level check is the `r.levelno == logging.WARNING` filter above:
+        # `warnings` is empty if the rescue goes out at DEBUG, which reverting
+        # the log call to `logger.debug` proves by failing the `assert warnings`
+        # above. An earlier version also searched DEBUG records for the old
+        # wording, but that string exists at no level after the rewording, so
+        # the assertion could never fail (found by the #339 review).
 
 
 # ---------------------------------------------------------------------------
