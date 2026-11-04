@@ -206,7 +206,7 @@ owner's plugin name after the prefix.
 | `before_compaction` | broadcast, awaited | `CompactionPlugin`, after the summary succeeded and before `replace_with_summary()`; the window still holds `messages[:cut]`, so a plugin can fork over the dropped prefix (see [Forks](#forks)); failures logged, never block compaction |
 | `on_compaction` | broadcast | `CompactionPlugin`, after `replace_with_summary()`; side effects only (persistence) |
 | `on_llm_request` | broadcast | `LLMClient.chat()` via LLMPlugin's injected observer, before the retry loop; side effects only (observability) |
-| `on_llm_response` | broadcast | `LLMClient.chat()` via the observer, exactly once per call (success or terminal failure); names the model the request was sent with (an `extra_body` override wins, #297) and carries llama-server's `timings` verbatim; side effects only (metrics, usage log) |
+| `on_llm_response` | broadcast | `LLMClient.chat()` via the observer, exactly once per call (success or terminal failure); names the model the request was sent with (an `extra_body` override wins, #297) and carries llama-server's `timings` verbatim, plus the call's start time, total duration across retried attempts, attempts made, and the request's message and tool counts; side effects only (metrics, usage log) |
 | `on_metrics` | broadcast | any plugin via `pm.ahook.on_metrics(...)`; built-in emission from `MetricsPlugin.on_llm_response`; never emit from inside an `on_metrics` implementation (recursion) |
 | `on_config_reload` | broadcast | `ConfigWatcherPlugin`, when `agent.yaml`'s mtime changes; per-plugin error isolation |
 
@@ -483,6 +483,32 @@ retrieval, appraisal, critique, the gates and the silence plugin record
 their outcomes. All sinks are
 fail-soft.
 
+**Call timing and queue wait (PRD §3.10.6).** Each `usage_log` row records
+when its call started and ended, so overlapping calls are found from the
+rows alone: in a self-join on `a.id < b.id`, two calls overlap when
+`a.started_at < b.ended_at AND b.started_at < a.ended_at` (calls that only
+touch at an endpoint do not). `ended_at` is `started_at + total_ms / 1000`,
+so it comes from the monotonic duration and cannot disagree with
+`total_ms`. `latency_ms` is the final
+attempt only. When calls share a llama-server slot (a pinned `id_slot`, or
+a single-slot server), a call that arrives while another holds the slot
+waits inside the server, and that wait is part of its `latency_ms`. The
+server's own work is `prompt_ms + predicted_ms`; what remains is, approximately, the wait:
+
+```sql
+SELECT id, stage, latency_ms - (prompt_ms + predicted_ms) AS queue_wait_ms
+FROM usage_log;  -- NULL where the backend gave no timings
+```
+
+It is not stored: it is a function of stored columns. `prompt_ms` and
+`predicted_ms` are NULL, never 0, when the backend reports no `timings`
+or the call failed; a reported 0 stays 0. `max_context_tokens` is looked
+up at write time through the channel registry (`optional_depends_on`;
+`resolve_config(channel)`), so a runtime override that lands between the
+request and the write is what the row records; a failing lookup logs a
+warning naming the channel and writes NULL. Existing tables gain the
+columns in place; older rows read NULL.
+
 ```sql
 CREATE TABLE usage_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -501,8 +527,17 @@ CREATE TABLE usage_log (
     cached_tokens INTEGER,      -- usage.prompt_tokens_details.cached_tokens, where the provider reports it
     cache_n INTEGER,            -- llama-server timings.cache_n: prompt tokens reused from cache (PRD §3.13.10)
     prompt_n INTEGER,           -- llama-server timings.prompt_n: prompt tokens prefilled; NULL from other providers
-    latency_ms REAL,
-    error TEXT
+    latency_ms REAL,            -- the final attempt's duration (retried attempts and their sleeps are not in it)
+    error TEXT,
+    started_at REAL,            -- wall-clock epoch seconds when the call began (#350)
+    ended_at REAL,              -- started_at + total_ms / 1000
+    total_ms REAL,              -- monotonic, first attempt to end, including retries and the sleeps between
+    attempts INTEGER,           -- attempts made; 1 = no retry (transient retries and model-not-loaded waits count)
+    message_count INTEGER,      -- messages in the request (embeddings: number of texts)
+    tool_count INTEGER,         -- tool schemas in the request (embeddings: 0)
+    max_context_tokens INTEGER, -- the channel's budget in force when the row is written; NULL with no channel, no registry or an unknown channel
+    prompt_ms REAL,             -- llama-server timings.prompt_ms: the final attempt's prefill time; NULL from other providers and on failure
+    predicted_ms REAL           -- llama-server timings.predicted_ms: the final attempt's decode time; NULL likewise
 );
 
 CREATE TABLE exchange_log (
