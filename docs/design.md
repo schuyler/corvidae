@@ -1694,7 +1694,12 @@ default priority) returned non-None first. The caller does not use the return va
    the channel's pending tool-call ids, the Agent's
    `mid_conversation_system_role`) as a plain call on `llm.main`,
    with no tools, through `view_call` (PRD §3.8). The render is the
-   uncapped prefix: the window is over budget when compaction runs. If that call raises or returns
+   uncapped prefix: the window is over budget when compaction runs. If the fork
+   raises a connection-class error (`is_backend_unreachable`), the view call is not
+   attempted: it would spend the same wait on a backend that is already
+   down. `_fork_summary` raises `BackendUnreachable`, `resolve_compaction`
+   records the failure cooldown and returns, and the turn's own retry loop
+   waits for the backend (#400, PRD §3.1). If the view call raises or returns
    nothing (logged at WARNING; `RuntimeError` when no Agent can render a
    view), compaction declines and the over-budget fallback (#308) brings the
    window back within budget. The client is resolved when
@@ -1813,7 +1818,7 @@ Stage names are opaque to core (it never names cognition plugins).
 
 | Stage | Cut | Runs | On a miss |
 |---|---|---|---|
-| `compaction` | dropped prefix | inline in `resolve_compaction` | standalone view call on the same prefix (`llm.main`, no tools), then the over-budget fallback (#308) |
+| `compaction` | dropped prefix | inline in `resolve_compaction` | standalone view call on the same prefix (`llm.main`, no tools), then the over-budget fallback (#308); on a connection-class failure the view is skipped and compaction defers to the turn's retry loop (#400) |
 | `consolidation` (compaction trigger) | dropped prefix | inline in `before_compaction`; the record is stashed and the `on_compaction` task consumes it | catch-up in the `on_compaction` task: no stash (range not in `messages[:cut]`, fork failed) or the watermark moved since the fork; the rebuilt view on `llm.main` |
 | `consolidation` (idle trigger) | full window | in the idle task | range wholly in the live window: skip with a warning, watermark unchanged, retried on the next idle trigger; no registered channel or window, or a range row not in the window: catch-up (rebuilt view on `llm.main`) |
 | `appraisal` (stage 2) | full window at run time | silent TaskQueue task | skip with a warning (forks off, originating rowid left the window or was never persisted, fork failed or unusable) |
