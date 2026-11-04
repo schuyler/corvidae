@@ -1509,10 +1509,15 @@ class Agent(CorvidaePlugin):
         # Guard: a transform must preserve the identity+register as a prefix.
         # Appending is the expected use; rewriting is rejected (#136).
         if not transformed.startswith(composed):
+            implementors = sorted(
+                name for name, plugin in self.pm.list_name_plugin()
+                if hasattr(plugin, 'transform_system_prompt')
+            )
             logger.warning(
                 'transform_system_prompt modified the identity layer for '
-                'channel %s; using the untransformed system prompt',
-                channel.id,
+                'channel %s (plugins: %s); append to the prompt instead. '
+                'Using the untransformed system prompt.',
+                channel.id, ', '.join(implementors) or 'none',
             )
             return composed
         return transformed
@@ -1728,12 +1733,14 @@ class Agent(CorvidaePlugin):
         retain_count: int,
         compacted_ids: list[int],
     ) -> None:
-        """Re-resolve the channel's tool set at the compaction boundary.
+        """Re-resolve the channel's tool set and system prompt at the
+        compaction boundary.
 
         Compaction already rebuilds the KV cache past the system prompt, so
         this is where a reloaded channels.<id>.tools.disabled reaches the
-        schemas (issue #149); between boundaries they never move. A call
-        dispatched before the boundary runs to completion.
+        schemas (issue #149) and the transform_system_prompt hook re-runs
+        (#136); between boundaries neither moves. A call dispatched before
+        the boundary runs to completion.
         """
         conv = channel.conversation
         if conv is None:

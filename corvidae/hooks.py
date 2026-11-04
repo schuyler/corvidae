@@ -1030,10 +1030,13 @@ class AgentSpec:
                 result = yield
                 return result + "\\n\\nExtra section."
 
-        Runs once per conversation start and restart, and for the background
-        views that share ``Agent.channel_system_prompt``; the result is not
-        re-resolved at compaction. A wrapper that raises is logged and the
-        untransformed prompt is used, as is a None result.
+        Runs at every boundary: conversation start, restart, compaction,
+        and the background views that share ``Agent.channel_system_prompt``.
+        A wrapper that raises is logged and the untransformed prompt is
+        used, as is a None result. A transform that modifies the
+        identity+register prefix is rejected with a WARNING naming the
+        plugin; the untransformed prompt is used. Appending is the
+        expected use.
 
         Args:
             channel: The Channel the prompt is for.
