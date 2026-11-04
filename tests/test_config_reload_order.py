@@ -41,10 +41,10 @@ async def _dispatch(registration_order: list[str]) -> tuple[LLMPlugin, _FakeAgen
     """Register in ``registration_order`` and dispatch one reload through the
     real ConfigWatcherPlugin path."""
     llm = LLMPlugin()
-    llm._role_configs["main"] = {"base_url": "http://old", "model": "old"}
+    llm._profile_configs["main"] = {"base_url": "http://old", "model": "old"}
     llm._clients["main"] = MagicMock(name="old-client")
 
-    def _new_client(cfg, role):
+    def _new_client(cfg, profile="main"):
         """A stand-in client whose lifecycle methods are awaitable."""
         client = MagicMock(name="new-client")
         client.start = AsyncMock()
