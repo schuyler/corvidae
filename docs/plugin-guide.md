@@ -177,7 +177,8 @@ the answer.
 
 The bare imperative allowlist is `send` (transports receive it through
 `TransportPlugin`; see [Writing a transport](#writing-a-transport)),
-`register_tools` (implementers append to the list passed in) and
+`register_tools` (implementers append to the list passed in),
+`register_llm_stages` (implementers add to the dict passed in) and
 `persist_message` (every implementation runs; the caller resolves the list
 with `resolve_single_result`).
 
@@ -315,6 +316,7 @@ Any plugin can send: `await self.pm.ahook.send(channel=channel, event=OutboundMe
 | Hook | Type | When |
 |------|------|------|
 | `register_tools(tool_registry: list)` | sync broadcast | During `on_start`, to collect tools |
+| `register_llm_stages(stages: dict[str, str])` | sync broadcast | At the top of `LLMPlugin.on_start`, to collect the model-calling stages each plugin owns: `stages[name] = kind`, with kind `"chat"` or `"embedding"` |
 | `on_agent_response(channel, request_text: str, response_text: str, trace_id: str \| None, meta: dict, logprobs: dict \| None)` | async broadcast | After agent produces a response. Fires for a final the output gate vetoed (or an empty one) too, after its assistant row is in the window and before the transport send; `final_was_unsent(channel)` tells the two apart |
 | `transform_system_prompt(channel, text: str) -> str \| None` | async `firstresult=True` wrapper chain | When a conversation's system prompt is composed (identity, then register): a new conversation, a restart, and the background views. Return the prompt with your section added; see below |
 | `before_agent_turn(channel, trace_id: str \| None, meta: dict)` | async broadcast | Before each LLM invocation |
@@ -380,8 +382,8 @@ Producers that start a background task in `on_start` and inject notifications sh
 
 | Hook | Type | When |
 |------|------|------|
-| `on_llm_request(role, model, request_id, message_count, tool_count, attribution)` | async broadcast | Immediately before an LLM chat-completion call |
-| `on_llm_response(role, model, request_id, usage, latency_ms, attribution, error, timings)` | async broadcast | Exactly once per LLM call, after success or terminal failure |
+| `on_llm_request(profile, model, request_id, message_count, tool_count, attribution)` | async broadcast | Immediately before an LLM chat-completion call |
+| `on_llm_response(profile, model, request_id, usage, latency_ms, attribution, error, timings, started_at, total_ms, attempts, message_count, tool_count)` | async broadcast | Exactly once per LLM call, after success or terminal failure |
 | `on_metrics(name, value, tags)` | async broadcast | Whenever any plugin emits a metric event |
 
 `on_llm_request` / `on_llm_response` fire from the `LLMClient` chokepoint
@@ -389,12 +391,18 @@ Producers that start a background task in `on_start` and inject notifications sh
 system is covered — turn-loop, compaction, and subagent calls alike.
 `request_id` pairs a request with its response. Retried transient attempts
 do not fire `on_llm_response`; one request pairs with exactly one response.
-`model` is the model the request was sent with: the role's configured
-model unless an `extra_body` (the role's or the call's) overrode it.
+`model` is the model the request was sent with: the profile's configured
+model unless an `extra_body` (the profile's or the call's) overrode it.
 `usage` is the response envelope's `usage` field verbatim (or `None`);
 `timings` is the response's `timings` field verbatim, which llama-server
 sends (`cache_n` prompt tokens reused from cache, `prompt_n` prefilled)
 and other providers omit (`None`, as on terminal failure);
+`latency_ms` is the final attempt's duration; `started_at` is the call's
+wall-clock start (epoch seconds), `total_ms` its monotonic duration from
+the first attempt to the end including retries and the sleeps between,
+and `attempts` how many attempts were made (1 = no retry; transient-status
+and connection retries and model-not-loaded waits each count); `message_count` and `tool_count` are the request's counts
+(embeddings: the number of texts, and 0);
 `error` is `None` on success and the exception string on terminal failure.
 The request payload is summarized (message/tool counts), never shipped
 wholesale. Observer failures are logged and never break the LLM call.
@@ -788,7 +796,7 @@ is a window (live, or rebuilt from `message_log`) rendered with
 `build_fork_prompt` under the channel's system prompt, plus your instruction
 as the last `user` message, sent with `view_call(client, channel_id,
 messages, extra_body=...)` on a client you bind once
-(`llm.get_client("background")`). It sends no tools, raises `ForkRefused` on
+(`llm.get_client("<your stage>")`, a stage you registered with `register_llm_stages`). It sends no tools, raises `ForkRefused` on
 a reply with tool calls (structured or written out), and tags the call
 `mode="standalone"`; set your own `stage`, channel and trigger attribution
 around it. Get the channel's system prompt, budget (`max_tokens`),
@@ -1176,7 +1184,7 @@ Registered by `SubagentPlugin` (entry point name: `subagent`).
 |------|------------|--------------|
 | `subagent` | `instructions: str`, `description: str`, `_ctx: ToolContext` | Enqueues a background task that runs a full agent loop with `instructions` as its prompt. Returns immediately with the enqueued task ID. Results are delivered via `on_notify` when the task completes. |
 
-`subagent` requires `ToolContext` (injected automatically — not an LLM parameter). It excludes itself from the subagent's tool registry to prevent recursion. The subagent uses the `llm.background` config block if present, falling back to `llm.main`.
+`subagent` requires `ToolContext` (injected automatically — not an LLM parameter). It excludes itself from the subagent's tool registry to prevent recursion. The subagent calls the model as the `subagent` stage, a `chat` stage, so it uses `llm.main`.
 
 ### RuntimeSettingsPlugin tools
 
@@ -1313,7 +1321,7 @@ Compacts conversation history when it approaches the channel's
 
 Implements one hook:
 
-- `resolve_compaction` (`trylast=True`) — fires before each LLM call. Checks whether the token estimate exceeds `compaction_threshold * max_tokens`. If so, and if the conversation has more than `min_messages_to_compact` messages, summarizes older messages to fit within `compaction_retention * max_tokens`, moving the cut off any tool cycle that straddles it where that still leaves a useful compaction (design.md, CompactionPlugin step 3). With `agent.forks` on for `compaction`, the summary comes from a fork of the dropped prefix (`agent.compaction_fork_prompt`); otherwise, or if the fork fails, from the same render sent on `llm.background` with no tools (the view call); if that fails too, the over-budget fallback applies. Fires `before_compaction` before truncating and `on_compaction` after. Returns True to stop the `firstresult` chain. Runs after any third-party handlers at default priority.
+- `resolve_compaction` (`trylast=True`) — fires before each LLM call. Checks whether the token estimate exceeds `compaction_threshold * max_tokens`. If so, and if the conversation has more than `min_messages_to_compact` messages, summarizes older messages to fit within `compaction_retention * max_tokens`, moving the cut off any tool cycle that straddles it where that still leaves a useful compaction (design.md, CompactionPlugin step 3). With `agent.forks` on for `compaction`, the summary comes from a fork of the dropped prefix (`agent.compaction_fork_prompt`); otherwise, or if the fork fails, from the same render sent on the compaction stage's profile (`llm.main` today) with no tools (the view call); if that fails too, the over-budget fallback applies. Fires `before_compaction` before truncating and `on_compaction` after. Returns True to stop the `firstresult` chain. Runs after any third-party handlers at default priority.
 
 Token counting uses tiktoken (cl100k_base encoding) via `count_tokens()` in `corvidae/context.py`. When tiktoken is unavailable, a character-based fallback is used (3.5 chars per token). `agent.chars_per_token` is deprecated and only takes effect in the fallback path.
 
@@ -1382,16 +1390,23 @@ logged with a traceback and never breaks an LLM call.
   and emits `on_metrics` events: `llm.tokens.prompt`, `llm.tokens.completion`,
   `llm.tokens.total` (each skipped if the usage dict lacks it),
   `llm.latency_ms` (always), and `llm.errors` (value 1.0, on terminal
-  failure). Tags: `{"role", "model", "stage", "channel"}` — stage and
+  failure). Tags: `{"profile", "model", "stage", "channel"}` — stage and
   channel come from the call's attribution snapshot.
 - **`UsageLogPlugin`** (entry point `"usage_log"`, depends on
   `"persistence"`) — consumes `on_llm_response` and writes one row per LLM
   call into the `usage_log` SQLite table (in the persistence plugin's
-  database): timestamp, request id, role, model, stage, channel id,
+  database): timestamp, request id, profile, model, stage, channel id,
   trace id (NULL for calls outside any trace), trigger,
   mode (`fork`/`standalone` for stages that can fork, else NULL), token
   counts, cached tokens, llama-server's `cache_n` and `prompt_n` (prompt
-  tokens reused from cache vs prefilled), latency, and error.
+  tokens reused from cache vs prefilled), latency (the final attempt),
+  and error; the call's `started_at`, `ended_at`, `total_ms` (including
+  retries) and `attempts`; the request's `message_count` and
+  `tool_count`; the channel's `max_context_tokens` (found through the
+  optional `"registry"` plugin; NULL when unknown); and llama-server's
+  `prompt_ms` and `predicted_ms` (prefill and decode time of the final
+  attempt, NULL when the backend reports none). Subtracting those two
+  from `latency_ms` approximates the time a call queued in the server.
   The table is created lazily on first use (`CREATE TABLE IF NOT EXISTS`).
 - **`MetricsJsonlPlugin`** (entry point `"metrics_jsonl"`) — consumes
   `on_metrics` and appends one JSON line per event
@@ -1414,19 +1429,40 @@ Owns the `LLMClient` instance lifecycle. Entry point name: `"llm"`. Other plugin
 
 Implements two hooks:
 
-- `on_start` — reads `llm.main` (required) and `llm.background` (optional),
-  creates `LLMClient` instances, and starts their aiohttp sessions.
+- `on_start` — broadcasts `register_llm_stages` to collect the model-calling
+  stages, reads every profile under `llm:` (`llm.main` is required), creates an
+  `LLMClient` for each, starts their aiohttp sessions, and logs where each
+  stage resolves (`llm stages resolved: ...`).
 - `on_stop` — closes all aiohttp sessions.
 
 Each created client gets a hook observer injected that fires
-`on_llm_request`/`on_llm_response` (with the client's role and the current
+`on_llm_request`/`on_llm_response` (with the client's profile and the current
 attribution snapshot) around every chat call. `corvidae/llm.py` itself
 stays free of plugin-system imports — the observer seam is a plain object
 with async `request`/`response` methods, defined in `llm_plugin.py`.
 
-`get_client(role)` returns the client for `"main"` or `"background"`. If no
-background client is configured, `get_client("background")` falls back to
-the main client.
+Each key under `llm:` is a **profile**. A plugin that calls a model owns one
+or more **stages** and names them in `register_llm_stages`:
+
+```python
+@hookimpl
+def register_llm_stages(self, stages: dict[str, str]) -> None:
+    stages["summarize"] = "chat"       # or "embedding"
+```
+
+A stage resolves to its kind's default profile: `chat` to `main`,
+`embedding` to `embedding`. There are no fallback chains. Then:
+
+```python
+llm = get_dependency(self.pm, "llm", LLMPlugin)
+client = llm.get_client("summarize")   # None if the default profile isn't configured
+main = llm.get_client()                # the main-turn client
+```
+
+`get_client(stage)` raises `ValueError` for a name no plugin registered, and
+profile names count: `get_client("main")` raises, so use `get_client()`. An
+`llm.background` block is accepted but nothing resolves to it until the
+operator stage-to-profile map (#399) arrives.
 
 **Config:**
 ```yaml
@@ -1440,9 +1476,10 @@ llm:
     retry_base_delay: 2.0      # optional (default 2.0)
     retry_max_delay: 60.0      # optional (default 60.0)
     timeout: 120               # optional: request timeout in seconds
-  background:                  # optional — absent means use llm.main
-    base_url: https://api.openai.com/v1
-    model: gpt-4o-mini
+  embedding:                   # optional — the embedding stage gets no client without it
+    base_url: http://localhost:8082/v1
+    model: nomic-embed-text
+    dimensions: 768            # required
 ```
 
 **Without this plugin:** `Agent` and `CompactionPlugin` cannot create LLM

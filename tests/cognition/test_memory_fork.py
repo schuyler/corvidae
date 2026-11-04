@@ -2,11 +2,11 @@
 
 Compaction trigger: before_compaction forks the record from the dropped
 prefix and stashes it; the on_compaction task consumes it instead of the
-view call, and a fork miss there is the background view call (the range has
+view call, and a fork miss there is the main-profile view call (the range has
 left the window, #380, #388). Idle trigger: a range wholly in the live window
 forks the full window, and a miss skips (watermark unchanged, retried on the
 next trigger, #320, PRD §3.8.5); a range not wholly in a live window is
-written from the rendered view on llm.background. Everything after the LLM
+written from the rendered view on llm.main. Everything after the LLM
 call is unchanged.
 """
 
@@ -145,7 +145,7 @@ async def test_summary_rows_in_range_do_not_block_the_fork(env):
 
 @pytest.mark.parametrize("live_window,error,forked,view", [
     (True, None, True, 0),
-    # No live window: the range is written from the view on llm.background.
+    # No live window: the range is written from the view on llm.main.
     (False, None, False, 1),
     # A fork failure on an in-window range skips: no view call and no
     # memory row (#320); test_idle_in_window_miss_skips covers the details.
@@ -220,7 +220,7 @@ def _range_partly_trimmed(memory, channel, ids):
 async def test_idle_out_of_window_uses_the_view(env, break_window):
     """#320 R5, #380 R1: a range that is not wholly in a live window is
     windowless work: no fork even with a working agent, one view request
-    (system prompt first) on llm.background, a record."""
+    (system prompt first) on llm.main, a record."""
     memory, stub, channel, db, ids = env
     agent = _use(memory, FakeForkAgent({"consolidation"}, text=FORK_JSON))
     break_window(memory, channel, ids)

@@ -226,24 +226,43 @@ class RecordingClient:
         return [[1.0, 0.0, 0.0, 0.0] for _ in texts]
 
 
+#: Stages the kernel plugins register (compaction, subagent), for fixtures that
+#: build an LLMPlugin without on_start and so never run register_llm_stages.
+CORE_LLM_STAGES = {"compaction": "chat", "subagent": "chat"}
+
+
+def collect_llm_stages(plugin, name):
+    """The stages ``plugin`` registers through the register_llm_stages hook,
+    collected on a real plugin manager as LLMPlugin.on_start does."""
+    from corvidae.hooks import create_plugin_manager
+
+    pm = create_plugin_manager()
+    pm.register(plugin, name=name)
+    stages: dict[str, str] = {}
+    pm.hook.register_llm_stages(stages=stages)
+    return stages
+
+
 def recording_llm_plugin(main, background=None):
-    """A real LLMPlugin whose ``get_client`` records the role it is asked for
-    (``plugin.roles``) and serves ``main`` / ``background`` clients; an
-    unconfigured role falls back to main, as LLMPlugin does."""
+    """A real LLMPlugin whose ``get_client`` records the stage it is asked for
+    (``plugin.stages_requested``) and serves ``main`` and, when given, a
+    ``background`` client that no stage resolves to. The core stages are
+    registered, as register_llm_stages would on start."""
     from corvidae.llm_plugin import LLMPlugin
 
     class _RecordingLLMPlugin(LLMPlugin):
-        """LLMPlugin that logs each requested role."""
+        """LLMPlugin that logs each requested stage."""
 
         def __init__(self) -> None:
             super().__init__()
-            self.roles: list[str] = []
+            self.stages_requested: list[str | None] = []
 
-        def get_client(self, role: str = "main"):
-            self.roles.append(role)
-            return super().get_client(role)
+        def get_client(self, stage: str | None = None):
+            self.stages_requested.append(stage)
+            return super().get_client(stage)
 
     plugin = _RecordingLLMPlugin()
+    plugin._stages = dict(CORE_LLM_STAGES)
     plugin._clients["main"] = main
     if background is not None:
         plugin._clients["background"] = background

@@ -548,6 +548,16 @@ class TestToken:
         with pytest.raises(ValueError, match="token"):
             await plugin.on_init(pm=pm, config={"web": {"token": bad}})
 
+    async def test_short_env_token_rejected(self, monkeypatch):
+        # The env var shares the config token's check, so a too-short value
+        # from the environment must be refused rather than accepted.
+        monkeypatch.setenv("CORVIDAE_WEB_TOKEN", "short-token")
+        pm = create_plugin_manager()
+        pm.register(ChannelRegistry(), name="registry")
+        plugin = WebPlugin(pm)
+        with pytest.raises(ValueError, match="token"):
+            await plugin.on_init(pm=pm, config={"web": {}})
+
     async def test_generated_token_logged_once_as_url(self, make_env, caplog):
         caplog.set_level(logging.DEBUG)
         env = await make_env(token=None)
@@ -732,6 +742,20 @@ class TestAuth:
                                                          **env.cookie()}) as r:
             assert r.status == 403
 
+    async def test_ws_bad_host_403(self, make_env):
+        # The Host check runs before auth on every route, the WebSocket
+        # included; a DNS-rebinding page must not reach the handshake.
+        env = await make_env()
+        key = base64.b64encode(os.urandom(16)).decode()
+        req = (
+            f"GET /ws HTTP/1.1\r\nHost: evil.example\r\n"
+            "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n"
+            f"Origin: {env.origin}\r\nCookie: corvidae_web={session_for(TOKEN)}\r\n\r\n"
+        ).encode("ascii")
+        status = await raw_http(env.port, req)
+        assert b" 403 " in status, status
+
     def _assert_security_headers(self, headers, port):
         assert _parse_csp(headers["Content-Security-Policy"]) == _expected_csp(
             {f"ws://127.0.0.1:{port}", f"ws://localhost:{port}"})
@@ -864,6 +888,24 @@ class TestInbound:
         assert err["request"] == request_type and err["code"] == "bad_request"
         assert "history" not in conn.types()
         assert env.agent.calls == []
+
+    @pytest.mark.parametrize("name", ["a-b", "a_b", "1st", "x" * 64])
+    async def test_good_names_accepted(self, make_env, name):
+        # Only rejections were pinned; the slug grammar's accept side is
+        # hyphen, underscore, a leading digit, and the 64-char cap.
+        env = await make_env()
+        conn = await env.connect("main")
+        peer = await env.connect(name)
+        await conn.send(type="send", conversation=name, text="hi")
+        user = await peer.wait_type("user", text="hi")
+        assert user["conversation"] == name, user
+
+    @pytest.mark.parametrize("name", ["a-b", "a_b", "1st", "x" * 64])
+    async def test_good_names_subscribe_accepted(self, make_env, name):
+        env = await make_env()
+        # connect() subscribes and waits for history; a rejected slug raises
+        # an error frame instead, which that wait reports.
+        await env.connect(name)
 
     @pytest.mark.parametrize("text", [5, "\ud800"])
     async def test_bad_text(self, make_env, text):
