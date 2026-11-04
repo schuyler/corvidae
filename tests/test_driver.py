@@ -459,3 +459,26 @@ def test_burst_verdict_requires_codewords_after_the_count_ends() -> None:
     # No count at all fails with a reason naming 400.
     passed, detail = burst_verdict(["hello"], words)
     assert not passed and "400" in detail
+
+
+def test_usage_log_queries_read_the_profile_column(tmp_path):
+    """R4: the harness's usage_log queries filter on ``profile``."""
+    import sqlite3
+
+    from corvidae.metrics import USAGE_LOG_DDL
+    from harness.driver import count_main_calls_since, usage_rows_since
+
+    db_path = tmp_path / "sessions.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(USAGE_LOG_DDL)
+    conn.executemany(
+        "INSERT INTO usage_log "
+        "(ts, request_id, profile, model, channel_id, prompt_tokens, cached_tokens) "
+        "VALUES (?, ?, ?, 'm', 'c1', ?, ?)",
+        [(10.0, "r1", "main", 100, 40), (11.0, "r2", "background", 7, 0)],
+    )
+    conn.commit()
+    conn.close()
+
+    assert count_main_calls_since(db_path, "c1", 0.0) == 1
+    assert usage_rows_since(db_path, "c1", 0.0) == [(100, 40)]

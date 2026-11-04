@@ -93,7 +93,7 @@ async def make_env(tmp_path, monkeypatch):
         llm = LLMPlugin()
         pm.register(llm, name="llm")
         await llm.on_init(pm=pm, config=config)
-        monkeypatch.setattr(llm, "_create_client", lambda cfg, role="main": StubEncoder())
+        monkeypatch.setattr(llm, "_create_client", lambda cfg, profile="main": StubEncoder())
 
         clock, tracker = install_kernel_clock(pm)
         cleanups.append(clock.close)

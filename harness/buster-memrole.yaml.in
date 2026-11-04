@@ -7,7 +7,7 @@
 # still answer the person? The default profile (buster.yaml.in) keeps memory
 # and the funnel off, so this is a separate profile with one probe channel.
 #
-# No llm.embedding role: retrieval runs FTS5-only, so no embedding server is
+# No llm.embedding profile: retrieval runs FTS5-only, so no embedding server is
 # needed on the host. The driver seeds the memory row itself.
 
 llm:

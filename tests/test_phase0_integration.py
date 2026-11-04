@@ -81,7 +81,7 @@ async def _build_stack():
 
 async def _fetch_usage_rows(db):
     async with db.execute(
-        "SELECT stage, channel_id, role, model, total_tokens FROM usage_log ORDER BY id"
+        "SELECT stage, channel_id, profile, model, total_tokens FROM usage_log ORDER BY id"
     ) as cursor:
         return await cursor.fetchall()
 
@@ -100,10 +100,10 @@ class TestPhase0Acceptance:
 
             rows = await _fetch_usage_rows(db)
             assert len(rows) == 1
-            stage, channel_id, role, model, total = rows[0]
+            stage, channel_id, profile, model, total = rows[0]
             assert stage == "turn"
             assert channel_id == channel.id
-            assert role == "main"
+            assert profile == "main"
             assert model == "test-model"
             assert total == 14
         finally:
@@ -119,6 +119,9 @@ class TestPhase0Acceptance:
             compaction = CompactionPlugin()
             plugin.pm.register(compaction, name="compaction")
             await compaction.on_init(plugin.pm, {})
+            # The LLMPlugin started before compaction was registered; collect
+            # the stages the late plugin owns.
+            plugin.pm.hook.register_llm_stages(stages=llm._stages)
 
             # Build a conversation big enough to trip the 80% threshold of a
             # tiny max_tokens budget, then invoke the hook the way the agent
@@ -137,7 +140,7 @@ class TestPhase0Acceptance:
 
             rows = await _fetch_usage_rows(db)
             assert len(rows) == 1
-            stage, channel_id, role, model, total = rows[0]
+            stage, channel_id, profile, model, total = rows[0]
             assert stage == "compaction"
             assert channel_id == channel.id
         finally:

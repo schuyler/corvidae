@@ -106,10 +106,6 @@ async def run_live_evaluation(args) -> None:
                 "base_url": args.base_url, "model": args.model,
                 "api_key": args.api_key,
             },
-            "background": {
-                "base_url": args.base_url, "model": args.model,
-                "api_key": args.api_key,
-            },
             "embedding": {
                 "base_url": args.embedding_base_url or args.base_url,
                 "model": args.embedding_model or args.model,
@@ -131,6 +127,13 @@ async def run_live_evaluation(args) -> None:
     llm = LLMPlugin()
     pm.register(llm, name="llm")
     await llm.on_init(pm=pm, config=config)
+
+    # MemoryPlugin registers its LLM stages when LLMPlugin starts, so it
+    # must be registered first or get_client() can't resolve them.
+    memory_plugin = MemoryPlugin()
+    pm.register(memory_plugin, name="memory")
+    await memory_plugin.on_init(pm=pm, config=config)
+
     await llm.on_start(config=config)
 
     usage = UsageLogPlugin()
@@ -141,9 +144,6 @@ async def run_live_evaluation(args) -> None:
     pm.register(funnel, name="funnel")
     await funnel.on_init(pm=pm, config=config)
 
-    memory_plugin = MemoryPlugin()
-    pm.register(memory_plugin, name="memory")
-    await memory_plugin.on_init(pm=pm, config=config)
     await memory_plugin.on_start(config=config)
 
     # Ingest the fixture conversation through the real consolidation path.
@@ -192,15 +192,12 @@ async def run_live_evaluation(args) -> None:
         await run_retention_job(memory_plugin)
 
     # Run the queries through the real retrieval path.
-    channels = sorted({m["channel_id"] for m in memories})
-    # Group all fixture channels so retrieval sees the whole corpus.
-    memory_plugin._channel_groups = {"fixture": channels}
-
+    # Retrieval spans the whole memory, whatever channel wrote each record.
     recalls, mrrs = [], []
     positive = [q for q in queries if q["relevant"]]
     for query in positive:
         candidates, degraded = await memory_plugin.retrieve(
-            channels[0], query["text"], k=args.k
+            query["text"], k=args.k
         )
         # Map retrieved summaries back to fixture ids by exact-summary match
         # (live consolidation rewrites summaries, so fall back to reporting raw).
