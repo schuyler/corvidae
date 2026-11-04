@@ -68,16 +68,41 @@ A misspelled entry is not an error — `pm.set_blocked` on a name that matches n
 
 ## `llm` — LLM backend
 
-The `llm.main` block is required. Every key under `llm:` is a **profile**, built into its own client (`llm.main` and `llm.embedding` are the two corvidae reads; any other name is accepted and built, but nothing uses it yet). Each model-calling stage is registered by the plugin that owns it, with a kind: `chat` or `embedding`. A stage uses its kind's default profile: `chat` stages (main turns, compaction, consolidation, the importance prior, appraisal, critique, subagents) use `llm.main`, and the `embedding` stage uses `llm.embedding`. There are no fallback chains. Mapping individual stages to other profiles is not configurable yet (#399). Only `llm.main` is hot-swapped on config reload — other profiles are restart-only.
+Every key under `llm:` except `defaults` and `stages` is a **profile**: an endpoint, a model and request parameters, built into its own client. Each model-calling stage is registered by the plugin that owns it, with a kind (`chat` or `embedding`). A stage sends to the profile `llm.stages` maps it to; a stage the map doesn't name uses its kind's default profile, `llm.main` for chat and `llm.embedding` for embedding unless `llm.defaults` says otherwise. Main turns use the default chat profile. There are no fallback chains. Only a default chat profile is required.
+
+```yaml
+llm:
+  main:                       # a profile; kind omitted means chat
+    base_url: http://host:8080/v1
+    model: swift-1.5
+    extra_body: {reasoning_effort: xhigh}
+  forks:                      # a profile derived from main
+    extends: main
+    extra_body:
+      reasoning_budget_tokens: 8192
+  embedding:
+    kind: embedding
+    base_url: http://host:8081/v1
+    model: bge-m3
+    dimensions: 1024
+  defaults: {chat: main, embedding: embedding}   # optional; these are the fallbacks
+  stages:                     # optional: stage -> profile
+    compaction: forks
+    consolidation: forks
+```
+
+**All of `llm:` is read at startup. A change to any of it, `llm.main` included, applies on restart.** A reload that changes it logs the usual per-key restart-only warning for each changed key, plus one summary, `llm config changed; LLM profiles, llm.stages and llm.defaults apply on restart`, and keeps the running clients. A reload whose `llm:` section is malformed is refused whole, like any other bad section.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `llm.main.base_url` | string | — | Base URL for an OpenAI-compatible Chat Completions endpoint. **Required.** |
-| `llm.main.model` | string | — | Model identifier sent in each request. **Required.** |
+| `llm.main.base_url` | string | — | Base URL for an OpenAI-compatible Chat Completions endpoint. Required in every profile; the `llm.main` block itself is required only when `llm.defaults.chat` is unset. |
+| `llm.main.model` | string | — | Model identifier sent in each request. Required in every profile. |
+| `llm.<profile>.kind` | `chat` \| `embedding` | `chat` | What the profile serves. A chat profile takes chat stages and main turns; an embedding profile takes the `embedding` stage and needs `dimensions`. An omitted `kind` means `chat`, applied after `extends` is merged, so a child of an embedding profile stays one. Any other value fails startup. |
+| `llm.<profile>.extends` | string | — | Name of another profile to build on. See [Derived profiles](#derived-profiles-extends). Consumed by corvidae; never sent to the endpoint. |
 | `llm.main.api_key` | string | `null` | API key for authentication, sent as `Authorization: Bearer <key>`. Omit if the backend does not require one. Either a literal key or a quoted `"${VAR}"` reference to an environment variable (see below). Give the bare key: a value such as `Bearer ${X}` would send "Bearer Bearer ...". |
-| `llm.main.extra_body` | mapping | `null` | Provider-specific fields merged into the request body (e.g., `id_slot` for llama.cpp). On llama.cpp, `reasoning_format: none` returns the reply's reasoning inline, for `raw_reasoning`. |
+| `llm.main.extra_body` | mapping | `null` | Provider-specific fields merged into the request body (e.g., `id_slot` for llama.cpp). On llama.cpp, `reasoning_format: none` returns the reply's reasoning inline, for `raw_reasoning`. This is where a stage's reasoning budget (`reasoning_budget_tokens`) or token cap (`max_tokens`) goes. Corvidae passes the keys through without interpreting them. Where a channel's `set_settings` override and a fork's profile set the same key, the profile wins on a fork (see [`agent.forks`](#agentforks--background-processes-as-forks)); on a main turn the override wins. |
 | `llm.main.raw_reasoning` | boolean | `false` | The endpoint returns reasoning inline in `content`, closed by `</think>` (llama.cpp with `extra_body.reasoning_format: none`). Corvidae splits it into `reasoning_content` itself and treats a reply with no `</think>` as cut off mid-reasoning: the turn is re-run once, then reported as failed (#355). A call that sends `response_format` (a fork or background stage's JSON schema) runs in the server's parsed mode instead: `reasoning_format` is dropped from that request and its reply is not split, so it gets no cut-off detection (#360). shortcut: this relies on the server's own default being a parsed mode; a llama-server started with `--reasoning-format none` still rejects schema calls; upgrade to an explicit per-call override if such a deployment appears. shortcut: set it only where the chat template forces thinking open; otherwise every non-reasoning reply reads as cut off. Upgrade when a per-reply signal replaces the template assumption. |
-| `llm.main.reasoning_reopened` | string | `truncate` | What happens to a final reply that reopens reasoning after its answer: a second `<think>`, or a stray `</think>`, after the first `</think>` (#348). Needs `raw_reasoning`: in parsed mode the client sees no tags to check. Either way the client cuts the reply at that tag, so the user never sees the text after it, and logs a warning with the channel and the full raw completion. `truncate` sends and stores the text before the tag. `rerun` throws the cut reply away and regenerates once with the same messages; if that reply reopens too, its cut text is used. A stray `</think>` has no start marker, so the second block's text before the tag survives the cut. Only the main turn loop reruns; forks, subagents and background stages always truncate. Schema calls (`response_format`) aren't split, so they aren't checked. An invalid value is logged as a warning and read as `truncate`; it never stops startup. Applies on reload. |
+| `llm.main.reasoning_reopened` | string | `truncate` | What happens to a final reply that reopens reasoning after its answer: a second `<think>`, or a stray `</think>`, after the first `</think>` (#348). Needs `raw_reasoning`: in parsed mode the client sees no tags to check. Either way the client cuts the reply at that tag, so the user never sees the text after it, and logs a warning with the channel and the full raw completion. `truncate` sends and stores the text before the tag. `rerun` throws the cut reply away and regenerates once with the same messages; if that reply reopens too, its cut text is used. A stray `</think>` has no start marker, so the second block's text before the tag survives the cut. Only the main turn loop reruns; forks, subagents and background stages always truncate. Schema calls (`response_format`) aren't split, so they aren't checked. An invalid value is logged as a warning and read as `truncate`; it never stops startup. Applies on restart. |
 | `llm.main.max_retries` | integer | `3` | Maximum retry attempts on transient HTTP errors (429, 500, 502, 503, 504) and connection failures. Set to 0 to disable retries. After they run out, the turn sends the error reply and then retries itself (5 s doubling to 60 s) until the backend answers. |
 | `llm.main.retry_base_delay` | float | `2.0` | Base delay in seconds for exponential backoff between retry attempts. |
 | `llm.main.retry_max_delay` | float | `60.0` | Maximum delay cap in seconds for exponential backoff. |
@@ -85,20 +110,62 @@ The `llm.main` block is required. Every key under `llm:` is a **profile**, built
 | `llm.main.timeout` | float | `null` | Total HTTP timeout in seconds per LLM request. `null` means no timeout: the request waits as long as the server takes, and a connect to a host that drops packets waits until the OS gives up. |
 | `llm.embedding.base_url` | string | — | Base URL for an OpenAI-compatible `/embeddings` endpoint (embedding servers are usually separate from generation servers). Optional. |
 | `llm.embedding.model` | string | — | Embedding model identifier. Recorded in `embedding_meta`; changing it against an existing store logs an ERROR and disables embedding. Config revert is the only remediation. |
-| `llm.embedding.dimensions` | integer | — | **Required when `llm.embedding` is present.** Fixed vector dimension of the embedding model; the `memory_vec` table schema depends on it. Validated at startup. |
+| `llm.embedding.kind` | string | — | **Must be `embedding`** on the profile the embedding stage uses. Without it the block is a chat profile and startup fails (see [Migration](#migration-from-the-single-main-block)). |
+| `llm.embedding.dimensions` | integer | — | **Required for an embedding profile** (any profile with `kind: embedding`, not only one named `embedding`). Fixed vector dimension of the embedding model; the `memory_vec` table schema depends on it. Validated at startup. |
 | `llm.embedding.document_prefix` | string | `""` | String prepended to every text when embedding stored content (`kind="document"`). Recorded in `embedding_meta`; changing it against an existing store logs an ERROR and disables embedding. Config revert is the only remediation. Trailing space is the operator's responsibility (match the model card). |
 | `llm.embedding.query_prefix` | string | `""` | String prepended to every text when embedding a retrieval query (`kind="query"`). See `document_prefix` for mismatch semantics. |
+| `llm.defaults.chat`, `llm.defaults.embedding` | string | `main`, `embedding` | The default profile for each kind: what main turns and any unmapped stage of that kind use. Each must name a defined profile of that kind. A kind may have no default (no `llm.embedding` block and no `llm.defaults.embedding`: memory degrades to keyword search unless `llm.stages.embedding` maps the stage); a chat default is required, so `defaults.chat: foo` with no `llm.main` boots and sends main turns to `foo`. Any other key under `defaults` fails startup. |
+| `llm.stages.<stage>` | string | — | The profile `<stage>` sends to. See [Stages](#stages). |
 | `llm.embedding.*` | — | — | The remaining keys (`api_key`, which also takes `"${VAR}"`, `max_retries`, ...) match `llm.main`. `document_prefix` and `query_prefix` are embedding-only — they do not exist on `llm.main`. |
 
-**API key from the environment.** Quote the reference so YAML keeps it as text: `api_key: "${OPENAI_API_KEY}"`. The variable is read from the environment the daemon runs in, so a tracked `agent.yaml` holds no secret. This works for every profile, `main` included, and uses the same `${VAR}` expansion as MCP `headers`. A literal key still works; a value with no `${NAME}` (including one containing a bare `$`) is used as is. If the variable is unset, empty or contains a newline or NUL (often a trailing newline), startup fails with an error naming `llm.<profile>.api_key` and the variable; set it in the environment corvidae runs in and restart. The key's value is never logged or put in an error or a reply. A config reload re-reads the same variable; to pick up a changed environment, restart. A reload that newly references an unset variable fails, is logged, and keeps the old `llm.main` client.
+**API key from the environment.** Quote the reference so YAML keeps it as text: `api_key: "${OPENAI_API_KEY}"`. The variable is read from the environment the daemon runs in, so a tracked `agent.yaml` holds no secret. This works for every profile, `main` included, and uses the same `${VAR}` expansion as MCP `headers`. A literal key still works; a value with no `${NAME}` (including one containing a bare `$`) is used as is. If the variable is unset, empty or contains a newline or NUL (often a trailing newline), startup fails with an error naming `llm.<profile>.api_key` and the variable; set it in the environment corvidae runs in and restart. The key's value is never logged or put in an error or a reply. To pick up a changed environment, restart. A reload doesn't rebuild clients, so a changed variable or a newly referenced one is picked up only on restart.
 
-**Remote profiles.** Every profile is an OpenAI-compatible client, so any of them can point at a hosted endpoint. Whatever that profile is sent then leaves the host: `main` serves turns, compaction summaries, the agent's rendered view for out-of-window memory consolidation and for compaction's fallback (the system prompt, CONTEXT blocks, tool calls and results, up to the channel's budget; compaction's fallback sends the uncapped prefix), the importance prior, subagents, and the forked appraisal and critique stages; `embedding` serves memory embedding, retrieval and retention. Conversation content is in all of these inputs. See `threat-model.md` finding 12. Hosted endpoints give no latency guarantee, so set `llm.<profile>.timeout` generously.
+**Remote profiles.** Every profile is an OpenAI-compatible client, so any of them can point at a hosted endpoint. Whatever that profile is sent then leaves the host. A profile receives the main turns if it is the default chat profile, and everything the stages mapped to it send (see [Stages](#stages)): the agent's rendered view (the system prompt, CONTEXT blocks, tool calls and results, up to the channel's budget; compaction's fallback sends the uncapped prefix), the importance prior, subagent turns, memory embedding, retrieval and retention. Conversation content is in all of these inputs. Every stage `llm.stages` doesn't map goes to its kind's default profile, so with no `llm.stages` entries the default chat profile gets all of the chat stages and the default embedding profile gets the embedding stage. See `threat-model.md` finding 12. Hosted endpoints give no latency guarantee, so set `llm.<profile>.timeout` generously.
 
-An `llm.background` block is still accepted and built into a client, but no stage resolves to it, so it does nothing until the stage-to-profile map arrives (#399). When `llm.embedding` is absent, the `embedding` stage gets no client: `MemoryPlugin` stores records with `embedded=0` and retrieval degrades to FTS5 keyword search.
-
-At startup `LLMPlugin` logs where every registered stage resolves, for example `llm stages resolved: appraisal→main, compaction→main, consolidation→main, critique→main, embedding→embedding, rubric→main, subagent→main`. A stage whose default profile isn't configured shows `→(none)`.
+At startup `LLMPlugin` logs where every registered stage resolves, for example `llm stages resolved: appraisal→main, compaction→main, consolidation→main, critique→main, embedding→embedding, rubric→main, subagent→main`. A stage with no profile (its kind has no default and the map doesn't name it) shows `→(none)`.
 
 Retry behavior applies to transient status codes (429, 500, 502, 503, 504) and connection errors. The `Retry-After` header (429 responses) is honored when present; otherwise exponential backoff is used. Retries do not apply to client errors (4xx) other than 429.
+
+### Derived profiles (`extends`)
+
+`extends: <profile>` lays the block over the named profile, so a derived profile states only what differs. The merge:
+
+- Mappings merge recursively: a child's `extra_body.reasoning_budget_tokens` adds to the base's `extra_body`, keeping its other keys.
+- Lists and scalars replace.
+- A child's `null` deletes the inherited key. With `extends: main` and `extra_body: {reasoning_effort: null}`, the derived profile has no `reasoning_effort`.
+- Chains resolve root first. `kind` is an ordinary key, so a child inherits its base's.
+
+Every resolved profile needs `base_url` and `model` after the merge (a base block that exists only to be extended is not supported), and an embedding profile needs `dimensions`. Startup fails, and a reload is refused, on an unknown base, an `extends` cycle, an unknown `kind`, a missing `base_url`, `model` or `dimensions`, a non-mapping profile, an unknown or wrong-kind `defaults` entry, no default chat profile, a `defaults` or `stages` value that isn't a profile name (a list or mapping), or a `stages` entry naming a missing profile. Each message names the key (`llm.forks.extends names unknown profile 'mian'; defined profiles: embedding, forks, main`).
+
+A change to a base is a change to every profile that extends it, but only at the next restart.
+
+### Stages
+
+| Stage | Kind | What it sends |
+|-------|------|---------------|
+| `compaction` | chat | The summary fork, and the view call when the fork misses. |
+| `subagent` | chat | A subagent's turns. |
+| `consolidation` | chat | The consolidation fork, and the catch-up view call for a range that left the window. |
+| `rubric` | chat | The importance prior's call. |
+| `appraisal` | chat | The stage-2 appraisal fork. |
+| `critique` | chat | Each stylistic lens and the provenance check. |
+| `embedding` | embedding | Memory embedding, retrieval and retention. |
+
+Every call a stage makes goes to its profile, on every path: fork, view call, windowless call and subagent. A fork renders what it renders without the map; only its endpoint, model and `extra_body` come from the stage's profile. `usage_log` and the metrics name the stage's profile on every call, forks included.
+
+The `consolidation`, `rubric`, `appraisal`, `critique` and `embedding` stages belong to the cognition extra; without it only `compaction` and `subagent` exist.
+
+An `llm.stages` entry naming a profile that doesn't exist, or one of the wrong kind (a chat stage mapped to an embedding profile), fails startup. An entry naming no registered stage logs a warning and is ignored: a disabled plugin's stage is expected there, and so is a typo, so check the warning. If a kind has no default profile and some stage of that kind is unmapped, startup logs a warning naming those stages, which then have no client and degrade.
+
+Keeping a fork's cached prefix is the operator's job. A stage mapped to another endpoint or model sends a cold prefill, and a profile that sets a template-visible key (such as `reasoning_effort`) differently from main's also misses. Derive the stage's profile from `main` with `extends` and set only sampler-side keys to keep it. #440 reports misses.
+
+### Migration from the single `main` block
+
+- An `llm.embedding` block needs `kind: embedding`. Without it startup fails with `llm.embedding is a chat profile but is the default embedding profile by name; add kind: embedding to it, or set llm.defaults.embedding`.
+- `agent.forks.reasoning_budget_tokens` is removed, and leaving it in config is a startup error that names the key. To keep a budget, put `reasoning_budget_tokens` in the `extra_body` of a profile, and map the fork stages to it under `llm.stages`. An unmapped fork carries a budget only if the default chat profile's `extra_body` sets one; the old default of 2048 is gone.
+- `llm.background` has no special meaning. It was accepted but nothing used it; map a stage to it under `llm.stages` if you want it used.
+- `llm.main` is no longer hot-swapped on reload; restart to apply a change.
+- The `main_client` and `background_client` properties and `LLMPlugin.embedding_dimensions` are removed; use `get_client(stage)` and `profile_config(stage)`.
 
 ---
 
@@ -132,7 +199,7 @@ These values apply to all channels. Per-channel overrides in the `channels` sect
 | `agent.compaction_threshold` | float | `0.8` | Compaction triggers when `token_estimate / max_context_tokens` exceeds this value. |
 | `agent.compaction_retention` | float | `0.5` | After compaction, retain messages that fit within `compaction_retention × max_context_tokens` tokens, counting from the most recent. |
 | `agent.min_messages_to_compact` | integer | `5` | Skip compaction if the conversation has this many messages or fewer. |
-| `agent.compaction_fork_prompt` | string | built-in | Instruction appended to the dropped prefix as a `user` turn when compaction writes its summary: to a fork when forks are on for `compaction` (see [`agent.forks`](#agentforks--background-processes-as-forks)), and to the same render sent on `llm.main` on a fork miss or with forks off. Documented copy: `prompts/compaction_fork.md`. Replaces the removed `agent.compaction_prompt`: a config that still sets that key logs a startup warning naming this one and the key is ignored. Move any custom text here, rewritten as an instruction to the agent about its own conversation, not as a summarizer's system prompt. |
+| `agent.compaction_fork_prompt` | string | built-in | Instruction appended to the dropped prefix as a `user` turn when compaction writes its summary: to a fork when forks are on for `compaction` (see [`agent.forks`](#agentforks--background-processes-as-forks)), and to the same render sent on the `compaction` stage's profile on a fork miss or with forks off. Documented copy: `prompts/compaction_fork.md`. Replaces the removed `agent.compaction_prompt`: a config that still sets that key logs a startup warning naming this one and the key is ignored. Move any custom text here, rewritten as an instruction to the agent about its own conversation, not as a summarizer's system prompt. |
 | `agent.forks` | mapping | on | Run compaction, consolidation, appraisal and critique as forks of the main window. See [`agent.forks`](#agentforks--background-processes-as-forks). |
 | `agent.chars_per_token` | float | `3.5` | **Deprecated.** Accepted for interface and config compatibility. Has no effect on token counting — `count_tokens()` uses the module-level `_FALLBACK_CHARS_PER_TOKEN` constant (3.5) regardless of this value. |
 | `agent.immutable_settings` | list of strings | `[]` | Keys the agent is blocked from changing via the `set_settings` tool, on top of its built-in allowlist. `set_settings` only accepts the inference parameters `temperature`, `top_p`, `top_k`, `frequency_penalty`, `presence_penalty`, `max_tokens` and `seed`, the framework keys `max_turns`, `max_context_tokens` and `reasoning_history`, and dotted plugin tunables, so this list is for narrowing that set (e.g. the gate keys under "Runtime-tunable gate parameters"). `system_prompt` is always blocked. |
@@ -144,32 +211,36 @@ These values apply to all channels. Per-channel overrides in the `channels` sect
 On by default (GitHub issue #51; the default flipped in #320). A background
 stage doesn't build its own prompt. It renders the channel's window exactly
 as the main turn does, appends one `user` instruction, and makes one call on
-`llm.main`. On a single-slot llama-server that reuses the cached prefix
-instead of evicting it, and the agent's own system prompt is in view, so
+the stage's profile (`llm.stages`, else the default chat profile). When that
+profile is the main turn's, or differs only in sampler-side keys, a single-slot
+llama-server reuses the cached prefix instead of evicting it. The agent's own system prompt is in view either way, so
 records and summaries are written in its voice. A fork miss (forks off for
 the stage, the exchange left the window, the fork failed or its reply was
 unusable) skips the stage with a warning naming the stage, channel, trace
 and what was missing; it makes no standalone call. That covers stage-2
 appraisal, every critique lens, the provenance check and idle
 consolidation of a range still in the window. Two exceptions send the
-agent's rendered view on `llm.main` as a plain call instead, with no tools: compaction
+agent's rendered view on the stage's profile as a plain call instead, with no tools: compaction
 on a miss (then the fallback described in design.md applies), and
 consolidation of a range that has left the window, including the compaction
 trigger's task, rebuilt from `message_log`. Both use the same fork-instruction
-keys. See [design.md](design.md#forks). The view call costs a cold prefill on
-the main model's slot: for compaction's fallback it sends the whole uncapped
+keys. See [design.md](design.md#forks). The view call costs a cold prefill, on
+the slot of the stage's profile (the default chat profile's when the stage is unmapped): for compaction's fallback it sends the whole uncapped
 prefix at the cut (the window is over budget when compaction runs). Catch-up consolidation trims each segment's view to
 `max_context_tokens`; a single oversized row or tool cycle can still exceed
 it, and a warning names the segment.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `agent.forks.enabled` | boolean | `true` | Master switch. `false` makes every live-window stage except compaction skip on every run (appraisal stage 2, all lenses, provenance, idle consolidation of in-window ranges); compaction and out-of-window consolidation send the view as a plain call on `llm.main`. With forks off, a channel that never compacts never consolidates its in-window rows. |
-| `agent.forks.reasoning_budget_tokens` | integer or null | `2048` | Sent as `reasoning_budget_tokens` on every fork. A fork keeps the main reasoning effort, because the chat template renders it into the system block and changing it would break the cached prefix; this per-request budget bounds the fork's think instead. `null` sends nothing (server default). llama-server applies it only when the template declares thinking tags. |
+| `agent.forks.enabled` | boolean | `true` | Master switch. `false` makes every live-window stage except compaction skip on every run (appraisal stage 2, all lenses, provenance, idle consolidation of in-window ranges); compaction and out-of-window consolidation send the view as a plain call on the stage's profile. With forks off, a channel that never compacts never consolidates its in-window rows. |
 | `agent.forks.stages` | list of strings or null | `null` | Which stages fork: `compaction`, `consolidation`, `appraisal`, `critique`. `null` means all of them. A name no plugin uses matches nothing. `consolidation`, `appraisal` and `critique` belong to the cognition extra; without it only `compaction` exists. |
 
-Any other key under `agent.forks`, a non-boolean `enabled`, a negative or
-non-integer budget, or `stages` that isn't a list of strings fails at
+`agent.forks.reasoning_budget_tokens` was removed, and a config that still sets it fails startup with an error naming the key. A fork's reasoning budget, token cap and any other request parameter belong to the profile its stage maps to: put them in that profile's `extra_body` (see [`llm`](#llm--llm-backend)). A fork keeps the main reasoning effort only if its profile does: the chat template renders the effort into the system block, so a profile that changes `reasoning_effort` misses the cached prefix. An unmapped fork resolves to the default chat profile and sends no budget unless that profile has one.
+
+**Body precedence on a fork.** Later wins: `model`, `messages` and `tools`; the stage profile's `extra_body`; the channel's runtime overrides (`set_settings`), minus any key the profile's `extra_body` also sets; the stage's own `extra_body` (its `response_format`); `tool_choice: "none"`. So the profile beats a runtime override: a channel's `max_tokens: 200` against a profile's `extra_body.max_tokens: 4096` sends 4096, and the fork's cached prefix is unaffected because every runtime override is a sampler-side key. A main turn is unchanged, and there the override beats the profile. The same applies to an unmapped fork: an override of a key in the default chat profile's `extra_body` is dropped for forks and still applies to the channel's main turns.
+
+Any other key under `agent.forks`, a non-boolean `enabled`, `reasoning_budget_tokens` (removed; see
+[`llm.stages`](#stages)), or `stages` that isn't a list of strings fails at
 startup, and a reload carrying one is rejected.
 
 Each stage has a fork instruction:
@@ -222,8 +293,7 @@ Editing a prompt file does not trigger a reload; the change applies when
 the key is next resolved (on reload or at restart, per the table). Whether
 file edits trigger a reload is left to #408.
 
-Forks always run on `llm.main`, because only the main model shares the
-window's cache.
+A fork goes to its stage's profile, else to the default chat profile. Only the model whose window is forked shares its cache, so a stage mapped to another model forks cold.
 
 Each forkable stage tags its own LLM call (the summary, the record, the
 stage-2 appraisal, each critique lens) `mode = 'fork'` or `'standalone'`
@@ -359,7 +429,7 @@ A record's `created_at` is the `sessions.db` timestamp of the last message in it
 | `memory.retrieval.bands.moderate` | float | `0.60` | Value at or above which a retrieved memory is banded `[moderate]`; below is `[weak]` (dropped unless nothing else matched). Compared against the same quantity as `bands.strong`. |
 | `memory.retrieval.band_on` | `score` \| `similarity` | `score` | What the bands are applied to. `score` bands the recency-decayed score, so with the default half-life nothing older than about 9 days can be `[strong]`. `similarity` bands raw relevance, so an old, apt memory reads `[strong] (180d)` rather than as a guess; candidates are still ranked by the decayed score. In FTS5-degraded retrieval every keyword hit carries the similarity proxy (0.6), so under `similarity` all keyword hits get the same band: whichever band 0.6 falls in under the configured thresholds (`[moderate]` with the defaults). `retrieval_log.top_score` (and `exchange_log.retrieval_top_score`) record the top-ranked candidate's decayed score; `retrieval_log.top_similarity` (and `exchange_log.retrieval_top_similarity`) record the same candidate's raw similarity. Calibrate the thresholds from whichever one `band_on` names, excluding `degraded_to_fts = 1` rows, whose similarity is the 0.6 proxy rather than a measurement (`exchange_log` has no such flag; join `retrieval_log` on `trace_id` to filter it). Rows written before these columns existed read NULL. Any other value logs a warning and uses `score`. |
 | `memory.retrieval.recency_from` | `created` \| `last_used` | `created` | Where the ranking age is measured from. `last_used` uses `max(created_at, last_retrieved_at)`, the same rule retention uses, so a memory stays fresh while it keeps being recalled. The `(age)` shown to the model is always measured from `created_at`. Any other value logs a warning and uses `created`. |
-| `memory.consolidation_fork_prompt` | string | built-in | Overrides the instruction appended to the window for a consolidation record: to a fork when `agent.forks` is on for `consolidation`, and to the agent's rebuilt view sent on `llm.main` for a range that has left the window (documented copy: `prompts/memory_consolidation_fork.md`). Replaces the removed `memory.consolidation_prompt`: a config that still sets that key logs a startup warning naming this one and the key is ignored. Must be a string; a non-string value fails startup naming the key and the value, because records are stamped with the text the call was sent with ([cognition.md](cognition.md#record-stamps)). Static config, not a runtime tunable. The output schema is fixed in code: an override must still ask for the record shape (`summary`, `topic_tags`, `participants`). |
+| `memory.consolidation_fork_prompt` | string | built-in | Overrides the instruction appended to the window for a consolidation record: to a fork when `agent.forks` is on for `consolidation`, and to the agent's rebuilt view sent on the `consolidation` stage's profile for a range that has left the window (documented copy: `prompts/memory_consolidation_fork.md`). Replaces the removed `memory.consolidation_prompt`: a config that still sets that key logs a startup warning naming this one and the key is ignored. Must be a string; a non-string value fails startup naming the key and the value, because records are stamped with the text the call was sent with ([cognition.md](cognition.md#record-stamps)). Static config, not a runtime tunable. The output schema is fixed in code: an override must still ask for the record shape (`summary`, `topic_tags`, `participants`). |
 | `memory.dup_threshold` | float | `0.95` | Near-duplicate merge threshold. When a new consolidation embedding has cosine similarity ≥ this value against an existing record anywhere in the agent's memory, on any channel, the older record is superseded: its statistics are folded into the new record and its vec row is deleted. Retrieval spans the whole memory, so every channel sees the survivor. (There is no `memory.channel_groups` any more: it was removed in #168 and a config that still sets it is not read, with no warning. Memory has no per-channel scope; for a second identity, run a second instance.) Applied only when sqlite-vec is available and the new record's embedding succeeded; silently skipped otherwise. |
 
 ### `memory.retention` — Retention job
@@ -809,7 +879,6 @@ No restart is required for the changes listed below. Changes that require restar
 
 | Setting | Effect |
 |---------|--------|
-| `llm.main` | New `LLMClient` created and started; old client closed asynchronously after in-flight requests finish. |
 | `agent.compaction_threshold` | `CompactionPlugin` reads the new threshold on its next compaction check. |
 | `agent.chars_per_token` | Deprecated. The value is reloaded into `Agent` and `CompactionPlugin` for config compatibility, but has no effect on token counting — `count_tokens()` uses the module-level constant. |
 | `agent.request_logprobs` | `Agent` re-reads the flag; takes effect on the next LLM call. |
@@ -834,7 +903,7 @@ No restart is required for the changes listed below. Changes that require restar
 | `irc.allow` | The allowlist is parsed once in `on_init`; a reload keeps the old one. |
 | `web.host`, `web.port`, `web.allowed_origins`, adding or removing the `web` block | The listener is bound at startup. A reload logs `restart to apply` and keeps serving with the old values. |
 | Existing exact entries in `channels:` | Channels already registered retain their original `ChannelConfig` until restart, except `tools.disabled` (above). Transport-wide entries are live (above). |
-| `llm.*` other than `llm.main` | Not updated on reload. |
+| `llm.*` (every profile, including `llm.main`, plus `llm.defaults` and `llm.stages`) | Read at startup. A reload that changes any of it logs a restart-only warning per changed key and `llm config changed; LLM profiles, llm.stages and llm.defaults apply on restart` and keeps the running clients. A malformed `llm:` section still refuses the whole reload. A reload is not checked against the registered stages, so a `llm.stages` entry of the wrong kind passes the reload and fails the next startup. |
 | `memory.*` (including `memory.consolidation_fork_prompt`) | `MemoryPlugin` reads its section at init only. That includes `memory.idle_consolidate_after` and `memory.retention.*`: the idle watch and retention timer are set when the plugin starts. |
 | `heartbeat.after` | `HeartbeatPlugin` reads it at init and registers its idle watch at start. Putting the heartbeat to sleep or waking it takes a restart. |
 | `heartbeat.keep_beats` | `HeartbeatPlugin` reads it at init. Changing it takes a restart. |
@@ -845,7 +914,7 @@ No restart is required for the changes listed below. Changes that require restar
 At startup (not reload), a missing or malformed config file, or a rejected
 value in the `agent` or `channels` sections (e.g. a `channels.<id>.tools`
 block that is not `{disabled: [names]}`, or an unknown key such as
-`channels.<id>.max_turn`), or in `tools.call_timeout` / `tools.timeouts`, prints
+`channels.<id>.max_turn`), in the `llm` section (profiles, `extends`, `llm.defaults`, `llm.stages`), or in `tools.call_timeout` / `tools.timeouts`, prints
 `Config error: <detail> — check <path>` to stderr and exits non-zero. The
 detail names the key, the rejected value and what is accepted. The file is
 read as UTF-8 whatever the locale: one that isn't valid UTF-8 says so, with
@@ -856,7 +925,7 @@ nested too deeply to load says to reduce the nesting.
 - **Not valid UTF-8, or YAML nested too deeply**: logged at `ERROR` naming the file, the cause (with the byte offset for UTF-8) and the remedy; reload is skipped and the running config stays in force.
 - **Rejected value in `agent:`, `daemon:` or `channels:`** (e.g. a malformed `channels.<id>.tools`): logged at `ERROR` naming the file. For `channels:` the message also names the key and the value and says "reload skipped"; for `agent:` and `daemon:` the key is in the logged traceback. The reload is skipped whole: no section is applied and no plugin receives `on_config_reload`, so a typo in one `channels:` entry cannot change `agent:` values.
 - **Rejected `tools.call_timeout` or `tools.timeouts`**: logged at `ERROR` naming the key and the value, with "reload skipped"; the running config is unchanged.
-- **Missing `llm.main` after merge**: logged at `ERROR`; reload is skipped.
+- **Malformed `llm:` section** (an unknown `extends` base, an `extends` cycle, an unknown `kind`, an embedding profile with no `dimensions`, no default chat profile, an `llm.stages` entry naming a missing profile, and so on): logged at `ERROR` naming the key, with "reload skipped"; the running config is unchanged.
 - **Config file deleted**: logged at `WARNING`; polling continues. The file may reappear.
 - **Per-plugin failure in `on_config_reload`**: logged at `ERROR`; other plugins still receive the reload.
 

@@ -15,7 +15,8 @@ Reserved config keys consumed (set by Runtime):
 Error handling:
     - Invalid YAML: logged at ERROR, reload skipped.
     - Missing file: logged at WARNING, polling continues (file may reappear).
-    - Failed validation (no llm.main): logged at ERROR, reload skipped.
+    - Failed validation (a malformed llm section, such as no default chat
+      profile): logged at ERROR, reload skipped.
     - Per-plugin exceptions: logged at ERROR, other plugins still receive reload.
 """
 
@@ -35,6 +36,7 @@ from corvidae.channel import (
 )
 from corvidae.hooks import CorvidaePlugin, hookimpl
 from corvidae.idle import validate_daemon_config
+from corvidae.llm_plugin import parse_llm_config
 from corvidae.runtime import deep_merge
 from corvidae.tool_collection import parse_tool_timeouts
 
@@ -168,7 +170,7 @@ class ConfigWatcherPlugin(CorvidaePlugin):
         Steps:
         1. Parse YAML from disk. On failure: log ERROR, skip.
         2. Deep-merge CLI overrides on top of the new YAML.
-        3. Validate (must be a dict with llm.main). On failure: log ERROR, skip.
+        3. Validate the llm section (parse_llm_config). On failure: log ERROR, skip.
         3b-3e. Validate agent, daemon, channels and tools (call_timeout,
            timeouts) sections. On failure: log ERROR, skip the whole reload
            (nothing is applied, #208).
@@ -222,12 +224,14 @@ class ConfigWatcherPlugin(CorvidaePlugin):
             if base_dir is not None:
                 new_config["_base_dir"] = base_dir
 
-        # Step 3: Validate — must have llm.main.
-        llm_main = new_config.get("llm", {}).get("main")
-        if not llm_main:
+        # Step 3: Validate the llm section. Nothing in it is applied on
+        # reload, but a malformed one refuses the whole reload.
+        try:
+            parse_llm_config(new_config.get("llm"))
+        except ValueError as exc:
             logger.error(
-                "config reload failed: llm.main is absent from %s after merge",
-                self._config_path,
+                "config reload failed: %s in %s; reload skipped, running config unchanged",
+                exc, self._config_path, exc_info=True,
             )
             return
 

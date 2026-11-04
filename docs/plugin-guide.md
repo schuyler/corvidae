@@ -740,6 +740,10 @@ turn's render of the window, up to a cut, plus one `user` instruction.
 from corvidae.fork import fork_agent, window_db_ids
 
 class MyPlugin(CorvidaePlugin):
+    @hookimpl
+    def register_llm_stages(self, stages: dict[str, str]) -> None:
+        stages["review"] = "chat"              # the stage the fork below names
+
     async def review(self, channel, rowid: int) -> str | None:
         agent = fork_agent(self.pm, "review")   # None unless agent.forks enables "review"
         conv = channel.conversation
@@ -751,6 +755,7 @@ class MyPlugin(CorvidaePlugin):
         try:
             result = await agent.fork(
                 channel, "Pause here and review your last answer. Reply in JSON.",
+                stage="review",
                 extra_body={"response_format": {...}},
             )
         except Exception as exc:
@@ -759,7 +764,7 @@ class MyPlugin(CorvidaePlugin):
         return result.text
 ```
 
-- `Agent.fork(channel, instruction, *, cut=None, extra_body=None)` returns
+- `Agent.fork(channel, instruction, *, stage, cut=None, extra_body=None)` returns
   `ForkResult(text, message, usage, model)`. `model` is the model the fork
   request was sent with (`LLMClient.request_model(body)`, so an
   `extra_body["model"]` override shows), for plugins that record how their
@@ -768,14 +773,26 @@ class MyPlugin(CorvidaePlugin):
   the whole window;
   `cut=k` forks `messages[:k]` (use `snap_cut_to_tool_boundary` if `k`
   might split a tool cycle, or the prefix won't match the cache).
-- It uses `llm.main`, the agent's tool schemas with `tool_choice: "none"`,
-  and the channel's runtime overrides, so the prefix matches the main
-  turn. Don't pass `reasoning_effort` or anything else the chat template
-  renders into the prompt: that breaks the cached prefix. Bound cost with
-  `agent.forks.reasoning_budget_tokens` instead.
+- `stage` is required, and must be a stage you registered with
+  `register_llm_stages` (an unregistered name raises `ValueError`). The call
+  goes to that stage's profile: the one the operator maps it to under
+  `llm.stages`, else the default chat profile. Name the stage, never a
+  profile.
+- It sends the agent's tool schemas with `tool_choice: "none"` and the
+  channel's runtime overrides, so the render matches the main turn; the
+  prefix is cached only if the stage's profile is the main turn's, or
+  differs from it in sampler-side keys. Don't pass `reasoning_effort` or
+  anything else the chat template renders into the prompt in your own
+  `extra_body`: that breaks the cached prefix. There is no fork budget key:
+  the operator bounds a stage's reasoning and output with
+  `reasoning_budget_tokens` and `max_tokens` in its profile's `extra_body`.
+  Where a runtime override and the stage profile set the same key, the
+  profile wins on a fork (the override is not sent); your `extra_body` beats
+  the profile, and `tool_choice: "none"` beats everything (design.md,
+  "Body precedence").
 - It mutates nothing, persists nothing, fires no hooks and never runs
   tools: a reply with `tool_calls` (or a call written out as text) raises `ForkRefused`; no window or no
-  client raises `ForkUnavailable`. Treat these as a miss: skip the live-window work and log it. Keep a non-fork path only for windowless work (seeding, imports), and for a range that has left the window or a stage whose output can't be skipped, as compaction does: for those use the view call below, not a prompt that describes the conversation.
+  client for the stage raises `ForkUnavailable`. Treat these as a miss: skip the live-window work and log it. Keep a non-fork path only for windowless work (seeding, imports), and for a range that has left the window or a stage whose output can't be skipped, as compaction does: for those use the view call below, not a prompt that describes the conversation.
 - Set your own `stage` attribution around the call; `Agent.fork` adds
   `mode="fork"`. Tag any standalone call you keep `mode="standalone"`.
 - Check containment yourself: a fork only makes sense while the rows your
@@ -1184,7 +1201,7 @@ Registered by `SubagentPlugin` (entry point name: `subagent`).
 |------|------------|--------------|
 | `subagent` | `instructions: str`, `description: str`, `_ctx: ToolContext` | Enqueues a background task that runs a full agent loop with `instructions` as its prompt. Returns immediately with the enqueued task ID. Results are delivered via `on_notify` when the task completes. |
 
-`subagent` requires `ToolContext` (injected automatically — not an LLM parameter). It excludes itself from the subagent's tool registry to prevent recursion. The subagent calls the model as the `subagent` stage, a `chat` stage, so it uses `llm.main`.
+`subagent` requires `ToolContext` (injected automatically — not an LLM parameter). It excludes itself from the subagent's tool registry to prevent recursion. The subagent calls the model as the `subagent` stage, a `chat` stage, so it uses `llm.stages.subagent`, else the default chat profile (`llm.main` by default).
 
 ### RuntimeSettingsPlugin tools
 
@@ -1321,7 +1338,7 @@ Compacts conversation history when it approaches the channel's
 
 Implements one hook:
 
-- `resolve_compaction` (`trylast=True`) — fires before each LLM call. Checks whether the token estimate exceeds `compaction_threshold * max_tokens`. If so, and if the conversation has more than `min_messages_to_compact` messages, summarizes older messages to fit within `compaction_retention * max_tokens`, moving the cut off any tool cycle that straddles it where that still leaves a useful compaction (design.md, CompactionPlugin step 3). With `agent.forks` on for `compaction`, the summary comes from a fork of the dropped prefix (`agent.compaction_fork_prompt`); otherwise, or if the fork fails, from the same render sent on the compaction stage's profile (`llm.main` today) with no tools (the view call); if that fails too, the over-budget fallback applies. Fires `before_compaction` before truncating and `on_compaction` after. Returns True to stop the `firstresult` chain. Runs after any third-party handlers at default priority.
+- `resolve_compaction` (`trylast=True`) — fires before each LLM call. Checks whether the token estimate exceeds `compaction_threshold * max_tokens`. If so, and if the conversation has more than `min_messages_to_compact` messages, summarizes older messages to fit within `compaction_retention * max_tokens`, moving the cut off any tool cycle that straddles it where that still leaves a useful compaction (design.md, CompactionPlugin step 3). With `agent.forks` on for `compaction`, the summary comes from a fork of the dropped prefix (`agent.compaction_fork_prompt`); otherwise, or if the fork fails, from the same render sent on the compaction stage's profile (`llm.stages.compaction`, else the default chat profile) with no tools (the view call); if that fails too, the over-budget fallback applies. Fires `before_compaction` before truncating and `on_compaction` after. Returns True to stop the `firstresult` chain. Runs after any third-party handlers at default priority.
 
 Token counting uses tiktoken (cl100k_base encoding) via `count_tokens()` in `corvidae/context.py`. When tiktoken is unavailable, a character-based fallback is used (3.5 chars per token). `agent.chars_per_token` is deprecated and only takes effect in the fallback path.
 
@@ -1427,13 +1444,17 @@ still fire from LLMPlugin's observer; nothing records them.
 Owns the `LLMClient` instance lifecycle. Entry point name: `"llm"`. Other plugins retrieve clients via
 `get_dependency(pm, "llm", LLMPlugin)`.
 
-Implements two hooks:
+Implements these lifecycle hooks:
 
 - `on_start` — broadcasts `register_llm_stages` to collect the model-calling
-  stages, reads every profile under `llm:` (`llm.main` is required), creates an
-  `LLMClient` for each, starts their aiohttp sessions, and logs where each
-  stage resolves (`llm stages resolved: ...`).
+  stages, parses the `llm:` section (`parse_llm_config`: profiles, `extends`,
+  `llm.defaults`, `llm.stages`), checks the stage map against the registered
+  stages, creates an `LLMClient` for each profile, starts their aiohttp
+  sessions, and logs where each stage resolves (`llm stages resolved: ...`).
 - `on_stop` — closes all aiohttp sessions.
+- `on_config_reload` — swaps no client. A reload that changes `llm:` logs a
+  warning, and the change applies on restart; nothing under `llm:` is
+  hot-reloaded, `llm.main` included.
 
 Each created client gets a hook observer injected that fires
 `on_llm_request`/`on_llm_response` (with the client's profile and the current
@@ -1450,24 +1471,29 @@ def register_llm_stages(self, stages: dict[str, str]) -> None:
     stages["summarize"] = "chat"       # or "embedding"
 ```
 
-A stage resolves to its kind's default profile: `chat` to `main`,
-`embedding` to `embedding`. There are no fallback chains. Then:
+A stage resolves to the profile the operator maps it to under `llm.stages`,
+else to its kind's default profile (`llm.defaults`; `chat` to `main` and
+`embedding` to `embedding` when omitted). There are no fallback chains, and
+a plugin never names a profile. Then:
 
 ```python
 llm = get_dependency(self.pm, "llm", LLMPlugin)
-client = llm.get_client("summarize")   # None if the default profile isn't configured
-main = llm.get_client()                # the main-turn client
+client = llm.get_client("summarize")   # None if the stage resolves to no profile
+main = llm.get_client()                # the main-turn client (default chat profile)
+settings = llm.profile_config("summarize")  # the stage's resolved profile settings, read-only
 ```
 
 `get_client(stage)` raises `ValueError` for a name no plugin registered, and
-profile names count: `get_client("main")` raises, so use `get_client()`. An
-`llm.background` block is accepted but nothing resolves to it until the
-operator stage-to-profile map (#399) arrives.
+profile names count: `get_client("main")` raises, so use `get_client()`.
+Resolve the client when you call it, as the stages in this repo do, not in your
+own `on_start`: hooks run concurrently, so `LLMPlugin` may not have started
+yet. The `main_client` and `background_client` properties and
+`embedding_dimensions` are gone.
 
 **Config:**
 ```yaml
 llm:
-  main:                        # required
+  main:                        # required unless llm.defaults.chat names another profile
     base_url: https://api.openai.com/v1
     model: gpt-4o
     api_key: sk-...            # optional; can also use environment variable
@@ -1477,10 +1503,15 @@ llm:
     retry_max_delay: 60.0      # optional (default 60.0)
     timeout: 120               # optional: request timeout in seconds
   embedding:                   # optional — the embedding stage gets no client without it
+    kind: embedding            # required for an embedding profile
     base_url: http://localhost:8082/v1
     model: nomic-embed-text
     dimensions: 768            # required
+  # stages: {compaction: main}   # optional: map a stage to a defined profile
 ```
+
+See [`llm`](configuration.md#llm--llm-backend) for `kind`, `extends`,
+`defaults` and `stages`.
 
 **Without this plugin:** `Agent` and `CompactionPlugin` cannot create LLM
 clients and will raise `RuntimeError` during startup.
@@ -1589,7 +1620,7 @@ Implements three hooks:
 On each poll cycle, when the mtime has changed:
 1. The file is parsed as YAML.
 2. CLI overrides are deep-merged on top of the new YAML.
-3. The result is validated (must be a dict with `llm.main`).
+3. The `llm` section is validated (`parse_llm_config`: a malformed profile set, `extends` problem, `defaults` or `stages` entry, or no default chat profile). On failure the reload is skipped.
 4. `ChannelRegistry.agent_defaults` is updated from the new `agent` section.
 5. `load_channel_config` is called: it registers new exact entries, updates `tools.disabled` on channels already registered, and replaces transport-wide entries (`signal:*`), re-matching them on every live channel. A malformed section changes no channel.
 6. `on_config_reload` is dispatched to each plugin individually. A plugin that raises logs an error but does not block the other plugins.

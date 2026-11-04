@@ -40,7 +40,7 @@ from corvidae.hooks import create_plugin_manager
 from corvidae.llm_plugin import LLMPlugin
 from corvidae_cognition.memory import MemoryPlugin
 from corvidae.persistence import PersistencePlugin, init_db
-from helpers import CORRUPT_MESSAGES, insert_raw_message, skip_warnings
+from helpers import CORRUPT_MESSAGES, insert_raw_message, skip_warnings, stub_llm_config, with_chat_llm
 
 
 DIMS = 32
@@ -49,6 +49,7 @@ EMBED_CONFIG = {
     "llm": {
         "main": {"base_url": "http://localhost:8080", "model": "chat"},
         "embedding": {
+            "kind": "embedding",
             "base_url": "http://localhost:8081",
             "model": "test-embedder",
             "dimensions": DIMS,
@@ -75,7 +76,7 @@ class StubEmbedClient:
 
 async def build_tools_env(config=None):
     """Full pm: persistence + llm(stub) + funnel + memory + memory_tools."""
-    config = config or EMBED_CONFIG
+    config = with_chat_llm(config or EMBED_CONFIG)
     db = await aiosqlite.connect(":memory:")
     await init_db(db)
 
@@ -90,9 +91,7 @@ async def build_tools_env(config=None):
     embedder = StubEmbedClient()
     llm._clients["main"] = embedder
     llm._clients["embedding"] = embedder
-    embedding_cfg = config.get("llm", {}).get("embedding")
-    if embedding_cfg:
-        llm.embedding_dimensions = embedding_cfg["dimensions"]
+    stub_llm_config(llm, config.get("llm"))
 
     funnel = FunnelPlugin()
     pm.register(funnel, name="funnel")

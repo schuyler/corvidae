@@ -5,7 +5,7 @@ The documented copy of `CompactionPlugin.DEFAULT_FORK_PROMPT` in
 `agent.forks.stages`), compaction forks the window at the cut: the prompt is
 the main turn's render of everything about to be dropped, followed by this
 text as a `user` turn (GitHub issue #51). When forks are off or the fork
-fails, the same render is sent as a plain call on `llm.main`. Either
+fails, the same render is sent as a plain call on the `compaction` stage's profile. Either
 way the agent's own system prompt is above it, so "you" is the agent.
 
 Override this text with a literal string via the

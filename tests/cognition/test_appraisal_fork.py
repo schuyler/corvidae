@@ -47,6 +47,7 @@ async def test_fork_used_when_exchange_is_in_window(tmp_path):
     env, stored = await _run(tmp_path, agent)
     assert env.stub.chat_calls == []
     call = agent.calls[0]
+    assert call["stage"] == "appraisal"
     assert (call["cut"], call["extra_body"]) == (None, STAGE2_EXTRA_BODY)
     assert call["instruction"].startswith(DEFAULT_STAGE2_FORK_PROMPT)
     for part in ("«is the heater the culprit?»", "«yes, brownout»", "no retrieval recorded"):

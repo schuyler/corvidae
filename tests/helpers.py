@@ -10,6 +10,8 @@ import time
 import pytest
 import aiosqlite
 
+from corvidae.hooks import hookimpl
+
 
 def sent(pm, kind: type) -> list[tuple[object, object]]:
     """Return (channel, event) for every ``send`` of an event of ``kind``.
@@ -179,12 +181,12 @@ class FakeForkAgent:
             lambda messages: apply_reasoning_history(messages, policy),
         )
 
-    async def fork(self, channel, instruction, *, cut=None, extra_body=None):
+    async def fork(self, channel, instruction, *, stage, cut=None, extra_body=None):
         from corvidae.attribution import get_attribution
         from corvidae.fork import ForkResult
 
         self.calls.append({
-            "instruction": instruction, "cut": cut, "extra_body": extra_body,
+            "instruction": instruction, "stage": stage, "cut": cut, "extra_body": extra_body,
             "attribution": dict(get_attribution()),
         })
         if self.error is not None and (self.fail_marker is None or self.fail_marker in instruction):
@@ -231,6 +233,27 @@ class RecordingClient:
 CORE_LLM_STAGES = {"compaction": "chat", "subagent": "chat"}
 
 
+#: A minimal llm: section: one chat profile, no embedding profile.
+STUB_LLM_SECTION = {"main": {"base_url": "http://stub.test/v1", "model": "stub"}}
+
+
+def with_chat_llm(config: dict | None = None) -> dict:
+    """``config`` with an llm: section added when it has none, so a plugin
+    that parses llm: in on_init gets the default chat profile every real
+    config has."""
+    config = dict(config or {})
+    config.setdefault("llm", STUB_LLM_SECTION)
+    return config
+
+
+def stub_llm_config(plugin, llm_section: dict | None = None) -> None:
+    """Give an LLMPlugin that never ran on_start its parsed llm: section, so
+    get_client resolves the clients a test assigns to ``plugin._clients``."""
+    from corvidae.llm_plugin import parse_llm_config
+
+    plugin._config = parse_llm_config(llm_section or STUB_LLM_SECTION)
+
+
 def collect_llm_stages(plugin, name):
     """The stages ``plugin`` registers through the register_llm_stages hook,
     collected on a real plugin manager as LLMPlugin.on_start does."""
@@ -264,9 +287,93 @@ def recording_llm_plugin(main, background=None):
     plugin = _RecordingLLMPlugin()
     plugin._stages = dict(CORE_LLM_STAGES)
     plugin._clients["main"] = main
+    llm_section = dict(STUB_LLM_SECTION)
     if background is not None:
         plugin._clients["background"] = background
+        llm_section["background"] = {"base_url": "http://background.test/v1", "model": "bg"}
+    stub_llm_config(plugin, llm_section)
     return plugin
+
+
+class LLMResponseRecorder:
+    """Plugin recording the profile and attribution of every on_llm_response."""
+
+    def __init__(self) -> None:
+        self.responses: list[dict] = []
+
+    @hookimpl
+    async def on_llm_response(self, profile, model, attribution):
+        self.responses.append({"profile": profile, "model": model, "attribution": attribution})
+
+
+async def start_llm_plugin(monkeypatch, llm_config: dict, stages: dict, pm=None):
+    """A real LLMPlugin, started from ``llm_config``, on ``pm`` (or a fresh one).
+
+    ``stages`` is what an owner plugin registers through register_llm_stages.
+    Every client is real, but ``aiohttp.ClientSession`` is replaced for the
+    test by a fake that answers each POST with a canned text completion and
+    records ``{"url", "json"}`` in the returned ``posts`` list, so a test sees
+    which endpoint and body each call reached.
+
+    Returns (plugin, posts). The caller stops the plugin.
+    """
+    import aiohttp
+
+    from corvidae.hooks import create_plugin_manager
+    from corvidae.llm_plugin import LLMPlugin
+    from llm_response_fixtures import _make_text_response
+
+    posts: list[dict] = []
+
+    class _Response:
+        status = 200
+        headers: dict = {}
+
+        def raise_for_status(self):
+            pass
+
+        async def json(self):
+            return _make_text_response("ok")
+
+        async def text(self):
+            return ""
+
+    class _Post:
+        async def __aenter__(self):
+            return _Response()
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class _Session:
+        def __init__(self, headers=None):
+            self.headers = headers or {}
+
+        def post(self, url, json=None, timeout=None):
+            posts.append({"url": url, "json": json})
+            return _Post()
+
+        async def close(self):
+            pass
+
+    monkeypatch.setattr(aiohttp, "ClientSession", _Session)
+
+    table = dict(stages)
+
+    class _StageOwner:
+        @hookimpl
+        def register_llm_stages(self, stages):
+            stages.update(table)
+
+    if pm is None:
+        pm = create_plugin_manager()
+    pm.register(_StageOwner(), name="stage_owner")
+    plugin = LLMPlugin()
+    pm.register(plugin, name="llm")
+    config = {"llm": llm_config}
+    await plugin.on_init(pm, config)
+    await plugin.on_start(config)
+    return plugin, posts
 
 
 def window_of(channel_id, rowids, summary=False, contents=None):

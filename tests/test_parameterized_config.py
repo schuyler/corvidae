@@ -13,6 +13,7 @@ import inspect
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from helpers import stub_llm_config
 
 pytestmark = pytest.mark.timeout(30)
 
@@ -534,7 +535,8 @@ class TestAgentMaxToolResultChars:
 
         from corvidae.llm_plugin import LLMPlugin
         mock_llm = LLMPlugin(pm)
-        mock_llm.main_client = MagicMock()
+        mock_llm._clients["main"] = MagicMock()
+        stub_llm_config(mock_llm)
         pm.register(mock_llm, name="llm")
 
         # Configure ToolCollectionPlugin with the custom max_result_chars value

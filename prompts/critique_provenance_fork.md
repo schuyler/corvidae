@@ -5,7 +5,7 @@ The documented copy of `DEFAULT_FORK_PROMPTS["provenance"]` in
 `agent.forks.stages`), the lens runs as a fork of the live window instead
 of a separate critic call: the main turn's render of the whole window,
 followed by this text as a `user` turn (GitHub issue #51). It runs on
-`llm.main` with a per-claim verdicts `response_format` (one verdict per
+the `critique` stage's profile with a per-claim verdicts `response_format` (one verdict per
 claim, in order) and `tool_choice: "none"`. Objections are derived from the
 unsupported verdicts, quoting the claim. A reply that isn't exactly one
 well-formed verdict per claim skips the check with a warning and records

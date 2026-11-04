@@ -207,7 +207,7 @@ stylistic critique lenses and the provenance check with a warning (#320, PRD
 stay in the tunable list above, and no stage reads them. Compaction on a
 fork miss, and consolidation of a range that has left the window, don't use
 a standalone prompt either: they send the agent's rendered view (system
-prompt, window, fork instruction) on `llm.main` with no tools (PRD
+prompt, window, fork instruction) on the stage's profile with no tools (PRD
 §3.8; #380, #388), so the fork instructions above are the only prompts that
 steer them. The old `agent.compaction_prompt` and
 `memory.consolidation_prompt` are gone.
@@ -265,7 +265,7 @@ Compaction is the adjacent problem. Summaries are stored as
 `role: assistant` (`compaction.py`), so the model reads whatever was
 injected as something it said itself, and that persists across restarts
 too. Every summary is now written from the agent's rendered view, by a
-fork or, on a miss, as a call on `llm.main` (PRD §3.3.3, §3.8). It
+fork or, on a miss, as a call on the `compaction` stage's profile (PRD §3.3.3, §3.8). It
 is genuinely the agent's own words about what it read, written under its
 own persona, not a neutral paraphrase stored under `role: assistant`: the
 earlier standalone summarizer, which made the neutral paraphrase, is gone.
@@ -283,11 +283,11 @@ confirmation (`tools/shell.py`). `task_pipeline` is `shell` with a
 and per channel (#149). `write_file` writes anywhere
 the daemon user can, creating parent directories, including over
 `agent.yaml`, which `ConfigWatcherPlugin` reloads within two seconds. That
-lets the model change `llm.main.base_url` or clear `immutable_settings`
-immediately. It can also add an MCP server whose `command` is anything,
+lets the model clear `immutable_settings` immediately. It can also repoint
+any profile's `base_url`, add an MCP server whose `command` is anything,
 disable plugins, or re-enable globally disabled tools; those keys are not
-hot-reloaded, so they wait for the next restart, which makes the attack
-persistent and quiet rather than immediate. A channel's own
+hot-reloaded (nothing under `llm:` is), so they wait for the next restart,
+which makes the attack persistent and quiet rather than immediate. A channel's own
 `channels.<id>.tools.disabled` *is* hot-reloaded. Removing an entry from it
 widens that channel's tools at its next compaction, with no restart, so on
 a channel that still has `write_file` the per-channel list is only as
@@ -487,7 +487,7 @@ queue's bound, but nothing bounds their total (finding 14).
 With `agent.forks.enabled` (on by default since #320; #51), compaction,
 consolidation, appraisal and critique don't build their own prompts. (With
 forks off, or on a miss, compaction and out-of-window consolidation send
-the same view as a plain call on `llm.main` instead of forking it: the
+the same view as a plain call on the stage's profile instead of forking it: the
 exposure is the same.) Each
 appends its instruction as a `user` turn to the channel's rendered window,
 after whatever untrusted text the window holds, under the agent's own
@@ -634,28 +634,32 @@ human removed. What bounds it:
 
 Every `llm:` profile is an OpenAI-compatible client, so any profile can point
 at a hosted provider. Doing so sends that profile's requests, conversation
-content included, to the provider. A stage uses its kind's default profile
-(no fallback chains), so there are two endpoints to weigh:
+content included, to the provider. A stage sends to whatever profile
+`llm.stages` maps it to, and to its kind's default profile when the map
+doesn't name it (no fallback chains). Main turns go to the default chat
+profile. With no `llm.stages` entries that is two endpoints, the default chat
+profile's and the default embedding profile's; each mapping adds the stage's traffic to the mapped profile's
+endpoint and takes it off the default's. Weigh the endpoint per stage:
 
-- `main`: every chat stage. Agent turns, compaction summaries (written by a
-  fork or, on a miss or with forks off, as a plain call on the rendered
-  view), the forked appraisal and critique stages (they fork the window,
-  so they cannot move off `main`), memory consolidation of
-  ranges that have left the window, the importance prior, and subagents
-  (their task context and tool results). The consolidation and compaction
-  view (PRD §3.8) is the whole window the agent held: the system prompt
-  (identity and register), CONTEXT blocks, tool calls and their results, and
-  earlier summaries, one per segment trimmed to the channel's
-  `max_context_tokens` for consolidation (an oversized row or tool cycle can
-  still exceed it). Compaction's fallback sends the uncapped window prefix at
-  the cut, since the window is over budget when compaction runs. A remote
-  `main` is a disclosure decision for all of it. An `llm.background` block
-  is accepted but no stage uses it, so it changes nothing here until the
-  operator stage-to-profile map arrives (#399).
-- `embedding`: memory embedding and retrieval queries, and retention.
+| Stage | What it sends |
+|---|---|
+| main turns (not a stage) | The agent's turns: system prompt, window, tool calls and results. Default chat profile. |
+| `compaction` | The dropped prefix, in a fork or, on a miss or with forks off, as a plain view call. On a miss it is the uncapped prefix at the cut, since the window is over budget when compaction runs. |
+| `consolidation` | The same window as a fork, and for a range that has left the window the rebuilt view (PRD §3.8), one segment at a time, trimmed to the channel's `max_context_tokens` (an oversized row or tool cycle can still exceed it). |
+| `appraisal`, `critique` | The window at run time (the provenance check, the prefix ending at the exchange's reply), with the stage's instruction. These are forks, and a fork is a rendered view like any other: mapping the stage off the default chat profile sends the whole window, system prompt and tool schemas to the other endpoint. |
+| `rubric` | The importance prior's call: the text being scored. |
+| `subagent` | A subagent's task context and tool results. |
+| `embedding` | Memory embedding and retrieval queries, and retention. |
+
+The view is the whole window the agent held: the system prompt (identity and
+register), CONTEXT blocks, tool calls and their results, and earlier
+summaries. A remote profile is a disclosure decision for every stage mapped
+to it, and for main turns if it is the default chat profile.
 
 The provider also sees whatever untrusted text those stages carry. Treat a
-remote profile as a disclosure decision per stage, not only a cost one.
+remote profile as a disclosure decision per stage, not only a cost one. All
+of `llm:` is read at startup, so a repointed profile or stage takes effect at
+the next restart, not when `agent.yaml` is saved.
 
 The key can live in the daemon's environment (`api_key: "${VAR}"`), which
 keeps it out of a tracked `agent.yaml`. As with MCP tokens (finding 6), that
@@ -803,7 +807,8 @@ What each kind of unlock costs:
   if it is built (PRD §3.5.9), `agent.compaction_*`, the `tools.*` limits).
   Today these are reachable only through a writable `agent.yaml` (finding
   4); an unlock through a tool carries the same costs. A repointed
-  `llm.main.base_url` sends every conversation, and the API key, to a host
+  `base_url` on the default chat profile (`llm.main` unless
+  `llm.defaults.chat` names another) sends every conversation, and the API key, to a host
   of the attacker's choosing. `plugins.disabled` switches off the gates
   wholesale at the next restart. A scheduled job's prompt comes back
   framed as the operator's. A setting not named in this ledger falls under

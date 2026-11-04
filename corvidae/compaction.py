@@ -403,7 +403,7 @@ class CompactionPlugin(CorvidaePlugin):
         if agent is None:
             return None
         try:
-            result = await agent.fork(channel, self._fork_prompt, cut=cut)
+            result = await agent.fork(channel, self._fork_prompt, stage="compaction", cut=cut)
         except Exception as exc:
             if is_backend_unreachable(exc):
                 # One wait already spent; the turn's own retry loop waits for

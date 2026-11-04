@@ -23,7 +23,10 @@ from corvidae.tool import Tool, ToolContext, ToolRegistry, tool_to_schema
 from corvidae.tool_collection import ToolCollectionPlugin
 from corvidae.tool_policy import disabled_on, expand_disabled
 
-from helpers import CORE_LLM_STAGES, build_plugin_and_channel, drain, drain_task_queue
+from helpers import (
+    CORE_LLM_STAGES, build_plugin_and_channel, drain, drain_task_queue,
+    recording_llm_plugin, stub_llm_config,
+)
 from llm_response_fixtures import _make_text_response, _make_tool_call, _make_tool_call_response
 
 
@@ -239,12 +242,14 @@ class TestChannelSchemas:
             client = MagicMock()
             client.chat = AsyncMock(return_value=_make_text_response("ok"))
             plugin._client = client
+            # A fork's client comes from LLMPlugin, by stage.
+            plugin.pm.register(recording_llm_plugin(client), name="llm")
             plugin._mark_started()
             await plugin.on_message(channel=channel, sender="u", text="a", trace_id=mint_trace_id())
             await drain(plugin, channel)
             turn_tools = client.chat.call_args_list[0].kwargs["tools"]
 
-            await plugin.fork(channel, "summarize")
+            await plugin.fork(channel, "summarize", stage="compaction")
             fork_tools = client.chat.call_args_list[1].kwargs["tools"]
             assert json.dumps(fork_tools) == json.dumps(turn_tools)
         finally:
@@ -383,8 +388,8 @@ class TestSubagentInherits:
         pm.register(ChannelRegistry({}), name="registry")
         llm = LLMPlugin(pm)
         llm._stages = dict(CORE_LLM_STAGES)
-        llm.main_client = MagicMock()
-        llm.background_client = None
+        llm._clients["main"] = MagicMock()
+        stub_llm_config(llm)
         pm.register(llm, name="llm")
         registry = ToolRegistry()
         for name, fn in _fake_tools([]).items():

@@ -14,6 +14,8 @@ import pytest
 from corvidae.llm import LLMClient
 from corvidae.llm_plugin import LLMPlugin
 
+from helpers import stub_llm_config
+
 
 BASE_URL = "http://localhost:8080"
 MODEL = "embed-model"
@@ -168,6 +170,12 @@ class TestLLMPluginProfiles:
         plugin._stages = {"embedding": "embedding"}
         for profile, client in profiles.items():
             plugin._clients[profile] = client
+        stub_llm_config(plugin, {
+            "main": {"base_url": BASE_URL, "model": "chat-model"},
+            "embedding": {
+                "base_url": BASE_URL, "model": MODEL, "kind": "embedding", "dimensions": 3,
+            },
+        })
         return plugin
 
     def test_get_client_embedding_returns_embedding_client(self):
@@ -181,6 +189,7 @@ class TestLLMPluginProfiles:
             "llm": {
                 "main": {"base_url": BASE_URL, "model": "chat-model"},
                 "embedding": {
+                    "kind": "embedding",
                     "base_url": "http://localhost:8081",
                     "model": MODEL,
                     "dimensions": 3,
@@ -194,15 +203,12 @@ class TestLLMPluginProfiles:
 
         assert plugin._clients["embedding"].model == MODEL
         assert plugin._clients["embedding"] is not plugin.get_client()
-        assert plugin.embedding_dimensions == 3
-        # Legacy accessors still work over the profile dict.
-        assert plugin.main_client is plugin.get_client()
 
     async def test_missing_dimensions_raises_at_startup(self):
         config = {
             "llm": {
                 "main": {"base_url": BASE_URL, "model": "chat-model"},
-                "embedding": {"base_url": BASE_URL, "model": MODEL},
+                "embedding": {"base_url": BASE_URL, "model": MODEL, "kind": "embedding"},
             }
         }
         plugin = LLMPlugin()

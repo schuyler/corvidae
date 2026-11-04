@@ -70,6 +70,7 @@ from corvidae.fork import (
     ForkUnavailable,
     ViewInputs,
     build_fork_prompt,
+    fork_body,
     looks_like_tool_call,
     parse_forks_config,
 )
@@ -665,7 +666,7 @@ class Agent(CorvidaePlugin):
         try:
             result = await run_agent_turn(self._client, messages, tool_schemas, extra_body=llm_overrides)
             # A final reply that reopened reasoning after its answer is
-            # discarded and re-run once when llm.main.reasoning_reopened is
+            # discarded and re-run once when the main profile's reasoning_reopened is
             # "rerun"; the client already cut and logged it, and a second
             # reopen is simply the cut text (#348).
             if (
@@ -1466,8 +1467,8 @@ class Agent(CorvidaePlugin):
         already refuses other undotted keys; this filter keeps framework
         keys, dotted plugin tunables (see corvidae.tuning), transport
         metadata, and anything else that reaches runtime_overrides out of
-        the body. Shared by the main turn and forks, which must send the
-        same body to keep the cached prefix.
+        the body. Shared by the main turn and forks; a fork then drops any
+        key its stage profile's extra_body also sets (fork_body).
         """
         return {
             k: v
@@ -1547,6 +1548,7 @@ class Agent(CorvidaePlugin):
         channel: Channel,
         instruction: str,
         *,
+        stage: str,
         cut: int | None = None,
         extra_body: dict | None = None,
     ) -> ForkResult:
@@ -1554,29 +1556,41 @@ class Agent(CorvidaePlugin):
 
         The prompt is ``build_prompt(window[:cut])`` plus ``instruction`` as
         a user turn, built with exactly what step 7 of the agent loop uses
-        (main client, tool schemas, pending ids, mid-conversation role,
-        override filter, reasoning effort untouched), so the server reuses
-        the cached prefix. ``cut`` None forks from the whole window.
+        (tool schemas, pending ids, mid-conversation role, override filter,
+        reasoning effort untouched), so the server reuses the cached prefix
+        when the stage's profile shares the main turn's. ``cut`` None forks
+        from the whole window.
 
-        On top of the main turn's body a fork sends ``tool_choice: "none"``,
-        the configured ``reasoning_budget_tokens``, and ``extra_body`` (a
-        stage's ``response_format``). Those keys are applied after the
-        runtime overrides so ``set_settings`` can't re-enable tool calls.
+        The request goes to ``stage``'s profile (``llm.stages``, else the
+        default chat profile): its endpoint, model and ``extra_body``. A
+        runtime override of a key that ``extra_body`` also sets is not sent,
+        so the profile wins (see :func:`corvidae.fork.fork_body`). A fork
+        also sends ``tool_choice: "none"`` and ``extra_body`` (a stage's
+        ``response_format``), applied last so ``set_settings`` can't
+        re-enable tool calls.
 
         Mutates nothing, persists nothing, fires no hooks, dispatches no
         tools. Attribution gains ``mode="fork"`` for the call; the caller
         sets ``stage``.
 
         Raises:
-            ForkUnavailable: no live window or no main client.
+            ForkUnavailable: no live window or no client for ``stage``.
             ForkRefused: the model answered with tool calls, structured or
                 written out as text.
         """
         conv = channel.conversation
         if conv is None:
-            raise ForkUnavailable(f"no live window on {channel.id}")
-        if self._client is None:
-            raise ForkUnavailable("LLM client not initialized")
+            raise ForkUnavailable(f"no live window on {channel.id} for stage {stage}")
+
+        # The stage's client and profile settings, read from LLMPlugin now.
+        llm = self.pm.get_plugin("llm")
+        client = llm.get_client(stage) if llm is not None else None
+        if client is None:
+            raise ForkUnavailable(
+                f"no LLM client for stage {stage}; set llm.stages.{stage} or "
+                "define a default chat profile"
+            )
+        profile_body = llm.profile_config(stage).get("extra_body")
 
         messages = build_fork_prompt(
             conv,
@@ -1585,15 +1599,12 @@ class Agent(CorvidaePlugin):
             frozenset(channel.pending_tool_call_ids),
             self._mid_conversation_system_role,
         )
-        # Fork-specific keys last: a stage's body, then the invariants.
-        body = {**self._llm_overrides(channel), **(extra_body or {}), "tool_choice": "none"}
-        if self._forks.reasoning_budget_tokens is not None:
-            body["reasoning_budget_tokens"] = self._forks.reasoning_budget_tokens
+        # The profile beats the overrides; the stage's body and tool_choice
+        # none come last.
+        body = fork_body(self._llm_overrides(channel), profile_body, extra_body)
 
-        # Bound once: a config reload or plugin stop can replace or clear
-        # self._client during the await, and the stamp must name the model
-        # this request was actually sent with.
-        client = self._client
+        # The client was bound above, so a plugin stop that clears LLMPlugin's
+        # clients during the await can't change the model this stamp names.
         token = set_attribution(channel_id=channel.id, mode="fork")
         try:
             # The channel's own schemas: a fork must share the turn's prefix.
@@ -1896,7 +1907,7 @@ class Agent(CorvidaePlugin):
 
         # Get the LLM client from LLMPlugin (which owns the lifecycle).
         llm = get_dependency(self.pm, "llm", LLMPlugin)
-        self._client = llm.main_client
+        self._client = llm.get_client()
 
         # Get tool registry and config from ToolCollectionPlugin.
         tools_plugin = get_dependency(self.pm, "tools", ToolCollectionPlugin)
@@ -1932,8 +1943,6 @@ class Agent(CorvidaePlugin):
     async def on_config_reload(self, config: dict) -> None:
         """Re-read agent config and re-borrow the LLM client from LLMPlugin.
 
-        Re-borrows _client because LLMPlugin may have swapped its main_client
-        during this same reload cycle (Key Design Decision #3 in design doc).
         System prompt changes take effect only on new conversations (existing
         conversations retain their current ContextWindow.system_prompt).
         """
@@ -1944,7 +1953,7 @@ class Agent(CorvidaePlugin):
         self._mid_conversation_system_role = _resolve_mid_conversation_system_role(agent_config)
         self._forks = parse_forks_config(agent_config)
 
-        # Re-borrow the LLM client from LLMPlugin after a possible swap.
+        # Re-borrow the LLM client from LLMPlugin.
         # Avoids isinstance check so MagicMock(spec=LLMPlugin) works in tests.
         llm = self.pm.get_plugin("llm")
         if llm is not None and hasattr(llm, "get_client"):

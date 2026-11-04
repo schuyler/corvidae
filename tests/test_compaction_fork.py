@@ -211,6 +211,7 @@ async def test_fork_produces_summary():
     summarize.assert_not_called()
     call = agent.calls[0]
     assert (call["instruction"], call["cut"]) == (CompactionPlugin.DEFAULT_FORK_PROMPT, 6)
+    assert call["stage"] == "compaction"
     assert call["attribution"]["stage"] == "compaction"
     assert conv.messages[0] == {
         "role": "user", "content": "[Summary of earlier conversation]\nforked summary",
@@ -301,7 +302,8 @@ async def test_fork_through_real_agent_is_prefix_of_main_render():
         }})
         client = MagicMock()
         client.chat = AsyncMock(return_value=_make_text_response("real fork"))
-        agent._client = client
+        # A fork's client comes from LLMPlugin, by stage.
+        agent.pm.register(recording_llm_plugin(client), name="llm")
         agent._mark_started()
         conv = _straddling_window()
         channel.conversation = conv

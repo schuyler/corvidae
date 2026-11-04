@@ -67,14 +67,14 @@ async def _build_stack():
     await llm.on_init(pm, config)
     await llm.on_start(config)
     # Replace the real aiohttp session with the stub — no network.
-    llm.main_client.session = _make_always_ok_session()
+    llm.get_client().session = _make_always_ok_session()
 
     usage_log = UsageLogPlugin()
     pm.register(usage_log, name="usage_log")
     await usage_log.on_init(pm, {})
     await usage_log.on_start({})
 
-    plugin._client = llm.main_client
+    plugin._client = llm.get_client()
     plugin._mark_started()
     return plugin, channel, db, llm
 
@@ -158,6 +158,9 @@ class TestPhase0Acceptance:
             compaction = CompactionPlugin()
             plugin.pm.register(compaction, name="compaction")
             await compaction.on_init(plugin.pm, {})
+            # The LLMPlugin started before compaction was registered; collect
+            # the stages the late plugin owns.
+            plugin.pm.hook.register_llm_stages(stages=llm._stages)
 
             # Pre-seed a conversation that will trip compaction (threshold is
             # evaluated against the channel's max_context_tokens).
@@ -202,7 +205,7 @@ class TestPhase0Acceptance:
             async def work():
                 # This LLM call happens in the worker, long after the
                 # enqueuer's attribution was reset.
-                await llm.main_client.chat([{"role": "user", "content": "bg"}])
+                await llm.get_client().chat([{"role": "user", "content": "bg"}])
                 done.set()
                 return "ok"
 

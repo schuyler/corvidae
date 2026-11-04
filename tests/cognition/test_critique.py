@@ -374,6 +374,7 @@ class TestEligibility:
         # The lens is a fork (#320); its instruction quotes the original text.
         assert env.stub.chat_calls == []
         assert "«the ORIGINAL user question»" in env.fork_agent.calls[0]["instruction"]
+        assert env.fork_agent.calls[0]["stage"] == "critique"
         await _teardown(env)
 
 
@@ -609,14 +610,14 @@ class RenderingForkAgent(FakeForkAgent):
         super().__init__(*args, **kwargs)
         self.requests: list[list[dict]] = []
 
-    async def fork(self, channel, instruction, *, cut=None, extra_body=None):
+    async def fork(self, channel, instruction, *, stage, cut=None, extra_body=None):
         from corvidae.fork import build_fork_prompt
 
         if channel.conversation is not None:
             self.requests.append(build_fork_prompt(
                 channel.conversation, cut, instruction, frozenset(), "system"))
         return await super().fork(
-            channel, instruction, cut=cut, extra_body=extra_body)
+            channel, instruction, stage=stage, cut=cut, extra_body=extra_body)
 
 
 def _row(role, content, rowid, **extra):
@@ -924,6 +925,7 @@ class TestProvenanceCritic:
             assert CLAIM["claim"] in instruction
             assert "Heads up: the quarterly audit deadline is Thursday." in instruction
             assert "memory: audits are quarterly" in instruction
+            assert call["stage"] == "critique"
             assert call["attribution"]["stage"] == "critique"
             assert env.stub.chat_calls == []
             outcomes = await _read_outcomes(env.db, "kp")
@@ -1140,7 +1142,7 @@ async def _real_path_env(tmp_path, replies, past_claims):
     agent._forks = ForksConfig(enabled=True, stages=frozenset({"appraisal", "critique"}))
     forks: list[dict] = []
 
-    async def fork(ch, instruction, *, cut=None, extra_body=None):
+    async def fork(ch, instruction, *, stage, cut=None, extra_body=None):
         forks.append({
             "instruction": instruction, "cut": cut,
             "request": build_fork_prompt(

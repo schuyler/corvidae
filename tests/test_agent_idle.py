@@ -196,7 +196,7 @@ async def test_agent_start_resolves_idle_tracker_from_plugin_manager():
     client = MagicMock()
     client.chat = AsyncMock(return_value=_make_text_response("ok"))
     llm = NonCallableMagicMock(spec=LLMPlugin)
-    llm.main_client = client
+    llm.get_client.return_value = client
     tools = NonCallableMagicMock(spec=ToolCollectionPlugin)
     tools.get_tools.return_value = ({}, [])
     tools.max_result_chars = 100_000

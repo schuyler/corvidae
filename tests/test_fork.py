@@ -23,7 +23,7 @@ from corvidae.fork import (
 from corvidae.hooks import hookimpl
 
 from corvidae.outbound import OutboundMessage
-from helpers import build_plugin_and_channel, sent
+from helpers import LLMResponseRecorder, build_plugin_and_channel, sent, start_llm_plugin
 from llm_response_fixtures import _make_text_response, _make_tool_call, _make_tool_call_response
 
 INSTRUCTION = "Summarize the conversation above."
@@ -169,9 +169,8 @@ def test_snap_reaches_a_fixpoint_and_ignores_unanswered_calls():
 
 @pytest.mark.parametrize("raw,expected", [
     ({}, ForksConfig()),
-    ({"forks": {"enabled": True, "reasoning_budget_tokens": 512, "stages": ["x"]}},
-     ForksConfig(True, 512, frozenset({"x"}))),
-    ({"forks": {"reasoning_budget_tokens": None, "stages": None}}, ForksConfig(True, None, None)),
+    ({"forks": {"enabled": True, "stages": ["x"]}}, ForksConfig(True, stages=frozenset({"x"}))),
+    ({"forks": {"stages": None}}, ForksConfig()),
 ])
 def test_parse_forks_config(raw, expected):
     assert parse_forks_config(raw) == expected
@@ -204,7 +203,7 @@ def test_stage_enabled():
 
 
 @pytest.mark.parametrize("forks", [
-    {"enabled": "yes"}, {"reasoning_budget_tokens": -5}, {"reasoning_budget_tokens": True},
+    {"enabled": "yes"},
     {"stages": "compaction"}, {"stages": ["a", 3]}, {"bogus": 1}, "on",
 ])
 def test_invalid_forks_config_fails_validation(forks):
@@ -212,6 +211,52 @@ def test_invalid_forks_config_fails_validation(forks):
 
     with pytest.raises(ValueError, match="forks"):
         validate_agent_config({"forks": forks})
+
+
+@pytest.mark.parametrize("budget", [2048, None])
+def test_forks_reasoning_budget_key_is_an_error_pointing_to_the_stage_map(budget):
+    """R9: agent.forks.reasoning_budget_tokens is removed; leaving it in
+    config names the key and points to llm.stages. Any value, null included."""
+    from corvidae.channel import validate_agent_config
+
+    for parse in (parse_forks_config, validate_agent_config):
+        with pytest.raises(ValueError) as exc:
+            parse({"forks": {"reasoning_budget_tokens": budget}})
+        message = str(exc.value)
+        assert "agent.forks.reasoning_budget_tokens" in message
+        assert "llm.stages" in message
+
+
+# ---------------------------------------------------------------------------
+# fork_body: the body a fork sends on top of the stage profile's (R8)
+# ---------------------------------------------------------------------------
+
+
+def test_fork_body_profile_beats_runtime_override():
+    """R8: a runtime override of a key the stage profile's extra_body also
+    sets is not sent; the others ride along."""
+    from corvidae.fork import fork_body
+
+    body = fork_body({"max_tokens": 200, "temperature": 0.3}, {"max_tokens": 4096}, None)
+
+    assert "max_tokens" not in body
+    assert body["temperature"] == 0.3
+
+
+def test_fork_body_stage_schema_and_tool_choice_win():
+    """R8: the stage's own body beats the profile and the override, and
+    tool_choice none beats everything."""
+    from corvidae.fork import fork_body
+
+    fmt = {"type": "json_schema"}
+    body = fork_body(
+        {"tool_choice": "required", "response_format": {"type": "text"}},
+        {"response_format": {"type": "json_object"}, "tool_choice": "auto"},
+        {"response_format": fmt},
+    )
+
+    assert body["response_format"] == fmt
+    assert body["tool_choice"] == "none"
 
 
 # ---------------------------------------------------------------------------
@@ -228,21 +273,62 @@ class _EventRecorder:
         self.events.append(message)
 
 
+FORK_STAGES = {"compaction": "chat", "consolidation": "chat", "appraisal": "chat"}
+MAIN_PROFILE = {"base_url": "http://main.test/v1", "model": "main-m"}
+
+
 @pytest.fixture
-async def forking_agent():
-    """(agent, channel, client) with forks on, a fake main client, a live window."""
+async def forking_agent(monkeypatch):
+    """(agent, channel, client) with forks on, a live window, and a started
+    LLMPlugin whose default chat client (profile main) is a stub."""
     plugin, channel, db = await build_plugin_and_channel()
     await plugin.on_init(plugin.pm, {"agent": {
-        "forks": {"enabled": True, "reasoning_budget_tokens": 1024},
+        "forks": {"enabled": True},
         "mid_conversation_system_role": "user",
     }})
     plugin._tool_schemas = TOOL_SCHEMAS
     client = MagicMock()
     client.chat = AsyncMock(return_value=_make_text_response("fork says hi"))
+    llm, _ = await start_llm_plugin(
+        monkeypatch, {"main": MAIN_PROFILE}, FORK_STAGES, pm=plugin.pm
+    )
+    llm._clients["main"] = client
     plugin._client = client
     plugin._mark_started()
     channel.conversation = _tool_window()
     yield plugin, channel, client
+    await db.close()
+
+
+MAPPED_LLM = {
+    "main": MAIN_PROFILE,
+    # max_tokens lives in a base that forks extends: R8 counts inherited keys.
+    "capped": {**MAIN_PROFILE, "extra_body": {"max_tokens": 4096}},
+    "forks": {
+        "extends": "capped",
+        "base_url": "http://forks.test/v1",
+        "model": "forks-m",
+        "extra_body": {"reasoning_budget_tokens": 8192},
+    },
+    "stages": {"consolidation": "forks"},
+}
+
+
+@pytest.fixture
+async def mapped_agent(monkeypatch):
+    """(agent, channel, posts, recorder): real clients over a recording HTTP
+    session, stage consolidation mapped to profile ``forks``, appraisal not."""
+    plugin, channel, db = await build_plugin_and_channel()
+    await plugin.on_init(plugin.pm, {"agent": {"forks": {"enabled": True}}})
+    plugin._tool_schemas = TOOL_SCHEMAS
+    recorder = LLMResponseRecorder()
+    plugin.pm.register(recorder, name="recorder")
+    llm, posts = await start_llm_plugin(monkeypatch, MAPPED_LLM, FORK_STAGES, pm=plugin.pm)
+    plugin._client = llm.get_client()
+    plugin._mark_started()
+    channel.conversation = _tool_window()
+    yield plugin, channel, posts, recorder
+    await llm.on_stop()
     await db.close()
 
 
@@ -261,7 +347,9 @@ async def test_fork_request_matches_main_turn(forking_agent):
 
     client.chat = AsyncMock(side_effect=chat)
     fmt = {"type": "json_schema"}
-    result = await plugin.fork(channel, INSTRUCTION, cut=2, extra_body={"response_format": fmt})
+    result = await plugin.fork(
+        channel, INSTRUCTION, stage="consolidation", cut=2, extra_body={"response_format": fmt}
+    )
 
     messages = client.chat.call_args.args[0]
     full = channel.conversation.build_prompt(frozenset({"zz"}), mid_conversation_system_role="user")
@@ -269,9 +357,9 @@ async def test_fork_request_matches_main_turn(forking_agent):
     kwargs = client.chat.call_args.kwargs
     assert kwargs["tools"] == TOOL_SCHEMAS
     # Inference overrides ride along; plugin tunables don't; fork keys win.
+    # An unmapped fork sends no reasoning budget (R9).
     assert kwargs["extra_body"] == {
-        "temperature": 0.3, "tool_choice": "none",
-        "reasoning_budget_tokens": 1024, "response_format": fmt,
+        "temperature": 0.3, "tool_choice": "none", "response_format": fmt,
     }
     assert result.text == "fork says hi"
     assert result.usage["prompt_tokens"] == 100
@@ -295,7 +383,7 @@ async def test_tool_calls_raise_fork_refused(forking_agent, response):
     plugin, channel, client = forking_agent
     client.chat = AsyncMock(return_value=response)
     with pytest.raises(ForkRefused):
-        await plugin.fork(channel, INSTRUCTION)
+        await plugin.fork(channel, INSTRUCTION, stage="consolidation")
     assert channel.pending_tool_call_ids == set()
 
 
@@ -307,7 +395,7 @@ async def test_tool_calls_raise_fork_refused(forking_agent, response):
 async def test_ordinary_replies_are_not_refused(forking_agent, text):
     plugin, channel, client = forking_agent
     client.chat = AsyncMock(return_value=_make_text_response(text))
-    assert (await plugin.fork(channel, INSTRUCTION)).text == text
+    assert (await plugin.fork(channel, INSTRUCTION, stage="consolidation")).text == text
 
 
 @pytest.mark.parametrize("missing", ["conversation", "client"])
@@ -316,19 +404,25 @@ async def test_fork_unavailable(forking_agent, missing):
     if missing == "conversation":
         channel.conversation = None
     else:
-        plugin._client = None
-    with pytest.raises(ForkUnavailable):
-        await plugin.fork(channel, INSTRUCTION)
+        plugin.pm.get_plugin("llm")._clients.clear()
+    with pytest.raises(ForkUnavailable, match="consolidation"):
+        await plugin.fork(channel, INSTRUCTION, stage="consolidation")
 
 
-async def test_fork_config_reloads_and_null_budget_is_omitted(forking_agent):
+async def test_fork_config_reloads_and_unmapped_fork_sends_no_budget(forking_agent):
     plugin, channel, client = forking_agent
-    await plugin.on_config_reload({"agent": {"forks": {
-        "enabled": True, "stages": ["appraisal"], "reasoning_budget_tokens": None,
-    }}})
+    await plugin.on_config_reload({"agent": {"forks": {"enabled": True, "stages": ["appraisal"]}}})
     assert plugin.fork_enabled("appraisal") and not plugin.fork_enabled("compaction")
-    await plugin.fork(channel, INSTRUCTION)
+    await plugin.fork(channel, INSTRUCTION, stage="appraisal")
     assert "reasoning_budget_tokens" not in client.chat.call_args.kwargs["extra_body"]
+
+
+async def test_fork_requires_a_stage(forking_agent):
+    """R7: stage is a required keyword; a missing one fails loudly instead of
+    routing to the main profile."""
+    plugin, channel, client = forking_agent
+    with pytest.raises(TypeError, match="stage"):
+        await plugin.fork(channel, INSTRUCTION)
 
 
 async def test_usage_log_mode_column_upgrades_and_records(db):
@@ -360,8 +454,10 @@ async def test_fork_result_carries_request_model(forking_agent):
     # Echo the body's model override, else a fixed default.
     client.request_model = lambda extra_body=None: (extra_body or {}).get("model", "m")
 
-    overridden = await plugin.fork(channel, INSTRUCTION, extra_body={"model": "fork-m"})
-    plain = await plugin.fork(channel, INSTRUCTION)
+    overridden = await plugin.fork(
+        channel, INSTRUCTION, stage="consolidation", extra_body={"model": "fork-m"}
+    )
+    plain = await plugin.fork(channel, INSTRUCTION, stage="consolidation")
 
     assert overridden.model == "fork-m"
     assert plain.model == "m"
@@ -376,12 +472,12 @@ async def test_fork_model_is_the_client_the_call_was_sent_with(forking_agent):
     replacement.request_model = lambda extra_body=None: "replacement-m"
 
     async def chat(messages, **kwargs):
-        # A reload replaces the client while the request is in flight.
-        plugin._client = replacement
+        # The profile's client is replaced while the request is in flight.
+        plugin.pm.get_plugin("llm")._clients["main"] = replacement
         return _make_text_response("fork says hi")
 
     client.chat = AsyncMock(side_effect=chat)
-    result = await plugin.fork(channel, INSTRUCTION)
+    result = await plugin.fork(channel, INSTRUCTION, stage="consolidation")
 
     assert result.model == "original-m"
 
@@ -393,11 +489,86 @@ async def test_fork_survives_client_cleared_mid_call(forking_agent):
     client.request_model = lambda extra_body=None: "original-m"
 
     async def chat(messages, **kwargs):
-        # A stop clears the client while the request is in flight.
-        plugin._client = None
+        # A stop clears the clients while the request is in flight.
+        plugin.pm.get_plugin("llm")._clients.clear()
         return _make_text_response("fork says hi")
 
     client.chat = AsyncMock(side_effect=chat)
-    result = await plugin.fork(channel, INSTRUCTION)
+    result = await plugin.fork(channel, INSTRUCTION, stage="consolidation")
 
     assert result.model == "original-m"
+
+
+# ---------------------------------------------------------------------------
+# Stage profiles (#399): R7, R8, R11
+# ---------------------------------------------------------------------------
+
+
+async def test_mapped_stage_fork_goes_to_the_mapped_profile(mapped_agent):
+    """R7: a mapped stage's fork is sent to its profile's endpoint and model;
+    an unmapped stage's fork goes to the default chat profile. The render is
+    the main turn's: same messages and tools."""
+    plugin, channel, posts, _ = mapped_agent
+
+    await plugin.fork(channel, INSTRUCTION, stage="consolidation", cut=2)
+    await plugin.fork(channel, INSTRUCTION, stage="appraisal", cut=2)
+
+    mapped, unmapped = posts
+    assert mapped["url"] == "http://forks.test/v1/chat/completions"
+    assert mapped["json"]["model"] == "forks-m"
+    assert unmapped["url"] == "http://main.test/v1/chat/completions"
+    assert unmapped["json"]["model"] == "main-m"
+    full = channel.conversation.build_prompt(
+        frozenset(), mid_conversation_system_role=plugin._mid_conversation_system_role
+    )
+    expected = full[:3] + [{"role": "user", "content": INSTRUCTION}]
+    for post in posts:
+        assert post["json"]["messages"] == expected
+        assert post["json"]["tools"] == TOOL_SCHEMAS
+
+
+async def test_unmapped_fork_request_body_has_no_reasoning_budget(mapped_agent):
+    """R9: nothing injects a budget; an unmapped fork's profile sets none."""
+    plugin, channel, posts, _ = mapped_agent
+
+    await plugin.fork(channel, INSTRUCTION, stage="appraisal")
+
+    assert "reasoning_budget_tokens" not in posts[-1]["json"]
+
+
+async def test_profile_max_tokens_beats_channel_override_on_a_fork(mapped_agent):
+    """R8: a channel's runtime max_tokens 200 against the stage profile's
+    extra_body max_tokens 4096 sends 4096; an override the profile doesn't set
+    still applies."""
+    plugin, channel, posts, _ = mapped_agent
+    channel.runtime_overrides = {"max_tokens": 200, "temperature": 0.3}
+
+    await plugin.fork(channel, INSTRUCTION, stage="consolidation")
+
+    sent_body = posts[-1]["json"]
+    assert sent_body["max_tokens"] == 4096
+    assert sent_body["temperature"] == 0.3
+    assert sent_body["reasoning_budget_tokens"] == 8192
+
+
+async def test_stage_schema_and_tool_choice_still_win_on_a_fork(mapped_agent):
+    """R8: with a stage profile in play, the stage's response_format and
+    tool_choice none are still what is sent."""
+    plugin, channel, posts, _ = mapped_agent
+    channel.runtime_overrides = {"tool_choice": "required"}
+    fmt = {"type": "json_schema"}
+
+    await plugin.fork(channel, INSTRUCTION, stage="consolidation", extra_body={"response_format": fmt})
+
+    assert posts[-1]["json"]["response_format"] == fmt
+    assert posts[-1]["json"]["tool_choice"] == "none"
+
+
+async def test_fork_attribution_names_the_mapped_profile(mapped_agent):
+    """R11: a fork's on_llm_response names the stage's profile."""
+    plugin, channel, _, recorder = mapped_agent
+
+    await plugin.fork(channel, INSTRUCTION, stage="consolidation")
+    await plugin.fork(channel, INSTRUCTION, stage="appraisal")
+
+    assert [r["profile"] for r in recorder.responses] == ["forks", "main"]

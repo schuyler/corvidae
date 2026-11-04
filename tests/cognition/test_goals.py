@@ -33,6 +33,7 @@ CONFIG = {
         "main": {"base_url": "http://localhost:8080", "model": "chat"},
         "background": {"base_url": "http://localhost:8080", "model": "bg"},
         "embedding": {
+            "kind": "embedding",
             "base_url": "http://localhost:8081",
             "model": "test-embedder",
             "dimensions": DIMS,
@@ -107,7 +108,7 @@ async def env(tmp_path, monkeypatch):
     # (on_start is broadcast LIFO), so goals must create its table lazily.
     await pm.ahook.on_start(config=config)
     db = persistence.db
-    assert llm.embedding_dimensions == DIMS
+    assert llm._config.profiles["embedding"]["dimensions"] == DIMS
 
     registry: list = []
     pm.hook.register_tools(tool_registry=registry)

@@ -107,6 +107,7 @@ async def run_live_evaluation(args) -> None:
                 "api_key": args.api_key,
             },
             "embedding": {
+                "kind": "embedding",
                 "base_url": args.embedding_base_url or args.base_url,
                 "model": args.embedding_model or args.model,
                 "dimensions": args.embedding_dimensions,

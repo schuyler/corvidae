@@ -80,6 +80,7 @@ async def test_compaction_fork_record_is_stashed_and_consumed(env):
 
     call = agent.calls[0]
     assert call["cut"] == 3
+    assert call["stage"] == "consolidation"
     assert call["instruction"].startswith(DEFAULT_CONSOLIDATION_FORK_PROMPT)
     assert (call["attribution"]["stage"], call["attribution"]["trigger"]) == ("consolidation", "compaction")
     assert _view_requests(stub) == []

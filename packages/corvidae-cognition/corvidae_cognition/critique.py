@@ -921,7 +921,7 @@ class CritiquePlugin(CorvidaePlugin):
         )
         try:
             result = await agent.fork(
-                channel, instruction, cut=cut,
+                channel, instruction, stage="critique", cut=cut,
                 extra_body=provenance_extra_body(len(evidence)))
             objections, supported = self._verdicts_from_text(result.text, evidence)
         except Exception:
@@ -1208,7 +1208,9 @@ class CritiquePlugin(CorvidaePlugin):
             return None
         # Fork and parse; any failure or unusable reply skips this lens.
         try:
-            result = await agent.fork(channel, instruction, extra_body=OBJECTION_EXTRA_BODY)
+            result = await agent.fork(
+                channel, instruction, stage="critique", extra_body=OBJECTION_EXTRA_BODY
+            )
             return self._objections_from_text(result.text, lens)
         except Exception as exc:
             self._skip_lens(

@@ -71,7 +71,7 @@ See [docs/configuration.md](docs/configuration.md) for the full reference.
 
 Key sections:
 
-- `llm.main` — required; `base_url` and `model` are the only mandatory fields
+- `llm` — model profiles; `llm.main` is required unless `llm.defaults.chat` names another default, and every profile needs `base_url` and `model` (an embedding profile also needs `kind: embedding` and `dimensions`). `llm.stages` maps individual stages to other profiles.
 - `daemon` — SQLite path, task worker count
 - `agent` — system prompt, token budget, compaction, tool result limits
 - `irc` — omit entirely to disable IRC

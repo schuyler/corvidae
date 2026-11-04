@@ -23,7 +23,7 @@ from corvidae.hooks import create_plugin_manager
 from corvidae.llm_plugin import LLMPlugin
 from corvidae_cognition.memory import MemoryPlugin, RubricPrior
 from corvidae.persistence import PersistencePlugin, init_db
-from helpers import CORRUPT_MESSAGES, FakeForkAgent, insert_raw_message, skip_warnings
+from helpers import CORRUPT_MESSAGES, FakeForkAgent, insert_raw_message, skip_warnings, stub_llm_config, with_chat_llm
 
 
 CONSOLIDATION_JSON = json.dumps({
@@ -37,6 +37,7 @@ EMBED_CONFIG = {
         "main": {"base_url": "http://localhost:8080", "model": "chat"},
         "background": {"base_url": "http://localhost:8080", "model": "bg"},
         "embedding": {
+            "kind": "embedding",
             "base_url": "http://localhost:8081",
             "model": "test-embedder",
             "dimensions": 4,
@@ -82,7 +83,7 @@ async def build_consolidation_env(config=None, db_path=":memory:"):
     Returns (memory, persistence, llm_stub_background, channel, db). The pm
     also holds a forks-off FakeForkAgent under ``agent`` (view-capable).
     """
-    config = config or EMBED_CONFIG
+    config = with_chat_llm(config or EMBED_CONFIG)
     db = await aiosqlite.connect(db_path)
     await init_db(db)
     if db_path != ":memory:":
@@ -100,9 +101,7 @@ async def build_consolidation_env(config=None, db_path=":memory:"):
     stub = StubClient()
     llm._clients["main"] = stub
     llm._clients["embedding"] = stub
-    embedding_cfg = config.get("llm", {}).get("embedding")
-    if embedding_cfg:
-        llm.embedding_dimensions = embedding_cfg["dimensions"]
+    stub_llm_config(llm, config.get("llm"))
 
     # A view-capable agent with forks off (stages=set()): a range outside the
     # live window is written from the rendered view on llm.main, so the

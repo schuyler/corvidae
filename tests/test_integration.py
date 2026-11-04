@@ -39,6 +39,7 @@ from corvidae.thinking import ThinkingPlugin
 from corvidae.tools import CoreToolsPlugin
 from corvidae.tools.subagent import SubagentPlugin
 
+from helpers import stub_llm_config
 from llm_response_fixtures import (
     _make_text_response,
     _make_tool_call_response,
@@ -298,7 +299,8 @@ class TestGroupALifecycle:
         pm.register(mcp_plugin, name="mcp")
 
         llm_plugin = LLMPlugin(pm)
-        llm_plugin.main_client = MagicMock()
+        llm_plugin._clients["main"] = MagicMock()
+        stub_llm_config(llm_plugin)
         pm.register(llm_plugin, name="llm")
 
         compaction_plugin = CompactionPlugin(pm)

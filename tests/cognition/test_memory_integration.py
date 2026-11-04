@@ -21,7 +21,7 @@ from corvidae.llm_plugin import LLMPlugin
 from corvidae_cognition.memory import MemoryPlugin
 from corvidae.persistence import PersistencePlugin, init_db
 
-from helpers import FakeForkAgent
+from helpers import FakeForkAgent, stub_llm_config
 from .test_memory_retrieval import DIMS, StubEmbedClient, bow_embed
 
 
@@ -36,6 +36,7 @@ CONFIG = {
     "llm": {
         "main": {"base_url": "http://localhost:8080", "model": "chat"},
         "embedding": {
+            "kind": "embedding",
             "base_url": "http://localhost:8081",
             "model": "test-embedder",
             "dimensions": DIMS,
@@ -73,7 +74,7 @@ async def build_stack(db_path):
     stub = StubChatEmbedClient()
     llm._clients["main"] = stub
     llm._clients["embedding"] = stub
-    llm.embedding_dimensions = DIMS
+    stub_llm_config(llm, CONFIG["llm"])
 
     # A view-capable agent with forks off: a range outside the live window
     # is written from the rendered view on llm.main (#380, #388).

@@ -9,17 +9,19 @@ the agent it describes (plans/forks.md Part 1).
 
 This module holds the pure pieces: the prompt builder, the tool-block cut
 snap, the ``agent.forks`` config parser, and the result/error types. The
-call itself is ``Agent.fork`` (agent.py), which owns the five inputs the
-prefix depends on (client, tool schemas, build_prompt arguments, runtime
-override filter, reasoning effort). Plugins reach it through
-:func:`fork_agent`.
+call itself is ``Agent.fork`` (agent.py), which owns the inputs the prefix
+depends on (tool schemas, build_prompt arguments, runtime override filter,
+reasoning effort) and takes the client from the stage's profile
+(``llm.stages``, #399). Plugins reach it through :func:`fork_agent`.
 
 Config:
     agent:
       forks:
         enabled: true                 # default; false makes every live-window stage but compaction skip
-        reasoning_budget_tokens: 2048 # per fork call; null = server default
         stages: null                  # null = every stage; or a list of names
+
+A fork's reasoning budget, token cap and the like are request parameters of
+the profile its stage maps to under ``llm.stages``, not ``agent.forks`` keys.
 
 Stage names are opaque here: core never names the cognition plugins
 (tests/test_trace_core.py), so each plugin passes its own stage name
@@ -42,16 +44,11 @@ if TYPE_CHECKING:
     from corvidae.agent import Agent
     from corvidae.llm import LLMClient
 
-#: Default per-fork reasoning budget. A fork keeps the main reasoning effort
-#: (it is rendered into the system block, so changing it breaks the cached
-#: prefix) and bounds its think with this per-request budget instead.
-DEFAULT_FORK_REASONING_BUDGET = 2048
-
 #: Characters of a message quoted in a fork instruction to name where an
 #: exchange or a consolidation range begins.
 QUOTE_CHARS = 120
 
-_FORKS_KEYS = frozenset({"enabled", "reasoning_budget_tokens", "stages"})
+_FORKS_KEYS = frozenset({"enabled", "stages"})
 
 
 class ForkRefused(Exception):
@@ -63,7 +60,7 @@ class ForkRefused(Exception):
 
 
 class ForkUnavailable(Exception):
-    """A fork could not be built: no live window or no main client."""
+    """A fork could not be built: no live window or no client for its stage."""
 
 
 @dataclass(frozen=True)
@@ -107,7 +104,6 @@ class ForksConfig:
     """Parsed ``agent.forks`` section. Static operator flags, never tunables."""
 
     enabled: bool = True
-    reasoning_budget_tokens: int | None = DEFAULT_FORK_REASONING_BUDGET
     #: None means every stage; otherwise only the named stages fork.
     stages: frozenset[str] | None = None
 
@@ -120,15 +116,24 @@ def parse_forks_config(agent_config: dict) -> ForksConfig:
     """Parse and validate ``agent.forks`` from the agent config section.
 
     Raises:
-        ValueError: on an unknown key, a non-boolean ``enabled``, a budget
-            that is not a non-negative integer or null, or ``stages`` that
-            is neither null nor a list of strings.
+        ValueError: on the removed ``reasoning_budget_tokens`` key, an
+            unknown key, a non-boolean ``enabled``, or ``stages`` that is
+            neither null nor a list of strings.
     """
     raw = agent_config.get("forks")
     if raw is None:
         return ForksConfig()
     if not isinstance(raw, dict):
         raise ValueError(f"agent.forks must be a mapping; got {raw!r}")
+
+    # The removed budget key: point at its replacement rather than the
+    # generic unknown-key error.
+    if "reasoning_budget_tokens" in raw:
+        raise ValueError(
+            "agent.forks.reasoning_budget_tokens was removed (#399); set "
+            "reasoning_budget_tokens in the extra_body of the profile each "
+            "stage maps to under llm.stages"
+        )
 
     # Unknown keys are rejected so a typo doesn't silently leave forks off.
     unknown = set(raw) - _FORKS_KEYS
@@ -138,16 +143,6 @@ def parse_forks_config(agent_config: dict) -> ForksConfig:
     enabled = raw.get("enabled", True)
     if not isinstance(enabled, bool):
         raise ValueError(f"agent.forks.enabled must be true or false; got {enabled!r}")
-
-    # bool is an int subclass; reject it explicitly so `true` isn't a budget of 1.
-    budget = raw.get("reasoning_budget_tokens", DEFAULT_FORK_REASONING_BUDGET)
-    if budget is not None and (
-        isinstance(budget, bool) or not isinstance(budget, int) or budget < 0
-    ):
-        raise ValueError(
-            "agent.forks.reasoning_budget_tokens must be a non-negative integer "
-            f"or null; got {budget!r}"
-        )
 
     stages_raw = raw.get("stages")
     if stages_raw is not None and (
@@ -159,7 +154,6 @@ def parse_forks_config(agent_config: dict) -> ForksConfig:
 
     return ForksConfig(
         enabled=enabled,
-        reasoning_budget_tokens=budget,
         stages=frozenset(stages_raw) if stages_raw is not None else None,
     )
 
@@ -308,6 +302,27 @@ def quote(text: str | None, limit: int = QUOTE_CHARS) -> str:
     message in a fork instruction."""
     flat = " ".join((text or "").split())
     return flat[:limit] + ("…" if len(flat) > limit else "")
+
+
+def fork_body(
+    overrides: dict, profile_body: dict | None, stage_body: dict | None
+) -> dict:
+    """The call-level ``extra_body`` a fork sends on top of its client's.
+
+    The client's instance body (the stage profile's ``extra_body``) is merged
+    first by ``LLMClient.chat`` and this body wins over it, so a runtime
+    override of a key the profile also sets is dropped here: the profile
+    beats ``set_settings``. Then the stage's own body (``response_format``),
+    then ``tool_choice: "none"``, which beats everything so a fork never
+    dispatches tools.
+    """
+    # Overrides the profile also sets are not sent: the profile wins (R8).
+    shadowed = profile_body or {}
+    body = {k: v for k, v in overrides.items() if k not in shadowed}
+    # The stage's own body, then the invariant.
+    body.update(stage_body or {})
+    body["tool_choice"] = "none"
+    return body
 
 
 async def view_call(

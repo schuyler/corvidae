@@ -1,16 +1,18 @@
 """LLMPlugin — owns LLM client lifecycle and configuration.
 
-Parses every profile under llm: in config, creates one LLMClient per profile,
-and manages their aiohttp session lifecycle. Other plugins access clients
-via get_dependency(pm, "llm", LLMPlugin).get_client(stage), where stage is a
-model-calling stage the plugin registered through register_llm_stages (None
-for main turns).
+Parses the llm: section (parse_llm_config), creates one LLMClient per
+profile, and manages their aiohttp session lifecycle. Other plugins access
+clients via get_dependency(pm, "llm", LLMPlugin).get_client(stage), where
+stage is a model-calling stage the plugin registered through
+register_llm_stages (None for main turns).
 
 Config:
     llm:
-      main:           # required
+      main:           # a profile; the default chat profile unless defaults.chat says otherwise
         base_url: ...
         model: ...
+        kind: chat          # optional: chat (default) | embedding
+        extends: other      # optional: deep overlay of another profile
         api_key: ...        # optional
         extra_body: ...     # optional
         max_retries: 3      # optional
@@ -20,17 +22,24 @@ Config:
         raw_reasoning: false  # endpoint returns <think>…</think> inline in content
         reasoning_reopened: truncate  # truncate | rerun: a reply that reopens reasoning after its answer
         timeout: ...        # optional
-      embedding:      # optional — the /embeddings profile (bootstrap-mapping §4.3)
-        (same keys, plus required dimensions: int)
+      embedding:      # the /embeddings profile (bootstrap-mapping §4.3)
+        (same keys, plus kind: embedding and required dimensions: int)
+      defaults:       # optional: kind -> default profile (chat -> main, embedding -> embedding)
+        chat: main
+      stages:         # optional: stage -> profile
+        compaction: forks
 
-Profiles are open-ended: any key under llm: becomes a client. A stage
-resolves to its kind's default profile (DEFAULT_PROFILES): chat stages to
-main, embedding stages to embedding. Only llm.main is hot-swapped by
-on_config_reload; other profiles are restart-only for now.
+Every key under llm: except defaults and stages is a profile. A stage
+resolves to the profile llm.stages names for it, else to its kind's default
+profile. Everything under llm: is restart-only; a reload that changes it logs
+a warning and keeps the running clients.
 """
 import asyncio
+import copy
 import logging
 import math
+from collections.abc import Mapping
+from dataclasses import dataclass
 
 import aiohttp
 
@@ -135,78 +144,252 @@ def _reasoning_reopened(cfg: dict, profile: str) -> str:
         logger.warning(
             "llm.%s.reasoning_reopened is %r; accepted values are "
             "truncate, rerun; falling back to truncate — fix the value in "
-            "agent.yaml and reload or restart",
+            "agent.yaml and restart",
             profile, value,
         )
         return "truncate"
     return value
 
 
-async def _close_after(client: LLMClient, delay: float = 5.0) -> None:
-    """Close an old LLM client after a delay, allowing in-flight requests to finish."""
-    await asyncio.sleep(delay)
-    try:
-        await client.stop()
-    except Exception:
-        logger.warning("failed to close old LLM client", exc_info=True)
+#: The kinds a profile may have.
+KINDS: frozenset[str] = frozenset({"chat", "embedding"})
+
+#: Names under llm: that are not profiles.
+RESERVED: frozenset[str] = frozenset({"defaults", "stages"})
+
+#: The profile each kind's default falls back to when llm.defaults omits it.
+FALLBACK_DEFAULTS: dict[str, str] = {"chat": "main", "embedding": "embedding"}
 
 
-#: The profile a stage of each kind resolves to.
-DEFAULT_PROFILES: dict[str, str] = {"chat": "main", "embedding": "embedding"}
+@dataclass(frozen=True)
+class LLMConfig:
+    """The parsed llm: section.
+
+    Attributes:
+        profiles: name -> resolved settings: ``extends`` applied and removed,
+            ``kind`` filled in.
+        defaults: kind -> default profile name, configured or fallback; a
+            kind with no default is absent.
+        stages: stage -> profile name, as configured.
+    """
+
+    profiles: dict[str, dict]
+    defaults: dict[str, str]
+    stages: dict[str, str]
+
+    def profile_for(self, stage: str | None, kind: str) -> str | None:
+        """The profile ``stage`` uses: the stage map's entry, else ``kind``'s
+        default, else None. ``stage=None`` is a main turn."""
+        if stage is not None and stage in self.stages:
+            return self.stages[stage]
+        return self.defaults.get(kind)
+
+
+def merge_profile(base: dict, child: dict) -> dict:
+    """``base`` overlaid with ``child``, without mutating either.
+
+    Mappings merge recursively; lists and scalars replace; a child value of
+    None deletes the inherited key (unlike runtime.deep_merge, where None is
+    a no-op).
+    """
+    merged = copy.deepcopy(base)
+    for key, value in child.items():
+        if value is None:
+            # None means "delete the inherited key".
+            merged.pop(key, None)
+        elif isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = merge_profile(merged[key], value)
+        elif isinstance(value, dict):
+            # Nothing to merge with, but nested None still deletes.
+            merged[key] = merge_profile({}, value)
+        else:
+            merged[key] = copy.deepcopy(value)
+    return merged
+
+
+def _section(section: Mapping, key: str) -> dict:
+    """llm.<key> as a dict (an absent or null block is empty); anything but a
+    mapping is a config error."""
+    value = section.get(key)
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(
+            f"llm.{key} must be a mapping; got {type(value).__name__}"
+        )
+    return value
+
+
+def _profile_name(key: str, value: object, profiles: Mapping) -> str:
+    """The profile name at llm.<key>; anything but a string naming a defined
+    profile is a config error."""
+    if not isinstance(value, str):
+        raise ValueError(
+            f"llm.{key} must be a profile name; got {value!r}; "
+            f"defined profiles: {', '.join(sorted(profiles))}"
+        )
+    if value not in profiles:
+        raise ValueError(
+            f"llm.{key} names unknown profile {value!r}; "
+            f"defined profiles: {', '.join(sorted(profiles))}"
+        )
+    return value
+
+
+def _resolve_profile(name: str, blocks: dict[str, dict]) -> dict:
+    """Profile ``name`` with its ``extends`` chain folded in, root first.
+
+    Raises:
+        ValueError: on an unknown base or an ``extends`` cycle.
+    """
+    # Walk up the chain from the profile to its root.
+    chain = [name]
+    while "extends" in blocks[chain[-1]]:
+        base = blocks[chain[-1]]["extends"]
+        if not isinstance(base, str) or base not in blocks:
+            raise ValueError(
+                f"llm.{chain[-1]}.extends names unknown profile {base!r}; "
+                f"defined profiles: {', '.join(sorted(blocks))}"
+            )
+        if base in chain:
+            cycle = chain[chain.index(base):] + [base]
+            raise ValueError(
+                f"llm.{chain[-1]}.extends forms a cycle: {' → '.join(cycle)}; "
+                "remove one extends"
+            )
+        chain.append(base)
+
+    # Fold root to leaf: the root's block as written, then each child over it.
+    root, *children = reversed(chain)
+    resolved = {k: copy.deepcopy(v) for k, v in blocks[root].items() if k != "extends"}
+    for child in children:
+        resolved = merge_profile(
+            resolved, {k: v for k, v in blocks[child].items() if k != "extends"}
+        )
+    return resolved
+
+
+def parse_llm_config(section: dict | None) -> LLMConfig:
+    """Parse and validate the llm: section. Pure.
+
+    Raises:
+        ValueError: naming the offending key, for a malformed profile, an
+            ``extends`` problem, a bad kind, an embedding profile with no
+            dimensions, a bad llm.defaults or llm.stages entry, or no default
+            chat profile.
+    """
+    if section is None:
+        section = {}
+    if not isinstance(section, dict):
+        raise ValueError(f"llm must be a mapping; got {type(section).__name__}")
+
+    # Every key except the reserved ones is a profile; a null block is absent.
+    blocks: dict[str, dict] = {}
+    for name, block in section.items():
+        if name in RESERVED or block is None:
+            continue
+        if not isinstance(block, dict):
+            raise ValueError(f"llm.{name} must be a mapping; got {type(block).__name__}")
+        blocks[name] = block
+
+    # Resolve each profile and validate the result.
+    profiles: dict[str, dict] = {}
+    for name in blocks:
+        resolved = _resolve_profile(name, blocks)
+        # An omitted kind means chat, applied after the chain is merged.
+        kind = resolved.setdefault("kind", "chat")
+        if not isinstance(kind, str) or kind not in KINDS:
+            raise ValueError(
+                f"llm.{name}.kind must be one of {', '.join(sorted(KINDS))}; got {kind!r}"
+            )
+        for key in ("base_url", "model"):
+            if resolved.get(key) is None:
+                raise ValueError(f"llm.{name}.{key} is required (after extends)")
+        if kind == "embedding" and resolved.get("dimensions") is None:
+            raise ValueError(
+                f"llm.{name}.dimensions is required for an embedding profile "
+                "(the model's fixed vector dimension)"
+            )
+        profiles[name] = resolved
+
+    # Each kind's default: configured, else the fallback name if it exists.
+    configured = _section(section, "defaults")
+    unknown_kinds = set(configured) - KINDS
+    if unknown_kinds:
+        raise ValueError(
+            f"llm.defaults: unknown kind {sorted(unknown_kinds)[0]!r}; "
+            f"accepted: {', '.join(sorted(KINDS))}"
+        )
+    defaults: dict[str, str] = {}
+    for kind in sorted(KINDS):
+        if kind in configured:
+            name = _profile_name(f"defaults.{kind}", configured[kind], profiles)
+            if profiles[name]["kind"] != kind:
+                raise ValueError(
+                    f"llm.defaults.{kind} names {name!r}, a "
+                    f"{profiles[name]['kind']} profile; name a profile of kind {kind}"
+                )
+            defaults[kind] = name
+        elif FALLBACK_DEFAULTS[kind] in profiles:
+            name = FALLBACK_DEFAULTS[kind]
+            if profiles[name]["kind"] != kind:
+                raise ValueError(
+                    f"llm.{name} is a {profiles[name]['kind']} profile but is the "
+                    f"default {kind} profile by name; add kind: {kind} to it, "
+                    f"or set llm.defaults.{kind}"
+                )
+            defaults[kind] = name
+    if "chat" not in defaults:
+        raise ValueError(
+            "no default chat profile: define llm.main or set llm.defaults.chat"
+        )
+
+    # The stage map: every entry must name a defined profile.
+    stages = dict(_section(section, "stages"))
+    for stage, name in stages.items():
+        _profile_name(f"stages.{stage}", name, profiles)
+    return LLMConfig(profiles=profiles, defaults=defaults, stages=stages)
+
+
+def check_stage_map(config: LLMConfig, stages: Mapping[str, str]) -> None:
+    """Check llm.stages against the registered stages (stage -> kind).
+
+    Raises:
+        ValueError: when a stage is mapped to a profile of another kind.
+
+    An entry naming an unregistered stage is logged: a disabled plugin's
+    stage is expected there.
+    """
+    for stage, name in config.stages.items():
+        if stage not in stages:
+            logger.warning(
+                "llm.stages.%s names no registered stage (registered: %s); "
+                "ignoring it — a disabled plugin's stage is expected here",
+                stage, ", ".join(sorted(stages)) or "(none)",
+            )
+            continue
+        profile_kind = config.profiles[name]["kind"]
+        if profile_kind != stages[stage]:
+            raise ValueError(
+                f"llm.stages.{stage} maps a {stages[stage]} stage to {name!r}, "
+                f"a {profile_kind} profile; map it to a {stages[stage]} profile"
+            )
 
 
 class LLMPlugin(CorvidaePlugin):
-    """Plugin that owns LLM client instances and their lifecycle.
-
-    Attributes:
-        embedding_dimensions: The vector dimension of the embedding profile,
-            or None when llm.embedding is not configured. The vec table
-            schema (MemoryPlugin) needs a fixed dimension, so it is a
-            required, startup-validated key.
-    """
+    """Plugin that owns LLM client instances and their lifecycle."""
 
     depends_on = frozenset()
 
     def __init__(self, pm=None) -> None:
         if pm is not None:
             self.pm = pm
-        # profile -> LLMClient; populated in on_start from every key under llm:
-        self._clients: dict[str, LLMClient | None] = {}
-        # profile -> config dict as parsed in on_init
-        self._profile_configs: dict[str, dict] = {}
+        # profile -> LLMClient; populated in on_start, one per resolved profile
+        self._clients: dict[str, LLMClient] = {}
+        # the parsed llm: section; None until on_start
+        self._config: LLMConfig | None = None
         # stage -> kind; collected from register_llm_stages in on_start
         self._stages: dict[str, str] = {}
-        self.embedding_dimensions: int | None = None
-
-    # ------------------------------------------------------------------
-    # Legacy accessors — kept as properties over the profile dict so existing
-    # callers and tests (which read and assign these directly) keep working.
-    # ------------------------------------------------------------------
-
-    @property
-    def main_client(self) -> LLMClient | None:
-        """The llm.main client (None before on_start)."""
-        return self._clients.get("main")
-
-    @main_client.setter
-    def main_client(self, client: LLMClient | None) -> None:
-        self._clients["main"] = client
-
-    @property
-    def background_client(self) -> LLMClient | None:
-        """The llm.background client, or None when not configured."""
-        return self._clients.get("background")
-
-    @background_client.setter
-    def background_client(self, client: LLMClient | None) -> None:
-        self._clients["background"] = client
-
-    @hookimpl
-    async def on_init(self, pm, config: dict) -> None:
-        await super().on_init(pm, config)
-        # Every key under llm: is a profile config (main, embedding, and
-        # future profiles alike).
-        self._profile_configs = dict(config.get("llm", {}) or {})
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
@@ -214,31 +397,29 @@ class LLMPlugin(CorvidaePlugin):
         if getattr(self, "pm", None) is not None:
             self.pm.hook.register_llm_stages(stages=self._stages)
 
-        profile_configs = self._profile_configs
-        if not profile_configs:
-            # Backward compat: read from config if on_init was not called
-            profile_configs = dict(config.get("llm", {}) or {})
-        if profile_configs.get("main") is None:
-            raise KeyError("llm.main config is required")
+        # Parse and check the llm: section before creating any client.
+        self._config = parse_llm_config(config.get("llm"))
+        check_stage_map(self._config, self._stages)
 
-        # Validate the embedding profile before creating any client: the vec
-        # table needs a fixed dimension, so a missing key is a config error.
-        embedding_cfg = profile_configs.get("embedding")
-        if embedding_cfg is not None:
-            if "dimensions" not in embedding_cfg:
-                raise ValueError(
-                    "llm.embedding requires a 'dimensions' key (the fixed "
-                    "vector dimension of the embedding model)"
-                )
-            self.embedding_dimensions = int(embedding_cfg["dimensions"])
-
-        # One client per configured profile.
-        for profile, cfg in profile_configs.items():
-            if cfg is None:
-                continue
+        # One client per resolved profile.
+        for profile, cfg in self._config.profiles.items():
             client = self._create_client(cfg, profile=profile)
             await client.start()
             self._clients[profile] = client
+
+        # R5: report each kind that has no default and still has stages
+        # that fall back to it.
+        for kind in sorted(KINDS - self._config.defaults.keys()):
+            unmapped = sorted(
+                stage for stage, stage_kind in self._stages.items()
+                if stage_kind == kind and stage not in self._config.stages
+            )
+            if unmapped:
+                logger.warning(
+                    "no default %s profile; unmapped stages %s have no client "
+                    "and degrade (set llm.defaults.%s or define llm.%s)",
+                    kind, ", ".join(unmapped), kind, FALLBACK_DEFAULTS[kind],
+                )
 
         # R5: where each stage's traffic goes, in one line.
         logger.info(
@@ -252,57 +433,20 @@ class LLMPlugin(CorvidaePlugin):
     @hookimpl
     async def on_stop(self) -> None:
         for client in self._clients.values():
-            if client is not None:
-                await client.stop()
+            await client.stop()
 
-    @hookimpl(tryfirst=True)
+    @hookimpl
     async def on_config_reload(self, config: dict) -> None:
-        """Re-read llm config and swap the main client if it changed.
+        """Warn when the llm: section changed; it applies on restart only.
 
-        Only llm.main is hot-swapped: a new LLMClient is created, started,
-        and swapped in, with the old one closed after a delay so in-flight
-        requests complete. Other profiles (embedding, ...) are
-        restart-only for now — changes to them are logged and ignored.
-
-        ``tryfirst`` because Agent.on_config_reload re-borrows the client
-        from this plugin: the swap has to land before anything reads it, and
-        ConfigWatcher dispatches in registration order, which is not
-        deterministic (#382).
+        No client is swapped: profiles, llm.stages and llm.defaults are read
+        at startup.
         """
-        llm_config = config.get("llm", {}) or {}
-        new_main_config = llm_config.get("main")
-        if new_main_config is None:
-            # Validation should have caught this; log and skip.
-            logger.error("on_config_reload: llm.main missing from new config, skipping LLM swap")
-            return
-
-        # Non-main profile changes are restart-only; surface them honestly.
-        for profile, cfg in llm_config.items():
-            if profile != "main" and cfg != self._profile_configs.get(profile):
-                logger.warning(
-                    "on_config_reload: llm.%s changed; profile reconfiguration "
-                    "is restart-only, ignoring", profile,
-                )
-
-        # Compare new config with stored config; skip swap if unchanged.
-        if new_main_config == self._profile_configs.get("main"):
-            return
-
-        logger.info("on_config_reload: llm.main changed, creating new LLM client")
-
-        # Create and start new client before swapping so that an error during
-        # start does not leave the plugin with a None client.
-        new_client = self._create_client(new_main_config, profile="main")
-        await new_client.start()
-
-        # Swap the reference and store the updated config.
-        old_client = self._clients.get("main")
-        self._clients["main"] = new_client
-        self._profile_configs["main"] = new_main_config
-
-        # Schedule deferred closure of the old client so in-flight requests finish.
-        if old_client is not None:
-            asyncio.create_task(_close_after(old_client, delay=5.0))
+        if parse_llm_config(config.get("llm")) != self._config:
+            logger.warning(
+                "llm config changed; LLM profiles, llm.stages and llm.defaults "
+                "apply on restart"
+            )
 
     @hookimpl(trylast=True)
     async def resolve_llm_error(self, channel, error: Exception) -> str | None:
@@ -347,31 +491,41 @@ class LLMPlugin(CorvidaePlugin):
         return None
 
     def resolve_profile(self, stage: str | None = None) -> str | None:
-        """The configured profile ``stage`` resolves to, or None when its
-        default profile isn't configured.
+        """The profile ``stage`` resolves to, or None when it has no client.
 
-        ``stage=None`` is a main turn. A registered stage resolves to its
-        kind's default profile; any other name raises ValueError.
+        ``stage=None`` is a main turn. A registered stage resolves to the
+        profile llm.stages maps it to, else to its kind's default profile;
+        any other name raises ValueError.
         """
         if stage is None:
-            profile = DEFAULT_PROFILES["chat"]
+            kind = "chat"
         elif stage in self._stages:
-            profile = DEFAULT_PROFILES[self._stages[stage]]
+            kind = self._stages[stage]
         else:
             raise ValueError(
                 f"unregistered llm stage {stage!r}; registered stages: "
                 f"{', '.join(sorted(self._stages)) or '(none)'}"
             )
-        return profile if self._clients.get(profile) is not None else None
+        # Before on_start nothing is resolved.
+        if self._config is None:
+            return None
+        profile = self._config.profile_for(stage, kind)
+        return profile if profile in self._clients else None
 
     def get_client(self, stage: str | None = None) -> LLMClient | None:
         """Return the client for ``stage`` (None for main turns).
 
-        None when the stage's default profile isn't configured (including
-        main turns before on_start). An unregistered stage raises ValueError.
+        None when the stage has no profile (including main turns before
+        on_start). An unregistered stage raises ValueError.
         """
         profile = self.resolve_profile(stage)
         return self._clients[profile] if profile is not None else None
+
+    def profile_config(self, stage: str | None = None) -> dict:
+        """The resolved settings of ``stage``'s profile, or {} when it has
+        none. Read-only: the dict is the plugin's own."""
+        profile = self.resolve_profile(stage)
+        return self._config.profiles[profile] if profile is not None else {}
 
     def _create_client(self, cfg: dict, profile: str = "main") -> LLMClient:
         """Construct an LLMClient from config and inject its hook observer.
@@ -383,7 +537,7 @@ class LLMPlugin(CorvidaePlugin):
         here, not passed through.
         """
         # Resolve ${VAR} in api_key from the environment. The resolved key
-        # lives only on the client, never in _profile_configs, so reload
+        # lives only on the client, never in the parsed config, so reload
         # comparison and logs see the raw reference.
         api_key = cfg.get("api_key")
         if isinstance(api_key, str):

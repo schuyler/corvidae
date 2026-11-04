@@ -23,6 +23,7 @@ from corvidae.channel import ChannelConfig, ChannelRegistry, load_channel_config
 from corvidae.context import ContextWindow
 from corvidae.persistence import init_db
 from corvidae.channel import resolve_system_prompt
+from helpers import stub_llm_config
 
 
 # ---------------------------------------------------------------------------
@@ -195,7 +196,7 @@ class TestConfigureLogging:
 
 def _make_minimal_config(tmp_path, extra=None):
     """Write a minimal agent.yaml for integration tests and return its path."""
-    data = {"llm": {"base_url": "http://localhost:8080", "model": "test"}}
+    data = {"llm": {"main": {"base_url": "http://localhost:8080", "model": "test"}}}
     if extra:
         data.update(extra)
     config_file = tmp_path / "agent.yaml"
@@ -839,7 +840,8 @@ class TestAgentLogging:
         from corvidae.tool_collection import ToolCollectionPlugin
         from corvidae.tool import ToolRegistry
         mock_llm = LLMPlugin(pm)
-        mock_llm.main_client = MagicMock()
+        mock_llm._clients["main"] = MagicMock()
+        stub_llm_config(mock_llm)
         pm.register(mock_llm, name="llm")
 
         tools_plugin = ToolCollectionPlugin(pm)

@@ -918,7 +918,9 @@ class AppraisalPlugin(CorvidaePlugin):
         )
         # Fork and parse; any failure or unusable reply is a miss.
         try:
-            result = await agent.fork(channel, instruction, extra_body=STAGE2_EXTRA_BODY)
+            result = await agent.fork(
+                channel, instruction, stage="appraisal", extra_body=STAGE2_EXTRA_BODY
+            )
             return _stage2_from_text(result.text)
         except Exception as exc:
             self._skip_stage2(

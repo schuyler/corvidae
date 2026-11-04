@@ -1,8 +1,13 @@
 # LLM backend — OpenAI-compatible Chat Completions API (required)
-# llm.main is required. Every key under llm: is a profile, built into its own
-# client. Chat stages (main turns, compaction, consolidation, the importance
-# prior, appraisal, critique, subagents) use llm.main; the embedding stage
-# uses llm.embedding when it is configured.
+# Every key under llm: except defaults and stages is a profile, built into its
+# own client. Main turns go to the default chat profile (llm.main unless
+# llm.defaults.chat names another). A stage sends to the profile llm.stages
+# maps it to, else to its kind's default: chat stages (compaction,
+# consolidation, rubric, appraisal, critique, subagent) to the default chat
+# profile, the embedding stage to the default embedding profile (llm.embedding
+# unless llm.defaults.embedding names another), if there is one. Only a
+# default chat profile is required. All of llm: is read at startup; a change
+# needs a restart.
 llm:
   main:
     base_url: http://localhost:8080/v1   # llama-server, vLLM, OpenAI, etc.
@@ -24,11 +29,24 @@ llm:
     # model_not_loaded_wait: 60.0      # seconds to wait out "model is not loaded" (llama-server router)
     # timeout: null                    # HTTP timeout in seconds per request (null means no timeout)
   # embedding:                         # optional: embedding model for memory retrieval
+  #   kind: embedding                  # REQUIRED for an embedding profile; an omitted kind means chat
   #   base_url: http://localhost:8082/v1  # embedding servers are usually separate endpoints
   #   model: nomic-embed-text
   #   dimensions: 768                  # REQUIRED: fixed vector dimension of the model
   #   # api_key: sk-...                # omit for local servers
   #   # api_key: "${OPENAI_API_KEY}"   # or from the environment
+  # forks:                             # any other name is a profile: here one derived from main
+  #   extends: main                    # deep overlay: mappings merge, lists and scalars replace,
+  #                                    # a child's null deletes the inherited key
+  #   extra_body:
+  #     reasoning_budget_tokens: 2048  # a fork's think budget now lives in its profile
+  #     # reasoning_effort: null       # example: delete a key main sets
+  # defaults:                          # optional: each kind's default profile
+  #   chat: main                       # fallback when omitted (main turns and unmapped chat stages)
+  #   embedding: embedding             # when set, the profile must exist; omitted, llm.embedding is used if defined
+  # stages:                            # optional: stage -> profile (default: the kind's default)
+  #   compaction: forks                # stages: compaction, subagent, consolidation, rubric,
+  #   consolidation: forks             # appraisal, critique (chat); embedding (embedding)
 
 # Daemon settings (optional)
 daemon:
@@ -57,8 +75,9 @@ agent:
   #                                 # the background view used on a fork miss (prompts/compaction_fork.md);
   #                                 # replaces the removed compaction_prompt (still set: startup warning, ignored)
   # forks:                          # run background stages as forks of the main window (#51)
-  #   enabled: true                 # default; false: live-window stages skip, compaction uses a view call on llm.main
-  #   reasoning_budget_tokens: 2048 # per-fork think budget; null = server default
+  #   enabled: true                 # default; false: live-window stages skip, compaction uses a view call
+  #                                 # (a fork's profile, budget and caps come from llm.stages; the old
+  #                                 # reasoning_budget_tokens key is a startup error)
   #   stages: null                  # null = all; or [compaction, consolidation, appraisal, critique]
   # chars_per_token: 3.5            # deprecated: retained for config compatibility; has no effect on token counting
   # request_logprobs: false         # ask the LLM for token logprobs on every request (llama-server supports
@@ -89,7 +108,7 @@ agent:
 #   retrieval:
 #     band_on: score                  # score | similarity: what strong/moderate/weak is applied to
 #     recency_from: created           # created | last_used: where ranking age is measured from
-#   consolidation_fork_prompt: "..."  # instruction for consolidation, forked or sent on llm.main over the
+#   consolidation_fork_prompt: "..."  # instruction for consolidation, forked or sent to the consolidation stage over the
 #                                     # agent's rebuilt view; replaces the removed consolidation_prompt
 #                                     # (still set: startup warning, ignored)
 

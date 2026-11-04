@@ -47,6 +47,7 @@ from corvidae.agent import _resolve_mid_conversation_system_role
 from corvidae.channel import ChannelConfig
 from corvidae.fork import ViewInputs
 from corvidae.llm import LLMClient
+from corvidae.llm_plugin import parse_llm_config
 from corvidae.thinking import apply_reasoning_history
 from corvidae_cognition.memory import (
     CONSOLIDATION_EXTRA_BODY,
@@ -115,12 +116,16 @@ def _load_config(config_path: Path) -> dict:
 
 
 def _build_client(config: dict, config_path: Path) -> LLMClient:
-    """llm.main: the profile the daemon's consolidation stage resolves to by
-    default (LLMPlugin.get_client("consolidation"))."""
-    llm_config = config.get("llm") or {}
-    cfg = llm_config.get("main")
-    if cfg is None:
-        raise ValueError(f"{config_path}: no llm.main configured")
+    """The client for the profile the daemon's consolidation stage resolves
+    to (llm.stages, else the default chat profile), as
+    ``LLMPlugin.get_client("consolidation")`` builds it."""
+    # The same parse the daemon runs, so the stage resolves identically.
+    try:
+        llm_config = parse_llm_config(config.get("llm"))
+    except ValueError as e:
+        raise ValueError(f"{config_path}: {e}") from e
+    profile = llm_config.profile_for("consolidation", "chat")
+    cfg = llm_config.profiles[profile]
     kwargs = {k: cfg[k] for k in _LLM_CLIENT_KEYS if k in cfg}
     return LLMClient(**kwargs)
 
