@@ -4,7 +4,7 @@ System prompt for `CritiquePlugin`'s adversarial lens (bootstrap-mapping
 §3.3; phase-2 WP2.7), selected when the exchange's appraisal shows negative
 valence plus disagreement: the user is pushing back, so the risk is that the
 agent defended an error instead of examining it. Schema-constrained JSON
-objections — structured, not free text. Runs on the `critic` LLM role as a
+objections — structured, not free text. Runs as a fork on `llm.main` as a
 silent background task.
 
 ---

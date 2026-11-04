@@ -1,9 +1,9 @@
-"""Tests for the embeddings client surface and LLM role generalization
+"""Tests for the embeddings client surface and LLM profile generalization
 (Phase 1a WP1a.3, bootstrap-mapping §4.3).
 
 - LLMClient.embed POSTs {base_url}/embeddings and unpacks vectors in order.
-- LLMPlugin builds a client per role under llm:; get_client(role) falls
-  back to main for unconfigured or unknown roles.
+- LLMPlugin builds a client per profile under llm:; an embedding-kind stage
+  resolves to the embedding profile.
 - llm.embedding requires a ``dimensions`` key, validated at startup.
 """
 
@@ -160,12 +160,14 @@ class TestLLMClientEmbed:
             await client.embed(["alpha"], kind="passage")
 
 
-class TestLLMPluginRoles:
-    def _plugin_with_clients(self, roles: dict) -> LLMPlugin:
-        """Build a bare plugin with the given role->client mapping."""
+class TestLLMPluginProfiles:
+    def _plugin_with_clients(self, profiles: dict) -> LLMPlugin:
+        """Build a bare plugin with the given profile->client mapping and an
+        embedding-kind stage registered."""
         plugin = LLMPlugin()
-        for role, client in roles.items():
-            plugin._clients[role] = client
+        plugin._stages = {"embedding": "embedding"}
+        for profile, client in profiles.items():
+            plugin._clients[profile] = client
         return plugin
 
     def test_get_client_embedding_returns_embedding_client(self):
@@ -173,17 +175,7 @@ class TestLLMPluginRoles:
         plugin = self._plugin_with_clients({"main": main, "embedding": embedding})
         assert plugin.get_client("embedding") is embedding
 
-    def test_get_client_embedding_falls_back_to_main(self):
-        main = MagicMock(name="main")
-        plugin = self._plugin_with_clients({"main": main})
-        assert plugin.get_client("embedding") is main
-
-    def test_get_client_unknown_role_falls_back_to_main(self):
-        main = MagicMock(name="main")
-        plugin = self._plugin_with_clients({"main": main})
-        assert plugin.get_client("no-such-role") is main
-
-    async def test_on_start_builds_client_per_role(self):
+    async def test_on_start_builds_client_per_profile(self):
         """Every key under llm: becomes a client; embedding keeps dimensions."""
         config = {
             "llm": {
@@ -200,11 +192,11 @@ class TestLLMPluginRoles:
         with patch.object(LLMClient, "start", new_callable=AsyncMock):
             await plugin.on_start(config=config)
 
-        assert plugin.get_client("embedding").model == MODEL
-        assert plugin.get_client("embedding") is not plugin.get_client("main")
+        assert plugin._clients["embedding"].model == MODEL
+        assert plugin._clients["embedding"] is not plugin.get_client()
         assert plugin.embedding_dimensions == 3
-        # Legacy accessors still work over the role dict.
-        assert plugin.main_client is plugin.get_client("main")
+        # Legacy accessors still work over the profile dict.
+        assert plugin.main_client is plugin.get_client()
 
     async def test_missing_dimensions_raises_at_startup(self):
         config = {
@@ -229,7 +221,7 @@ class TestLLMPluginRoles:
             "query_prefix": "search_query: ",
         }
         plugin = LLMPlugin()
-        client = plugin._create_client(cfg, role="embedding")
+        client = plugin._create_client(cfg, profile="embedding")
         # Both prefix attributes must be set on the constructed client.
         assert client.document_prefix == "search_document: "
         assert client.query_prefix == "search_query: "

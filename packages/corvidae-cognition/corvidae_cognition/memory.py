@@ -45,8 +45,6 @@ Config:
         bands:
           strong: 0.75               # value >= strong → asserted confidently
           moderate: 0.60             # value >= moderate → hedged
-      channel_groups: {}             # {group_name: [channel ids or * ? globs]}
-                                     # shared memory
       consolidation_fork_prompt: ... # instruction for forked consolidation
                                      # (agent.forks, #51); static config
 
@@ -69,7 +67,6 @@ import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from fnmatch import fnmatchcase
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 import aiosqlite
@@ -166,8 +163,8 @@ CONSOLIDATION_EXTRA_BODY = {
 
 # Default instruction for consolidation (GitHub issue #51). With agent.forks
 # on, the record is written by a fork of the live window; a range that has
-# left the window is written from a rebuilt view of it on llm.background
-# (#380). Either way this text is appended as a user turn, followed by a
+# left the window is written from a rebuilt view of it on the consolidation
+# stage's client (#380). Either way this text is appended as a user turn, followed by a
 # sentence naming where the range starts. prompts/memory_consolidation_fork.md
 # is the documented copy; memory.consolidation_fork_prompt (static config,
 # not a runtime tunable) overrides it. The agent's own system prompt is above
@@ -575,14 +572,14 @@ async def build_catchup_segments(
             logger.warning(
                 "catch-up view for channel %s dropped its own rows (message ids %s) "
                 "to fit max_context_tokens %d; they are committed without reaching a "
-                "view — raise max_context_tokens or the background role's context",
+                "view — raise max_context_tokens or the consolidation profile's context",
                 channel_id, ", ".join(map(str, lost)), inputs.max_tokens,
             )
         if truncated:
             logger.warning(
                 "catch-up view for channel %s truncated message id %s to fit "
                 "max_context_tokens %d — raise max_context_tokens or the "
-                "background role's context",
+                "consolidation profile's context",
                 channel_id, window.messages[-1].get("_db_id"), inputs.max_tokens,
             )
         messages = build_fork_prompt(
@@ -593,7 +590,7 @@ async def build_catchup_segments(
             logger.warning(
                 "catch-up view for channel %s, message ids %d-%d measures %d tokens, "
                 "over max_context_tokens %d; sending it anyway — raise "
-                "max_context_tokens or the background role's context",
+                "max_context_tokens or the consolidation profile's context",
                 channel_id, seg_rows[0][0], end_id, measured, inputs.max_tokens,
             )
         segments.append(CatchupSegment(seg_rows, end_id, messages))
@@ -611,101 +608,6 @@ def _retrieval_choice(retrieval_cfg: dict, key: str, choices: tuple[str, ...]) -
         )
         return choices[0]
     return value
-
-
-# Wildcards a memory.channel_groups member may use. These are the only
-# metacharacters fnmatchcase and SQLite GLOB agree on; '[' / ']' (character
-# classes) differ between the two and are rejected in pattern members
-# (GitHub issue #50). Wildcard-free members match by equality, so a
-# literal id may contain brackets (IRC nicks can).
-_GLOB_WILDCARDS = frozenset("*?")
-_GLOB_REJECTED = frozenset("[]")
-
-
-def _is_pattern(member: str) -> bool:
-    """Whether a channel_groups member is a glob pattern, not a literal id."""
-    return not _GLOB_WILDCARDS.isdisjoint(member)
-
-
-def _validate_channel_groups(groups: object) -> dict[str, list[str]]:
-    """Check memory.channel_groups is {name: [str]} with no bracket patterns.
-
-    Raises ValueError rather than dropping a bad member: silently narrowing
-    or reshaping a memory compartment is worse than refusing to start.
-    """
-    if not isinstance(groups, dict):
-        raise ValueError(
-            f"memory.channel_groups must be a mapping, got {type(groups).__name__}"
-        )
-    for name, members in groups.items():
-        if not isinstance(members, list) or not all(
-            isinstance(m, str) for m in members
-        ):
-            raise ValueError(
-                f"memory.channel_groups.{name} must be a list of channel ids"
-            )
-        for member in members:
-            if _is_pattern(member) and not _GLOB_REJECTED.isdisjoint(member):
-                raise ValueError(
-                    f"memory.channel_groups.{name} member {member!r}: "
-                    "'[' and ']' are not supported in a '*' / '?' pattern"
-                )
-    return groups
-
-
-@dataclass(frozen=True)
-class ChannelScope:
-    """The set of channels whose memories a calling channel may read.
-
-    ``ids`` match by equality (the caller's own id and literal group
-    members); ``patterns`` are '*' / '?' globs from group members, matched
-    case-sensitively with the same semantics in Python and SQLite GLOB.
-    """
-
-    ids: frozenset[str]
-    patterns: tuple[str, ...] = ()
-
-    def contains(self, channel_id: str) -> bool:
-        """Whether a memory owned by channel_id is visible in this scope."""
-        return channel_id in self.ids or any(
-            fnmatchcase(channel_id, p) for p in self.patterns
-        )
-
-    def sql(self, column: str) -> tuple[str, list[str]]:
-        """A parenthesized WHERE fragment restricting column to this scope,
-        with its bind parameters (ids first, then patterns). An empty scope
-        yields "(0)", which matches nothing."""
-        if not self.ids and not self.patterns:
-            return "(0)", []
-        clauses = []
-        if self.ids:
-            placeholders = ",".join("?" for _ in self.ids)
-            clauses.append(f"{column} IN ({placeholders})")
-        clauses.extend(f"{column} GLOB ?" for _ in self.patterns)
-        return "(" + " OR ".join(clauses) + ")", [*sorted(self.ids), *self.patterns]
-
-    def same_reach(self, other: "ChannelScope") -> bool:
-        """Whether two scopes admit exactly the same channels.
-
-        Ids already matched by one of the scope's own patterns are dropped
-        before comparing, so the scopes of two members of a "*" group (each
-        holding its own id plus "*") compare equal. Syntactically different
-        patterns compare unequal even if they match the same channels; that
-        errs toward "different", which only forgoes a merge.
-        """
-        def normal(scope: "ChannelScope") -> tuple[frozenset[str], frozenset[str]]:
-            # Drop ids a pattern in the same scope already covers.
-            ids = frozenset(
-                i for i in scope.ids
-                if not any(fnmatchcase(i, p) for p in scope.patterns)
-            )
-            return ids, frozenset(scope.patterns)
-
-        return normal(self) == normal(other)
-
-    def describe(self) -> str:
-        """Human-readable listing for scope errors shown to the model."""
-        return ", ".join([*sorted(self.ids), *self.patterns])
 
 
 def _format_age(seconds: float) -> str:
@@ -769,7 +671,7 @@ class RubricPrior:
         get_client: Callable[[], object],
         get_prompt: Callable[[], str] | None = None,
     ) -> None:
-        # A callable, not a client, so the current background client is
+        # A callable, not a client, so the current client is
         # resolved at call time (clients can be swapped on config reload).
         self._get_client = get_client
         self._get_prompt = get_prompt or (lambda: RUBRIC_PROMPT)
@@ -1011,7 +913,6 @@ class MemoryPlugin(CorvidaePlugin):
         self._half_life_days: float = DEFAULT_HALF_LIFE_DAYS
         self._band_on: str = BAND_ON_CHOICES[0]
         self._recency_from: str = RECENCY_FROM_CHOICES[0]
-        self._channel_groups: dict[str, list[str]] = {}
         # Phase 1b: near-dup merge threshold (WP1b.2)
         self._dup_threshold: float = 0.95
         # Tracked background tasks (consolidation) — plugin-owned
@@ -1042,13 +943,19 @@ class MemoryPlugin(CorvidaePlugin):
         self._db_lock = asyncio.Lock()
         # Pluggable importance prior; replaced by later phases (§3.1).
         self.importance_prior: ImportancePrior = RubricPrior(
-            lambda: self._llm().get_client("background"),
+            lambda: self._llm().get_client("rubric"),
             lambda: self._rubric_prompt,
         )
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
+
+    @hookimpl
+    def register_llm_stages(self, stages: dict[str, str]) -> None:
+        stages["consolidation"] = "chat"
+        stages["rubric"] = "chat"
+        stages["embedding"] = "embedding"
 
     @hookimpl
     async def on_init(self, pm, config: dict) -> None:
@@ -1100,9 +1007,6 @@ class MemoryPlugin(CorvidaePlugin):
         self._band_on = _retrieval_choice(retrieval_cfg, "band_on", BAND_ON_CHOICES)
         self._recency_from = _retrieval_choice(
             retrieval_cfg, "recency_from", RECENCY_FROM_CHOICES
-        )
-        self._channel_groups = _validate_channel_groups(
-            self._memory_cfg.get("channel_groups", {}) or {}
         )
         # Phase 1b: near-dup merge threshold (WP1b.2)
         self._dup_threshold = float(self._memory_cfg.get("dup_threshold", 0.95))
@@ -1562,7 +1466,7 @@ class MemoryPlugin(CorvidaePlugin):
 
         A range wholly in the live window is one record (a fork, or a skip).
         A range that has left it is written from the agent's rebuilt view on
-        llm.background, one record per segment (split at summary boundaries
+        the consolidation stage's client, one record per segment (split at summary boundaries
         and wherever a segment would exceed the channel's budget); each
         segment commits and moves the watermark by itself.
 
@@ -1602,7 +1506,7 @@ class MemoryPlugin(CorvidaePlugin):
 
             # The first-person record: a fork of the live window for a range
             # in it (stashed at compaction, or run now for idle), a skip when
-            # that fork misses, else the rebuilt view on llm.background.
+            # that fork misses, else the rebuilt view on the stage's client.
             outcome, record = await self._live_record(
                 channel_id, rows, watermark, range_end, trigger
             )
@@ -1828,16 +1732,13 @@ class MemoryPlugin(CorvidaePlugin):
 
         # WP1b.2 — near-dup check: query BEFORE inserting the new vec row
         # so the new record is naturally excluded from the results.
-        # Candidates come from this channel's retrieval scope (GitHub
-        # issue #58), but a record on another channel merges only if
-        # that channel's scope reaches exactly the same channels:
-        # the survivor must stay visible to every channel that could
-        # see the superseded record, and groups are not transitive.
+        # Candidates come from the agent's whole memory (PRD §3.7 Memory 3,
+        # GitHub issue #168): the nearest indexed record over the threshold
+        # merges, on whatever channel it lives.
         # Skip entirely when embedding is unavailable or the new record
         # has no vector (embed failed — no vector to compare).
         dup_old_id: int | None = None
         dup_cross_channel = False
-        own_scope = self._channel_scope(channel_id)
         if (
             embedding is not None
             and self._vec_available
@@ -1845,33 +1746,25 @@ class MemoryPlugin(CorvidaePlugin):
         ):
             try:
                 import sqlite_vec as _sv
-                scope_sql, scope_params = own_scope.sql("m.channel_id")
                 async with db.execute(
                     "SELECT v.memory_id, (1.0 - v.distance) as similarity, "
                     "m.channel_id "
                     "FROM (SELECT memory_id, distance FROM memory_vec "
                     "      WHERE embedding MATCH ? AND k = ?) AS v "
                     "JOIN memory m ON m.id = v.memory_id "
-                    f"WHERE {scope_sql} AND m.indexed = 1 "
+                    "WHERE m.indexed = 1 "
                     "ORDER BY v.distance",
                     (
                         _sv.serialize_float32(embedding),
                         VEC_OVERFETCH * 2,
-                        *scope_params,
                     ),
                 ) as dup_cursor:
                     dup_rows = await dup_cursor.fetchall()
-                # Nearest first: take the first candidate over the
-                # threshold whose owner has the same reach.
-                for dup_candidate_id, dup_similarity, dup_channel in dup_rows:
-                    if dup_similarity < self._dup_threshold:
-                        break
-                    if dup_channel == channel_id or own_scope.same_reach(
-                        self._channel_scope(dup_channel)
-                    ):
-                        dup_old_id = dup_candidate_id
-                        dup_cross_channel = dup_channel != channel_id
-                        break
+                # Rows are nearest first: the nearest one merges if it is
+                # over the threshold, and none farther can be.
+                if dup_rows and dup_rows[0][1] >= self._dup_threshold:
+                    dup_old_id, dup_similarity, dup_channel = dup_rows[0]
+                    dup_cross_channel = dup_channel != channel_id
             except Exception:
                 logger.debug(
                     "dup detection query failed; skipping for this record",
@@ -2038,8 +1931,8 @@ class MemoryPlugin(CorvidaePlugin):
     async def _catch_up(
         self, channel_id: str, watermark: int, range_end: int
     ) -> tuple[object, RecordStamp, list[CatchupSegment]]:
-        """The background client, record stamp and view segments for a range
-        that has left the window. Makes no commits.
+        """The consolidation client, record stamp and view segments for a
+        range that has left the window. Makes no commits.
 
         Raises:
             RuntimeError: no agent plugin can supply the channel's view
@@ -2055,7 +1948,7 @@ class MemoryPlugin(CorvidaePlugin):
             )
         inputs = await agent.view_inputs(channel_id)
         # Bound once (R3): the stamp's model and the requests share a client.
-        client = self._llm().get_client("background")
+        client = self._llm().get_client("consolidation")
         stamp = RecordStamp(
             self._consolidation_fork_prompt, "standalone",
             client.request_model(CONSOLIDATION_EXTRA_BODY),
@@ -2148,7 +2041,7 @@ class MemoryPlugin(CorvidaePlugin):
                 for m in unanswered_user_messages(conv.messages)
                 if isinstance(m.get("content"), str)
             )
-            candidates, degraded = await self.retrieve(channel.id, query)
+            candidates, degraded = await self.retrieve(query)
 
             # Drop weak-banded candidates unless nothing else matched.
             non_weak = [c for c in candidates if c["band"] != "weak"]
@@ -2238,13 +2131,13 @@ class MemoryPlugin(CorvidaePlugin):
             )
 
     async def retrieve(
-        self, channel_id: str, text: str, k: int | None = None
+        self, text: str, k: int | None = None
     ) -> tuple[list[dict], bool]:
         """Score memory candidates for a query text.
 
         Vector KNN over memory_vec when available; FTS5 keyword search
-        otherwise or when the encoder fails (trap #10). Candidates are
-        channel-compartmentalized: same channel, or same configured group.
+        otherwise or when the encoder fails (trap #10). Candidates come from
+        the agent's whole memory, every channel's (PRD principle 14).
 
         Returns:
             (candidates sorted by score descending, degraded_to_fts).
@@ -2255,7 +2148,6 @@ class MemoryPlugin(CorvidaePlugin):
         if db is None:
             return [], False
         k = k or self._retrieval_k
-        scope = self._channel_scope(channel_id)
         now = time.time()
 
         rows: list[tuple] = []
@@ -2264,7 +2156,7 @@ class MemoryPlugin(CorvidaePlugin):
             try:
                 client = self._llm().get_client("embedding")
                 query_vector = (await client.embed([text], kind="query"))[0]
-                rows = await self._vec_candidates(db, query_vector, scope, k)
+                rows = await self._vec_candidates(db, query_vector, k)
             except Exception:
                 logger.warning(
                     "retrieval embedding failed; degrading to FTS5",
@@ -2275,7 +2167,7 @@ class MemoryPlugin(CorvidaePlugin):
             degraded = True
 
         if degraded:
-            rows = await self._fts_candidates(db, text, scope, k)
+            rows = await self._fts_candidates(db, text, k)
 
         candidates = []
         for memory_id, summary, created_at, last_retrieved_at, similarity in rows:
@@ -2288,8 +2180,7 @@ class MemoryPlugin(CorvidaePlugin):
             else:
                 last_activity = created_at
             ranking_age = max(0.0, now - last_activity)
-            # Relevance × recency decay; participant-match arrives with
-            # Phase 4 (channel scope is the proxy until then, §3.1).
+            # Relevance × recency decay.
             score = similarity * math.exp(
                 -(ranking_age / 86400.0) / self._half_life_days
             )
@@ -2315,12 +2206,10 @@ class MemoryPlugin(CorvidaePlugin):
         candidates.sort(key=lambda c: c["score"], reverse=True)
         return candidates[:k], degraded
 
-    async def recent(self, channel_id: str, limit: int) -> list[dict]:
-        """The newest memories of the other channels in ``channel_id``'s scope.
+    async def recent(self, limit: int) -> list[dict]:
+        """The newest memories of the whole memory, every channel's.
 
-        Records owned by ``channel_id`` itself are left out, so a channel
-        reviewing its group (the heartbeat) doesn't review its own earlier
-        reviews. Same status filters as retrieval: indexed and not redacted.
+        Same status filters as retrieval: indexed and not redacted.
         Returns up to ``limit`` dicts ``{summary, channel_id, age_seconds}``,
         newest first, aged on the kernel clock. Raises RuntimeError while
         the memory DB is not open.
@@ -2328,12 +2217,11 @@ class MemoryPlugin(CorvidaePlugin):
         db = await self._ensure_schema()
         if db is None:
             raise RuntimeError("memory DB is not open yet")
-        scope_sql, scope_params = self._channel_scope(channel_id).sql("channel_id")
         async with db.execute(
             "SELECT summary, channel_id, created_at FROM memory "
-            f"WHERE indexed = 1 AND redacted = 0 AND {scope_sql} AND channel_id != ? "
+            "WHERE indexed = 1 AND redacted = 0 "
             "ORDER BY created_at DESC, id DESC LIMIT ?",
-            (*scope_params, channel_id, limit),
+            (limit,),
         ) as cursor:
             rows = await cursor.fetchall()
         now = self._now()
@@ -2342,58 +2230,27 @@ class MemoryPlugin(CorvidaePlugin):
             for summary, owner, created_at in rows
         ]
 
-    def _channel_scope(self, channel_id: str) -> ChannelScope:
-        """The channels whose memories this channel may retrieve.
-
-        The channel itself (by equality), plus every member of any
-        configured group it belongs to (memory.channel_groups, §3.1
-        compartmentalization). A group applies when the caller equals a
-        literal member or matches a '*' / '?' pattern member; its literal
-        members join the scope as ids and its patterns as patterns, so
-        channels created at runtime are covered (GitHub issue #50).
-        """
-        ids = {channel_id}
-        patterns: list[str] = []
-        for members in self._channel_groups.values():
-            # Does this group admit the caller?
-            if not any(
-                fnmatchcase(channel_id, m) if _is_pattern(m) else channel_id == m
-                for m in members
-            ):
-                continue
-            # Merge the group's members into the scope, deduplicated.
-            for m in members:
-                if not _is_pattern(m):
-                    ids.add(m)
-                elif m not in patterns:
-                    patterns.append(m)
-        return ChannelScope(frozenset(ids), tuple(patterns))
-
     async def _vec_candidates(
-        self, db: aiosqlite.Connection, query_vector: list[float],
-        scope: ChannelScope, k: int,
+        self, db: aiosqlite.Connection, query_vector: list[float], k: int,
     ) -> list[tuple]:
         """Exact-KNN candidates:
         (id, summary, created_at, last_retrieved_at, cosine_similarity).
 
         sqlite-vec is brute-force exact KNN (no ANN index), so the KNN scan
-        costs the same regardless of k; we over-fetch and filter by scope
-        and flags in the join.
+        costs the same regardless of k; we over-fetch and filter by status
+        flags in the join.
         """
         import sqlite_vec
-        scope_sql, scope_params = scope.sql("m.channel_id")
         async with db.execute(
             "SELECT m.id, m.summary, m.created_at, m.last_retrieved_at, v.distance "
             "FROM (SELECT memory_id, distance FROM memory_vec "
             "      WHERE embedding MATCH ? AND k = ?) AS v "
             "JOIN memory m ON m.id = v.memory_id "
-            f"WHERE m.indexed = 1 AND m.redacted = 0 "
-            f"AND {scope_sql} "
+            "WHERE m.indexed = 1 AND m.redacted = 0 "
             "ORDER BY v.distance",
             (
                 sqlite_vec.serialize_float32(query_vector),
                 k * VEC_OVERFETCH,
-                *scope_params,
             ),
         ) as cursor:
             rows = await cursor.fetchall()
@@ -2404,21 +2261,19 @@ class MemoryPlugin(CorvidaePlugin):
         ]
 
     async def _fts_candidates(
-        self, db: aiosqlite.Connection, text: str, scope: ChannelScope, k: int
+        self, db: aiosqlite.Connection, text: str, k: int
     ) -> list[tuple]:
         """FTS5 keyword candidates with a fixed similarity proxy:
         (id, summary, created_at, last_retrieved_at, FTS_SIMILARITY_PROXY)."""
         match = _fts_match_query(text)
         if match is None:
             return []
-        scope_sql, scope_params = scope.sql("m.channel_id")
         async with db.execute(
             "SELECT m.id, m.summary, m.created_at, m.last_retrieved_at "
             "FROM memory_fts JOIN memory m ON m.id = memory_fts.rowid "
-            f"WHERE memory_fts MATCH ? AND m.indexed = 1 AND m.redacted = 0 "
-            f"AND {scope_sql} "
+            "WHERE memory_fts MATCH ? AND m.indexed = 1 AND m.redacted = 0 "
             "ORDER BY rank LIMIT ?",
-            (match, *scope_params, k),
+            (match, k),
         ) as cursor:
             rows = await cursor.fetchall()
         return [
@@ -2455,12 +2310,12 @@ class MemoryPlugin(CorvidaePlugin):
     # ------------------------------------------------------------------
 
     def _llm(self):
-        """The LLMPlugin instance (role-client access)."""
+        """The LLMPlugin instance (profile-client access)."""
         from corvidae.llm_plugin import LLMPlugin
         return get_dependency(self.pm, "llm", LLMPlugin)
 
     def _embedding_enabled(self) -> bool:
-        """True when an embedding role is configured and encoders match."""
+        """True when an embedding profile is configured and encoders match."""
         return self._embedding_cfg is not None and not self._encoder_mismatch
 
     async def _open_write_db(self, shared: aiosqlite.Connection) -> aiosqlite.Connection:
@@ -2669,7 +2524,7 @@ class MemoryPlugin(CorvidaePlugin):
         await db.execute(MESSAGE_FTS_UPDATE_TRIGGER)
         await db.execute(RETENTION_META_DDL)
 
-        # The vector surface exists only with an embedding role configured
+        # The vector surface exists only with an embedding profile configured
         # and a loadable sqlite-vec extension; anything else degrades to
         # FTS5-only retrieval. Text is canonical; vectors are a cache.
         dimensions = self._embedding_dimensions()

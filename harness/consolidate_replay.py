@@ -3,7 +3,7 @@
 
 Reproduces the exact request `MemoryPlugin._consolidate_range` sends for a
 range that has left the live window (its catch-up: the agent's rebuilt view
-plus the consolidation instruction, on llm.background), against a frozen
+plus the consolidation instruction, on the consolidation stage's default profile), against a frozen
 snapshot database, so that `memory.consolidation_fork_prompt` variants can
 be compared on identical input without a live IRC session (see
 .claude/plans/consolidation-replay.md). Both build the request with
@@ -57,8 +57,8 @@ from corvidae_cognition.memory import (
     fetch_range_rows,
 )
 
-# Role configs carry keys LLMClient does not take (e.g. `dimensions` on the
-# embedding role). Derived, not hand-listed, so a constructor rename cannot
+# Profile configs carry keys LLMClient does not take (e.g. `dimensions` on the
+# embedding profile). Derived, not hand-listed, so a constructor rename cannot
 # silently drop a key and leave replay diverging from the daemon.
 _LLM_CLIENT_KEYS = frozenset(
     inspect.signature(LLMClient.__init__).parameters
@@ -115,10 +115,10 @@ def _load_config(config_path: Path) -> dict:
 
 
 def _build_client(config: dict, config_path: Path) -> LLMClient:
-    """llm.background, falling back to llm.main (LLMPlugin.get_client's
-    documented fallback — background is the role the daemon's catch-up uses)."""
+    """llm.main: the profile the daemon's consolidation stage resolves to by
+    default (LLMPlugin.get_client("consolidation"))."""
     llm_config = config.get("llm") or {}
-    cfg = llm_config.get("background") or llm_config.get("main")
+    cfg = llm_config.get("main")
     if cfg is None:
         raise ValueError(f"{config_path}: no llm.main configured")
     kwargs = {k: cfg[k] for k in _LLM_CLIENT_KEYS if k in cfg}

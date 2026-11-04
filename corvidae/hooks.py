@@ -62,7 +62,9 @@ HOOK_GRAMMAR: dict[str, tuple[tuple[str, ...], dict[str, bool]]] = {
 
 # Bare imperative names: broadcast, caller-defined use of the result list.
 # Kernel-only; plugin-declared hooks must use a prefixed class.
-IMPERATIVE_HOOKS = frozenset({"send", "register_tools", "persist_message"})
+IMPERATIVE_HOOKS = frozenset(
+    {"send", "register_tools", "register_llm_stages", "persist_message"}
+)
 
 
 def grammar_class(name: str) -> str | None:
@@ -729,6 +731,20 @@ class AgentSpec:
         """
 
     @hookspec
+    def register_llm_stages(self, stages: dict[str, str]) -> None:
+        """Called once at LLMPlugin startup so plugins can name their model-calling stages.
+
+        Grammar class: bare imperative (broadcast; the caller reads the dict).
+
+        Args:
+            stages: A mutable dict. A plugin adds ``stages[name] = kind`` for
+                each stage it owns, where kind is "chat" or "embedding". The
+                stage name is what the plugin passes to
+                ``LLMPlugin.get_client(stage)``; the kind selects the default
+                profile the stage resolves to.
+        """
+
+    @hookspec
     async def on_agent_response(
         self,
         channel: Channel,
@@ -1048,7 +1064,7 @@ class AgentSpec:
     @hookspec
     async def on_llm_request(
         self,
-        role: str,
+        profile: str,
         model: str,
         request_id: str,
         message_count: int,
@@ -1074,7 +1090,8 @@ class AgentSpec:
         with on_llm_response), and it exists for consumers outside the tree.
 
         Args:
-            role: The LLMPlugin role that made the call ("main", "background").
+            profile: The llm profile of the client that made the call (a key
+                under ``llm:``, e.g. "main").
             model: The model name the request is sent with: the client's
                 configured model unless an ``extra_body`` overrode it (#297).
             request_id: uuid hex minted per call; pairs request with response.
@@ -1087,7 +1104,7 @@ class AgentSpec:
     @hookspec
     async def on_llm_response(
         self,
-        role: str,
+        profile: str,
         model: str,
         request_id: str,
         usage: dict | None,
@@ -1095,6 +1112,11 @@ class AgentSpec:
         attribution: dict,
         error: str | None,
         timings: dict | None,
+        started_at: float,
+        total_ms: float,
+        attempts: int,
+        message_count: int,
+        tool_count: int,
     ) -> None:
         """Fired exactly once per LLM call, after it succeeds or terminally fails.
 
@@ -1105,7 +1127,8 @@ class AgentSpec:
         on_llm_response, matched by request_id.
 
         Args:
-            role: The LLMPlugin role that made the call ("main", "background").
+            profile: The llm profile of the client that made the call (a key
+                under ``llm:``, e.g. "main").
             model: The model name the request was sent with: the client's
                 configured model unless an ``extra_body`` overrode it (#297).
             request_id: The id minted for the matching on_llm_request.
@@ -1118,6 +1141,15 @@ class AgentSpec:
                 llama-server reports it: ``cache_n`` is prompt tokens reused
                 from cache, ``prompt_n`` prompt tokens prefilled (PRD
                 §3.13.10). Other providers omit it.
+            started_at: Wall-clock epoch seconds when the call began.
+            total_ms: Monotonic duration in ms from the call's first attempt
+                to its end, including retries and the sleeps between them.
+            attempts: Attempts made; 1 means no retry. Counts transient
+                retries and model-not-loaded waits.
+            message_count: Number of messages in the request payload (for
+                embeddings, the number of texts).
+            tool_count: Number of tool schemas in the request payload (0 for
+                embeddings).
         """
 
     @hookspec
@@ -1146,7 +1178,7 @@ class AgentSpec:
         Args:
             name: Dotted metric name (e.g. "llm.tokens.total").
             value: The numeric measurement.
-            tags: Dimensional tags (e.g. {"role": "main", "stage": "turn"}).
+            tags: Dimensional tags (e.g. {"profile": "main", "stage": "turn"}).
         """
 
     @hookspec(firstresult=True)

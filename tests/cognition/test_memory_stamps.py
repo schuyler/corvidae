@@ -114,20 +114,20 @@ async def prompt_text(db, prompt_hash: str):
 
 async def test_catchup_record_stamped_standalone(tmp_path):
     """R1/R8: a catch-up record (a range that left the window, written from
-    the view on llm.background) carries mode standalone, the background
+    the view on llm.main) carries mode standalone, the main profile's
     request model, and exactly the fork instruction (no range sentence)."""
     config = config_with(EMBED_CONFIG, consolidation_fork_prompt="PROMPT-F")
     memory, persistence, stub, channel, db = await build_consolidation_env(
         config, db_path=str(tmp_path / "s.db")
     )
     try:
-        # Background role answers with a distinct model name.
-        memory._llm()._clients["background"] = ModelStub("configured", sent_model="bg-model")
+        # The consolidation stage resolves to main, which answers with a distinct model name.
+        memory._llm()._clients["main"] = ModelStub("configured", sent_model="main-model")
         await drive_idle_consolidation(memory, persistence, channel, db)
 
         [(_, prompt_hash, mode, model)] = await stamps_of(db)
         assert mode == "standalone"
-        assert model == "bg-model"
+        assert model == "main-model"
         assert prompt_hash == sha("PROMPT-F")
         # The side table resolves the hash to exactly the fork instruction.
         text = await prompt_text(db, prompt_hash)
@@ -180,7 +180,7 @@ async def test_idle_fork_record_stamped(fork_env):
 
 async def test_raw_transcript_fallback_is_stamped_standalone(tmp_path):
     """R1: the degraded raw-transcript record is still stamped as the view
-    call: the fork instruction, mode standalone and the background model."""
+    call: the fork instruction, mode standalone and the main profile's model."""
     config = config_with(EMBED_CONFIG, consolidation_fork_prompt="PROMPT-F")
     memory, persistence, stub, channel, db = await build_consolidation_env(
         config, db_path=str(tmp_path / "s.db")
@@ -189,12 +189,12 @@ async def test_raw_transcript_fallback_is_stamped_standalone(tmp_path):
         # Two malformed replies: the retry fails and the record degrades to the transcript.
         client = _SequenceChatClient(["nope", "still not json"])
         client.model = "configured"
-        client.request_model = lambda extra_body=None: "bg-x"
-        memory._llm()._clients["background"] = client
+        client.request_model = lambda extra_body=None: "main-x"
+        memory._llm()._clients["main"] = client
         await drive_compaction_consolidation(memory, persistence, channel)
 
         [(_, prompt_hash, mode, model)] = await stamps_of(db)
-        assert (mode, model) == ("standalone", "bg-x")
+        assert (mode, model) == ("standalone", "main-x")
         assert prompt_hash == sha("PROMPT-F")
     finally:
         await db.close()
@@ -207,7 +207,7 @@ async def test_prompt_text_stored_once(tmp_path):
         config, db_path=str(tmp_path / "s.db")
     )
     try:
-        memory._llm()._clients["background"] = ModelStub("bg-x")
+        memory._llm()._clients["main"] = ModelStub("main-x")
         # Three separate ranges consolidated under one prompt.
         for _ in range(3):
             await drive_compaction_consolidation(memory, persistence, channel)
