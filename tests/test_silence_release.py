@@ -406,6 +406,114 @@ class TestSystemPromptHook:
         assert prompt == plain
         assert channel.id in caplog.text and "transform_system_prompt" in caplog.text
 
+    async def test_wrapper_that_rewrites_identity_is_rejected(self, agent_env, caplog):
+        """A transform that modifies the identity+register prefix is
+        rejected; the channel falls back to the untransformed prompt (#136)."""
+        plugin, channel = agent_env
+        plain = await plugin.channel_system_prompt(channel)
+
+        class _Rewrites:
+            @hookimpl(wrapper=True)
+            def transform_system_prompt(self, channel, text):
+                result = yield
+                return "REWRITTEN " + result
+
+        plugin.pm.register(_Rewrites(), name="rewrites")
+        with caplog.at_level("WARNING"):
+            prompt = await plugin.channel_system_prompt(channel)
+
+        assert prompt == plain
+        assert "identity layer" in caplog.text
+        assert channel.id in caplog.text
+        assert "append to the prompt" in caplog.text
+
+    async def test_wrapper_that_appends_is_accepted(self, agent_env):
+        """A transform that appends a section is accepted (#136)."""
+        plugin, channel = agent_env
+        plain = await plugin.channel_system_prompt(channel)
+
+        class _Appends:
+            @hookimpl(wrapper=True)
+            def transform_system_prompt(self, channel, text):
+                result = yield
+                return result + "\n\nAPPENDED-SECTION"
+
+        plugin.pm.register(_Appends(), name="appends")
+        prompt = await plugin.channel_system_prompt(channel)
+
+        assert prompt == plain + "\n\nAPPENDED-SECTION"
+
+    async def test_compaction_boundary_refreshes_system_prompt(self, agent_env):
+        """The system prompt is re-resolved at the compaction boundary
+        so the transform hook re-runs (#136)."""
+        plugin, channel = agent_env
+        # Set up a conversation with a system prompt.
+        conv = ContextWindow(channel.id)
+        conv.system_prompt = await plugin.channel_system_prompt(channel)
+        channel.conversation = conv
+        original = conv.system_prompt
+
+        # Register a wrapper that appends a marker.
+        class _Marker:
+            @hookimpl(wrapper=True)
+            def transform_system_prompt(self, channel, text):
+                result = yield
+                return result + "\n\nCOMPACTION-MARKER"
+
+        plugin.pm.register(_Marker(), name="marker")
+
+        # Simulate a compaction boundary.
+        await plugin.on_compaction(
+            channel=channel,
+            summary_msg={"role": "user", "content": "summary"},
+            retain_count=1,
+            compacted_ids=[1],
+        )
+
+        assert conv.system_prompt == original + "\n\nCOMPACTION-MARKER"
+
+    async def test_non_boundary_turn_sends_identical_prompt(self, agent_env):
+        """Between boundaries the system prompt is byte-identical and the
+        transform hook does not re-run (principle 2, #136). Drives an
+        actual turn with a stubbed LLM."""
+        plugin, channel = agent_env
+        conv = ContextWindow(channel.id)
+        channel.conversation = conv
+        plugin._client = _client(_make_text_response("ok"))
+        plugin._mark_started()
+
+        # Boundary 1: conversation start. The hook runs, prompt is set.
+        class _Counter:
+            calls = 0
+            @hookimpl(wrapper=True)
+            def transform_system_prompt(self, channel, text):
+                _Counter.calls += 1
+                result = yield
+                return result + "\n\nBOUNDARY-1"
+
+        plugin.pm.register(_Counter(), name="counter")
+        conv.system_prompt = await plugin.channel_system_prompt(channel)
+        assert _Counter.calls == 1
+        prompt_at_boundary1 = conv.system_prompt
+
+        # Non-boundary: drive an actual turn. The hook does not run,
+        # the prompt is unchanged.
+        await _say(plugin, channel, "hello")
+        assert _Counter.calls == 1
+        assert conv.system_prompt == prompt_at_boundary1
+
+        # Boundary 2: compaction. The hook runs again.
+        await plugin.on_compaction(
+            channel=channel,
+            summary_msg={"role": "user", "content": "summary"},
+            retain_count=1,
+            compacted_ids=[],
+        )
+        assert _Counter.calls == 2
+        # The seed is re-composed from config at each boundary, so the
+        # prompt is the same as after boundary 1 (no accumulation).
+        assert conv.system_prompt == prompt_at_boundary1
+
 
 # ---------------------------------------------------------------------------
 # S10: core names nothing from cognition

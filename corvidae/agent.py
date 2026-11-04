@@ -1503,7 +1503,23 @@ class Agent(CorvidaePlugin):
                 channel.id, exc_info=True, extra={"channel": channel.id},
             )
             return composed
-        return composed if transformed is None else transformed
+        if transformed is None:
+            return composed
+        # Guard: a transform must preserve the identity+register as a prefix.
+        # Appending is the expected use; rewriting is rejected (#136).
+        if not transformed.startswith(composed):
+            implementors = sorted(
+                name for name, plugin in self.pm.list_name_plugin()
+                if hasattr(plugin, 'transform_system_prompt')
+            )
+            logger.warning(
+                'transform_system_prompt modified the identity layer for '
+                'channel %s (plugins: %s); append to the prompt instead. '
+                'Using the untransformed system prompt.',
+                channel.id, ', '.join(implementors) or 'none',
+            )
+            return composed
+        return transformed
 
     @property
     def mid_conversation_system_role(self) -> str:
@@ -1716,12 +1732,14 @@ class Agent(CorvidaePlugin):
         retain_count: int,
         compacted_ids: list[int],
     ) -> None:
-        """Re-resolve the channel's tool set at the compaction boundary.
+        """Re-resolve the channel's tool set and system prompt at the
+        compaction boundary.
 
         Compaction already rebuilds the KV cache past the system prompt, so
         this is where a reloaded channels.<id>.tools.disabled reaches the
-        schemas (issue #149); between boundaries they never move. A call
-        dispatched before the boundary runs to completion.
+        schemas (issue #149) and the transform_system_prompt hook re-runs
+        (#136); between boundaries neither moves. A call dispatched before
+        the boundary runs to completion.
         """
         conv = channel.conversation
         if conv is None:
@@ -1734,6 +1752,17 @@ class Agent(CorvidaePlugin):
                 extra={"channel": channel.id, "disabled": sorted(view.disabled)},
             )
         conv.tool_view = view
+        # Refresh the system prompt at the compaction boundary (#136).
+        # Compaction rebuilds the KV cache past the system prompt, so this
+        # is where a transform_system_prompt hook re-runs. Between
+        # boundaries the prompt is byte-identical (principle 2).
+        new_prompt = await self.channel_system_prompt(channel)
+        if new_prompt != conv.system_prompt:
+            logger.info(
+                'system prompt changed at compaction boundary',
+                extra={'channel': channel.id},
+            )
+        conv.system_prompt = new_prompt
 
     async def _dispatch_tool_calls(
         self, tool_calls: list[dict], channel: Channel
