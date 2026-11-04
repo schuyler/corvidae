@@ -1058,7 +1058,9 @@ that trace.
    the `trylast` `CompactionPlugin`; the return value is not used. A
    `tryfirst` handler may trim the window in place and return None, which
    doesn't stop the chain (cognition's HeartbeatPlugin does this on
-   `internal:heartbeat`, keeping its last `heartbeat.keep_beats` beats).
+   `internal:heartbeat`, trimming to `trim_low_watermark` of the channel's
+   compaction budget when the window has grown to `trim_high_watermark` of
+   it).
    Right after the hook, whatever it did or raised, the kernel calls
    `conv.fit_to_budget(max_context_tokens)` (also when no compaction
    plugin is loaded) and logs one WARNING if it dropped rows, truncated
@@ -3551,7 +3553,8 @@ scheduler:
 
 heartbeat:
   after: 3600                   # seconds of system quiet before a beat; absent = asleep
-  keep_beats: 3                 # earlier beats kept in the beat's window; 0 = start empty
+  trim_high_watermark: 0.8      # of the channel's compaction budget: where the beat-start trim fires
+  trim_low_watermark: 0.5       # of the budget: where it lands (oldest beat boundary whose tail fits)
 
 funnel:
   default_budget: 512           # tokens per admission-funnel call

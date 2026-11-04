@@ -38,7 +38,7 @@ CI proves that path: the `cognition-fts` job installs cognition without
 | `OutcomeLogPlugin` | `outcome_log` | Records each exchange and its outcome in `exchange_log` |
 | `GatePlugin` | `gates` | The engagement gate (may the agent ignore a message?) and the decide gate (may it stay silent instead of answering?), both over the appraisal vector |
 | `SilencePlugin` | `silence` | Lets the agent end any turn without sending anything: a final that is exactly `NO_REPLY` goes unsent, and each decline is recorded in `exchange_log`. It adds the instruction to the system prompt of chat channels |
-| `HeartbeatPlugin` | `heartbeat` | Starts a turn on `internal:heartbeat` when the whole system has been quiet for `heartbeat.after` seconds; the turn reviews recent memory (and goals, when loaded) and acts only if something warrants it; keeps only its last `keep_beats` beats in its window. Asleep unless configured |
+| `HeartbeatPlugin` | `heartbeat` | Starts a turn on `internal:heartbeat` when the whole system has been quiet for `heartbeat.after` seconds; the turn reviews recent memory (and goals, when loaded) and acts only if something warrants it; trims its window to `trim_low_watermark` of its compaction budget when it has grown to `trim_high_watermark` of it. Asleep unless configured |
 
 Entry-point names are the same as when these plugins lived in the kernel, so
 `plugins.disabled` lists in existing `agent.yaml` files keep working. Without
@@ -972,23 +972,30 @@ ordinary notification pipeline with the agent's normal tools. The `heartbeat`
 origin keeps the existing conventions: critique doesn't review it, the
 decide gate treats it as non-user, and `exchange_log` records it.
 
-**Its window.** A beat sees only the last `heartbeat.keep_beats` beats
-(default 3; `0` starts every beat empty), so its prompt doesn't grow with the
-number of earlier beats (#286). A beat is its notification row (a system
-message starting `[heartbeat]`) and everything up to the next one: the
-assistant rows, tool calls and results, a goals entry, a not-sent marker. The
-plugin registers a `tryfirst` `resolve_compaction` handler that, when a beat
-starts on `internal:heartbeat`, deletes everything older than the oldest kept
-beat from the in-memory window, including a leftover compaction summary, and
-returns None. It makes no LLM call, writes nothing to `message_log` (the rows
-stay), and fires neither `before_compaction` nor `on_compaction`. It never
-trims mid-beat: only when the window ends in a beat notification (so a
-compaction summary written mid-beat stays until the next beat), and never
-across a tool call and its result or while a tool call is pending (each skip
-logs a WARNING naming `internal:heartbeat` and the reason; the next beat
-trims past it). Because it returns None, `CompactionPlugin` still runs
-after it, as the over-budget safety net on the trimmed window. Four
-consequences.
+**Its window.** A beat's window is bounded by the trim watermarks, so its
+prompt doesn't grow with the number of earlier beats (#286, #426). A beat is
+its notification row (a system message starting `[heartbeat]`) and everything
+up to the next one: the assistant rows, tool calls and results, a goals entry,
+a not-sent marker. The plugin registers a `tryfirst` `resolve_compaction`
+handler that, when a beat starts on `internal:heartbeat` and the window has
+grown to `heartbeat.trim_high_watermark` (default 0.8) of the channel's
+compaction budget, deletes older beats from the in-memory window — back to
+the oldest beat boundary whose tail, system prompt included, fits
+`heartbeat.trim_low_watermark` (default 0.5) of the budget, including a
+leftover compaction summary — and returns None. Between trims the window only
+grows, so each beat's prompt extends the previous beat's and a
+prompt-caching backend serves the whole prefix: the cold prefill happens once
+per trim, not once per beat. It makes no LLM call, writes nothing to
+`message_log` (the rows stay), and fires neither `before_compaction` nor
+`on_compaction`. It never trims mid-beat: only when the window ends in a beat
+notification (so a compaction summary written mid-beat stays until the next
+beat), and never across a tool call and its result or while a tool call is
+pending (each skip logs a WARNING naming `internal:heartbeat` and the reason;
+the next beat trims past it). If even the current beat's notification exceeds
+the low watermark, the cut is the current beat's start and the beat runs on;
+compaction is the over-budget net for that. Because it returns None,
+`CompactionPlugin` still runs after it, as the over-budget safety net on the
+trimmed window. Four consequences.
 
 - *Memory.* The trim leaves rows above the channel's memory watermark, and
   the idle trigger consolidates every one of them: as a fork when the range
@@ -1026,17 +1033,17 @@ beat's conclusions once they are consolidated.
 
 **Known limitation: a beat can lose sight of its own outreach.** PRD §3.5.9
 and §3.7 Heartbeat let a beat speak on another channel or leave a note
-there. A beat sees its own earlier actions only in the window, which holds
-its last `keep_beats` beats. Older beats leave the window, and memory
-brings them back only once they are consolidated: heartbeat rows may wait
-for traffic before they are (see *When* above), and the review shows only
-the newest 20 records. So once the send and note tools exist, a beat
-could repeat an outreach made more than `keep_beats` beats ago. Today it
-can't happen: there is no send, note or read tool yet (#234, #235), so a
-beat can't reach anyone. The bounds once they land are the `keep_beats`
-window, the goals entry (a beat that records an outreach as a goal step sees
-it in later beats), and the target channel's memories, once its rows have been consolidated and
-are among the newest 20; the
+there. A beat sees its own earlier actions only in the window, which holds a tail
+of beats bounded by the trim watermarks. Older beats leave the window, and
+memory brings them back only once they are consolidated: heartbeat rows may
+wait for traffic before they are (see *When* above), and the review shows
+only the newest 20 records. So once the send and note tools exist, a beat
+could repeat an outreach made far enough back that its beat has been trimmed
+away. Today it can't happen: there is no send, note or read tool yet (#234,
+#235), so a beat can't reach anyone. The bounds once they land are the
+watermark window, the goals entry (a beat that records an outreach as a goal
+step sees it in later beats), and the target channel's memories, once its
+rows have been consolidated and are among the newest 20; the
 PRD's per-destination limit on messages the agent starts caps repeats too,
 but only when the operator sets it. The
 cross-channel tools (§3.5.9–11) should record each outreach where a later
@@ -1054,8 +1061,10 @@ it.
 channel and the exception, and that beat is skipped; the tracker retries
 `after` seconds later. An invalid `heartbeat.after` (zero, negative, non-finite,
 boolean, non-numeric) fails startup with a `ValueError`, as does an invalid
-`heartbeat.keep_beats` (negative, fractional, boolean or string; checked even
-while the heartbeat sleeps), naming the key, the value and what is accepted, and an awake
+`heartbeat.trim_high_watermark` or `heartbeat.trim_low_watermark` (zero, one,
+out-of-range, non-finite, boolean or string, a low watermark at or above the
+high one; checked even while the heartbeat sleeps), naming the key, the value
+and what is accepted, and an awake
 heartbeat without the memory plugin fails startup with a `RuntimeError`
 saying to enable memory or remove `heartbeat.after`.
 

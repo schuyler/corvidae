@@ -26,6 +26,7 @@ from corvidae_cognition.heartbeat import (
     DEFAULT_HEARTBEAT_PROMPT,
     HEARTBEAT_CHANNEL,
     HeartbeatPlugin,
+    parse_trim_watermarks,
 )
 from corvidae_cognition.memory import MemoryPlugin
 from fake_clock import install_kernel_clock
@@ -320,34 +321,50 @@ async def test_sleep_survives_restart(make_env):
 
 
 # ---------------------------------------------------------------------------
-# #286 R7: heartbeat.keep_beats is validated at startup
+# #426: the trim watermarks are validated at startup
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("bad", [-1, 2.5, True, "3"])
-async def test_rejects_a_bad_keep_beats(make_env, bad):
-    """R7: a negative, fractional, boolean or string keep_beats fails startup,
-    naming the key, the rejected value, what is accepted and where to fix it."""
+@pytest.mark.parametrize("bad", [0, 1, -0.5, 1.5, True, "0.8", float("nan")])
+async def test_rejects_a_bad_trim_watermark(make_env, bad):
+    """A zero, one, out-of-range, boolean, string or NaN watermark fails
+    startup, naming the key, the rejected value, what is accepted and where
+    to fix it."""
+    for key in ("trim_high_watermark", "trim_low_watermark"):
+        with pytest.raises(ValueError) as exc:
+            await make_env({"heartbeat": {key: bad}}, with_memory=False)
+        message = str(exc.value)
+        assert f"heartbeat.{key}" in message
+        assert f"got {bad!r}" in message
+        assert "between 0 and 1" in message
+        assert "agent.yaml" in message
+
+
+async def test_low_watermark_must_be_below_the_high_one(make_env):
+    """A trim that lands above where it started would fire on every beat
+    and defeat the prompt cache: low >= high fails startup."""
     with pytest.raises(ValueError) as exc:
-        await make_env({"heartbeat": {"keep_beats": bad}}, with_memory=False)
+        await make_env({"heartbeat": {"trim_high_watermark": 0.5,
+                                      "trim_low_watermark": 0.6}},
+                       with_memory=False)
     message = str(exc.value)
-    assert "heartbeat.keep_beats" in message
-    assert f"got {bad!r}" in message
-    # What is accepted: a whole number, 0 or more (2.5 is "0 or more" but
-    # not a count of beats).
-    assert "whole number" in message
-    assert "0 or more" in message
-    assert "agent.yaml" in message
+    assert "heartbeat.trim_low_watermark" in message
+    assert "must be below" in message
 
 
-def test_keep_beats_defaults_to_three_and_accepts_zero():
-    """R2/R7: absent or null keep_beats is 3; 0 is a valid count."""
-    # parse_keep_beats is new in #286: imported here so the other tests collect.
-    from corvidae_cognition.heartbeat import parse_keep_beats
+def test_trim_watermarks_default_to_08_05():
+    """Absent or null watermarks are 0.8 / 0.5."""
+    assert parse_trim_watermarks({}) == (0.8, 0.5)
+    assert parse_trim_watermarks(
+        {"heartbeat": {"trim_high_watermark": None,
+                       "trim_low_watermark": None}}
+    ) == (0.8, 0.5)
 
-    assert parse_keep_beats({}) == 3
-    assert parse_keep_beats({"heartbeat": {"keep_beats": None}}) == 3
-    assert parse_keep_beats({"heartbeat": {"keep_beats": 0}}) == 0
+
+def test_keep_beats_is_inert():
+    """#426 migration: the retired keep_beats key no longer has any
+    effect on the trim."""
+    assert parse_trim_watermarks({"heartbeat": {"keep_beats": 0}}) == (0.8, 0.5)
 
 
 # ---------------------------------------------------------------------------

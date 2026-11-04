@@ -16,18 +16,26 @@ per ``after`` seconds of quiet, and none during traffic.
 
 Config:
     heartbeat:
-      after: 3600    # seconds of system-wide quiet; absent = asleep
-      keep_beats: 3  # earlier beats a beat still sees; 0 = each starts empty
-      memory_limit: 20        # recent memories a beat reviews; 0 = none
-      retired_goal_limit: 20  # retired goals a beat reviews; 0 = none
+      after: 3600                 # seconds of system-wide quiet; absent = asleep
+      trim_high_watermark: 0.8    # trim at a beat start, at this fraction of
+                                  # the channel's compaction budget
+      trim_low_watermark: 0.5     # the fraction of the budget a trim brings
+                                  # the window down to
+      memory_limit: 20            # recent memories a beat reviews; 0 = none
+      retired_goal_limit: 20      # retired goals a beat reviews; 0 = none
 
 Sleep is durable because it lives in agent.yaml: without
 ``heartbeat.after`` the plugin registers nothing, at every start.
 
-Window (#286): at the start of each beat a ``tryfirst`` ``resolve_compaction``
-handler drops everything older than the last ``keep_beats`` beats from the
-in-memory window, makes no LLM call, writes nothing to the log, and returns
-None so the kernel's CompactionPlugin still runs as the over-budget net.
+Window (#286, #426): at the start of each beat a ``tryfirst``
+``resolve_compaction`` handler trims the in-memory window when it has grown
+to ``trim_high_watermark`` of the channel's compaction budget, dropping
+older beats down to ``trim_low_watermark`` of it. A trim makes no LLM call,
+writes nothing to the log, and returns None so the kernel's CompactionPlugin
+still runs as the over-budget net. Between trims the window only grows, so
+each beat's prompt is a superset of the previous beat's and a prompt-caching
+backend serves the whole prefix: a beat prefills only its new tail, and the
+cold prefill happens once per trim instead of once per beat.
 
 Logging:
     - INFO: asleep at start, each beat sent
@@ -44,7 +52,7 @@ import logging
 import math
 from typing import Any
 
-from corvidae.context import MessageType
+from corvidae.context import MessageType, count_tokens, message_tokens
 from corvidae.prompts import resolve_prompt
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 from corvidae.idle import IdleTracker, IdleWatch
@@ -101,8 +109,12 @@ MEMORY_HEADER = (
 )
 
 
-#: Earlier beats a beat still sees when ``heartbeat.keep_beats`` is absent.
-DEFAULT_KEEP_BEATS = 3
+#: Trim at a beat start when the window reaches this fraction of the
+#: channel's compaction budget (#426).
+DEFAULT_TRIM_HIGH_WATERMARK = 0.8
+
+#: The fraction of the budget a trim brings the window down to.
+DEFAULT_TRIM_LOW_WATERMARK = 0.5
 
 #: How the Agent frames an untargeted notification (corvidae/agent.py, the
 #: ``f"[{source}]\n\n{text}"`` system message), so every beat's row starts
@@ -128,22 +140,51 @@ def _heartbeat_block(config: dict) -> dict:
     return block
 
 
-def parse_keep_beats(config: dict) -> int:
-    """Return ``heartbeat.keep_beats``, DEFAULT_KEEP_BEATS when absent or null.
+def parse_trim_watermarks(config: dict) -> tuple[float, float]:
+    """Return ``(trim_high_watermark, trim_low_watermark)`` as fractions.
 
-    Raises ValueError naming the key, the value and what is accepted.
+    Each is a fraction of the channel's compaction budget: the high
+    watermark is where a beat-start trim fires, the low watermark where it
+    lands. Raises ValueError naming the key, the value and what is
+    accepted: a number strictly between 0 and 1, and low below high (a
+    trim that lands above where it started would fire on every beat).
     """
-    value = _heartbeat_block(config).get("keep_beats")
-    if value is None:
-        return DEFAULT_KEEP_BEATS
-    # bool is an int subclass; True is not a count. 2.5 and "3" are not either.
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+    block = _heartbeat_block(config)
+    parsed: dict[str, float] = {}
+    for name, value in (("trim_high_watermark",
+                         block.get("trim_high_watermark",
+                                   DEFAULT_TRIM_HIGH_WATERMARK)),
+                        ("trim_low_watermark",
+                         block.get("trim_low_watermark",
+                                   DEFAULT_TRIM_LOW_WATERMARK))):
+        default = (DEFAULT_TRIM_HIGH_WATERMARK if "high" in name
+                   else DEFAULT_TRIM_LOW_WATERMARK)
+        if value is None:
+            # An explicit null in agent.yaml means "use the default".
+            value = default
+        # bool is an int subclass; True is not a fraction. 1.0 would trim
+        # to the budget edge every beat; 0 would keep nothing.
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or not 0 < value < 1
+        ):
+            raise ValueError(
+                f"heartbeat.{name}: got {value!r}; expected a number strictly "
+                "between 0 and 1 (a fraction of the channel's compaction "
+                "budget) — check agent.yaml, or remove the key for the "
+                f"default of {default}"
+            )
+        parsed[name] = float(value)
+    high, low = parsed["trim_high_watermark"], parsed["trim_low_watermark"]
+    if low >= high:
         raise ValueError(
-            f"heartbeat.keep_beats: got {value!r}; expected a whole number of "
-            "beats, 0 or more (0 starts every beat empty) — check agent.yaml, "
-            f"or remove the key for the default of {DEFAULT_KEEP_BEATS}"
+            f"heartbeat.trim_low_watermark: {low} must be below "
+            f"trim_high_watermark {high}; a trim that lands above where it "
+            "started would fire on every beat and defeat the prompt cache"
         )
-    return value
+    return float(high), float(low)
 
 
 def parse_memory_limit(config: dict) -> int:
@@ -214,12 +255,23 @@ def _straddles(messages: list[dict], cut: int) -> bool:
     )
 
 
-def beat_cut(messages: list[dict], keep_beats: int) -> int:
-    """Index of the first message to keep, or 0 when nothing should be dropped.
+def hysteresis_cut(
+    messages: list[dict],
+    token_estimate: int,
+    system_tokens: int,
+    high_watermark: float,
+    low_watermark: float,
+    budget: int,
+) -> int:
+    """Index of the first message to keep, or 0 when no trim is warranted.
 
-    A beat is everything from its notification to the next one. Trims only
-    when the window ends in a beat notification (a beat's first item), never
-    mid-beat.
+    The #426 replacement for the keep_beats cut. A trim fires at a beat
+    start (the window ends in a beat notification) only when the window has
+    grown to ``high_watermark * budget`` tokens, and then drops older beats
+    down to ``low_watermark * budget`` (system prompt included), snapped to
+    a beat boundary — never mid-beat, never inside a tool cycle. Between
+    trims the window only grows, so each beat's prompt is a superset of the
+    previous beat's and a prompt-caching backend serves the whole prefix.
     """
     # Not a beat start (tool result, empty window): never trim mid-beat.
     # Without this gate the cut still can't fall inside the current beat
@@ -232,15 +284,32 @@ def beat_cut(messages: list[dict], keep_beats: int) -> int:
     # whole hook call and skipping CompactionPlugin for the rest of the beat.
     if not messages or not is_beat_notification(messages[-1]):
         return 0
+    # The cache-preserving case: the window is under the high watermark, so
+    # nothing is dropped and the next beat's prompt extends this one.
+    if token_estimate < high_watermark * budget:
+        return 0
+    target = low_watermark * budget
     starts = [i for i, m in enumerate(messages) if is_beat_notification(m)]
-    # The current beat plus keep_beats earlier ones; anything older goes,
-    # including a leftover summary or CONTEXT row ahead of the oldest kept beat.
-    cut = starts[max(0, len(starts) - 1 - keep_beats)]
+    # Suffix token counts, so the tail from any boundary is O(1).
+    tail = [0] * (len(messages) + 1)
+    for i in range(len(messages) - 1, -1, -1):
+        tail[i] = tail[i + 1] + message_tokens(messages[i])
+    # The oldest beat boundary whose tail (system prompt included) fits the
+    # target; anything older goes, including a leftover summary or CONTEXT
+    # row ahead of the oldest kept beat.
+    cut = 0
+    for s in starts:
+        if system_tokens + tail[s] <= target:
+            cut = s
+            break
+    # Nothing fits even down to the current beat: keep only the current beat.
+    if not cut:
+        cut = starts[-1]
     # A cut inside a tool cycle would orphan a result: skip, logged.
     if cut and _straddles(messages, cut):
         logger.warning(
             "heartbeat: trim skipped on %s: a tool cycle straddles the cut at "
-            "message %d, so older beats kept this turn; the next beat's cut "
+            "message %d, so older beats kept this turn; the next beat's trim "
             "moves past it",
             HEARTBEAT_CHANNEL, cut, extra={"channel": HEARTBEAT_CHANNEL, "cut": cut},
         )
@@ -323,7 +392,8 @@ class HeartbeatPlugin(CorvidaePlugin):
         if pm is not None:
             self.pm = pm
         self._after: float | None = None
-        self._keep_beats: int = DEFAULT_KEEP_BEATS
+        self._trim_high: float = DEFAULT_TRIM_HIGH_WATERMARK
+        self._trim_low: float = DEFAULT_TRIM_LOW_WATERMARK
         self._memory_limit: int = DEFAULT_MEMORY_LIMIT
         self._retired_goal_limit: int = DEFAULT_RETIRED_GOAL_LIMIT
         self._memory: MemoryPlugin | None = None
@@ -338,7 +408,7 @@ class HeartbeatPlugin(CorvidaePlugin):
         """Read heartbeat.after; an awake heartbeat requires memory."""
         await super().on_init(pm, config)
         # Validated before the asleep return: a bad value fails startup either way.
-        self._keep_beats = parse_keep_beats(config)
+        self._trim_high, self._trim_low = parse_trim_watermarks(config)
         self._memory_limit = parse_memory_limit(config)
         self._retired_goal_limit = parse_retired_goal_limit(config)
         self._after = parse_after(config)
@@ -359,7 +429,7 @@ class HeartbeatPlugin(CorvidaePlugin):
 
     @hookimpl(tryfirst=True)
     async def resolve_compaction(self, channel: Any, conversation: Any, max_tokens: int) -> None:
-        """Drop all but the last ``keep_beats`` beats when a beat starts.
+        """Trim at a beat start when the window passes the high watermark.
 
         A side-effect handler: it only edits the in-memory window (the log is
         untouched, no LLM is called) and always returns None, so the kernel's
@@ -369,8 +439,15 @@ class HeartbeatPlugin(CorvidaePlugin):
         if channel.id != HEARTBEAT_CHANNEL:
             return None
         messages = conversation.messages
-        cut = beat_cut(messages, self._keep_beats)
-        # Nothing to drop, or not at a beat start.
+        cut = hysteresis_cut(
+            messages,
+            conversation.token_estimate(),
+            count_tokens(conversation.system_prompt),
+            self._trim_high,
+            self._trim_low,
+            max_tokens,
+        )
+        # Nothing to drop (under the high watermark), or not at a beat start.
         if cut <= 0:
             return None
         # A tool call in flight means the system is not quiet: never cut then.
@@ -386,7 +463,7 @@ class HeartbeatPlugin(CorvidaePlugin):
         logger.debug(
             "heartbeat: window trimmed",
             extra={"channel": HEARTBEAT_CHANNEL, "dropped": cut,
-                   "keep_beats": self._keep_beats},
+                   "high": self._trim_high, "low": self._trim_low},
         )
         return None
 
