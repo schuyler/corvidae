@@ -1118,6 +1118,31 @@ guard is scoped to the hook: a plugin that holds the agent reference can
 still set `conv.system_prompt` directly, bypassing the transform chain
 entirely.
 
+## Skills directory reaches the system role (#140)
+
+The agent's skills directory is agent-writable (principle 15). A skill's
+index (name + description) is contributed to the system prompt through
+`transform_system_prompt`, and the full skill text is loaded into the
+conversation by the `use_skill` tool. This means:
+
+- **The index is system-role content.** A skill's name and description
+  appear in the system prompt on every turn. An agent that writes a skill
+  with a misleading description is writing instructions that the model
+  reads as trusted system content.
+- **The full text is conversation content.** `use_skill` loads the skill
+  body as a tool result, which is untrusted content in the conversation.
+  The model is instructed to treat tool results as data, not commands.
+- **The idle scan (#139) watches skill-directory writes.** They are a
+  persistence-of-influence channel: a skill written now is read on every
+  future turn until deleted or overwritten.
+
+The threat is self-modification, not external attack. The agent is
+trusted to write its own skills; the operator can restrict this with a
+confirmation lock or trust gate (principle 15), but the default is
+unlocked. The bundled-copy restore mechanism (deferred) would provide a
+recovery path for accidental or malicious overwrites of framework-shipped
+skills.
+
 ## What to do first
 
 1. Done (#206): `set_settings` allowlists its undotted keys, which closed

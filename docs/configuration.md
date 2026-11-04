@@ -58,7 +58,7 @@ channels:
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `plugins.disabled` | list of strings | `[]` | Entry-point plugin names to block from loading. `Runtime.start()` calls `pm.set_blocked(name)` for each entry before entry points are loaded; blocked plugins are never instantiated. Names must match the entry-point name from `[project.entry-points.corvidae]` in `pyproject.toml` (e.g. `memory`, `funnel`, `appraisal`, `critique`, `outcome_log`, `memory_tools`, `goals`, `silence`, `subagent`, `mcp`, `cli`). Only entry-point plugins can be disabled this way — manually registered plugins cannot be blocked via config. A null `plugins:` or `disabled:` means nothing is disabled; any other non-list value (a bare string, say) or a non-string entry fails startup with a `Config error` naming the key and value. |
+| `plugins.disabled` | list of strings | `[]` | Entry-point plugin names to block from loading. `Runtime.start()` calls `pm.set_blocked(name)` for each entry before entry points are loaded; blocked plugins are never instantiated. Names must match the entry-point name from `[project.entry-points.corvidae]` in `pyproject.toml` (e.g. `memory`, `funnel`, `appraisal`, `critique`, `outcome_log`, `memory_tools`, `goals`, `silence`, `skills`, `subagent`, `mcp`, `cli`). Only entry-point plugins can be disabled this way — manually registered plugins cannot be blocked via config. A null `plugins:` or `disabled:` means nothing is disabled; any other non-list value (a bare string, say) or a non-string entry fails startup with a `Config error` naming the key and value. |
 
 `agent.minimal.yaml.example` disables `memory`, `memory_tools`, `funnel`, `appraisal`, `critique`, `outcome_log`, `gates`, `silence`, `heartbeat` and `goals` — the cognition plugin set — leaving the core agent loop, multi-turn tool calling, compaction, and persistence/restart recovery intact. See the [Plugin Guide](plugin-guide.md#plugin-disable) for the hook-level mechanics.
 
@@ -516,6 +516,17 @@ heartbeat:
 Two things bound a beat's window: the `keep_beats` trim, and ordinary compaction (`agent.compaction_threshold` and `agent.compaction_retention`, applied to the heartbeat channel's `max_context_tokens`). The trim drops the oldest beat from just after the system prompt at the start of every beat, so the prompt prefix changes each time. On a backend that caches prompt prefixes, every beat then re-processes its whole retained window instead of only the new beat. To let beats append to a stable prefix, set `heartbeat.keep_beats` high enough that the trim never binds, and bound the window with a budget of its own, `channels.internal:heartbeat.max_context_tokens` (see [`channels`](#channels--per-channel-overrides)); compaction then runs occasionally instead of the trim running every beat. The trim still runs after a compaction: at the next beat it cuts at the first beat notification, so the compaction summary is dropped from the head of the window whatever `keep_beats` is. The log keeps every row, and memory consolidation keeps the durable record.
 
 ---
+
+## `skills` — skills directory and index (#140)
+
+| Key | Type | Default | Notes |
+|-----|------|---------|-------|
+| `skills.directory` | string | `skills` | Path to the skills directory (relative to the workspace or absolute). Each subdirectory with a `SKILL.md` file is a skill. The index (names + descriptions) is contributed to the system prompt via `transform_system_prompt` at conversation start and compaction boundaries. The `use_skill` tool loads a skill's full text on demand. |
+| `skills.bundled` | string | unset | Path to bundled copies for restoration (deferred). |
+
+Skills are agent-writable (principle 15). The idle scan (#139) watches
+skill-directory writes as a persistence-of-influence channel. See
+[threat-model.md](threat-model.md#skills-directory-reaches-the-system-role-140).
 
 ## `silence` — the right to silence
 
