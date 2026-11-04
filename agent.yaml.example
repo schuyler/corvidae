@@ -205,8 +205,11 @@ agent:
 # heartbeat:
 #   after: 3600                        # seconds of quiet before a beat; also the gap between beats
 #   keep_beats: 3                      # earlier beats a beat still sees; 0 = each beat starts empty
-#   prompt: {file: prompts/heartbeat.md}                    # or an inline string / list of paths; absent = built-in
+#   prompt: {file: my-heartbeat.md}                         # or an inline string / list of paths; absent = built-in
 #   goals_instruction: {file: prompts/heartbeat-goals.md}   # goals paragraph; absent = built-in
+#   # Point `prompt` at your own file, not prompts/heartbeat.md: the shipped
+#   # copy is documentation and opens with a header, which `resolve_prompt`
+#   # would send to the model along with the instruction.
 
 # Right to silence (cognition). The paragraph added to chat channels' system
 # prompts; keep the literal NO_REPLY in any replacement. Read at startup.

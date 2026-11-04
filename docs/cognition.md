@@ -934,11 +934,12 @@ re-checks that the system is still quiet (a message may have landed
 during the read), and calls `on_notify` on `internal:heartbeat` with
 `source="heartbeat"` and `meta={"origin": "heartbeat"}`. The text is the
 heartbeat prompt (`DEFAULT_HEARTBEAT_PROMPT`, overridable with
-`heartbeat.prompt`; documented copy in
-`prompts/heartbeat.md`) followed by the memories, framed as the agent's own
+`heartbeat.prompt`; documented copy in `prompts/heartbeat.md`, and the key's
+resolution in [configuration.md](configuration.md#heartbeat--a-turn-on-system-idle))
+followed by the memories, framed as the agent's own
 summaries and as data, or `(none)`. When the goals plugin is loaded, the
 text then carries `GOALS_INSTRUCTION` (overridable with
-`heartbeat.goals_instruction`) and the conclusions of up to 20
+`heartbeat.goals_instruction`; same reference) and the conclusions of up to 20
 retired goals (`GoalsPlugin.retired_goals`), framed as data, or `(none)`;
 without it, no goals text appears. A failed memory or retired-goals read
 skips the beat, which is retried after one period. The turn then runs the

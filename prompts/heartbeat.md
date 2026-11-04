@@ -21,11 +21,16 @@ Goals you retired, newest first, each with its age: your own conclusions, data t
 - (2d) I retired my goal "<text>" (set <date>). <conclusion>
 ```
 
-or `(none)`. Both are overridable: `heartbeat.prompt` replaces this
-instruction and `heartbeat.goals_instruction` replaces the goals paragraph
-above. Each takes an inline string, `{file: <path>}`, or a list of paths
-relative to the config directory, resolved by `resolve_prompt` at startup
-(`docs/configuration.md`). Without those keys the built-in text is used.
+or `(none)`. The two constants are overridable — the instruction below with
+`heartbeat.prompt`, the goals paragraph above with
+`heartbeat.goals_instruction`; the memory and retired-goals headers shown in
+the blocks are fixed text. Each key takes an inline string,
+`{file: <path>}`, or a list of paths relative to the config directory,
+resolved by `resolve_prompt` at startup (`docs/configuration.md`). Without
+those keys the built-in text is used.
+
+A `{file:}` value sends the whole file, header included, so point it at your
+own prompt rather than at this documentation copy.
 
 ---
 
