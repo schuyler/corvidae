@@ -522,11 +522,9 @@ Two things bound a beat's window: the `keep_beats` trim, and ordinary compaction
 | Key | Type | Default | Notes |
 |-----|------|---------|-------|
 | `skills.directory` | string | `skills` | Path to the skills directory (relative to the workspace or absolute). Each subdirectory with a `SKILL.md` file is a skill. The index (names + descriptions) is contributed to the system prompt via `transform_system_prompt` at conversation start and compaction boundaries. The `use_skill` tool loads a skill's full text on demand. |
-| `skills.bundled` | string | unset | Path to bundled copies for restoration (deferred). |
-
-Skills are agent-writable (principle 15). The idle scan (#139) watches
-skill-directory writes as a persistence-of-influence channel. See
-[threat-model.md](threat-model.md#skills-directory-reaches-the-system-role-140).
+Skills are agent-writable (principle 15). The idle scan (#139, planned)
+will watch skill-directory writes as a persistence-of-influence channel.
+See [threat-model.md](threat-model.md#skills-directory-reaches-the-system-role-140).
 
 ## `silence` — the right to silence
 

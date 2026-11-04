@@ -5,44 +5,56 @@ An index of names and descriptions sits in the stable prompt region,
 contributed through the kernel's ``transform_system_prompt`` hook (#136).
 A ``use_skill`` tool loads a skill's full instructions on demand.
 
-Skills are writable by the agent (principle 15). Bundled copies protect
-against loss: an overwritten skill can be restored from its bundled copy.
+Skills are writable by the agent (principle 15). The index is re-resolved
+at compaction boundaries so a skill written after startup appears in the
+prompt at the next boundary.
 """
 
 import logging
 from pathlib import Path
+
+import yaml
 
 from corvidae.hooks import CorvidaePlugin, hookimpl
 
 logger = logging.getLogger("corvidae.skills")
 
 
-def _parse_frontmatter(text: str) -> dict:
-    """Parse simple YAML frontmatter (key: value pairs) from a SKILL.md.
+def _parse_skill(text: str) -> tuple[str, str]:
+    """Extract (name, description) from a SKILL.md file.
 
-    Returns an empty dict when there is no frontmatter.
+    Uses YAML frontmatter when present; falls back to the first line.
+    Returns (name, description) where name defaults to the directory
+    name (set by the caller) and description defaults to the first line.
     """
-    if not text.startswith("---"):
-        return {}
-    end = text.find("\n---", 3)
-    if end == -1:
-        return {}
-    block = text[3:end].strip()
-    result = {}
-    for line in block.splitlines():
-        if ":" in line:
-            key, _, value = line.partition(":")
-            result[key.strip()] = value.strip()
-    return result
+    fm: dict = {}
+    if text.startswith("---"):
+        end = text.find("\n---", 3)
+        if end != -1:
+            try:
+                loaded = yaml.safe_load(text[3:end])
+                if isinstance(loaded, dict):
+                    fm = loaded
+            except yaml.YAMLError:
+                pass
 
+    name = str(fm.get("name", ""))
+    description = str(fm.get("description", ""))
 
-def _first_line(text: str) -> str:
-    """The first non-empty, non-frontmatter line, stripped of # markers."""
-    for line in text.splitlines():
-        line = line.strip()
-        if line and not line.startswith("---"):
-            return line.lstrip("# ").strip()
-    return ""
+    if not description:
+        # Fall back to the first non-empty line after the frontmatter block
+        start = 0
+        if text.startswith("---"):
+            end = text.find("\n---", 3)
+            if end != -1:
+                start = end + 4  # skip past the closing ---
+        for line in text[start:].splitlines():
+            line = line.strip()
+            if line:
+                description = line.lstrip("# ").strip()
+                break
+
+    return name, description
 
 
 class SkillsPlugin(CorvidaePlugin):
@@ -53,32 +65,54 @@ class SkillsPlugin(CorvidaePlugin):
             self.pm = pm
         self._skills_dir: Path | None = None
         self._index: str = ""
+        self._skill_names: set[str] = set()
 
     @hookimpl
     async def on_init(self, pm, config: dict) -> None:
+        await super().on_init(pm, config)
         skills_cfg = config.get("skills", {})
-        self._skills_dir = Path(skills_cfg.get("directory", "skills"))
+        directory = skills_cfg.get("directory", "skills")
+        base = config.get("_base_dir", ".")
+        self._skills_dir = Path(base) / directory
 
     @hookimpl
     async def on_start(self) -> None:
         self._rebuild_index()
 
+    @hookimpl
+    async def on_compaction(self, channel, summary_msg, retain_count, compacted_ids):
+        self._rebuild_index()
+
     def _rebuild_index(self) -> None:
         """Scan the skills directory and build the index string."""
+        self._skill_names = set()
         if self._skills_dir is None or not self._skills_dir.is_dir():
             self._index = ""
             return
 
         entries = []
-        for entry in sorted(self._skills_dir.iterdir()):
+        try:
+            children = sorted(self._skills_dir.iterdir())
+        except OSError as e:
+            logger.warning("Skills directory unreadable: %s", e)
+            self._index = ""
+            return
+
+        for entry in children:
             skill_file = entry / "SKILL.md"
             if not entry.is_dir() or not skill_file.is_file():
                 continue
-            text = skill_file.read_text(encoding="utf-8", errors="replace")
-            fm = _parse_frontmatter(text)
-            name = fm.get("name", entry.name)
-            description = fm.get("description", _first_line(text))
-            entries.append(f"- {name}: {description}")
+            try:
+                text = skill_file.read_text(encoding="utf-8", errors="replace")
+            except OSError as e:
+                logger.warning("Skipping unreadable skill %s: %s", entry.name, e)
+                continue
+            name, description = _parse_skill(text)
+            # The directory name is the canonical key; frontmatter name
+            # is display-only.
+            self._skill_names.add(entry.name)
+            display_name = name or entry.name
+            entries.append(f"- {display_name}: {description}")
 
         if not entries:
             self._index = ""
@@ -109,17 +143,18 @@ class SkillsPlugin(CorvidaePlugin):
                 return plugin._index
             if plugin._skills_dir is None:
                 return "Skills directory not configured."
-            skill_file = plugin._skills_dir / name / "SKILL.md"
-            if not skill_file.is_file():
-                available = ", ".join(
-                    e.name for e in sorted(plugin._skills_dir.iterdir())
-                    if e.is_dir() and (e / "SKILL.md").is_file()
-                )
+            # Validate against the scanned index to prevent path traversal.
+            if name not in plugin._skill_names:
+                available = ", ".join(sorted(plugin._skill_names))
                 return (
                     f"Skill '{name}' not found. "
-                    f"Available: {available or 'none'}"
+                    f"Available: {available or 'none'}. "
+                    f"Use use_skill with no argument to list skills."
                 )
-            return skill_file.read_text(encoding="utf-8", errors="replace")
+            skill_file = plugin._skills_dir / name / "SKILL.md"
+            try:
+                return skill_file.read_text(encoding="utf-8", errors="replace")
+            except OSError as e:
+                return f"Failed to read skill '{name}': {e}"
 
         tool_registry.append(use_skill)
-

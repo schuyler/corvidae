@@ -1130,11 +1130,12 @@ conversation by the `use_skill` tool. This means:
   with a misleading description is writing instructions that the model
   reads as trusted system content.
 - **The full text is conversation content.** `use_skill` loads the skill
-  body as a tool result, which is untrusted content in the conversation.
-  The model is instructed to treat tool results as data, not commands.
-- **The idle scan (#139) watches skill-directory writes.** They are a
-  persistence-of-influence channel: a skill written now is read on every
-  future turn until deleted or overwritten.
+  body as a tool result. The skill's purpose is to be instructions the
+  agent follows, so the tool result is trusted by design — the same trust
+  boundary as any other agent-written content.
+- **The idle scan (#139, planned) will watch skill-directory writes.**
+  They are a persistence-of-influence channel: a skill written now is read
+  on every future turn until deleted or overwritten.
 
 The threat is self-modification, not external attack. The agent is
 trusted to write its own skills; the operator can restrict this with a
