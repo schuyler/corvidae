@@ -467,9 +467,13 @@ class TestLLMCallTimings:
         observer = _RecordingObserver()
         client.observer = observer
 
+        # Lists of different lengths, so a hard-coded count cannot pass.
+        messages = MESSAGES + [{"role": "assistant", "content": "ok"}]
+        tools = TOOLS * 3
+
         # Bracket the call with wall-clock reads so started_at can be checked against them.
         before = time.time()
-        await client.chat(MESSAGES, tools=TOOLS)
+        await client.chat(messages, tools=tools)
         after = time.time()
 
         resp = observer.responses[0]
@@ -477,8 +481,8 @@ class TestLLMCallTimings:
         assert isinstance(resp["started_at"], float)
         assert before <= resp["started_at"] <= after
         assert resp["total_ms"] >= resp["latency_ms"]
-        assert resp["message_count"] == len(MESSAGES)
-        assert resp["tool_count"] == len(TOOLS)
+        assert resp["message_count"] == 2
+        assert resp["tool_count"] == 3
 
     async def test_chat_without_tools_reports_zero_tool_count(self):
         client = LLMClient(base_url=BASE_URL, model=MODEL)
