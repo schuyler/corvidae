@@ -112,6 +112,13 @@ _LLM_ERROR_TEMPLATE = (
     "Sorry — {cause}, so I couldn't process your message. "
     "Please try again in a moment."
 )
+# The unreachable backend is retried by the daemon (#281), so asking the user
+# to resend is wrong: the answer arrives when the server is back. Used only
+# when a retry was actually armed, never as a promise we cannot keep.
+_LLM_RETRY_TEMPLATE = (
+    "Sorry — {cause}, so I couldn't process your message yet. "
+    "I'll answer as soon as the model server is back."
+)
 # Note: same text as MAX_ROUNDS_REACHED_MESSAGE in tools/subagent.py — kept in sync.
 MAX_TURNS_FALLBACK_MESSAGE = "(max tool-calling rounds reached)"
 
@@ -150,13 +157,16 @@ def _describe_llm_failure(exc: Exception) -> str:
     return "the model request failed"
 
 
-def _llm_error_message(exc: Exception) -> str:
+def _llm_error_message(exc: Exception, retry_armed: bool = False) -> str:
     """Build the complete user-facing message for a specific LLM failure.
 
     The exception is required: callers always know which failure happened, so
     omitting the cause is a programming error rather than a supported default.
+    ``retry_armed`` says the daemon has scheduled a re-run, which changes the
+    remedy from "resend this" to "wait for the server".
     """
-    return _LLM_ERROR_TEMPLATE.format(cause=_describe_llm_failure(exc))
+    template = _LLM_RETRY_TEMPLATE if retry_armed else _LLM_ERROR_TEMPLATE
+    return template.format(cause=_describe_llm_failure(exc))
 
 
 class QueueItemRole(Enum):
@@ -561,13 +571,32 @@ class Agent(CorvidaePlugin):
             return None
         return conversation_message, request_text
 
+    def _warn_compaction_failed(self, channel: Channel, exc: BaseException) -> None:
+        """Log the one WARNING for a compaction attempt that failed (#400).
+
+        Names the channel and the exception type, as PRD §3.3.2 and AGENTS.md
+        require: the traceback alone does not say which channel stopped
+        compacting, which is what a reader needs when one channel repeats it.
+        """
+        logger.warning(
+            "compaction failed for channel %s (%s); skipping this turn — the "
+            "window stays as it is and compaction is retried on a later turn "
+            "(see the traceback for where)",
+            channel.id, type(exc).__name__,
+            exc_info=True,
+            extra={"channel": channel.id},
+        )
+
     def _warn_over_budget(
         self, channel: Channel, conv: ContextWindow, max_ctx: int,
         dropped: list[dict], truncated: bool,
     ) -> None:
         """Log the one WARNING for a fit_to_budget application (#308)."""
         # Message_log id range of the dropped rows, when they carry ids.
-        ids = [m["_db_id"] for m in dropped if isinstance(m.get("_db_id"), int)]
+        ids = [
+            m["_db_id"] for m in dropped
+            if isinstance(m, dict) and isinstance(m.get("_db_id"), int)
+        ]
         if not dropped:
             what = "dropped no rows"
         elif ids:
@@ -684,8 +713,9 @@ class Agent(CorvidaePlugin):
             logger.exception("run_agent_turn failed for channel %s", channel.id)
             # Schedule the retry before the error gate: a vetoed fallback
             # returns early below and must not cancel the retry.
+            retry_armed = False
             if unreachable and item is not None:
-                self._schedule_turn_retry(channel, item, exc)
+                retry_armed = self._schedule_turn_retry(channel, item, exc)
             # The error hook is optional policy: if it raises, fall back to the
             # default message rather than leaving the user with silence.
             try:
@@ -699,7 +729,7 @@ class Agent(CorvidaePlugin):
                 error_msg = None
             if error_msg is None:
                 # Build a complete message with the human-readable failure class.
-                error_msg = _llm_error_message(exc)
+                error_msg = _llm_error_message(exc, retry_armed=retry_armed)
             # Per-emission gate: a veto suppresses this unpersisted send and
             # nothing else — no assistant message exists on this path.
             if not await self._gate_send(channel, error_msg, "error", item):
@@ -732,8 +762,12 @@ class Agent(CorvidaePlugin):
 
     def _schedule_turn_retry(
         self, channel: Channel, item: QueueItem, exc: Exception
-    ) -> None:
-        """Arm a timer that re-enqueues ``item`` as a retry after a backoff delay."""
+    ) -> bool:
+        """Arm a timer that re-enqueues ``item`` as a retry after a backoff delay.
+
+        Returns whether a retry is now pending. False means the caller must
+        not promise one: the fallback text depends on it.
+        """
         # Resolved lazily: test helpers mark the Agent started without _start_plugin.
         # shortcut: hand-built plugin managers omit the clock; make it strict
         # (depends_on) if a non-Runtime entry point appears
@@ -745,7 +779,7 @@ class Agent(CorvidaePlugin):
                 channel.id, item.trace_id,
                 extra={"channel": channel.id, "trace_id": item.trace_id},
             )
-            return
+            return False
         state = self._turn_retries.get(channel.id)
         if state is not None and state.item is item:
             # Another failure of the same retry: back off further.
@@ -780,6 +814,7 @@ class Agent(CorvidaePlugin):
                 "attempt": attempt, "delay": delay,
             },
         )
+        return True
 
     async def _gate_send(
         self,
@@ -1234,13 +1269,15 @@ class Agent(CorvidaePlugin):
                     channel=channel, conversation=conv,
                     max_tokens=resolved["max_context_tokens"],
                 )
-            except Exception:
-                logger.warning("compaction failed, skipping", exc_info=True)
+            except Exception as exc:
+                self._warn_compaction_failed(channel, exc)
             _phases["compact"] = time.monotonic() - _t_compact_start
 
         # 5b. Hard ceiling (#308, PRD §3.3.2): whatever compaction did or
         # skipped, a window over max_context_tokens loses its oldest rows from
-        # memory (message_log keeps them). Pure list arithmetic, so not wrapped.
+        # memory (message_log keeps them). Not wrapped: fit_to_budget cannot
+        # raise on any row the window can hold (§3.1.18.1, #392), so a wrapper
+        # here would only hide a defect in that guarantee.
         # Outside the retry guard: a retried turn (#281) is a main-turn call
         # too, and tool results may have joined its window since.
         max_ctx = resolved["max_context_tokens"]

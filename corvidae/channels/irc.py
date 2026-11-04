@@ -56,6 +56,40 @@ class IRCClient(pydle.Client):
         self._server = server
         self._port = port
         self._tls = tls
+        # pydle spawns the read loop with a bare create_task and never keeps
+        # a reference, so a loop killed by a socket reset was invisible: it
+        # left `connected` True and the reconnect poll never fired (#275).
+        self._read_task: Optional[asyncio.Task] = None
+
+    def _read_loop_alive(self) -> bool:
+        """Whether pydle's read loop is still running.
+
+        False once the task has finished for any reason other than a
+        cancellation, which is a deliberate shutdown rather than a drop.
+        """
+        task = self._read_task
+        return task is None or task.cancelled() or not task.done()
+
+    async def handle_forever(self) -> None:
+        """pydle's read loop, with its task kept and its death logged.
+
+        pydle catches only TimeoutError; anything else (a ConnectionResetError
+        from a reset socket, say) kills the loop without running
+        ``on_disconnect``. Keeping the task lets ``connect_with_retry`` see
+        the death and reconnect.
+        """
+        self._read_task = asyncio.current_task()
+        try:
+            await super().handle_forever()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "IRC read task for %s:%s as %s died (%s); the connection is "
+                "dead even though pydle still reports it up — reconnecting",
+                self._server, self._port, self.nickname, type(exc).__name__,
+            )
+            raise
 
     async def on_isupport_modes(self, value):
         """Handle MODES ISUPPORT token; pydle crashes when value is None."""
@@ -141,7 +175,10 @@ class IRCClient(pydle.Client):
                     # Hold connection open, polling for shutdown/disconnect
                     while self.plugin._connect_task is not None:
                         await asyncio.sleep(self._CONNECTION_POLL_INTERVAL)
-                        if not self.connected:
+                        # `connected` alone misses a dead read loop: pydle
+                        # leaves reader and writer in place when the loop
+                        # dies, so check both (#275).
+                        if not self.connected or not self._read_loop_alive():
                             break
                 except Exception as exc:
                     # Any failure at all must re-enter backoff: an exception

@@ -40,6 +40,11 @@ async def _fire_response(pm, *, usage=USAGE, error=None, attribution=ATTRIBUTION
         attribution=attribution,
         error=error,
         timings=timings,
+        started_at=1000.0,
+        total_ms=latency_ms,
+        attempts=1,
+        message_count=2,
+        tool_count=1,
     )
 
 

@@ -347,7 +347,8 @@ async def test_usage_log_mode_column_upgrades_and_records(db):
     for rid, attribution in [("f", {"mode": "fork"}), ("s", {"mode": "standalone"}), ("t", {})]:
         await pm.ahook.on_llm_response(profile="main", model="m", request_id=rid, usage={},
                                        latency_ms=1.0, attribution=attribution, error=None,
-                                       timings=None)
+                                       timings=None, started_at=1000.0, total_ms=1.0,
+                                       attempts=1, message_count=1, tool_count=0)
     async with db.execute("SELECT request_id, mode FROM usage_log ORDER BY id") as cursor:
         assert await cursor.fetchall() == [("old", None), ("f", "fork"), ("s", "standalone"), ("t", None)]
 

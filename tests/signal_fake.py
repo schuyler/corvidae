@@ -71,6 +71,10 @@ class FakeSignalServer:
         # frame contains that value anywhere (used for contact-lookup-style
         # round trips where the exact method name is unresolved by design).
         self._respond_next: list[tuple[Any, Any]] = []
+        # method-substring -> count, for requests to accept and never answer.
+        # Models a signal-cli that has wedged: the frame reaches it, no
+        # response ever comes back.
+        self._silent: dict[str, int] = {}
         self.connection_count = 0
         # Optional synchronous callback invoked with each request frame the
         # instant it is read, for tests that need to assert ordering against
@@ -136,6 +140,14 @@ class FakeSignalServer:
         req_id = frame.get("id")
         if req_id is None:
             return
+        for substr, remaining in list(self._silent.items()):
+            if substr.lower() in method:
+                if remaining <= 1:
+                    del self._silent[substr]
+                else:
+                    self._silent[substr] = remaining - 1
+                logger.debug("fake signal server: swallowing %s (armed silent)", method)
+                return
         for substr, message in list(self._fail_next.items()):
             if substr.lower() in method:
                 del self._fail_next[substr]
@@ -198,6 +210,15 @@ class FakeSignalServer:
         method name").
         """
         self._respond_next.append((value, result))
+
+    def go_silent_for(self, method_substring: str, times: int = 1) -> None:
+        """Accept the next ``times`` matching requests and never answer them.
+
+        Models the failure the client must survive: signal-cli reads the
+        frame but the response never comes, so a client that awaits the
+        response forever has no way to tell the daemon is wedged.
+        """
+        self._silent[method_substring] = times
 
     async def next_request(self, timeout: float = 5.0) -> dict:
         """Wait for and return the next JSON-RPC frame sent by the client."""

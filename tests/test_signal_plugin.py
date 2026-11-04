@@ -1396,6 +1396,91 @@ class TestLiveness:
         finally:
             await _stop_plugin(h)
 
+    async def test_unanswered_typing_does_not_stall_the_inbound_processor(
+        self, tmp_path, caplog
+    ):
+        """#413: signal-cli accepts `sendTyping` and never answers it.
+
+        A client that awaits the response with no bound holds the inbound
+        notification processor forever: the message below is never dispatched
+        to on_message, and every later message on every Signal channel queues
+        behind it. The bound is patched down here so the test costs a fraction
+        of a second; production uses the module constant.
+        """
+        with patch("corvidae.channels.signal.LIVENESS_RPC_TIMEOUT", 0.2):
+            h = await _start_plugin(tmp_path)
+            try:
+                # Accept and swallow the start frame; nothing answers it.
+                h.server.go_silent_for("sendTyping", times=1)
+                with caplog.at_level(logging.WARNING):
+                    await h.server.push_notification(
+                        "receive",
+                        make_data_envelope(source_uuid=AUTH_ACI, source_number=None, text="hi"),
+                    )
+                    # The message is still dispatched: the wedge is cosmetic.
+                    await _wait_until(
+                        lambda: h.pm.ahook.on_message.await_count >= 1, timeout=5
+                    )
+                    # And the timeout is reported, naming the channel.
+                    await _wait_until(
+                        lambda: any(
+                            r.levelno == logging.WARNING and "typing" in _record_text(r)
+                            for r in caplog.records
+                        ),
+                        timeout=5,
+                    )
+                # Giving up must not leak the request entry: the response will
+                # never arrive to clean it up.
+                assert not h.plugin._pending_requests
+            finally:
+                await _stop_plugin(h)
+
+    async def test_unanswered_receipt_does_not_stall_the_inbound_processor(
+        self, tmp_path, caplog
+    ):
+        """#413: the same for `sendReceipt`, sent from on_message_persisted.
+
+        The receipt runs on the serial inbound processor without covering it,
+        so an unanswered one holds the next inbound message. The call has to
+        give up and log rather than wait on a daemon that never replies.
+        """
+        with patch("corvidae.channels.signal.LIVENESS_RPC_TIMEOUT", 0.2):
+            h = await _start_plugin(tmp_path)
+            try:
+                ts = _now_ms()
+                await h.server.push_notification(
+                    "receive",
+                    make_data_envelope(
+                        source_uuid=AUTH_ACI, source_number=None, text="hi", timestamp=ts
+                    ),
+                )
+                typing_request = await h.server.next_request(timeout=5)
+                assert "typing" in str(typing_request.get("method", "")).lower()
+                # The start frame is awaited before on_message is dispatched,
+                # so wait for the dispatch rather than assuming it happened.
+                await _wait_until(lambda: h.agent.calls, timeout=5)
+                _, trace_id, channel = h.agent.calls[0]
+
+                h.server.go_silent_for("sendReceipt", times=1)
+                with caplog.at_level(logging.WARNING):
+                    # Bounded: this returns only because the call gave up.
+                    await asyncio.wait_for(
+                        h.plugin.on_message_persisted(
+                            channel=channel, trace_id=trace_id, rowid=1, text="hi", meta={}
+                        ),
+                        timeout=5,
+                    )
+                    await _wait_until(
+                        lambda: any(
+                            r.levelno == logging.WARNING
+                            and "receipt" in _record_text(r)
+                            for r in caplog.records
+                        ),
+                        timeout=5,
+                    )
+            finally:
+                await _stop_plugin(h)
+
 
 # ---------------------------------------------------------------------------
 # Backlog timestamps
