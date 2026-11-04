@@ -485,13 +485,15 @@ fail-soft.
 
 **Call timing and queue wait (PRD §3.10.6).** Each `usage_log` row records
 when its call started and ended, so overlapping calls are found from the
-rows alone (`a.started_at < b.ended_at AND b.started_at < a.ended_at`).
-`ended_at` is `started_at + total_ms / 1000`, so the interval and the
-duration come from one monotonic measurement. `latency_ms` is the final
+rows alone: in a self-join on `a.id < b.id`, two calls overlap when
+`a.started_at < b.ended_at AND b.started_at < a.ended_at` (calls that only
+touch at an endpoint do not). `ended_at` is `started_at + total_ms / 1000`,
+so it comes from the monotonic duration and cannot disagree with
+`total_ms`. `latency_ms` is the final
 attempt only. When calls share a llama-server slot (a pinned `id_slot`, or
 a single-slot server), a call that arrives while another holds the slot
-waits inside the server, and that wait is part of its `latency_ms`. The server's own work is
-`prompt_ms + predicted_ms`; what remains is, approximately, the wait:
+waits inside the server, and that wait is part of its `latency_ms`. The
+server's own work is `prompt_ms + predicted_ms`; what remains is, approximately, the wait:
 
 ```sql
 SELECT id, stage, latency_ms - (prompt_ms + predicted_ms) AS queue_wait_ms

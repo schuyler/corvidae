@@ -400,8 +400,8 @@ and other providers omit (`None`, as on terminal failure);
 `latency_ms` is the final attempt's duration; `started_at` is the call's
 wall-clock start (epoch seconds), `total_ms` its monotonic duration from
 the first attempt to the end including retries and the sleeps between,
-and `attempts` how many attempts were made (1 = no retry; model-not-loaded
-waits count); `message_count` and `tool_count` are the request's counts
+and `attempts` how many attempts were made (1 = no retry; transient-status
+and connection retries and model-not-loaded waits each count); `message_count` and `tool_count` are the request's counts
 (embeddings: the number of texts, and 0);
 `error` is `None` on success and the exception string on terminal failure.
 The request payload is summarized (message/tool counts), never shipped
