@@ -84,7 +84,35 @@ build-backend = "setuptools.build_meta"
 dev = [
     "pytest-asyncio>=1.3.0",
     "pytest-timeout>=2.4.0",
+    "ruff>=0.17",
+    "basedpyright>=1.28",
 ]
+
+# Lint and type checks are ADVISORY until the tree is clean (#111, #455).
+# CI runs them with continue-on-error, so the output is visible but does not
+# fail the run. Flipping them to hard failures is #455's job.
+#
+# The rule set starts from ruff's defaults rather than "everything": E4/E7/E9
+# (real errors) and F (pyflakes -- unused imports, undefined names), plus the
+# isort rules. Widening it is #455's call.
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.ruff.lint.isort]
+# The project imports its own packages absolutely (`from corvidae.channel ...`),
+# and `tests` is on pythonpath, so nothing here is first-party by convention.
+known-first-party = ["corvidae"]
+
+[tool.basedpyright]
+include = ["corvidae", "packages"]
+# Advisory only (#455): report everything, fail on nothing yet.
+typeCheckingMode = "basic"
+reportMissingImports = "warning"
+reportMissingTypeStubs = "none"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

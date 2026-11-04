@@ -55,6 +55,21 @@ jobs:
       - name: Run kernel tests
         run: uv run --no-sync pytest -q --ignore=tests/cognition
 
+      # Advisory until the tree is clean (#111, #455): the output is in the
+      # log, but a finding does not fail the run. Drop continue-on-error in
+      # #455 once main reports nothing.
+      - name: Lint (advisory, #111)
+        continue-on-error: true
+        run: uv run --no-sync ruff check .
+
+      - name: Check formatting (advisory, #111)
+        continue-on-error: true
+        run: uv run --no-sync ruff format --check .
+
+      - name: Type-check (advisory, #111)
+        continue-on-error: true
+        run: uv run --no-sync basedpyright
+
   # Everything: the kernel plus the cognition and discord extras.
   full:
     runs-on: ubuntu-latest
