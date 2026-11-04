@@ -543,7 +543,7 @@ class AppraisalPlugin(CorvidaePlugin):
             self._fork_prompt = resolve_prompt(
                 config, "appraisal.stage2_fork_prompt", DEFAULT_STAGE2_FORK_PROMPT
             )
-        except (OSError, TypeError) as exc:
+        except (OSError, ValueError) as exc:
             logger.warning(
                 "appraisal: fork prompt reload failed (%s); keeping previous",
                 exc,

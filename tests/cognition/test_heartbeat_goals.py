@@ -205,3 +205,28 @@ async def test_beat_without_goals_plugin_carries_no_goals_text(make_env):
     assert heartbeat.DEFAULT_HEARTBEAT_PROMPT in text
     assert heartbeat.GOALS_INSTRUCTION not in text
     assert heartbeat.RETIRED_GOALS_HEADER not in text
+
+
+async def test_beat_obeys_retired_goal_limit(make_env, monkeypatch):
+    """The beat reviews only the newest ``heartbeat.retired_goal_limit``
+    retired goals; older conclusions stay out of the notification."""
+    monkeypatch.setitem(
+        CONFIG, "heartbeat", {"after": AFTER, "retired_goal_limit": 1}
+    )
+    env = await make_env(with_goals=True)
+    ctx = ctx_for("irc:#test")
+    await add_message(env, "irc:#test", "talking about the two jobs")
+    await env.tools["add_goal"]("The old job", _ctx=ctx)
+    await env.tools["retire_goal"](1, "Old conclusion: it ran every night.", _ctx=ctx)
+    await env.tools["add_goal"]("The new job", _ctx=ctx)
+    await env.tools["retire_goal"](2, "New conclusion: the schedule holds.", _ctx=ctx)
+
+    await env.clock.advance(AFTER)
+    assert len(env.agent.calls) == 1
+    text = env.agent.calls[0]["text"]
+    # The conclusion can also surface in the memory section (a beat reviews
+    # the whole memory, #168); the limit governs the retired-goals list, so
+    # assert on that section only.
+    retired_section = text[text.index(heartbeat.RETIRED_GOALS_HEADER):]
+    assert "New conclusion: the schedule holds." in retired_section
+    assert "Old conclusion: it ran every night." not in retired_section

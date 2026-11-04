@@ -445,7 +445,7 @@ class TestOnMessagePersistenceAndLoop:
         await drain(plugin, channel)
 
         assert sent(plugin.pm, OutboundMessage) == [
-            (channel, OutboundMessage(text="my answer", latency_ms=ANY)),
+            (channel, OutboundMessage(text="my answer", latency_ms=ANY, trace_id=ANY)),
         ]
         plugin.pm.ahook.on_agent_response.assert_awaited_once()
         call_kwargs = plugin.pm.ahook.on_agent_response.call_args.kwargs
@@ -654,7 +654,7 @@ class TestOnMessageThinkingTokens:
         await drain(plugin, channel)
 
         assert sent(plugin.pm, OutboundMessage) == [
-            (channel, OutboundMessage(text="clean answer", latency_ms=ANY)),
+            (channel, OutboundMessage(text="clean answer", latency_ms=ANY, trace_id=ANY)),
         ]
 
         await db.close()
@@ -998,7 +998,7 @@ class TestOnMessageToolCallRoundTrip:
 
         assert tool_result_store.get("called_with") == "test query"
         assert sent(plugin.pm, OutboundMessage) == [
-            (channel, OutboundMessage(text="final response after tool", latency_ms=ANY)),
+            (channel, OutboundMessage(text="final response after tool", latency_ms=ANY, trace_id=ANY)),
         ]
 
         await task_plugin.on_stop()
@@ -1203,7 +1203,7 @@ class TestOnNotify:
         await drain(plugin, channel)
 
         assert sent(plugin.pm, OutboundMessage) == [
-            (channel, OutboundMessage(text="notified response", latency_ms=ANY)),
+            (channel, OutboundMessage(text="notified response", latency_ms=ANY, trace_id=ANY)),
         ]
 
         await db.close()

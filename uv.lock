@@ -521,7 +521,7 @@ acp = [
     { name = "agent-client-protocol" },
 ]
 cognition = [
-    { name = "corvidae-cognition" },
+    { name = "corvidae-cognition", extra = ["vec"] },
 ]
 dev = [
     { name = "jinja2" },
@@ -547,7 +547,7 @@ requires-dist = [
     { name = "aiosqlite", specifier = ">=0.19" },
     { name = "apluggy", git = "https://github.com/schuyler/apluggy.git?rev=main" },
     { name = "click", specifier = ">=8.0" },
-    { name = "corvidae-cognition", marker = "extra == 'cognition'", editable = "packages/corvidae-cognition" },
+    { name = "corvidae-cognition", extras = ["vec"], marker = "extra == 'cognition'", editable = "packages/corvidae-cognition" },
     { name = "ddgs", specifier = ">=9.0" },
     { name = "discord-py", marker = "extra == 'discord'", specifier = ">=2.4" },
     { name = "jinja2", marker = "extra == 'dev'", specifier = ">=3.1" },
@@ -575,14 +575,19 @@ version = "0.0.1"
 source = { editable = "packages/corvidae-cognition" }
 dependencies = [
     { name = "corvidae" },
+]
+
+[package.optional-dependencies]
+vec = [
     { name = "sqlite-vec" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "corvidae", editable = "." },
-    { name = "sqlite-vec", specifier = ">=0.1.9" },
+    { name = "sqlite-vec", marker = "extra == 'vec'", specifier = ">=0.1.9" },
 ]
+provides-extras = ["vec"]
 
 [[package]]
 name = "cryptography"

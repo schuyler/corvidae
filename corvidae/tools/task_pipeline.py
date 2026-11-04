@@ -339,9 +339,16 @@ class TaskPipelinePlugin:
                     status = "running"
                     command = task.get("command", "")
                     try:
-                        from corvidae.tools.shell import shell as _shell_impl
-                        result = await _shell_impl(command, timeout=120)
-                        status = "done"
+                        from corvidae.tools.shell import run_shell as _run_shell
+                        result, exit_code = await _run_shell(command, timeout=120)
+                        # A non-zero exit is a failed task: `shell()` reports it
+                        # in the text rather than raising, so checking the code
+                        # is the only way dependents are held back (#105).
+                        if exit_code not in (0, None):
+                            status = "failed"
+                            failed_tasks.add(task_name)
+                        else:
+                            status = "done"
                     except Exception as exc:
                         status = "failed"
                         # Name the step and the command so the model can tell

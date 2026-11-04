@@ -525,8 +525,11 @@ async def test_retention_arm_before_db_opens_logs_one_plain_warning(
         persistence.db = db
         await env.advance(memory_module.RETENTION_DB_RETRY_SECONDS)
 
+    # Only the re-arm warning is under test. A build without sqlite-vec also
+    # logs its degradation notice here, and that is not this test's subject.
     warnings = [r for r in caplog.records
-                if r.name == "corvidae.memory" and r.levelno >= logging.WARNING]
+                if r.name == "corvidae.memory" and r.levelno >= logging.WARNING
+                and "sqlite-vec" not in r.getMessage()]
     assert len(warnings) == 1, [r.getMessage() for r in warnings]
     assert warnings[0].levelno == logging.WARNING
     assert warnings[0].exc_info is None
@@ -560,7 +563,8 @@ async def test_retention_meta_read_failure_keeps_traceback(make_env, caplog):
     # that its writes share the persistence connection; not under test here.
     warnings = [r for r in caplog.records
                 if r.name == "corvidae.memory" and r.levelno >= logging.WARNING
-                and "share the persistence connection" not in r.getMessage()]
+                and "share the persistence connection" not in r.getMessage()
+                and "sqlite-vec" not in r.getMessage()]
     assert len(warnings) == 1, [r.getMessage() for r in warnings]
     assert warnings[0].levelno == logging.WARNING
     assert warnings[0].exc_info is not None

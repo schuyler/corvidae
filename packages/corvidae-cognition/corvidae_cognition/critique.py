@@ -486,7 +486,7 @@ class CritiquePlugin(CorvidaePlugin):
         self.config = config
         try:
             self._fork_prompts = self._resolve_fork_prompts(config)
-        except (OSError, TypeError) as exc:
+        except (OSError, ValueError) as exc:
             logger.warning(
                 "critique: fork prompt reload failed (%s); keeping previous",
                 exc,

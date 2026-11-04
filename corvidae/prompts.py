@@ -102,8 +102,11 @@ def resolve_prompt(
     Raises:
         FileNotFoundError: A named file does not exist or is unreadable.
             The message names the config key and the absolute path.
-        TypeError: The value is neither ``str``, ``list``, ``dict``,
-            nor ``None``.
+        ValueError: The value is neither ``str``, ``list``, ``dict``,
+            nor ``None``. (Deliberate: the config-level helper raises
+            ValueError for consistency with config validation; the
+            value-level ``channel.resolve_system_prompt`` keeps its
+            TypeError contract.)
     """
     value = _dotted_get(config, key)
     if value is None:

@@ -209,6 +209,110 @@ class TestAcpCancel:
         await agent.new_session(cwd=str(tmp_path))
         await agent.cancel(session_id="does-not-exist")
 
+    async def test_cancelled_turns_late_final_does_not_complete_the_next_prompt(
+        self, tmp_path
+    ):
+        """#419: a cancelled turn keeps running, and its final must not answer
+        the prompt that replaced it.
+
+        The client would otherwise see the new prompt end before its turn has
+        run, with the real reply arriving later as a stray update."""
+        from acp import text_block
+
+        plugin, registry, agent = await _init_acp_plugin()
+        created = await agent.new_session(cwd=str(tmp_path))
+        session_id = created.session_id
+        channel = registry.get(f"acp:{session_id}")
+
+        # Each prompt's on_message records the trace id it was given and
+        # leaves the turn open, as a turn with tools in flight does.
+        traces: list[str] = []
+
+        async def _fake_on_message(channel, sender: str, text: str, trace_id: str) -> None:
+            traces.append(trace_id)
+            channel.pending_tool_call_ids.add("call_1")
+
+        plugin.pm.ahook.on_message = _fake_on_message
+
+        first = asyncio.create_task(
+            agent.prompt(session_id=session_id, prompt=[text_block("one")])
+        )
+        await asyncio.sleep(0)
+        assert len(traces) == 1
+        first_trace = traces[0]
+
+        await agent.cancel(session_id=session_id)
+        assert (await asyncio.wait_for(first, timeout=2)).stop_reason == "cancelled"
+
+        # The cancelled turn is still running; the client sends a new prompt.
+        channel.pending_tool_call_ids.clear()
+        second = asyncio.create_task(
+            agent.prompt(session_id=session_id, prompt=[text_block("two")])
+        )
+        await asyncio.sleep(0)
+        assert len(traces) == 2, "the second prompt did not reach on_message"
+        second_trace = traces[1]
+        assert second_trace != first_trace
+
+        # The first turn's final lands, sent. It must leave the second prompt
+        # alone. send_message is the path that completes unconditionally, so
+        # this is the reachable form of the bug.
+        channel.pending_tool_call_ids.clear()
+        await plugin.send(
+            channel=channel,
+            event=OutboundMessage(text="late one", trace_id=first_trace),
+        )
+        await asyncio.sleep(0)
+        assert not second.done(), (
+            "the cancelled turn's final completed the prompt that replaced it"
+        )
+
+        # The second turn's own final resolves it.
+        await plugin.send(
+            channel=channel,
+            event=OutboundMessage(text="two", trace_id=second_trace),
+        )
+        response = await asyncio.wait_for(second, timeout=2)
+        assert response.stop_reason == "end_turn"
+
+    async def test_final_from_a_trace_the_transport_never_admitted_leaves_the_prompt_pending(
+        self, tmp_path
+    ):
+        """#419: a notification-originated turn on this channel answers no
+        client prompt, so its final must not complete one."""
+        from acp import text_block
+
+        plugin, registry, agent = await _init_acp_plugin()
+        created = await agent.new_session(cwd=str(tmp_path))
+        session_id = created.session_id
+        channel = registry.get(f"acp:{session_id}")
+
+        async def _fake_on_message(channel, sender: str, text: str, trace_id: str) -> None:
+            channel.pending_tool_call_ids.add("call_1")
+
+        plugin.pm.ahook.on_message = _fake_on_message
+
+        prompt = asyncio.create_task(
+            agent.prompt(session_id=session_id, prompt=[text_block("go")])
+        )
+        await asyncio.sleep(0)
+
+        # A reminder firing on this channel, carrying its own trace. It is a
+        # sent final, so it reaches send_message -- the path that completes.
+        channel.pending_tool_call_ids.clear()
+        await plugin.send(
+            channel=channel,
+            event=OutboundMessage(text="reminder text", trace_id="trace-from-a-reminder"),
+        )
+        await asyncio.sleep(0)
+        assert not prompt.done(), (
+            "a notification-originated final completed the client's prompt"
+        )
+
+        prompt.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await prompt
+
 
 # ---------------------------------------------------------------------------
 # Misconfiguration and unsupported input must be visible, not silently
