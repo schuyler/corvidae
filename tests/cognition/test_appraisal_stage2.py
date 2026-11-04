@@ -91,7 +91,6 @@ async def build_env(tmp_path, chat_text=VALID_STAGE2_JSON, start_worker=False):
     pm.register(llm, name="llm")
     stub = StubClient(chat_text)
     llm._clients["main"] = stub
-    llm._clients["background"] = stub
 
     task_plugin = TaskPlugin()
     pm.register(task_plugin, name="task")
@@ -839,10 +838,9 @@ class TestAppraisalPrior:
         llm = LLMPlugin()
         pm.register(llm, name="llm")
         llm._clients["main"] = StubClient(consolidation_json)
-        llm._clients["background"] = StubClient(consolidation_json)
         cfg = {"daemon": {"session_db": db_path}, "memory": {}}
         memory = MemoryPlugin()
-        # A view-capable agent with forks off: the range is written from the background view.
+        # A view-capable agent with forks off: the range is written from the main view.
         pm.register(FakeForkAgent(set()), name="agent")
         pm.register(memory, name="memory")
         await memory.on_init(pm=pm, config=cfg)
@@ -962,11 +960,10 @@ class TestAppraisalPrior:
         llm = LLMPlugin()
         pm.register(llm, name="llm")
         llm._clients["main"] = StubClient(consolidation_json)
-        llm._clients["background"] = StubClient(consolidation_json)
 
         cfg = {"daemon": {"session_db": db_path}, "memory": {}}
         memory = MemoryPlugin()
-        # A view-capable agent with forks off: the range is written from the background view.
+        # A view-capable agent with forks off: the range is written from the main view.
         pm.register(FakeForkAgent(set()), name="agent")
         pm.register(memory, name="memory")
         await memory.on_init(pm=pm, config=cfg)

@@ -15,7 +15,7 @@ llm:
     # keep it accurate for the run report's legibility.
     model: qwen3.6:35b
     extra_body:
-      id_slot: 0   # pin main-role requests to KV slot 0, separate from other roles' slots on the shared multi-slot server
+      id_slot: 0   # pin main-profile requests to KV slot 0, separate from other profiles' slots on the shared multi-slot server
     timeout: 300
 
 daemon:

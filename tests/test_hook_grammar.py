@@ -145,6 +145,15 @@ def test_imperative_hook_exists_and_is_broadcast(name: str) -> None:
     )
 
 
+def test_register_llm_stages_is_an_imperative_hookspec() -> None:
+    """R3: register_llm_stages joins the imperative allowlist beside
+    register_tools, and is a broadcast hookspec taking the stages dict."""
+    assert "register_llm_stages" in IMPERATIVE
+    spec = _CALLERS["register_llm_stages"].spec
+    assert not spec.opts.get("firstresult")
+    assert list(spec.argnames) == ["stages"]
+
+
 # --- Test 5: retired names stay retired ----------------------------------------
 
 

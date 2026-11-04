@@ -472,6 +472,10 @@ class CritiquePlugin(CorvidaePlugin):
     # ------------------------------------------------------------------
 
     @hookimpl
+    def register_llm_stages(self, stages: dict[str, str]) -> None:
+        stages["critique"] = "chat"
+
+    @hookimpl
     async def on_init(self, pm, config: dict) -> None:
         await super().on_init(pm, config)
         self.config = config

@@ -60,56 +60,21 @@ def test_llm_plugin_init_stores_pm_and_initializes_clients_as_none():
 
 
 # ---------------------------------------------------------------------------
-# 4. LLMPlugin.get_client("main") returns main_client
+# 4. LLMPlugin.get_client() with no stage returns main_client (main turns)
 # ---------------------------------------------------------------------------
 
 
-def test_llm_plugin_get_client_main_returns_main_client():
-    """get_client('main') must return main_client."""
+def test_llm_plugin_get_client_without_stage_returns_main_client():
+    """R2: get_client() is the main-turn client."""
     from corvidae.llm_plugin import LLMPlugin
 
     plugin = LLMPlugin(pm=None)
     mock_client = MagicMock()
     plugin.main_client = mock_client
 
-    result = plugin.get_client("main")
+    result = plugin.get_client()
     assert result is mock_client, (
-        f"get_client('main') should return main_client, got {result!r}"
-    )
-
-
-# ---------------------------------------------------------------------------
-# 5. LLMPlugin.get_client("background") returns background_client if set,
-#    else falls back to main_client
-# ---------------------------------------------------------------------------
-
-
-def test_llm_plugin_get_client_background_returns_background_client_when_set():
-    """get_client('background') returns background_client when configured."""
-    from corvidae.llm_plugin import LLMPlugin
-
-    plugin = LLMPlugin(pm=None)
-    plugin.main_client = MagicMock(name="main")
-    plugin.background_client = MagicMock(name="background")
-
-    result = plugin.get_client("background")
-    assert result is plugin.background_client, (
-        "get_client('background') should return background_client when set"
-    )
-
-
-def test_llm_plugin_get_client_background_falls_back_to_main_when_not_set():
-    """get_client('background') falls back to main_client when background is None."""
-    from corvidae.llm_plugin import LLMPlugin
-
-    plugin = LLMPlugin(pm=None)
-    mock_main = MagicMock(name="main")
-    plugin.main_client = mock_main
-    plugin.background_client = None  # not configured
-
-    result = plugin.get_client("background")
-    assert result is mock_main, (
-        "get_client('background') should fall back to main_client when background_client is None"
+        f"get_client() should return main_client, got {result!r}"
     )
 
 
@@ -119,7 +84,7 @@ def test_llm_plugin_get_client_background_falls_back_to_main_when_not_set():
 
 
 def test_llm_plugin_create_client_returns_llm_client_with_correct_params():
-    """_create_client(cfg, role) must return an LLMClient constructed from cfg."""
+    """_create_client(cfg, profile) must return an LLMClient constructed from cfg."""
     from corvidae.llm_plugin import LLMPlugin
     from corvidae.llm import LLMClient
 
@@ -134,7 +99,7 @@ def test_llm_plugin_create_client_returns_llm_client_with_correct_params():
         "timeout": 60.0,
     }
 
-    client = LLMPlugin()._create_client(cfg, role="main")
+    client = LLMPlugin()._create_client(cfg, profile="main")
 
     assert isinstance(client, LLMClient), (
         f"_create_client should return an LLMClient, got {type(client)!r}"
@@ -154,7 +119,7 @@ def test_llm_plugin_create_client_uses_defaults_for_optional_params():
     }
 
     # Must not raise
-    client = LLMPlugin()._create_client(cfg, role="main")
+    client = LLMPlugin()._create_client(cfg, profile="main")
     assert isinstance(client, LLMClient)
 
 
@@ -166,7 +131,7 @@ def test_llm_plugin_create_client_rejects_non_bool_raw_reasoning():
     cfg = {"base_url": "http://localhost:8080", "model": "my-model"}
     assert LLMPlugin()._create_client({**cfg, "raw_reasoning": True}).raw_reasoning is True
     with pytest.raises(ValueError) as exc:
-        LLMPlugin()._create_client({**cfg, "raw_reasoning": "false"}, role="background")
+        LLMPlugin()._create_client({**cfg, "raw_reasoning": "false"}, profile="background")
     assert "llm.background.raw_reasoning" in str(exc.value)
     assert "true or false" in str(exc.value)
     assert "'false'" in str(exc.value)
@@ -192,7 +157,7 @@ def test_llm_plugin_create_client_invalid_reasoning_reopened_warns_and_falls_bac
     # and accepted values.
     cfg = {"base_url": "http://localhost:8080", "model": "my-model"}
     with caplog.at_level("WARNING", logger="corvidae.llm_plugin"):
-        client = LLMPlugin()._create_client({**cfg, "reasoning_reopened": "sometimes"}, role="background")
+        client = LLMPlugin()._create_client({**cfg, "reasoning_reopened": "sometimes"}, profile="background")
     assert client.reasoning_reopened == "truncate"
     text = " ".join(r.getMessage() for r in caplog.records if r.name == "corvidae.llm_plugin")
     for needle in ("llm.background.reasoning_reopened", "'sometimes'", "truncate", "rerun"):
@@ -229,7 +194,7 @@ async def test_llm_plugin_on_start_creates_and_starts_main_client():
     with patch.object(LLMPlugin, "_create_client", return_value=mock_client) as mock_create:
         await plugin.on_start(config=config)
 
-    mock_create.assert_called_once_with(config["llm"]["main"], role="main")
+    mock_create.assert_called_once_with(config["llm"]["main"], profile="main")
     mock_client.start.assert_awaited_once()
     assert plugin.main_client is mock_client
 
@@ -440,8 +405,8 @@ _KEY_VAR = "CORVIDAE_TEST_KEY"
 _SECRET = "sk-secret-value-217"
 
 
-def _role_cfg(api_key: str | None) -> dict:
-    """Build a minimal role config carrying the given api_key."""
+def _profile_cfg(api_key: str | None) -> dict:
+    """Build a minimal profile config carrying the given api_key."""
     cfg = {
         "base_url": "http://localhost:9",
         "model": "m",
@@ -457,25 +422,25 @@ async def _start_plugin(llm: dict):
     from corvidae.llm_plugin import LLMPlugin
 
     plugin = LLMPlugin()
-    plugin._role_configs = dict(llm)
+    plugin._profile_configs = dict(llm)
     await plugin.on_start(config={"llm": llm})
     return plugin
 
 
 class TestApiKeyFromEnvironment:
-    @pytest.mark.parametrize("role", ["main", "background", "embedding"])
-    async def test_env_ref_resolves_to_bearer_token(self, role, monkeypatch):
-        """K1: ${VAR} in api_key is sent as the Bearer token, for every role."""
+    @pytest.mark.parametrize("profile", ["main", "background", "embedding"])
+    async def test_env_ref_resolves_to_bearer_token(self, profile, monkeypatch):
+        """K1: ${VAR} in api_key is sent as the Bearer token, for every profile."""
         monkeypatch.setenv(_KEY_VAR, _SECRET)
-        llm = {"main": _role_cfg("sk-main")}
-        llm[role] = _role_cfg("${" + _KEY_VAR + "}")
+        llm = {"main": _profile_cfg("sk-main")}
+        llm[profile] = _profile_cfg("${" + _KEY_VAR + "}")
         plugin = await _start_plugin(llm)
         try:
-            client = plugin.get_client(role)
+            client = plugin._clients[profile]
             assert client.api_key == _SECRET
             assert client.session.headers["Authorization"] == f"Bearer {_SECRET}"
             # The raw config keeps the reference, never the resolved key.
-            assert plugin._role_configs[role]["api_key"] == "${" + _KEY_VAR + "}"
+            assert plugin._profile_configs[profile]["api_key"] == "${" + _KEY_VAR + "}"
         finally:
             await plugin.on_stop()
 
@@ -489,15 +454,15 @@ class TestApiKeyFromEnvironment:
         else:
             monkeypatch.setenv(_KEY_VAR, value)
         llm = {
-            "main": _role_cfg("sk-main"),
-            "background": _role_cfg("${" + _KEY_VAR + "}"),
+            "main": _profile_cfg("sk-main"),
+            "background": _profile_cfg("${" + _KEY_VAR + "}"),
         }
         from corvidae.llm_plugin import LLMPlugin
 
         # Build the plugin here (not via _start_plugin) so teardown can stop
         # the main client that on_start started before background failed.
         plugin = LLMPlugin()
-        plugin._role_configs = dict(llm)
+        plugin._profile_configs = dict(llm)
         try:
             with caplog.at_level("DEBUG"):
                 with pytest.raises(ValueError) as excinfo:
@@ -524,7 +489,7 @@ class TestApiKeyFromEnvironment:
         """K3: a multi-line secret is not echoed anywhere."""
         secret = "topsecret217\nsecond"
         monkeypatch.setenv(_KEY_VAR, secret)
-        llm = {"main": _role_cfg("${" + _KEY_VAR + "}")}
+        llm = {"main": _profile_cfg("${" + _KEY_VAR + "}")}
         with caplog.at_level("DEBUG"):
             with pytest.raises(ValueError) as excinfo:
                 await _start_plugin(llm)
@@ -538,7 +503,7 @@ class TestApiKeyFromEnvironment:
         from corvidae.llm_plugin import LLMPlugin
 
         monkeypatch.setenv(_KEY_VAR, _SECRET)
-        plugin = await _start_plugin({"main": _role_cfg("${" + _KEY_VAR + "}")})
+        plugin = await _start_plugin({"main": _profile_cfg("${" + _KEY_VAR + "}")})
         try:
             with caplog.at_level("DEBUG"):
                 reply = await plugin.resolve_llm_error(
@@ -554,9 +519,9 @@ class TestApiKeyFromEnvironment:
 
     async def test_literal_key_still_works(self):
         """K4: a literal api_key behaves as before."""
-        plugin = await _start_plugin({"main": _role_cfg("sk-literal")})
+        plugin = await _start_plugin({"main": _profile_cfg("sk-literal")})
         try:
-            assert plugin.get_client("main").session.headers[
+            assert plugin.get_client().session.headers[
                 "Authorization"
             ] == "Bearer sk-literal"
         finally:
@@ -566,20 +531,242 @@ class TestApiKeyFromEnvironment:
         """K4: '$' without a ${NAME} is not an env reference."""
         from corvidae.llm_plugin import LLMPlugin
 
-        client = LLMPlugin()._create_client(_role_cfg("pa$$word$"), role="main")
+        client = LLMPlugin()._create_client(_profile_cfg("pa$$word$"), profile="main")
         assert client.api_key == "pa$$word$"
 
     async def test_reload_to_unset_variable_keeps_old_client(self, monkeypatch):
         """Reload: an unset variable raises and the old main client stays."""
         monkeypatch.delenv(_KEY_VAR, raising=False)
-        plugin = await _start_plugin({"main": _role_cfg("sk-old")})
+        plugin = await _start_plugin({"main": _profile_cfg("sk-old")})
         try:
-            old = plugin.get_client("main")
+            old = plugin.get_client()
             with pytest.raises(ValueError) as excinfo:
                 await plugin.on_config_reload(
-                    config={"llm": {"main": _role_cfg("${" + _KEY_VAR + "}")}}
+                    config={"llm": {"main": _profile_cfg("${" + _KEY_VAR + "}")}}
                 )
             assert "llm.main.api_key" in str(excinfo.value)
-            assert plugin.get_client("main") is old
+            assert plugin.get_client() is old
         finally:
             await plugin.on_stop()
+
+
+# ---------------------------------------------------------------------------
+# #431: a name per model-calling stage; a stage resolves to its kind's
+# default profile; stages are registered by their owning plugins
+# ---------------------------------------------------------------------------
+
+_ALL_STAGES = {
+    "compaction": "chat",
+    "consolidation": "chat",
+    "embedding": "embedding",
+    "rubric": "chat",
+    "subagent": "chat",
+}
+
+
+def _plugin_with_profiles(stages: dict, *profiles: str):
+    """A bare LLMPlugin holding ``stages`` and one stub client per profile."""
+    from corvidae.llm_plugin import LLMPlugin
+
+    plugin = LLMPlugin(pm=None)
+    plugin._stages = dict(stages)
+    for profile in profiles:
+        plugin._clients[profile] = MagicMock(name=profile)
+    return plugin
+
+
+@pytest.mark.parametrize("stage", ["compaction", "consolidation", "rubric", "subagent"])
+def test_chat_stage_resolves_to_main_with_background_configured(stage):
+    """R2: a chat stage gets the main client; nothing resolves through
+    background."""
+    plugin = _plugin_with_profiles(_ALL_STAGES, "main", "background", "embedding")
+    assert plugin.get_client(stage) is plugin._clients["main"]
+
+
+def test_embedding_stage_resolves_to_embedding_client():
+    """R2: the embedding stage gets the embedding client."""
+    plugin = _plugin_with_profiles(_ALL_STAGES, "main", "background", "embedding")
+    assert plugin.get_client("embedding") is plugin._clients["embedding"]
+
+
+def test_embedding_stage_without_embedding_profile_is_none():
+    """R2: an unconfigured default is None; the embedding stage does not fall
+    back to main."""
+    plugin = _plugin_with_profiles(_ALL_STAGES, "main", "background")
+    assert plugin.get_client("embedding") is None
+
+
+def test_fallback_chain_surface_is_gone():
+    """R2: FALLBACK_CHAINS, fallback_chain and resolve_role are removed."""
+    from corvidae.llm_plugin import LLMPlugin
+
+    for name in ("FALLBACK_CHAINS", "fallback_chain", "resolve_role"):
+        assert not hasattr(LLMPlugin, name), f"LLMPlugin.{name} must be removed"
+
+
+@pytest.mark.parametrize("stage", ["unregistered", "main"])
+def test_get_client_rejects_a_name_that_is_not_a_registered_stage(stage):
+    """R3: an unregistered stage fails loudly, and a profile name is not a
+    stage (callers wanting main use get_client())."""
+    plugin = _plugin_with_profiles(_ALL_STAGES, "main", "background")
+    with pytest.raises(ValueError) as excinfo:
+        plugin.get_client(stage)
+    message = str(excinfo.value)
+    assert stage in message
+    assert "compaction" in message, "the error should name the registered stages"
+
+
+async def test_on_start_collects_stages_through_register_llm_stages():
+    """R3: LLMPlugin.on_start collects stages from every plugin's
+    register_llm_stages hookimpl, before any client starts."""
+    from corvidae.hooks import create_plugin_manager, hookimpl
+    from corvidae.llm_plugin import LLMPlugin
+
+    class _Owner:
+        @hookimpl
+        def register_llm_stages(self, stages):
+            stages["owned"] = "chat"
+
+    class _OtherOwner:
+        @hookimpl
+        def register_llm_stages(self, stages):
+            stages["vectors"] = "embedding"
+
+    class _BlockedClient:
+        async def start(self):
+            raise RuntimeError("client start blocked")
+
+    pm = create_plugin_manager()
+    pm.register(_Owner(), name="owner")
+    pm.register(_OtherOwner(), name="other_owner")
+    plugin = LLMPlugin()
+    pm.register(plugin, name="llm")
+    config = {"llm": {"main": {"model": "m"}}}
+    await plugin.on_init(pm, config)
+
+    with patch.object(plugin, "_create_client", lambda cfg, **kw: _BlockedClient()):
+        with pytest.raises(RuntimeError, match="blocked"):
+            await plugin.on_start(config)
+
+    assert plugin._stages == {"owned": "chat", "vectors": "embedding"}
+
+
+_STAGE_LOG_PREFIX = "llm stages resolved:"
+
+
+@pytest.mark.parametrize(
+    "llm_config,expected",
+    [
+        (
+            {"main": {"model": "m"}, "background": {"model": "b"},
+             "embedding": {"model": "e", "dimensions": 4}},
+            "llm stages resolved: compaction→main, consolidation→main, "
+            "embedding→embedding, rubric→main, subagent→main",
+        ),
+        (
+            {"main": {"model": "m"}, "background": {"model": "b"}},
+            "llm stages resolved: compaction→main, consolidation→main, "
+            "embedding→(none), rubric→main, subagent→main",
+        ),
+    ],
+    ids=["embedding_configured", "embedding_unconfigured"],
+)
+async def test_on_start_logs_each_stage_resolution(caplog, llm_config, expected):
+    """R5: one INFO line at startup lists each registered stage's profile,
+    sorted by stage name, with (none) for an unconfigured default."""
+    import logging
+
+    from corvidae.hooks import create_plugin_manager, hookimpl
+    from corvidae.llm_plugin import LLMPlugin
+
+    class _Owner:
+        @hookimpl
+        def register_llm_stages(self, stages):
+            # Deliberately unsorted: the line sorts them.
+            for name in ("subagent", "rubric", "embedding", "consolidation", "compaction"):
+                stages[name] = _ALL_STAGES[name]
+
+    class FakeClient:
+        async def start(self):
+            pass
+
+        async def stop(self):
+            pass
+
+    pm = create_plugin_manager()
+    pm.register(_Owner(), name="owner")
+    plugin = LLMPlugin()
+    pm.register(plugin, name="llm")
+    config = {"llm": llm_config}
+    await plugin.on_init(pm, config)
+
+    with patch.object(plugin, "_create_client", lambda cfg, **kw: FakeClient()):
+        with caplog.at_level(logging.INFO, logger="corvidae.llm_plugin"):
+            await plugin.on_start(config)
+
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith(_STAGE_LOG_PREFIX)]
+    assert lines == [expected]
+
+
+def test_no_client_reads_llm_private_dict_outside_llm_plugin():
+    """R3: no consumer walks LLMPlugin._clients — the grep is the test.
+
+    web.py keeps its own unrelated _clients fan-out set; the patterns
+    below target the llm plugin's dict specifically.
+    """
+    import pathlib
+    import re
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    pattern = re.compile(r'getattr\(\s*llm\s*,\s*"_clients"|llm\._clients')
+    offenders = []
+    for path in list(root.glob("corvidae/**/*.py")) + list(root.glob("packages/**/*.py")):
+        if "test" in path.parts:
+            continue
+        if path.name == "llm_plugin.py":
+            continue
+        if pattern.search(path.read_text()):
+            offenders.append(str(path))
+    assert not offenders, f"reads of LLMPlugin._clients outside llm_plugin.py: {offenders}"
+
+
+def _fake_ep(name, dist_name):
+    import types
+
+    return types.SimpleNamespace(name=name, dist=types.SimpleNamespace(name=dist_name))
+
+
+def test_entry_point_duplicates_fail_loudly(monkeypatch):
+    """R6: two distributions claiming one entry-point name is a Config
+    error naming the point, both distributions, and the remedy."""
+    from corvidae import runtime
+
+    import importlib.metadata
+
+    monkeypatch.setattr(
+        importlib.metadata, "entry_points", lambda group="corvidae": [
+            _fake_ep("dup", "dist-a"),
+            _fake_ep("dup", "dist-b"),
+            _fake_ep("solo", "dist-a"),
+        ]
+    )
+    with pytest.raises(ValueError) as exc:
+        runtime.check_entry_point_duplicates("corvidae")
+    message = str(exc.value)
+    assert "dup" in message
+    assert "dist-a" in message and "dist-b" in message
+    assert "uninstall one" in message
+
+
+def test_entry_point_no_duplicates_passes(monkeypatch):
+    from corvidae import runtime
+
+    import importlib.metadata
+
+    monkeypatch.setattr(
+        importlib.metadata, "entry_points", lambda group="corvidae": [
+            _fake_ep("one", "dist-a"),
+            _fake_ep("two", "dist-b"),
+        ]
+    )
+    runtime.check_entry_point_duplicates("corvidae")  # no raise

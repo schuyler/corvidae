@@ -1078,18 +1078,6 @@ class TestProvenanceCritic:
 # ---------------------------------------------------------------------------
 
 
-class RoleStub:
-    """An LLM client stand-in answering every call with fixed text."""
-
-    def __init__(self, text):
-        self.text = text
-        self.calls: list[list[dict]] = []
-
-    async def chat(self, messages, tools=None, extra_body=None):
-        self.calls.append(messages)
-        return {"choices": [{"message": {"role": "assistant", "content": self.text}}]}
-
-
 def _stage2_reply(past_claims):
     return json.dumps({
         "valence": 0.5, "stakes": 0.5, "ambiguity": 0.0, "commitment_density": 0.0,
@@ -1124,8 +1112,6 @@ async def _real_path_env(tmp_path, replies, past_claims):
 
     llm = LLMPlugin()
     pm.register(llm, name="llm")
-    critic = RoleStub(OBJECTION_VERDICT)
-    llm._clients["critic"] = critic
 
     plugins = []
     for name, cls in (("appraisal", AppraisalPlugin), ("critique", CritiquePlugin)):
@@ -1175,7 +1161,7 @@ async def _real_path_env(tmp_path, replies, past_claims):
     agent._client = client
     agent._mark_started()
     return SimpleNamespace(
-        agent=agent, channel=channel, db=db, critic=critic, gathered=gathered,
+        agent=agent, channel=channel, db=db, gathered=gathered,
         plugins=plugins, forks=forks,
     )
 
@@ -1223,7 +1209,6 @@ class TestProvenanceRealPath:
             assert _candidate_rowids(env.gathered[trace_id]) == [[]]
             [fork] = _real_provenance_forks(env)
             assert CLAIM["claim"] in fork["instruction"]
-            assert env.critic.calls == []
             outcomes = await _read_outcomes(env.db, trace_id)
             assert outcomes["provenance"]["objections"] == 1
         finally:
@@ -1242,7 +1227,6 @@ class TestProvenanceRealPath:
             provenance = _real_provenance_forks(env)
             assert len(provenance) == 2
             assert texts[0] in provenance[-1]["instruction"]
-            assert env.critic.calls == []
             # The fork ends at the reply of the exchange it audits.
             assert provenance[-1]["request"][-2]["content"] == CLAIM_REPLY
         finally:
@@ -1253,7 +1237,6 @@ class TestProvenanceRealPath:
         try:
             await _say(env, "when is it due?")
             assert _real_provenance_forks(env) == []
-            assert env.critic.calls == []
         finally:
             await _real_path_teardown(env)
 
