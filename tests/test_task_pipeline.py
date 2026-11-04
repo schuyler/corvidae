@@ -161,11 +161,13 @@ class TestPipelineExecutionErrors:
 
         from corvidae.tools.task_pipeline import TaskPipelinePlugin
 
-        async def failing_shell(command, timeout=30):
+        async def failing_run_shell(command, timeout=30):
             raise RuntimeError("boom")
 
+        # The pipeline reads the exit code from run_shell, so that is the
+        # function to fail (#105).
         shell_module = importlib.import_module("corvidae.tools.shell")
-        monkeypatch.setattr(shell_module, "shell", failing_shell)
+        monkeypatch.setattr(shell_module, "run_shell", failing_run_shell)
 
         plugin = TaskPipelinePlugin(None)
         registry: list = []
@@ -183,6 +185,52 @@ tasks:
         assert "build" in result
         assert "make all" in result
         assert "boom" in result
+
+    async def test_non_zero_exit_marks_the_task_failed(self, monkeypatch):
+        """#105 item 3: a command that exits non-zero is a failed task.
+
+        `shell()` returns "Exit code: N" in its output rather than raising, so
+        the pipeline's `except Exception` never fired and every task was marked
+        `done` -- dependents then ran after a command that had failed.
+        """
+        import importlib
+
+        from corvidae.tools.task_pipeline import TaskPipelinePlugin
+
+        async def failing_run_shell(command, timeout=30):
+            # Mirrors the real run_shell: a non-zero code is in the text too.
+            return "some output\nExit code: 3", 3
+
+        shell_module = importlib.import_module("corvidae.tools.shell")
+        # The pipeline reads the exit code from run_shell, which is the only
+        # function it calls; patching `shell` as well would be dead.
+        monkeypatch.setattr(shell_module, "run_shell", failing_run_shell)
+
+        plugin = TaskPipelinePlugin(None)
+        registry: list = []
+        plugin.register_tools(registry)
+        tool = next(t for t in registry if t.name == "task_pipeline")
+
+        definition = """
+tasks:
+  - name: build
+    command: "make all"
+    depends_on: []
+  - name: deploy
+    command: "make deploy"
+    depends_on: [build]
+"""
+        result = await tool.fn(definition)
+
+        assert plugin._task_status["build"] == "failed", (
+            f"a non-zero exit must fail the task, got "
+            f"{plugin._task_status['build']!r}: {result}"
+        )
+        assert plugin._task_status["deploy"] == "failed", (
+            "a dependent of a failed task must not run"
+        )
+        assert "blocked" in result.lower(), result
+        assert "Exit code: 3" in result, f"the exit code must be reported: {result!r}"
 
 
 # --- Issue #94: cancellation kills the running step's process ---
