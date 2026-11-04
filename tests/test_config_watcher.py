@@ -1509,6 +1509,9 @@ class TestReloadableKeyRegistry:
         )
 
     async def test_funnel_declares_what_its_hook_re_reads(self):
+        # The kernel job runs without the cognition extra, so this test must
+        # skip there rather than fail to import (#408).
+        pytest.importorskip("corvidae_cognition")
         from corvidae_cognition.funnel import FunnelPlugin
 
         hook_keys = _keys_read_in_hook(FunnelPlugin.on_config_reload)
