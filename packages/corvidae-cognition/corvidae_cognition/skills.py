@@ -10,7 +10,9 @@ at compaction boundaries so a skill written after startup appears in the
 prompt at the next boundary.
 """
 
+import asyncio
 import logging
+import re
 from pathlib import Path
 
 import yaml
@@ -23,35 +25,48 @@ logger = logging.getLogger("corvidae.skills")
 def _parse_skill(text: str) -> tuple[str, str]:
     """Extract (name, description) from a SKILL.md file.
 
-    Uses YAML frontmatter when present; falls back to the first line.
-    Returns (name, description) where name defaults to the directory
-    name (set by the caller) and description defaults to the first line.
+    Uses YAML frontmatter when present; falls back to the first content
+    line. Returns (name, description) where name defaults to "" (the
+    caller substitutes the directory name) and description defaults to
+    the first non-empty line after any frontmatter.
     """
-    fm: dict = {}
-    if text.startswith("---"):
-        end = text.find("\n---", 3)
-        if end != -1:
-            try:
-                loaded = yaml.safe_load(text[3:end])
-                if isinstance(loaded, dict):
-                    fm = loaded
-            except yaml.YAMLError:
-                pass
+    # Strip BOM if present
+    if text.startswith("\ufeff"):
+        text = text[1:]
 
-    name = str(fm.get("name", ""))
-    description = str(fm.get("description", ""))
+    fm: dict = {}
+    fm_end = 0
+    if text.startswith("---"):
+        # Find the closing delimiter: a line that is exactly "---"
+        end = 3
+        while end < len(text):
+            newline = text.find("\n", end)
+            if newline == -1:
+                break
+            line = text[end:newline].strip()
+            if line == "---":
+                fm_end = newline + 1
+                try:
+                    loaded = yaml.safe_load(text[3:end])
+                    if isinstance(loaded, dict):
+                        fm = loaded
+                except yaml.YAMLError:
+                    pass
+                break
+            end = newline + 1
+
+    name = fm.get("name")
+    name = str(name) if name is not None else ""
+    description = fm.get("description")
+    description = str(description).strip() if description is not None else ""
 
     if not description:
-        # Fall back to the first non-empty line after the frontmatter block
-        start = 0
-        if text.startswith("---"):
-            end = text.find("\n---", 3)
-            if end != -1:
-                start = end + 4  # skip past the closing ---
-        for line in text[start:].splitlines():
+        # Fall back to the first non-empty line after the frontmatter
+        for line in text[fm_end:].splitlines():
             line = line.strip()
             if line:
-                description = line.lstrip("# ").strip()
+                # Strip markdown heading markers
+                description = re.sub(r"^\s*#+\s*", "", line).strip()
                 break
 
     return name, description
@@ -70,33 +85,30 @@ class SkillsPlugin(CorvidaePlugin):
     @hookimpl
     async def on_init(self, pm, config: dict) -> None:
         await super().on_init(pm, config)
-        skills_cfg = config.get("skills", {})
+        skills_cfg = config.get("skills") or {}
         directory = skills_cfg.get("directory", "skills")
-        base = config.get("_base_dir", ".")
+        base = config.get("_base_dir") or "."
         self._skills_dir = Path(base) / directory
 
     @hookimpl
     async def on_start(self) -> None:
-        self._rebuild_index()
+        await asyncio.to_thread(self._rebuild_index)
 
     @hookimpl
     async def on_compaction(self, channel, summary_msg, retain_count, compacted_ids):
-        self._rebuild_index()
+        await asyncio.to_thread(self._rebuild_index)
 
-    def _rebuild_index(self) -> None:
-        """Scan the skills directory and build the index string."""
-        self._skill_names = set()
+    def _scan_skills(self) -> list[tuple[str, str, str]]:
+        """Synchronous scan. Returns (dir_name, display_name, description) tuples."""
+        results = []
         if self._skills_dir is None or not self._skills_dir.is_dir():
-            self._index = ""
-            return
+            return results
 
-        entries = []
         try:
-            children = sorted(self._skills_dir.iterdir())
+            children = sorted(self._skills_dir.iterdir(), key=lambda p: p.name)
         except OSError as e:
             logger.warning("Skills directory unreadable: %s", e)
-            self._index = ""
-            return
+            return results
 
         for entry in children:
             skill_file = entry / "SKILL.md"
@@ -108,16 +120,18 @@ class SkillsPlugin(CorvidaePlugin):
                 logger.warning("Skipping unreadable skill %s: %s", entry.name, e)
                 continue
             name, description = _parse_skill(text)
-            # The directory name is the canonical key; frontmatter name
-            # is display-only.
-            self._skill_names.add(entry.name)
             display_name = name or entry.name
-            entries.append(f"- {display_name}: {description}")
+            results.append((entry.name, display_name, description))
+        return results
 
+    def _rebuild_index(self) -> None:
+        """Build the index string from a synchronous scan."""
+        results = self._scan_skills()
+        self._skill_names = {r[0] for r in results}
+        entries = [f"- {r[1]}: {r[2]}" for r in results]
         if not entries:
             self._index = ""
             return
-
         self._index = (
             "Available skills (use `use_skill` to load full instructions):\n"
             + "\n".join(entries)
@@ -126,6 +140,8 @@ class SkillsPlugin(CorvidaePlugin):
     @hookimpl(wrapper=True)
     def transform_system_prompt(self, channel, text):
         result = yield
+        if result is None:
+            result = text
         if self._index:
             return f"{result}\n\n{self._index}"
         return result
@@ -152,8 +168,12 @@ class SkillsPlugin(CorvidaePlugin):
                     f"Use use_skill with no argument to list skills."
                 )
             skill_file = plugin._skills_dir / name / "SKILL.md"
-            try:
+
+            def _read() -> str:
                 return skill_file.read_text(encoding="utf-8", errors="replace")
+
+            try:
+                return await asyncio.to_thread(_read)
             except OSError as e:
                 return f"Failed to read skill '{name}': {e}"
 
