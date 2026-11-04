@@ -2784,8 +2784,12 @@ monitored.
   have no await between them, so a refresh can't land after the stop and a
   message arriving during the stop sends its start after it. A failed stop
   is logged at WARNING with the channel id and the indicator is left to
-  expire; it never prevents a reply from being delivered (a stop that
-  signal-cli never answers is #413).
+  expire; it never prevents a reply from being delivered. A liveness RPC
+  waits at most `LIVENESS_RPC_TIMEOUT` (10 s) for signal-cli's response, so
+  a daemon that accepts the frame and never answers costs one delay and a
+  WARNING rather than holding the inbound processor or the reply path
+  (#413). The bound covers typing and receipts only: `send` is not bounded
+  this way, because a send that times out may have been delivered.
 - *Read receipt.* Sent from `on_message_persisted` — processing start —
   not on arrival. A message can sit queued behind contended local
   inference, and a "read" marker followed by a long silence is worse than
