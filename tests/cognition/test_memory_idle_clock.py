@@ -149,12 +149,12 @@ async def make_env(retention_runs):
         pm.register(llm, name="llm")
         await llm.on_init(pm=pm, config=config)
         stub = StubClient()
-        for role in ("main", "background", "embedding"):
-            llm._clients[role] = stub
+        for profile in ("main", "embedding"):
+            llm._clients[profile] = stub
         llm.embedding_dimensions = 4
 
         # A view-capable agent with forks off: an out-of-window range is
-        # written from the rendered view on llm.background (#380, #388).
+        # written from the rendered view on llm.main (#380, #388).
         # (A caller passing its own pm may already hold a real Agent.)
         if pm.get_plugin("agent") is None:
             pm.register(FakeForkAgent(set()), name="agent")

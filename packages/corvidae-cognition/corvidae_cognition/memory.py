@@ -163,8 +163,8 @@ CONSOLIDATION_EXTRA_BODY = {
 
 # Default instruction for consolidation (GitHub issue #51). With agent.forks
 # on, the record is written by a fork of the live window; a range that has
-# left the window is written from a rebuilt view of it on llm.background
-# (#380). Either way this text is appended as a user turn, followed by a
+# left the window is written from a rebuilt view of it on the consolidation
+# stage's client (#380). Either way this text is appended as a user turn, followed by a
 # sentence naming where the range starts. prompts/memory_consolidation_fork.md
 # is the documented copy; memory.consolidation_fork_prompt (static config,
 # not a runtime tunable) overrides it. The agent's own system prompt is above
@@ -572,14 +572,14 @@ async def build_catchup_segments(
             logger.warning(
                 "catch-up view for channel %s dropped its own rows (message ids %s) "
                 "to fit max_context_tokens %d; they are committed without reaching a "
-                "view — raise max_context_tokens or the background role's context",
+                "view — raise max_context_tokens or the consolidation profile's context",
                 channel_id, ", ".join(map(str, lost)), inputs.max_tokens,
             )
         if truncated:
             logger.warning(
                 "catch-up view for channel %s truncated message id %s to fit "
                 "max_context_tokens %d — raise max_context_tokens or the "
-                "background role's context",
+                "consolidation profile's context",
                 channel_id, window.messages[-1].get("_db_id"), inputs.max_tokens,
             )
         messages = build_fork_prompt(
@@ -590,7 +590,7 @@ async def build_catchup_segments(
             logger.warning(
                 "catch-up view for channel %s, message ids %d-%d measures %d tokens, "
                 "over max_context_tokens %d; sending it anyway — raise "
-                "max_context_tokens or the background role's context",
+                "max_context_tokens or the consolidation profile's context",
                 channel_id, seg_rows[0][0], end_id, measured, inputs.max_tokens,
             )
         segments.append(CatchupSegment(seg_rows, end_id, messages))
@@ -671,7 +671,7 @@ class RubricPrior:
         get_client: Callable[[], object],
         get_prompt: Callable[[], str] | None = None,
     ) -> None:
-        # A callable, not a client, so the current background client is
+        # A callable, not a client, so the current client is
         # resolved at call time (clients can be swapped on config reload).
         self._get_client = get_client
         self._get_prompt = get_prompt or (lambda: RUBRIC_PROMPT)
@@ -943,13 +943,19 @@ class MemoryPlugin(CorvidaePlugin):
         self._db_lock = asyncio.Lock()
         # Pluggable importance prior; replaced by later phases (§3.1).
         self.importance_prior: ImportancePrior = RubricPrior(
-            lambda: self._llm().get_client("background"),
+            lambda: self._llm().get_client("rubric"),
             lambda: self._rubric_prompt,
         )
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
+
+    @hookimpl
+    def register_llm_stages(self, stages: dict[str, str]) -> None:
+        stages["consolidation"] = "chat"
+        stages["rubric"] = "chat"
+        stages["embedding"] = "embedding"
 
     @hookimpl
     async def on_init(self, pm, config: dict) -> None:
@@ -1460,7 +1466,7 @@ class MemoryPlugin(CorvidaePlugin):
 
         A range wholly in the live window is one record (a fork, or a skip).
         A range that has left it is written from the agent's rebuilt view on
-        llm.background, one record per segment (split at summary boundaries
+        the consolidation stage's client, one record per segment (split at summary boundaries
         and wherever a segment would exceed the channel's budget); each
         segment commits and moves the watermark by itself.
 
@@ -1500,7 +1506,7 @@ class MemoryPlugin(CorvidaePlugin):
 
             # The first-person record: a fork of the live window for a range
             # in it (stashed at compaction, or run now for idle), a skip when
-            # that fork misses, else the rebuilt view on llm.background.
+            # that fork misses, else the rebuilt view on the stage's client.
             outcome, record = await self._live_record(
                 channel_id, rows, watermark, range_end, trigger
             )
@@ -1925,8 +1931,8 @@ class MemoryPlugin(CorvidaePlugin):
     async def _catch_up(
         self, channel_id: str, watermark: int, range_end: int
     ) -> tuple[object, RecordStamp, list[CatchupSegment]]:
-        """The background client, record stamp and view segments for a range
-        that has left the window. Makes no commits.
+        """The consolidation client, record stamp and view segments for a
+        range that has left the window. Makes no commits.
 
         Raises:
             RuntimeError: no agent plugin can supply the channel's view
@@ -1942,7 +1948,7 @@ class MemoryPlugin(CorvidaePlugin):
             )
         inputs = await agent.view_inputs(channel_id)
         # Bound once (R3): the stamp's model and the requests share a client.
-        client = self._llm().get_client("background")
+        client = self._llm().get_client("consolidation")
         stamp = RecordStamp(
             self._consolidation_fork_prompt, "standalone",
             client.request_model(CONSOLIDATION_EXTRA_BODY),
@@ -2304,12 +2310,12 @@ class MemoryPlugin(CorvidaePlugin):
     # ------------------------------------------------------------------
 
     def _llm(self):
-        """The LLMPlugin instance (role-client access)."""
+        """The LLMPlugin instance (profile-client access)."""
         from corvidae.llm_plugin import LLMPlugin
         return get_dependency(self.pm, "llm", LLMPlugin)
 
     def _embedding_enabled(self) -> bool:
-        """True when an embedding role is configured and encoders match."""
+        """True when an embedding profile is configured and encoders match."""
         return self._embedding_cfg is not None and not self._encoder_mismatch
 
     async def _open_write_db(self, shared: aiosqlite.Connection) -> aiosqlite.Connection:
@@ -2518,7 +2524,7 @@ class MemoryPlugin(CorvidaePlugin):
         await db.execute(MESSAGE_FTS_UPDATE_TRIGGER)
         await db.execute(RETENTION_META_DDL)
 
-        # The vector surface exists only with an embedding role configured
+        # The vector surface exists only with an embedding profile configured
         # and a loadable sqlite-vec extension; anything else degrades to
         # FTS5-only retrieval. Text is canonical; vectors are a cache.
         dimensions = self._embedding_dimensions()

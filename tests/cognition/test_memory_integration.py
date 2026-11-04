@@ -72,12 +72,11 @@ async def build_stack(db_path):
     await llm.on_init(pm=pm, config=CONFIG)
     stub = StubChatEmbedClient()
     llm._clients["main"] = stub
-    llm._clients["background"] = stub
     llm._clients["embedding"] = stub
     llm.embedding_dimensions = DIMS
 
     # A view-capable agent with forks off: a range outside the live window
-    # is written from the rendered view on llm.background (#380, #388).
+    # is written from the rendered view on llm.main (#380, #388).
     pm.register(FakeForkAgent(set()), name="agent")
 
     funnel = FunnelPlugin()

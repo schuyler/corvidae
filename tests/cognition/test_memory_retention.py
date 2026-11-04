@@ -897,6 +897,32 @@ class TestJobStartup:
 # ---------------------------------------------------------------------------
 
 
+class TestBackfillStage:
+    async def test_backfill_asks_for_the_embedding_stage(self):
+        """R1: the retention backfill's call site requests the ``embedding`` stage."""
+        memory, embedder, channel, db = await build_retention_env()
+        if not memory._vec_available:
+            pytest.skip("sqlite-vec unavailable")
+        llm = memory._llm()
+        stages: list = []
+        real_get_client = llm.get_client
+
+        def get_client(stage=None):
+            stages.append(stage)
+            return real_get_client(stage)
+
+        llm.get_client = get_client
+        await seed_memory_row(
+            db, channel.id, "wifi sensor backfill stage test unique phrase",
+            indexed=1, embedded=0, vec_available=False,
+        )
+
+        await run_retention_job(memory)
+
+        assert stages == ["embedding"]
+        await db.close()
+
+
 class TestBackfillAttribution:
     """Backfill embed calls must carry stage='retention' attribution."""
 

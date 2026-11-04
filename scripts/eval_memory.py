@@ -106,10 +106,6 @@ async def run_live_evaluation(args) -> None:
                 "base_url": args.base_url, "model": args.model,
                 "api_key": args.api_key,
             },
-            "background": {
-                "base_url": args.base_url, "model": args.model,
-                "api_key": args.api_key,
-            },
             "embedding": {
                 "base_url": args.embedding_base_url or args.base_url,
                 "model": args.embedding_model or args.model,
@@ -131,6 +127,13 @@ async def run_live_evaluation(args) -> None:
     llm = LLMPlugin()
     pm.register(llm, name="llm")
     await llm.on_init(pm=pm, config=config)
+
+    # MemoryPlugin registers its LLM stages when LLMPlugin starts, so it
+    # must be registered first or get_client() can't resolve them.
+    memory_plugin = MemoryPlugin()
+    pm.register(memory_plugin, name="memory")
+    await memory_plugin.on_init(pm=pm, config=config)
+
     await llm.on_start(config=config)
 
     usage = UsageLogPlugin()
@@ -141,9 +144,6 @@ async def run_live_evaluation(args) -> None:
     pm.register(funnel, name="funnel")
     await funnel.on_init(pm=pm, config=config)
 
-    memory_plugin = MemoryPlugin()
-    pm.register(memory_plugin, name="memory")
-    await memory_plugin.on_init(pm=pm, config=config)
     await memory_plugin.on_start(config=config)
 
     # Ingest the fixture conversation through the real consolidation path.
