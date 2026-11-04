@@ -736,6 +736,22 @@ All operations are synchronous; no database access:
   because memory retrieval keys on a plain `user` tail, and because the
   rewrite must stay a pure function of each message for the prompt prefix
   to stay cache-stable.
+
+  Every row the window can hold is renderable (PRD §3.1.18.1, #392), because
+  these steps run unwrapped on every turn and an exception here is a
+  deterministic per-turn failure that wedges the channel. A row that is not a
+  message object is left out; a malformed `tool_calls` value (no `id`, a
+  non-list value including a falsy one such as `""`, a non-dict entry) is
+  filtered out by `well_formed_calls()`, and the row renders without it, or is
+  left out entirely when that was its whole payload. A `tool_call_id` that is
+  not a non-empty string — `message_log` never validates the field — is read
+  through `result_call_id()`, so an unhashable value renders as an orphan
+  result instead of raising. Each omission logs one WARNING naming the channel
+  and the row (`message_log` id, or the window position when the row was never
+  persisted). `snap_cut_forward`, `snap_cut_to_tool_boundary`,
+  `_first_result_index` and `build_fork_prompt` read `tool_calls` through the
+  same helper, so the cut snaps, the render and a fork's prefix agree on which
+  calls exist.
 - `corvidae.context.unanswered_user_messages(messages)` (a module function,
   not a method) — the user-role MESSAGE rows after the window's last
   assistant row, in order (all of them when there is no assistant row). A
@@ -751,7 +767,9 @@ All operations are synchronous; no database access:
   by its JSON-serialized visible fields (role, content, `tool_calls`,
   `reasoning_content`, etc.), not just the `content` string, so a message
   whose size is mostly in tool-call arguments or reasoning content is still
-  counted accurately.
+  counted accurately. It never raises on a row's content (§3.1.18.1, #392):
+  a value JSON cannot encode is counted by its `str()`, and a row that is not
+  a mapping is counted by its `repr`, so both still contribute to the budget.
 - `replace_with_summary(summary_msg, retain_count)` — replaces older messages
   with a summary in-memory, retaining the `retain_count` most-recent entries.
   Raises `ValueError` if `retain_count` exceeds `len(messages)`.
@@ -762,7 +780,9 @@ All operations are synchronous; no database access:
   would drop the newest row, in which case the orphaned result renders as a
   framed notification. The newest row is always kept; if it alone exceeds
   the budget its content is truncated in memory only, with a visible
-  marker. Returns `(dropped, truncated)`.
+  marker. A newest row that is not a message object has no content to
+  truncate, so it stands as it is and the caller reports the overage.
+  Returns `(dropped, truncated)`.
 - The window only grows at the tail (`append`) and truncates at the head
   (`replace_with_summary`, `fit_to_budget`). Nothing is inserted, removed or mutated
   mid-window, so there is no method for removing entries by type; stale
