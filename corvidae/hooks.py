@@ -557,6 +557,11 @@ class CorvidaePlugin:
     depends_on: frozenset[str] = frozenset()
     optional_depends_on: frozenset[str] = frozenset()
     hookspecs: ClassVar[type | None] = None
+    # Dotted config-key prefixes this plugin re-reads in on_config_reload.
+    # Everything a plugin reads but does not list here applies at restart,
+    # so a reload that changes one is reported as pending (#408). Empty
+    # means the plugin reloads nothing, which is most of them.
+    reloadable_keys: tuple[str, ...] = ()
 
     @hookimpl
     async def on_init(self, pm, config: dict) -> None:

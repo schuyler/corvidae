@@ -1329,3 +1329,329 @@ async def test_reload_with_bad_tools_timeouts_is_rejected(tmp_path, caplog):
     assert "['a']" in caplog.text
     assert "tool names to seconds" in caplog.text
     assert "reload skipped" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# #408: a restart-only key that changes must be reported, and a plugin's
+# declared live keys must be the ones its reload hook actually re-reads.
+# ---------------------------------------------------------------------------
+
+def _make_watcher(config_path: Path):
+    """A ConfigWatcherPlugin wired to a plugin manager, not started."""
+    from corvidae.config_watcher import ConfigWatcherPlugin
+    from corvidae.hooks import create_plugin_manager
+
+    from corvidae.compaction import CompactionPlugin
+
+    pm = create_plugin_manager()
+    watcher = ConfigWatcherPlugin()
+    pm.register(watcher, name="config_watcher")
+    # Compaction is the plugin whose live keys the warning test relies on.
+    pm.register(CompactionPlugin(), name="compaction")
+    watcher.pm = pm
+    watcher._config_path = config_path
+    watcher._cli_overrides = {}
+    return watcher
+
+
+class _RecordingConfig(dict):
+    """A config dict that records every key read, including nested ones.
+
+    A source scan cannot see a key a hook reads through a helper
+    (`_resolve_mid_conversation_system_role(agent_config)`), so the guard
+    drives the hook instead and observes what it actually reads (#408
+    review).
+    """
+
+    def __init__(self, data: dict, prefix: str = "", log: set[str] | None = None):
+        super().__init__(data)
+        self._prefix = prefix
+        self.reads = log if log is not None else set()
+
+    def get(self, key, default=None):
+        dotted = f"{self._prefix}.{key}" if self._prefix else key
+        self.reads.add(dotted)
+        value = super().get(key, default)
+        if isinstance(value, dict):
+            return _RecordingConfig(value, dotted, self.reads)
+        return value
+
+    def __getitem__(self, key):
+        dotted = f"{self._prefix}.{key}" if self._prefix else key
+        self.reads.add(dotted)
+        value = super().__getitem__(key)
+        if isinstance(value, dict):
+            return _RecordingConfig(value, dotted, self.reads)
+        return value
+
+
+async def _keys_read_by_hook(plugin, config: dict) -> set[str]:
+    """Dotted keys the plugin's on_config_reload actually reads."""
+    recorder = _RecordingConfig(config)
+    await plugin.on_config_reload(recorder)
+    # A section read like `config.get("funnel")` is also recorded; keep it
+    # only when nothing was read beneath it, since a parent that led to
+    # leaves is not itself a key an operator sets.
+    reads = {k for k in recorder.reads if not k.startswith("_")}
+    leaves = {
+        k for k in reads
+        if not any(other.startswith(k + ".") for other in reads)
+    }
+    return leaves
+
+
+def _make_watcher(config_path: Path):
+    """A ConfigWatcherPlugin wired to a plugin manager, not started."""
+    from corvidae.config_watcher import ConfigWatcherPlugin
+    from corvidae.hooks import create_plugin_manager
+
+    from corvidae.compaction import CompactionPlugin
+
+    pm = create_plugin_manager()
+    watcher = ConfigWatcherPlugin()
+    pm.register(watcher, name="config_watcher")
+    # Compaction is the plugin whose live keys the warning test relies on.
+    pm.register(CompactionPlugin(), name="compaction")
+    watcher.pm = pm
+    watcher._config_path = config_path
+    watcher._cli_overrides = {}
+    return watcher
+
+
+def _make_watcher(config_path: Path):
+    """A ConfigWatcherPlugin wired to a plugin manager, not started."""
+    from corvidae.config_watcher import ConfigWatcherPlugin
+    from corvidae.hooks import create_plugin_manager
+
+    from corvidae.compaction import CompactionPlugin
+
+    pm = create_plugin_manager()
+    watcher = ConfigWatcherPlugin()
+    pm.register(watcher, name="config_watcher")
+    # Compaction is the plugin whose live keys the warning test relies on.
+    pm.register(CompactionPlugin(), name="compaction")
+    watcher.pm = pm
+    watcher._config_path = config_path
+    watcher._cli_overrides = {}
+    return watcher
+
+
+class TestRestartOnlyWarning:
+    async def test_changing_a_restart_only_key_warns_with_the_key(
+        self, tmp_path, caplog
+    ):
+        """A key no plugin reloads is reported as pending a restart.
+
+        The failure this prevents: changing `memory.retrieval.bands` logged
+        only that compaction and agent config were updated, so the operator
+        had no way to learn the memory change was waiting for a restart.
+        """
+        cfg = tmp_path / "agent.yaml"
+        cfg.write_text(
+            yaml.safe_dump(
+                {
+                    "llm": {"main": {"base_url": "http://localhost:8080/v1", "model": "m"}},
+                    "memory": {"retrieval": {"bands": [1, 2, 3]}},
+                }
+            )
+        )
+        watcher = _make_watcher(cfg)
+        watcher.config = {
+            "_config_path": str(cfg),
+            "_base_dir": str(tmp_path),
+            "llm": {"main": {"base_url": "http://localhost:8080/v1", "model": "m"}},
+            "memory": {"retrieval": {"bands": [1, 2, 4]}},
+        }
+
+        with caplog.at_level(logging.WARNING):
+            # The helper is the unit under R2; the full reload path needs a
+            # registry, which is not what this test is about.
+            watcher._warn_restart_only_changes(
+                {
+                    "_config_path": str(cfg),
+                    "llm": {"main": {"base_url": "http://localhost:8080/v1", "model": "m"}},
+                    "memory": {"retrieval": {"bands": [1, 2, 3]}},
+                }
+            )
+
+        pending = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+        named = [m for m in pending if "memory.retrieval.bands" in m]
+        assert named, f"a restart-only change must name the key; got {pending}"
+        assert "restart" in named[0].lower(), named[0]
+
+    async def test_changing_a_live_key_does_not_warn(self, tmp_path, caplog):
+        """A key a plugin declares reloadable applies at once, so it is not
+        reported as pending."""
+        cfg = tmp_path / "agent.yaml"
+        cfg.write_text(
+            yaml.safe_dump(
+                {
+                    "llm": {"main": {"base_url": "http://localhost:8080/v1", "model": "m"}},
+                    "agent": {"compaction_threshold": 0.9},
+                }
+            )
+        )
+        watcher = _make_watcher(cfg)
+        watcher.config = {
+            "_config_path": str(cfg),
+            "_base_dir": str(tmp_path),
+            "llm": {"main": {"base_url": "http://localhost:8080/v1", "model": "m"}},
+            "agent": {"compaction_threshold": 0.5},
+        }
+
+        with caplog.at_level(logging.WARNING):
+            watcher._warn_restart_only_changes(
+                {
+                    "_config_path": str(cfg),
+                    "llm": {"main": {"base_url": "http://localhost:8080/v1", "model": "m"}},
+                    "agent": {"compaction_threshold": 0.9},
+                }
+            )
+
+        messages = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+        assert not [m for m in messages if "compaction_threshold" in m], messages
+
+
+# A config with every section the declared hooks below read, so the
+# recorder observes each key they take. Values are defaults-shaped.
+_FULL_SECTION_CFG = {
+    "agent": {
+        "chars_per_token": 4,
+        "request_logprobs": False,
+        "mid_conversation_system_role": "system",
+        "compaction_threshold": 0.8,
+        "compaction_retention": 0.5,
+        "min_messages_to_compact": 5,
+        "compaction_fork_prompt": "x",
+        "forks": {},
+    },
+    "funnel": {"default_budget": 512, "budgets": {}},
+}
+
+
+class TestReloadableKeyRegistry:
+    """R3: the declared live keys are the ones the hook actually re-reads.
+
+    A declared key that the hook never reads is a lie the operator pays for:
+    they change it, see no warning, and wait for an effect that never comes.
+    """
+
+    async def test_compaction_declares_what_its_hook_re_reads(self):
+        from corvidae.compaction import CompactionPlugin
+
+        hook_keys = await _keys_read_by_hook(CompactionPlugin(None), _FULL_SECTION_CFG)
+        assert hook_keys, "could not find any config keys in the hook"
+        missing = {
+            k for k in hook_keys
+            if not any(k == d or k.startswith(d + ".") for d in CompactionPlugin.reloadable_keys)
+        }
+        assert not missing, (
+            f"CompactionPlugin.on_config_reload reads {sorted(missing)} but "
+            f"reloadable_keys is {CompactionPlugin.reloadable_keys}"
+        )
+
+    async def test_agent_declares_what_its_hook_re_reads(self):
+        from corvidae.agent import Agent
+
+        agent_plugin = Agent()
+        # The hook re-borrows the LLM client at the end; only reads matter.
+        agent_plugin.pm = MagicMock()
+        agent_plugin.pm.get_plugin.return_value = None
+        hook_keys = await _keys_read_by_hook(agent_plugin, _FULL_SECTION_CFG)
+        missing = {
+            k for k in hook_keys
+            if not any(k == d or k.startswith(d + ".") for d in Agent.reloadable_keys)
+        }
+        assert not missing, (
+            f"Agent.on_config_reload reads {sorted(missing)} but "
+            f"reloadable_keys is {Agent.reloadable_keys}"
+        )
+
+    async def test_funnel_declares_what_its_hook_re_reads(self):
+        # The kernel job runs without the cognition extra, so this test must
+        # skip there rather than fail to import (#408).
+        pytest.importorskip("corvidae_cognition")
+        from corvidae_cognition.funnel import FunnelPlugin
+
+        hook_keys = await _keys_read_by_hook(FunnelPlugin(None), _FULL_SECTION_CFG)
+        missing = {
+            k for k in hook_keys
+            if not any(k == d or k.startswith(d + ".") for d in FunnelPlugin.reloadable_keys)
+        }
+        assert not missing, (
+            f"FunnelPlugin.on_config_reload reads {sorted(missing)} but "
+            f"reloadable_keys is {FunnelPlugin.reloadable_keys}"
+        )
+
+    async def test_a_second_reload_does_not_re_report_the_first_changes(
+        self, tmp_path, caplog
+    ):
+        """The warning compares against the last reload, not against startup.
+
+        `self.config` is set once in on_init and never advances, so using it
+        as the baseline would make reload N re-report everything reload 1
+        changed, on every reload, forever.
+        """
+        cfg = tmp_path / "agent.yaml"
+        cfg.write_text(yaml.safe_dump({"llm": {"main": {}}}))
+        watcher = _make_watcher(cfg)
+        watcher.config = {
+            "_config_path": str(cfg),
+            "llm": {"main": {"model": "m"}},
+            "memory": {"retrieval": {"bands": [1]}},
+        }
+        changed = {
+            "_config_path": str(cfg),
+            "llm": {"main": {"model": "m"}},
+            "memory": {"retrieval": {"bands": [2]}},
+        }
+
+        with caplog.at_level(logging.WARNING):
+            watcher._warn_restart_only_changes(changed)
+            first = [r.getMessage() for r in caplog.records if "bands" in r.getMessage()]
+            assert first, "the first reload must report the change"
+
+            caplog.clear()
+            # Same config again: the reload watcher saw this one already.
+            watcher._warn_restart_only_changes(changed)
+            second = [r.getMessage() for r in caplog.records if "bands" in r.getMessage()]
+
+        assert not second, f"an unchanged key must not be re-reported: {second}"
+
+    async def test_the_reload_path_calls_the_restart_only_report(
+        self, tmp_path, caplog
+    ):
+        """Step 5b runs on a real reload, not only when called directly.
+
+        The other warning tests drive the helper; without this one, deleting
+        its call site in `_reload_config` leaves every test green (#408
+        review).
+        """
+        cfg = tmp_path / "agent.yaml"
+        cfg.write_text(
+            yaml.safe_dump(
+                {
+                    "llm": {"main": {"base_url": "http://localhost:8080/v1", "model": "m"}},
+                    "memory": {"retrieval": {"bands": [1, 2, 3]}},
+                }
+            )
+        )
+        watcher = _make_watcher(cfg)
+        registry = MagicMock()
+        watcher._registry = registry
+        watcher.config = {
+            "_config_path": str(cfg),
+            "_base_dir": str(tmp_path),
+            "llm": {"main": {"base_url": "http://localhost:8080/v1", "model": "m"}},
+            "memory": {"retrieval": {"bands": [9, 9, 9]}},
+        }
+
+        with patch(
+            "corvidae.config_watcher.apply_channel_config", create=True
+        ), caplog.at_level(logging.WARNING):
+            await watcher._reload_config()
+
+        messages = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any("memory.retrieval.bands" in m for m in messages), (
+            f"the reload path must report the restart-only change; got {messages}"
+        )
