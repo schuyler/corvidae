@@ -87,7 +87,7 @@ reads the per-channel **consolidation watermark**, fetches the working
 range, produces the record (first-person summary with epistemic framing,
 JSON out) — from a fork of the live window when the range is in it (see
 [Forks](design.md#forks)), else from the agent's rebuilt view of the range
-sent on `llm.background` (catch-up, below); an idle range that is in the
+sent on `llm.main` (catch-up, below); an idle range that is in the
 window but can't be forked is skipped instead, with a warning, and retried
 on the next trigger (it reaches catch-up once it has left the window). Both
 calls are constrained by a
@@ -218,7 +218,7 @@ hit/admitted counts, degradation flag).
 `memory_fts` (flagged `degraded_to_fts=1`; the FTS query caps each
 blank-line-separated paragraph at 20 tokens, so every message of a burst
 keeps its own 20 and a single message is capped at 20 as before); sqlite-vec unloadable → FTS5
-with one clear startup warning; no `llm.embedding` role → records stored
+with one clear startup warning; no `llm.embedding` profile → records stored
 with `embedded=0`, retrieval FTS5-only; a stored encoder differing from
 config → ERROR and embeddings disabled rather than silently mixing
 encoders. Nothing in the memory path raises into the turn loop.
@@ -239,7 +239,7 @@ view is trimmed oldest-first to the budget, put under the channel's
 `reasoning_history`, headed by the channel's system prompt (identity and
 register, from `Agent.view_inputs`, which also resolves the channel after a
 restart) and ends with `memory.consolidation_fork_prompt` plus the range
-sentence. It goes on `llm.background` with no tools and the record
+sentence. It goes on `llm.main` with no tools and the record
 schema. Each segment is its own record and its own watermark advance; a
 failure leaves earlier segments stored and retries the rest. A segment
 with no dialog that is followed by another folds its id span into the next
@@ -256,11 +256,11 @@ nullable `memory` columns:
 - `prompt_hash`: sha256 of the UTF-8 instruction text the call used. The
   text itself is stored once per hash in `memory_prompt`, however many
   records share it. An empty prompt is still a prompt and is stored as `''`.
-- `mode`: `fork`, `standalone` (the view call on `llm.background`) or
+- `mode`: `fork`, `standalone` (the view call on `llm.main`) or
   `direct`.
 - `model`: the model the call was sent with, after any
-  `llm.<role>.extra_body.model` override, so a record says what actually
-  ran rather than what `llm.<role>.model` names. `Agent.fork` always sets
+  `llm.<profile>.extra_body.model` override, so a record says what actually
+  ran rather than what `llm.<profile>.model` names. `Agent.fork` always sets
   `ForkResult.model` from `LLMClient.request_model`, so it is NULL only for a
   row written without a model (a pre-stamp row, or a `ForkResult` built
   without one).
@@ -270,7 +270,7 @@ What each path stamps:
 | Path | `mode` | Instruction text | `model` |
 |---|---|---|---|
 | Fork of the live window (compaction or idle) | `fork` | `memory.consolidation_fork_prompt` | `ForkResult.model` |
-| Catch-up: the rebuilt view on `llm.background` | `standalone` | `memory.consolidation_fork_prompt` | `LLMClient.request_model` of the background client |
+| Catch-up: the rebuilt view on `llm.main` | `standalone` | `memory.consolidation_fork_prompt` | `LLMClient.request_model` of the main client |
 | Raw-transcript fallback after two unusable replies | `standalone` | `memory.consolidation_fork_prompt` | as above (the call was sent; only its reply was unusable) |
 | `write_record` (goal retirement) | `direct` | none: `prompt_hash` NULL, no `memory_prompt` row | NULL |
 
@@ -969,7 +969,7 @@ consequences.
   the idle trigger consolidates every one of them: as a fork when the range
   is wholly in the window (with forks off the run is skipped, so in-window
   heartbeat rows wait until trimmed), by catch-up (the view on
-  `llm.background`) once any of it has been trimmed out. The compaction safety net can also cover them, when the kept
+  `llm.main`) once any of it has been trimmed out. The compaction safety net can also cover them, when the kept
   beats pass the compaction threshold and `on_compaction` fires.
 - *When.* The trim keeps compaction from firing, so the compaction route to
   consolidation is normally gone on this channel. If `heartbeat.after` is

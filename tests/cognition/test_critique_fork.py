@@ -461,3 +461,11 @@ def test_provenance_instruction_rules_out_tools_and_replying_to_the_user():
     prompt = DEFAULT_FORK_PROMPTS["provenance"]
     assert "can't call tools" in prompt
     assert "not a reply to the user" in prompt
+
+
+def test_critique_registers_its_llm_stage_as_chat():
+    """R1a: critique owns the ``critique`` stage, a chat stage."""
+    from corvidae_cognition.critique import CritiquePlugin
+    from helpers import collect_llm_stages
+
+    assert collect_llm_stages(CritiquePlugin(), "critique") == {"critique": "chat"}

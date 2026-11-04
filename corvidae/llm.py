@@ -75,7 +75,7 @@ def split_raw_reasoning(message: dict) -> bool:
     closed it. A server's parsed reasoning cannot tell a cut-off from a
     decline (both arrive as empty content); a missing </think> in the raw
     text can. shortcut: assumes the chat template forces thinking open, so
-    set llm.<role>.raw_reasoning only on endpoints whose template does;
+    set llm.<profile>.raw_reasoning only on endpoints whose template does;
     elsewhere every reply without a </think> would read as cut off.
     """
     # Drop an optional opening tag and the whitespace after it.
@@ -382,7 +382,7 @@ class LLMClient:
 
         # The model this request is actually sent with: extra_body can
         # override the configured one, and the usage record must name the
-        # model the server was asked for, not the role's default (#297).
+        # model the server was asked for, not the profile's default (#297).
         sent_model = payload["model"]
 
         # Mint a per-call id pairing the observer request with its response,
@@ -397,7 +397,9 @@ class LLMClient:
         )
 
         response, elapsed = await self._post_with_retries(
-            "/chat/completions", payload, request_id, label="chat completion"
+            "/chat/completions", payload, request_id, label="chat completion",
+            message_count=len(messages),
+            tool_count=len(tools) if tools else 0,
         )
 
         usage = response.get("usage", {})
@@ -476,7 +478,9 @@ class LLMClient:
         )
 
         response, elapsed = await self._post_with_retries(
-            "/embeddings", payload, request_id, label="embeddings"
+            "/embeddings", payload, request_id, label="embeddings",
+            message_count=len(texts),
+            tool_count=0,
         )
 
         # Unpack one vector per input, honoring the index field when the
@@ -496,7 +500,8 @@ class LLMClient:
         return vectors
 
     async def _post_with_retries(
-        self, path: str, payload: dict, request_id: str, label: str
+        self, path: str, payload: dict, request_id: str, label: str,
+        message_count: int, tool_count: int,
     ) -> tuple[dict, float]:
         """POST with transient-error retries; shared by chat() and embed().
 
@@ -508,6 +513,10 @@ class LLMClient:
         Returns:
             (parsed JSON response, elapsed seconds of the final attempt).
         """
+        # Call-level timing for the observer: wall-clock start for the
+        # interval, and a monotonic start spanning every attempt and sleep.
+        started_at = time.time()
+        call_start = time.monotonic()
         start = time.monotonic()
         # The model this request asks for; chat() may have overridden the
         # configured one through extra_body.
@@ -617,6 +626,11 @@ class LLMClient:
                 latency_ms=(time.monotonic() - start) * 1000,
                 error=str(exc),
                 timings=None,
+                started_at=started_at,
+                total_ms=(time.monotonic() - call_start) * 1000,
+                attempts=attempt + not_loaded_attempt + 1,
+                message_count=message_count,
+                tool_count=tool_count,
             )
             raise
 
@@ -633,6 +647,11 @@ class LLMClient:
             latency_ms=elapsed * 1000,
             error=None,
             timings=response.get("timings"),
+            started_at=started_at,
+            total_ms=(time.monotonic() - call_start) * 1000,
+            attempts=attempt + not_loaded_attempt + 1,
+            message_count=message_count,
+            tool_count=tool_count,
         )
 
         return response, elapsed
