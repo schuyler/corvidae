@@ -108,7 +108,11 @@ class TestTimingColumns:
         assert row["attempts"] == 3
         assert row["message_count"] == 7
         assert row["tool_count"] == 4
-        assert row["ended_at"] == pytest.approx(1700000000.25 + 350.5 / 1000)
+        # Absolute tolerance: the default relative one is ~1700 s at epoch
+        # magnitudes and would accept ended_at == started_at.
+        assert row["ended_at"] == pytest.approx(
+            1700000000.25 + 350.5 / 1000, abs=1e-6
+        )
 
 
 class TestBackendTimingSplit:
@@ -130,10 +134,9 @@ class TestBackendTimingSplit:
 
         row = await _fetch(db, "r6", "prompt_ms, predicted_ms")
 
+        # Exact tuple equality: a reported zero must stay a stored zero, not
+        # collapse to NULL (None != 0).
         assert (row["prompt_ms"], row["predicted_ms"]) == expected
-        # A reported zero must stay a stored zero, not collapse to NULL.
-        if expected[0] == 0:
-            assert row["prompt_ms"] is not None
 
 
 class TestMaxContextTokens:
