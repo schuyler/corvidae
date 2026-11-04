@@ -741,7 +741,10 @@ class Agent(CorvidaePlugin):
             try:
                 await self.pm.ahook.send(
                     channel=channel,
-                    event=OutboundMessage(text=error_msg),
+                    event=OutboundMessage(
+                        text=error_msg,
+                        trace_id=item.trace_id if item is not None else None,
+                    ),
                 )
             except Exception:
                 logger.warning(
@@ -1007,7 +1010,11 @@ class Agent(CorvidaePlugin):
         try:
             await self.pm.ahook.send(
                 channel=channel,
-                event=OutboundMessage(text=display_response, latency_ms=result.latency_ms),
+                event=OutboundMessage(
+                    text=display_response,
+                    latency_ms=result.latency_ms,
+                    trace_id=trace_id,
+                ),
             )
         except Exception:
             logger.error(

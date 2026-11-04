@@ -457,6 +457,36 @@ class TestHandleResponse:
         assert len(sent(plugin.pm, OutboundMessage)) == 1
         assert "the answer" in sent_texts(plugin.pm, OutboundMessage)[0]
 
+    async def test_sent_reply_carries_the_turns_trace_id(self, plugin_and_channel):
+        """#419: the transport can only key on the trace if the kernel sends it.
+
+        Without this the ACP transport's trace comparison is inert end to end,
+        because a sent final is the path that completes a prompt. Asserting on
+        the emitted event, not on a helper, is the point: a hand-built
+        OutboundMessage in a transport test cannot catch this.
+        """
+        plugin, channel, db = plugin_and_channel
+        result = _make_turn_result(text="the answer")
+        plugin.pm.ahook.transform_display_text = AsyncMock(return_value=None)
+
+        await plugin._handle_response(
+            result=result,
+            channel=channel,
+            max_turns_limit=5,
+            request_text="the question",
+            item=QueueItem(
+                role=QueueItemRole.USER, content="the question", channel=channel,
+                trace_id="trace-under-test", originating=True,
+            ),
+        )
+
+        events = sent(plugin.pm, OutboundMessage)
+        assert len(events) == 1
+        _channel, event = events[0]
+        assert event.trace_id == "trace-under-test", (
+            f"the sent reply must carry the turn's trace: {event!r}"
+        )
+
     async def test_text_response_increments_turn_counter(self, plugin_and_channel):
         """No tool calls -> channel.turn_counter incremented by 1."""
         plugin, channel, db = plugin_and_channel

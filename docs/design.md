@@ -3297,6 +3297,13 @@ trace id and passes it to `on_message`, and completes with `end_turn`
 after tool drain (from `send_message`, or from `on_agent_response` when
 the final was unsent), including when the final `session/update` cannot be
 delivered (logged at WARNING; #99); `session/cancel` yields `cancelled`.
+Completion is keyed on that trace (#419): the prompt's trace is stored
+beside its future, and a final carrying a different one leaves the future
+pending at DEBUG. That covers a cancelled turn whose late final lands after
+the client has sent a new prompt, and a notification-originated turn (a
+reminder firing on an `acp:` channel), neither of which answers the
+client's prompt. A final carrying no trace id still completes, because a
+prompt that never resolves hangs the client's `session/prompt`.
 A second `session/prompt` on a session with one in flight is rejected
 with `invalidRequest` and the first is left untouched (#93). The stdio loop
 starts reading only once `Agent.started` is true: Runtime starts Agent
