@@ -487,6 +487,32 @@ class TestSystemPromptHook:
         prompt2 = await plugin.channel_system_prompt(channel)
         assert prompt2 == plain
 
+    async def test_interim_path_with_funnel_loaded(self, agent_env):
+        """The interim path works with a funnel-style plugin loaded
+        (#136 done-when: works with and without the funnel)."""
+        plugin, channel = agent_env
+        plain = await plugin.channel_system_prompt(channel)
+
+        # A funnel stand-in that appends a CONTEXT message to the window.
+        class _FunnelStandIn:
+            @hookimpl
+            async def before_agent_turn(self, channel, trace_id, meta):
+                if channel.conversation is not None:
+                    channel.conversation.append(
+                        {"role": "system", "content": "[CONTEXT] fact"},
+                        MessageType.CONTEXT,
+                    )
+
+        plugin.pm.register(_FunnelStandIn(), name="funnel_standin")
+
+        # Queue an interim section.
+        plugin.queue_system_prompt_section(channel, "INTERIM-WITH-FUNNEL")
+
+        # The next boundary includes it, alongside the funnel's CONTEXT.
+        prompt = await plugin.channel_system_prompt(channel)
+        assert "INTERIM-WITH-FUNNEL" in prompt
+        assert prompt.startswith(plain)
+
     async def test_non_boundary_turn_sends_identical_prompt(self, agent_env):
         """A turn without a compaction boundary sends a byte-identical
         system prompt (principle 2, #136)."""

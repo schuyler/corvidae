@@ -1095,6 +1095,26 @@ themselves and would need the same treatment. The systemd hardening in
 applies only to signal-cli; corvidae itself runs under `screen` with none
 of it.
 
+## `transform_system_prompt` prefix guard (#136)
+
+A plugin wrapper on `transform_system_prompt` receives the composed
+identity+register and returns the transformed prompt. Without a guard, a
+malicious or buggy plugin could rewrite the identity layer — replacing the
+operator's persona with its own, or injecting instructions that persist
+for the life of the conversation and across compactions.
+
+The kernel enforces a prefix check: if the transformed output does not
+start with the composed input, the transform is rejected with a WARNING
+and the untransformed prompt is used. Appending is the only permitted
+operation. This is a kernel-level invariant, not a convention: no plugin
+can modify the identity+register prefix through the hook, regardless of
+what it returns.
+
+The guard does not prevent a plugin from appending malicious content. A
+wrapper that appends instructions to the system prompt has the same reach
+as any other system-prompt content: it is trusted text the model reads on
+every turn. The trust boundary is plugin registration, not the hook.
+
 ## What to do first
 
 1. Done (#206): `set_settings` allowlists its undotted keys, which closed
