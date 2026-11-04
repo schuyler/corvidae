@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import time
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -184,11 +185,11 @@ class _HookRecorder:
 
     @hookimpl
     async def on_llm_request(
-        self, role, model, request_id, message_count, tool_count, attribution
+        self, profile, model, request_id, message_count, tool_count, attribution
     ):
         self.requests.append(
             {
-                "role": role,
+                "profile": profile,
                 "model": model,
                 "request_id": request_id,
                 "message_count": message_count,
@@ -199,11 +200,11 @@ class _HookRecorder:
 
     @hookimpl
     async def on_llm_response(
-        self, role, model, request_id, usage, latency_ms, attribution, error
+        self, profile, model, request_id, usage, latency_ms, attribution, error
     ):
         self.responses.append(
             {
-                "role": role,
+                "profile": profile,
                 "model": model,
                 "request_id": request_id,
                 "usage": usage,
@@ -227,7 +228,7 @@ class TestLLMPluginObserverWiring:
         await plugin.on_start(config)
         return plugin, recorder
 
-    async def test_main_and_background_clients_get_observers_with_roles(self):
+    async def test_main_and_background_clients_get_observers_with_profiles(self):
         config = {
             "llm": {
                 "main": {"base_url": BASE_URL, "model": "main-model"},
@@ -247,11 +248,11 @@ class TestLLMPluginObserverWiring:
         finally:
             await plugin.on_stop()
 
-        roles = [r["role"] for r in recorder.requests]
-        assert roles == ["main", "background"]
+        profiles = [r["profile"] for r in recorder.requests]
+        assert profiles == ["main", "background"]
         models = [r["model"] for r in recorder.requests]
         assert models == ["main-model", "bg-model"]
-        assert [r["role"] for r in recorder.responses] == ["main", "background"]
+        assert [r["profile"] for r in recorder.responses] == ["main", "background"]
 
     async def test_hook_receives_attribution_snapshot(self):
         from corvidae.attribution import reset_attribution, set_attribution
@@ -293,12 +294,12 @@ class TestLLMPluginObserverWiring:
             await asyncio.sleep(0)
 
         assert recorder.requests[0]["model"] == "new-model"
-        assert recorder.requests[0]["role"] == "main"
+        assert recorder.requests[0]["profile"] == "main"
 
 
 class TestObserverNamesModelSent:
     """#297 / PRD §3.13.10: the observer pair names the model each call was
-    sent with, not the role's configured model, and passes llama-server's
+    sent with, not the profile's configured model, and passes llama-server's
     ``timings`` through so cache hits are recordable."""
 
     async def _chat(self, client, **kwargs):
@@ -415,7 +416,7 @@ class TestObserverNamesModelSent:
     )
     async def test_usage_log_names_model_sent(self, db, instance_body, call_body, status, expected):
         """usage_log names the model sent for each override source, on
-        success and on terminal failure, and the role's model without one."""
+        success and on terminal failure, and the profile's model without one."""
         from aiohttp import ClientResponseError
 
         from corvidae.llm_plugin import _HookObserver
@@ -439,3 +440,140 @@ class TestObserverNamesModelSent:
 
         async with db.execute("SELECT model FROM usage_log") as cursor:
             assert await cursor.fetchall() == [(expected,)]
+
+
+def _make_status_response(status: int, body: str = ""):
+    """Build a mock aiohttp response with a status and a readable error body."""
+    response = AsyncMock()
+    response.status = status
+    response.json = AsyncMock(return_value=MOCK_COMPLETION)
+    response.text = AsyncMock(return_value=body)
+    response.raise_for_status = MagicMock()
+    response.headers = {}
+    if status >= 400:
+        from aiohttp import ClientResponseError
+        response.raise_for_status.side_effect = ClientResponseError(
+            request_info=MagicMock(), history=(), status=status
+        )
+    return response
+
+
+class TestLLMCallTimings:
+    """#350: every on_llm_response carries started_at, total_ms, attempts and the request's counts."""
+
+    async def test_first_try_chat_reports_one_attempt_and_counts(self):
+        client = LLMClient(base_url=BASE_URL, model=MODEL)
+        client.session = _make_mock_session(_make_mock_response())
+        observer = _RecordingObserver()
+        client.observer = observer
+
+        # Lists of different lengths, so a hard-coded count cannot pass.
+        messages = MESSAGES + [{"role": "assistant", "content": "ok"}]
+        tools = TOOLS * 3
+
+        # Bracket the call with wall-clock reads so started_at can be checked against them.
+        before = time.time()
+        await client.chat(messages, tools=tools)
+        after = time.time()
+
+        resp = observer.responses[0]
+        assert resp["attempts"] == 1
+        assert isinstance(resp["started_at"], float)
+        assert before <= resp["started_at"] <= after
+        assert resp["total_ms"] >= resp["latency_ms"]
+        assert resp["message_count"] == 2
+        assert resp["tool_count"] == 3
+
+    async def test_chat_without_tools_reports_zero_tool_count(self):
+        client = LLMClient(base_url=BASE_URL, model=MODEL)
+        client.session = _make_mock_session(_make_mock_response())
+        observer = _RecordingObserver()
+        client.observer = observer
+
+        await client.chat(MESSAGES)
+
+        resp = observer.responses[0]
+        assert resp["message_count"] == len(MESSAGES)
+        assert resp["tool_count"] == 0
+
+    async def test_embed_reports_text_count_and_no_tools(self):
+        client = LLMClient(base_url=BASE_URL, model=MODEL)
+        embed_response = _make_status_response(200)
+        embed_response.json = AsyncMock(return_value={
+            "data": [
+                {"index": 0, "embedding": [0.1, 0.2]},
+                {"index": 1, "embedding": [0.3, 0.4]},
+            ]
+        })
+        client.session = _make_mock_session(embed_response)
+        observer = _RecordingObserver()
+        client.observer = observer
+
+        await client.embed(["first", "second"], kind="document")
+
+        resp = observer.responses[0]
+        # message_count is the number of texts; embeddings carry no tools.
+        assert resp["message_count"] == 2
+        assert resp["tool_count"] == 0
+        assert resp["attempts"] == 1
+
+    async def test_two_transient_failures_then_success_counts_all_attempts(self):
+        # Small base delay: retry sleeps are 0.05 s then 0.10 s (no Retry-After header).
+        client = LLMClient(base_url=BASE_URL, model=MODEL, retry_base_delay=0.05)
+        client.session = _make_mock_session(
+            _make_status_response(503),
+            _make_status_response(503),
+            _make_mock_response(),
+        )
+        observer = _RecordingObserver()
+        client.observer = observer
+
+        await client.chat(MESSAGES)
+
+        resp = observer.responses[0]
+        slept_ms = (0.05 + 0.10) * 1000
+        assert resp["attempts"] == 3
+        # total_ms spans the failed attempts and the sleeps between them.
+        assert resp["total_ms"] >= slept_ms
+        assert resp["total_ms"] > resp["latency_ms"]
+        # latency_ms is the final attempt alone, so it excludes the sleeps.
+        assert resp["latency_ms"] < slept_ms
+
+    async def test_model_not_loaded_wait_counts_as_attempt(self, monkeypatch):
+        # Shrink the 1 s minimum not-loaded delay so the test stays fast.
+        monkeypatch.setattr("corvidae.llm.MODEL_NOT_LOADED_MIN_DELAY", 0.01)
+        client = LLMClient(base_url=BASE_URL, model=MODEL, retry_base_delay=0.01)
+        not_loaded_body = '{"error": {"message": "model is not loaded"}}'
+        client.session = _make_mock_session(
+            _make_status_response(400, not_loaded_body),
+            _make_mock_response(),
+        )
+        observer = _RecordingObserver()
+        client.observer = observer
+
+        await client.chat(MESSAGES)
+
+        # One not-loaded wait plus the successful attempt.
+        assert observer.responses[0]["attempts"] == 2
+
+    async def test_terminal_failure_fires_one_response_with_timing(self):
+        from aiohttp import ClientResponseError
+
+        client = LLMClient(base_url=BASE_URL, model=MODEL)
+        client.session = _make_mock_session(
+            _make_status_response(404, "no such model")
+        )
+        observer = _RecordingObserver()
+        client.observer = observer
+
+        with pytest.raises(ClientResponseError):
+            await client.chat(MESSAGES)
+
+        assert len(observer.responses) == 1
+        resp = observer.responses[0]
+        assert resp["error"] is not None
+        assert resp["timings"] is None
+        assert resp["attempts"] >= 1
+        assert isinstance(resp["started_at"], float)
+        assert isinstance(resp["total_ms"], float)
+        assert resp["total_ms"] >= 0

@@ -190,26 +190,11 @@ class TestRetrievalBasics:
         await db.close()
 
 
-class TestCompartmentalization:
-    async def test_other_channel_memories_never_surface(self):
-        memory, embedder, channel, conv, db = await build_retrieval_env()
-        await seed_memory(
-            db, "irc:#other", "the wifi password for the other channel is hunter2",
-        )
-        await ask(memory, channel, conv, "what is the wifi password?")
-        assert context_messages(conv) == []
-        await db.close()
+class TestWholeMemory:
+    """Retrieval spans every channel's memory (issue #168, principle 14)."""
 
-    async def test_group_configured_channels_share(self):
-        config = {
-            **EMBED_CONFIG,
-            "memory": {
-                "channel_groups": {
-                    "home": ["irc:#electronics", "irc:#garden"],
-                },
-            },
-        }
-        memory, embedder, channel, conv, db = await build_retrieval_env(config)
+    async def test_other_channel_memories_surface(self):
+        memory, embedder, channel, conv, db = await build_retrieval_env()
         await seed_memory(
             db, "irc:#garden",
             "the solar charge controller logs power data to MQTT",
@@ -221,59 +206,19 @@ class TestCompartmentalization:
         assert "MQTT" in contexts[0]["content"]
         await db.close()
 
-
-def glob_config(*members: str) -> dict:
-    """EMBED_CONFIG plus one channel group with the given members."""
-    return {**EMBED_CONFIG, "memory": {"channel_groups": {"g": list(members)}}}
-
-
-class TestGlobChannelGroups:
-    """memory.channel_groups members may be * / ? patterns (issue #50)."""
-
-    async def test_glob_member_shares_with_runtime_channel(self):
-        # A Signal channel id that appears only at runtime is covered by
-        # the pattern, both as the caller and as the memory's owner.
-        memory, embedder, channel, conv, db = await build_retrieval_env(
-            glob_config("irc:#electronics", "signal:*")
-        )
-        await seed_memory(
-            db, "signal:a1b2-runtime-aci",
-            "the solar charge controller logs power data to MQTT",
-        )
-        await ask(memory, channel, conv,
-                  "where does the solar charge controller log power data?")
-        contexts = context_messages(conv)
-        assert len(contexts) == 1
-        assert "MQTT" in contexts[0]["content"]
-        await db.close()
-
-    async def test_glob_caller_sees_literal_member(self):
-        memory, embedder, _channel, _conv, db = await build_retrieval_env(
-            glob_config("irc:#electronics", "signal:*")
-        )
-        await seed_memory(db, "irc:#electronics", "the rain gauge is on the north fence")
-        caller = Channel(transport="signal", scope="new-aci")
-        conv = ContextWindow(caller.id)
-        caller.conversation = conv
-        await ask(memory, caller, conv, "where is the rain gauge?")
+    async def test_other_transport_memories_surface(self):
+        # A transport the caller has never shared a channel with.
+        memory, embedder, channel, conv, db = await build_retrieval_env()
+        await seed_memory(db, "signal:a1b2-runtime-aci",
+                          "the rain gauge is on the north fence")
+        await ask(memory, channel, conv, "where is the rain gauge?")
         contexts = context_messages(conv)
         assert len(contexts) == 1
         assert "north fence" in contexts[0]["content"]
         await db.close()
 
-    async def test_non_matching_channel_stays_compartmentalized(self):
-        memory, embedder, channel, conv, db = await build_retrieval_env(
-            glob_config("signal:*")
-        )
-        await seed_memory(db, "signal:some-aci", "the wifi password is hunter2")
-        await ask(memory, channel, conv, "what is the wifi password?")
-        assert context_messages(conv) == []
-        await db.close()
-
-    async def test_glob_scope_applies_in_fts_degraded_path(self):
-        memory, embedder, channel, conv, db = await build_retrieval_env(
-            glob_config("irc:#electronics", "signal:*")
-        )
+    async def test_whole_memory_applies_in_fts_degraded_path(self):
+        memory, embedder, channel, conv, db = await build_retrieval_env()
         await seed_memory(db, "signal:some-aci",
                           "kestrel's weather station uses an ESP32 board")
         embedder.fail = True
@@ -283,71 +228,23 @@ class TestGlobChannelGroups:
         assert "ESP32" in contexts[0]["content"]
         await db.close()
 
-
-class TestChannelScopeResolver:
-    """Unit tests for MemoryPlugin._channel_scope and group validation."""
-
-    async def test_question_mark_matches_exactly_one_character(self):
-        memory, *_rest, db = await build_retrieval_env(glob_config("irc:#a?"))
-        scope = memory._channel_scope("irc:#ab")
-        assert scope.contains("irc:#ac")
-        assert not scope.contains("irc:#a")
-        assert not scope.contains("irc:#abc")
-        # A non-member caller gets only itself.
-        assert not memory._channel_scope("irc:#abc").contains("irc:#ab")
+    async def test_retrieve_takes_no_channel(self):
+        # retrieve(text, k) is the whole signature: nothing to scope by.
+        memory, embedder, channel, conv, db = await build_retrieval_env()
+        await seed_memory(db, "irc:#garden", "the rain gauge is on the north fence")
+        candidates, degraded = await memory.retrieve("where is the rain gauge?")
+        assert not degraded
+        assert [c["summary"] for c in candidates] == [
+            "the rain gauge is on the north fence"
+        ]
         await db.close()
 
-    async def test_match_is_case_sensitive(self):
-        # SQLite GLOB is case-sensitive; the Python check must agree.
-        memory, *_rest, db = await build_retrieval_env(glob_config("irc:#Lex*"))
-        assert not memory._channel_scope("irc:#lex").contains("irc:#Lex")
-        await db.close()
-
-    async def test_own_id_matches_by_equality(self):
-        # A caller whose own id contains a literal '*' must not have it
-        # treated as a pattern that widens its scope.
-        memory, *_rest, db = await build_retrieval_env()
-        scope = memory._channel_scope("irc:#a*")
-        assert scope.contains("irc:#a*")
-        assert not scope.contains("irc:#abc")
-        await db.close()
-
-    @pytest.mark.parametrize("member", ["signal:[ab]*", "irc:#x]?", "irc:[y*"])
-    async def test_bracket_pattern_members_rejected(self, member):
-        with pytest.raises(ValueError, match="channel_groups"):
-            await MemoryPlugin().on_init(
-                pm=create_plugin_manager(), config=glob_config(member)
-            )
-
-    async def test_bracket_literal_member_accepted_by_equality(self):
-        # IRC nicks may contain '[' / ']'; a wildcard-free member never
-        # reaches GLOB, so it is allowed and matched exactly.
-        memory, *_rest, db = await build_retrieval_env(
-            glob_config("irc:[bob]", "irc:#lex")
-        )
-        scope = memory._channel_scope("irc:#lex")
-        assert scope.contains("irc:[bob]")
-        assert not scope.contains("irc:b")
-        assert memory._channel_scope("irc:[bob]").contains("irc:#lex")
-        await db.close()
-
-    async def test_empty_scope_sql_matches_nothing(self):
-        # A directly constructed empty scope must still be valid SQL.
-        import aiosqlite
-        from corvidae_cognition.memory import ChannelScope
-        fragment, params = ChannelScope(frozenset()).sql("c")
-        assert params == []
-        async with aiosqlite.connect(":memory:") as db:
-            await db.execute("CREATE TABLE t (c TEXT)")
-            await db.execute("INSERT INTO t VALUES ('irc:#lex')")
-            async with db.execute(f"SELECT c FROM t WHERE {fragment}") as cur:
-                assert await cur.fetchall() == []
-
-    async def test_non_list_group_rejected(self):
-        config = {**EMBED_CONFIG,
-                  "memory": {"channel_groups": {"g": "signal:*"}}}
-        with pytest.raises(ValueError, match="channel_groups"):
-            await MemoryPlugin().on_init(pm=create_plugin_manager(), config=config)
+    async def test_scope_machinery_is_gone(self):
+        # No ChannelScope, no resolver, no group state to resurrect.
+        import corvidae_cognition.memory as memory_module
+        assert not hasattr(memory_module, "ChannelScope")
+        assert not hasattr(memory_module, "_validate_channel_groups")
+        assert not hasattr(MemoryPlugin, "_channel_scope")
 
 
 class TestDedupeAndStats:
@@ -530,14 +427,8 @@ class TestRecallBenchmark:
             Path(__file__).parent.parent / "fixtures" / "memory_retrieval_basic.json"
         )
         fixture = json.loads(fixture_path.read_text())
-        # One group spanning both fixture channels so every query sees the
-        # whole corpus.
-        channels = sorted({m["channel_id"] for m in fixture["memories"]})
-        config = {
-            **EMBED_CONFIG,
-            "memory": {"channel_groups": {"fixture": channels}},
-        }
-        memory, embedder, channel, conv, db = await build_retrieval_env(config)
+        # Every query sees the whole corpus, whatever channel wrote it.
+        memory, embedder, channel, conv, db = await build_retrieval_env()
 
         id_map: dict[int, str] = {}
         for record in fixture["memories"]:
@@ -546,9 +437,7 @@ class TestRecallBenchmark:
 
         recalls = []
         for query in fixture["queries"]:
-            candidates, degraded = await memory.retrieve(
-                channels[0], query["text"], k=5
-            )
+            candidates, degraded = await memory.retrieve(query["text"], k=5)
             assert not degraded
             ranked = [id_map[c["id"]] for c in candidates]
             recalls.append(recall_at_k(ranked, query["relevant"], 5))
@@ -584,7 +473,7 @@ class TestRetrievalLogSimilarity:
         await seed_memory(db, channel.id,
                           "kestrel moved the rain gauge to the north fence",
                           created_at=time.time() - 30 * 86400)
-        candidates, _ = await memory.retrieve(channel.id, "where is the rain gauge?")
+        candidates, _ = await memory.retrieve("where is the rain gauge?")
         await ask(memory, channel, conv, "where is the rain gauge?")
 
         async with db.execute(
