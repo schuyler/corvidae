@@ -1520,3 +1520,38 @@ class TestReloadableKeyRegistry:
             f"FunnelPlugin.on_config_reload reads {sorted(missing)} but "
             f"reloadable_keys is {FunnelPlugin.reloadable_keys}"
         )
+
+    async def test_a_second_reload_does_not_re_report_the_first_changes(
+        self, tmp_path, caplog
+    ):
+        """The warning compares against the last reload, not against startup.
+
+        `self.config` is set once in on_init and never advances, so using it
+        as the baseline would make reload N re-report everything reload 1
+        changed, on every reload, forever.
+        """
+        cfg = tmp_path / "agent.yaml"
+        cfg.write_text(yaml.safe_dump({"llm": {"main": {}}}))
+        watcher = _make_watcher(cfg)
+        watcher.config = {
+            "_config_path": str(cfg),
+            "llm": {"main": {"model": "m"}},
+            "memory": {"retrieval": {"bands": [1]}},
+        }
+        changed = {
+            "_config_path": str(cfg),
+            "llm": {"main": {"model": "m"}},
+            "memory": {"retrieval": {"bands": [2]}},
+        }
+
+        with caplog.at_level(logging.WARNING):
+            watcher._warn_restart_only_changes(changed)
+            first = [r.getMessage() for r in caplog.records if "bands" in r.getMessage()]
+            assert first, "the first reload must report the change"
+
+            caplog.clear()
+            # Same config again: the reload watcher saw this one already.
+            watcher._warn_restart_only_changes(changed)
+            second = [r.getMessage() for r in caplog.records if "bands" in r.getMessage()]
+
+        assert not second, f"an unchanged key must not be re-reported: {second}"

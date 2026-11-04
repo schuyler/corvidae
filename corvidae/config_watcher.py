@@ -311,9 +311,17 @@ class ConfigWatcherPlugin(CorvidaePlugin):
         plugins it did update, and the operator learns the change was pending
         only by noticing behaviour never changed (#408).
         """
-        old = self.config if isinstance(getattr(self, "config", None), dict) else {}
+        # Compare against the last config this watcher saw, not against the
+        # startup config: otherwise reload N re-reports every key reload 1
+        # changed, forever. `self.config` is set once in on_init and never
+        # advances, so it is only the seed for this.
         live = self._reloadable_prefixes()
-        for key in sorted(_changed_leaf_keys(old, new_config)):
+        previous = getattr(self, "_last_config", None)
+        if not isinstance(previous, dict):
+            previous = self.config if isinstance(getattr(self, "config", None), dict) else {}
+        self._last_config = new_config
+
+        for key in sorted(_changed_leaf_keys(previous, new_config)):
             if key.startswith("_") or any(
                 key == p or key.startswith(p + ".") for p in live
             ):
