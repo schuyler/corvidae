@@ -87,7 +87,7 @@ reads the per-channel **consolidation watermark**, fetches the working
 range, produces the record (first-person summary with epistemic framing,
 JSON out) — from a fork of the live window when the range is in it (see
 [Forks](design.md#forks)), else from the agent's rebuilt view of the range
-sent on `llm.background` (catch-up, below); an idle range that is in the
+sent on `llm.main` (catch-up, below); an idle range that is in the
 window but can't be forked is skipped instead, with a warning, and retried
 on the next trigger (it reaches catch-up once it has left the window). Both
 calls are constrained by a
@@ -157,14 +157,9 @@ retention.
 
 **Near-duplicate merge.** Before inserting the new vector, consolidation
 looks for the nearest indexed record with cosine similarity
-≥ `memory.dup_threshold` among the records in the channel's retrieval
-scope (#58). A record on another channel qualifies only if that channel's
-scope has the same reach (`ChannelScope.same_reach`), because groups are
-not transitive: with groups {A, B} and {A, C}, folding C's record into one
-owned by A, and later A's into one owned by B, would hide the fact from C.
-Equal reach keeps the survivor visible to exactly the channels that could
-see the superseded record. Under a single `*` group every channel
-qualifies. The old record is superseded (`superseded_by`, `indexed=0`,
+≥ `memory.dup_threshold` anywhere in the agent's memory, on whatever channel
+it lives (PRD §3.7 Memory 3, #168). Retrieval spans the whole memory, so
+every channel sees the survivor. The old record is superseded (`superseded_by`, `indexed=0`,
 vector deleted); the survivor takes the summed retrieval count, the
 higher importance, and the later of the two records' dates. Message
 ranges fold only within one channel: `message_log` ids are global, and
@@ -181,6 +176,17 @@ attribution snapshot for that call, into `MetricsPlugin`'s emitted tags,
 the `usage_log.trigger` column, and the `memory consolidated` completion
 log line.
 
+### Corrupt `exchange_log` rows
+
+A corrupt `appraisal` value (unparseable JSON, invalid UTF-8, or JSON that
+is not an envelope object) can only come from an out-of-band write. The range
+readers (`importance_over_range`, `mean_valence`) and `corvidae redact`'s
+scrubber skip such a row with one WARNING naming the trace id and channel
+(#311). The prior and mean valence are computed over the remaining exchanges,
+and redact finishes over the others. A row the scrubber skips keeps its
+`past_claims`, and redact still exits 0, so check the log for the warning
+after a redact run on a database you suspect is damaged.
+
 #### Retrieval (read path)
 
 `before_agent_turn` runs when the window tail is a plain user MESSAGE
@@ -189,9 +195,9 @@ unanswered user message in the window (`unanswered_user_messages`), joined
 by blank lines: a coalesced burst (#398) is retrieved for as a whole, and
 one message is just itself. The query is embedded and matched against `memory_vec`
 (sqlite-vec exact KNN, cosine distance); candidates are filtered to
-`indexed=1 AND redacted=0` and channel-compartmentalized (`channel_id`
-match, or shared scope via `memory.channel_groups`, whose members may be
-`*` / `?` globs matched with SQLite `GLOB`). Scores are
+`indexed=1 AND redacted=0`. There is no per-channel scope: records from
+every channel are candidates (PRD principle 14, #168), and
+[threat-model.md](threat-model.md) finding 15 records what that costs. Scores are
 `cosine_similarity × exp(-age_days / memory.half_life_days)`, where
 `age_days` runs from `created_at`, or from `max(created_at,
 last_retrieved_at)` under `memory.retrieval.recency_from: last_used`.
@@ -212,7 +218,7 @@ hit/admitted counts, degradation flag).
 `memory_fts` (flagged `degraded_to_fts=1`; the FTS query caps each
 blank-line-separated paragraph at 20 tokens, so every message of a burst
 keeps its own 20 and a single message is capped at 20 as before); sqlite-vec unloadable → FTS5
-with one clear startup warning; no `llm.embedding` role → records stored
+with one clear startup warning; no `llm.embedding` profile → records stored
 with `embedded=0`, retrieval FTS5-only; a stored encoder differing from
 config → ERROR and embeddings disabled rather than silently mixing
 encoders. Nothing in the memory path raises into the turn loop.
@@ -233,7 +239,7 @@ view is trimmed oldest-first to the budget, put under the channel's
 `reasoning_history`, headed by the channel's system prompt (identity and
 register, from `Agent.view_inputs`, which also resolves the channel after a
 restart) and ends with `memory.consolidation_fork_prompt` plus the range
-sentence. It goes on `llm.background` with no tools and the record
+sentence. It goes on `llm.main` with no tools and the record
 schema. Each segment is its own record and its own watermark advance; a
 failure leaves earlier segments stored and retries the rest. A segment
 with no dialog that is followed by another folds its id span into the next
@@ -250,11 +256,11 @@ nullable `memory` columns:
 - `prompt_hash`: sha256 of the UTF-8 instruction text the call used. The
   text itself is stored once per hash in `memory_prompt`, however many
   records share it. An empty prompt is still a prompt and is stored as `''`.
-- `mode`: `fork`, `standalone` (the view call on `llm.background`) or
+- `mode`: `fork`, `standalone` (the view call on `llm.main`) or
   `direct`.
 - `model`: the model the call was sent with, after any
-  `llm.<role>.extra_body.model` override, so a record says what actually
-  ran rather than what `llm.<role>.model` names. `Agent.fork` always sets
+  `llm.<profile>.extra_body.model` override, so a record says what actually
+  ran rather than what `llm.<profile>.model` names. `Agent.fork` always sets
   `ForkResult.model` from `LLMClient.request_model`, so it is NULL only for a
   row written without a model (a pre-stamp row, or a `ForkResult` built
   without one).
@@ -264,7 +270,7 @@ What each path stamps:
 | Path | `mode` | Instruction text | `model` |
 |---|---|---|---|
 | Fork of the live window (compaction or idle) | `fork` | `memory.consolidation_fork_prompt` | `ForkResult.model` |
-| Catch-up: the rebuilt view on `llm.background` | `standalone` | `memory.consolidation_fork_prompt` | `LLMClient.request_model` of the background client |
+| Catch-up: the rebuilt view on `llm.main` | `standalone` | `memory.consolidation_fork_prompt` | `LLMClient.request_model` of the main client |
 | Raw-transcript fallback after two unusable replies | `standalone` | `memory.consolidation_fork_prompt` | as above (the call was sent; only its reply was unusable) |
 | `write_record` (goal retirement) | `direct` | none: `prompt_hash` NULL, no `memory_prompt` row | NULL |
 
@@ -428,12 +434,12 @@ exchanges (message ids are global), logging a failed lookup and falling back to
 the rubric prior and NULL valence. Configuration is documented in
 [configuration.md](configuration.md) (`memory.*`, `llm.embedding`).
 
-`recent(channel_id, limit)` is the one read API for other plugins: the
-newest `limit` records (indexed, not redacted) owned by the *other*
-channels in `channel_id`'s scope, as `{summary, channel_id, age_seconds}`
-dicts, newest first, with ages from the kernel clock. The caller's own
-records are left out. `HeartbeatPlugin` uses it. It raises `RuntimeError`
-while the memory DB is not open.
+`recent(limit)` is the one read API for other plugins: the newest `limit`
+records (indexed, not redacted) of the whole memory, every channel's, as
+`{summary, channel_id, age_seconds}` dicts, newest first, with ages from the
+kernel clock. Nothing is left out by owner, so a caller sees its own records
+too. `HeartbeatPlugin` uses it. It raises `RuntimeError` while the memory DB
+is not open.
 
 **Without this plugin:** no memory records form and no retrieval happens;
 compaction remains plain lossy summarization.
@@ -447,29 +453,23 @@ than being dropped (the LLM call has already been paid for).
 Registers the `search_memory` and `recall_raw` agent tools — the active
 memory surface ("remember harder"). Entry point
 name: `"memory_tools"`; `depends_on = frozenset({"memory"})`. Reaches the
-DB and channel-scope logic through `get_dependency(pm, "memory",
-MemoryPlugin)`.
+DB through `get_dependency(pm, "memory", MemoryPlugin)`.
 
 Implements one hook:
 
 - `register_tools` — appends `search_memory` and `recall_raw` to
   `tool_registry`.
 
-**Compartment scoping:** both tools enforce the calling channel's
-`_channel_scope` (the channel itself plus any group siblings configured in
-`memory.channel_groups` — identical to the scope `MemoryPlugin`'s passive
-retrieval uses). `_channel_scope` returns a `ChannelScope`, not a list:
-group members may be `*` / `?` globs, so test membership with
-`scope.contains(channel_id)` and build SQL with
-`scope.sql("m.channel_id")`, which emits `IN (...)` for literal ids and
-`GLOB ?` for patterns (an empty `ChannelScope` emits `(0)` and matches
-nothing). `search_memory`'s `channel=` argument narrows by equality and is
-never treated as a pattern. The calling channel comes from `_ctx.channel`; when
-`_ctx.channel is None` both tools return an error string and never fall
-back to unscoped access. The tools are broader than passive retrieval in
-*status* (they reach demoted, superseded, and redacted-tombstone records)
-but never broader in *compartment* — channel B cannot enumerate or raw-recall
-channel A's memories.
+**Whole memory:** both tools span every channel's records, as passive
+retrieval does (PRD principle 14, #168); neither takes the calling channel
+into account, so neither declares `_ctx`. They reach further than passive
+retrieval in *status* (demoted, superseded, and redacted-tombstone records).
+`search_memory`'s optional `channel=` argument narrows to one channel's
+records by equality and is never treated as a pattern; an id nothing was
+written on simply matches nothing. `recall_raw` replays a record's raw range
+from the record's own channel: `message_log` ids are global, so the range
+holds other channels' interleaved rows and the `channel_id` predicate keeps
+them out.
 
 Both tools retry briefly when the memory schema is still being created by
 another task. If `search_memory`'s FTS5 query fails, it falls back to a
@@ -479,8 +479,8 @@ another task. If `search_memory`'s FTS5 query fails, it falls back to a
 
 | Tool | Parameters | What it does |
 |------|------------|--------------|
-| `search_memory` | `query: str`, `channel: str\|None` (default `None`), `tags: list[str]\|None` (default `None`), `after: str\|None` (default `None`), `before: str\|None` (default `None`), `include_demoted: bool` (default `True`), `max_tokens: int` (default `2000`) | FTS5 keyword search over `memory_fts`. Returns a numbered list `id. score (age)[flags] summary` sorted by FTS relevance, capped at approximately `max_tokens`. `channel` narrows within the calling channel's scope; a value outside scope returns an error string naming visible channels. `after`/`before` are ISO-8601 (`YYYY-MM-DD` or full timestamp; naive values treated as UTC) compared against `created_at` (`after` ⇒ `≥`, `before` ⇒ `<`); unparseable values return an error string. `include_demoted=False` restricts to `indexed=1` records, hiding demoted, superseded, and redacted-tombstone records (all are `indexed=0`). `tags` filters by `topic_tags` JSON array intersection. **Does not update access stats.** |
-| `recall_raw` | `memory_id: int`, `max_tokens: int` (default `1000`) | Replays the raw `message_log` dialog for the record's `[msg_id_start, msg_id_end]` range using `WHERE channel_id = record.channel_id AND id BETWEEN ...` — the channel predicate is load-bearing because the `message_log` id sequence is global across all channels. Returns a participants header (`[memory N: messages S–E, participants: {...}]`) followed by verbatim `role: content` lines, truncated at `max_tokens` with an explicit marker. Works on demoted, superseded, and tombstoned records. Rejects out-of-scope record IDs without bumping stats. **Bumps `retrieval_count` and `last_retrieved_at`** on the record — the bump is what makes the record eligible for re-promotion by the next retention job run. |
+| `search_memory` | `query: str`, `channel: str\|None` (default `None`), `tags: list[str]\|None` (default `None`), `after: str\|None` (default `None`), `before: str\|None` (default `None`), `include_demoted: bool` (default `True`), `max_tokens: int` (default `2000`) | FTS5 keyword search over `memory_fts`. Returns a numbered list `id. score (age)[flags] summary` sorted by FTS relevance, capped at approximately `max_tokens`. `channel` narrows to one channel's records by exact id; a channel with no records matches nothing. `after`/`before` are ISO-8601 (`YYYY-MM-DD` or full timestamp; naive values treated as UTC) compared against `created_at` (`after` ⇒ `≥`, `before` ⇒ `<`); unparseable values return an error string. `include_demoted=False` restricts to `indexed=1` records, hiding demoted, superseded, and redacted-tombstone records (all are `indexed=0`). `tags` filters by `topic_tags` JSON array intersection. **Does not update access stats.** |
+| `recall_raw` | `memory_id: int`, `max_tokens: int` (default `1000`) | Replays the raw `message_log` dialog for the record's `[msg_id_start, msg_id_end]` range using `WHERE channel_id = record.channel_id AND id BETWEEN ...` — the channel predicate is load-bearing because the `message_log` id sequence is global across all channels. Returns a participants header (`[memory N: messages S–E, participants: {...}]`) followed by verbatim `role: content` lines, truncated at `max_tokens` with an explicit marker. Works on demoted, superseded, and tombstoned records. Reaches any channel's record. **Bumps `retrieval_count` and `last_retrieved_at`** on the record — the bump is what makes the record eligible for re-promotion by the next retention job run. |
 
 **Recall-stat semantics:** `recall_raw` bumps the record's access stats;
 `search_memory` does not. `search_memory` is a catalog for choosing what
@@ -558,10 +558,9 @@ when a goal does and the funnel's dedupe drops an unchanged one. The
 supersession clause is what lets an older entry still in the window be read
 as stale: the latest entry is current.
 
-**Visibility:** goals are agent-wide. Every channel sees every goal,
-whatever `memory.channel_groups` says. A goal added or retired on one channel
-shows up on the others at their next turn. This is a recorded variance from
-the compartmentalization of memory; see finding 10 in
+**Visibility:** goals are agent-wide. Every channel sees every goal, as it
+sees every memory. A goal added or retired on one channel shows up on the
+others at their next turn; see finding 10 in
 [threat-model.md](threat-model.md).
 
 **Retirement record:** `retire_goal` calls `MemoryPlugin.write_record` first
@@ -728,10 +727,11 @@ model makes both language judgments; the code only fetches evidence:
    - `message` and `summary` rows. CONTEXT (injected data, including
      earlier critique) and `unsent` rows are never a record of something
      said.
-   - rows from channels in the calling channel's memory scope
-     (`memory.channel_groups`), or the channel alone without MemoryPlugin.
-     The excerpts reach the critic, and its objections re-enter the window,
-     so an unscoped search would carry text across channels.
+   - rows from every channel (PRD §3.7 Critique 2, #168): the search
+     reaches what has left the window, wherever it was said. The excerpts
+     reach the critic, and its objections re-enter the window, so text can
+     cross channels here; [threat-model.md](threat-model.md) finding 15
+     records it.
 3. **Judgment.** The check runs as a fork of the window, cut just after
    the exchange's final reply, so the judge sees what the agent saw
    when it wrote it: the system prompt, the exchange's own rows (tool
@@ -929,7 +929,7 @@ any channel cancels the pending beat. The result is at most one beat per
 `after` seconds, never two at once, and none during a conversation. Under
 traffic that never stops it never beats; that is accepted until #214.
 
-**What a beat is.** The plugin reads `MemoryPlugin.recent("internal:heartbeat", 20)`,
+**What a beat is.** The plugin reads `MemoryPlugin.recent(20)`,
 re-checks that the system is still quiet (a message may have landed
 during the read), and calls `on_notify` on `internal:heartbeat` with
 `source="heartbeat"` and `meta={"origin": "heartbeat"}`. The text is the
@@ -966,7 +966,7 @@ consequences.
   the idle trigger consolidates every one of them: as a fork when the range
   is wholly in the window (with forks off the run is skipped, so in-window
   heartbeat rows wait until trimmed), by catch-up (the view on
-  `llm.background`) once any of it has been trimmed out. The compaction safety net can also cover them, when the kept
+  `llm.main`) once any of it has been trimmed out. The compaction safety net can also cover them, when the kept
   beats pass the compaction threshold and `on_compaction` fires.
 - *When.* The trim keeps compaction from firing, so the compaction route to
   consolidation is normally gone on this channel. If `heartbeat.after` is
@@ -990,27 +990,25 @@ don't exist yet; when they land, the beat uses them like any other turn,
 with no allowlist. The prompt tells the model that most beats warrant
 nothing, and to say so in one line and stop.
 
-**What it reviews.** Memory is compartmented, so the beat sees only the
-channels that share a `memory.channel_groups` group with
-`internal:heartbeat`. With no group, every beat's list is `(none)`.
-Records consolidated from the beat channel itself are left out of the
-review, so beats don't review earlier beats. One edge: when near-duplicate
-merging leaves a beat-owned record as the survivor of a conversation
-memory, that memory drops out of later reviews.
+**What it reviews.** The newest 20 indexed, unredacted records of the whole
+memory, every channel's, newest first. There is nothing to configure: the
+beat reaches every channel's records (#168). Records consolidated from the
+beat channel itself are in the list too, so a beat can see an earlier
+beat's conclusions once they are consolidated.
 
 **Known limitation: a beat can lose sight of its own outreach.** PRD §3.5.9
 and §3.7 Heartbeat let a beat speak on another channel or leave a note
 there. A beat sees its own earlier actions only in the window, which holds
 its last `keep_beats` beats. Older beats leave the window, and memory
-doesn't bring them back: heartbeat rows may wait for traffic before they're
-consolidated (see *When* above), and the review leaves out records owned by
-`internal:heartbeat` anyway. So once the send and note tools exist, a beat
+brings them back only once they are consolidated: heartbeat rows may wait
+for traffic before they are (see *When* above), and the review shows only
+the newest 20 records. So once the send and note tools exist, a beat
 could repeat an outreach made more than `keep_beats` beats ago. Today it
 can't happen: there is no send, note or read tool yet (#234, #235), so a
 beat can't reach anyone. The bounds once they land are the `keep_beats`
 window, the goals entry (a beat that records an outreach as a goal step sees
-it in later beats), and the target channel's memories, when that channel is
-in the heartbeat's review scope and its rows have been consolidated; the
+it in later beats), and the target channel's memories, once its rows have been consolidated and
+are among the newest 20; the
 PRD's per-destination limit on messages the agent starts caps repeats too,
 but only when the operator sets it. The
 cross-channel tools (§3.5.9–11) should record each outreach where a later

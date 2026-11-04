@@ -15,7 +15,7 @@ Config:
       forks:                # background processes as forks of the window (#51)
         enabled: true       # default; see corvidae.fork for the full section
 
-LLM client configuration is owned by LLMPlugin (llm: main:, llm: background:).
+LLM client configuration is owned by LLMPlugin (llm: main:, llm: embedding:).
 Tool result truncation configuration is owned by ToolCollectionPlugin (tools: max_result_chars:).
 
 Logging:
@@ -1568,29 +1568,6 @@ class Agent(CorvidaePlugin):
             model=client.request_model(body),
         )
 
-    def _warn_if_forks_change_model(self) -> None:
-        """Warn when forks are on and llm.background is a different model.
-
-        Forks always run on llm.main (only it shares the window's cache),
-        so enabling them moves the forked background stages off a
-        separately configured background model.
-        """
-        if not self._forks.enabled:
-            return
-        llm = self.pm.get_plugin("llm")
-        # get_client falls back to main when background is unconfigured,
-        # which makes the model-equality check below a no-op: same path.
-        background = llm.get_client("background") if llm is not None else None
-        main_model = getattr(self._client, "model", None)
-        background_model = getattr(background, "model", None)
-        if background is None or background_model == main_model:
-            return
-        logger.warning(
-            "agent.forks.enabled: forked stages run on llm.main (%s), not "
-            "llm.background (%s); their cost moves to the main model",
-            main_model, background_model,
-        )
-
     def _build_tool_view(self, channel: Channel) -> ToolView:
         """The daemon's tools narrowed to ``channel``'s disabled list.
 
@@ -1884,8 +1861,6 @@ class Agent(CorvidaePlugin):
                 "no idle tracker registered (name 'idle'); idle signals are off — "
                 "Runtime registers one, so this plugin manager was built by hand"
             )
-
-        self._warn_if_forks_change_model()
 
         # Everything _process_queue_item needs is in place.
         self._mark_started()

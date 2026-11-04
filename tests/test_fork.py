@@ -5,7 +5,6 @@ user instruction, so llama-server reuses the cached prefix. It mutates,
 persists, fires and dispatches nothing.
 """
 
-import logging
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -332,37 +331,13 @@ async def test_fork_config_reloads_and_null_budget_is_omitted(forking_agent):
     assert "reasoning_budget_tokens" not in client.chat.call_args.kwargs["extra_body"]
 
 
-@pytest.mark.parametrize("enabled,background,warns", [
-    (True, "small", True), (False, "small", False), (True, "big", False), (True, None, False),
-])
-async def test_startup_warns_when_forks_move_background_work(caplog, enabled, background, warns):
-    from corvidae.llm_plugin import LLMPlugin
-    from corvidae.tool import ToolRegistry
-    from corvidae.tool_collection import ToolCollectionPlugin
-
-    plugin, channel, db = await build_plugin_and_channel()
-    llm = LLMPlugin()
-    llm._clients["main"] = MagicMock(model="big")
-    if background:
-        llm._clients["background"] = MagicMock(model=background)
-    plugin.pm.register(llm, name="llm")
-    tools = ToolCollectionPlugin()
-    tools.registry = ToolRegistry()
-    plugin.pm.register(tools, name="tools")
-    await plugin.on_init(plugin.pm, {"agent": {"forks": {"enabled": enabled}}})
-    with caplog.at_level(logging.WARNING, logger="corvidae.agent"):
-        await plugin.on_start({})
-    await db.close()
-    assert any("fork" in r.getMessage() for r in caplog.records) == warns
-
-
 async def test_usage_log_mode_column_upgrades_and_records(db):
     from corvidae.hooks import create_plugin_manager
     from corvidae.metrics import USAGE_LOG_DDL, UsageLogPlugin
     from corvidae.persistence import PersistencePlugin
 
     await db.execute(USAGE_LOG_DDL.replace("    mode TEXT,\n", ""))
-    await db.execute("INSERT INTO usage_log (ts, request_id, role, model) VALUES (1, 'old', 'main', 'm')")
+    await db.execute("INSERT INTO usage_log (ts, request_id, profile, model) VALUES (1, 'old', 'main', 'm')")
     await db.commit()
     pm = create_plugin_manager()
     persistence = PersistencePlugin()
@@ -370,7 +345,7 @@ async def test_usage_log_mode_column_upgrades_and_records(db):
     pm.register(persistence, name="persistence")
     pm.register(UsageLogPlugin(pm), name="usage_log")
     for rid, attribution in [("f", {"mode": "fork"}), ("s", {"mode": "standalone"}), ("t", {})]:
-        await pm.ahook.on_llm_response(role="main", model="m", request_id=rid, usage={},
+        await pm.ahook.on_llm_response(profile="main", model="m", request_id=rid, usage={},
                                        latency_ms=1.0, attribution=attribution, error=None,
                                        timings=None)
     async with db.execute("SELECT request_id, mode FROM usage_log ORDER BY id") as cursor:

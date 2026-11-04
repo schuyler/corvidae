@@ -3,9 +3,10 @@
 A consolidation range that has left the live window is written from the
 view the agent had: the channel's system prompt, the summary in force plus
 the rows after its boundary (trimmed to the channel's budget, under its
-reasoning_history policy), and the consolidation instruction, sent on
-``llm.background`` with no tools. A range spanning more than one window, or
-more than one budget, is split into one view and one record per segment.
+reasoning_history policy), and the consolidation instruction, sent on the
+consolidation stage's client (main) with no tools. A range spanning more
+than one window, or more than one budget, is split into one view and one
+record per segment.
 
 Summaries are created the way the daemon creates them: rows are persisted,
 then ``PersistencePlugin.on_compaction`` writes the summary row (never an
@@ -75,7 +76,7 @@ class Env:
     agent: FakeForkAgent
     main: RecordingClient
     bg: RecordingClient
-    roles: list
+    stages: list
 
     async def rows(self, messages: list[dict]) -> list[int]:
         """Persist ``messages`` as ordinary message rows; returns their ids."""
@@ -123,28 +124,29 @@ class Env:
 
 @pytest.fixture
 async def env():
-    """The consolidation env with a recording main and background client,
-    the forks-off view-capable agent, and a log of requested LLM roles."""
+    """The consolidation env with a recording main and background client (the
+    consolidation stage resolves to main), the forks-off view-capable agent,
+    and a log of requested LLM stages."""
     memory, persistence, _stub, channel, db = await build_consolidation_env()
     llm = memory._llm()
-    main = RecordingClient("MAIN SHOULD NOT BE CALLED")
-    bg = RecordingClient(CONSOLIDATION_JSON, model="bg-model")
+    main = RecordingClient(CONSOLIDATION_JSON, model="main-model")
+    bg = RecordingClient("BACKGROUND SHOULD NOT BE CALLED")
     llm._clients["main"] = main
     llm._clients["background"] = bg
-    # Record every role asked for (instance attribute shadows the method).
-    roles: list[str] = []
+    # Record every stage asked for (instance attribute shadows the method).
+    stages: list[str | None] = []
     real_get_client = llm.get_client
 
-    def get_client(role: str = "main"):
-        roles.append(role)
-        return real_get_client(role)
+    def get_client(stage: str | None = None):
+        stages.append(stage)
+        return real_get_client(stage)
 
     llm.get_client = get_client
     agent = memory.pm.get_plugin("agent")
     # The stub embeds every record to one vector, so near-dup merge would fold
     # consecutive segment records together; real summaries differ.
     memory._dup_threshold = 1.1
-    yield Env(memory, persistence, channel, db, agent, main, bg, roles)
+    yield Env(memory, persistence, channel, db, agent, main, bg, stages)
     await db.close()
 
 
@@ -241,7 +243,7 @@ async def test_catchup_request_is_the_channels_rendered_view(env):
 
     await env.consolidate(rows[3])
 
-    [call] = env.bg.chat_calls
+    [call] = env.main.chat_calls
     messages = call["messages"]
     assert messages[0] == {"role": "system", "content": SYSTEM}
     summary = {"role": "assistant", "content": SUMMARY_PREFIX + "what came before"}
@@ -277,7 +279,7 @@ async def test_summary_in_force_is_newest_decodable_before_range(env):
 
     await env.consolidate(rows[-1])
 
-    [call] = env.bg.chat_calls
+    [call] = env.main.chat_calls
     messages = call["messages"]
     assert messages[0] == {"role": "system", "content": SYSTEM}
     assert messages[1] == {"role": "assistant", "content": SUMMARY_PREFIX + "OLDEST decodable"}
@@ -288,23 +290,31 @@ async def test_summary_in_force_is_newest_decodable_before_range(env):
 
 
 # ---------------------------------------------------------------------------
-# R3: the consolidation role
+# R1/R2: the consolidation stage
 # ---------------------------------------------------------------------------
 
 
-async def test_catchup_call_asks_for_consolidation_role(env):
-    """R3: the catch-up call asks for the ``consolidation`` role (chain:
-    consolidation → background → main, #238); with only main+background
-    configured it lands on background, as a view (the system prompt first);
-    the main client gets no consolidation call."""
+async def test_catchup_call_asks_for_consolidation_stage(env):
+    """R1/R2: the catch-up call asks for the ``consolidation`` stage, which
+    resolves to main (nothing resolves through background), as a view (the
+    system prompt first); the background client gets no consolidation call."""
     rows = await env.rows(alternating(["hello there", "hi, how can I help"]))
 
     await env.consolidate(rows[-1])
 
-    assert "consolidation" in env.roles
-    [call] = env.bg.chat_calls
+    assert "consolidation" in env.stages
+    [call] = env.main.chat_calls
     assert call["messages"][0]["content"] == "IDENTITY\n\nREGISTER"
-    assert env.main.chat_calls == []
+    assert env.bg.chat_calls == []
+
+
+async def test_record_embedding_asks_for_the_embedding_stage(env):
+    """R1: embedding the written record requests the ``embedding`` stage."""
+    rows = await env.rows(alternating(["hello there", "hi, how can I help"]))
+
+    await env.consolidate(rows[-1])
+
+    assert "embedding" in env.stages
 
 
 # ---------------------------------------------------------------------------
@@ -323,7 +333,7 @@ async def test_catchup_view_applies_reasoning_history_drop(env):
 
     await env.consolidate(rows[-1])
 
-    [call] = env.bg.chat_calls
+    [call] = env.main.chat_calls
     messages = call["messages"]
     # A view (system prompt first) that carries the stored row's content.
     assert messages[0] == {"role": "system", "content": SYSTEM}
@@ -351,7 +361,7 @@ async def test_catchup_spanning_two_windows_writes_one_record_per_segment(env):
 
     await env.consolidate(b_rows[-1])
 
-    first, second = env.bg.chat_calls
+    first, second = env.main.chat_calls
     # First window: no summary, A's rows only (T and B are after it).
     assert first["messages"][0] == {"role": "system", "content": SYSTEM}
     assert first["messages"][1:-1] == alternating(["A one", "A two", "A three"])
@@ -432,7 +442,7 @@ async def test_long_unsummarized_history_splits_within_budget(env, kind):
 
     await env.consolidate(ids[-1])
 
-    calls = env.bg.chat_calls
+    calls = env.main.chat_calls
     assert len(calls) >= 3
     for call in calls:
         assert call["tools"] is None
@@ -506,7 +516,7 @@ async def test_catchup_warns_when_view_loses_rows(env, caplog, kind):
         await env.consolidate(ids[-1])
 
     # Still a request and a record.
-    [call_made] = env.bg.chat_calls
+    [call_made] = env.main.chat_calls
     assert len(await fetch_memories(env.db)) == 1
     if kind == "dropped_call":
         text = dump(call_made["messages"])
@@ -546,7 +556,7 @@ async def test_catchup_request_with_tool_rows_renders_without_tools(env):
 
     await env.consolidate(ids[-1])
 
-    [made] = env.bg.chat_calls
+    [made] = env.main.chat_calls
     assert made["tools"] is None
     assert "tool_choice" not in (made["extra_body"] or {})
     assert made["extra_body"] == CONSOLIDATION_EXTRA_BODY

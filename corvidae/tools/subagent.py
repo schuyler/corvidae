@@ -112,11 +112,10 @@ class SubagentPlugin(CorvidaePlugin):
     """Plugin that registers the subagent tool.
 
     Launches background agents via run_agent_loop. All subagents share the
-    background LLMClient from LLMPlugin (using llm.background if configured,
-    otherwise llm.main) and the full tool set minus the subagent tool itself
-    (to prevent recursion).
+    LLMClient LLMPlugin resolves for the subagent stage and the full tool set
+    minus the subagent tool itself (to prevent recursion).
 
-    Depends on "llm" (LLMPlugin) to access the shared background LLM client,
+    Depends on "llm" (LLMPlugin) to access the shared LLM client,
     and on "tools" (ToolCollectionPlugin) to read the tool registry and
     max_result_chars at tool-call time.
     """
@@ -133,6 +132,10 @@ class SubagentPlugin(CorvidaePlugin):
             config, "tools.subagent.system_prompt", SUBAGENT_SYSTEM_PROMPT
         )
         logger.debug("SubagentPlugin started")
+
+    @hookimpl
+    def register_llm_stages(self, stages: dict[str, str]) -> None:
+        stages["subagent"] = "chat"
 
     @hookimpl
     def register_tools(self, tool_registry: list) -> None:
@@ -154,7 +157,7 @@ class SubagentPlugin(CorvidaePlugin):
         """Build and enqueue a Task that runs a subagent loop.
 
         Retrieves ToolCollectionPlugin to read tool_registry and max_result_chars,
-        excludes the subagent tool from the set, uses the shared background client
+        excludes the subagent tool from the set, uses the shared subagent-stage client
         from LLMPlugin, and enqueues the task. Returns immediately; the result
         is delivered via TaskPlugin -> on_notify -> Agent.
 
@@ -197,7 +200,7 @@ class SubagentPlugin(CorvidaePlugin):
         tools_dict = registry.as_dict()
         tool_schemas = registry.schemas()
 
-        # Use the shared background client from LLMPlugin (do NOT call start/stop).
+        # Use the shared subagent-stage client from LLMPlugin (do NOT call start/stop).
         llm = get_dependency(self.pm, "llm", LLMPlugin)
         client = llm.get_client("subagent")
 

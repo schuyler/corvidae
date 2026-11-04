@@ -50,13 +50,6 @@ class TestR1VocabularyGrep:
         offenders = []
         for path, rel in _core_python_files():
             text = path.read_text()
-            # llm_plugin.py names the roles in its fallback table (#238 R2):
-            # "appraisal" there is a config role name, not a reference to
-            # the cognition concept. Strip the table literal before scanning.
-            if rel == "llm_plugin.py":
-                text = re.sub(
-                    r"FALLBACK_CHAINS.*?\n    \}", "", text, flags=re.S
-                )
             for m in VOCAB_PATTERN.finditer(text):
                 line_no = text.count("\n", 0, m.start()) + 1
                 offenders.append(f"{rel}:{line_no}: {m.group(0)!r}")

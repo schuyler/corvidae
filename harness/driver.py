@@ -470,7 +470,7 @@ def _query(db_path: Path, sql: str, params: tuple) -> list[tuple]:
 def count_main_calls_since(db_path: Path, channel_id: str, since_ts: float) -> int:
     rows = _query(
         db_path,
-        "SELECT COUNT(*) FROM usage_log WHERE role = ? AND channel_id = ? AND ts >= ?",
+        "SELECT COUNT(*) FROM usage_log WHERE profile = ? AND channel_id = ? AND ts >= ?",
         ("main", channel_id, since_ts),
     )
     return rows[0][0] if rows else 0
@@ -481,7 +481,7 @@ def seed_memory_row(db_path: Path, channel_id: str, summary: str) -> int:
 
     Written with stdlib sqlite3 while the daemon holds the database (WAL
     mode tolerates a second writer). embedded=0 matches a profile with no
-    embedding role; the memory_fts insert trigger indexes the summary for
+    embedding profile; the memory_fts insert trigger indexes the summary for
     keyword retrieval. Returns the new row id.
     """
     conn = sqlite3.connect(db_path, timeout=10)
@@ -788,11 +788,11 @@ def has_summary_row_since(db_path: Path, channel_id: str, since_ts: float) -> bo
 
 
 def usage_rows_since(db_path: Path, channel_id: str, since_ts: float) -> list[tuple[int, int]]:
-    """(prompt_tokens, cached_tokens) for main-role calls, oldest first."""
+    """(prompt_tokens, cached_tokens) for main-profile calls, oldest first."""
     return _query(
         db_path,
         "SELECT prompt_tokens, cached_tokens FROM usage_log "
-        "WHERE role = 'main' AND channel_id = ? AND ts >= ? ORDER BY ts",
+        "WHERE profile = 'main' AND channel_id = ? AND ts >= ? ORDER BY ts",
         (channel_id, since_ts),
     )
 
@@ -951,7 +951,7 @@ async def probe_tool_loop(ctx: RunContext) -> ProbeResult:
         )
     call_count = count_main_calls_since(ctx.session_db, f"irc:{channel}", ts0)
     passed = call_count >= 3
-    details = f"reply contained QRT-9083; usage_log main-role calls since probe start: {call_count}"
+    details = f"reply contained QRT-9083; usage_log main-profile calls since probe start: {call_count}"
     return ProbeResult("tool_loop", passed, details, duration, _transcript(ctx, channel, sent))
 
 
@@ -1535,12 +1535,12 @@ async def probe_burst(ctx: RunContext) -> ProbeResult:
     duration = time.monotonic() - t0
     replied, detail = burst_verdict(bot_lines(), BURST_CODEWORDS)
 
-    # Buster runs cognition off, so main-role calls are only these turns: the
+    # Buster runs cognition off, so main-profile calls are only these turns: the
     # count and one call for the whole burst. Known flake: a reasoning-reopen
     # or cut-off re-run makes it 3.
     calls = count_main_calls_since(ctx.session_db, f"irc:{channel}", ts0)
     passed = replied and calls == 2
-    details = f"{detail}; main-role calls since probe start: {calls} (want 2)"
+    details = f"{detail}; main-profile calls since probe start: {calls} (want 2)"
     return ProbeResult("burst", passed, details, duration, _transcript(ctx, channel, sent))
 
 

@@ -1,6 +1,6 @@
 """Expand ``${VAR}`` references in config values from the environment.
 
-Shared by MCP ``headers`` and ``llm.<role>.api_key`` so one convention covers
+Shared by MCP ``headers`` and ``llm.<profile>.api_key`` so one convention covers
 every config value that may carry a secret. A value with no ``${NAME}`` is a
 literal and is returned unchanged.
 """

@@ -506,10 +506,7 @@ class TestDemotionRetrievalIntegration:
         memory_tools.register_tools(tools)
         tool_fn = {t.name: t.fn for t in tools}["search_memory"]
 
-        ctx = MagicMock()
-        ctx.channel = channel
-
-        result = await tool_fn("wifi power-save", _ctx=ctx)
+        result = await tool_fn("wifi power-save")
         assert f"{mid}" in result or "demoted" in result.lower(), (
             f"demoted record {mid} must appear in search_memory output"
         )
@@ -717,10 +714,7 @@ class TestStatInflation:
         memory_tools.register_tools(tools)
         tool_fn = {t.name: t.fn for t in tools}["search_memory"]
 
-        ctx = MagicMock()
-        ctx.channel = channel
-
-        await tool_fn("ESP32 rain gauge", _ctx=ctx)
+        await tool_fn("ESP32 rain gauge")
 
         m = await fetch_memory(db, mid)
         assert m["retrieval_count"] == 0, (
@@ -823,6 +817,32 @@ class TestJobStartup:
 # ---------------------------------------------------------------------------
 # WP1b.1 backfill attribution (green fix #2 — 2026-07-07)
 # ---------------------------------------------------------------------------
+
+
+class TestBackfillStage:
+    async def test_backfill_asks_for_the_embedding_stage(self):
+        """R1: the retention backfill's call site requests the ``embedding`` stage."""
+        memory, embedder, channel, db = await build_retention_env()
+        if not memory._vec_available:
+            pytest.skip("sqlite-vec unavailable")
+        llm = memory._llm()
+        stages: list = []
+        real_get_client = llm.get_client
+
+        def get_client(stage=None):
+            stages.append(stage)
+            return real_get_client(stage)
+
+        llm.get_client = get_client
+        await seed_memory_row(
+            db, channel.id, "wifi sensor backfill stage test unique phrase",
+            indexed=1, embedded=0, vec_available=False,
+        )
+
+        await run_retention_job(memory)
+
+        assert stages == ["embedding"]
+        await db.close()
 
 
 class TestBackfillAttribution:

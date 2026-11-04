@@ -13,7 +13,8 @@ from corvidae.fork import ForkRefused, build_fork_prompt
 from corvidae.hooks import create_plugin_manager, hookimpl
 
 from helpers import (
-    FakeForkAgent, RecordingClient, build_plugin_and_channel, recording_llm_plugin,
+    FakeForkAgent, RecordingClient, build_plugin_and_channel, collect_llm_stages,
+    recording_llm_plugin,
 )
 from llm_response_fixtures import _make_text_response
 
@@ -217,12 +218,13 @@ async def test_fork_produces_summary():
     }
 
 
-def _view_rig(agent, text="view summary", bg_error=None):
-    """A CompactionPlugin on a pm holding ``agent`` and a role-recording LLM
-    plugin; returns (plugin, channel, main client, background client, llm)."""
+def _view_rig(agent, text="view summary", view_error=None):
+    """A CompactionPlugin on a pm holding ``agent`` and a stage-recording LLM
+    plugin; returns (plugin, channel, main client, background client, llm).
+    The view call resolves to main; background is configured but unreachable."""
     pm = create_plugin_manager()
-    main = RecordingClient("MAIN SHOULD NOT BE CALLED")
-    background = RecordingClient(text, error=bg_error)
+    main = RecordingClient(text, error=view_error)
+    background = RecordingClient("BACKGROUND SHOULD NOT BE CALLED")
     llm = recording_llm_plugin(main, background)
     pm.register(llm, name="llm")
     pm.register(agent, name="agent")
@@ -237,28 +239,32 @@ def _view_rig(agent, text="view summary", bg_error=None):
     pytest.param(FakeForkAgent({"compaction"}, error=ForkRefused("tool call")), id="fork_raises"),
     pytest.param(FakeForkAgent(set(), text="forks off"), id="forks_off"),
 ])
-async def test_fork_miss_summarizes_from_background_view(agent):
-    """R5: on a fork miss, or with forks off, the summary is written from the
-    same view (system prompt, the window prefix at the cut, the compaction
-    fork instruction) as a plain call on the compaction role with no tools
-    (chain: compaction → background → main, #238; lands on background in a
-    standard config)."""
+async def test_fork_miss_summarizes_from_main_view(agent):
+    """R1/R2: on a fork miss, or with forks off, the summary is written from
+    the same view (system prompt, the window prefix at the cut, the compaction
+    fork instruction) as a plain call for the compaction stage with no tools;
+    the stage resolves to its kind's default (main), not background."""
     conv = _straddling_window()
-    plugin, channel, main, background, llm = _view_rig(agent, text="background summary")
+    plugin, channel, main, background, llm = _view_rig(agent, text="view summary")
     # The view the fork would have sent, rendered before the window changes.
     expected = build_fork_prompt(conv, 6, CompactionPlugin.DEFAULT_FORK_PROMPT, frozenset(), "system")
 
     assert await plugin.resolve_compaction(channel=channel, conversation=conv, max_tokens=MAX_TOKENS)
 
-    [call] = background.chat_calls
+    [call] = main.chat_calls
     assert call["messages"][0] == {"role": "system", "content": conv.system_prompt}
     assert call["messages"] == expected
     assert call["messages"][-1] == {"role": "user", "content": CompactionPlugin.DEFAULT_FORK_PROMPT}
     assert call["tools"] is None
-    assert "compaction" in llm.roles
-    assert main.chat_calls == []
+    assert "compaction" in llm.stages_requested
+    assert background.chat_calls == []
     assert (call["attribution"]["stage"], call["attribution"]["mode"]) == ("compaction", "standalone")
-    assert conv.messages[0]["content"] == "[Summary of earlier conversation]\nbackground summary"
+    assert conv.messages[0]["content"] == "[Summary of earlier conversation]\nview summary"
+
+
+def test_compaction_registers_its_stage_as_chat():
+    """R1/R3: the compaction plugin owns the ``compaction`` stage, kind chat."""
+    assert collect_llm_stages(CompactionPlugin(), "compaction") == {"compaction": "chat"}
 
 
 @pytest.mark.parametrize("tail_has_user,role", [
@@ -268,7 +274,7 @@ async def test_fork_miss_summarizes_from_background_view(agent):
 async def test_view_summary_role(tail_has_user, role):
     """R5: the role rule is unchanged for a summary written from the view:
     ``assistant``, or ``user`` only when the retained tail has no user
-    message (#56). With forks off the background view wrote it."""
+    message (#56). With forks off the main-profile view wrote it."""
     conv = _straddling_window()
     if not tail_has_user:
         conv.messages[-1] = _msg("assistant", "next", 10)
@@ -276,12 +282,12 @@ async def test_view_summary_role(tail_has_user, role):
 
     assert await plugin.resolve_compaction(channel=channel, conversation=conv, max_tokens=MAX_TOKENS)
 
-    # One request on background: the view, headed by the system prompt and
+    # One request on main: the view, headed by the system prompt and
     # ending in the compaction fork instruction.
-    [call] = background.chat_calls
+    [call] = main.chat_calls
     assert call["messages"][0]["role"] == "system"
     assert call["messages"][-1]["content"] == CompactionPlugin.DEFAULT_FORK_PROMPT
-    assert main.chat_calls == []
+    assert background.chat_calls == []
     # The persisted summary is that reply, in the rule's role.
     assert conv.messages[0]["content"] == "[Summary of earlier conversation]\nview reply"
     assert conv.messages[0]["role"] == role

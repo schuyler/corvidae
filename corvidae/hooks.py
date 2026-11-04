@@ -62,7 +62,9 @@ HOOK_GRAMMAR: dict[str, tuple[tuple[str, ...], dict[str, bool]]] = {
 
 # Bare imperative names: broadcast, caller-defined use of the result list.
 # Kernel-only; plugin-declared hooks must use a prefixed class.
-IMPERATIVE_HOOKS = frozenset({"send", "register_tools", "persist_message"})
+IMPERATIVE_HOOKS = frozenset(
+    {"send", "register_tools", "register_llm_stages", "persist_message"}
+)
 
 
 def grammar_class(name: str) -> str | None:
@@ -729,6 +731,20 @@ class AgentSpec:
         """
 
     @hookspec
+    def register_llm_stages(self, stages: dict[str, str]) -> None:
+        """Called once at LLMPlugin startup so plugins can name their model-calling stages.
+
+        Grammar class: bare imperative (broadcast; the caller reads the dict).
+
+        Args:
+            stages: A mutable dict. A plugin adds ``stages[name] = kind`` for
+                each stage it owns, where kind is "chat" or "embedding". The
+                stage name is what the plugin passes to
+                ``LLMPlugin.get_client(stage)``; the kind selects the default
+                profile the stage resolves to.
+        """
+
+    @hookspec
     async def on_agent_response(
         self,
         channel: Channel,
@@ -1048,7 +1064,7 @@ class AgentSpec:
     @hookspec
     async def on_llm_request(
         self,
-        role: str,
+        profile: str,
         model: str,
         request_id: str,
         message_count: int,
@@ -1074,7 +1090,8 @@ class AgentSpec:
         with on_llm_response), and it exists for consumers outside the tree.
 
         Args:
-            role: The LLMPlugin role that made the call ("main", "background").
+            profile: The llm profile of the client that made the call (a key
+                under ``llm:``, e.g. "main").
             model: The model name the request is sent with: the client's
                 configured model unless an ``extra_body`` overrode it (#297).
             request_id: uuid hex minted per call; pairs request with response.
@@ -1087,7 +1104,7 @@ class AgentSpec:
     @hookspec
     async def on_llm_response(
         self,
-        role: str,
+        profile: str,
         model: str,
         request_id: str,
         usage: dict | None,
@@ -1105,7 +1122,8 @@ class AgentSpec:
         on_llm_response, matched by request_id.
 
         Args:
-            role: The LLMPlugin role that made the call ("main", "background").
+            profile: The llm profile of the client that made the call (a key
+                under ``llm:``, e.g. "main").
             model: The model name the request was sent with: the client's
                 configured model unless an ``extra_body`` overrode it (#297).
             request_id: The id minted for the matching on_llm_request.
@@ -1146,7 +1164,7 @@ class AgentSpec:
         Args:
             name: Dotted metric name (e.g. "llm.tokens.total").
             value: The numeric measurement.
-            tags: Dimensional tags (e.g. {"role": "main", "stage": "turn"}).
+            tags: Dimensional tags (e.g. {"profile": "main", "stage": "turn"}).
         """
 
     @hookspec(firstresult=True)

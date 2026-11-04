@@ -18,10 +18,12 @@ and outbound mentions disabled. The web transport binds loopback by
 default, needs a token that can't be turned off, and renders model output
 through DOMPurify under a strict CSP.
 
-Memory is compartmentalized per channel in the tree today, but that is no
-longer the design: the PRD makes the agent one identity across channels,
-with no compartments and no cross-channel allowlist. Finding 15 records what
-that costs, including a gap the operator has accepted.
+Memory spans every channel: the PRD makes the agent one identity across
+channels, with no compartments and no cross-channel allowlist, and retrieval,
+`search_memory`, `recall_raw`, near-duplicate merge, the provenance critic's
+evidence search and the heartbeat's review all reach the whole memory (#168).
+Finding 15 records what that costs, including a gap the operator has
+accepted.
 
 The weak spot is that the model's authority is unbounded and the model's
 inputs are not. Simon Willison's "lethal trifecta" is three things in one
@@ -48,11 +50,9 @@ under prompt injection or with a poisoned model. The provenance check is
 model-driven at both ends (#155). Stage-2 appraisal, reading the exchange,
 decides which claims to check, so injected text can talk it out of listing
 a claim. The provenance critic is shown excerpts of earlier raw-log
-messages. In the tree those excerpts are limited to the channel's memory
-scope, so no text crosses a channel boundary that memory wouldn't already
-cross; the PRD widens the search to every channel, matching retrieval
-(finding 15). But
-they are quoted, untrusted text in the critic's prompt, framed as data, and
+messages, from every channel, matching retrieval (finding 15, #168), so
+text from one channel can reach the critic's prompt while it judges another's
+reply. They are quoted, untrusted text in the critic's prompt, framed as data, and
 the critic's objections re-enter the window as CONTEXT (provenance objections also wake a turn whose stub tells the agent it may reply `NO_REPLY` to send nothing; the veto of an exact `NO_REPLY` final covers every turn origin while `SilencePlugin` is loaded, and critique-origin turns only otherwise). The number of
 claims (5) and excerpts (5 per claim, 500 characters each) is capped, so
 one reply can't fan out into an unbounded critic prompt. Leaving sandboxing out
@@ -207,7 +207,7 @@ stylistic critique lenses and the provenance check with a warning (#320, PRD
 stay in the tunable list above, and no stage reads them. Compaction on a
 fork miss, and consolidation of a range that has left the window, don't use
 a standalone prompt either: they send the agent's rendered view (system
-prompt, window, fork instruction) on `llm.background` with no tools (PRD
+prompt, window, fork instruction) on `llm.main` with no tools (PRD
 §3.8; #380, #388), so the fork instructions above are the only prompts that
 steer them. The old `agent.compaction_prompt` and
 `memory.consolidation_prompt` are gone.
@@ -265,7 +265,7 @@ Compaction is the adjacent problem. Summaries are stored as
 `role: assistant` (`compaction.py`), so the model reads whatever was
 injected as something it said itself, and that persists across restarts
 too. Every summary is now written from the agent's rendered view, by a
-fork or, on a miss, as a call on `llm.background` (PRD §3.3.3, §3.8). It
+fork or, on a miss, as a call on `llm.main` (PRD §3.3.3, §3.8). It
 is genuinely the agent's own words about what it read, written under its
 own persona, not a neutral paraphrase stored under `role: assistant`: the
 earlier standalone summarizer, which made the neutral paraphrase, is gone.
@@ -322,10 +322,10 @@ user owns them, `shell` can `chmod` them back).
 IRC used to accept every channel message and every private message from
 anyone, and a PM from a stranger auto-created a persistent channel keyed on
 their nick: a private conversation with full tool access for anyone who
-could reach the server, whose history and memory compartment the next
-holder of that nick inherited. Glob members in `memory.channel_groups`
-(`irc:*`, or `*` alone) widened that to every channel a stranger could
-create by PM.
+could reach the server, whose history the next holder of that nick
+inherited. Memory records from any such channel were retrievable on every
+other (finding 15), so a stranger's PM could also plant text for later
+retrieval everywhere.
 
 Now IRC is default-deny like Signal. `irc.allow` lists the senders who may
 drive the agent; with none, everyone is refused, in channels and PMs. A
@@ -483,8 +483,8 @@ queue's bound, but nothing bounds their total (finding 14).
 With `agent.forks.enabled` (on by default since #320; #51), compaction,
 consolidation, appraisal and critique don't build their own prompts. (With
 forks off, or on a miss, compaction and out-of-window consolidation send
-the same view on `llm.background` instead of forking it: see the
-`background` role in finding 12, and the same exposure applies.) Each
+the same view as a plain call on `llm.main` instead of forking it: the
+exposure is the same.) Each
 appends its instruction as a `user` turn to the channel's rendered window,
 after whatever untrusted text the window holds, under the agent's own
 persona, with the agent's tool schemas in the prompt. Injection that could
@@ -570,7 +570,7 @@ What it doesn't protect against, so you know:
 and shows them in a CONTEXT entry on every turn. Three things follow.
 
 - **No compartment.** Goals are agent-wide: every channel sees every goal,
-  crossing `memory.channel_groups`. A goal written from a private channel
+  as it sees every memory. A goal written from a private channel
   appears on a public one at its next turn. #220 recorded this as a
   variance from PRD principle 14; under the revised principle 14 it is what
   the PRD requires of memory too (finding 15). Nothing in a goal is scoped
@@ -611,15 +611,12 @@ human removed. What bounds it:
   heartbeat window is trimmed without compaction, so a reloaded list is
   enforced at dispatch at once but reaches the beat's tool schemas only at a
   restart.
-- **Scope.** The beat reviews only the channels grouped with
-  `internal:heartbeat` in `memory.channel_groups`, never its own earlier
-  beats. With no group it sees nothing. Group membership works both ways:
-  what a beat's turn consolidates into memory, including anything its tools
-  fetched, becomes retrievable from every channel in the group. Keep
-  channels with untrusted participants out of the heartbeat's group, or
-  disable the beat's network tools. The PRD drops `memory.channel_groups`
-  (#168), after which the beat reviews the whole memory and disabling its
-  tools is the remaining control.
+- **Scope.** The beat reviews the newest records of the whole memory, every
+  channel's and its own earlier beats' included (#168); there is no group to
+  keep a channel with untrusted participants out of. Memory spans channels
+  both ways: what a beat's turn consolidates into memory, including anything
+  its tools fetched, becomes retrievable from every channel. Disabling the
+  beat's network tools is the control that remains.
 - **Framing.** The summaries are presented as the agent's own and as data
   to review, not instructions. The framing is soft, as everywhere else.
 - **Rate.** At most one beat per `heartbeat.after` seconds of quiet, and
@@ -631,33 +628,30 @@ human removed. What bounds it:
 
 ### 12. A remote model endpoint receives that stage's inputs
 
-Every `llm:` role is an OpenAI-compatible client, so any role can point at a
-hosted provider. Doing so sends that role's requests, conversation content
-included, to the provider. Which stage uses which role:
+Every `llm:` profile is an OpenAI-compatible client, so any profile can point
+at a hosted provider. Doing so sends that profile's requests, conversation
+content included, to the provider. A stage uses its kind's default profile
+(no fallback chains), so there are two endpoints to weigh:
 
-- `main`: agent turns, compaction summaries written by a fork, and the
-  forked appraisal and critique stages (they fork the local window, so they cannot use a remote
-  role). The `llm.appraisal` and `llm.critic` roles are no longer read by any
-  stage: stage 2 and the lenses run only as forks on `llm.main` (#320).
-- `background`: the rendered view (PRD §3.8) for memory consolidation of
-  ranges that have left the window, one per segment trimmed to the channel's
-  `max_context_tokens` (an oversized row or tool cycle can still exceed it), and for compaction's summary on a fork miss or with
-  forks off; the importance prior; and subagents (their task context and
-  tool results). The view is the whole window the agent held: the system
-  prompt (identity and register), CONTEXT blocks, tool calls and their
-  results, and earlier summaries. Before #380/#388 this role saw only a
-  dialog transcript (consolidation); compaction's fallback ran on `main`.
-  A remote `background` endpoint now receives much more of the host's
-  data, compaction content included. Compaction's fallback sends the uncapped window prefix at
+- `main`: every chat stage. Agent turns, compaction summaries (written by a
+  fork or, on a miss or with forks off, as a plain call on the rendered
+  view), the forked appraisal and critique stages (they fork the window,
+  so they cannot move off `main`), memory consolidation of
+  ranges that have left the window, the importance prior, and subagents
+  (their task context and tool results). The consolidation and compaction
+  view (PRD §3.8) is the whole window the agent held: the system prompt
+  (identity and register), CONTEXT blocks, tool calls and their results, and
+  earlier summaries, one per segment trimmed to the channel's
+  `max_context_tokens` for consolidation (an oversized row or tool cycle can
+  still exceed it). Compaction's fallback sends the uncapped window prefix at
   the cut, since the window is over budget when compaction runs. A remote
-  `background` role is a disclosure decision for all of it, not only for
-  the importance prior.
+  `main` is a disclosure decision for all of it. An `llm.background` block
+  is accepted but no stage uses it, so it changes nothing here until the
+  operator stage-to-profile map arrives (#399).
 - `embedding`: memory embedding and retrieval queries, and retention.
 
-A role that isn't configured falls back to `main`, so the endpoint of
-`main` receives that stage instead. The provider also sees whatever
-untrusted text those stages carry. Treat a remote role as a disclosure
-decision per stage, not only a cost one.
+The provider also sees whatever untrusted text those stages carry. Treat a
+remote profile as a disclosure decision per stage, not only a cost one.
 
 The key can live in the daemon's environment (`api_key: "${VAR}"`), which
 keeps it out of a tracked `agent.yaml`. As with MCP tokens (finding 6), that
@@ -727,7 +721,7 @@ What each kind of unlock costs:
   the prompt, refusals included, is now the model's to change.
 - **The prompts that judge and remember** (the critic's and appraiser's
   prompts, open by default today; fork instructions, which now also steer
-  the background view for compaction misses and out-of-window
+  the standalone view for compaction misses and out-of-window
   consolidation; and `agent.forks.*`, which decides
   whether those stages fork at all). The check can be rewritten by the
   thing it checks (finding 2). An injection can rewrite how the agent
@@ -936,9 +930,12 @@ decision (2026-11-01), and these are its costs.
   allowlists say who may *drive* the agent, not who reads its replies.
   Everyone in a Discord guild channel or a public IRC channel reads them.
   Something said on a private Signal channel can come back in a reply
-  there: through retrieval, a goal (finding 10), a note, or the agent
+  there: through retrieval or `search_memory`/`recall_raw` (which replays
+  another channel's raw dialog), a goal (finding 10), a note, or the agent
   reading the Signal conversation because a question on the public channel
-  made it relevant. The sensitivity plugin (#138) is the capability an
+  made it relevant. The provenance critic's evidence search also quotes
+  other channels' raw dialog to the critic, so a critique objection can carry
+  it into the window. The sensitivity plugin (#138) is the capability an
   operator can load against this: it filters what enters a window
   (retrieval, notes, reads, the goals entry) by who is present, though not
   text already in the window. It is off unless loaded, and it isn't built.
@@ -997,11 +994,13 @@ does not stop what the agent knows from surfacing on that channel (first
 bullet). For a separate identity, run a second instance with its own
 database.
 
-Where the tree stands: memory is still compartmented per channel by default
-(`memory.channel_groups`, #168), and there is no send, note or read tool
-(#234, #235), so most of the costs above arrive with those changes; goals
-already cross channels (finding 10). The identity and register layers
-are built (#316), but not their runtime overrides and separate locks.
+Where the tree stands: memory spans every channel (#168), so the first
+bullet's gap is live today wherever the agent speaks in a room people you
+haven't allowed can read, and so is the poisoned-memory bullet; goals
+already cross channels (finding 10). There is no send, note or read tool
+yet (#234, #235), so the other costs above arrive with those. The identity
+and register layers are built (#316), but not their runtime overrides and
+separate locks.
 
 ### Smaller things
 

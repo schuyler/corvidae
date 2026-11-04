@@ -55,7 +55,7 @@ that shares keywords with it (so retrieval admits the block) but whose answer
 isn't in it. It passes when the reply carries the answer (42),
 `retrieval_log` shows the block was admitted on that turn, and a follow-up
 recalls the remembered codename. The profile turns on `memory` and `funnel`,
-which the default profile keeps off, and has no `llm.embedding` role, so
+which the default profile keeps off, and has no `llm.embedding` profile, so
 retrieval runs FTS5-only and the host needs no embedding server. Run it
 before making `user` the default for `mid_conversation_system_role`.
 
@@ -95,7 +95,7 @@ straight out of `sessions.db`.
 `quiet_period` tests behavior across silence. The profile sets
 `memory.idle_consolidate_after: 45`, `memory.retention.interval: 60` and
 `max_delay: 30`, disables the scheduler (so retention is proven to run
-without it) and has no `llm.embedding` role, so records are stored
+without it) and has no `llm.embedding` profile, so records are stored
 unembedded. The probe sends two lines carrying `QUIET_TOKEN_A`, records the
 newest `message_log` id and `retention_meta.last_run`, then sends nothing.
 It waits for `consolidation_watermark` to reach that id with a `memory` row
@@ -131,7 +131,7 @@ tool would not hold the queue), then four seconds later sends three lines
 back to back, each carrying a codeword and asking the bot to repeat every
 codeword. It passes when every codeword appears in bot lines after the
 first bot line containing "400" (the count's end) and
-`usage_log` holds exactly two main-role calls on `#p-burst` since the probe
+`usage_log` holds exactly two main-profile calls on `#p-burst` since the probe
 started (the buster profile disables memory, appraisal and critique, so those
 are only these turns). The four seconds and the length of the
 count are guesses to tune on the first run. Known flakes: a reasoning-reopen
@@ -357,7 +357,7 @@ The replay builds the daemon's exact request for a range that has left the
 live window: the agent's rebuilt view (the summary in force, the rows after
 its boundary, trimmed to the budget) under the channel's system prompt,
 followed by the consolidation instruction, sent as a plain call on the
-`llm.background` role. It calls the same function the daemon does,
+`llm.main` profile (the consolidation stage's default). It calls the same function the daemon does,
 `build_catchup_segments` in
 `packages/corvidae-cognition/corvidae_cognition/memory.py`, so a result here
 is a result about production rather than about a lookalike that drifted.

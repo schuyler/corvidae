@@ -1,9 +1,9 @@
 """MemoryToolsPlugin — search_memory and recall_raw tools (WP1b.3).
 
 Provides the agent's active memory surface (bootstrap-mapping §3.1 "remember
-harder"). Both tools enforce the calling channel's _channel_scope — they are
-broader than passive retrieval in *status* (see demoted/superseded records)
-but never broader in *compartment* (channel B cannot reach channel A's records).
+harder"). Both tools span the agent's whole memory, every channel's (PRD
+principle 14, GitHub issue #168); they reach further than passive retrieval in
+*status* (demoted and superseded records are visible).
 
 Tool semantics:
   search_memory  — FTS keyword search; does NOT update access stats.
@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from corvidae.context import MessageType
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
 from corvidae.persistence import decode_message_row, parse_message_type
-from corvidae_cognition.memory import ChannelScope, _format_age, _fts_match_query
+from corvidae_cognition.memory import _format_age, _fts_match_query
 from corvidae.tool import Tool, tool_to_schema
 
 logger = logging.getLogger("corvidae.tools.memory_tools")
@@ -39,7 +39,7 @@ _SCHEMA_RETRY_DELAY = 0.05
 class MemoryToolsPlugin(CorvidaePlugin):
     """Plugin registering search_memory and recall_raw agent tools.
 
-    Depends on the memory plugin for DB access and channel-scope resolution.
+    Depends on the memory plugin for DB access.
     """
 
     depends_on = frozenset({"memory"})
@@ -78,29 +78,15 @@ class MemoryToolsPlugin(CorvidaePlugin):
             before: str | None = None,
             include_demoted: bool = True,
             max_tokens: int = 2000,
-            _ctx=None,
         ) -> str:
             """Search memory records using keyword search. Returns a numbered list with
             score, age, flags ([demoted]/[superseded]), and summary. Does not update
             access stats. Use include_demoted=False to restrict to active (indexed=1)
             records. Use after/before (YYYY-MM-DD or ISO-8601, UTC) to filter by
-            creation date. Use tags=[...] to filter by topic_tags. Results are
-            token-capped at max_tokens (approximate)."""
+            creation date. Use channel to restrict to one channel's records
+            (an exact id such as irc:#lex). Use tags=[...] to filter by
+            topic_tags. Results are token-capped at max_tokens (approximate)."""
             memory = plugin._memory()
-
-            if _ctx is None or _ctx.channel is None:
-                return "Error: no channel context available"
-
-            calling_channel = _ctx.channel
-            scope = memory._channel_scope(calling_channel.id)
-
-            # Validate channel argument if supplied
-            if channel is not None and not scope.contains(channel):
-                visible = scope.describe()
-                return (
-                    f"Error: channel '{channel}' is outside your visible scope. "
-                    f"Visible channels: {visible}"
-                )
 
             # Parse date filters (naive values treated as UTC per plan)
             after_ts: float | None = None
@@ -137,16 +123,13 @@ class MemoryToolsPlugin(CorvidaePlugin):
             if match is None:
                 return "No results: query has no searchable terms."
 
-            # Scope: restrict to channel arg (narrowing) or calling channel's
-            # full scope. The channel arg matches by equality, never as a
-            # glob, so a model passing a pattern cannot widen its reach.
-            scope_to_use = (
-                ChannelScope(frozenset({channel})) if channel is not None else scope
-            )
-            scope_sql, scope_params = scope_to_use.sql("m.channel_id")
-
-            conditions = [scope_sql]
-            params: list = list(scope_params)
+            # The whole memory, narrowed to one channel only when asked. The
+            # channel arg matches by equality, never as a glob.
+            conditions: list[str] = []
+            params: list = []
+            if channel is not None:
+                conditions.append("m.channel_id = ?")
+                params.append(channel)
 
             if not include_demoted:
                 # indexed=1 excludes demoted (indexed=0), superseded (indexed=0),
@@ -171,7 +154,7 @@ class MemoryToolsPlugin(CorvidaePlugin):
                 )
                 params.extend(tags)
 
-            where = " AND ".join(conditions)
+            where = " AND ".join(conditions) if conditions else "1"
             sql = (
                 "SELECT m.id, m.summary, m.created_at, m.indexed, m.superseded_by, "
                 "memory_fts.rank "
@@ -243,18 +226,11 @@ class MemoryToolsPlugin(CorvidaePlugin):
         async def recall_raw(
             memory_id: int,
             max_tokens: int = 1000,
-            _ctx=None,
         ) -> str:
             """Replay the raw dialog messages for a memory record (remember harder).
             Returns a participants header followed by verbatim role:content lines.
             Works on demoted, superseded, and tombstoned records. Updates access stats."""
             memory = plugin._memory()
-
-            if _ctx is None or _ctx.channel is None:
-                return "Error: no channel context available"
-
-            calling_channel = _ctx.channel
-            scope = memory._channel_scope(calling_channel.id)
 
             db = await plugin._wait_for_schema(memory)
             if db is None:
@@ -272,13 +248,6 @@ class MemoryToolsPlugin(CorvidaePlugin):
                 return f"Error: memory {memory_id} not found"
 
             mid, channel_id, _summary, msg_id_start, msg_id_end, participants_json = row
-
-            # Scope check — no stat bump on rejection
-            if not scope.contains(channel_id):
-                return (
-                    f"Error: memory {memory_id} (channel '{channel_id}') is outside "
-                    f"your scope. Visible channels: {scope.describe()}"
-                )
 
             # Fetch raw messages with channel_id predicate.
             # message_log uses a global AUTOINCREMENT id shared by all channels;

@@ -319,7 +319,7 @@ async def view_call(
     """Send a rendered view (a :func:`build_fork_prompt` render) on ``client``.
 
     No tools and no ``tool_choice`` are sent. The caller binds the client
-    once (``llm.get_client("background")``) and has already set the
+    once (``llm.get_client(stage)``) and has already set the
     attribution stage, channel id and trigger; this sets mode ``standalone``
     around the call.
 
@@ -356,7 +356,7 @@ def view_agent(pm) -> "Agent | None":
     """Return the Agent plugin when it can supply view inputs, else None.
 
     Duck-typed like :func:`fork_agent`, but ignores ``agent.forks``: the
-    view call runs on ``llm.background``, so it works with forks off.
+    view call is a plain client call, so it works with forks off.
     """
     if pm is None:
         return None
@@ -373,7 +373,7 @@ def fork_agent(pm, stage: str):
     cognition plugins use for each other, so plugins don't import
     Agent. A disabled agent plugin degrades to a miss: a live-window
     stage skips (PRD §3.8.5); compaction makes the view call on
-    ``llm.background`` instead of a fork.
+    a plain client call instead of a fork.
     """
     if pm is None:
         return None
