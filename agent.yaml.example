@@ -200,6 +200,8 @@ agent:
 #   # Point `prompt` at your own file, not prompts/heartbeat.md: the shipped
 #   # copy is documentation and opens with a header, which `resolve_prompt`
 #   # would send to the model along with the instruction.
+#   memory_limit: 20                   # newest in-scope memories a beat reviews; 0 = none
+#   retired_goal_limit: 20             # newest retired goals a beat reviews; 0 = none
 
 # Right to silence (cognition). The paragraph added to chat channels' system
 # prompts; keep the literal NO_REPLY in any replacement. Read at startup.

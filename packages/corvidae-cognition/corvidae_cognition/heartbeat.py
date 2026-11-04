@@ -18,6 +18,8 @@ Config:
     heartbeat:
       after: 3600    # seconds of system-wide quiet; absent = asleep
       keep_beats: 3  # earlier beats a beat still sees; 0 = each starts empty
+      memory_limit: 20        # recent memories a beat reviews; 0 = none
+      retired_goal_limit: 20  # retired goals a beat reviews; 0 = none
 
 Sleep is durable because it lives in agent.yaml: without
 ``heartbeat.after`` the plugin registers nothing, at every start.
@@ -54,8 +56,9 @@ logger = logging.getLogger("corvidae.heartbeat")
 #: to sessions.db and the logs only. A persistence key: don't change it.
 HEARTBEAT_CHANNEL = "internal:heartbeat"
 
-#: How many recent memories a beat reviews.
-RECENT_MEMORY_LIMIT = 20
+#: How many recent memories a beat reviews when ``heartbeat.memory_limit``
+#: is absent.
+DEFAULT_MEMORY_LIMIT = 20
 
 #: The beat's instruction. prompts/heartbeat.md is the documented copy.
 DEFAULT_HEARTBEAT_PROMPT = (
@@ -72,8 +75,9 @@ DEFAULT_HEARTBEAT_PROMPT = (
     "redo something you already did."
 )
 
-#: How many retired goals a beat reviews, when the goals plugin is loaded.
-RETIRED_GOAL_LIMIT = 20
+#: How many retired goals a beat reviews, when the goals plugin is loaded
+#: and ``heartbeat.retired_goal_limit`` is absent.
+DEFAULT_RETIRED_GOAL_LIMIT = 20
 
 #: Appended when the goals plugin is loaded (PRD §3.7 Goals and Heartbeat).
 GOALS_INSTRUCTION = (
@@ -138,6 +142,43 @@ def parse_keep_beats(config: dict) -> int:
             f"heartbeat.keep_beats: got {value!r}; expected a whole number of "
             "beats, 0 or more (0 starts every beat empty) — check agent.yaml, "
             f"or remove the key for the default of {DEFAULT_KEEP_BEATS}"
+        )
+    return value
+
+
+def parse_memory_limit(config: dict) -> int:
+    """Return ``heartbeat.memory_limit``, DEFAULT_MEMORY_LIMIT when absent.
+
+    Raises ValueError naming the key, the value and what is accepted.
+    """
+    value = _heartbeat_block(config).get("memory_limit")
+    if value is None:
+        return DEFAULT_MEMORY_LIMIT
+    # bool is an int subclass; True is not a count. 2.5 and "3" are not either.
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(
+            f"heartbeat.memory_limit: got {value!r}; expected a whole number "
+            "of memories, 0 or more (0 reviews none) — check agent.yaml, "
+            f"or remove the key for the default of {DEFAULT_MEMORY_LIMIT}"
+        )
+    return value
+
+
+def parse_retired_goal_limit(config: dict) -> int:
+    """Return ``heartbeat.retired_goal_limit``, DEFAULT_RETIRED_GOAL_LIMIT when absent.
+
+    Raises ValueError naming the key, the value and what is accepted.
+    """
+    value = _heartbeat_block(config).get("retired_goal_limit")
+    if value is None:
+        return DEFAULT_RETIRED_GOAL_LIMIT
+    # bool is an int subclass; True is not a count. 2.5 and "3" are not either.
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(
+            f"heartbeat.retired_goal_limit: got {value!r}; expected a whole "
+            "number of retired goals, 0 or more (0 reviews none) — check "
+            "agent.yaml, "
+            f"or remove the key for the default of {DEFAULT_RETIRED_GOAL_LIMIT}"
         )
     return value
 
@@ -283,6 +324,8 @@ class HeartbeatPlugin(CorvidaePlugin):
             self.pm = pm
         self._after: float | None = None
         self._keep_beats: int = DEFAULT_KEEP_BEATS
+        self._memory_limit: int = DEFAULT_MEMORY_LIMIT
+        self._retired_goal_limit: int = DEFAULT_RETIRED_GOAL_LIMIT
         self._memory: MemoryPlugin | None = None
         self._idle: IdleTracker | None = None
         # The kernel ChannelRegistry, duck-typed: corvidae.channel is not
@@ -296,6 +339,8 @@ class HeartbeatPlugin(CorvidaePlugin):
         await super().on_init(pm, config)
         # Validated before the asleep return: a bad value fails startup either way.
         self._keep_beats = parse_keep_beats(config)
+        self._memory_limit = parse_memory_limit(config)
+        self._retired_goal_limit = parse_retired_goal_limit(config)
         self._after = parse_after(config)
         if self._after is None:
             return
@@ -378,9 +423,9 @@ class HeartbeatPlugin(CorvidaePlugin):
         goals = self.pm.get_plugin("goals")
         retired = None
         try:
-            memories = await self._memory.recent(RECENT_MEMORY_LIMIT)
+            memories = await self._memory.recent(self._memory_limit)
             if goals is not None:
-                retired = await goals.retired_goals(RETIRED_GOAL_LIMIT)
+                retired = await goals.retired_goals(self._retired_goal_limit)
         except Exception as exc:
             logger.warning(
                 "heartbeat: memory or retired-goals read failed on %s (%s); "

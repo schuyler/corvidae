@@ -603,7 +603,8 @@ appears on every channel at its next turn.
 
 **Heartbeat review.** A beat's turn carries the goals entry like any other
 turn. When this plugin is loaded, the heartbeat also asks
-`retired_goals(20)` for the newest retirement records (agent-wide, newest
+`retired_goals(heartbeat.retired_goal_limit)` (default 20) for the newest
+retirement records (agent-wide, newest
 first, each with its age) and appends them to the beat with an instruction
 to take a next step on an open goal or retire a finished one, and not to
 take up a retired goal again without something new (see HeartbeatPlugin).
@@ -938,7 +939,7 @@ any channel cancels the pending beat. The result is at most one beat per
 `after` seconds, never two at once, and none during a conversation. Under
 traffic that never stops it never beats; that is accepted until #214.
 
-**What a beat is.** The plugin reads `MemoryPlugin.recent(20)`,
+**What a beat is.** The plugin reads `MemoryPlugin.recent(heartbeat.memory_limit)` (default 20),
 re-checks that the system is still quiet (a message may have landed
 during the read), and calls `on_notify` on `internal:heartbeat` with
 `source="heartbeat"` and `meta={"origin": "heartbeat"}`. The text is the
@@ -948,8 +949,9 @@ resolution in [configuration.md](configuration.md#heartbeat--a-turn-on-system-id
 followed by the memories, framed as the agent's own
 summaries and as data, or `(none)`. When the goals plugin is loaded, the
 text then carries `GOALS_INSTRUCTION` (overridable with
-`heartbeat.goals_instruction`; same reference) and the conclusions of up to 20
-retired goals (`GoalsPlugin.retired_goals`), framed as data, or `(none)`;
+`heartbeat.goals_instruction`; same reference) and the conclusions of up to
+`heartbeat.retired_goal_limit` retired goals (default 20,
+`GoalsPlugin.retired_goals`), framed as data, or `(none)`;
 without it, no goals text appears. A failed memory or retired-goals read
 skips the beat, which is retried after one period. The turn then runs the
 ordinary notification pipeline with the agent's normal tools. The `heartbeat`
