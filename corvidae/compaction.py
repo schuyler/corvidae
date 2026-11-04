@@ -44,6 +44,7 @@ from corvidae.fork import (
     view_call,
 )
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
+from corvidae.llm import is_backend_unreachable
 
 if TYPE_CHECKING:
     # Only for annotations; compaction must not import these at runtime.
@@ -51,6 +52,18 @@ if TYPE_CHECKING:
     from corvidae.context import ContextWindow
 
 logger = logging.getLogger(__name__)
+
+
+class BackendUnreachable(Exception):
+    """The LLM backend could not be reached during compaction (#400).
+
+    Distinct from a summary miss: a miss tries the background view, while an
+    outage skips it and defers compaction to the turn's retry loop.
+    """
+
+    def __init__(self, channel_id: str) -> None:
+        super().__init__(f"channel {channel_id}: LLM backend unreachable")
+        self.channel_id = channel_id
 
 
 class CompactionPlugin(CorvidaePlugin):
@@ -269,6 +282,11 @@ class CompactionPlugin(CorvidaePlugin):
             if summary_text is None:
                 # Fork miss or forks off: the same view on the stage's client.
                 summary_text = await self._view_summary(channel, conversation, cut)
+        except BackendUnreachable:
+            # The backend is down; the view would wait on the same dead
+            # endpoint. Defer to the turn's retry loop (#400).
+            self._last_failed_compaction[channel_id] = time.monotonic()
+            return None
         except Exception:
             # Record failure time for cooldown
             self._last_failed_compaction[channel_id] = time.monotonic()
@@ -375,13 +393,28 @@ class CompactionPlugin(CorvidaePlugin):
         compaction, or the fork failed or came back empty (logged). The
         fork's prefix already holds any prior summary at its head, so the
         instruction carries it forward without a bounded copy.
+
+        Raises:
+            BackendUnreachable: the fork failed on a connection-class error.
+                The view call goes out on the same dead backend, so it is not
+                attempted (#400, PRD §3.1's unreachable-backend rule).
         """
         agent = fork_agent(self.pm, "compaction")
         if agent is None:
             return None
         try:
             result = await agent.fork(channel, self._fork_prompt, cut=cut)
-        except Exception:
+        except Exception as exc:
+            if is_backend_unreachable(exc):
+                # One wait already spent; the turn's own retry loop waits for
+                # the backend, and compaction runs first once it is back.
+                logger.warning(
+                    "compaction deferred: channel %s could not reach the LLM "
+                    "backend (%s); not trying the background view",
+                    channel.id, type(exc).__name__,
+                    extra={"channel_id": channel.id},
+                )
+                raise BackendUnreachable(channel.id) from exc
             logger.warning(
                 "compaction fork failed; falling back to the background view",
                 exc_info=True, extra={"channel_id": channel.id},

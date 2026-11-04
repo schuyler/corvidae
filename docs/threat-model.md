@@ -124,7 +124,7 @@ everything.
 
 Most severe first. File references are to the reviewed commit.
 
-### 1. `set_settings` could rewrite the system prompt and switch models (fixed, #206)
+### 1. `set_settings` could overwrite the request body (fixed, #206)
 
 At the reviewed commit, the one hard rule `RuntimeSettingsPlugin` enforced
 was that `system_prompt` is immutable. It checked the literal key
@@ -316,6 +316,10 @@ opt-out, deny private address ranges and non-HTTP schemes in `web_fetch`,
 root the file tools in a directory, and have `agent.yaml` and the prompt
 files owned by another user and read-only to the daemon (if the daemon
 user owns them, `shell` can `chmod` them back).
+
+The first three of those are PRD §3.5.3 item 3, which the tree does not yet
+meet: the dangerous tools are opt-out, the file tools are unrooted, and
+`web_fetch` has no scheme or address check. That gap is tracked in #444.
 
 ### 5. IRC had no sender authorization (mitigated, #77)
 
@@ -1028,9 +1032,10 @@ separate locks.
   while finding 4 stands.
 - Tool arguments are not validated against the generated schema. Wrong
   types produce a generic "tool failed". Robustness, not security.
-- `task_pipeline` never marks a non-zero exit as failed, because `shell`
-  returns a string, so dependents run after failures. A correctness bug
-  with mild safety consequences for "deploy after test" graphs.
+- `task_pipeline` marks a task failed on a non-zero exit code, so
+  dependents of a failed step do not run. It reads the code from
+  `shell.run_shell`, which returns it beside the output rather than making
+  callers parse `Exit code: N` out of the text (#105).
 - `web_search` sends conversation-derived queries to DuckDuckGo. By
   design, but it is an off-box data flow nobody sees.
 - `harness/install-signal-cli.sh` defaults `SERVICE_USER` to a real

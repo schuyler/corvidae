@@ -12,6 +12,18 @@ TIMEOUT_ERROR_TEMPLATE = "Error: command timed out after {timeout} seconds"
 
 async def shell(command: str, timeout: int = 30) -> str:
     """Execute a shell command and return the output."""
+    output, _ = await run_shell(command, timeout=timeout)
+    return output
+
+
+async def run_shell(command: str, timeout: int = 30) -> tuple[str, int | None]:
+    """Execute a shell command; return its formatted output and exit code.
+
+    The exit code is ``None`` when the command produced no exit status of its
+    own -- a timeout, which returns the timeout message. Callers that need to
+    know whether the command succeeded use this rather than parsing
+    ``"Exit code: N"`` out of the text (#105).
+    """
     # Set once spawned, so the cancel handler knows whether there is a process.
     proc = None
     try:
@@ -28,7 +40,7 @@ async def shell(command: str, timeout: int = 30) -> str:
             proc.kill()
         except OSError:
             logger.debug("proc.kill() failed (process may have already exited)", exc_info=True)
-        return TIMEOUT_ERROR_TEMPLATE.format(timeout=timeout)
+        return TIMEOUT_ERROR_TEMPLATE.format(timeout=timeout), None
     except asyncio.CancelledError:
         # Cancelled from outside (call timeout, shutdown): don't leave the
         # command running. Kill and reap it, then propagate the cancel.
@@ -52,9 +64,9 @@ async def shell(command: str, timeout: int = 30) -> str:
         parts.append(f"Exit code: {proc.returncode}")
 
     if not parts:
-        return "(no output)"
+        return "(no output)", proc.returncode
 
-    return "\n".join(parts)
+    return "\n".join(parts), proc.returncode
 
 
 # Expose the module-level constant as a function attribute so that

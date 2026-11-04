@@ -522,6 +522,24 @@ class TestWebSearch:
             output = await web_search("error test")
         assert "Error searching the web" in output
 
+    async def test_web_search_error_names_the_query_and_failure_class(self):
+        """#105 item 2: an unnameable failure cannot be traced to its request.
+
+        Same shape as web_fetch: operation, input, failure class, detail.
+        """
+        mock_ctx = MagicMock()
+        mock_ctx.__enter__ = MagicMock(side_effect=RuntimeError("network down"))
+        mock_ctx.__exit__ = MagicMock(return_value=False)
+        with patch("corvidae.tools.web.DDGS", return_value=mock_ctx):
+            output = await web_search("unusual query terms")
+        assert "unusual query terms" in output, (
+            f"the error must name the query that failed: {output!r}"
+        )
+        assert "RuntimeError" in output, (
+            f"the error must name the failure class: {output!r}"
+        )
+        assert "network down" in output, f"the error must keep the detail: {output!r}"
+
     async def test_web_search_separator(self):
         results = [
             {"title": "R1", "href": "http://a.com", "body": "s1"},

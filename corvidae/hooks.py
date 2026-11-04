@@ -1117,6 +1117,11 @@ class AgentSpec:
         attribution: dict,
         error: str | None,
         timings: dict | None,
+        started_at: float,
+        total_ms: float,
+        attempts: int,
+        message_count: int,
+        tool_count: int,
     ) -> None:
         """Fired exactly once per LLM call, after it succeeds or terminally fails.
 
@@ -1141,6 +1146,15 @@ class AgentSpec:
                 llama-server reports it: ``cache_n`` is prompt tokens reused
                 from cache, ``prompt_n`` prompt tokens prefilled (PRD
                 §3.13.10). Other providers omit it.
+            started_at: Wall-clock epoch seconds when the call began.
+            total_ms: Monotonic duration in ms from the call's first attempt
+                to its end, including retries and the sleeps between them.
+            attempts: Attempts made; 1 means no retry. Counts transient
+                retries and model-not-loaded waits.
+            message_count: Number of messages in the request payload (for
+                embeddings, the number of texts).
+            tool_count: Number of tool schemas in the request payload (0 for
+                embeddings).
         """
 
     @hookspec

@@ -79,7 +79,7 @@ class TestBatchedToolResults:
             "Before the fix, this would be 3+ (one per tool result)."
         )
         assert sent(plugin.pm, OutboundMessage) == [
-            (channel, OutboundMessage(text="done with both tools", latency_ms=ANY)),
+            (channel, OutboundMessage(text="done with both tools", latency_ms=ANY, trace_id=ANY)),
         ]
         assert tool_results == {"a": "hello_a", "b": "hello_b"}
 
@@ -135,7 +135,7 @@ class TestBatchedToolResults:
 
         assert llm_call_count == 2, f"Expected 2 LLM calls, got {llm_call_count}"
         assert sent(plugin.pm, OutboundMessage) == [
-            (channel, OutboundMessage(text="all three done", latency_ms=ANY)),
+            (channel, OutboundMessage(text="all three done", latency_ms=ANY, trace_id=ANY)),
         ]
 
         await task_plugin.on_stop()
@@ -193,7 +193,7 @@ class TestBatchedToolResults:
         await drain(plugin, channel)
 
         assert sent(plugin.pm, OutboundMessage) == [
-            (channel, OutboundMessage(text="final answer", latency_ms=ANY)),
+            (channel, OutboundMessage(text="final answer", latency_ms=ANY, trace_id=ANY)),
         ]
         await task_plugin.on_stop()
         await db.close()

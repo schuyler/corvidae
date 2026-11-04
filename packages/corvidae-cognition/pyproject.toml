@@ -7,7 +7,14 @@ name = "corvidae-cognition"
 version = "0.0.1"
 description = "Cognition plugins for corvidae: memory, appraisal, critique, funnel, outcome log"
 requires-python = ">=3.13"
-dependencies = ["corvidae", "sqlite-vec>=0.1.9"]
+dependencies = ["corvidae"]
+
+# sqlite-vec is a compiled extension, and only memory and retention use it.
+# Without it, memory degrades to FTS5 with one startup warning (PRD §3.7
+# Memory 5, #130). The root `cognition` extra pulls this sub-extra in, so the
+# documented install keeps vector memory; `cognition-fts` leaves it out.
+[project.optional-dependencies]
+vec = ["sqlite-vec>=0.1.9"]
 
 [project.entry-points."corvidae.redact"]
 exchange_log = "corvidae_cognition.outcome_log:redact_exchange_log"

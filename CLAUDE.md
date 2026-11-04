@@ -9,7 +9,10 @@ installs the `dev` extra (pytest, pytest-asyncio), the `dev` dependency group
 (pytest-timeout), which the pytest config needs, the `acp` and `discord`
 extras, whose transport tests import the SDKs, and the `cognition` extra
 (`packages/corvidae-cognition`: memory, appraisal, critique, funnel,
-outcome_log, goals), which `tests/cognition/` imports. That is CI's `full`
+outcome_log, goals), which `tests/cognition/` imports. The `cognition` extra
+includes `sqlite-vec` through the distribution's `vec` sub-extra; leave it out
+to exercise the FTS5-only path (`docs/cognition.md`), which is what CI's
+`cognition-fts` job does. That is CI's `full`
 job. The kernel alone is `--extra dev --extra acp`; CI's `kernel` job runs
 everything outside `tests/cognition/` that way, so a kernel module must never
 import `corvidae_cognition` (`tests/test_kernel_boundary.py`).
@@ -20,8 +23,17 @@ uv run pytest                    # full suite
 uv run pytest --ignore=tests/cognition  # the kernel suite
 uv run pytest tests/test_foo.py  # one file
 uv run pytest --run-eval         # include live-LLM eval tests (deselected by default)
+uv run ruff check .              # lint
+uv run ruff format --check .     # formatting
+uv run basedpyright              # type check
 uv run corvidae                  # run the daemon; reads ./agent.yaml
 ```
+
+Lint, formatting and type checks are **advisory**: CI runs them with
+`continue-on-error`, so they report but do not fail a run. The tree is not
+clean yet (445 ruff findings, 218 files that would reformat, 113 type
+errors). Cleaning it and making the checks fail is #455; do not flip them
+before then.
 
 `agent.yaml` is gitignored. Copy `agent.yaml.example` to create one.
 

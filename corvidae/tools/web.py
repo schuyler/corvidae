@@ -126,4 +126,6 @@ async def web_search(query: str, max_results: int | None = _SEARCH_MAX) -> str:
     try:
         return await asyncio.to_thread(_do_search)
     except Exception as exc:
-        return f"Error searching the web: {exc}"
+        # Name the query, the failure class and the detail, as web_fetch does:
+        # an aiohttp or DuckDuckGo failure is untraceable without them.
+        return f"Error searching the web for {query!r}: {type(exc).__name__}: {exc}"

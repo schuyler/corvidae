@@ -55,6 +55,21 @@ jobs:
       - name: Run kernel tests
         run: uv run --no-sync pytest -q --ignore=tests/cognition
 
+      # Advisory until the tree is clean (#111, #455): the output is in the
+      # log, but a finding does not fail the run. Drop continue-on-error in
+      # #455 once main reports nothing.
+      - name: Lint (advisory, #111)
+        continue-on-error: true
+        run: uv run --no-sync ruff check .
+
+      - name: Check formatting (advisory, #111)
+        continue-on-error: true
+        run: uv run --no-sync ruff format --check .
+
+      - name: Type-check (advisory, #111)
+        continue-on-error: true
+        run: uv run --no-sync basedpyright
+
   # Everything: the kernel plus the cognition and discord extras.
   full:
     runs-on: ubuntu-latest
@@ -91,8 +106,42 @@ jobs:
       - name: Run tests
         run: uv run --no-sync pytest -q
 
-  # The browser smoke test for the web console's DOMPurify options (#90, #254).
-  # tests/test_web_render_smoke.py skips itself without Playwright, so neither
+  # Cognition without its sqlite-vec extra (#130): the FTS5-only degradation
+  # path PRD §3.7 (Memory 5) requires. Without this job the vector tests skip
+  # silently in every other configuration.
+  cognition-fts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.13"
+          enable-cache: true
+
+      # Cognition is installed WITHOUT its `vec` sub-extra. A workspace sync
+      # does not pull the member in on its own, so this names it explicitly.
+      - name: Install dependencies (no sqlite-vec)
+        run: |
+          uv sync --locked --extra dev --extra acp
+          uv pip install --no-deps -e packages/corvidae-cognition
+
+      - name: Check sqlite-vec really is absent
+        run: |
+          uv run --no-sync python - <<'PY'
+          import importlib.util
+          assert importlib.util.find_spec("sqlite_vec") is None, \
+              "this job must run without sqlite-vec; the FTS5 path is untested otherwise"
+          assert importlib.util.find_spec("corvidae_cognition") is not None, \
+              "cognition did not install"
+          print("cognition installed, sqlite-vec absent")
+          PY
+
+      - name: Run cognition tests on the FTS5 path
+        run: uv run --no-sync pytest -q tests/cognition
+
+  # The browser smoke test for the web console's DOMPurify options (#90, #254).  # tests/test_web_render_smoke.py skips itself without Playwright, so neither
   # job above runs it; this one installs Playwright and Chromium and fails on a
   # skip. Playwright is pinned and supplied with `--with`, so it stays out of
   # pyproject.toml and uv.lock.

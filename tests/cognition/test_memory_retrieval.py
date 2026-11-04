@@ -117,8 +117,11 @@ async def seed_memory(
     db, channel_id: str, summary: str, created_at: float | None = None,
     embedded: bool = True,
 ) -> int:
-    """Insert one memory row (+ vec row when embedded)."""
-    import sqlite_vec
+    """Insert one memory row (+ vec row when embedded).
+
+    The vec import happens only when a vec row is written, so seeding with
+    ``embedded=False`` works in a build without sqlite-vec (#130).
+    """
     cursor = await db.execute(
         "INSERT INTO memory (channel_id, created_at, summary, importance, "
         "msg_id_start, msg_id_end, embedded) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -127,6 +130,13 @@ async def seed_memory(
     )
     rowid = cursor.lastrowid
     if embedded:
+        try:
+            import sqlite_vec
+        except ImportError:
+            # The test asked for a vec row, which this build cannot write.
+            # Skipping matches the file's other sqlite-vec guards (#130).
+            pytest.skip("sqlite-vec unavailable; this test needs an embedded row")
+
         await db.execute(
             "INSERT INTO memory_vec (memory_id, embedding) VALUES (?, ?)",
             (rowid, sqlite_vec.serialize_float32(bow_embed(summary))),
