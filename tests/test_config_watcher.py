@@ -1617,3 +1617,41 @@ class TestReloadableKeyRegistry:
             second = [r.getMessage() for r in caplog.records if "bands" in r.getMessage()]
 
         assert not second, f"an unchanged key must not be re-reported: {second}"
+
+    async def test_the_reload_path_calls_the_restart_only_report(
+        self, tmp_path, caplog
+    ):
+        """Step 5b runs on a real reload, not only when called directly.
+
+        The other warning tests drive the helper; without this one, deleting
+        its call site in `_reload_config` leaves every test green (#408
+        review).
+        """
+        cfg = tmp_path / "agent.yaml"
+        cfg.write_text(
+            yaml.safe_dump(
+                {
+                    "llm": {"main": {"base_url": "http://localhost:8080/v1", "model": "m"}},
+                    "memory": {"retrieval": {"bands": [1, 2, 3]}},
+                }
+            )
+        )
+        watcher = _make_watcher(cfg)
+        registry = MagicMock()
+        watcher._registry = registry
+        watcher.config = {
+            "_config_path": str(cfg),
+            "_base_dir": str(tmp_path),
+            "llm": {"main": {"base_url": "http://localhost:8080/v1", "model": "m"}},
+            "memory": {"retrieval": {"bands": [9, 9, 9]}},
+        }
+
+        with patch(
+            "corvidae.config_watcher.apply_channel_config", create=True
+        ), caplog.at_level(logging.WARNING):
+            await watcher._reload_config()
+
+        messages = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any("memory.retrieval.bands" in m for m in messages), (
+            f"the reload path must report the restart-only change; got {messages}"
+        )
