@@ -1303,18 +1303,19 @@ design, not requirement. The requirements are outcomes:
    afterwards rather than guessed. This puts raw model output in the
    daemon log, which the threat model accounts for.
 6. Each LLM call's record (principle 11; §3.13.10 adds further items)
-   carries when the call started and ended, its total duration from start
-   to end including retried attempts and the waits between them, how many
-   attempts it took, and the duration of its final attempt, so overlapping
-   calls can be reconstructed from the records alone; the context it ran
-   against (message count, tool count, and the token budget in force for
-   its channel); and, where the backend reports them, how long the final
-   attempt spent prefilling the prompt and, separately, decoding the reply. A value
-   the backend or the call cannot supply, such as the backend's timings,
-   or the budget of a call with no channel, is recorded as unknown, never
-   as zero; a value reported as zero stays zero. What the final attempt's
-   duration leaves after that prefill and decode work is, approximately,
-   the time it waited in the backend, so a call queued behind another on a shared
+   carries when the call started and ended, its total duration from
+   start to end including retried attempts and the waits between them,
+   how many attempts it took, and the duration of its final attempt, so
+   overlapping calls can be reconstructed from the records alone; the
+   context it ran against (message count, tool count, and the token
+   budget in force for its channel); and, where the backend reports
+   them, how long the final attempt spent prefilling the prompt and,
+   separately, decoding the reply. A value the backend or the call
+   cannot supply, such as the backend's timings, or the budget of a call
+   with no channel, is recorded as unknown, never as zero; a value
+   reported as zero stays zero. What the final attempt's duration leaves
+   after that prefill and decode work is, approximately, the time it
+   waited in the backend, so a call queued behind another on a shared
    backend can be told from a slow one.
 
 ### 3.11 Configuration and operations
