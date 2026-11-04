@@ -21,10 +21,14 @@ class OutboundMessage:
         text: The message content to deliver.
         latency_ms: Agent-loop latency for this reply, or None. Transports
             that display timing (the CLI) use it; the rest ignore it.
+        trace_id: The trace of the turn that produced this reply, or None
+            when the sender does not know it. Transports that track which
+            message a reply answers key on it (#419).
     """
 
     text: str
     latency_ms: float | None = None
+    trace_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
