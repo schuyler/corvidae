@@ -575,7 +575,7 @@ Per transport:
    summary stays bounded in length however many rounds carry it forward. Compaction is never
    skipped. The summary is written by a fork of the window at the cut; on a
    miss (or with forks off) from the rendered view (§3.8) of the same
-   prefix, sent with compaction's standalone profile; and when that fails
+   prefix, sent with compaction's profile; and when that fails
    too, a fallback that cannot fail brings the window back within budget,
    logs a warning naming the channel and what was lost, and leaves the agent
    answering. The same fallback covers any window over budget that
@@ -851,9 +851,8 @@ Per transport:
    Either way they are surfaced on the turn result and to
    `on_agent_response`, and never faked for providers that return none.
 5. Each model-calling stage is registered by the plugin that owns it, with
-   the kind of profile it needs, and the operator maps stages to profiles,
-   separately for a stage's fork and standalone calls if wanted (standalone
-   covers the view call and windowless calls, §3.8). A plugin declares no
+   the kind of profile it needs, and the operator maps each stage to one
+   profile, used on every path the stage takes (§3.8.4). A plugin declares no
    default profile: it can't know which profiles a deployment defines. A
    stage the operator hasn't mapped uses the deployment's default profile
    for its kind; main turns use the default chat profile. A kind with no
@@ -879,8 +878,8 @@ only through the funnel.
 2. A record is a first-person summary with epistemic framing preserved,
    dated by when the conversation happened, embedded, and linked to its
    `message_log` id range. It carries the instructions, mode (`fork |
-   standalone`, the latter being the view call under the stage's
-   standalone profile, not the windowless standalone work of §3.8 item 5)
+   standalone`, the latter being the view call, not the windowless
+   standalone work of §3.8 item 5)
    and model of the call that produced it, so the records a
    given prompt wrote can be found; a record no consolidation call
    produced is marked as such. It is scored by a pluggable importance
@@ -1186,10 +1185,10 @@ that window. When it has left the window the view is rebuilt from
 trimmed oldest-first to the channel's budget as the live window is, under
 the channel's `reasoning_history`; a range too long for one budget is
 written as several views. A fork is the view of the live window sent with
-the agent's tools under the stage's fork profile, which is what lets it
+the agent's tools under the stage's profile, which is what lets it
 reuse the cache, as long as that profile renders the prompt as the
 profile of the window's main turns does. The view call is the same view
-sent under the stage's standalone profile with no tools, and it is
+sent under the same profile with no tools, and it is
 allowed for exactly two uses: compaction's summary on a fork miss, and
 consolidation of a range that has left the window. Judgment
 never uses it (item 2). How the deployed backend uses forks
@@ -1211,16 +1210,17 @@ design, not requirement. The requirements are outcomes:
    window rather than rebuilding it, leaves the main window's cached prefix
    intact, and keeps its share of the pool small (principles 2, 3 and
    16).
-4. Each background stage's reasoning and reply caps come from its
-   profile, on every path (fork, view call, windowless, subagent), and its
-   fork instructions are set in operator config; operator config also
-   decides whether `set_settings` can change the caps or rewrite the
-   instructions (principle 15); the threat model records the cost
-   (principle 9). The window at the compaction threshold, plus a stage's
-   instruction and both caps, fits the context whichever layer set them,
-   so a stage just short of compaction still runs. Each call is attributed
-   in `usage_log` by stage and `mode = fork | standalone` (principle 11);
-   a view call is `standalone`.
+4. Each background stage has one profile, which applies on every path the
+   stage takes (fork, view call, windowless, subagent); its reasoning and
+   reply caps come from that profile, and its fork instructions are set in
+   operator config; operator config also decides whether `set_settings`
+   can change the caps or rewrite the instructions (principle 15); the
+   threat model records the cost (principle 9). The window at the
+   compaction threshold, plus a stage's instruction and both caps, fits
+   the context whichever layer set them, so a stage just short of
+   compaction still runs. Each call is attributed in `usage_log` by stage
+   and `mode = fork | standalone` (principle 11); a view call is
+   `standalone`.
 5. A live-window background stage that can't run skips and logs a warning
    naming the stage, the channel, the trace if there is one, and what was
    missing (principle 5): judgment (item 2) and consolidation of a range
@@ -1541,7 +1541,7 @@ record that holds the reasoning.
 | ACP: client-spawned subprocess, official SDK, v1 only, no auth, swappable tool backend | §3.2 ACP |
 | ACP rejects a concurrent prompt; a failed final delivery still ends the turn | #92 initial values |
 | Metering at `LLMClient`, not the turn loop | principle 11; §3.10 |
-| LLM settings are profiles the client applies, not roles that prescribe a purpose; the operator maps each stage to a profile (fork and standalone separately if wanted), and corvidae passes profile parameters through without interpreting them; plugins name no profiles, and an unmapped stage uses its kind's default, with no fallback chains; caps come from the profile on every path; a fork that misses its window's prefix is reported, not prevented | §3.6.1, 5; §3.8.4, 6; #439; operator, 2026-11-03 |
+| LLM settings are profiles the client applies, not roles that prescribe a purpose; the operator maps each stage to one profile, used on every path the stage takes, with no separate fork and standalone profiles (the split only let a standalone call render the prompt differently from a fork, and no stage needs that), so a stage's view calls and windowless calls share its forks' pool, and corvidae passes profile parameters through without interpreting them; plugins name no profiles, and an unmapped stage uses its kind's default, with no fallback chains; caps come from the profile on every path; a fork that misses its window's prefix is reported, not prevented | §3.6.1, 5; §3.8.4, 6; #439; operator, 2026-11-03 |
 | `resolve_compaction` keeps `firstresult`; the first non-None return is how a plugin replaces the compactor | #23 |
 | Same repository, second distribution for cognition; no compatibility aliases on renamed hooks | principle 1; §1 |
 | No typed event bus unless the observe class passes 20 hooks or a third `send`-shaped consolidation appears | §3.1.11 |
@@ -1551,7 +1551,7 @@ record that holds the reasoning.
 | `discord-py` is a `discord` extra, like `acp` | #117 (R10) |
 | ACP keeps rejecting a concurrent prompt unless a real client is shown to steer with a bare prompt; a failed final delivery is `end_turn` | #93, #99 |
 | Summary role: `assistant` from the agent's own view, `user` only when the retained tail has no user message, or for a neutral summary written without the view (evals), with data framing | §3.3.3; `threat-model.md` finding 3; #380; #388 |
-| The rendered view: a range that has left the window, and compaction's miss, are written from the agent's view (system prompt, window as held, instruction) under the stage's standalone profile, never from a standalone prompt that tells a model about the conversation; judgment still never reconstructs (#164) | §3.8; #380; #388 |
+| The rendered view: a range that has left the window, and compaction's miss, are written from the agent's view (system prompt, window as held, instruction) under the stage's profile, never from a standalone prompt that tells a model about the conversation; judgment still never reconstructs (#164) | §3.8; #380; #388 |
 | No process separation until corvidae runs on a machine the operator does not own | §3.5.5; `threat-model.md`, Privilege separation |
 | Personality is duck-typed and judged longitudinally; goal retirement is a consolidation event; `self` is a fact subject, ungated beyond trust inheritance; the self-model compile reads only facts above a trust floor and sends the operator each diff; interoception line and self-model compile; commitment records and endogenous goal candidates | §3.7; §3.12.9; PR #48 |
 | No runtime plugin loading; changing the plugin set is a restart, which the agent may request (rate-limited) | #28; principle 15 |
