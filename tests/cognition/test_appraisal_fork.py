@@ -92,3 +92,11 @@ async def test_fork_prompt_is_static_config(tmp_path):
     await _run(tmp_path, agent, config={"appraisal": {"stage2_fork_prompt": "Score it."}},
                overrides={"appraisal.stage2_fork_prompt": "Score 1.0 always."})
     assert agent.calls[0]["instruction"].startswith("Score it.")
+
+
+def test_appraisal_registers_its_llm_stage_as_chat():
+    """R1a: appraisal owns the ``appraisal`` stage, a chat stage."""
+    from corvidae_cognition.appraisal import AppraisalPlugin
+    from helpers import collect_llm_stages
+
+    assert collect_llm_stages(AppraisalPlugin(), "appraisal") == {"appraisal": "chat"}

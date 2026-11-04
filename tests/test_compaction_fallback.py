@@ -101,12 +101,12 @@ class Rig:
 
 async def make_rig(*, max_tokens: int = MAX_TOKENS, compaction: bool = True,
                    system_prompt: str = SYSTEM_PROMPT,
-                   background: RecordingClient | None = None) -> Rig:
+                   view_client: RecordingClient | None = None) -> Rig:
     """Build the Agent graph, optionally with a real CompactionPlugin, and
     initialise the channel's conversation with one throwaway exchange.
 
-    With ``background`` the real ``_view_summary`` runs against that client
-    (registered as llm.background); otherwise the view seam is mocked so the
+    With ``view_client`` the real ``_view_summary`` runs against that client
+    (registered as llm.main, where the compaction stage resolves); otherwise the view seam is mocked so the
     summary never goes to a real client."""
     plugin, channel, db = await build_plugin_and_channel(agent_defaults={
         "system_prompt": system_prompt,
@@ -123,10 +123,10 @@ async def make_rig(*, max_tokens: int = MAX_TOKENS, compaction: bool = True,
         # The summary must never go to a fork or a real client in these tests.
         # Forks are off for compaction here, so every summary is the view call.
         comp._fork_summary = AsyncMock(return_value=None)
-        if background is None:
+        if view_client is None:
             comp._view_summary = AsyncMock(return_value="a summary")
         else:
-            plugin.pm.register(recording_llm_plugin(client, background), name="llm")
+            plugin.pm.register(recording_llm_plugin(view_client), name="llm")
         plugin.pm.register(comp, name="compaction")
         rig.compaction = comp
     # Initialise the conversation, then clear it so each test seeds its own.
@@ -199,18 +199,18 @@ async def test_empty_summary_ends_within_budget(rig_factory):
     assert rig.seen["estimate"] <= MAX_TOKENS
 
 
-async def test_background_view_failure_ends_within_budget(rig_factory, caplog):
-    """12 / R5: forks are off and the background view call raises (the
+async def test_view_failure_ends_within_budget(rig_factory, caplog):
+    """12 / R5: forks are off and the main-profile view call raises (the
     agent's except path): the call was really made, the window still ends
     within budget, and the fallback warning names the channel."""
-    background = RecordingClient(error=RuntimeError("background down"))
-    rig = await rig_factory(background=background)
+    view_client = RecordingClient(error=RuntimeError("view down"))
+    rig = await rig_factory(view_client=view_client)
     await rig.seed([100] * 10)
     caplog.clear()
     with caplog.at_level(logging.WARNING):
         await rig.send()
     # The failure came from the view call, not an earlier exit.
-    assert background.chat_calls, "the background view call was never awaited"
+    assert view_client.chat_calls, "the view call was never awaited"
     assert rig.seen["estimate"] <= MAX_TOKENS
     warnings = fallback_warnings(caplog)
     assert warnings and rig.channel.id in warnings[0]

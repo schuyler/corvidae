@@ -2,7 +2,7 @@
 
 Three plugins:
   - MetricsPlugin: consumes on_llm_response and emits on_metrics events
-    (token counts, latency, errors) with role/model/stage/channel tags.
+    (token counts, latency, errors) with profile/model/stage/channel tags.
   - UsageLogPlugin: consumes on_llm_response and writes one row per LLM
     call into the ``usage_log`` SQLite table (persistence plugin's DB).
   - MetricsJsonlPlugin: consumes on_metrics and appends one JSON line per
@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS usage_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts REAL NOT NULL,
     request_id TEXT NOT NULL,
-    role TEXT NOT NULL,
+    profile TEXT NOT NULL,
     model TEXT NOT NULL,
     stage TEXT,
     channel_id TEXT,
@@ -51,9 +51,31 @@ CREATE TABLE IF NOT EXISTS usage_log (
     cache_n INTEGER,
     prompt_n INTEGER,
     latency_ms REAL,
-    error TEXT
+    error TEXT,
+    started_at REAL,
+    ended_at REAL,
+    total_ms REAL,
+    attempts INTEGER,
+    message_count INTEGER,
+    tool_count INTEGER,
+    max_context_tokens INTEGER,
+    prompt_ms REAL,
+    predicted_ms REAL
 )
 """
+# Columns added by #350, as (name, type) for the in-place upgrade sweep.
+# Must match the columns in USAGE_LOG_DDL.
+USAGE_LOG_TIMING_COLUMNS = (
+    ("started_at", "REAL"),
+    ("ended_at", "REAL"),
+    ("total_ms", "REAL"),
+    ("attempts", "INTEGER"),
+    ("message_count", "INTEGER"),
+    ("tool_count", "INTEGER"),
+    ("max_context_tokens", "INTEGER"),
+    ("prompt_ms", "REAL"),
+    ("predicted_ms", "REAL"),
+)
 USAGE_LOG_INDEX_DDL = "CREATE INDEX IF NOT EXISTS idx_usage_ts ON usage_log (ts)"
 
 
@@ -79,11 +101,11 @@ class MetricsPlugin(CorvidaePlugin):
 
     @hookimpl
     async def on_llm_response(
-        self, role, model, request_id, usage, latency_ms, attribution, error
+        self, profile, model, request_id, usage, latency_ms, attribution, error
     ) -> None:
         """Translate one LLM response into token/latency/error metrics."""
         tags = {
-            "role": role,
+            "profile": profile,
             "model": model,
             "stage": attribution.get("stage", ""),
             "channel": attribution.get("channel_id", ""),
@@ -109,6 +131,7 @@ class UsageLogPlugin(CorvidaePlugin):
     """Writes one usage_log row per LLM call via the persistence DB."""
 
     depends_on = frozenset({"persistence"})
+    optional_depends_on = frozenset({"registry"})
 
     def __init__(self, pm=None) -> None:
         if pm is not None:
@@ -139,6 +162,11 @@ class UsageLogPlugin(CorvidaePlugin):
             # _ensure_table ADD COLUMN sweep).
             async with db.execute("PRAGMA table_info(usage_log)") as cursor:
                 columns = {row[1] for row in await cursor.fetchall()}
+            # The llm-config column was named role before profiles.
+            if "role" in columns and "profile" not in columns:
+                await db.execute(
+                    "ALTER TABLE usage_log RENAME COLUMN role TO profile"
+                )
             if "cached_tokens" not in columns:
                 await db.execute(
                     "ALTER TABLE usage_log ADD COLUMN cached_tokens INTEGER"
@@ -153,6 +181,11 @@ class UsageLogPlugin(CorvidaePlugin):
             # from cache vs prefilled, per call (PRD §3.13.10).
             await add_column_if_missing(db, "usage_log", "cache_n", "INTEGER")
             await add_column_if_missing(db, "usage_log", "prompt_n", "INTEGER")
+            # #350: call timing (wall-clock start, end, total incl. retries),
+            # attempts, the request's message/tool counts, the channel's
+            # context budget, and the backend's prefill/decode split.
+            for column, column_type in USAGE_LOG_TIMING_COLUMNS:
+                await add_column_if_missing(db, "usage_log", column, column_type)
             await db.commit()
             self._table_ready = True
         return db
@@ -166,10 +199,37 @@ class UsageLogPlugin(CorvidaePlugin):
         except Exception:
             logger.warning("usage_log table creation deferred", exc_info=True)
 
+    def _max_context_tokens(self, channel_id: str | None) -> int | None:
+        """The channel's resolved max_context_tokens budget, or None.
+
+        None when there is no channel, no registry plugin, or the channel is
+        unknown. A failing lookup is logged and also gives None, so the row
+        is still written.
+        """
+        # No channel means no budget to look up.
+        if not channel_id:
+            return None
+        # The registry is optional: without it the budget is unknown.
+        registry = self.pm.get_plugin("registry")
+        if registry is None:
+            return None
+        try:
+            # Resolve the channel's effective config, budget included.
+            channel = registry.get(channel_id)
+            if channel is None:
+                return None
+            return registry.resolve_config(channel)["max_context_tokens"]
+        except Exception:
+            logger.warning(
+                "usage_log max_context_tokens lookup failed for channel %s; "
+                "writing NULL", channel_id, exc_info=True,
+            )
+            return None
+
     @hookimpl
     async def on_llm_response(
-        self, role, model, request_id, usage, latency_ms, attribution, error,
-        timings,
+        self, profile, model, request_id, usage, latency_ms, attribution, error,
+        timings, started_at, total_ms, attempts, message_count, tool_count,
     ) -> None:
         """Insert one row for this LLM call. Fail-soft."""
         try:
@@ -181,16 +241,22 @@ class UsageLogPlugin(CorvidaePlugin):
                 return
             usage = usage or {}
             timings = timings or {}
+            # One monotonic duration gives the end time, so the interval
+            # and total_ms never disagree.
+            ended_at = started_at + total_ms / 1000
             await db.execute(
-                "INSERT INTO usage_log (ts, request_id, role, model, stage, "
+                "INSERT INTO usage_log (ts, request_id, profile, model, stage, "
                 "channel_id, trace_id, trigger, mode, prompt_tokens, "
                 "completion_tokens, total_tokens, cached_tokens, cache_n, "
-                "prompt_n, latency_ms, error) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "prompt_n, latency_ms, error, started_at, ended_at, total_ms, "
+                "attempts, message_count, tool_count, max_context_tokens, "
+                "prompt_ms, predicted_ms) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                "?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     time.time(),
                     request_id,
-                    role,
+                    profile,
                     model,
                     attribution.get("stage"),
                     attribution.get("channel_id"),
@@ -205,6 +271,15 @@ class UsageLogPlugin(CorvidaePlugin):
                     timings.get("prompt_n"),
                     latency_ms,
                     error,
+                    started_at,
+                    ended_at,
+                    total_ms,
+                    attempts,
+                    message_count,
+                    tool_count,
+                    self._max_context_tokens(attribution.get("channel_id")),
+                    timings.get("prompt_ms"),
+                    timings.get("predicted_ms"),
                 ),
             )
             await db.commit()
