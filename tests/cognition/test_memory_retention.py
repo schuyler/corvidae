@@ -486,8 +486,14 @@ class TestDemotion:
         assert "vec row" in text.lower(), (
             f"the warning must say the vec row was left behind: {text!r}"
         )
-        assert "backfill" in text.lower() or "demotion" in text.lower(), (
-            f"the warning must name the next step: {text!r}"
+        # No pass clears this row: backfill selects indexed = 1 and the row is
+        # now indexed = 0, and the demotion pass only flips rows 1 -> 0 itself.
+        # So the remedy has to be the manual statement, not a later pass.
+        assert "delete from memory_vec" in text.lower(), (
+            f"the warning must give the remedy that actually works: {text!r}"
+        )
+        assert "backfill" not in text.lower() and "demotion pass" not in text.lower(), (
+            f"the warning must not name a pass that cannot clear the row: {text!r}"
         )
 
         # And not merely at DEBUG, where the default level hides it.
