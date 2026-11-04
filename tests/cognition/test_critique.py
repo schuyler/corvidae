@@ -10,7 +10,7 @@
   injectable RNG, marked in the outcome;
 - the provenance check (#155): stage-2 appraisal (a model) lists the
   reply's claims about the past; critique fetches the closest earlier
-  messages for each, within the channel's memory scope and before the
+  messages for each, on every channel and before the
   exchange; the provenance critic (a model) judges support. No regex or
   word list judges language anywhere on that path;
 - silent execution: empty verdict -> no on_notify, outcome recorded;
@@ -822,38 +822,22 @@ class TestProvenanceEvidence:
         finally:
             await _teardown(env)
 
-    async def test_only_channels_in_memory_scope(self, tmp_path):
-        from corvidae_cognition.memory import ChannelScope
-
+    async def test_searches_every_channel(self, tmp_path):
+        # Evidence is raw dialog on every channel (PRD §3.7 Critique 2), with
+        # no memory plugin or scope needed to say which.
         env = await _provenance_env(tmp_path)
-
-        class ScopeOnlyMemory(CorvidaePlugin):
-            def _channel_scope(self, channel_id):
-                return ChannelScope(frozenset({channel_id}), ("signal:*",))
-
-        env.pm.register(ScopeOnlyMemory(), name="memory")
         try:
             other = await _log(env, "the quarterly audit deadline is Thursday",
                                channel_id="irc:#elsewhere")
-            grouped = await _log(env, "the quarterly audit deadline is Thursday",
-                                 channel_id="signal:alice")
+            signal = await _log(env, "the quarterly audit deadline is Thursday",
+                                channel_id="signal:alice")
+            own = await _log(env, "the quarterly audit deadline is Thursday")
             origin = await _log(env, "when is it due?")
             await _begin_exchange(env, "ks", origin_rowid=origin)
             evidence = await env.plugin._gather_evidence(env.channel, "ks", [CLAIM])
-            assert _candidate_rowids(evidence) == [[grouped]]
-            assert other not in _candidate_rowids(evidence)[0]
-        finally:
-            await _teardown(env)
-
-    async def test_without_memory_only_the_channel_itself(self, tmp_path):
-        env = await _provenance_env(tmp_path)
-        try:
-            await _log(env, "the quarterly audit deadline is Thursday", channel_id="irc:#elsewhere")
-            own = await _log(env, "the quarterly audit deadline is Thursday")
-            origin = await _log(env, "when is it due?")
-            await _begin_exchange(env, "kw", origin_rowid=origin)
-            evidence = await env.plugin._gather_evidence(env.channel, "kw", [CLAIM])
-            assert _candidate_rowids(evidence) == [[own]]
+            assert sorted(_candidate_rowids(evidence)[0]) == sorted([other, signal, own])
+            channels = {c["channel_id"] for c in evidence[0]["candidates"]}
+            assert channels == {"irc:#elsewhere", "signal:alice", env.channel.id}
         finally:
             await _teardown(env)
 
@@ -1094,18 +1078,6 @@ class TestProvenanceCritic:
 # ---------------------------------------------------------------------------
 
 
-class RoleStub:
-    """An LLM client stand-in answering every call with fixed text."""
-
-    def __init__(self, text):
-        self.text = text
-        self.calls: list[list[dict]] = []
-
-    async def chat(self, messages, tools=None, extra_body=None):
-        self.calls.append(messages)
-        return {"choices": [{"message": {"role": "assistant", "content": self.text}}]}
-
-
 def _stage2_reply(past_claims):
     return json.dumps({
         "valence": 0.5, "stakes": 0.5, "ambiguity": 0.0, "commitment_density": 0.0,
@@ -1140,8 +1112,6 @@ async def _real_path_env(tmp_path, replies, past_claims):
 
     llm = LLMPlugin()
     pm.register(llm, name="llm")
-    critic = RoleStub(OBJECTION_VERDICT)
-    llm._clients["critic"] = critic
 
     plugins = []
     for name, cls in (("appraisal", AppraisalPlugin), ("critique", CritiquePlugin)):
@@ -1191,7 +1161,7 @@ async def _real_path_env(tmp_path, replies, past_claims):
     agent._client = client
     agent._mark_started()
     return SimpleNamespace(
-        agent=agent, channel=channel, db=db, critic=critic, gathered=gathered,
+        agent=agent, channel=channel, db=db, gathered=gathered,
         plugins=plugins, forks=forks,
     )
 
@@ -1239,7 +1209,6 @@ class TestProvenanceRealPath:
             assert _candidate_rowids(env.gathered[trace_id]) == [[]]
             [fork] = _real_provenance_forks(env)
             assert CLAIM["claim"] in fork["instruction"]
-            assert env.critic.calls == []
             outcomes = await _read_outcomes(env.db, trace_id)
             assert outcomes["provenance"]["objections"] == 1
         finally:
@@ -1258,7 +1227,6 @@ class TestProvenanceRealPath:
             provenance = _real_provenance_forks(env)
             assert len(provenance) == 2
             assert texts[0] in provenance[-1]["instruction"]
-            assert env.critic.calls == []
             # The fork ends at the reply of the exchange it audits.
             assert provenance[-1]["request"][-2]["content"] == CLAIM_REPLY
         finally:
@@ -1269,7 +1237,6 @@ class TestProvenanceRealPath:
         try:
             await _say(env, "when is it due?")
             assert _real_provenance_forks(env) == []
-            assert env.critic.calls == []
         finally:
             await _real_path_teardown(env)
 

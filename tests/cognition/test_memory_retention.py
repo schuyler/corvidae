@@ -12,6 +12,7 @@ phase-1b.md WP1b.1). Clock-frozen via unittest.mock.patch('time.time').
 
 import asyncio
 import json
+import logging
 import math
 import time
 from unittest.mock import AsyncMock, MagicMock, patch, call
@@ -437,6 +438,83 @@ class TestDemotion:
         m = await fetch_memory(db, mid)
         assert m["redacted"] == 1
 
+    async def test_failed_vec_delete_warns_and_still_demotes(self, caplog):
+        """#339: a vec-row delete that fails is a WARNING, and the row still demotes.
+
+        Dropping ``memory_vec`` makes the demotion pass's DELETE raise a real
+        ``OperationalError``. The rescue is the demotion itself: the memory row
+        is demoted with its vec row left behind. AGENTS.md requires that
+        rescue be logged at WARNING naming what was left and what happens next.
+        """
+        memory, embedder, channel, db = await build_retention_env()
+        if not memory._vec_available:
+            pytest.skip("sqlite-vec unavailable")
+
+        now = time.time()
+        old_created_at = now - 86400.0 * 300
+        mid = await seed_memory_row(
+            db, channel.id, "trivial old chatter whose vec delete will fail",
+            importance=0.1,
+            created_at=old_created_at, retrieval_count=0, last_retrieved_at=None,
+        )
+        assert await vec_row_exists(db, mid), "precondition: vec row must exist"
+        # The vec table is gone, so DELETE FROM memory_vec raises. Dropping it
+        # on the shared connection covers the in-memory test database; the
+        # write connection is that same connection for a file-less database.
+        await db.execute("DROP TABLE memory_vec")
+        await db.commit()
+
+        caplog.set_level(logging.DEBUG, logger="corvidae.retention")
+        await run_retention_job(memory, now=now)
+
+        # The rescue happened: the row is demoted despite the failed delete.
+        m = await fetch_memory(db, mid)
+        assert m["indexed"] == 0, "the failed vec delete must not stop the demotion"
+        assert m["embedded"] == 0, "the demoted row keeps embedded=0"
+
+        # It is reported at WARNING, naming the record and the remainder.
+        warnings = [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING and "vec" in r.getMessage().lower()
+        ]
+        assert warnings, (
+            "a failed vec-row delete is a rescue that leaves state behind; it must "
+            f"be logged at WARNING. got: {[r.getMessage() for r in caplog.records]}"
+        )
+        text = warnings[0].getMessage()
+        assert str(mid) in text, f"the warning must name the memory id {mid}: {text!r}"
+        assert "vec row" in text.lower(), (
+            f"the warning must say the vec row was left behind: {text!r}"
+        )
+        # No pass clears this row: backfill selects indexed = 1 and the row is
+        # now indexed = 0, and the demotion pass only flips rows 1 -> 0 itself.
+        # So the remedy has to be the manual statement, not a later pass.
+        assert "delete from memory_vec" in text.lower(), (
+            f"the warning must give the remedy that actually works: {text!r}"
+        )
+        # `memory_vec` is a vec0 virtual table, so the statement fails under a
+        # stock sqlite3 unless sqlite-vec is loaded (#198, redact.py:229). A
+        # remedy that cannot run as printed is not a remedy.
+        assert "sqlite-vec" in text.lower(), (
+            f"the printed remedy must say it needs the extension loaded: {text!r}"
+        )
+        assert "backfill" not in text.lower() and "demotion pass" not in text.lower(), (
+            f"the warning must not name a pass that cannot clear the row: {text!r}"
+        )
+        # And it must not claim the stale row is still retrievable. Both KNN
+        # queries join `m.indexed = 1`, so a demoted row is never returned;
+        # naming a match that cannot happen sends the reader chasing a wrong
+        # answer instead of a dead over-fetch slot.
+        assert "matched by vector search" not in text.lower(), (
+            f"the warning must not claim the demoted row still matches: {text!r}"
+        )
+        # The level check is the `r.levelno == logging.WARNING` filter above:
+        # `warnings` is empty if the rescue goes out at DEBUG, which reverting
+        # the log call to `logger.debug` proves by failing the `assert warnings`
+        # above. An earlier version also searched DEBUG records for the old
+        # wording, but that string exists at no level after the rewording, so
+        # the assertion could never fail (found by the #339 review).
+
 
 # ---------------------------------------------------------------------------
 # WP1b.1 retrieval integration (before_agent_turn exclusion + search_memory)
@@ -506,10 +584,7 @@ class TestDemotionRetrievalIntegration:
         memory_tools.register_tools(tools)
         tool_fn = {t.name: t.fn for t in tools}["search_memory"]
 
-        ctx = MagicMock()
-        ctx.channel = channel
-
-        result = await tool_fn("wifi power-save", _ctx=ctx)
+        result = await tool_fn("wifi power-save")
         assert f"{mid}" in result or "demoted" in result.lower(), (
             f"demoted record {mid} must appear in search_memory output"
         )
@@ -717,10 +792,7 @@ class TestStatInflation:
         memory_tools.register_tools(tools)
         tool_fn = {t.name: t.fn for t in tools}["search_memory"]
 
-        ctx = MagicMock()
-        ctx.channel = channel
-
-        await tool_fn("ESP32 rain gauge", _ctx=ctx)
+        await tool_fn("ESP32 rain gauge")
 
         m = await fetch_memory(db, mid)
         assert m["retrieval_count"] == 0, (
@@ -823,6 +895,32 @@ class TestJobStartup:
 # ---------------------------------------------------------------------------
 # WP1b.1 backfill attribution (green fix #2 — 2026-07-07)
 # ---------------------------------------------------------------------------
+
+
+class TestBackfillStage:
+    async def test_backfill_asks_for_the_embedding_stage(self):
+        """R1: the retention backfill's call site requests the ``embedding`` stage."""
+        memory, embedder, channel, db = await build_retention_env()
+        if not memory._vec_available:
+            pytest.skip("sqlite-vec unavailable")
+        llm = memory._llm()
+        stages: list = []
+        real_get_client = llm.get_client
+
+        def get_client(stage=None):
+            stages.append(stage)
+            return real_get_client(stage)
+
+        llm.get_client = get_client
+        await seed_memory_row(
+            db, channel.id, "wifi sensor backfill stage test unique phrase",
+            indexed=1, embedded=0, vec_available=False,
+        )
+
+        await run_retention_job(memory)
+
+        assert stages == ["embedding"]
+        await db.close()
 
 
 class TestBackfillAttribution:

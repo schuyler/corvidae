@@ -2,7 +2,7 @@
 
 Both triggers (compaction, idle) run one watermarked code path in a
 tracked background task: fetch the un-consolidated message_log range,
-summarize first-person via the background LLM role, score an importance
+summarize first-person via the main profile, score an importance
 prior, embed (fail-soft to embedded=0), and insert the memory row with the
 watermark advance in one atomic step.
 """
@@ -99,14 +99,13 @@ async def build_consolidation_env(config=None, db_path=":memory:"):
     await llm.on_init(pm=pm, config=config)
     stub = StubClient()
     llm._clients["main"] = stub
-    llm._clients["background"] = stub
     llm._clients["embedding"] = stub
     embedding_cfg = config.get("llm", {}).get("embedding")
     if embedding_cfg:
         llm.embedding_dimensions = embedding_cfg["dimensions"]
 
     # A view-capable agent with forks off (stages=set()): a range outside the
-    # live window is written from the rendered view on llm.background, so the
+    # live window is written from the rendered view on llm.main, so the
     # tests that drive such a range reach a view-capable agent (#380, #388).
     pm.register(FakeForkAgent(set()), name="agent")
 
@@ -329,6 +328,36 @@ class TestAttribution:
         assert attribution.get("stage") == "consolidation"
         assert attribution.get("channel_id") == channel.id
         await db.close()
+
+
+class TestStageRegistration:
+    def test_memory_registers_its_llm_stages_with_kinds(self):
+        """R1/R3: memory owns the consolidation, rubric and embedding stages."""
+        from helpers import collect_llm_stages
+
+        assert collect_llm_stages(MemoryPlugin(), "memory") == {
+            "consolidation": "chat",
+            "rubric": "chat",
+            "embedding": "embedding",
+        }
+
+    async def test_default_importance_prior_asks_for_the_rubric_stage(self):
+        """R1: the default prior's call site requests the ``rubric`` stage."""
+        stages: list = []
+        client = StubClient(chat_text=json.dumps({"importance": 0.9}))
+
+        class _LLM:
+            def get_client(self, stage=None):
+                stages.append(stage)
+                return client
+
+        memory = MemoryPlugin()
+        memory._llm = lambda: _LLM()
+        memory._rubric_prompt = "RUBRIC"
+
+        score = await memory.importance_prior.score([{"role": "user", "content": "x"}])
+
+        assert (stages, score) == (["rubric"], 0.9)
 
 
 class TestRubricPrior:
@@ -590,7 +619,7 @@ class TestMalformedConsolidationReply:
         """One unusable reply costs a retry, not the whole range."""
         memory, persistence, stub, channel, db = await build_consolidation_env()
         client = _SequenceChatClient(["not json at all", CONSOLIDATION_JSON])
-        memory._llm()._clients["background"] = client
+        memory._llm()._clients["main"] = client
         try:
             await drive_compaction_consolidation(memory, persistence, channel)
 
@@ -605,7 +634,7 @@ class TestMalformedConsolidationReply:
         """After the retry fails, keep the work as the raw transcript."""
         memory, persistence, stub, channel, db = await build_consolidation_env()
         client = _SequenceChatClient(["nope", "still not json", "unused"])
-        memory._llm()._clients["background"] = client
+        memory._llm()._clients["main"] = client
         try:
             await drive_compaction_consolidation(memory, persistence, channel)
 

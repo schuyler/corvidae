@@ -202,10 +202,10 @@ async def test_no_beat_when_a_channel_goes_busy_during_the_memory_read(make_env)
     env = await make_env(AWAKE)
     real_recent = env.memory.recent
 
-    async def recent_then_traffic(channel_id, limit):
+    async def recent_then_traffic(limit):
         # A message lands on another channel while memory is being read.
         env.tracker.note_activity("irc:#busy")
-        return await real_recent(channel_id, limit)
+        return await real_recent(limit)
 
     env.memory.recent = recent_then_traffic
     await env.clock.advance(AFTER)
@@ -226,10 +226,10 @@ async def test_memory_read_failure_retries_next_period(make_env, caplog):
     real_recent = env.memory.recent
     failures = [RuntimeError("database is locked")]
 
-    async def flaky_recent(channel_id, limit):
+    async def flaky_recent(limit):
         if failures:
             raise failures.pop()
-        return await real_recent(channel_id, limit)
+        return await real_recent(limit)
 
     env.memory.recent = flaky_recent
     with caplog.at_level(logging.WARNING, logger="corvidae.heartbeat"):
@@ -271,19 +271,15 @@ async def test_rejects_an_after_that_would_beat_back_to_back(make_env, bad):
 # ---------------------------------------------------------------------------
 
 
-async def test_beat_carries_prompt_and_recent_memory_in_scope(make_env):
-    """H2: the beat holds the heartbeat prompt and the memories of the
-    channels in its scope, newest first. Out-of-scope, redacted and the
-    heartbeat's own records stay out."""
-    config = {
-        "heartbeat": {"after": AFTER},
-        "memory": {"channel_groups": {"review": [HEARTBEAT_CHANNEL, "irc:#lex"]}},
-    }
-    env = await make_env(config)
+async def test_beat_carries_prompt_and_recent_memory(make_env):
+    """H2: the beat holds the heartbeat prompt and the newest memories of the
+    whole memory, every channel's and its own included, newest first. Redacted
+    records stay out. No configuration is needed to reach any channel."""
+    env = await make_env({"heartbeat": {"after": AFTER}})
     now = env.clock.now()
     await env.seed_memory("irc:#lex", "I promised kestrel a wiring diagram.", now - 7200)
     await env.seed_memory("irc:#lex", "kestrel said the station reboots at noon.", now - 60)
-    await env.seed_memory("signal:alice", "Alice's private plans.", now - 30)
+    await env.seed_memory("signal:alice", "Alice's plans for Friday.", now - 30)
     await env.seed_memory("irc:#lex", "A redacted thing.", now - 20, redacted=1)
     await env.seed_memory(HEARTBEAT_CHANNEL, "I reviewed my memories.", now - 10)
 
@@ -291,12 +287,14 @@ async def test_beat_carries_prompt_and_recent_memory_in_scope(make_env):
     assert len(env.beats) == 1
     text = env.beats[0]["text"]
     assert DEFAULT_HEARTBEAT_PROMPT in text
-    newer = text.index("kestrel said the station reboots at noon.")
-    older = text.index("I promised kestrel a wiring diagram.")
-    assert newer < older
-    assert "Alice's private plans." not in text
+    newest_first = [
+        text.index("I reviewed my memories."),
+        text.index("Alice's plans for Friday."),
+        text.index("kestrel said the station reboots at noon."),
+        text.index("I promised kestrel a wiring diagram."),
+    ]
+    assert newest_first == sorted(newest_first)
     assert "A redacted thing." not in text
-    assert "I reviewed my memories." not in text
 
 
 # ---------------------------------------------------------------------------

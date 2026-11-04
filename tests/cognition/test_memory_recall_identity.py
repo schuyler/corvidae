@@ -62,7 +62,7 @@ class TestBandOn:
         """Today's behavior: a 60-day-old exact match bands weak."""
         memory, _, channel, _, db = await env()
         await seed_memory(db, channel.id, SUMMARY, created_at=time.time() - 60 * DAY)
-        [c], _ = await memory.retrieve(channel.id, SUMMARY)
+        [c], _ = await memory.retrieve(SUMMARY)
         assert c["similarity"] == pytest.approx(1.0, abs=1e-4)
         assert c["score"] == pytest.approx(math.exp(-2), rel=1e-3)
         assert c["band"] == "weak"
@@ -70,7 +70,7 @@ class TestBandOn:
     async def test_similarity_bands_on_raw_similarity(self, env):
         memory, _, channel, _, db = await env(_config(band_on="similarity"))
         await seed_memory(db, channel.id, SUMMARY, created_at=time.time() - 60 * DAY)
-        [c], _ = await memory.retrieve(channel.id, SUMMARY)
+        [c], _ = await memory.retrieve(SUMMARY)
         assert c["band"] == "strong"
         # The score still decays — only the band changes.
         assert c["score"] == pytest.approx(math.exp(-2), rel=1e-3)
@@ -80,7 +80,7 @@ class TestBandOn:
         memory, _, channel, _, db = await env(_config(band_on="similarity"))
         old = await seed_memory(db, channel.id, SUMMARY, created_at=time.time() - 60 * DAY)
         new = await seed_memory(db, channel.id, SUMMARY, created_at=time.time() - 1 * DAY)
-        candidates, _ = await memory.retrieve(channel.id, SUMMARY)
+        candidates, _ = await memory.retrieve(SUMMARY)
         assert [c["id"] for c in candidates] == [new, old]
         assert all(c["band"] == "strong" for c in candidates)
 
@@ -89,7 +89,7 @@ class TestBandOn:
         memory, embedder, channel, _, db = await env(_config(band_on="similarity"))
         await seed_memory(db, channel.id, SUMMARY, created_at=time.time() - 60 * DAY)
         embedder.fail = True
-        [c], degraded = await memory.retrieve(channel.id, "weather station wifi")
+        [c], degraded = await memory.retrieve("weather station wifi")
         assert degraded
         assert c["similarity"] == FTS_SIMILARITY_PROXY
         assert c["band"] == "moderate"
@@ -99,7 +99,7 @@ class TestBandOn:
             memory, _, channel, _, db = await env(_config(band_on="vibes"))
         assert "band_on" in caplog.text
         await seed_memory(db, channel.id, SUMMARY, created_at=time.time() - 60 * DAY)
-        [c], _ = await memory.retrieve(channel.id, SUMMARY)
+        [c], _ = await memory.retrieve(SUMMARY)
         assert c["band"] == "weak"
 
 
@@ -113,14 +113,14 @@ class TestRecencyFrom:
         memory, _, channel, _, db = await env()
         mid = await seed_memory(db, channel.id, SUMMARY, created_at=time.time() - 60 * DAY)
         await _set_last_retrieved(db, mid, time.time())
-        [c], _ = await memory.retrieve(channel.id, SUMMARY)
+        [c], _ = await memory.retrieve(SUMMARY)
         assert c["score"] == pytest.approx(math.exp(-2), rel=1e-3)
 
     async def test_last_used_ranks_from_last_retrieval(self, env):
         memory, _, channel, _, db = await env(_config(recency_from="last_used"))
         mid = await seed_memory(db, channel.id, SUMMARY, created_at=time.time() - 60 * DAY)
         await _set_last_retrieved(db, mid, time.time() - 1 * DAY)
-        [c], _ = await memory.retrieve(channel.id, SUMMARY)
+        [c], _ = await memory.retrieve(SUMMARY)
         assert c["score"] == pytest.approx(math.exp(-1 / 30), rel=1e-3)
         # Displayed age still measures from created_at.
         assert c["age_seconds"] == pytest.approx(60 * DAY, rel=1e-3)
@@ -129,7 +129,7 @@ class TestRecencyFrom:
     async def test_last_used_never_retrieved_falls_back_to_created(self, env):
         memory, _, channel, _, db = await env(_config(recency_from="last_used"))
         await seed_memory(db, channel.id, SUMMARY, created_at=time.time() - 60 * DAY)
-        [c], _ = await memory.retrieve(channel.id, SUMMARY)
+        [c], _ = await memory.retrieve(SUMMARY)
         assert c["score"] == pytest.approx(math.exp(-2), rel=1e-3)
 
     async def test_last_used_applies_in_fts_degraded_mode(self, env):
@@ -137,7 +137,7 @@ class TestRecencyFrom:
         mid = await seed_memory(db, channel.id, SUMMARY, created_at=time.time() - 60 * DAY)
         await _set_last_retrieved(db, mid, time.time())
         embedder.fail = True
-        [c], degraded = await memory.retrieve(channel.id, "weather station wifi")
+        [c], degraded = await memory.retrieve("weather station wifi")
         assert degraded
         assert c["score"] == pytest.approx(FTS_SIMILARITY_PROXY, rel=1e-3)
 
@@ -147,7 +147,7 @@ class TestRecencyFrom:
         assert "recency_from" in caplog.text
         mid = await seed_memory(db, channel.id, SUMMARY, created_at=time.time() - 60 * DAY)
         await _set_last_retrieved(db, mid, time.time())
-        [c], _ = await memory.retrieve(channel.id, SUMMARY)
+        [c], _ = await memory.retrieve(SUMMARY)
         assert c["score"] == pytest.approx(math.exp(-2), rel=1e-3)
 
     async def test_both_settings_together(self, env):
@@ -157,7 +157,7 @@ class TestRecencyFrom:
         )
         mid = await seed_memory(db, channel.id, SUMMARY, created_at=time.time() - 180 * DAY)
         await _set_last_retrieved(db, mid, time.time() - 2 * DAY)
-        [c], _ = await memory.retrieve(channel.id, SUMMARY)
+        [c], _ = await memory.retrieve(SUMMARY)
         assert c["band"] == "strong"
         # Ranked as 2 days old, displayed as 180.
         assert c["score"] == pytest.approx(math.exp(-2 / 30), rel=1e-3)

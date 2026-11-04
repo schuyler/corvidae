@@ -23,7 +23,7 @@ Two independent paths:
     only as a fork of the live window cut at the exchange's final reply, so
     the judge sees the system prompt and the exchange's own tool results as
     records. The code only fetches evidence: the memory snapshot and, per
-    claim, the closest earlier messages in the channel's memory scope. The
+    claim, the closest earlier messages on every channel. The
     forked critic, a model, judges whether any of it supports the claim,
     answering with one verdict (supported or not, plus a reason) per claim;
     the unsupported ones become objections. A fork that can't run (forks
@@ -60,7 +60,6 @@ from corvidae.persistence import decode_message_row
 from corvidae.task import Task
 from corvidae.prompts import resolve_prompt
 from corvidae.tuning import config_value, resolve_tunable
-from corvidae_cognition.memory import ChannelScope
 from corvidae_cognition.probe import ReadOnlyProbe
 
 # Why a lens skips when forks are off for the stage (shared by both skip texts).
@@ -471,6 +470,10 @@ class CritiquePlugin(CorvidaePlugin):
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
+
+    @hookimpl
+    def register_llm_stages(self, stages: dict[str, str]) -> None:
+        stages["critique"] = "chat"
 
     @hookimpl
     async def on_init(self, pm, config: dict) -> None:
@@ -949,8 +952,8 @@ class CritiquePlugin(CorvidaePlugin):
             records, but the fork's window already carries them, so only
             this search leaves them out;
           * record types (dialogue and summaries), not CONTEXT or UNSENT;
-          * channels in the calling channel's memory scope, so no text
-            crosses a channel boundary into the critic's input.
+          * every channel (PRD §3.7 Critique 2, GitHub issue #168): the
+            search reaches what has left the window, wherever it was said.
 
         None, with a warning, when there is no probe connection, no
         originating rowid, or a search fails: an absence that wasn't
@@ -974,7 +977,6 @@ class CritiquePlugin(CorvidaePlugin):
                 trace_id, extra={"channel": channel.id, "trace_id": trace_id},
             )
             return None
-        scope_sql, scope_params = self._scope(channel).sql("m.channel_id")
         types = ",".join("?" for _ in RECORD_MESSAGE_TYPES)
         sql = (
             "SELECT m.id, m.channel_id, CAST(m.message AS BLOB), m.message_type, "
@@ -982,7 +984,7 @@ class CritiquePlugin(CorvidaePlugin):
             "highlight(message_fts, 0, char(2), char(3)) "
             "FROM message_fts JOIN message_log m ON m.id = message_fts.rowid "
             f"WHERE message_fts MATCH ? AND m.id < ? AND m.message_type IN ({types}) "
-            f"AND {scope_sql} ORDER BY bm25(message_fts) LIMIT ?"
+            "ORDER BY bm25(message_fts) LIMIT ?"
         )
         evidence: list[dict] = []
         try:
@@ -995,7 +997,7 @@ class CritiquePlugin(CorvidaePlugin):
                     async with db.execute(
                         sql,
                         (match_expr, before_rowid, *RECORD_MESSAGE_TYPES,
-                         *scope_params, PROVENANCE_CANDIDATES),
+                         PROVENANCE_CANDIDATES),
                     ) as cursor:
                         rows = await cursor.fetchall()
                 candidates = []
@@ -1024,15 +1026,6 @@ class CritiquePlugin(CorvidaePlugin):
             )
             return None
         return evidence
-
-    def _scope(self, channel) -> ChannelScope:
-        """The channels whose messages may be shown as evidence: MemoryPlugin's
-        scope for this channel (its channel_groups), else the channel alone."""
-        memory = self.pm.get_plugin("memory") if hasattr(self, "pm") else None
-        scope_of = getattr(memory, "_channel_scope", None)
-        if callable(scope_of):
-            return scope_of(channel.id)
-        return ChannelScope(frozenset({channel.id}))
 
     @staticmethod
     def _render_evidence(evidence: list[dict]) -> str:

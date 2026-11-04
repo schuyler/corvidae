@@ -42,6 +42,14 @@ STALE_MESSAGE_THRESHOLD_SECONDS = 5 * 60
 # scheduler's timer pass.
 ALIAS_RESOLUTION_WAIT_SECONDS = 5.0
 
+# How long a liveness RPC (typing, read receipt) waits for signal-cli's
+# response. A signal-cli that accepts the frame but never answers would
+# otherwise hold the serial inbound processor -- and, in send_message, the
+# reply -- for as long as the daemon stays wedged. Deliberately not applied
+# to `send`: a send that times out may have been delivered, and giving up on
+# it would change delivery semantics rather than only liveness (#413).
+LIVENESS_RPC_TIMEOUT = 10.0
+
 # Connection retry backoff ladder -- the same one IRCClient uses.
 _INITIAL_BACKOFF = 10
 _BACKOFF_MULTIPLIER = 2
@@ -357,7 +365,14 @@ class SignalPlugin(TransportPlugin):
         frame = {"jsonrpc": "2.0", "id": req_id, "method": method, "params": params}
         writer.write((json.dumps(frame) + "\n").encode("utf-8"))
         await writer.drain()
-        return await future
+        try:
+            return await future
+        finally:
+            # A caller that bounds this await (the liveness RPCs, #413) cancels
+            # it on timeout. The response may never come, so drop the entry
+            # here rather than leaking one per wedged call; the pop is
+            # idempotent with the one the response path already did.
+            self._pending_requests.pop(req_id, None)
 
     # -----------------------------------------------------------------
     # Inbound decoding and filtering
@@ -782,7 +797,12 @@ class SignalPlugin(TransportPlugin):
             # sendTyping is one method with a boolean "stop" -- not a
             # separate stop method or an action string. False starts (or
             # refreshes) the indicator; True clears it.
-            await self._send_rpc("sendTyping", {"recipient": channel.scope, "stop": stop})
+            # Bounded (#413): a wedged daemon must not hold the inbound
+            # processor, which sends the start frame inline.
+            await asyncio.wait_for(
+                self._send_rpc("sendTyping", {"recipient": channel.scope, "stop": stop}),
+                LIVENESS_RPC_TIMEOUT,
+            )
             return True
         except Exception as exc:
             # Name the channel and what was being sent, and the remedy: the
@@ -825,11 +845,23 @@ class SignalPlugin(TransportPlugin):
         if timestamp_ms is None:
             return
         try:
-            await self._send_rpc(
-                "sendReceipt", {"recipient": channel.scope, "targetTimestamp": timestamp_ms}
+            # Bounded (#413): on_message_persisted runs on the serial inbound
+            # processor, so an unanswered receipt would hold the next message.
+            await asyncio.wait_for(
+                self._send_rpc(
+                    "sendReceipt", {"recipient": channel.scope, "targetTimestamp": timestamp_ms}
+                ),
+                LIVENESS_RPC_TIMEOUT,
             )
         except Exception as exc:
-            logger.warning("signal: failed to send read receipt: %s", exc, exc_info=True)
+            # Names the channel and the remedy, as the typing rescue does: the
+            # marker is cosmetic, only a persistent failure needs action.
+            logger.warning(
+                "signal: failed to send read receipt on %s (%s): %s; "
+                "the reply is unaffected -- if this repeats, check that "
+                "signal-cli is running and its socket is reachable",
+                channel.id, type(exc).__name__, exc, exc_info=True,
+            )
 
     async def _sweep_orphans_before(self, channel: Channel, trace_id: str) -> None:
         """Release pending entries admitted before ``trace_id`` that were
