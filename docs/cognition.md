@@ -149,8 +149,10 @@ computed (#272, #309). A demotion whose `memory_vec` delete fails still
 demotes the row and logs a WARNING naming the record and that its vec row was
 left behind. No later pass clears that row — the backfill selects `indexed = 1`
 and the row is now `indexed = 0`, and the demotion pass only flips rows it
-finds at `indexed = 1` — so the stale vec row keeps matching KNN until it is
-deleted by hand with `DELETE FROM memory_vec WHERE memory_id = ?`. The log
+finds at `indexed = 1` — but retrieval never returns it either: both KNN
+queries join `m.indexed = 1`. What the stale row costs is the vec-rows ≤
+indexed invariant, and one dead slot in each over-fetch, until it is deleted
+by hand with `DELETE FROM memory_vec WHERE memory_id = ?`. The log
 lines count the rows actually written. `_db_lock`
 stays, serializing memory's own writers (consolidation versus goals);
 it no longer carries cross-plugin atomicity. A persistence DB with no

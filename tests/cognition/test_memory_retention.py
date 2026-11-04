@@ -495,6 +495,13 @@ class TestDemotion:
         assert "backfill" not in text.lower() and "demotion pass" not in text.lower(), (
             f"the warning must not name a pass that cannot clear the row: {text!r}"
         )
+        # And it must not claim the stale row is still retrievable. Both KNN
+        # queries join `m.indexed = 1`, so a demoted row is never returned;
+        # naming a match that cannot happen sends the reader chasing a wrong
+        # answer instead of a dead over-fetch slot.
+        assert "matched by vector search" not in text.lower(), (
+            f"the warning must not claim the demoted row still matches: {text!r}"
+        )
 
         # And not merely at DEBUG, where the default level hides it.
         debug_copies = [
