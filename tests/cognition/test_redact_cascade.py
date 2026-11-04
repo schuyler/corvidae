@@ -18,6 +18,7 @@ Behaviours tested (bootstrap-mapping §4.11–4.12):
 """
 
 import asyncio
+import importlib.util
 import json
 import time
 
@@ -713,6 +714,10 @@ async def _state(path: str, ids: dict) -> tuple[dict, dict, bool]:
         await db.close()
 
 
+@pytest.mark.skipif(
+    importlib.util.find_spec("sqlite_vec") is None,
+    reason="these construct a real vec0 table, so they need sqlite-vec (#130)",
+)
 class TestCliWithMemoryVec:
     def test_memory_form_completes_and_deletes_vec_row(self, tmp_path):
         from click.testing import CliRunner
