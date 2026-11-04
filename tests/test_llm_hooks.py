@@ -1,6 +1,5 @@
 """Tests for the LLMClient observer seam and on_llm_request/on_llm_response hooks."""
 
-import asyncio
 import logging
 import time
 from unittest.mock import AsyncMock, MagicMock
@@ -228,7 +227,7 @@ class TestLLMPluginObserverWiring:
         await plugin.on_start(config)
         return plugin, recorder
 
-    async def test_main_and_background_clients_get_observers_with_profiles(self):
+    async def test_every_profile_client_gets_an_observer_with_its_profile(self):
         config = {
             "llm": {
                 "main": {"base_url": BASE_URL, "model": "main-model"},
@@ -238,13 +237,13 @@ class TestLLMPluginObserverWiring:
         plugin, recorder = await self._start_plugin(config)
         try:
             # Stub out the HTTP sessions so chat() never hits the network.
-            plugin.main_client.session = _make_mock_session(_make_mock_response())
-            plugin.background_client.session = _make_mock_session(
+            plugin.get_client().session = _make_mock_session(_make_mock_response())
+            plugin._clients["background"].session = _make_mock_session(
                 _make_mock_response()
             )
 
-            await plugin.main_client.chat(MESSAGES)
-            await plugin.background_client.chat(MESSAGES)
+            await plugin.get_client().chat(MESSAGES)
+            await plugin._clients["background"].chat(MESSAGES)
         finally:
             await plugin.on_stop()
 
@@ -260,10 +259,10 @@ class TestLLMPluginObserverWiring:
         config = {"llm": {"main": {"base_url": BASE_URL, "model": MODEL}}}
         plugin, recorder = await self._start_plugin(config)
         try:
-            plugin.main_client.session = _make_mock_session(_make_mock_response())
+            plugin.get_client().session = _make_mock_session(_make_mock_response())
             token = set_attribution(stage="turn", channel_id="c1")
             try:
-                await plugin.main_client.chat(MESSAGES)
+                await plugin.get_client().chat(MESSAGES)
             finally:
                 reset_attribution(token)
         finally:
@@ -277,24 +276,6 @@ class TestLLMPluginObserverWiring:
             "stage": "turn",
             "channel_id": "c1",
         }
-
-    async def test_config_reload_rewires_observer_on_new_client(self):
-        config = {"llm": {"main": {"base_url": BASE_URL, "model": MODEL}}}
-        plugin, recorder = await self._start_plugin(config)
-        try:
-            new_config = {
-                "llm": {"main": {"base_url": BASE_URL, "model": "new-model"}}
-            }
-            await plugin.on_config_reload(new_config)
-            plugin.main_client.session = _make_mock_session(_make_mock_response())
-            await plugin.main_client.chat(MESSAGES)
-        finally:
-            await plugin.on_stop()
-            # Allow the deferred old-client close task to be scheduled/cancelled.
-            await asyncio.sleep(0)
-
-        assert recorder.requests[0]["model"] == "new-model"
-        assert recorder.requests[0]["profile"] == "main"
 
 
 class TestObserverNamesModelSent:

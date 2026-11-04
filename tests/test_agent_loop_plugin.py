@@ -20,7 +20,7 @@ from corvidae.persistence import PersistencePlugin
 from corvidae.tool import ToolRegistry
 
 from corvidae.outbound import OutboundMessage
-from helpers import build_plugin_and_channel, drain, sent, sent_texts
+from helpers import build_plugin_and_channel, drain, sent, sent_texts, stub_llm_config
 from llm_response_fixtures import (
     _make_text_response,
     _make_tool_call_response,
@@ -91,7 +91,8 @@ class TestOnStart:
         # Register a mock LLMPlugin so Agent can borrow the client from it
         mock_client = MagicMock()
         mock_llm = LLMPlugin(pm)
-        mock_llm.main_client = mock_client
+        mock_llm._clients["main"] = mock_client
+        stub_llm_config(mock_llm)
         pm.register(mock_llm, name="llm")
 
         # Register ToolCollectionPlugin with an empty registry
@@ -139,7 +140,8 @@ class TestOnStart:
         pm.register(tool_plugin, name="tool_plugin")
 
         mock_llm = LLMPlugin(pm)
-        mock_llm.main_client = MagicMock()
+        mock_llm._clients["main"] = MagicMock()
+        stub_llm_config(mock_llm)
         pm.register(mock_llm, name="llm")
 
         tools_plugin = ToolCollectionPlugin(pm)
@@ -178,7 +180,8 @@ class TestOnStart:
         pm.register(persistence, name="persistence")
 
         mock_llm = LLMPlugin(pm)
-        mock_llm.main_client = MagicMock()
+        mock_llm._clients["main"] = MagicMock()
+        stub_llm_config(mock_llm)
         pm.register(mock_llm, name="llm")
 
         tools_plugin = ToolCollectionPlugin(pm)
@@ -218,7 +221,8 @@ class TestOnStart:
         pm.register(persistence, name="persistence")
 
         mock_llm = LLMPlugin(pm)
-        mock_llm.main_client = MagicMock()
+        mock_llm._clients["main"] = MagicMock()
+        stub_llm_config(mock_llm)
         pm.register(mock_llm, name="llm")
 
         tools_plugin = ToolCollectionPlugin(pm)
@@ -257,7 +261,7 @@ class TestOnStart:
             await llm_plugin.on_start(config=bad_config)
 
     async def test_on_start_config_parses_llm_main(self):
-        """on_start borrows self._client from LLMPlugin.main_client."""
+        """on_start borrows self._client from LLMPlugin.get_client()."""
         from corvidae.llm_plugin import LLMPlugin
         from corvidae.tool_collection import ToolCollectionPlugin
         from corvidae.tool import ToolRegistry
@@ -269,7 +273,8 @@ class TestOnStart:
 
         mock_main_client = MagicMock()
         mock_llm = LLMPlugin(pm)
-        mock_llm.main_client = mock_main_client
+        mock_llm._clients["main"] = mock_main_client
+        stub_llm_config(mock_llm)
         pm.register(mock_llm, name="llm")
 
         tools_plugin = ToolCollectionPlugin(pm)

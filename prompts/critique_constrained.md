@@ -5,7 +5,7 @@ System prompt for `CritiquePlugin`'s constrained lens (bootstrap-mapping
 commitment density: the exchange contains concrete commitments, facts,
 numbers, or promises, so the risk is a violated constraint. Schema-
 constrained JSON objections — structured, not free text. Runs as a fork on
-`llm.main` as a silent background task.
+the `critique` stage's profile as a silent background task.
 
 ---
 

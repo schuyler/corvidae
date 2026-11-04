@@ -13,6 +13,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from helpers import stub_llm_config
+
 
 # ---------------------------------------------------------------------------
 # 1. LLMPlugin can be imported from corvidae.llm_plugin
@@ -42,25 +44,24 @@ def test_llm_plugin_depends_on_is_empty_set():
 
 
 # ---------------------------------------------------------------------------
-# 3. LLMPlugin.__init__ accepts pm, initializes main_client and
-#    background_client as None
+# 3. LLMPlugin.__init__ accepts pm and starts with no clients
 # ---------------------------------------------------------------------------
 
 
 def test_llm_plugin_init_stores_pm_and_initializes_clients_as_none():
-    """LLMPlugin(pm) must store pm and initialize main/background client as None."""
+    """LLMPlugin(pm) must store pm and hold no clients before on_start."""
     from corvidae.llm_plugin import LLMPlugin
 
     mock_pm = MagicMock()
     plugin = LLMPlugin(pm=mock_pm)
 
     assert plugin.pm is mock_pm, "LLMPlugin must store pm as self.pm"
-    assert plugin.main_client is None, "main_client must be None before on_start"
-    assert plugin.background_client is None, "background_client must be None before on_start"
+    assert plugin.get_client() is None, "the main-turn client must be None before on_start"
+    assert plugin._clients == {}, "no client may exist before on_start"
 
 
 # ---------------------------------------------------------------------------
-# 4. LLMPlugin.get_client() with no stage returns main_client (main turns)
+# 4. LLMPlugin.get_client() with no stage returns the default chat client (main turns)
 # ---------------------------------------------------------------------------
 
 
@@ -70,11 +71,12 @@ def test_llm_plugin_get_client_without_stage_returns_main_client():
 
     plugin = LLMPlugin(pm=None)
     mock_client = MagicMock()
-    plugin.main_client = mock_client
+    plugin._clients["main"] = mock_client
+    stub_llm_config(plugin)
 
     result = plugin.get_client()
     assert result is mock_client, (
-        f"get_client() should return main_client, got {result!r}"
+        f"get_client() should return the main profile's client, got {result!r}"
     )
 
 
@@ -168,13 +170,13 @@ def test_llm_plugin_create_client_invalid_reasoning_reopened_warns_and_falls_bac
 
 
 # ---------------------------------------------------------------------------
-# 7. LLMPlugin.on_start creates and starts main_client from config
+# 7. LLMPlugin.on_start creates and starts the main client from config
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_llm_plugin_on_start_creates_and_starts_main_client():
-    """on_start must create main_client and call client.start()."""
+    """on_start must create the main profile's client and call client.start()."""
     from corvidae.llm_plugin import LLMPlugin
 
     plugin = LLMPlugin()
@@ -194,102 +196,37 @@ async def test_llm_plugin_on_start_creates_and_starts_main_client():
     with patch.object(LLMPlugin, "_create_client", return_value=mock_client) as mock_create:
         await plugin.on_start(config=config)
 
-    mock_create.assert_called_once_with(config["llm"]["main"], profile="main")
+    # The client is built from the resolved profile, which carries its kind.
+    mock_create.assert_called_once_with(
+        {**config["llm"]["main"], "kind": "chat"}, profile="main"
+    )
     mock_client.start.assert_awaited_once()
-    assert plugin.main_client is mock_client
-
-
-@pytest.mark.asyncio
-async def test_llm_plugin_on_start_creates_background_client_when_configured():
-    """on_start creates background_client when llm.background is present."""
-    from corvidae.llm_plugin import LLMPlugin
-
-    plugin = LLMPlugin(pm=None)
-
-    main_mock = MagicMock(name="main_client")
-    main_mock.start = AsyncMock()
-    bg_mock = MagicMock(name="background_client")
-    bg_mock.start = AsyncMock()
-
-    clients = [main_mock, bg_mock]
-
-    config = {
-        "llm": {
-            "main": {"base_url": "http://localhost:8080", "model": "main-model"},
-            "background": {"base_url": "http://localhost:9090", "model": "bg-model"},
-        }
-    }
-    await plugin.on_init(pm=None, config=config)
-
-    with patch.object(LLMPlugin, "_create_client", side_effect=clients):
-        await plugin.on_start(config=config)
-
-    main_mock.start.assert_awaited_once()
-    bg_mock.start.assert_awaited_once()
-    assert plugin.main_client is main_mock
-    assert plugin.background_client is bg_mock
-
-
-@pytest.mark.asyncio
-async def test_llm_plugin_on_start_no_background_client_when_absent():
-    """on_start leaves background_client as None when llm.background is absent."""
-    from corvidae.llm_plugin import LLMPlugin
-
-    plugin = LLMPlugin(pm=None)
-
-    mock_client = MagicMock()
-    mock_client.start = AsyncMock()
-
-    with patch.object(LLMPlugin, "_create_client", return_value=mock_client):
-        config = {
-            "llm": {
-                "main": {"base_url": "http://localhost:8080", "model": "test-model"},
-            }
-        }
-        await plugin.on_start(config=config)
-
-    assert plugin.background_client is None
+    assert plugin._clients["main"] is mock_client
 
 
 # ---------------------------------------------------------------------------
-# 8. LLMPlugin.on_stop stops both clients
+# 8. LLMPlugin.on_stop stops every client
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_llm_plugin_on_stop_stops_main_and_background_clients():
-    """on_stop must call stop() on both main and background clients when both exist."""
+async def test_llm_plugin_on_stop_stops_every_client():
+    """on_stop must call stop() on the client of every profile."""
     from corvidae.llm_plugin import LLMPlugin
 
     plugin = LLMPlugin(pm=None)
     main_mock = MagicMock()
     main_mock.stop = AsyncMock()
-    bg_mock = MagicMock()
-    bg_mock.stop = AsyncMock()
+    other_mock = MagicMock()
+    other_mock.stop = AsyncMock()
 
-    plugin.main_client = main_mock
-    plugin.background_client = bg_mock
+    plugin._clients["main"] = main_mock
+    plugin._clients["other"] = other_mock
 
     await plugin.on_stop()
 
     main_mock.stop.assert_awaited_once()
-    bg_mock.stop.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_llm_plugin_on_stop_stops_only_main_when_no_background():
-    """on_stop must stop main_client without error when background_client is None."""
-    from corvidae.llm_plugin import LLMPlugin
-
-    plugin = LLMPlugin(pm=None)
-    main_mock = MagicMock()
-    main_mock.stop = AsyncMock()
-    plugin.main_client = main_mock
-    plugin.background_client = None
-
-    await plugin.on_stop()  # must not raise
-
-    main_mock.stop.assert_awaited_once()
+    other_mock.stop.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -298,7 +235,7 @@ async def test_llm_plugin_on_stop_safe_when_clients_are_none():
     from corvidae.llm_plugin import LLMPlugin
 
     plugin = LLMPlugin(pm=None)
-    # Both clients are None — on_stop must complete without error
+    # No clients exist — on_stop must complete without error
     await plugin.on_stop()
 
 
@@ -422,7 +359,6 @@ async def _start_plugin(llm: dict):
     from corvidae.llm_plugin import LLMPlugin
 
     plugin = LLMPlugin()
-    plugin._profile_configs = dict(llm)
     await plugin.on_start(config={"llm": llm})
     return plugin
 
@@ -434,13 +370,15 @@ class TestApiKeyFromEnvironment:
         monkeypatch.setenv(_KEY_VAR, _SECRET)
         llm = {"main": _profile_cfg("sk-main")}
         llm[profile] = _profile_cfg("${" + _KEY_VAR + "}")
+        if profile == "embedding":
+            llm[profile]["kind"] = "embedding"
         plugin = await _start_plugin(llm)
         try:
             client = plugin._clients[profile]
             assert client.api_key == _SECRET
             assert client.session.headers["Authorization"] == f"Bearer {_SECRET}"
             # The raw config keeps the reference, never the resolved key.
-            assert plugin._profile_configs[profile]["api_key"] == "${" + _KEY_VAR + "}"
+            assert plugin._config.profiles[profile]["api_key"] == "${" + _KEY_VAR + "}"
         finally:
             await plugin.on_stop()
 
@@ -462,7 +400,6 @@ class TestApiKeyFromEnvironment:
         # Build the plugin here (not via _start_plugin) so teardown can stop
         # the main client that on_start started before background failed.
         plugin = LLMPlugin()
-        plugin._profile_configs = dict(llm)
         try:
             with caplog.at_level("DEBUG"):
                 with pytest.raises(ValueError) as excinfo:
@@ -534,17 +471,20 @@ class TestApiKeyFromEnvironment:
         client = LLMPlugin()._create_client(_profile_cfg("pa$$word$"), profile="main")
         assert client.api_key == "pa$$word$"
 
-    async def test_reload_to_unset_variable_keeps_old_client(self, monkeypatch):
-        """Reload: an unset variable raises and the old main client stays."""
+    async def test_reload_to_unset_variable_warns_and_keeps_old_client(
+        self, monkeypatch, caplog
+    ):
+        """Reload: llm is restart-only, so a changed api_key (here an unset
+        variable) warns, is not resolved, and the old client stays."""
         monkeypatch.delenv(_KEY_VAR, raising=False)
         plugin = await _start_plugin({"main": _profile_cfg("sk-old")})
         try:
             old = plugin.get_client()
-            with pytest.raises(ValueError) as excinfo:
+            with caplog.at_level("WARNING", logger="corvidae.llm_plugin"):
                 await plugin.on_config_reload(
                     config={"llm": {"main": _profile_cfg("${" + _KEY_VAR + "}")}}
                 )
-            assert "llm.main.api_key" in str(excinfo.value)
+            assert "apply on restart" in caplog.text
             assert plugin.get_client() is old
         finally:
             await plugin.on_stop()
@@ -570,8 +510,13 @@ def _plugin_with_profiles(stages: dict, *profiles: str):
 
     plugin = LLMPlugin(pm=None)
     plugin._stages = dict(stages)
+    llm_section = {}
     for profile in profiles:
         plugin._clients[profile] = MagicMock(name=profile)
+        llm_section[profile] = {"base_url": f"http://{profile}.test", "model": profile}
+    if "embedding" in llm_section:
+        llm_section["embedding"].update(kind="embedding", dimensions=4)
+    stub_llm_config(plugin, llm_section)
     return plugin
 
 
@@ -641,7 +586,7 @@ async def test_on_start_collects_stages_through_register_llm_stages():
     pm.register(_OtherOwner(), name="other_owner")
     plugin = LLMPlugin()
     pm.register(plugin, name="llm")
-    config = {"llm": {"main": {"model": "m"}}}
+    config = {"llm": {"main": {"base_url": "http://m", "model": "m"}}}
     await plugin.on_init(pm, config)
 
     with patch.object(plugin, "_create_client", lambda cfg, **kw: _BlockedClient()):
@@ -658,13 +603,16 @@ _STAGE_LOG_PREFIX = "llm stages resolved:"
     "llm_config,expected",
     [
         (
-            {"main": {"model": "m"}, "background": {"model": "b"},
-             "embedding": {"model": "e", "dimensions": 4}},
+            {"main": {"base_url": "http://m", "model": "m"},
+             "background": {"base_url": "http://b", "model": "b"},
+             "embedding": {"base_url": "http://e", "model": "e", "kind": "embedding",
+                           "dimensions": 4}},
             "llm stages resolved: compaction→main, consolidation→main, "
             "embedding→embedding, rubric→main, subagent→main",
         ),
         (
-            {"main": {"model": "m"}, "background": {"model": "b"}},
+            {"main": {"base_url": "http://m", "model": "m"},
+             "background": {"base_url": "http://b", "model": "b"}},
             "llm stages resolved: compaction→main, consolidation→main, "
             "embedding→(none), rubric→main, subagent→main",
         ),

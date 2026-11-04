@@ -25,7 +25,7 @@ from corvidae_cognition import retention as retention_module
 from corvidae_cognition import memory as memory_module
 from corvidae_cognition.memory import MemoryPlugin
 from fake_clock import FakeClock, install_kernel_clock
-from helpers import FakeForkAgent
+from helpers import FakeForkAgent, stub_llm_config, with_chat_llm
 
 CONSOLIDATION_JSON = json.dumps({
     "summary": "I helped kestrel debug the weather station's wifi dropouts.",
@@ -42,6 +42,7 @@ CONFIG = {
         "main": {"base_url": "http://localhost:8080", "model": "chat"},
         "background": {"base_url": "http://localhost:8080", "model": "bg"},
         "embedding": {
+            "kind": "embedding",
             "base_url": "http://localhost:8081",
             "model": "test-embedder",
             "dimensions": 4,
@@ -133,7 +134,7 @@ async def make_env(retention_runs):
         config=None, *, last_run=None, with_idle=True, pm=None, db=None,
         persistence=None, channel=None,
     ) -> Env:
-        config = config or CONFIG
+        config = with_chat_llm(config or CONFIG)
         if db is None:
             # A standalone plugin manager with an in-memory session DB.
             db = await aiosqlite.connect(":memory:")
@@ -151,7 +152,7 @@ async def make_env(retention_runs):
         stub = StubClient()
         for profile in ("main", "embedding"):
             llm._clients[profile] = stub
-        llm.embedding_dimensions = 4
+        stub_llm_config(llm, config.get("llm"))
 
         # A view-capable agent with forks off: an out-of-window range is
         # written from the rendered view on llm.main (#380, #388).
@@ -579,7 +580,7 @@ async def test_idle_consolidate_after_must_be_positive(bad):
     with pytest.raises(ValueError) as exc:
         await MemoryPlugin().on_init(
             pm=create_plugin_manager(),
-            config={"memory": {"idle_consolidate_after": bad}},
+            config=with_chat_llm({"memory": {"idle_consolidate_after": bad}}),
         )
 
     msg = str(exc.value)

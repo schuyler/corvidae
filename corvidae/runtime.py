@@ -31,6 +31,7 @@ from corvidae.hooks import (
     validate_dependencies,
 )
 from corvidae.idle import IdleTracker, validate_daemon_config
+from corvidae.llm_plugin import parse_llm_config
 from corvidae.logging import configure_logging
 from corvidae.mcp_client import validate_mcp_config
 from corvidae.tool_collection import parse_tool_timeouts
@@ -143,7 +144,7 @@ class Runtime:
         5.  Create plugin manager.
         6.  Create ChannelRegistry, Clock and IdleTracker and register them
             with the plugin manager as "registry", "clock" and "idle".
-        7.  Validate the agent and daemon sections and tools.call_timeout /
+        7.  Validate the agent, daemon and llm sections and tools.call_timeout /
             tools.timeouts; load channel config from merged config.
         7b. Block disabled plugins via pm.set_blocked for each name in
             config["plugins"]["disabled"]. Must precede step 8 so blocked
@@ -244,6 +245,9 @@ class Runtime:
         try:
             validate_agent_config(config.get("agent", {}))
             validate_daemon_config(config.get("daemon") or {})
+            # The llm profiles, defaults and stage map: a bad block exits
+            # here, before any plugin loads.
+            parse_llm_config(config.get("llm"))
             disabled_plugins = disabled_plugins_from(config)
             # A disabled mcp plugin never reads its block, so skip the check.
             if "mcp" not in disabled_plugins:

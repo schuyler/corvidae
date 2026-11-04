@@ -5,7 +5,7 @@ The documented copy of `DEFAULT_STAGE2_FORK_PROMPT` in
 `agent.forks.stages`), the silent stage-2 task forks the live window at run
 time instead of making its own tier-3 call: the prompt is the main turn's
 render of the whole window, followed by this text as a `user` turn (GitHub
-issue #51). It runs on `llm.main` with the stage's `response_format` and
+issue #51). It runs on the `appraisal` stage's profile with the stage's `response_format` and
 `tool_choice: "none"`.
 
 `AppraisalPlugin` appends two lines: the exchange's opening message and

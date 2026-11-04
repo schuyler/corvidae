@@ -359,7 +359,8 @@ The replay builds the daemon's exact request for a range that has left the
 live window: the agent's rebuilt view (the summary in force, the rows after
 its boundary, trimmed to the budget) under the channel's system prompt,
 followed by the consolidation instruction, sent as a plain call on the
-`llm.main` profile (the consolidation stage's default). It calls the same function the daemon does,
+profile the consolidation stage resolves to (`llm.stages.consolidation`, else the
+default chat profile, `llm.main` unless configured otherwise). It calls the same function the daemon does,
 `build_catchup_segments` in
 `packages/corvidae-cognition/corvidae_cognition/memory.py`, so a result here
 is a result about production rather than about a lookalike that drifted.

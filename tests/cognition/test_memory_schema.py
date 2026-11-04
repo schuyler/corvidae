@@ -24,6 +24,7 @@ EMBED_CONFIG = {
     "llm": {
         "main": {"base_url": "http://localhost:8080", "model": "chat"},
         "embedding": {
+            "kind": "embedding",
             "base_url": "http://localhost:8081",
             "model": "test-embedder",
             "dimensions": 4,
@@ -50,9 +51,6 @@ async def build_memory_plugin(config: dict | None = None):
     llm = LLMPlugin()
     pm.register(llm, name="llm")
     await llm.on_init(pm=pm, config=config)
-    embedding_cfg = config.get("llm", {}).get("embedding")
-    if embedding_cfg is not None:
-        llm.embedding_dimensions = embedding_cfg["dimensions"]
 
     memory = MemoryPlugin()
     pm.register(memory, name="memory")
@@ -192,7 +190,6 @@ class TestEncoderMismatch:
         llm = LLMPlugin()
         pm.register(llm, name="llm")
         await llm.on_init(pm=pm, config=EMBED_CONFIG)
-        llm.embedding_dimensions = 4
 
         memory = MemoryPlugin()
         pm.register(memory, name="memory")
@@ -211,6 +208,7 @@ EMBED_CONFIG_WITH_PREFIXES = {
     "llm": {
         "main": {"base_url": "http://localhost:8080", "model": "chat"},
         "embedding": {
+            "kind": "embedding",
             "base_url": "http://localhost:8081",
             "model": "test-embedder",
             "dimensions": 4,
@@ -258,7 +256,6 @@ class TestPrefixSupport:
         llm = LLMPlugin()
         pm.register(llm, name="llm")
         await llm.on_init(pm=pm, config=EMBED_CONFIG_WITH_PREFIXES)
-        llm.embedding_dimensions = 4
 
         memory = MemoryPlugin()
         pm.register(memory, name="memory")
@@ -296,7 +293,6 @@ class TestPrefixSupport:
         llm = LLMPlugin()
         pm.register(llm, name="llm")
         await llm.on_init(pm=pm, config=EMBED_CONFIG)
-        llm.embedding_dimensions = 4
 
         memory = MemoryPlugin()
         pm.register(memory, name="memory")
@@ -335,7 +331,6 @@ class TestPrefixSupport:
         llm = LLMPlugin()
         pm.register(llm, name="llm")
         await llm.on_init(pm=pm, config=EMBED_CONFIG_WITH_PREFIXES)
-        llm.embedding_dimensions = 4
 
         memory = MemoryPlugin()
         pm.register(memory, name="memory")

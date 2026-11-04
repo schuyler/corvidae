@@ -30,7 +30,7 @@ from corvidae.llm_plugin import LLMPlugin
 from corvidae_cognition.memory import MemoryPlugin
 from corvidae.persistence import PersistencePlugin, init_db
 
-from helpers import FakeForkAgent
+from helpers import FakeForkAgent, stub_llm_config, with_chat_llm
 
 
 DIMS = 4  # small for speed; dedup uses cosine similarity only
@@ -40,6 +40,7 @@ EMBED_CONFIG_DEDUP = {
         "main": {"base_url": "http://localhost:8080", "model": "chat"},
         "background": {"base_url": "http://localhost:8080", "model": "bg"},
         "embedding": {
+            "kind": "embedding",
             "base_url": "http://localhost:8081",
             "model": "test-embedder",
             "dimensions": DIMS,
@@ -122,7 +123,7 @@ _DISTINCT_SUMMARY_B = (
 
 
 async def build_dedup_env(config=None):
-    config = config or EMBED_CONFIG_DEDUP
+    config = with_chat_llm(config or EMBED_CONFIG_DEDUP)
     db = await aiosqlite.connect(":memory:")
     await init_db(db)
 
@@ -138,9 +139,7 @@ async def build_dedup_env(config=None):
     stub = DupStubClient()
     llm._clients["main"] = stub
     llm._clients["embedding"] = stub
-    embedding_cfg = config.get("llm", {}).get("embedding")
-    if embedding_cfg:
-        llm.embedding_dimensions = embedding_cfg["dimensions"]
+    stub_llm_config(llm, config.get("llm"))
 
     # A view-capable agent with forks off: a range outside the live window
     # is written from the rendered view on llm.main (#380, #388).

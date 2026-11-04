@@ -35,7 +35,7 @@ from corvidae_cognition.outcome_log import OutcomeLogPlugin
 from corvidae.persistence import PersistencePlugin, init_db
 from corvidae.task import TaskPlugin
 
-from helpers import FakeForkAgent, window_of
+from helpers import FakeForkAgent, stub_llm_config, window_of, with_chat_llm
 
 
 VALID_STAGE2_JSON = json.dumps({
@@ -838,7 +838,8 @@ class TestAppraisalPrior:
         llm = LLMPlugin()
         pm.register(llm, name="llm")
         llm._clients["main"] = StubClient(consolidation_json)
-        cfg = {"daemon": {"session_db": db_path}, "memory": {}}
+        stub_llm_config(llm)
+        cfg = with_chat_llm({"daemon": {"session_db": db_path}, "memory": {}})
         memory = MemoryPlugin()
         # A view-capable agent with forks off: the range is written from the main view.
         pm.register(FakeForkAgent(set()), name="agent")
@@ -960,8 +961,9 @@ class TestAppraisalPrior:
         llm = LLMPlugin()
         pm.register(llm, name="llm")
         llm._clients["main"] = StubClient(consolidation_json)
+        stub_llm_config(llm)
 
-        cfg = {"daemon": {"session_db": db_path}, "memory": {}}
+        cfg = with_chat_llm({"daemon": {"session_db": db_path}, "memory": {}})
         memory = MemoryPlugin()
         # A view-capable agent with forks off: the range is written from the main view.
         pm.register(FakeForkAgent(set()), name="agent")

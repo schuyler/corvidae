@@ -364,6 +364,16 @@ on the records it writes ([cognition.md](cognition.md#record-stamps)).
 `model` and ignores `extra_body`, so the encoder `embedding_meta` records
 can't be switched by an override.
 
+**Merge order.** `chat` builds the payload in three layers, later ones
+winning: `model`, `messages` and `tools`; the client's own `extra_body`
+(the instance body, which for a profile's client is that profile's
+`extra_body`); the `extra_body` passed to the call. So a call-level key
+beats the profile's. The main turn relies on that: the channel's runtime
+overrides (`set_settings`) are call-level, so on a main turn an override
+beats the profile. A fork inverts it for the keys its stage profile sets,
+by not sending the shadowed override at all (see Forks, "Prefix parity").
+`LLMClient` itself never knows which kind of call it is serving.
+
 `chat` sends `defang_control_tokens(messages)`, not `messages` (#356).
 llama-server tokenizes request text with special-token parsing, so a
 literal `<|endoftext|>` in any message becomes the real control token. The
@@ -405,7 +415,8 @@ tail is in neither `content` nor `reasoning_content`, so it reaches no
 transport, no row and no memory; the log is its only copy (PRD §3.3.9,
 §3.10). This runs on every profile's client. `AgentTurnResult.reasoning_reopened`
 carries the flag. `Agent._run_turn` checks it before the cut-off check:
-with `llm.main.reasoning_reopened: rerun`, a final (no tool calls) that
+with `reasoning_reopened: rerun` on the main turn's profile (`llm.main` by
+default), a final (no tool calls) that
 reopened is popped from the messages and regenerated once, and that result
 is used whatever it holds (a second reopen is already cut); then the
 cut-off check runs on it as on any reply. With `truncate` (the default)
@@ -1723,7 +1734,7 @@ default priority) returned non-None first. The caller does not use the return va
    fork raises or comes back empty (logged at WARNING), `_view_summary`
    sends the same render (`build_fork_prompt` over the window at the cut,
    the channel's pending tool-call ids, the Agent's
-   `mid_conversation_system_role`) as a plain call on `llm.main`,
+   `mid_conversation_system_role`) as a plain call on the `compaction` stage's profile,
    with no tools, through `view_call` (PRD §3.8). The render is the
    uncapped prefix: the window is over budget when compaction runs. If the fork
    raises a connection-class error (`is_backend_unreachable`), the view call is not
@@ -1735,7 +1746,7 @@ default priority) returned non-None first. The caller does not use the return va
    view), compaction declines and the over-budget fallback (#308) brings the
    window back within budget. The client is resolved when
    compaction runs (`get_dependency(pm, "llm", LLMPlugin).get_client("compaction")`,
-   a `chat` stage, so `llm.main`), not in `on_start`. `agent.compaction_prompt` and the standalone summarizer
+   a `chat` stage, so `llm.stages.compaction`, else the default chat profile), not in `on_start`. `agent.compaction_prompt` and the standalone summarizer
    (`_summarize`, with its prior-summary cap and head/tail truncation) are
    gone; setting the key logs a startup warning and is otherwise ignored.
 7. Build the summary message (`[Summary of earlier conversation]\n…`).
@@ -1778,12 +1789,14 @@ fork_prompt = build_prompt(window[:cut]) + [{"role": "user", "content": instruct
 
 That render is the **rendered view** (PRD §3.8), `build_fork_prompt` in
 `fork.py`: the system prompt, a window, and one `user` instruction. A fork
-sends the live window on `llm.main` with the channel's tools. The **view
-call** (`view_call`) sends the same kind of render on `llm.main` with
+sends the live window to its stage's profile with the channel's tools. The **view
+call** (`view_call`) sends the same kind of render to its stage's profile with
 no tools and no `tool_choice`, attributed `mode="standalone"`. It has two
-producers: compaction on a fork miss (the live window at the cut) and memory
-catch-up (a window rebuilt from `message_log`, below). It carries no cache
-benefit: it is a cold prefill on the main model's slot.
+producers: compaction on a fork miss (the live window at the cut, sent as
+the `compaction` stage) and memory catch-up (a window rebuilt from
+`message_log`, below, sent as the `consolidation` stage). It carries no cache
+benefit: it is a cold prefill, on the slot of the stage's profile (the default chat
+profile's when the stage is unmapped).
 
 **View API (kernel, `corvidae.fork` and the Agent).** Cognition gets
 everything channel-specific from one value, `ViewInputs` (`system_prompt`,
@@ -1806,37 +1819,75 @@ newest first) are shared by `resolve_conversation` and the catch-up builder.
 `view_call` raises `ForkRefused` on a reply with tool calls (structured or
 written out); transport errors propagate.
 
-**Prefix parity.** `Agent.fork(channel, instruction, *, cut=None,
-extra_body=None)` builds with exactly what step 7 of the agent loop uses:
-the client of the model whose window is forked (`llm.main`, unless a
-stage forks another model's window, PRD §3.7 Critique 4, though no stage
-does yet; its `extra_body`,
-e.g. `id_slot`), the channel's
+**Prefix parity.** `Agent.fork(channel, instruction, *, stage, cut=None,
+extra_body=None)` renders with exactly what step 7 of the agent loop uses:
+the channel's
 conversation tool schemas (`conv.tool_view.schemas`, per-channel since #149),
 `build_prompt(pending_ids, mid_conversation_system_role)`, and the same
 runtime-override filter (`_llm_overrides`). Any difference in what reaches
-the template breaks the prefix and the cache with it. With a `cut`, calls before the cut whose first result falls at or after it render as pending, not abandoned, because they were pending as of the cut (#185). `reasoning_effort`
+the template breaks the prefix and the cache with it. Only where the request
+goes differs: `stage` is a required keyword, and the call goes to
+`LLMPlugin.get_client(stage)`, the client of the profile `llm.stages` maps
+that stage to (else the default chat profile). Its endpoint, model and
+`extra_body` (e.g. `id_slot`) are the stage profile's, not the main turn's.
+With no client for the stage, `Agent.fork` raises `ForkUnavailable`.
+
+Whether a fork hits the cache is therefore the operator's configuration,
+not a guarantee. A fork whose stage maps to a profile on another endpoint or
+model misses the main window's prefix, and so does one whose profile sets a
+template-visible key (such as `reasoning_effort`) the main profile does not.
+Corvidae passes profile parameters through without interpreting them. To keep
+the prefix, derive the stage's profile from the main one with `extends` and
+change only sampler-side keys; #440 reports misses. With a `cut`, calls before the cut whose first result falls at or after it render as pending, not abandoned, because they were pending as of the cut (#185). `reasoning_effort`
 is left alone, because Qwen 3.8/Swift's template renders the effort
 sentence first in the system block: a fork at a different effort would
 miss the cache from its first token.
 On top of that a fork sends `tool_choice: "none"` (tools stay in the
-render), `reasoning_budget_tokens` from `agent.forks.reasoning_budget_tokens`
-(a per-request sampler budget that never touches the template), and the
-stage's `extra_body` (`response_format`; consolidation sends the memory-record schema). Those keys are applied after the
-runtime overrides, so `set_settings` can't re-enable tool calls on a fork.
+render) and the stage's own `extra_body` (`response_format`; consolidation
+sends the memory-record schema). A reasoning budget is no longer a fork
+setting: put `reasoning_budget_tokens` in the `extra_body` of the profile the
+stage maps to, and a fork sends none when its profile has none.
+
+**Body precedence.** `LLMClient.chat` merges the profile's `extra_body` (the
+instance body) first and the call's `extra_body` over it, so a fork's call
+body is built to give this order, later entries winning:
+
+1. `model`, `messages` and `tools`.
+2. The stage profile's resolved `extra_body` (inherited keys included).
+3. The channel's runtime overrides, minus every key the stage profile's
+   `extra_body` also sets.
+4. The stage's `extra_body` argument (`response_format`).
+5. `tool_choice: "none"`.
+
+So the profile beats `set_settings`: a channel's runtime `max_tokens: 200`
+against a stage profile with `extra_body.max_tokens: 4096` sends 4096. The
+stage's schema beats the profile, and `tool_choice` beats everything, so
+`set_settings` can't re-enable tool calls on a fork. `fork_body(overrides,
+profile_body, stage_body)` in `fork.py` is the pure function that builds the
+call body. `model` is not an inference override, so the profile's model
+always applies.
+
+The cost is a cache miss when a channel override changes a key the stage's
+profile also sets. Every key `_llm_overrides` can carry is sampler-side
+(temperature, top_p, top_k, the penalties, `max_tokens`, `seed`), so on
+llama-server none of them changes the rendered prompt, and a dropped
+override changes only the fork's sampling. A fork whose stage is unmapped
+resolves to the default chat profile, so an override of a key in that
+profile's `extra_body` is dropped for its forks while still applying to the
+channel's main turns.
 
 **Invariants.** A fork mutates nothing, persists nothing, fires no hooks,
 and never dispatches tools: a reply carrying `tool_calls`, or a tool call
 written out as text (`<tool_call>`, a `<function…>` tag, a bare
 `{"name", "arguments"}` object), raises `ForkRefused`. No live window or
-no main client raises `ForkUnavailable`.
+no client for its stage raises `ForkUnavailable`.
 Every caller treats any fork exception, or an empty or unparseable reply,
 as a miss: it logs at WARNING and the live-window stage skips, with no
 standalone call (PRD §3.8.5, #320). The exceptions are compaction, whose
 summary on a miss is the standalone view call and then #308, and
 consolidation of a range that has left the window (the compaction trigger's
 task after the drop, an idle range not wholly in the window), which is
-written from a rebuilt view on `llm.main` (catch-up, below). Idle
+written from a rebuilt view sent as the `consolidation` stage (catch-up, below). Idle
 consolidation of a range wholly in the live window still skips on a miss,
 and is retried on the next idle trigger; once the range has left the window
 it reaches catch-up. A JSON parse failure names the failing phase
@@ -1849,9 +1900,9 @@ Stage names are opaque to core (it never names cognition plugins).
 
 | Stage | Cut | Runs | On a miss |
 |---|---|---|---|
-| `compaction` | dropped prefix | inline in `resolve_compaction` | standalone view call on the same prefix (`llm.main`, no tools), then the over-budget fallback (#308); on a connection-class failure the view is skipped and compaction defers to the turn's retry loop (#400) |
-| `consolidation` (compaction trigger) | dropped prefix | inline in `before_compaction`; the record is stashed and the `on_compaction` task consumes it | catch-up in the `on_compaction` task: no stash (range not in `messages[:cut]`, fork failed) or the watermark moved since the fork; the rebuilt view on `llm.main` |
-| `consolidation` (idle trigger) | full window | in the idle task | range wholly in the live window: skip with a warning, watermark unchanged, retried on the next idle trigger; no registered channel or window, or a range row not in the window: catch-up (rebuilt view on `llm.main`) |
+| `compaction` | dropped prefix | inline in `resolve_compaction` | standalone view call on the same prefix (the `compaction` stage's profile, no tools), then the over-budget fallback (#308); on a connection-class failure the view is skipped and compaction defers to the turn's retry loop (#400) |
+| `consolidation` (compaction trigger) | dropped prefix | inline in `before_compaction`; the record is stashed and the `on_compaction` task consumes it | catch-up in the `on_compaction` task: no stash (range not in `messages[:cut]`, fork failed) or the watermark moved since the fork; the rebuilt view, sent as the `consolidation` stage |
+| `consolidation` (idle trigger) | full window | in the idle task | range wholly in the live window: skip with a warning, watermark unchanged, retried on the next idle trigger; no registered channel or window, or a range row not in the window: catch-up (rebuilt view, sent as the `consolidation` stage) |
 | `appraisal` (stage 2) | full window at run time | silent TaskQueue task | skip with a warning (forks off, originating rowid left the window or was never persisted, fork failed or unusable) |
 | `critique` (each stylistic lens) | full window at run time | silent TaskQueue task | same as appraisal; a lens whose fork misses is skipped alone; if no lens ran, no outcome is recorded |
 | `critique` (provenance) | prefix ending at the exchange's final reply | silent TaskQueue task | skip with a warning (forks off, no live window, reply not recorded or not in the window, a compaction since the reply, or a failed fork) |
@@ -1881,7 +1932,7 @@ stripping can't alter rows a later segment reuses as context. Warnings, each
 naming the channel and message ids: the budget trim dropped a segment's own
 rows (they commit without reaching a view); a row was truncated; the
 finished request still measures over budget (it is sent anyway). Each
-segment is one `view_call` on `llm.main`, one record, and one commit
+segment is one `view_call` on the `consolidation` stage's profile, one record, and one commit
 that is a compare-and-set on the previous segment's end; a lost
 compare-and-set discards the rest, and a failure leaves earlier segments
 committed and the failure log says through which id. An unusable reply is
@@ -1890,7 +1941,7 @@ with no dialog that is followed by another segment folds its id span into
 the next segment's record (no record or commit of its own); a no-dialog
 last segment advances the watermark without a record. Records are
 stamped `(memory.consolidation_fork_prompt, "standalone", the
-request model)`. A view that `llm.main` rejects for length is a
+request model)`. A view that the stage's profile rejects for length is a
 transport error: the watermark stays and the next trigger retries.
 
 The compaction and consolidation forks share one prefix: the second
@@ -1938,10 +1989,15 @@ shows). `Agent.fork` always sets it, so it is None only when a
 ```yaml
 agent:
   forks:
-    enabled: true                 # default; false: live-window stages skip, compaction uses a view call on llm.main
-    reasoning_budget_tokens: 2048 # per fork; null = server default
+    enabled: true                 # default; false: live-window stages skip, compaction uses a view call
     stages: null                  # null = every stage; or a list of names
 ```
+
+`reasoning_budget_tokens` is no longer a key here: a config that still sets
+it fails startup with an error that names it and points at `llm.stages`.
+
+A fork's profile, and so its endpoint, model, reasoning budget and token cap,
+come from `llm.stages` (see LLMPlugin, "Configuration"), not from `agent.forks`.
 
 ### Forks on the deployed backend
 
@@ -1959,20 +2015,20 @@ provenance from the prefix ending at the exchange's final reply. Each forks
 only while the rows it needs are still in the window. A miss skips the
 stage with a warning (the rescue is a retry or a skip, never a standalone
 call), except compaction, which on a miss sends the same view to
-`llm.main` and, if that fails too, leaves the window to the
+the `compaction` stage's profile and, if that fails too, leaves the window to the
 over-budget fallback (#308), and consolidation of a range that has left the
-window, which is written from its rebuilt view on `llm.main`. Skip-on-miss
+window, which is written from its rebuilt view sent as the `consolidation` stage. Skip-on-miss
 and the default are implemented (#320).
 Still targets, not enforced today: stage 2 and the lenses forking only the
-prefix ending at the reply, per-stage reasoning and reply caps (today one
-global `agent.forks.reasoning_budget_tokens` and no reply cap), the
-headroom guarantee in the cost model below, and treating a fork that would
-not fit the slot's context as a miss.
+prefix ending at the reply, a reply cap that fits the slot's context (an
+operator can set `max_tokens` per stage in the stage profile's `extra_body`;
+nothing checks that it fits), the headroom guarantee in the cost model below,
+and treating a fork that would not fit the slot's context as a miss.
 
 **Cost model.** A fork reuses the cached prefix and prefills only its
 instruction and reply; the window is append-only, so a fork's prefix is
 still cached as long as no compaction has run since. A view call (compaction's fallback, catch-up consolidation)
-costs its own cold prefill on the main model's slot: at most the channel's
+costs its own cold prefill on the slot of the stage's profile (the default chat profile's when the stage is unmapped): at most the channel's
 budget per catch-up segment, and for compaction's fallback the whole
 uncapped prefix at the cut. The consolidation and compaction prompts that
 described the conversation to a model are gone; what still makes a
@@ -1984,11 +2040,12 @@ calls fully cached, restored from host RAM. Without `cache-ram`, a
 view or standalone call on a single slot evicts the main window and the next main
 turn re-prefills it. Either way only one call runs on the slot at a time,
 so a background call delays a waiting main turn by its own slot time;
-today only the global `agent.forks.reasoning_budget_tokens` bounds a
-fork's share of that. #181's target adds the rest: exchange-scoped forks
-scheduled before the slot's next main turn (PRD principle 3), per-stage
-reasoning and reply caps, and headroom (the window at the compaction
-threshold plus a fork's instruction and both caps fits the slot's
+today only what the operator puts in a stage's profile's `extra_body` (a
+`reasoning_budget_tokens`, a `max_tokens`) bounds a fork's share of that; an
+unmapped fork is bounded by the default chat profile's. #181's target adds the
+rest: exchange-scoped forks scheduled before the slot's next main turn (PRD
+principle 3), and headroom (the window at the compaction threshold plus a
+fork's instruction and its profile's caps fits the slot's
 context, so a fork just short of compaction still runs). #182 measures
 how long main turns wait today.
 
@@ -2050,45 +2107,77 @@ history bound. Starts/stops the worker on lifecycle hooks. Registers the
 
 ### Lifecycle
 
-- `on_start` — collects the model-calling stages (below), reads every
-  profile under `llm:` (`llm.main` is required), creates an `LLMClient` for
-  each and calls `start()` on it. It then logs where each stage resolves:
-  `llm stages resolved: ...` (`→(none)` for a stage whose default profile
-  isn't configured).
+- `on_start` — collects the model-calling stages (below), parses the `llm:`
+  section with `parse_llm_config`, checks `llm.stages` against the
+  registered stages (`check_stage_map`), then creates an `LLMClient` for
+  each resolved profile and calls `start()` on it. It logs a WARNING for
+  each kind that has stages falling back to a default that doesn't exist,
+  then logs where each stage resolves: `llm stages resolved: ...`
+  (`→(none)` for a stage with no profile).
 - `on_stop` — calls `stop()` on all clients.
+- `on_config_reload` — swaps no client. If the reloaded `llm:` section
+  parses to something other than what the daemon started with, it logs one
+  summary WARNING (ConfigWatcher's per-key restart-only warnings fire too,
+  since `LLMPlugin` declares no `reloadable_keys`): `llm config changed; LLM profiles, llm.stages and llm.defaults
+  apply on restart`. Everything under `llm:` is restart-only, `llm.main`
+  included. Live reload would need a rollback path, an ordering against the
+  Agent re-borrowing its client, and an encoder re-check for embeddings, and
+  nothing asked for it. PRD §3.6.1 says a change to a base profile reaches
+  its derived ones on reload too; that gap is #465.
+
+`Runtime.start` (step 7) and `ConfigWatcher` (step 3) both run
+`parse_llm_config`, so a malformed `llm:` section exits at startup with the
+usual `Config error: ... — check <path>` line before any plugin loads, and
+a reload that carries one is refused as a whole (logged at `ERROR`, nothing
+applied). The stage-map check that needs the registered stages runs in
+`on_start` only.
 
 `_create_client` expands `${VAR}` in a profile's `api_key` from the daemon's
 environment (`corvidae/envref.py::expand_env_refs`, shared with MCP
 `headers`). An unset, empty or multi-line variable raises a `ValueError`
-naming `llm.<profile>.api_key` and the variable, never the value; `on_start` and
-`on_config_reload` both go through it. The resolved key lives only on the
-client, so `_profile_configs` keeps the raw `${VAR}` text.
+naming `llm.<profile>.api_key` and the variable, never the value; `on_start`
+goes through it. The resolved key lives only on the client, so
+`LLMConfig.profiles` keeps the raw `${VAR}` text. `extends`, `kind` and
+`dimensions` are consumed by `LLMPlugin` and never reach `LLMClient`.
 
 ### Client access
 
-Every key under `llm:` is a **profile**. A plugin that calls a model
+Every key under `llm:` except `defaults` and `stages` is a **profile**,
+built into one client. A plugin that calls a model
 registers each call site as a **stage** through the `register_llm_stages`
 hook (`stages[name] = kind`, kind `"chat"` or `"embedding"`), which
 `LLMPlugin.on_start` broadcasts once. Core registers `compaction` and
-`subagent`; the cognition plugins register their own. A stage resolves to
-its kind's default profile: `chat` to `main`, `embedding` to `embedding`.
-There are no fallback chains, and no stage resolves to `background`: an
-`llm.background` block is accepted and built, but unused until the operator
-stage-to-profile map (#399) arrives.
+`subagent`; the cognition plugins register `consolidation`, `rubric`,
+`embedding`, `appraisal` and `critique`. A plugin names stages, never
+profiles. A stage resolves to the profile `llm.stages` maps it to; a stage
+the map doesn't name uses its kind's default profile (`LLMConfig.profile_for`).
+There are no fallback chains. Main turns are not a stage: they use the
+default chat profile.
 
-`LLMPlugin.get_client()` returns the main client (main turns).
-`get_client(stage)` returns the client for a registered stage, or `None`
-when its default profile isn't configured (no `llm.embedding`: the
-`embedding` stage gets no client and memory degrades to keyword search).
-An unregistered name raises `ValueError`, profile names such as `"main"`
-included. Other plugins retrieve the plugin via
-`get_dependency(pm, "llm", LLMPlugin)`.
+`LLMPlugin.get_client()` returns the default chat profile's client (main
+turns). `get_client(stage)` returns the client for a registered stage, or
+`None` when the stage has no profile (the kind has no default and the map
+doesn't name the stage: with no embedding profile the `embedding` stage gets
+no client and memory degrades to keyword search). An unregistered name
+raises `ValueError`, profile names such as `"main"` included.
+`resolve_profile(stage)` returns the profile name and `profile_config(stage)`
+the resolved settings (read-only; `Agent.fork` reads its `extra_body`).
+Other plugins retrieve the plugin via `get_dependency(pm, "llm", LLMPlugin)`.
+`MemoryPlugin` reads the embedding stage's encoder identity, `dimensions` and
+prefixes the same way, with `parse_llm_config(config.get("llm"))` in its
+`on_init`, so it follows the map and `extends` and can't diverge from the
+client `LLMPlugin` builds.
+
+Every call a stage makes goes to its profile: its fork, its view call, its
+windowless call, a subagent's turns, the rubric prior and embeddings.
+`usage_log` and the metrics name the stage's profile on every call, forks
+included, because the profile's client carries its name.
 
 ### Configuration
 
 ```yaml
 llm:
-  main:
+  main:                       # a profile; kind omitted means chat
     base_url: "http://host:8080"
     model: "model-name"
     api_key: "optional"
@@ -2098,15 +2187,77 @@ llm:
     retry_max_delay: 60.0
     model_not_loaded_wait: 60.0
     timeout: null             # optional; no timeout if absent
+  forks:
+    extends: main             # deep overlay of main; null deletes an inherited key
+    extra_body:
+      reasoning_budget_tokens: 2048
   embedding:                  # optional; absent means no embedding client
+    kind: embedding           # required for an embedding profile
     base_url: "..."
     model: "..."
     dimensions: 768           # required
     # same keys as main
+  defaults:                   # optional: kind -> default profile
+    chat: main                # these two are the fallbacks when omitted
+    embedding: embedding
+  stages:                     # optional: stage -> profile
+    compaction: forks
+    consolidation: forks
 ```
 
-**Graceful degradation:** `llm.main` is required — `on_start` raises `KeyError`
-if absent.
+`defaults` and `stages` are reserved names; a profile can't use them. A
+profile block that is `null` is treated as absent.
+
+**`kind` and `extends` (`merge_profile`).** `kind` is `chat` or `embedding`.
+An omitted `kind` means `chat`, applied after `extends` is merged, so a child
+of an embedding profile stays an embedding profile. `extends: <profile>` lays
+the block over the named profile: mappings merge recursively, lists and
+scalars replace, and a child's `null` deletes the inherited key (unlike
+`runtime.deep_merge`, where `None` is a no-op). Chains resolve root first. A
+resolved profile must have `base_url` and `model` (a partial block that exists
+only to be extended is not supported) and, for an embedding profile,
+`dimensions`.
+
+**Defaults.** `llm.defaults.<kind>` names each kind's default profile. When
+it is absent, chat defaults to `main` and embedding to `embedding`, if those
+exist. Only a default chat profile is required: `defaults.chat: foo` with no
+`main` boots and sends main turns to `foo`. A default, configured or by
+name, that names a profile of another kind is an error, which is how an
+existing `llm.embedding` block without `kind: embedding` fails startup
+instead of becoming a chat profile and silently dropping memory to keyword
+search.
+
+**Validation.** A malformed set of profiles aborts startup and changes nothing
+on reload. Each error names the key:
+
+| Case | Error |
+|---|---|
+| unknown base | `llm.<name>.extends names unknown profile '<base>'; defined profiles: ...` |
+| cycle | `llm.<name>.extends forms a cycle: a → b → a; remove one extends` |
+| unknown kind | `llm.<name>.kind must be one of chat, embedding; got '<v>'` |
+| embedding, no dimensions | `llm.<name>.dimensions is required for an embedding profile ...` |
+| missing endpoint | `llm.<name>.base_url is required (after extends)` (also `model`) |
+| not a mapping | `llm.<name> must be a mapping; got <type>` (also `llm.defaults`, `llm.stages`) |
+| bad default | `llm.defaults.<kind> names unknown profile '<p>'`; `... names '<p>', a <k> profile`; `llm.defaults: unknown kind '<k>'` |
+| fallback of the wrong kind | `llm.<fallback> is a <k> profile but is the default <kind> profile by name; add kind: <kind> to it, or set llm.defaults.<kind>` |
+| no chat default | `no default chat profile: define llm.main or set llm.defaults.chat` |
+| stage maps to a missing profile | `llm.stages.<stage> names unknown profile '<p>'; defined profiles: ...` |
+| default or stage value not a string | `llm.defaults.<kind> must be a profile name; got [...]; defined profiles: ...` (likewise `llm.stages.<stage>`) |
+| stage maps to the wrong kind (`on_start`) | `llm.stages.<stage> maps a <k> stage to '<p>', a <k2> profile; map it to a <k> profile` |
+
+An `llm.stages` entry that names no registered stage logs a WARNING and is
+ignored, because a disabled plugin's stage is expected there. A kind with no
+default but with stages that would use it logs a WARNING at startup, naming
+those stages: they have no client and degrade.
+
+**Fork budget.** `agent.forks.reasoning_budget_tokens` is gone. A fork
+carries a budget only if the profile its stage maps to has
+`reasoning_budget_tokens` in `extra_body`. The body a fork sends is ordered
+in Forks, "Body precedence".
+
+**Graceful degradation:** with no default chat profile `parse_llm_config`
+raises at startup. A missing embedding profile is not an error: memory falls
+back to keyword search.
 
 ## ToolCollectionPlugin
 
@@ -2326,9 +2477,11 @@ Declares `depends_on = {"llm", "tools"}`.
 
 ### LLM configuration
 
-Uses the `LLMClient` for the `subagent` stage from `LLMPlugin` (a `chat`
-stage, so `llm.main`). The client is retrieved at tool-call time, not
-captured at `on_start`.
+Uses the `LLMClient` for the `subagent` stage from `LLMPlugin`: the profile
+`llm.stages.subagent` names, else the default chat profile (`llm.main` unless
+`llm.defaults.chat` says otherwise). The client is retrieved at tool-call
+time, not captured at `on_start`. Runtime overrides don't reach a subagent,
+so the profile's `extra_body` applies as written.
 
 ### System prompt
 
@@ -3343,10 +3496,17 @@ llm:
     model_not_loaded_wait: 60.0 # seconds to wait out an unloaded router model
     timeout: null               # HTTP timeout per request; null = no timeout
   embedding:                    # optional embedding model for memory retrieval
+    kind: embedding             # required; an omitted kind means chat
     base_url: "..."
     model: "..."
     dimensions: 768             # required
     # same keys as main
+  # forks:                      # any other name is a profile too
+  #   extends: main             # deep overlay; a child's null deletes an inherited key
+  #   extra_body: {reasoning_budget_tokens: 2048}
+  # defaults: {chat: main, embedding: embedding}   # optional; these are the fallbacks
+  # stages: {compaction: forks}                    # optional: stage -> profile
+  # All of llm: is read at startup; a reload that changes it only logs a warning.
 
 agent:
   system_prompt: "..."          # string or list of file paths

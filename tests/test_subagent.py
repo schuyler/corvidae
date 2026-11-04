@@ -13,7 +13,7 @@ from corvidae.tool import Tool, ToolContext, ToolRegistry
 from corvidae.llm_plugin import LLMPlugin
 from corvidae.tools.subagent import SubagentPlugin, run_agent_loop
 
-from helpers import CORE_LLM_STAGES, collect_llm_stages
+from helpers import CORE_LLM_STAGES, collect_llm_stages, stub_llm_config
 from llm_response_fixtures import (
     _make_text_response,
     _make_tool_call_response,
@@ -67,8 +67,8 @@ def _make_pm_with_tool_registry(*tool_names: str):
     # Register a mock LLMPlugin so SubagentPlugin._launch can get a client.
     mock_llm = LLMPlugin(pm)
     mock_llm._stages = dict(CORE_LLM_STAGES)
-    mock_llm.main_client = MagicMock(name="main")
-    mock_llm.background_client = MagicMock(name="background")
+    mock_llm._clients["main"] = MagicMock(name="main")
+    stub_llm_config(mock_llm)
     pm.register(mock_llm, name="llm")
 
     tool_registry = ToolRegistry()
@@ -312,7 +312,7 @@ class TestLLMClientLifecycle:
         plugin = await _make_started_plugin()
         llm_plugin = plugin.pm.get_plugin("llm")
         shared_client = llm_plugin.get_client()
-        assert shared_client is llm_plugin.main_client
+        assert shared_client is llm_plugin._clients["main"]
 
         channel = _make_channel()
         task_queue = MagicMock(spec=TaskQueue)

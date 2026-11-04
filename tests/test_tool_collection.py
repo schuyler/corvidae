@@ -317,7 +317,7 @@ async def test_agent_start_copies_call_timeouts():
 
     agent, _channel, db = await build_plugin_and_channel()
     llm = NonCallableMagicMock(spec=LLMPlugin)
-    llm.main_client = MagicMock()
+    llm.get_client.return_value = MagicMock()
     tools = NonCallableMagicMock(spec=ToolCollectionPlugin)
     tools.get_tools.return_value = ({}, [])
     tools.max_result_chars = 100_000

@@ -5,7 +5,7 @@ The documented copy of `DEFAULT_FORK_PROMPTS["adversarial"]` in
 `agent.forks.stages`), the lens runs as a fork of the live window instead
 of a separate critic call: the main turn's render of the whole window,
 followed by this text as a `user` turn (GitHub issue #51). It runs on
-`llm.main` with the objections `response_format` and `tool_choice: "none"`.
+the `critique` stage's profile with the objections `response_format` and `tool_choice: "none"`.
 
 Selected when valence is low and disagreement high
 (`critique.lens.neg_valence`, `critique.lens.disagreement`).

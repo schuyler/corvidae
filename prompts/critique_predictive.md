@@ -4,7 +4,7 @@ System prompt for `CritiquePlugin`'s predictive lens (bootstrap-mapping
 §3.3; phase-2 WP2.7), selected when the exchange's appraisal shows high
 ambiguity: the message's intent was open to interpretation, so the risk is
 that the agent answered the wrong question. Schema-constrained JSON
-objections — structured, not free text. Runs as a fork on `llm.main` as a
+objections — structured, not free text. Runs as a fork on the `critique` stage's profile as a
 silent background task.
 
 ---

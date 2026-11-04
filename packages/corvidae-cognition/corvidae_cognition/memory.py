@@ -87,6 +87,7 @@ from corvidae.fork import (
     window_db_ids,
 )
 from corvidae.hooks import CorvidaePlugin, get_dependency, hookimpl
+from corvidae.llm_plugin import parse_llm_config
 from corvidae.persistence import (
     add_column_if_missing,
     decode_message_row,
@@ -671,8 +672,8 @@ class RubricPrior:
         get_client: Callable[[], object],
         get_prompt: Callable[[], str] | None = None,
     ) -> None:
-        # A callable, not a client, so the current client is
-        # resolved at call time (clients can be swapped on config reload).
+        # A callable, not a client, so the client is resolved at call time:
+        # the plugin may not have started when this is constructed.
         self._get_client = get_client
         self._get_prompt = get_prompt or (lambda: RUBRIC_PROMPT)
 
@@ -959,10 +960,17 @@ class MemoryPlugin(CorvidaePlugin):
 
     @hookimpl
     async def on_init(self, pm, config: dict) -> None:
-        """Read memory.* and llm.embedding config."""
+        """Read memory.* and the embedding stage's resolved llm profile."""
         await super().on_init(pm, config)
         self._memory_cfg = config.get("memory", {}) or {}
-        self._embedding_cfg = (config.get("llm", {}) or {}).get("embedding")
+        # The same parse LLMPlugin runs, so the encoder identity here is the
+        # profile the embedding stage's client is built from (llm.stages,
+        # else the default embedding profile; None when it has neither).
+        llm_config = parse_llm_config(config.get("llm"))
+        embedding_profile = llm_config.profile_for("embedding", "embedding")
+        self._embedding_cfg = (
+            llm_config.profiles[embedding_profile] if embedding_profile else None
+        )
         raw_after = self._memory_cfg.get(
             "idle_consolidate_after", DEFAULT_IDLE_CONSOLIDATE_AFTER
         )
@@ -1189,7 +1197,8 @@ class MemoryPlugin(CorvidaePlugin):
             + _fork_range_sentence(prefix, dialog_ids)
         )
         result = await agent.fork(
-            channel, instruction, cut=cut, extra_body=CONSOLIDATION_EXTRA_BODY
+            channel, instruction, stage="consolidation", cut=cut,
+            extra_body=CONSOLIDATION_EXTRA_BODY,
         )
         record = _record_from_text(result.text)
         # Stamp the fork instruction (not the code-generated range

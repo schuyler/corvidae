@@ -23,6 +23,7 @@ from corvidae.context import ContextWindow
 from corvidae_cognition.funnel import FunnelPlugin
 from corvidae.hooks import create_plugin_manager
 from corvidae.llm_plugin import LLMPlugin
+from helpers import stub_llm_config, with_chat_llm
 from corvidae_cognition.memory import MemoryPlugin
 from corvidae.persistence import PersistencePlugin, init_db
 
@@ -36,6 +37,7 @@ EMBED_CONFIG = {
     "llm": {
         "main": {"base_url": "http://localhost:8080", "model": "chat"},
         "embedding": {
+            "kind": "embedding",
             "base_url": "http://localhost:8081",
             "model": "test-embedder",
             "dimensions": DIMS,
@@ -63,7 +65,7 @@ class StubEmbedClient:
 
 
 async def build_benchmark_env(config=None):
-    config = config or EMBED_CONFIG
+    config = with_chat_llm(config or EMBED_CONFIG)
     db = await aiosqlite.connect(":memory:")
     await init_db(db)
 
@@ -78,9 +80,7 @@ async def build_benchmark_env(config=None):
     embedder = StubEmbedClient()
     llm._clients["main"] = embedder
     llm._clients["embedding"] = embedder
-    embedding_cfg = config.get("llm", {}).get("embedding")
-    if embedding_cfg:
-        llm.embedding_dimensions = embedding_cfg["dimensions"]
+    stub_llm_config(llm, config.get("llm"))
 
     funnel = FunnelPlugin()
     pm.register(funnel, name="funnel")

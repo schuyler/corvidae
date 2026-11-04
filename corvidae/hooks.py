@@ -745,8 +745,9 @@ class AgentSpec:
             stages: A mutable dict. A plugin adds ``stages[name] = kind`` for
                 each stage it owns, where kind is "chat" or "embedding". The
                 stage name is what the plugin passes to
-                ``LLMPlugin.get_client(stage)``; the kind selects the default
-                profile the stage resolves to.
+                ``LLMPlugin.get_client(stage)``. The operator's ``llm.stages``
+                map selects the profile; a stage it doesn't name resolves to
+                the kind's default profile.
         """
 
     @hookspec
@@ -1302,7 +1303,8 @@ class AgentSpec:
         replace_with_summary, so the window still holds every message about
         to be dropped and the server still holds their rendered prefix. A
         plugin that wants a fork over that prefix runs it here, with
-        ``Agent.fork(channel, instruction, cut=cut)`` (GitHub issue #51).
+        ``Agent.fork(channel, instruction, stage=stage, cut=cut)`` (GitHub
+        issue #51).
         Failures are logged and never block compaction.
 
         Args:

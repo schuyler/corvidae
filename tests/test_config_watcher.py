@@ -23,6 +23,8 @@ from unittest.mock import AsyncMock, MagicMock, patch, call
 import pytest
 import yaml
 
+from helpers import stub_llm_config
+
 
 # ---------------------------------------------------------------------------
 # 1. on_config_reload hookspec exists on AgentSpec
@@ -792,6 +794,81 @@ async def test_config_watcher_rejects_config_without_llm_main(tmp_path, caplog):
     assert error_records, "Missing llm.main must produce an ERROR log"
 
 
+async def test_config_watcher_rejects_malformed_llm_section(tmp_path, caplog):
+    """R2 (#399): a reload whose llm section is malformed (here an unknown
+    ``extends`` base) is rejected as a whole, as one without llm.main is."""
+    from corvidae.config_watcher import ConfigWatcherPlugin
+
+    config_file = tmp_path / "agent.yaml"
+    config_file.write_text(
+        "llm:\n"
+        "  main:\n    base_url: http://localhost\n    model: m\n"
+        "  forks:\n    extends: nope\n"
+    )
+
+    pm = MagicMock()
+    pm.hook.on_config_reload.get_hookimpls.return_value = []
+    plugin = ConfigWatcherPlugin()
+    await plugin.on_init(
+        pm=pm,
+        config={
+            "_config_path": config_file,
+            "_cli_overrides": {},
+            "llm": {"main": {"base_url": "http://localhost", "model": "m"}},
+        },
+    )
+
+    dispatched = []
+
+    async def capture_dispatch(config: dict) -> None:
+        dispatched.append(config)
+
+    plugin._dispatch_config_reload = capture_dispatch
+
+    with caplog.at_level(logging.ERROR, logger="corvidae.config_watcher"):
+        await plugin._reload_config()
+
+    assert not dispatched, "A malformed llm section must not be dispatched"
+    assert "llm.forks.extends" in caplog.text
+
+
+async def test_config_watcher_accepts_llm_section_with_defaults_chat_and_no_main(tmp_path):
+    """R5 (#399): a reload whose llm section names its default chat profile
+    through ``defaults.chat`` is accepted without an ``llm.main`` block."""
+    from corvidae.config_watcher import ConfigWatcherPlugin
+
+    config_file = tmp_path / "agent.yaml"
+    config_file.write_text(
+        "llm:\n"
+        "  foo:\n    base_url: http://localhost\n    model: m\n"
+        "  defaults:\n    chat: foo\n"
+    )
+
+    pm = MagicMock()
+    pm.hook.on_config_reload.get_hookimpls.return_value = []
+    plugin = ConfigWatcherPlugin()
+    await plugin.on_init(
+        pm=pm,
+        config={
+            "_config_path": config_file,
+            "_cli_overrides": {},
+            "llm": {"foo": {"base_url": "http://localhost", "model": "m"},
+                    "defaults": {"chat": "foo"}},
+        },
+    )
+
+    dispatched = []
+
+    async def capture_dispatch(config: dict) -> None:
+        dispatched.append(config)
+
+    plugin._dispatch_config_reload = capture_dispatch
+
+    await plugin._reload_config()
+
+    assert len(dispatched) == 1, "defaults.chat without llm.main must be accepted"
+
+
 # ---------------------------------------------------------------------------
 # 10. ConfigWatcherPlugin.on_stop cancels the watcher task
 # ---------------------------------------------------------------------------
@@ -943,101 +1020,45 @@ async def test_dispatch_config_reload_filters_kwargs_by_argnames(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 13. LLMPlugin.on_config_reload creates new client when llm config changes
+# 13. LLMPlugin.on_config_reload: llm config is restart-only (#399)
 # ---------------------------------------------------------------------------
 
 
-async def test_llm_plugin_on_config_reload_creates_new_client_on_change():
-    """LLMPlugin.on_config_reload must create a new main_client when llm.main changes."""
+async def test_llm_plugin_on_config_reload_warns_and_keeps_client_on_change(caplog):
+    """A reload that changes the llm section logs one WARNING that it applies
+    on restart; no client is created or swapped."""
     from corvidae.llm_plugin import LLMPlugin
 
     plugin = LLMPlugin(pm=None)
-    await plugin.on_init(
-        pm=None,
-        config={"llm": {"main": {"base_url": "http://old", "model": "old-model"}}},
-    )
+    stub_llm_config(plugin, {"main": {"base_url": "http://old", "model": "old-model"}})
 
     old_client = MagicMock(name="old_client")
-    old_client.start = AsyncMock()
-    old_client.stop = AsyncMock()
-    plugin.main_client = old_client
-
-    new_client = MagicMock(name="new_client")
-    new_client.start = AsyncMock()
+    plugin._clients["main"] = old_client
 
     new_config = {"llm": {"main": {"base_url": "http://new", "model": "new-model"}}}
 
-    with patch.object(LLMPlugin, "_create_client", return_value=new_client):
-        await plugin.on_config_reload(config=new_config)
-
-    assert plugin.main_client is new_client, (
-        "on_config_reload must swap main_client to the new client"
-    )
-    new_client.start.assert_awaited_once()
-
-
-async def test_llm_plugin_on_config_reload_schedules_old_client_close():
-    """LLMPlugin.on_config_reload must schedule closure of the old client
-    via asyncio.create_task (to allow in-flight requests to finish)."""
-    from corvidae.llm_plugin import LLMPlugin
-
-    plugin = LLMPlugin(pm=None)
-    await plugin.on_init(
-        pm=None,
-        config={"llm": {"main": {"base_url": "http://old", "model": "old-model"}}},
-    )
-
-    old_client = MagicMock(name="old_client")
-    old_client.start = AsyncMock()
-    old_client.stop = AsyncMock()
-    plugin.main_client = old_client
-
-    new_client = MagicMock(name="new_client")
-    new_client.start = AsyncMock()
-
-    new_config = {"llm": {"main": {"base_url": "http://new", "model": "new-model"}}}
-
-    tasks_created = []
-    original_create_task = asyncio.create_task
-
-    def tracking_create_task(coro, **kwargs):
-        task = original_create_task(coro, **kwargs)
-        tasks_created.append(task)
-        return task
-
-    with patch.object(LLMPlugin, "_create_client", return_value=new_client):
-        with patch("asyncio.create_task", side_effect=tracking_create_task):
+    with patch.object(LLMPlugin, "_create_client") as create:
+        with caplog.at_level(logging.WARNING, logger="corvidae.llm_plugin"):
             await plugin.on_config_reload(config=new_config)
 
-    assert tasks_created, (
-        "on_config_reload must schedule old client closure via asyncio.create_task"
-    )
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1 and "apply on restart" in warnings[0], warnings
+    create.assert_not_called()
+    assert plugin.get_client() is old_client
 
 
-async def test_llm_plugin_on_config_reload_no_change_no_swap():
-    """LLMPlugin.on_config_reload must NOT create a new client when llm.main is unchanged."""
+async def test_llm_plugin_on_config_reload_no_change_no_warning(caplog):
+    """A reload that leaves the llm section unchanged is silent."""
     from corvidae.llm_plugin import LLMPlugin
 
-    same_config = {"llm": {"main": {"base_url": "http://localhost", "model": "m"}}}
+    same_section = {"main": {"base_url": "http://localhost", "model": "m"}}
     plugin = LLMPlugin(pm=None)
-    await plugin.on_init(pm=None, config=same_config)
+    stub_llm_config(plugin, same_section)
 
-    original_client = MagicMock(name="original_client")
-    original_client.start = AsyncMock()
-    plugin.main_client = original_client
+    with caplog.at_level(logging.WARNING, logger="corvidae.llm_plugin"):
+        await plugin.on_config_reload(config={"llm": same_section})
 
-    create_calls = []
-    original_create = LLMPlugin._create_client
-
-    # Use module-level patch to avoid staticmethod binding issue where
-    # patch.object would pass `self` as the first argument.
-    with patch("corvidae.llm_plugin.LLMPlugin._create_client", side_effect=lambda cfg: (create_calls.append(cfg), original_create(cfg))[1]):
-        await plugin.on_config_reload(config=same_config)
-
-    assert not create_calls, (
-        "on_config_reload must not create a new client when llm.main config is unchanged"
-    )
-    assert plugin.main_client is original_client
+    assert not caplog.records
 
 
 # ---------------------------------------------------------------------------

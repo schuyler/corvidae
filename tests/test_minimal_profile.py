@@ -173,7 +173,7 @@ class TestMinimalProfile:
             marker_path.write_text("QRT-9083")
             tool_used = {"done": False}
             llm = rt.pm.get_plugin("llm")
-            llm.main_client.chat = AsyncMock(
+            llm.get_client().chat = AsyncMock(
                 side_effect=_make_fake_chat(marker_path, tool_used)
             )
 
@@ -268,7 +268,7 @@ class TestMinimalProfile:
             agent2 = rt2.pm.get_plugin("agent")
             llm2 = rt2.pm.get_plugin("llm")
             tool_used2 = {"done": True}  # tool already exercised pre-restart
-            llm2.main_client.chat = AsyncMock(
+            llm2.get_client().chat = AsyncMock(
                 side_effect=_make_fake_chat(marker_path, tool_used2)
             )
 
