@@ -309,6 +309,9 @@ class Agent(CorvidaePlugin):
         self._stopping: bool = False
         # Channel id -> the pending retry of its unreachable-backend turn.
         self._turn_retries: dict[str, _TurnRetry] = {}
+        # Per-channel queued system prompt sections (#136 interim path).
+        # Drained into the composed prompt at the next boundary.
+        self._prompt_sections: dict[str, list[str]] = {}
 
     @property
     def tools(self) -> dict[str, Callable]:
@@ -1490,6 +1493,10 @@ class Agent(CorvidaePlugin):
         identity = resolve_system_prompt(resolved_cfg["system_prompt"], base_dir)
         register = await self._resolve_register(channel, resolved_cfg["register_prompt"], base_dir)
         composed = f"{identity}\n\n{register}" if register else identity
+        # Drain queued interim sections (#136).
+        queued = self._prompt_sections.pop(channel.id, [])
+        if queued:
+            composed = composed + "\n\n" + "\n\n".join(queued)
         # Plugins may add sections; a failing one must not cost the channel
         # its prompt.
         try:
@@ -1503,7 +1510,29 @@ class Agent(CorvidaePlugin):
                 channel.id, exc_info=True, extra={"channel": channel.id},
             )
             return composed
-        return composed if transformed is None else transformed
+        if transformed is None:
+            return composed
+        # Guard: a transform must preserve the identity+register as a prefix.
+        # Appending is the expected use; rewriting is rejected (#136).
+        if not transformed.startswith(composed):
+            logger.warning(
+                'transform_system_prompt modified the identity layer for '
+                'channel %s; using the untransformed system prompt',
+                channel.id,
+            )
+            return composed
+        return transformed
+
+    def queue_system_prompt_section(self, channel: Channel, text: str) -> None:
+        """Queue a section for the channel's system prompt at the next
+        boundary (#136 interim path).
+
+        The section is appended to the composed prompt before the
+        transform hook runs, then the queue is cleared. A plugin that
+        needs its section visible before the boundary should also append
+        it to the conversation window.
+        """
+        self._prompt_sections.setdefault(channel.id, []).append(text)
 
     @property
     def mid_conversation_system_role(self) -> str:
@@ -1734,6 +1763,17 @@ class Agent(CorvidaePlugin):
                 extra={"channel": channel.id, "disabled": sorted(view.disabled)},
             )
         conv.tool_view = view
+        # Refresh the system prompt at the compaction boundary (#136).
+        # Compaction rebuilds the KV cache past the system prompt, so this
+        # is where a transform_system_prompt hook re-runs. Between
+        # boundaries the prompt is byte-identical (principle 2).
+        new_prompt = await self.channel_system_prompt(channel)
+        if new_prompt != conv.system_prompt:
+            logger.info(
+                'system prompt changed at compaction boundary',
+                extra={'channel': channel.id},
+            )
+        conv.system_prompt = new_prompt
 
     async def _dispatch_tool_calls(
         self, tool_calls: list[dict], channel: Channel

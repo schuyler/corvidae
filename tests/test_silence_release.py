@@ -406,6 +406,101 @@ class TestSystemPromptHook:
         assert prompt == plain
         assert channel.id in caplog.text and "transform_system_prompt" in caplog.text
 
+    async def test_wrapper_that_rewrites_identity_is_rejected(self, agent_env, caplog):
+        """A transform that modifies the identity+register prefix is
+        rejected; the channel falls back to the untransformed prompt (#136)."""
+        plugin, channel = agent_env
+        plain = await plugin.channel_system_prompt(channel)
+
+        class _Rewrites:
+            @hookimpl(wrapper=True)
+            def transform_system_prompt(self, channel, text):
+                result = yield
+                return "REWRITTEN " + result
+
+        plugin.pm.register(_Rewrites(), name="rewrites")
+        with caplog.at_level("WARNING"):
+            prompt = await plugin.channel_system_prompt(channel)
+
+        assert prompt == plain
+        assert "identity layer" in caplog.text
+
+    async def test_wrapper_that_appends_is_accepted(self, agent_env):
+        """A transform that appends a section is accepted (#136)."""
+        plugin, channel = agent_env
+        plain = await plugin.channel_system_prompt(channel)
+
+        class _Appends:
+            @hookimpl(wrapper=True)
+            def transform_system_prompt(self, channel, text):
+                result = yield
+                return result + "\n\nAPPENDED-SECTION"
+
+        plugin.pm.register(_Appends(), name="appends")
+        prompt = await plugin.channel_system_prompt(channel)
+
+        assert prompt == plain + "\n\nAPPENDED-SECTION"
+
+    async def test_compaction_boundary_refreshes_system_prompt(self, agent_env):
+        """The system prompt is re-resolved at the compaction boundary
+        so the transform hook re-runs (#136)."""
+        plugin, channel = agent_env
+        # Set up a conversation with a system prompt.
+        conv = ContextWindow(channel.id)
+        conv.system_prompt = await plugin.channel_system_prompt(channel)
+        channel.conversation = conv
+        original = conv.system_prompt
+
+        # Register a wrapper that appends a marker.
+        class _Marker:
+            @hookimpl(wrapper=True)
+            def transform_system_prompt(self, channel, text):
+                result = yield
+                return result + "\n\nCOMPACTION-MARKER"
+
+        plugin.pm.register(_Marker(), name="marker")
+
+        # Simulate a compaction boundary.
+        await plugin.on_compaction(
+            channel=channel,
+            summary_msg={"role": "user", "content": "summary"},
+            retain_count=1,
+            compacted_ids=[1],
+        )
+
+        assert conv.system_prompt == original + "\n\nCOMPACTION-MARKER"
+
+    async def test_queued_section_appears_at_next_boundary(self, agent_env):
+        """A queued section is appended to the composed prompt at the
+        next boundary and the queue is cleared (#136 interim path)."""
+        plugin, channel = agent_env
+        plain = await plugin.channel_system_prompt(channel)
+
+        # Queue a section.
+        plugin.queue_system_prompt_section(channel, "INTERIM-SECTION")
+
+        # The next call to channel_system_prompt includes it.
+        prompt = await plugin.channel_system_prompt(channel)
+        assert prompt == plain + "\n\nINTERIM-SECTION"
+
+        # The queue is cleared: the next call is back to plain.
+        prompt2 = await plugin.channel_system_prompt(channel)
+        assert prompt2 == plain
+
+    async def test_non_boundary_turn_sends_identical_prompt(self, agent_env):
+        """A turn without a compaction boundary sends a byte-identical
+        system prompt (principle 2, #136)."""
+        plugin, channel = agent_env
+        conv = ContextWindow(channel.id)
+        conv.system_prompt = await plugin.channel_system_prompt(channel)
+        channel.conversation = conv
+        prompt_before = conv.system_prompt
+
+        # No compaction, no conversation restart: the prompt is unchanged.
+        prompt_after = conv.system_prompt
+
+        assert prompt_before == prompt_after
+
 
 # ---------------------------------------------------------------------------
 # S10: core names nothing from cognition
