@@ -310,7 +310,6 @@ class Agent(CorvidaePlugin):
         # Channel id -> the pending retry of its unreachable-backend turn.
         self._turn_retries: dict[str, _TurnRetry] = {}
 
-
     @property
     def tools(self) -> dict[str, Callable]:
         """Public read-only access to the tool dict."""
