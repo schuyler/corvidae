@@ -75,7 +75,7 @@ def split_raw_reasoning(message: dict) -> bool:
     closed it. A server's parsed reasoning cannot tell a cut-off from a
     decline (both arrive as empty content); a missing </think> in the raw
     text can. shortcut: assumes the chat template forces thinking open, so
-    set llm.<role>.raw_reasoning only on endpoints whose template does;
+    set llm.<profile>.raw_reasoning only on endpoints whose template does;
     elsewhere every reply without a </think> would read as cut off.
     """
     # Drop an optional opening tag and the whitespace after it.
@@ -382,7 +382,7 @@ class LLMClient:
 
         # The model this request is actually sent with: extra_body can
         # override the configured one, and the usage record must name the
-        # model the server was asked for, not the role's default (#297).
+        # model the server was asked for, not the profile's default (#297).
         sent_model = payload["model"]
 
         # Mint a per-call id pairing the observer request with its response,

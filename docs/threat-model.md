@@ -207,7 +207,7 @@ stylistic critique lenses and the provenance check with a warning (#320, PRD
 stay in the tunable list above, and no stage reads them. Compaction on a
 fork miss, and consolidation of a range that has left the window, don't use
 a standalone prompt either: they send the agent's rendered view (system
-prompt, window, fork instruction) on `llm.background` with no tools (PRD
+prompt, window, fork instruction) on `llm.main` with no tools (PRD
 §3.8; #380, #388), so the fork instructions above are the only prompts that
 steer them. The old `agent.compaction_prompt` and
 `memory.consolidation_prompt` are gone.
@@ -265,7 +265,7 @@ Compaction is the adjacent problem. Summaries are stored as
 `role: assistant` (`compaction.py`), so the model reads whatever was
 injected as something it said itself, and that persists across restarts
 too. Every summary is now written from the agent's rendered view, by a
-fork or, on a miss, as a call on `llm.background` (PRD §3.3.3, §3.8). It
+fork or, on a miss, as a call on `llm.main` (PRD §3.3.3, §3.8). It
 is genuinely the agent's own words about what it read, written under its
 own persona, not a neutral paraphrase stored under `role: assistant`: the
 earlier standalone summarizer, which made the neutral paraphrase, is gone.
@@ -483,8 +483,8 @@ queue's bound, but nothing bounds their total (finding 14).
 With `agent.forks.enabled` (on by default since #320; #51), compaction,
 consolidation, appraisal and critique don't build their own prompts. (With
 forks off, or on a miss, compaction and out-of-window consolidation send
-the same view on `llm.background` instead of forking it: see the
-`background` role in finding 12, and the same exposure applies.) Each
+the same view as a plain call on `llm.main` instead of forking it: the
+exposure is the same.) Each
 appends its instruction as a `user` turn to the channel's rendered window,
 after whatever untrusted text the window holds, under the agent's own
 persona, with the agent's tool schemas in the prompt. Injection that could
@@ -628,33 +628,30 @@ human removed. What bounds it:
 
 ### 12. A remote model endpoint receives that stage's inputs
 
-Every `llm:` role is an OpenAI-compatible client, so any role can point at a
-hosted provider. Doing so sends that role's requests, conversation content
-included, to the provider. Which stage uses which role:
+Every `llm:` profile is an OpenAI-compatible client, so any profile can point
+at a hosted provider. Doing so sends that profile's requests, conversation
+content included, to the provider. A stage uses its kind's default profile
+(no fallback chains), so there are two endpoints to weigh:
 
-- `main`: agent turns, compaction summaries written by a fork, and the
-  forked appraisal and critique stages (they fork the local window, so they cannot use a remote
-  role). The `llm.appraisal` and `llm.critic` roles are no longer read by any
-  stage: stage 2 and the lenses run only as forks on `llm.main` (#320).
-- `background`: the rendered view (PRD §3.8) for memory consolidation of
-  ranges that have left the window, one per segment trimmed to the channel's
-  `max_context_tokens` (an oversized row or tool cycle can still exceed it), and for compaction's summary on a fork miss or with
-  forks off; the importance prior; and subagents (their task context and
-  tool results). The view is the whole window the agent held: the system
-  prompt (identity and register), CONTEXT blocks, tool calls and their
-  results, and earlier summaries. Before #380/#388 this role saw only a
-  dialog transcript (consolidation); compaction's fallback ran on `main`.
-  A remote `background` endpoint now receives much more of the host's
-  data, compaction content included. Compaction's fallback sends the uncapped window prefix at
+- `main`: every chat stage. Agent turns, compaction summaries (written by a
+  fork or, on a miss or with forks off, as a plain call on the rendered
+  view), the forked appraisal and critique stages (they fork the window,
+  so they cannot move off `main`), memory consolidation of
+  ranges that have left the window, the importance prior, and subagents
+  (their task context and tool results). The consolidation and compaction
+  view (PRD §3.8) is the whole window the agent held: the system prompt
+  (identity and register), CONTEXT blocks, tool calls and their results, and
+  earlier summaries, one per segment trimmed to the channel's
+  `max_context_tokens` for consolidation (an oversized row or tool cycle can
+  still exceed it). Compaction's fallback sends the uncapped window prefix at
   the cut, since the window is over budget when compaction runs. A remote
-  `background` role is a disclosure decision for all of it, not only for
-  the importance prior.
+  `main` is a disclosure decision for all of it. An `llm.background` block
+  is accepted but no stage uses it, so it changes nothing here until the
+  operator stage-to-profile map arrives (#399).
 - `embedding`: memory embedding and retrieval queries, and retention.
 
-A role that isn't configured falls back to `main`, so the endpoint of
-`main` receives that stage instead. The provider also sees whatever
-untrusted text those stages carry. Treat a remote role as a disclosure
-decision per stage, not only a cost one.
+The provider also sees whatever untrusted text those stages carry. Treat a
+remote profile as a disclosure decision per stage, not only a cost one.
 
 The key can live in the daemon's environment (`api_key: "${VAR}"`), which
 keeps it out of a tracked `agent.yaml`. As with MCP tokens (finding 6), that
@@ -724,7 +721,7 @@ What each kind of unlock costs:
   the prompt, refusals included, is now the model's to change.
 - **The prompts that judge and remember** (the critic's and appraiser's
   prompts, open by default today; fork instructions, which now also steer
-  the background view for compaction misses and out-of-window
+  the standalone view for compaction misses and out-of-window
   consolidation; and `agent.forks.*`, which decides
   whether those stages fork at all). The check can be rewritten by the
   thing it checks (finding 2). An injection can rewrite how the agent

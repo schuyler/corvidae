@@ -2,10 +2,10 @@
 
 The documented copy of the system prompt for `AppraisalPlugin`'s stage-2
 tier-3 call (bootstrap-mapping §3.2; phase-2 WP2.5) — one schema-constrained
-JSON call on the `appraisal` LLM role (falling back to `background`, then
-`main`) that scores the completed exchange after the response has gone out.
-Runs as a silent background task, never on the response path. Override it
-with a literal string via the `appraisal.stage2_prompt` config key.
+JSON call, a fork of the window on `llm.main`, that scores the completed
+exchange after the response has gone out. Runs as a silent background
+task, never on the response path. Override it with a literal string via the
+`appraisal.stage2_prompt` config key.
 
 ---
 

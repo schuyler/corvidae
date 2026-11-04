@@ -28,11 +28,11 @@ CONSOLIDATION_ATTRIBUTION = {
 
 
 async def _fire_response(pm, *, usage=USAGE, error=None, attribution=ATTRIBUTION,
-                         role="main", model="m1", request_id="req1",
+                         profile="main", model="m1", request_id="req1",
                          latency_ms=42.0, timings=None):
     """Dispatch on_llm_response through the pm the way LLMPlugin's observer does."""
     await pm.ahook.on_llm_response(
-        role=role,
+        profile=profile,
         model=model,
         request_id=request_id,
         usage=usage,
@@ -64,10 +64,10 @@ class TestMetricsPlugin:
         assert by_name["llm.tokens.completion"][0] == 20.0
         assert by_name["llm.tokens.total"][0] == 120.0
         assert by_name["llm.latency_ms"][0] == 42.0
-        # Tags carry role, model, and the attribution stage/channel.
+        # Tags carry profile, model, and the attribution stage/channel.
         for value, tags in by_name.values():
             assert tags == {
-                "role": "main",
+                "profile": "main",
                 "model": "m1",
                 "stage": "turn",
                 "channel": "irc:#general",
@@ -151,7 +151,7 @@ class TestUsageLogPlugin:
         await _fire_response(pm, request_id="req-abc")
 
         async with db.execute(
-            "SELECT request_id, role, model, stage, channel_id, prompt_tokens, "
+            "SELECT request_id, profile, model, stage, channel_id, prompt_tokens, "
             "completion_tokens, total_tokens, latency_ms, error "
             "FROM usage_log WHERE request_id = ?",
             ("req-abc",),
@@ -235,7 +235,7 @@ class TestUsageLogPlugin:
         old_ddl = USAGE_LOG_DDL.replace("    trigger TEXT,\n", "")
         await db.execute(old_ddl)
         await db.execute(
-            "INSERT INTO usage_log (ts, request_id, role, model) "
+            "INSERT INTO usage_log (ts, request_id, profile, model) "
             "VALUES (1.0, 'req-old', 'main', 'm1')"
         )
         await db.commit()
@@ -250,6 +250,36 @@ class TestUsageLogPlugin:
 
         assert rows == [("req-old", None), ("req-new", "compaction")]
 
+
+    async def test_table_with_role_column_is_renamed_to_profile_in_place(self, db):
+        """R4: a usage_log created when the column was called ``role`` has it
+        renamed to ``profile`` on open, with prior rows preserved, and new
+        rows land in the same column."""
+        await db.execute(
+            "CREATE TABLE usage_log (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "ts REAL NOT NULL, request_id TEXT NOT NULL, role TEXT NOT NULL, "
+            "model TEXT NOT NULL, stage TEXT, channel_id TEXT, trace_id TEXT, "
+            "prompt_tokens INTEGER, completion_tokens INTEGER, "
+            "total_tokens INTEGER, latency_ms REAL, error TEXT)"
+        )
+        await db.execute(
+            "INSERT INTO usage_log (ts, request_id, role, model) "
+            "VALUES (1.0, 'req-old', 'background', 'm1')"
+        )
+        await db.commit()
+
+        pm, plugin = await self._setup(db)
+        await _fire_response(pm, request_id="req-new", profile="main")
+
+        async with db.execute("PRAGMA table_info(usage_log)") as cursor:
+            columns = {row[1] for row in await cursor.fetchall()}
+        assert "profile" in columns
+        assert "role" not in columns
+        async with db.execute(
+            "SELECT request_id, profile FROM usage_log ORDER BY id"
+        ) as cursor:
+            rows = await cursor.fetchall()
+        assert rows == [("req-old", "background"), ("req-new", "main")]
 
     async def test_cache_counts_written_from_timings(self, db):
         """PRD §3.13.10: llama-server's timings.cache_n (prompt tokens reused
@@ -286,13 +316,13 @@ class TestUsageLogPlugin:
         both columns on next write, with prior rows preserved."""
         await db.execute(
             "CREATE TABLE usage_log (id INTEGER PRIMARY KEY AUTOINCREMENT, "
-            "ts REAL NOT NULL, request_id TEXT NOT NULL, role TEXT NOT NULL, "
+            "ts REAL NOT NULL, request_id TEXT NOT NULL, profile TEXT NOT NULL, "
             "model TEXT NOT NULL, stage TEXT, channel_id TEXT, trace_id TEXT, "
             "prompt_tokens INTEGER, completion_tokens INTEGER, "
             "total_tokens INTEGER, latency_ms REAL, error TEXT)"
         )
         await db.execute(
-            "INSERT INTO usage_log (ts, request_id, role, model) "
+            "INSERT INTO usage_log (ts, request_id, profile, model) "
             "VALUES (1.0, 'req-old', 'main', 'm1')"
         )
         await db.commit()
@@ -303,7 +333,7 @@ class TestUsageLogPlugin:
         )
 
         async with db.execute(
-            "SELECT ts, request_id, role, model, cache_n, prompt_n "
+            "SELECT ts, request_id, profile, model, cache_n, prompt_n "
             "FROM usage_log ORDER BY id"
         ) as cursor:
             rows = await cursor.fetchall()
@@ -329,7 +359,7 @@ class TestMetricsJsonlPlugin:
 
     async def test_writes_one_valid_json_line_per_event(self, tmp_path):
         pm, plugin = await self._setup(tmp_path)
-        await pm.ahook.on_metrics(name="llm.tokens.total", value=120.0, tags={"role": "main"})
+        await pm.ahook.on_metrics(name="llm.tokens.total", value=120.0, tags={"profile": "main"})
         await pm.ahook.on_metrics(name="llm.latency_ms", value=42.0, tags={})
         await plugin.on_stop()
 
@@ -338,7 +368,7 @@ class TestMetricsJsonlPlugin:
         first = json.loads(lines[0])
         assert first["name"] == "llm.tokens.total"
         assert first["value"] == 120.0
-        assert first["tags"] == {"role": "main"}
+        assert first["tags"] == {"profile": "main"}
         assert "ts" in first
 
     async def test_disabled_when_unconfigured(self, tmp_path):

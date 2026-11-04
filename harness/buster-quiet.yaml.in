@@ -8,7 +8,7 @@
 # and retention must run on its interval. The scheduler is disabled, which
 # proves retention runs without it. See plans/kernel-clock.md section 7.
 #
-# No llm.embedding role: consolidated records are stored unembedded, a
+# No llm.embedding profile: consolidated records are stored unembedded, a
 # documented degradation, so no embedding server is needed on the host.
 
 llm:

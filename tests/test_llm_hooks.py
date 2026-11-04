@@ -184,11 +184,11 @@ class _HookRecorder:
 
     @hookimpl
     async def on_llm_request(
-        self, role, model, request_id, message_count, tool_count, attribution
+        self, profile, model, request_id, message_count, tool_count, attribution
     ):
         self.requests.append(
             {
-                "role": role,
+                "profile": profile,
                 "model": model,
                 "request_id": request_id,
                 "message_count": message_count,
@@ -199,11 +199,11 @@ class _HookRecorder:
 
     @hookimpl
     async def on_llm_response(
-        self, role, model, request_id, usage, latency_ms, attribution, error
+        self, profile, model, request_id, usage, latency_ms, attribution, error
     ):
         self.responses.append(
             {
-                "role": role,
+                "profile": profile,
                 "model": model,
                 "request_id": request_id,
                 "usage": usage,
@@ -227,7 +227,7 @@ class TestLLMPluginObserverWiring:
         await plugin.on_start(config)
         return plugin, recorder
 
-    async def test_main_and_background_clients_get_observers_with_roles(self):
+    async def test_main_and_background_clients_get_observers_with_profiles(self):
         config = {
             "llm": {
                 "main": {"base_url": BASE_URL, "model": "main-model"},
@@ -247,11 +247,11 @@ class TestLLMPluginObserverWiring:
         finally:
             await plugin.on_stop()
 
-        roles = [r["role"] for r in recorder.requests]
-        assert roles == ["main", "background"]
+        profiles = [r["profile"] for r in recorder.requests]
+        assert profiles == ["main", "background"]
         models = [r["model"] for r in recorder.requests]
         assert models == ["main-model", "bg-model"]
-        assert [r["role"] for r in recorder.responses] == ["main", "background"]
+        assert [r["profile"] for r in recorder.responses] == ["main", "background"]
 
     async def test_hook_receives_attribution_snapshot(self):
         from corvidae.attribution import reset_attribution, set_attribution
@@ -293,12 +293,12 @@ class TestLLMPluginObserverWiring:
             await asyncio.sleep(0)
 
         assert recorder.requests[0]["model"] == "new-model"
-        assert recorder.requests[0]["role"] == "main"
+        assert recorder.requests[0]["profile"] == "main"
 
 
 class TestObserverNamesModelSent:
     """#297 / PRD §3.13.10: the observer pair names the model each call was
-    sent with, not the role's configured model, and passes llama-server's
+    sent with, not the profile's configured model, and passes llama-server's
     ``timings`` through so cache hits are recordable."""
 
     async def _chat(self, client, **kwargs):
@@ -415,7 +415,7 @@ class TestObserverNamesModelSent:
     )
     async def test_usage_log_names_model_sent(self, db, instance_body, call_body, status, expected):
         """usage_log names the model sent for each override source, on
-        success and on terminal failure, and the role's model without one."""
+        success and on terminal failure, and the profile's model without one."""
         from aiohttp import ClientResponseError
 
         from corvidae.llm_plugin import _HookObserver

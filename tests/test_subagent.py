@@ -13,6 +13,7 @@ from corvidae.tool import Tool, ToolContext, ToolRegistry
 from corvidae.llm_plugin import LLMPlugin
 from corvidae.tools.subagent import SubagentPlugin, run_agent_loop
 
+from helpers import CORE_LLM_STAGES, collect_llm_stages
 from llm_response_fixtures import (
     _make_text_response,
     _make_tool_call_response,
@@ -65,8 +66,9 @@ def _make_pm_with_tool_registry(*tool_names: str):
 
     # Register a mock LLMPlugin so SubagentPlugin._launch can get a client.
     mock_llm = LLMPlugin(pm)
-    mock_llm.main_client = MagicMock()
-    mock_llm.background_client = None
+    mock_llm._stages = dict(CORE_LLM_STAGES)
+    mock_llm.main_client = MagicMock(name="main")
+    mock_llm.background_client = MagicMock(name="background")
     pm.register(mock_llm, name="llm")
 
     tool_registry = ToolRegistry()
@@ -279,15 +281,38 @@ class TestLaunchWithMockedDependencies:
 
 
 class TestLLMClientLifecycle:
-    """After Part 3, SubagentPlugin uses the shared background client from LLMPlugin.
-    No ephemeral client is created — start/stop are not called on the shared client.
+    """SubagentPlugin uses the shared client its stage resolves to (main) from
+    LLMPlugin. No ephemeral client is created — start/stop are not called on
+    the shared client.
     """
 
-    async def test_work_uses_shared_client_from_llm_plugin(self):
-        """work() uses the shared background client from LLMPlugin, not an ephemeral one."""
+    async def test_subagent_registers_its_stage_as_chat(self):
+        """R1/R3: the subagent tool owns the ``subagent`` stage, kind chat."""
+        plugin = SubagentPlugin(create_plugin_manager())
+        assert collect_llm_stages(plugin, "subagent") == {"subagent": "chat"}
+
+    async def test_launch_asks_for_the_subagent_stage(self):
+        """R1: the subagent call site requests its own stage name."""
         plugin = await _make_started_plugin()
         llm_plugin = plugin.pm.get_plugin("llm")
-        shared_client = llm_plugin.get_client("background")
+        llm_plugin.get_client = MagicMock(side_effect=llm_plugin.get_client)
+        task_queue = MagicMock(spec=TaskQueue)
+        task_queue.enqueue = AsyncMock()
+        ctx = ToolContext(
+            channel=_make_channel(), tool_call_id="call-lc-00", task_queue=task_queue,
+        )
+
+        await plugin._launch("instructions", "desc", ctx)
+
+        llm_plugin.get_client.assert_called_once_with("subagent")
+
+    async def test_work_uses_shared_client_from_llm_plugin(self):
+        """work() uses the main client from LLMPlugin (the subagent stage's
+        default profile, not background), not an ephemeral one."""
+        plugin = await _make_started_plugin()
+        llm_plugin = plugin.pm.get_plugin("llm")
+        shared_client = llm_plugin.get_client()
+        assert shared_client is llm_plugin.main_client
 
         channel = _make_channel()
         task_queue = MagicMock(spec=TaskQueue)
@@ -312,13 +337,13 @@ class TestLLMClientLifecycle:
             await enqueued_task.work()
 
         assert captured_client.get("client") is shared_client, \
-            "work() must pass the shared LLMPlugin background client to run_agent_loop"
+            "work() must pass the shared LLMPlugin main client to run_agent_loop"
 
     async def test_work_does_not_call_start_or_stop_on_shared_client(self):
-        """work() must NOT call start() or stop() on the shared background client."""
+        """work() must NOT call start() or stop() on the shared client."""
         plugin = await _make_started_plugin()
         llm_plugin = plugin.pm.get_plugin("llm")
-        shared_client = llm_plugin.get_client("background")
+        shared_client = llm_plugin.get_client()
         shared_client.start = AsyncMock()
         shared_client.stop = AsyncMock()
 
@@ -348,7 +373,7 @@ class TestLLMClientLifecycle:
         """work() propagates exceptions from run_agent_loop without stopping shared client."""
         plugin = await _make_started_plugin()
         llm_plugin = plugin.pm.get_plugin("llm")
-        shared_client = llm_plugin.get_client("background")
+        shared_client = llm_plugin.get_client()
         shared_client.stop = AsyncMock()
 
         channel = _make_channel()

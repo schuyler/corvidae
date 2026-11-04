@@ -2,7 +2,7 @@
 
 Three plugins:
   - MetricsPlugin: consumes on_llm_response and emits on_metrics events
-    (token counts, latency, errors) with role/model/stage/channel tags.
+    (token counts, latency, errors) with profile/model/stage/channel tags.
   - UsageLogPlugin: consumes on_llm_response and writes one row per LLM
     call into the ``usage_log`` SQLite table (persistence plugin's DB).
   - MetricsJsonlPlugin: consumes on_metrics and appends one JSON line per
@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS usage_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts REAL NOT NULL,
     request_id TEXT NOT NULL,
-    role TEXT NOT NULL,
+    profile TEXT NOT NULL,
     model TEXT NOT NULL,
     stage TEXT,
     channel_id TEXT,
@@ -79,11 +79,11 @@ class MetricsPlugin(CorvidaePlugin):
 
     @hookimpl
     async def on_llm_response(
-        self, role, model, request_id, usage, latency_ms, attribution, error
+        self, profile, model, request_id, usage, latency_ms, attribution, error
     ) -> None:
         """Translate one LLM response into token/latency/error metrics."""
         tags = {
-            "role": role,
+            "profile": profile,
             "model": model,
             "stage": attribution.get("stage", ""),
             "channel": attribution.get("channel_id", ""),
@@ -139,6 +139,11 @@ class UsageLogPlugin(CorvidaePlugin):
             # _ensure_table ADD COLUMN sweep).
             async with db.execute("PRAGMA table_info(usage_log)") as cursor:
                 columns = {row[1] for row in await cursor.fetchall()}
+            # The llm-config column was named role before profiles.
+            if "role" in columns and "profile" not in columns:
+                await db.execute(
+                    "ALTER TABLE usage_log RENAME COLUMN role TO profile"
+                )
             if "cached_tokens" not in columns:
                 await db.execute(
                     "ALTER TABLE usage_log ADD COLUMN cached_tokens INTEGER"
@@ -168,7 +173,7 @@ class UsageLogPlugin(CorvidaePlugin):
 
     @hookimpl
     async def on_llm_response(
-        self, role, model, request_id, usage, latency_ms, attribution, error,
+        self, profile, model, request_id, usage, latency_ms, attribution, error,
         timings,
     ) -> None:
         """Insert one row for this LLM call. Fail-soft."""
@@ -182,7 +187,7 @@ class UsageLogPlugin(CorvidaePlugin):
             usage = usage or {}
             timings = timings or {}
             await db.execute(
-                "INSERT INTO usage_log (ts, request_id, role, model, stage, "
+                "INSERT INTO usage_log (ts, request_id, profile, model, stage, "
                 "channel_id, trace_id, trigger, mode, prompt_tokens, "
                 "completion_tokens, total_tokens, cached_tokens, cache_n, "
                 "prompt_n, latency_ms, error) "
@@ -190,7 +195,7 @@ class UsageLogPlugin(CorvidaePlugin):
                 (
                     time.time(),
                     request_id,
-                    role,
+                    profile,
                     model,
                     attribution.get("stage"),
                     attribution.get("channel_id"),

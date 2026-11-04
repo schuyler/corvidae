@@ -86,8 +86,8 @@ async def env(tmp_path, monkeypatch):
     pm.register(llm, name="llm")
     await llm.on_init(pm=pm, config=CONFIG)
     encoder = StubEncoder()
-    # LLMPlugin.on_start builds one client per role; hand it the stub.
-    monkeypatch.setattr(llm, "_create_client", lambda cfg, role="main": encoder)
+    # LLMPlugin.on_start builds one client per profile; hand it the stub.
+    monkeypatch.setattr(llm, "_create_client", lambda cfg, profile="main": encoder)
 
     clock, idle = install_kernel_clock(pm)
 

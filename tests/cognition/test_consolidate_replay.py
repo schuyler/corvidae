@@ -107,14 +107,14 @@ async def _seed_db(path, rows, channel_id="irc:#s-compact"):
 
 
 class _FakeLLMPlugin:
-    """Stands in for LLMPlugin: hands out one client, records the role asked for."""
+    """Stands in for LLMPlugin: hands out one client, records the stage asked for."""
 
     def __init__(self, client):
         self._client = client
-        self.roles_requested = []
+        self.stages_requested = []
 
-    def get_client(self, role):
-        self.roles_requested.append(role)
+    def get_client(self, stage=None):
+        self.stages_requested.append(stage)
         return self._client
 
 
@@ -278,7 +278,7 @@ async def test_replay_builds_the_daemons_catchup_request(tmp_path):
     """R10: pinned against the production code path, not a hand-copied shape.
 
     The daemon consolidates an out-of-window range through its catch-up (a
-    request to llm.background); the replay over the same snapshot database,
+    request for the consolidation stage); the replay over the same snapshot database,
     ViewInputs and fork prompt must send the same messages and extra_body.
     If either side grows its own request builder, this fails."""
     from corvidae_cognition.memory import DEFAULT_CONSOLIDATION_FORK_PROMPT
@@ -344,6 +344,55 @@ async def test_replay_sends_the_record_schema_extra_body(tmp_path):
     )
 
     assert replay_client.extra_bodies == [CONSOLIDATION_EXTRA_BODY]
+
+
+async def test_catch_up_asks_for_the_consolidation_stage(tmp_path):
+    """The daemon's catch-up consolidation asks for its own stage (#431 R1).
+
+    Characterization test: it pins which stage _catch_up requests so any
+    path that must agree with production consolidation (the replay) keeps
+    exercising the same client. The stage resolves to its kind's default
+    profile (main)."""
+    from corvidae_cognition.memory import MemoryPlugin
+
+    client = _FakeClient()
+    llm = _FakeLLMPlugin(client)
+    plugin = MemoryPlugin()
+    plugin._llm = lambda: llm
+
+    db = await _seed_db(tmp_path / "t.db", [_row(1, "user", "hi")])
+    plugin._resolve_db = lambda: db
+
+    class _FakeAgent:
+        async def view_inputs(self, channel_id):
+            return _view_inputs()
+
+    class _FakePM:
+        def get_plugin(self, name):
+            return _FakeAgent() if name == "agent" else None
+
+    plugin.pm = _FakePM()
+    await plugin._catch_up("irc:#s-compact", 0, 1)
+
+    assert llm.stages_requested == ["consolidation"]
+    await db.close()
+
+
+def test_replay_client_uses_llm_main_even_when_background_is_configured(tmp_path):
+    """R2/D5: the replay mirrors the daemon's consolidation stage at its
+    default profile (main). With llm.background configured it must still
+    build llm.main's client, or the replay sends consolidation to a
+    different model than the daemon."""
+    from harness.consolidate_replay import _build_client
+
+    config = {"llm": {
+        "main": {"base_url": "http://main.example/v1", "model": "main-model"},
+        "background": {"base_url": "http://bg.example/v1", "model": "bg-model"},
+    }}
+
+    client = _build_client(config, tmp_path / "agent.yaml")
+
+    assert (client.base_url, client.model) == ("http://main.example/v1", "main-model")
 
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,8 @@
 # LLM backend — OpenAI-compatible Chat Completions API (required)
-# llm.main is required. Every other key under llm: is an optional role
-# (background, embedding, ...); any unconfigured role falls back to llm.main.
+# llm.main is required. Every key under llm: is a profile, built into its own
+# client. Chat stages (main turns, compaction, consolidation, the importance
+# prior, appraisal, critique, subagents) use llm.main; the embedding stage
+# uses llm.embedding when it is configured.
 llm:
   main:
     base_url: http://localhost:8080/v1   # llama-server, vLLM, OpenAI, etc.
@@ -21,18 +23,6 @@ llm:
     # retry_max_delay: 60.0            # maximum delay cap in seconds
     # model_not_loaded_wait: 60.0      # seconds to wait out "model is not loaded" (llama-server router)
     # timeout: null                    # HTTP timeout in seconds per request (null means no timeout)
-  # background:                        # optional: separate LLM for background tasks
-  #   base_url: http://localhost:8080   # all fields must be specified; no inheritance from llm.main
-  #   model: llama3
-  #   # api_key: sk-...                 # omit for local servers
-  #   # api_key: "${OPENAI_API_KEY}"    # or from the environment; a remote role sends its inputs off-host
-  #   # extra_body:
-  #   #   id_slot: 1
-  #   # max_retries: 3
-  #   # retry_base_delay: 2.0
-  #   # retry_max_delay: 60.0
-  #   # model_not_loaded_wait: 60.0
-  #   # timeout: null
   # embedding:                         # optional: embedding model for memory retrieval
   #   base_url: http://localhost:8082/v1  # embedding servers are usually separate endpoints
   #   model: nomic-embed-text
@@ -67,7 +57,7 @@ agent:
   #                                 # the background view used on a fork miss (prompts/compaction_fork.md);
   #                                 # replaces the removed compaction_prompt (still set: startup warning, ignored)
   # forks:                          # run background stages as forks of the main window (#51)
-  #   enabled: true                 # default; false: live-window stages skip, compaction uses llm.background
+  #   enabled: true                 # default; false: live-window stages skip, compaction uses a view call on llm.main
   #   reasoning_budget_tokens: 2048 # per-fork think budget; null = server default
   #   stages: null                  # null = all; or [compaction, consolidation, appraisal, critique]
   # chars_per_token: 3.5            # deprecated: retained for config compatibility; has no effect on token counting
@@ -99,7 +89,7 @@ agent:
 #   retrieval:
 #     band_on: score                  # score | similarity: what strong/moderate/weak is applied to
 #     recency_from: created           # created | last_used: where ranking age is measured from
-#   consolidation_fork_prompt: "..."  # instruction for consolidation, forked or sent on llm.background over the
+#   consolidation_fork_prompt: "..."  # instruction for consolidation, forked or sent on llm.main over the
 #                                     # agent's rebuilt view; replaces the removed consolidation_prompt
 #                                     # (still set: startup warning, ignored)
 

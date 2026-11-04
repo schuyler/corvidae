@@ -791,7 +791,7 @@ class TestUsageLogAttributionWiring:
             attribution = get_attribution()
             captured_attribution.update(attribution)
             await plugin.pm.ahook.on_llm_response(
-                role="main",
+                profile="main",
                 model="test-model",
                 request_id="req-1",
                 usage={"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
