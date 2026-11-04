@@ -181,9 +181,9 @@ one is a bug even if its tests pass.
     subagents, consolidation, appraisal, critique and forks are all
     attributed by stage, channel, trace, trigger and mode. Eval questions
     are denominated in tokens; this is an eval prerequisite. The same
-    record names the model each call was sent with and how much of its
-    prompt came from cache, which is what a pool's warm heads are tuned
-    against (§3.13.10).
+    record names the profile and model each call was sent with and how
+    much of its prompt came from cache, which is what a pool's warm heads
+    are tuned against (§3.13.10).
 
 12. **How the work is done.** Red/green TDD; every test under a timeout;
     docs current before a change is complete. A plan for a change takes
@@ -575,16 +575,16 @@ Per transport:
    summary stays bounded in length however many rounds carry it forward. Compaction is never
    skipped. The summary is written by a fork of the window at the cut; on a
    miss (or with forks off) from the rendered view (§3.8) of the same
-   prefix, sent on the `background` role; and when that fails too, a
-   fallback that cannot fail brings the window back within budget, logs a
-   warning naming the channel and what was lost, and leaves the agent
+   prefix, sent with compaction's profile; and when that fails
+   too, a fallback that cannot fail brings the window back within budget,
+   logs a warning naming the channel and what was lost, and leaves the agent
    answering. The same fallback covers any window over budget that
    compaction won't or can't take (too few rows to compact, a few huge
    ones): a window over budget is always brought back within budget. A
    failed compaction must never wedge the agent; that failure is what
    ended nanobot, the harness corvidae replaced.
 3. A summary is written from the agent's own view of the dropped range
-   (§3.8), whether by a fork or on the `background` role, so it is the
+   (§3.8), whether by a fork or by the view call, so it is the
    agent's first-person account and persists as `assistant`. A retained
    tail with no `user` message gets a `user`-role summary instead, because
    strict chat templates reject a prompt with no user query. The one
@@ -752,8 +752,8 @@ Per transport:
    the channel's next compaction boundary or conversation start, as plugin
    sections do (§3.3.8; principle 2). `set_settings` can't lift a lock or
    change the lock list itself.
-7. `subagent` launches a background agent on the shared `background`
-   client with the calling channel's tool set minus itself and a
+7. `subagent` launches a background agent with the subagent stage's
+   profile, the calling channel's tool set minus itself and a
    persona-neutral prompt as shipped, which is one of the agent's prompts
    under principle 15; it returns a task id at once and its result arrives
    as a notification like any other tool.
@@ -819,17 +819,25 @@ Per transport:
 
 ### 3.6 LLM client
 
-1. OpenAI-compatible chat completions over aiohttp. Roles `main`,
-   `background`, `embedding`; any unconfigured role falls back to `main`;
-   consuming plugins implement their own two-step fallbacks (appraisal,
-   critic) on their windowless paths. The embedding role has its own
-   endpoint, a required `dimensions`, and document/query prefixes
-   matching the model card. Any role may point at a remote endpoint. Its
-   credentials should be storable outside config, in the daemon's
-   environment, so a tracked `agent.yaml` never has to hold a secret; a
-   literal key in config remains allowed. Whatever a
-   role is sent leaves the host, and `docs/threat-model.md` says which
-   stages send what (principle 9).
+1. OpenAI-compatible chat completions over aiohttp. The client applies a
+   profile to each call: a named set of settings (endpoint, credentials,
+   model, request parameters) of one kind (the API shape it serves: `chat`
+   or `embedding`; another kind comes with its first consumer). A profile
+   prescribes no purpose; what a call is for is its stage's business. A
+   profile may extend another and change only what differs, and a change to
+   a base, on reload too, reaches every profile built on it. The client
+   passes a profile's request parameters through without interpreting them,
+   except the keys the agent loop builds itself, which nothing overrides
+   (principle 9). Which of them change the rendered prompt, and so the
+   cached prefix (principle 2), depends on the backend; keeping a fork's
+   prefix is the operator's choice of profile, and a fork that misses it is
+   reported (§3.8.6). An embedding profile has a required `dimensions` and
+   document/query prefixes matching the model card. Any profile may point
+   at a remote endpoint. Its credentials should be storable outside config,
+   in the daemon's environment, so a tracked `agent.yaml` never has to hold
+   a secret; a literal key in config remains allowed. Whatever a profile is
+   sent leaves the host, and `docs/threat-model.md` says which stages send
+   what (principle 9).
 2. Retries transient status codes and connection errors with capped
    exponential backoff, honours `Retry-After`, and waits out a router's
    "model is not loaded" for `model_not_loaded_wait` seconds. A terminal
@@ -842,6 +850,15 @@ Per transport:
    says so, or, absent one, when `agent.request_logprobs` is on (§3.11.4).
    Either way they are surfaced on the turn result and to
    `on_agent_response`, and never faked for providers that return none.
+5. Each model-calling stage is registered by the plugin that owns it, with
+   the kind of profile it needs, and the operator maps each stage to one
+   profile, used on every path the stage takes (§3.8.4). A plugin declares no
+   default profile: it can't know which profiles a deployment defines. A
+   stage the operator hasn't mapped uses the deployment's default profile
+   for its kind; main turns use the default chat profile. A kind with no
+   default leaves its stages to degrade as their own requirements say (§3.7
+   Memory 5), reported at startup and on a reload that removes the default
+   (principle 5). There are no fallback chains.
 
 ### 3.7 Cognition
 
@@ -861,9 +878,9 @@ only through the funnel.
 2. A record is a first-person summary with epistemic framing preserved,
    dated by when the conversation happened, embedded, and linked to its
    `message_log` id range. It carries the instructions, mode (`fork |
-   standalone`, the latter being the view call on the `background` role, not the
-   windowless standalone work of §3.8 item 5) and
-   model of the call that produced it, so the records a
+   standalone`, the latter being the view call, not the windowless
+   standalone work of §3.8 item 5)
+   and model of the call that produced it, so the records a
    given prompt wrote can be found; a record no consolidation call
    produced is marked as such. It is scored by a pluggable importance
    prior (cheap-model rubric by default; the appraisal vector when
@@ -891,7 +908,7 @@ only through the funnel.
    per-channel scope to narrow it (principle 14), and
    `docs/threat-model.md` records what that costs.
 5. Degradation: encoder down, FTS5 over `memory_fts`, flagged; sqlite-vec
-   unloadable, FTS5 with one startup warning; no embedding role, records
+   unloadable, FTS5 with one startup warning; no embedding profile, records
    stored unembedded for backfill; a stored encoder different from config,
    ERROR and embeddings disabled rather than mixed. Nothing in the memory
    path raises into the turn loop. Text is canonical; vectors are a
@@ -991,9 +1008,9 @@ deciding only what to newly append and in what order.
    agent may end that turn without sending anything. It is told that
    silence is the default, and to reply only when it judges its earlier
    reply could lead the other party to take an incorrect action.
-5. A critic may run on a different model from `llm.main`. How it gets
-   the window it judges is design; the requirement is §3.8.2's: it judges
-   the window the agent saw when it wrote the reply.
+5. A critic may run on a different model from the one that wrote the window
+   it judges. How it gets that window is design; the requirement is
+   §3.8.2's: it judges the window the agent saw when it wrote the reply.
 
 **Output gate and the right to silence.**
 
@@ -1167,11 +1184,13 @@ that window. When it has left the window the view is rebuilt from
 `message_log`: the summary then in force and the rows after its boundary,
 trimmed oldest-first to the channel's budget as the live window is, under
 the channel's `reasoning_history`; a range too long for one budget is
-written as several views. A fork is the view of the live window sent on
-the `main` role with the agent's tools, which is what lets it reuse the
-cache. The view call is the same view sent on the `background` role with no
-tools, and it is allowed for exactly two uses: compaction's summary on a
-fork miss, and consolidation of a range that has left the window. Judgment
+written as several views. A fork is the view of the live window sent with
+the agent's tools under the stage's profile, which is what lets it
+reuse the cache, as long as that profile renders the prompt as the
+profile of the window's main turns does. The view call is the same view
+sent under the same profile with no tools, and it is
+allowed for exactly two uses: compaction's summary on a fork miss, and
+consolidation of a range that has left the window. Judgment
 never uses it (item 2). How the deployed backend uses forks
 (prefix parity, which stages fork, the cost model, the rollout gate) is
 design, not requirement. The requirements are outcomes:
@@ -1191,15 +1210,17 @@ design, not requirement. The requirements are outcomes:
    window rather than rebuilding it, leaves the main window's cached prefix
    intact, and keeps its share of the pool small (principles 2, 3 and
    16).
-4. Each background stage's reasoning and reply are capped per stage, and
-   its fork instructions are set in operator config; operator config also
-   decides whether `set_settings` can lift the caps or rewrite the
-   instructions (principle 15); the threat model records the cost
-   (principle 9). The window at the compaction threshold, plus a stage's
-   instruction and both caps, fits the context whichever layer set them,
-   so a stage just short of compaction still runs. Each call is attributed
-   in `usage_log` by stage and `mode = fork | standalone` (principle 11);
-   a view call is `standalone`.
+4. Each background stage has one profile, which applies on every path the
+   stage takes (fork, view call, windowless, subagent); its reasoning and
+   reply caps come from that profile, and its fork instructions are set in
+   operator config; operator config also decides whether `set_settings`
+   can change the caps or rewrite the instructions (principle 15); the
+   threat model records the cost (principle 9). The window at the
+   compaction threshold, plus a stage's instruction and both caps, fits
+   the context whichever layer set them, so a stage just short of
+   compaction still runs. Each call is attributed in `usage_log` by stage
+   and `mode = fork | standalone` (principle 11); a view call is
+   `standalone`.
 5. A live-window background stage that can't run skips and logs a warning
    naming the stage, the channel, the trace if there is one, and what was
    missing (principle 5): judgment (item 2) and consolidation of a range
@@ -1211,6 +1232,15 @@ design, not requirement. The requirements are outcomes:
    agent would. Seeding and imports have no window and run standalone (a windowless call,
    unlike the view call, which is also `mode = standalone` in `usage_log`).
    Subagents never fork.
+6. How much of each fork's prompt came from cache is recorded per stage and
+   profile (§3.13.10). A stage whose forks keep missing the cached prefix
+   the window's main turns keep reusing is reported, naming the stage and
+   the profiles, and stating only what was measured, never a cause
+   (principle 5). Where the backend doesn't report cache figures, or the
+   agent can't tell a fork's miss from an eviction it didn't cause (another
+   client, the server's own cache policy), the report stays silent rather
+   than guess. A miss is reported, not prevented: preventing it would need
+   corvidae to know which parameters each backend renders.
 
 ### 3.9 Scheduler
 
@@ -1272,11 +1302,27 @@ design, not requirement. The requirements are outcomes:
    channel and carrying the response text, so the cause can be read
    afterwards rather than guessed. This puts raw model output in the
    daemon log, which the threat model accounts for.
+6. Each LLM call's record (principle 11; §3.13.10 adds further items)
+   carries when the call started and ended, its total duration from
+   start to end including retried attempts and the waits between them,
+   how many attempts it took, and the duration of its final attempt, so
+   overlapping calls can be reconstructed from the records alone; the
+   context it ran against (message count, tool count, and the token
+   budget in force for its channel); and, where the backend reports
+   them, how long the final attempt spent prefilling the prompt and,
+   separately, decoding the reply. A value the backend or the call
+   cannot supply, such as the backend's timings, or the budget of a call
+   with no channel, is recorded as unknown, never as zero; a value
+   reported as zero stays zero. What the final attempt's duration leaves
+   after that prefill and decode work is, approximately, the time it
+   waited in the backend, so a call queued behind another on a shared
+   backend can be told from a slow one.
 
 ### 3.11 Configuration and operations
 
-1. One `agent.yaml` in the working directory; `llm.main` with `base_url`
-   and `model` is the only required content. `agent.yaml.example` covers
+1. One `agent.yaml` in the working directory; a default chat profile
+   with `base_url` and `model` (`llm.main` unless config names another)
+   is the only required content. `agent.yaml.example` covers
    every key, commented out; `agent.minimal.yaml.example` is the kernel
    alone.
 2. Resolution order for channel settings: built-in defaults, agent-level
@@ -1291,7 +1337,7 @@ design, not requirement. The requirements are outcomes:
    need a restart; a malformed reload changes nothing.
 4. Dotted tunables resolve at decision time through override, then live
    config, then default; they never reach the request body. Static keys
-   (fork prompts, fork output caps, `request_logprobs`,
+   (fork prompts, stage profiles and their caps, `request_logprobs`,
    `mid_conversation_system_role`) are set by the operator, and operator
    config decides whether the agent can change them (principle 15).
 5. Prompt files under `prompts/` ship as examples that the operator's
@@ -1333,8 +1379,8 @@ design, not requirement. The requirements are outcomes:
    per-test timeout; a kernel-only job runs the suite without the
    cognition extra.
 2. The harness drives probes over local IRC against a real llama-server
-   and reads verdicts out of `sessions.db`; profiles switch the config
-   template and probe set. The probe set covers the round trip, a tool
+   and reads verdicts out of `sessions.db`; harness profiles switch the
+   config template and probe set. The probe set covers the round trip, a tool
    loop, interleaving, compaction, restart recovery, KV-slot reuse,
    reminders with and without a restart, the memory-role probe, the
    heartbeat, behaviour across a quiet period (idle upkeep runs with no
@@ -1383,8 +1429,9 @@ on turns or time, rate limits on hosted APIs, enforcing parallelism apart
 from warm heads, whether the agent sees its pool's state) are tracked in
 #296 and are not requirements until decided there.
 
-1. Every chat role draws on a pool, one per provider endpoint; roles on one
-   endpoint share it. A pool is one cost center: usage is accounted to the
+1. Every chat profile draws on a pool, one per provider endpoint;
+   profiles on one endpoint share it. A pool is one cost center: usage is
+   accounted to the
    pool, not per channel or per sender, and its declaration belongs to the
    provider, so no per-channel override changes it. Embedding calls are
    metered and attributed (item 10) but take no lease, since they extend
@@ -1448,9 +1495,13 @@ from warm heads, whether the agent sees its pool's state) are tracked in
    waiting queues with their ages. Reading it is cheap enough to do at
    every call boundary.
 9. Waiting for a lease delays work; it never drops it.
-10. The per-call record principle 11 produces names the model each call
-    was sent with, not only the role's configured one (#297), and, where
-    the backend reports it, how many prompt tokens came from cache and how
+10. The per-call record principle 11 produces names the profile each call
+    was sent with and the model, not only the profile's configured one
+    (#297); how many reasoning tokens the call spent, as the provider
+    reports them or, where it doesn't, counted from the reply, saying
+    which; for a call that takes a lease, the lease wait that preceded it
+    (item 11); and, where the
+    backend reports it, how many prompt tokens came from cache and how
     many were prefilled (llama-server's `timings.cache_n` and `prompt_n`).
     These are what a pool's declared heads, the latency bounds and
     `--cache-ram` are tuned against.
@@ -1492,7 +1543,7 @@ record that holds the reasoning.
 | The heartbeat starts on system idle, not on a schedule, and acts only when warranted; sleep is durable | §3.7 Heartbeat; #134; diverges from the Persyn spec's per-beat action |
 | Idle-triggered work may carry a latency bound: the quiet it needs decays with waiting, so traffic can't starve it | #214 |
 | The agent may decline any turn when it has nothing to add (Grice's maxims, by register); gates still never withhold a direct reply by default | #215 |
-| Model endpoints may be remote; a role's credentials should be storable in the environment rather than config (not required to be), and the threat model names what each role sends | #217 |
+| Model endpoints may be remote; a profile's credentials should be storable in the environment rather than config (not required to be), and the threat model names what each profile sends | #217 |
 | Critique is gated: stylistic lenses run on salience, the provenance check on every claim about the past, never unconditionally per reply | principle 7; §3.7 Critique 1–2; diverges from the Persyn spec |
 | No inline refine step: the sent reply is the candidate, and correction arrives on a later turn | principle 3; §3.7 Critique 4; the Persyn spec's own deferred-deliberation default |
 | Operator-seeded goals allowed | §3.7 Goals; diverges from the Persyn spec |
@@ -1505,6 +1556,7 @@ record that holds the reasoning.
 | ACP: client-spawned subprocess, official SDK, v1 only, no auth, swappable tool backend | §3.2 ACP |
 | ACP rejects a concurrent prompt; a failed final delivery still ends the turn | #92 initial values |
 | Metering at `LLMClient`, not the turn loop | principle 11; §3.10 |
+| LLM settings are profiles the client applies, not roles that prescribe a purpose; the operator maps each stage to one profile, used on every path the stage takes, with no separate fork and standalone profiles (the split only let a standalone call render the prompt differently from a fork, and no stage needs that), so a stage's view calls and windowless calls share its forks' pool, and corvidae passes profile parameters through without interpreting them; plugins name no profiles, and an unmapped stage uses its kind's default, with no fallback chains; caps come from the profile on every path; a fork that misses its window's prefix is reported, not prevented | §3.6.1, 5; §3.8.4, 6; #439; operator, 2026-11-03 |
 | `resolve_compaction` keeps `firstresult`; the first non-None return is how a plugin replaces the compactor | #23 |
 | Same repository, second distribution for cognition; no compatibility aliases on renamed hooks | principle 1; §1 |
 | No typed event bus unless the observe class passes 20 hooks or a third `send`-shaped consolidation appears | §3.1.11 |
@@ -1514,7 +1566,7 @@ record that holds the reasoning.
 | `discord-py` is a `discord` extra, like `acp` | #117 (R10) |
 | ACP keeps rejecting a concurrent prompt unless a real client is shown to steer with a bare prompt; a failed final delivery is `end_turn` | #93, #99 |
 | Summary role: `assistant` from the agent's own view, `user` only when the retained tail has no user message, or for a neutral summary written without the view (evals), with data framing | §3.3.3; `threat-model.md` finding 3; #380; #388 |
-| The rendered view: a range that has left the window, and compaction's miss, are written from the agent's view (system prompt, window as held, instruction) on the background role, never from a standalone prompt that tells a model about the conversation; judgment still never reconstructs (#164) | §3.8; #380; #388 |
+| The rendered view: a range that has left the window, and compaction's miss, are written from the agent's view (system prompt, window as held, instruction) under the stage's profile, never from a standalone prompt that tells a model about the conversation; judgment still never reconstructs (#164) | §3.8; #380; #388 |
 | No process separation until corvidae runs on a machine the operator does not own | §3.5.5; `threat-model.md`, Privilege separation |
 | Personality is duck-typed and judged longitudinally; goal retirement is a consolidation event; `self` is a fact subject, ungated beyond trust inheritance; the self-model compile reads only facts above a trust floor and sends the operator each diff; interoception line and self-model compile; commitment records and endogenous goal candidates | §3.7; §3.12.9; PR #48 |
 | No runtime plugin loading; changing the plugin set is a restart, which the agent may request (rate-limited) | #28; principle 15 |

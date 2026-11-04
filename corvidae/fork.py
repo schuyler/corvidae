@@ -36,7 +36,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from corvidae.attribution import reset_attribution, set_attribution
-from corvidae.context import ContextWindow
+from corvidae.context import ContextWindow, well_formed_calls
 
 if TYPE_CHECKING:
     from corvidae.agent import Agent
@@ -203,7 +203,7 @@ def build_fork_prompt(
     pending_at_cut = {
         c["id"]
         for m in prefix.messages
-        for c in m.get("tool_calls") or []
+        for c in well_formed_calls(m)
         if result_at.get(c["id"], -1) >= cut
     }
     prompt = prefix.build_prompt(pending_ids | pending_at_cut, mid_conversation_system_role=mid_role)
@@ -215,8 +215,10 @@ def _first_result_index(messages: list[dict]) -> dict[str, int]:
     """Index of the first result for each tool_call_id (build_prompt's rule)."""
     result_at: dict[str, int] = {}
     for i, m in enumerate(messages):
+        if not isinstance(m, dict):
+            continue
         call_id = m.get("tool_call_id")
-        if m.get("role") == "tool" and call_id and call_id not in result_at:
+        if m.get("role") == "tool" and isinstance(call_id, str) and call_id and call_id not in result_at:
             result_at[call_id] = i
     return result_at
 
@@ -233,7 +235,7 @@ def snap_cut_forward(messages: list[dict], cut: int) -> int:
     while True:
         new_cut = cut
         for i in range(cut):
-            for c in messages[i].get("tool_calls") or []:
+            for c in well_formed_calls(messages[i]):
                 j = result_at.get(c["id"], -1)
                 if j >= new_cut:
                     new_cut = j + 1
@@ -261,8 +263,7 @@ def snap_cut_to_tool_boundary(messages: list[dict], cut: int) -> int:
     while True:
         new_cut = cut
         for i in range(cut):
-            calls = messages[i].get("tool_calls") or []
-            if any(result_at.get(c["id"], -1) >= cut for c in calls):
+            if any(result_at.get(c["id"], -1) >= cut for c in well_formed_calls(messages[i])):
                 new_cut = i
                 break
         if new_cut == cut:
@@ -319,7 +320,7 @@ async def view_call(
     """Send a rendered view (a :func:`build_fork_prompt` render) on ``client``.
 
     No tools and no ``tool_choice`` are sent. The caller binds the client
-    once (``llm.get_client("background")``) and has already set the
+    once (``llm.get_client(stage)``) and has already set the
     attribution stage, channel id and trigger; this sets mode ``standalone``
     around the call.
 
@@ -356,7 +357,7 @@ def view_agent(pm) -> "Agent | None":
     """Return the Agent plugin when it can supply view inputs, else None.
 
     Duck-typed like :func:`fork_agent`, but ignores ``agent.forks``: the
-    view call runs on ``llm.background``, so it works with forks off.
+    view call is a plain client call, so it works with forks off.
     """
     if pm is None:
         return None
@@ -373,7 +374,7 @@ def fork_agent(pm, stage: str):
     cognition plugins use for each other, so plugins don't import
     Agent. A disabled agent plugin degrades to a miss: a live-window
     stage skips (PRD §3.8.5); compaction makes the view call on
-    ``llm.background`` instead of a fork.
+    a plain client call instead of a fork.
     """
     if pm is None:
         return None

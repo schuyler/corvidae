@@ -523,6 +523,10 @@ class AppraisalPlugin(CorvidaePlugin):
     # ------------------------------------------------------------------
 
     @hookimpl
+    def register_llm_stages(self, stages: dict[str, str]) -> None:
+        stages["appraisal"] = "chat"
+
+    @hookimpl
     async def on_init(self, pm, config: dict) -> None:
         await super().on_init(pm, config)
         self.config = config
@@ -1012,7 +1016,9 @@ class AppraisalPlugin(CorvidaePlugin):
             return []
         try:
             async with db.execute(
-                "SELECT appraisal FROM exchange_log "
+                # CAST AS BLOB so invalid UTF-8 stored as TEXT fails at this
+                # row's decode, not inside fetchall() (#232, #311).
+                "SELECT trace_id, CAST(appraisal AS BLOB) FROM exchange_log "
                 "WHERE message_rowid IS NOT NULL AND message_rowid >= ? "
                 "AND message_rowid <= ? AND appraisal IS NOT NULL "
                 "AND channel_id = ?",
@@ -1031,13 +1037,35 @@ class AppraisalPlugin(CorvidaePlugin):
             )
             return []
         envelopes: list[dict] = []
-        for (appraisal_json,) in rows:
+        for trace_id, raw in rows:
+            # A corrupt value (bad JSON, invalid UTF-8, deep nesting) skips
+            # with one WARNING per row naming the trace id, channel and
+            # remedy — the #232 pattern — so a prior computed over fewer
+            # exchanges is never invisible (#311). Only out-of-band writes
+            # can produce one; the daemon's writers always emit valid JSON.
             try:
-                env = json.loads(appraisal_json)
-            except (json.JSONDecodeError, TypeError):
+                env = json.loads(raw)
+            except (ValueError, TypeError, RecursionError):
+                logger.warning(
+                    "skipping unparseable appraisal for exchange %s on "
+                    "channel %s; the prior/valence is computed over the "
+                    "remaining exchanges — inspect or correct the row",
+                    trace_id, channel_id,
+                    exc_info=True,
+                    extra={"channel": channel_id, "trace_id": trace_id},
+                )
                 continue
-            if isinstance(env, dict):
-                envelopes.append(env)
+            if not isinstance(env, dict):
+                logger.warning(
+                    "skipping appraisal for exchange %s on channel %s: "
+                    "decoded to %s, not an envelope; the prior/valence is "
+                    "computed over the remaining exchanges — inspect or "
+                    "correct the row",
+                    trace_id, channel_id, type(env).__name__,
+                    extra={"channel": channel_id, "trace_id": trace_id},
+                )
+                continue
+            envelopes.append(env)
         return envelopes
 
     def _exchange_db(self):

@@ -62,7 +62,7 @@ pyyaml           # YAML config parsing
 ## Hook Specifications
 
 Defined in `hooks.py`. All hooks are async (called via `pm.ahook`)
-except `register_tools` which is sync. This is a representative subset of
+except `register_tools` and `register_llm_stages`, which are sync. This is a representative subset of
 `AgentSpec` covering the turn-loop and message-lifecycle hooks; the
 [Hook reference](#hook-reference) table below is the complete, authoritative
 list of every hook (including lifecycle hooks like `on_init` not shown
@@ -75,6 +75,7 @@ class AgentSpec:
     async def on_message(self, channel: Channel, sender: str, text: str, trace_id: str) -> None
     async def send(self, channel: Channel, event: Outbound) -> None  # corvidae/outbound.py
     def register_tools(self, tool_registry: list) -> None  # sync; plugins append Tool instances or bare callables
+    def register_llm_stages(self, stages: dict[str, str]) -> None  # sync; plugins add stages[name] = "chat" | "embedding"
     async def on_agent_response(self, channel: Channel, request_text: str, response_text: str, trace_id: str | None, meta: dict, logprobs: dict | None) -> None
     async def on_notify(self, channel: Channel, source: str, text: str, tool_call_id: str | None, meta: dict | None) -> None
     async def should_process_message(self, channel: Channel, sender: str, text: str, trace_id: str | None) -> bool | None
@@ -183,6 +184,7 @@ owner's plugin name after the prefix.
 | `on_message` | broadcast | inbound message from any transport; the transport mints and passes `trace_id` (required, no default) |
 | `send` | broadcast (imperative) | outbound delivery. `Agent` sends `OutboundMessage` (replies, error text), `OutboundThinking` (when the LLM response carries `reasoning_content`), `OutboundProgress` (intermediate text alongside tool calls) and `OutboundToolStatus` (tool call dispatched); `TaskPlugin` sends `OutboundToolStatus` on completion. Transports receive it through `TransportPlugin.send`, which filters by `owns(channel)` and dispatches by event type |
 | `register_tools` | broadcast (sync) | startup tool collection |
+| `register_llm_stages` | broadcast (sync, imperative) | `LLMPlugin.on_start`, once, before it creates clients: plugins add `stages[name] = kind` (`chat` or `embedding`) for each model-calling stage they own |
 | `on_agent_response` | broadcast | after agent loop produces a text response, including a final the gate vetoed (or an empty one): the assistant row is already in the window, tagged `UNSENT` when not sent (`final_was_unsent`), and the transport send comes after. Discord, Signal, ACP and CLI implement it to release per-turn state for an unsent final; `SilencePlugin` records declines |
 | `on_notify` | broadcast | inject a notification into a channel queue |
 | `should_process_message` | broadcast / resolve_reject_wins | `on_message`, before enqueue, carrying the transport-minted `trace_id`; no default implementation; None from empty broadcast allows all messages |
@@ -204,7 +206,7 @@ owner's plugin name after the prefix.
 | `before_compaction` | broadcast, awaited | `CompactionPlugin`, after the summary succeeded and before `replace_with_summary()`; the window still holds `messages[:cut]`, so a plugin can fork over the dropped prefix (see [Forks](#forks)); failures logged, never block compaction |
 | `on_compaction` | broadcast | `CompactionPlugin`, after `replace_with_summary()`; side effects only (persistence) |
 | `on_llm_request` | broadcast | `LLMClient.chat()` via LLMPlugin's injected observer, before the retry loop; side effects only (observability) |
-| `on_llm_response` | broadcast | `LLMClient.chat()` via the observer, exactly once per call (success or terminal failure); names the model the request was sent with (an `extra_body` override wins, #297) and carries llama-server's `timings` verbatim; side effects only (metrics, usage log) |
+| `on_llm_response` | broadcast | `LLMClient.chat()` via the observer, exactly once per call (success or terminal failure); names the model the request was sent with (an `extra_body` override wins, #297) and carries llama-server's `timings` verbatim, plus the call's start time, total duration across retried attempts, attempts made, and the request's message and tool counts; side effects only (metrics, usage log) |
 | `on_metrics` | broadcast | any plugin via `pm.ahook.on_metrics(...)`; built-in emission from `MetricsPlugin.on_llm_response`; never emit from inside an `on_metrics` implementation (recursion) |
 | `on_config_reload` | broadcast | `ConfigWatcherPlugin`, when `agent.yaml`'s mtime changes; per-plugin error isolation |
 
@@ -344,7 +346,7 @@ class LLMClient:
 
 `request_model` returns the `model` a `chat` call with that `extra_body` is
 sent with: the configured model, overridden by the instance `extra_body`
-and then the call's (`llm.<role>.extra_body.model` can change the model).
+and then the call's (`llm.<profile>.extra_body.model` can change the model).
 `chat` builds its payload's `model` from it. Memory consolidation stamps it
 on the records it writes ([cognition.md](cognition.md#record-stamps)).
 `embed` is deliberately not routed through it: it sends the configured
@@ -361,7 +363,7 @@ of `<\|[^|<>\s]{1,40}\|>`, or of a bare `<think>`, `</think>`,
 `<tool_call>` or `</tool_call>` tag (#355), to `<` + U+200B + the rest. It returns new
 containers, so the window and the stored history keep the original text. It
 is a pure function of the messages, so the prompt prefix stays cache-stable.
-Every chat role and caller (main loop, forks, compaction, memory) goes
+Every chat profile and caller (main loop, forks, compaction, memory) goes
 through `chat`. `embed` and `tools` schemas are not rewritten. The model
 can still emit a control token from its own knowledge; this only keeps
 input text from supplying one. Other added tokens without the `<|…|>`
@@ -369,7 +371,7 @@ shape are not covered.
 
 **Raw reasoning (#355).** llama-server's parsed mode cannot tell a reply
 cut off mid-reasoning from a decline: both arrive with empty `content`. When
-the client has `raw_reasoning` (`llm.<role>.raw_reasoning`; the operator
+the client has `raw_reasoning` (`llm.<profile>.raw_reasoning`; the operator
 also configures the server to return reasoning inline, e.g. llama.cpp's
 `extra_body.reasoning_format: none`), `chat` splits the reply itself (`split_raw_reasoning`): an optional leading
 `<think>` is dropped, the text up to the first `</think>` becomes
@@ -390,7 +392,7 @@ the tag (trailing whitespace stripped), the response gets a top-level
 (from attribution, or `(none)`), the model and the full raw completion. The
 tail is in neither `content` nor `reasoning_content`, so it reaches no
 transport, no row and no memory; the log is its only copy (PRD §3.3.9,
-§3.10). This runs on every role's client. `AgentTurnResult.reasoning_reopened`
+§3.10). This runs on every profile's client. `AgentTurnResult.reasoning_reopened`
 carries the flag. `Agent._run_turn` checks it before the cut-off check:
 with `llm.main.reasoning_reopened: rerun`, a final (no tool calls) that
 reopened is popped from the messages and regenerated once, and that result
@@ -452,8 +454,8 @@ attempts do not fire `response`. Observer failures are individually
 caught and logged; they never break the call. `llm.py` stays free of
 pluggy imports — `LLMPlugin` injects a `_HookObserver` (defined in
 `llm_plugin.py`) that bridges to the `on_llm_request`/`on_llm_response`
-hooks with the client's role ("main"/"background") and the current
-attribution snapshot.
+hooks with the client's profile (a key under `llm:`, such as `main`) and the
+current attribution snapshot.
 
 **Attribution.** `attribution.py` holds a single ContextVar dict
 (`stage`, `channel_id`, `trace_id`, `meta`, plus stage-specific
@@ -481,12 +483,38 @@ retrieval, appraisal, critique, the gates and the silence plugin record
 their outcomes. All sinks are
 fail-soft.
 
+**Call timing and queue wait (PRD §3.10.6).** Each `usage_log` row records
+when its call started and ended, so overlapping calls are found from the
+rows alone: in a self-join on `a.id < b.id`, two calls overlap when
+`a.started_at < b.ended_at AND b.started_at < a.ended_at` (calls that only
+touch at an endpoint do not). `ended_at` is `started_at + total_ms / 1000`,
+so it comes from the monotonic duration and cannot disagree with
+`total_ms`. `latency_ms` is the final
+attempt only. When calls share a llama-server slot (a pinned `id_slot`, or
+a single-slot server), a call that arrives while another holds the slot
+waits inside the server, and that wait is part of its `latency_ms`. The
+server's own work is `prompt_ms + predicted_ms`; what remains is, approximately, the wait:
+
+```sql
+SELECT id, stage, latency_ms - (prompt_ms + predicted_ms) AS queue_wait_ms
+FROM usage_log;  -- NULL where the backend gave no timings
+```
+
+It is not stored: it is a function of stored columns. `prompt_ms` and
+`predicted_ms` are NULL, never 0, when the backend reports no `timings`
+or the call failed; a reported 0 stays 0. `max_context_tokens` is looked
+up at write time through the channel registry (`optional_depends_on`;
+`resolve_config(channel)`), so a runtime override that lands between the
+request and the write is what the row records; a failing lookup logs a
+warning naming the channel and writes NULL. Existing tables gain the
+columns in place; older rows read NULL.
+
 ```sql
 CREATE TABLE usage_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts REAL NOT NULL,
     request_id TEXT NOT NULL,
-    role TEXT NOT NULL,
+    profile TEXT NOT NULL,      -- the llm profile of the client that made the call (renamed from `role` in place on startup)
     model TEXT NOT NULL,        -- the model the request was sent with, after any extra_body override (#297)
     stage TEXT,
     channel_id TEXT,
@@ -499,8 +527,17 @@ CREATE TABLE usage_log (
     cached_tokens INTEGER,      -- usage.prompt_tokens_details.cached_tokens, where the provider reports it
     cache_n INTEGER,            -- llama-server timings.cache_n: prompt tokens reused from cache (PRD §3.13.10)
     prompt_n INTEGER,           -- llama-server timings.prompt_n: prompt tokens prefilled; NULL from other providers
-    latency_ms REAL,
-    error TEXT
+    latency_ms REAL,            -- the final attempt's duration (retried attempts and their sleeps are not in it)
+    error TEXT,
+    started_at REAL,            -- wall-clock epoch seconds when the call began (#350)
+    ended_at REAL,              -- started_at + total_ms / 1000
+    total_ms REAL,              -- monotonic, first attempt to end, including retries and the sleeps between
+    attempts INTEGER,           -- attempts made; 1 = no retry (transient retries and model-not-loaded waits count)
+    message_count INTEGER,      -- messages in the request (embeddings: number of texts)
+    tool_count INTEGER,         -- tool schemas in the request (embeddings: 0)
+    max_context_tokens INTEGER, -- the channel's budget in force when the row is written; NULL with no channel, no registry or an unknown channel
+    prompt_ms REAL,             -- llama-server timings.prompt_ms: the final attempt's prefill time; NULL from other providers and on failure
+    predicted_ms REAL           -- llama-server timings.predicted_ms: the final attempt's decode time; NULL likewise
 );
 
 CREATE TABLE exchange_log (
@@ -699,6 +736,22 @@ All operations are synchronous; no database access:
   because memory retrieval keys on a plain `user` tail, and because the
   rewrite must stay a pure function of each message for the prompt prefix
   to stay cache-stable.
+
+  Every row the window can hold is renderable (PRD §3.1.18.1, #392), because
+  these steps run unwrapped on every turn and an exception here is a
+  deterministic per-turn failure that wedges the channel. A row that is not a
+  message object is left out; a malformed `tool_calls` value (no `id`, a
+  non-list value including a falsy one such as `""`, a non-dict entry) is
+  filtered out by `well_formed_calls()`, and the row renders without it, or is
+  left out entirely when that was its whole payload. A `tool_call_id` that is
+  not a non-empty string — `message_log` never validates the field — is read
+  through `result_call_id()`, so an unhashable value renders as an orphan
+  result instead of raising. Each omission logs one WARNING naming the channel
+  and the row (`message_log` id, or the window position when the row was never
+  persisted). `snap_cut_forward`, `snap_cut_to_tool_boundary`,
+  `_first_result_index` and `build_fork_prompt` read `tool_calls` through the
+  same helper, so the cut snaps, the render and a fork's prefix agree on which
+  calls exist.
 - `corvidae.context.unanswered_user_messages(messages)` (a module function,
   not a method) — the user-role MESSAGE rows after the window's last
   assistant row, in order (all of them when there is no assistant row). A
@@ -714,7 +767,9 @@ All operations are synchronous; no database access:
   by its JSON-serialized visible fields (role, content, `tool_calls`,
   `reasoning_content`, etc.), not just the `content` string, so a message
   whose size is mostly in tool-call arguments or reasoning content is still
-  counted accurately.
+  counted accurately. It never raises on a row's content (§3.1.18.1, #392):
+  a value JSON cannot encode is counted by its `str()`, and a row that is not
+  a mapping is counted by its `repr`, so both still contribute to the budget.
 - `replace_with_summary(summary_msg, retain_count)` — replaces older messages
   with a summary in-memory, retaining the `retain_count` most-recent entries.
   Raises `ValueError` if `retain_count` exceeds `len(messages)`.
@@ -725,7 +780,9 @@ All operations are synchronous; no database access:
   would drop the newest row, in which case the orphaned result renders as a
   framed notification. The newest row is always kept; if it alone exceeds
   the budget its content is truncated in memory only, with a visible
-  marker. Returns `(dropped, truncated)`.
+  marker. A newest row that is not a message object has no content to
+  truncate, so it stands as it is and the caller reports the overage.
+  Returns `(dropped, truncated)`.
 - The window only grows at the tail (`append`) and truncates at the head
   (`replace_with_summary`, `fit_to_budget`). Nothing is inserted, removed or mutated
   mid-window, so there is no method for removing entries by type; stale
@@ -1655,17 +1712,19 @@ default priority) returned non-None first. The caller does not use the return va
    fork raises or comes back empty (logged at WARNING), `_view_summary`
    sends the same render (`build_fork_prompt` over the window at the cut,
    the channel's pending tool-call ids, the Agent's
-   `mid_conversation_system_role`) as a plain call on `llm.background`,
+   `mid_conversation_system_role`) as a plain call on `llm.main`,
    with no tools, through `view_call` (PRD §3.8). The render is the
-   uncapped prefix: the window is over budget when compaction runs, so a
-   fork miss moves the summary's cost and quality from `llm.main` to the
-   background model, and a background endpoint with a smaller context than
-   `max_context_tokens` fails more often. If that call raises or returns
+   uncapped prefix: the window is over budget when compaction runs. If the fork
+   raises a connection-class error (`is_backend_unreachable`), the view call is not
+   attempted: it would spend the same wait on a backend that is already
+   down. `_fork_summary` raises `BackendUnreachable`, `resolve_compaction`
+   records the failure cooldown and returns, and the turn's own retry loop
+   waits for the backend (#400, PRD §3.1). If the view call raises or returns
    nothing (logged at WARNING; `RuntimeError` when no Agent can render a
    view), compaction declines and the over-budget fallback (#308) brings the
-   window back within budget. The background client is resolved when
-   compaction runs (`get_dependency(pm, "llm", LLMPlugin)`), not in
-   `on_start`. `agent.compaction_prompt` and the standalone summarizer
+   window back within budget. The client is resolved when
+   compaction runs (`get_dependency(pm, "llm", LLMPlugin).get_client("compaction")`,
+   a `chat` stage, so `llm.main`), not in `on_start`. `agent.compaction_prompt` and the standalone summarizer
    (`_summarize`, with its prior-summary cap and head/tail truncation) are
    gone; setting the key logs a startup warning and is otherwise ignored.
 7. Build the summary message (`[Summary of earlier conversation]\n…`).
@@ -1709,11 +1768,11 @@ fork_prompt = build_prompt(window[:cut]) + [{"role": "user", "content": instruct
 That render is the **rendered view** (PRD §3.8), `build_fork_prompt` in
 `fork.py`: the system prompt, a window, and one `user` instruction. A fork
 sends the live window on `llm.main` with the channel's tools. The **view
-call** (`view_call`) sends the same kind of render on `llm.background` with
+call** (`view_call`) sends the same kind of render on `llm.main` with
 no tools and no `tool_choice`, attributed `mode="standalone"`. It has two
 producers: compaction on a fork miss (the live window at the cut) and memory
 catch-up (a window rebuilt from `message_log`, below). It carries no cache
-benefit: it is a cold prefill on the background slot.
+benefit: it is a cold prefill on the main model's slot.
 
 **View API (kernel, `corvidae.fork` and the Agent).** Cognition gets
 everything channel-specific from one value, `ViewInputs` (`system_prompt`,
@@ -1763,10 +1822,10 @@ no main client raises `ForkUnavailable`.
 Every caller treats any fork exception, or an empty or unparseable reply,
 as a miss: it logs at WARNING and the live-window stage skips, with no
 standalone call (PRD §3.8.5, #320). The exceptions are compaction, whose
-summary on a miss is the background view call and then #308, and
+summary on a miss is the standalone view call and then #308, and
 consolidation of a range that has left the window (the compaction trigger's
 task after the drop, an idle range not wholly in the window), which is
-written from a rebuilt view on `llm.background` (catch-up, below). Idle
+written from a rebuilt view on `llm.main` (catch-up, below). Idle
 consolidation of a range wholly in the live window still skips on a miss,
 and is retried on the next idle trigger; once the range has left the window
 it reaches catch-up. A JSON parse failure names the failing phase
@@ -1779,9 +1838,9 @@ Stage names are opaque to core (it never names cognition plugins).
 
 | Stage | Cut | Runs | On a miss |
 |---|---|---|---|
-| `compaction` | dropped prefix | inline in `resolve_compaction` | background view call on the same prefix (`llm.background`, no tools), then the over-budget fallback (#308) |
-| `consolidation` (compaction trigger) | dropped prefix | inline in `before_compaction`; the record is stashed and the `on_compaction` task consumes it | catch-up in the `on_compaction` task: no stash (range not in `messages[:cut]`, fork failed) or the watermark moved since the fork; the rebuilt view on `llm.background` |
-| `consolidation` (idle trigger) | full window | in the idle task | range wholly in the live window: skip with a warning, watermark unchanged, retried on the next idle trigger; no registered channel or window, or a range row not in the window: catch-up (rebuilt view on `llm.background`) |
+| `compaction` | dropped prefix | inline in `resolve_compaction` | standalone view call on the same prefix (`llm.main`, no tools), then the over-budget fallback (#308); on a connection-class failure the view is skipped and compaction defers to the turn's retry loop (#400) |
+| `consolidation` (compaction trigger) | dropped prefix | inline in `before_compaction`; the record is stashed and the `on_compaction` task consumes it | catch-up in the `on_compaction` task: no stash (range not in `messages[:cut]`, fork failed) or the watermark moved since the fork; the rebuilt view on `llm.main` |
+| `consolidation` (idle trigger) | full window | in the idle task | range wholly in the live window: skip with a warning, watermark unchanged, retried on the next idle trigger; no registered channel or window, or a range row not in the window: catch-up (rebuilt view on `llm.main`) |
 | `appraisal` (stage 2) | full window at run time | silent TaskQueue task | skip with a warning (forks off, originating rowid left the window or was never persisted, fork failed or unusable) |
 | `critique` (each stylistic lens) | full window at run time | silent TaskQueue task | same as appraisal; a lens whose fork misses is skipped alone; if no lens ran, no outcome is recorded |
 | `critique` (provenance) | prefix ending at the exchange's final reply | silent TaskQueue task | skip with a warning (forks off, no live window, reply not recorded or not in the window, a compaction since the reply, or a failed fork) |
@@ -1811,7 +1870,7 @@ stripping can't alter rows a later segment reuses as context. Warnings, each
 naming the channel and message ids: the budget trim dropped a segment's own
 rows (they commit without reaching a view); a row was truncated; the
 finished request still measures over budget (it is sent anyway). Each
-segment is one `view_call` on `llm.background`, one record, and one commit
+segment is one `view_call` on `llm.main`, one record, and one commit
 that is a compare-and-set on the previous segment's end; a lost
 compare-and-set discards the rest, and a failure leaves earlier segments
 committed and the failure log says through which id. An unusable reply is
@@ -1819,8 +1878,8 @@ retried once, then degrades to the raw transcript, as before. A segment
 with no dialog that is followed by another segment folds its id span into
 the next segment's record (no record or commit of its own); a no-dialog
 last segment advances the watermark without a record. Records are
-stamped `(memory.consolidation_fork_prompt, "standalone", the background
-request model)`. A view that `llm.background` rejects for length is a
+stamped `(memory.consolidation_fork_prompt, "standalone", the
+request model)`. A view that `llm.main` rejects for length is a
 transport error: the watermark stays and the next trigger retries.
 
 The compaction and consolidation forks share one prefix: the second
@@ -1868,14 +1927,10 @@ shows). `Agent.fork` always sets it, so it is None only when a
 ```yaml
 agent:
   forks:
-    enabled: true                 # default; false: live-window stages skip, compaction uses llm.background
+    enabled: true                 # default; false: live-window stages skip, compaction uses a view call on llm.main
     reasoning_budget_tokens: 2048 # per fork; null = server default
     stages: null                  # null = every stage; or a list of names
 ```
-
-With forks on and `llm.background` set to a different model than
-`llm.main`, `Agent.on_start` logs a warning: forked stages move to the
-main model.
 
 ### Forks on the deployed backend
 
@@ -1893,9 +1948,9 @@ provenance from the prefix ending at the exchange's final reply. Each forks
 only while the rows it needs are still in the window. A miss skips the
 stage with a warning (the rescue is a retry or a skip, never a standalone
 call), except compaction, which on a miss sends the same view to
-`llm.background` and, if that fails too, leaves the window to the
+`llm.main` and, if that fails too, leaves the window to the
 over-budget fallback (#308), and consolidation of a range that has left the
-window, which is written from its rebuilt view on `llm.background`. Skip-on-miss
+window, which is written from its rebuilt view on `llm.main`. Skip-on-miss
 and the default are implemented (#320).
 Still targets, not enforced today: stage 2 and the lenses forking only the
 prefix ending at the reply, per-stage reasoning and reply caps (today one
@@ -1906,7 +1961,7 @@ not fit the slot's context as a miss.
 **Cost model.** A fork reuses the cached prefix and prefills only its
 instruction and reply; the window is append-only, so a fork's prefix is
 still cached as long as no compaction has run since. A view call (compaction's fallback, catch-up consolidation)
-costs its own cold prefill on the background slot: at most the channel's
+costs its own cold prefill on the main model's slot: at most the channel's
 budget per catch-up segment, and for compaction's fallback the whole
 uncapped prefix at the cut. The consolidation and compaction prompts that
 described the conversation to a model are gone; what still makes a
@@ -1984,24 +2039,39 @@ history bound. Starts/stops the worker on lifecycle hooks. Registers the
 
 ### Lifecycle
 
-- `on_start` — reads `llm.main` (required) and `llm.background` (optional)
-  from config. Creates `LLMClient` instances for each and calls `start()` on
-  them.
+- `on_start` — collects the model-calling stages (below), reads every
+  profile under `llm:` (`llm.main` is required), creates an `LLMClient` for
+  each and calls `start()` on it. It then logs where each stage resolves:
+  `llm stages resolved: ...` (`→(none)` for a stage whose default profile
+  isn't configured).
 - `on_stop` — calls `stop()` on all clients.
 
-`_create_client` expands `${VAR}` in a role's `api_key` from the daemon's
+`_create_client` expands `${VAR}` in a profile's `api_key` from the daemon's
 environment (`corvidae/envref.py::expand_env_refs`, shared with MCP
 `headers`). An unset, empty or multi-line variable raises a `ValueError`
-naming `llm.<role>.api_key` and the variable, never the value; `on_start` and
+naming `llm.<profile>.api_key` and the variable, never the value; `on_start` and
 `on_config_reload` both go through it. The resolved key lives only on the
-client, so `_role_configs` keeps the raw `${VAR}` text.
+client, so `_profile_configs` keeps the raw `${VAR}` text.
 
 ### Client access
 
-`LLMPlugin.get_client(role="main")` — returns the client for the given role.
-`"background"` falls back to `main_client` if no background client is
-configured. Other plugins retrieve the plugin via
-`get_dependency(pm, "llm", LLMPlugin)` and call `get_client()`.
+Every key under `llm:` is a **profile**. A plugin that calls a model
+registers each call site as a **stage** through the `register_llm_stages`
+hook (`stages[name] = kind`, kind `"chat"` or `"embedding"`), which
+`LLMPlugin.on_start` broadcasts once. Core registers `compaction` and
+`subagent`; the cognition plugins register their own. A stage resolves to
+its kind's default profile: `chat` to `main`, `embedding` to `embedding`.
+There are no fallback chains, and no stage resolves to `background`: an
+`llm.background` block is accepted and built, but unused until the operator
+stage-to-profile map (#399) arrives.
+
+`LLMPlugin.get_client()` returns the main client (main turns).
+`get_client(stage)` returns the client for a registered stage, or `None`
+when its default profile isn't configured (no `llm.embedding`: the
+`embedding` stage gets no client and memory degrades to keyword search).
+An unregistered name raises `ValueError`, profile names such as `"main"`
+included. Other plugins retrieve the plugin via
+`get_dependency(pm, "llm", LLMPlugin)`.
 
 ### Configuration
 
@@ -2017,9 +2087,10 @@ llm:
     retry_max_delay: 60.0
     model_not_loaded_wait: 60.0
     timeout: null             # optional; no timeout if absent
-  background:                 # optional; absent means use llm.main
+  embedding:                  # optional; absent means no embedding client
     base_url: "..."
     model: "..."
+    dimensions: 768           # required
     # same keys as main
 ```
 
@@ -2230,8 +2301,8 @@ Declares `depends_on = {"llm", "tools"}`.
    `get_dependency(self.pm, "tools", ToolCollectionPlugin)` and reads
    `max_result_chars` and the tool registry from it.
 2. Calls `registry.exclude("subagent")` to remove itself from the subagent's tool set.
-3. Retrieves the shared background `LLMClient` from `LLMPlugin` via
-   `get_dependency(self.pm, "llm", LLMPlugin).get_client("background")`. The
+3. Retrieves the shared `LLMClient` for the `subagent` stage from `LLMPlugin` via
+   `get_dependency(self.pm, "llm", LLMPlugin).get_client("subagent")`. The
    subagent does NOT start or stop this client — lifecycle is owned by `LLMPlugin`.
 4. Builds a `messages` list (system prompt + user instructions) and a
    `work` coroutine that calls `run_agent_loop` with `channel` and `task_queue`
@@ -2244,8 +2315,8 @@ Declares `depends_on = {"llm", "tools"}`.
 
 ### LLM configuration
 
-Uses the shared background `LLMClient` from `LLMPlugin` (`llm.background` if
-configured, otherwise `llm.main`). The client is retrieved at tool-call time, not
+Uses the `LLMClient` for the `subagent` stage from `LLMPlugin` (a `chat`
+stage, so `llm.main`). The client is retrieved at tool-call time, not
 captured at `on_start`.
 
 ### System prompt
@@ -2773,8 +2844,12 @@ monitored.
   have no await between them, so a refresh can't land after the stop and a
   message arriving during the stop sends its start after it. A failed stop
   is logged at WARNING with the channel id and the indicator is left to
-  expire; it never prevents a reply from being delivered (a stop that
-  signal-cli never answers is #413).
+  expire; it never prevents a reply from being delivered. A liveness RPC
+  waits at most `LIVENESS_RPC_TIMEOUT` (10 s) for signal-cli's response, so
+  a daemon that accepts the frame and never answers costs one delay and a
+  WARNING rather than holding the inbound processor or the reply path
+  (#413). The bound covers typing and receipts only: `send` is not bounded
+  this way, because a send that times out may have been delivered.
 - *Read receipt.* Sent from `on_message_persisted` — processing start —
   not on arrival. A message can sit queued behind contended local
   inference, and a "read" marker followed by a long silence is worse than
@@ -3249,9 +3324,10 @@ llm:
     retry_max_delay: 60.0       # maximum retry delay cap in seconds
     model_not_loaded_wait: 60.0 # seconds to wait out an unloaded router model
     timeout: null               # HTTP timeout per request; null = no timeout
-  background:                   # optional separate LLM for subagent tasks
+  embedding:                    # optional embedding model for memory retrieval
     base_url: "..."
     model: "..."
+    dimensions: 768             # required
     # same keys as main
 
 agent:
@@ -3283,7 +3359,6 @@ memory:
     bands:
       strong: 0.75              # assert confidently at or above this value (score or similarity, per band_on)
       moderate: 0.60            # hedge at or above this value
-  channel_groups: {}            # {group: [channel ids or * ? globs]} shared memory scopes
 
 scheduler:
   timezone: UTC                 # IANA name; resolves offset-less times (default UTC)

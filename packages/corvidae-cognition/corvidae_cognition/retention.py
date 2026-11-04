@@ -109,8 +109,25 @@ async def run_retention_job(memory: "MemoryPlugin", now: float | None = None) ->
                             "DELETE FROM memory_vec WHERE memory_id = ?", (mid,)
                         )
                     except Exception:
-                        logger.debug(
-                            "vec row delete failed for memory %d", mid, exc_info=True
+                        # The demotion stands; only its vec row is left behind.
+                        # Nothing clears it later: the backfill selects
+                        # indexed = 1 and this row is now indexed = 0, and the
+                        # demotion pass only flips rows it finds at indexed = 1
+                        # itself. Retrieval joins `m.indexed = 1` on both KNN
+                        # queries, so the stale row is never returned; what it
+                        # costs is the vec-rows <= indexed invariant and one
+                        # dead over-fetch slot.
+                        logger.warning(
+                            "retention: vec row for memory %d was left behind "
+                            "(delete failed) and no later pass clears it; the "
+                            "row is demoted, so vector search never matches it "
+                            "(both KNN queries join indexed = 1). The vec "
+                            "table now holds one more row than there are "
+                            "indexed memories. Clean it with DELETE FROM "
+                            "memory_vec WHERE memory_id = %d, in a sqlite3 "
+                            "that has the sqlite-vec extension loaded "
+                            "(memory_vec is a vec0 virtual table)",
+                            mid, mid, exc_info=True,
                         )
         if demoted_count:
             logger.info("retention: demoted %d records", demoted_count)

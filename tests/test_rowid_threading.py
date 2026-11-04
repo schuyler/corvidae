@@ -213,17 +213,17 @@ class TestCompactionCarriesCompactedIds:
         assert call_kwargs["compacted_ids"] == expected_ids
 
     async def test_summarizer_input_carries_no_underscore_keys(self):
-        """The background view request (a fork miss: the fork raises) carries
+        """The view request (a fork miss: the fork raises) carries
         no ``_``-prefixed key on any message (R5, bootstrap-mapping §4.8)."""
         from corvidae.fork import ForkRefused
         from corvidae.hooks import create_plugin_manager
 
         from helpers import FakeForkAgent, RecordingClient, recording_llm_plugin
 
-        # A real pm holding a failing-fork agent and a recording background client.
+        # A real pm holding a failing-fork agent and a recording main client.
         pm = create_plugin_manager()
-        background = RecordingClient("a summary")
-        pm.register(recording_llm_plugin(RecordingClient("main"), background), name="llm")
+        main = RecordingClient("a summary")
+        pm.register(recording_llm_plugin(main), name="llm")
         pm.register(
             FakeForkAgent({"compaction"}, error=ForkRefused("tool call")), name="agent"
         )
@@ -239,8 +239,8 @@ class TestCompactionCarriesCompactedIds:
             conv.messages[-1]["_db_id"] = 200 + i
 
         await plugin.resolve_compaction(channel, conv, max_tokens=10)
-        assert background.chat_calls, "the background view call was not made"
-        for msg in background.chat_calls[0]["messages"]:
+        assert main.chat_calls, "the view call was not made"
+        for msg in main.chat_calls[0]["messages"]:
             assert not any(k.startswith("_") for k in msg)
 
 
