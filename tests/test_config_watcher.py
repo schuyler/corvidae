@@ -1329,3 +1329,194 @@ async def test_reload_with_bad_tools_timeouts_is_rejected(tmp_path, caplog):
     assert "['a']" in caplog.text
     assert "tool names to seconds" in caplog.text
     assert "reload skipped" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# #408: a restart-only key that changes must be reported, and a plugin's
+# declared live keys must be the ones its reload hook actually re-reads.
+# ---------------------------------------------------------------------------
+
+def _make_watcher(config_path: Path):
+    """A ConfigWatcherPlugin wired to a plugin manager, not started."""
+    from corvidae.config_watcher import ConfigWatcherPlugin
+    from corvidae.hooks import create_plugin_manager
+
+    from corvidae.compaction import CompactionPlugin
+
+    pm = create_plugin_manager()
+    watcher = ConfigWatcherPlugin()
+    pm.register(watcher, name="config_watcher")
+    # Compaction is the plugin whose live keys the warning test relies on.
+    pm.register(CompactionPlugin(), name="compaction")
+    watcher.pm = pm
+    watcher._config_path = config_path
+    watcher._cli_overrides = {}
+    return watcher
+
+
+def _keys_read_in_hook(hook) -> set[str]:
+    """Dotted config keys a reload hook reads, from its source.
+
+    Handles the two shapes used in this codebase: ``config.get("a")`` followed
+    by ``cfg.get("b")`` on the result (resolved by the local alias), and
+    ``config["a"]["b"]``. Deliberately shallow -- it needs to catch a key the
+    author declared live but never re-reads, not to be a static analyser.
+    """
+    import inspect
+    import re
+
+    source = inspect.getsource(hook)
+    # Top-level sections read straight off config, and the local alias each
+    # is bound to: `agent_config = config.get("agent")` -> {"agent_config": "agent"}.
+    sections = dict(re.findall(r'(\w+) = config\.get\("([a-z_]+)"', source))
+    keys: set[str] = set()
+    for alias, section in sections.items():
+        for leaf in re.findall(rf'{alias}\.get\("([a-z_.]+)"', source):
+            keys.add(f"{section}.{leaf}")
+    for section, leaf in re.findall(r'config\["([a-z_]+)"\]\["([a-z_.]+)"\]', source):
+        keys.add(f"{section}.{leaf}")
+    # A prompt key is named in full as resolve_prompt's second argument.
+    keys |= set(re.findall(r'resolve_prompt\(config, "([a-z_.]+)"', source))
+    return keys
+
+
+# Keys that are deliberately never called "live", because their consumers do
+# not re-read them on reload. Used to keep the registry honest.
+_NON_CONFIG_PREFIXES = ("_config_path", "_cli_overrides", "_base_dir")
+
+
+def _leaf_keys(node, prefix: str = "") -> set[str]:
+    """Dotted leaf keys of a nested config dict."""
+    leaves: set[str] = set()
+    if isinstance(node, dict):
+        for key, value in node.items():
+            dotted = f"{prefix}.{key}" if prefix else str(key)
+            if isinstance(value, dict) and value:
+                leaves |= _leaf_keys(value, dotted)
+            else:
+                leaves.add(dotted)
+    return leaves
+
+
+class TestRestartOnlyWarning:
+    async def test_changing_a_restart_only_key_warns_with_the_key(
+        self, tmp_path, caplog
+    ):
+        """A key no plugin reloads is reported as pending a restart.
+
+        The failure this prevents: changing `memory.retrieval.bands` logged
+        only that compaction and agent config were updated, so the operator
+        had no way to learn the memory change was waiting for a restart.
+        """
+        cfg = tmp_path / "agent.yaml"
+        cfg.write_text(
+            yaml.safe_dump(
+                {
+                    "llm": {"main": {"base_url": "http://localhost:8080/v1", "model": "m"}},
+                    "memory": {"retrieval": {"bands": [1, 2, 3]}},
+                }
+            )
+        )
+        watcher = _make_watcher(cfg)
+        watcher.config = {
+            "_config_path": str(cfg),
+            "_base_dir": str(tmp_path),
+            "llm": {"main": {"base_url": "http://localhost:8080/v1", "model": "m"}},
+            "memory": {"retrieval": {"bands": [1, 2, 4]}},
+        }
+
+        with caplog.at_level(logging.WARNING):
+            # The helper is the unit under R2; the full reload path needs a
+            # registry, which is not what this test is about.
+            watcher._warn_restart_only_changes(
+                {
+                    "_config_path": str(cfg),
+                    "llm": {"main": {"base_url": "http://localhost:8080/v1", "model": "m"}},
+                    "memory": {"retrieval": {"bands": [1, 2, 3]}},
+                }
+            )
+
+        pending = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+        named = [m for m in pending if "memory.retrieval.bands" in m]
+        assert named, f"a restart-only change must name the key; got {pending}"
+        assert "restart" in named[0].lower(), named[0]
+
+    async def test_changing_a_live_key_does_not_warn(self, tmp_path, caplog):
+        """A key a plugin declares reloadable applies at once, so it is not
+        reported as pending."""
+        cfg = tmp_path / "agent.yaml"
+        cfg.write_text(
+            yaml.safe_dump(
+                {
+                    "llm": {"main": {"base_url": "http://localhost:8080/v1", "model": "m"}},
+                    "agent": {"compaction_threshold": 0.9},
+                }
+            )
+        )
+        watcher = _make_watcher(cfg)
+        watcher.config = {
+            "_config_path": str(cfg),
+            "_base_dir": str(tmp_path),
+            "llm": {"main": {"base_url": "http://localhost:8080/v1", "model": "m"}},
+            "agent": {"compaction_threshold": 0.5},
+        }
+
+        with caplog.at_level(logging.WARNING):
+            watcher._warn_restart_only_changes(
+                {
+                    "_config_path": str(cfg),
+                    "llm": {"main": {"base_url": "http://localhost:8080/v1", "model": "m"}},
+                    "agent": {"compaction_threshold": 0.9},
+                }
+            )
+
+        messages = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+        assert not [m for m in messages if "compaction_threshold" in m], messages
+
+
+class TestReloadableKeyRegistry:
+    """R3: the declared live keys are the ones the hook actually re-reads.
+
+    A declared key that the hook never reads is a lie the operator pays for:
+    they change it, see no warning, and wait for an effect that never comes.
+    """
+
+    async def test_compaction_declares_what_its_hook_re_reads(self):
+        from corvidae.compaction import CompactionPlugin
+
+        hook_keys = _keys_read_in_hook(CompactionPlugin.on_config_reload)
+        assert hook_keys, "could not find any config keys in the hook"
+        missing = {
+            k for k in hook_keys
+            if not any(k == d or k.startswith(d + ".") for d in CompactionPlugin.reloadable_keys)
+        }
+        assert not missing, (
+            f"CompactionPlugin.on_config_reload reads {sorted(missing)} but "
+            f"reloadable_keys is {CompactionPlugin.reloadable_keys}"
+        )
+
+    async def test_agent_declares_what_its_hook_re_reads(self):
+        from corvidae.agent import Agent
+
+        hook_keys = _keys_read_in_hook(Agent.on_config_reload)
+        missing = {
+            k for k in hook_keys
+            if not any(k == d or k.startswith(d + ".") for d in Agent.reloadable_keys)
+        }
+        assert not missing, (
+            f"Agent.on_config_reload reads {sorted(missing)} but "
+            f"reloadable_keys is {Agent.reloadable_keys}"
+        )
+
+    async def test_funnel_declares_what_its_hook_re_reads(self):
+        from corvidae_cognition.funnel import FunnelPlugin
+
+        hook_keys = _keys_read_in_hook(FunnelPlugin.on_config_reload)
+        missing = {
+            k for k in hook_keys
+            if not any(k == d or k.startswith(d + ".") for d in FunnelPlugin.reloadable_keys)
+        }
+        assert not missing, (
+            f"FunnelPlugin.on_config_reload reads {sorted(missing)} but "
+            f"reloadable_keys is {FunnelPlugin.reloadable_keys}"
+        )

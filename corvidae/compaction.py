@@ -54,6 +54,14 @@ logger = logging.getLogger(__name__)
 
 
 class CompactionPlugin(CorvidaePlugin):
+    reloadable_keys = (
+        "agent.compaction_threshold",
+        "agent.compaction_retention",
+        "agent.min_messages_to_compact",
+        "agent.chars_per_token",
+        "agent.compaction_fork_prompt",
+    )
+
     """Plugin that implements default token-budget conversation compaction."""
 
     depends_on = frozenset({"llm"})

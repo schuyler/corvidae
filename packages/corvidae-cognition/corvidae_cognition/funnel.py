@@ -60,6 +60,11 @@ FRAME_FOOTER = "[end CONTEXT from {source}]"
 
 
 class FunnelPlugin(CorvidaePlugin):
+    reloadable_keys = (
+        "funnel.default_budget",
+        "funnel.budgets",
+    )
+
     """The single admission point for tail CONTEXT entries."""
 
     depends_on = frozenset()

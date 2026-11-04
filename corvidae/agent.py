@@ -238,6 +238,13 @@ def _resolve_mid_conversation_system_role(agent_config: dict) -> str:
 
 
 class Agent(CorvidaePlugin):
+    reloadable_keys = (
+        "agent.chars_per_token",
+        "agent.request_logprobs",
+        "agent.mid_conversation_system_role",
+        "agent.forks",
+    )
+
     """Plugin that wires the agent loop into the hook system.
 
     Attributes:

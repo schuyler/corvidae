@@ -40,6 +40,33 @@ from corvidae.tool_collection import parse_tool_timeouts
 
 logger = logging.getLogger(__name__)
 
+def _changed_leaf_keys(old: dict, new: dict, prefix: str = "") -> set[str]:
+    """Dotted leaf keys whose value differs between two config dicts.
+
+    A whole subtree appearing or disappearing reports each leaf under it
+    rather than the subtree name, so the warning names something the operator
+    can act on.
+    """
+    changed: set[str] = set()
+    for key in set(old) | set(new):
+        dotted = f"{prefix}.{key}" if prefix else str(key)
+        in_old, in_new = key in old, key in new
+        if in_old and in_new:
+            a, b = old[key], new[key]
+            if isinstance(a, dict) and isinstance(b, dict):
+                changed |= _changed_leaf_keys(a, b, dotted)
+            elif a != b:
+                changed.add(dotted)
+        else:
+            value = new[key] if in_new else old[key]
+            if isinstance(value, dict):
+                changed |= _changed_leaf_keys({} if in_new else value,
+                                              value if in_new else {}, dotted)
+            else:
+                changed.add(dotted)
+    return changed
+
+
 # Default poll interval in seconds if not specified in config.
 _DEFAULT_POLL_INTERVAL = 2.0
 
@@ -260,8 +287,42 @@ class ConfigWatcherPlugin(CorvidaePlugin):
         # re-matched against every live channel, like agent defaults above.
         apply_channel_config(parsed_channels, registry)
 
+        # Step 5b: Report changes no plugin reloads (they wait for a restart).
+        self._warn_restart_only_changes(new_config)
+
         # Step 6: Dispatch on_config_reload to each plugin individually.
         await self._dispatch_config_reload(new_config)
+
+    def _reloadable_prefixes(self) -> tuple[str, ...]:
+        """Every key prefix some loaded plugin declares it re-reads.
+
+        Plugins opt in with `reloadable_keys`; anything not claimed is
+        restart-only, which is the safe default (#408).
+        """
+        prefixes: list[str] = []
+        for plugin in self.pm.get_plugins():
+            prefixes.extend(getattr(plugin, "reloadable_keys", ()) or ())
+        return tuple(prefixes)
+
+    def _warn_restart_only_changes(self, new_config: dict) -> None:
+        """Log one WARNING per changed key that no plugin reloads.
+
+        Without this a restart-only edit is silent: the reload reports the
+        plugins it did update, and the operator learns the change was pending
+        only by noticing behaviour never changed (#408).
+        """
+        old = self.config if isinstance(getattr(self, "config", None), dict) else {}
+        live = self._reloadable_prefixes()
+        for key in sorted(_changed_leaf_keys(old, new_config)):
+            if key.startswith("_") or any(
+                key == p or key.startswith(p + ".") for p in live
+            ):
+                continue
+            logger.warning(
+                "config reload: %s changed; restart-only, takes effect on restart",
+                key,
+                extra={"key": key},
+            )
 
     async def _dispatch_config_reload(self, config: dict) -> None:
         """Dispatch on_config_reload to each plugin with per-plugin error isolation.
