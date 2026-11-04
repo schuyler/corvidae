@@ -424,6 +424,8 @@ class TestSystemPromptHook:
 
         assert prompt == plain
         assert "identity layer" in caplog.text
+        assert channel.id in caplog.text
+        assert "append to the prompt" in caplog.text
 
     async def test_wrapper_that_appends_is_accepted(self, agent_env):
         """A transform that appends a section is accepted (#136)."""
@@ -472,10 +474,13 @@ class TestSystemPromptHook:
 
     async def test_non_boundary_turn_sends_identical_prompt(self, agent_env):
         """Between boundaries the system prompt is byte-identical and the
-        transform hook does not re-run (principle 2, #136)."""
+        transform hook does not re-run (principle 2, #136). Drives an
+        actual turn with a stubbed LLM."""
         plugin, channel = agent_env
         conv = ContextWindow(channel.id)
         channel.conversation = conv
+        plugin._client = _client(_make_text_response("ok"))
+        plugin._mark_started()
 
         # Boundary 1: conversation start. The hook runs, prompt is set.
         class _Counter:
@@ -491,9 +496,9 @@ class TestSystemPromptHook:
         assert _Counter.calls == 1
         prompt_at_boundary1 = conv.system_prompt
 
-        # Non-boundary: a message is processed. The hook does not run,
+        # Non-boundary: drive an actual turn. The hook does not run,
         # the prompt is unchanged.
-        conv.append({"role": "user", "content": "hello"})
+        await _say(plugin, channel, "hello")
         assert _Counter.calls == 1
         assert conv.system_prompt == prompt_at_boundary1
 

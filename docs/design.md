@@ -199,15 +199,6 @@ owner's plugin name after the prefix.
 | `after_persist_assistant` | broadcast | `_process_queue_item`, after assistant message is persisted; plugins may mutate the in-memory dict |
 | `transform_display_text` | firstresult=True wrapper chain | `_resolve_display_text`, before the reply is sent; return transformed text or None to leave unchanged |
 | `transform_system_prompt` | firstresult=True wrapper chain | `Agent.channel_system_prompt`, when the identity and register are composed: a new conversation, a restart, a compaction boundary, and the background views that share it. Return the transformed prompt or None to leave unchanged. A raising wrapper is logged at WARNING with the channel and the untransformed prompt is used. A transform that modifies the identity+register prefix is rejected with a WARNING; the untransformed prompt is used. Appending is the expected use. `SilencePlugin` appends its instruction on conversational channels |
-
-**Resolution at compaction.** `on_compaction` re-resolves the system prompt
-from config at every compaction boundary, not only when a runtime override
-changed it. A config-file edit to `system_prompt` or `register_prompt`
-that was previously ignored until restart now applies at the next
-compaction. This fits principle 15 (the override path is unaffected: the
-guard compares against the freshly composed prompt, not a stored one) and
-the plugin-sections clause in PRD §3.3.8. Between boundaries the prompt
-is byte-identical (principle 2).
 | `resolve_conversation` | firstresult=True | `_process_queue_item`, when `channel.conversation is None`; return list of tagged message dicts or None to defer |
 | `resolve_register_prompt` | firstresult=True | `Agent`, when a conversation starts on a channel with no `register_prompt` configured at any layer; the owning transport returns its default register text, others return None. `SignalPlugin`, `DiscordPlugin` and `IRCPlugin` implement it, from fragments shipped in `corvidae/channels/registers/`. ACP, web and CLI return nothing. No answer means no register |
 | `resolve_channel` | firstresult=True | `SchedulerPlugin`, for a persisted channel id the registry does not hold (e.g. a reminder due after a restart); a transport returns the live Channel for ids it owns, created with transport-specific config, or None to defer. `SignalPlugin` and `DiscordPlugin` implement it. A transport may also return None for an id it owns but cannot build yet (Signal before its first alias resolution). For an id whose prefix names a transport that implements the hook, the scheduler retries; for other ids, callers fall back to `registry.get_or_create` from the split id |
@@ -218,6 +209,15 @@ is byte-identical (principle 2).
 | `on_llm_response` | broadcast | `LLMClient.chat()` via the observer, exactly once per call (success or terminal failure); names the model the request was sent with (an `extra_body` override wins, #297) and carries llama-server's `timings` verbatim, plus the call's start time, total duration across retried attempts, attempts made, and the request's message and tool counts; side effects only (metrics, usage log) |
 | `on_metrics` | broadcast | any plugin via `pm.ahook.on_metrics(...)`; built-in emission from `MetricsPlugin.on_llm_response`; never emit from inside an `on_metrics` implementation (recursion) |
 | `on_config_reload` | broadcast | `ConfigWatcherPlugin`, when `agent.yaml`'s mtime changes; per-plugin error isolation |
+
+**Resolution at compaction.** `on_compaction` re-resolves the system prompt
+from config at every compaction boundary, not only when a runtime override
+changed it. A config-file edit to `system_prompt` or `register_prompt`
+that was previously ignored until restart now applies at the next
+compaction. This fits principle 15 (the override path is unaffected: the
+guard compares against the freshly composed prompt, not a stored one) and
+the plugin-sections clause in PRD §3.3.8. Between boundaries the prompt
+is byte-identical (principle 2).
 
 ## Channel System
 

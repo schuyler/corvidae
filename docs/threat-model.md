@@ -1113,7 +1113,10 @@ what it returns.
 The guard does not prevent a plugin from appending malicious content. A
 wrapper that appends instructions to the system prompt has the same reach
 as any other system-prompt content: it is trusted text the model reads on
-every turn. The trust boundary is plugin registration, not the hook.
+every turn. The trust boundary is plugin registration, not the hook. The
+guard is scoped to the hook: a plugin that holds the agent reference can
+still set `conv.system_prompt` directly, bypassing the transform chain
+entirely.
 
 ## What to do first
 
