@@ -1001,5 +1001,10 @@ async def _call_mcp_tool(
 
     text = "\n".join(parts) if parts else "(no output)"
     if result.is_error:
-        return "Error: " + text
+        # Name the tool and the server, as the timeout and exception branches
+        # do: an error payload alone cannot be traced to the call that made it.
+        return (
+            f"Error: MCP tool '{original_name}' on server '{server_name}' "
+            f"returned an error: {text}"
+        )
     return text

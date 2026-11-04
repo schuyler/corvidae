@@ -799,6 +799,11 @@ class TestUsageLogAttributionWiring:
                 attribution=attribution,
                 error=None,
                 timings=None,
+                started_at=1000.0,
+                total_ms=1.0,
+                attempts=1,
+                message_count=1,
+                tool_count=0,
             )
             return _make_text_response("hi")
 

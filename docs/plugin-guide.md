@@ -383,7 +383,7 @@ Producers that start a background task in `on_start` and inject notifications sh
 | Hook | Type | When |
 |------|------|------|
 | `on_llm_request(profile, model, request_id, message_count, tool_count, attribution)` | async broadcast | Immediately before an LLM chat-completion call |
-| `on_llm_response(profile, model, request_id, usage, latency_ms, attribution, error, timings)` | async broadcast | Exactly once per LLM call, after success or terminal failure |
+| `on_llm_response(profile, model, request_id, usage, latency_ms, attribution, error, timings, started_at, total_ms, attempts, message_count, tool_count)` | async broadcast | Exactly once per LLM call, after success or terminal failure |
 | `on_metrics(name, value, tags)` | async broadcast | Whenever any plugin emits a metric event |
 
 `on_llm_request` / `on_llm_response` fire from the `LLMClient` chokepoint
@@ -397,6 +397,12 @@ model unless an `extra_body` (the profile's or the call's) overrode it.
 `timings` is the response's `timings` field verbatim, which llama-server
 sends (`cache_n` prompt tokens reused from cache, `prompt_n` prefilled)
 and other providers omit (`None`, as on terminal failure);
+`latency_ms` is the final attempt's duration; `started_at` is the call's
+wall-clock start (epoch seconds), `total_ms` its monotonic duration from
+the first attempt to the end including retries and the sleeps between,
+and `attempts` how many attempts were made (1 = no retry; transient-status
+and connection retries and model-not-loaded waits each count); `message_count` and `tool_count` are the request's counts
+(embeddings: the number of texts, and 0);
 `error` is `None` on success and the exception string on terminal failure.
 The request payload is summarized (message/tool counts), never shipped
 wholesale. Observer failures are logged and never break the LLM call.
@@ -446,7 +452,7 @@ These hooks return a value. Hooks marked `firstresult=True` (sequential) stop at
 |------|----------|---------|----------|
 | `should_process_message(channel, sender, text, trace_id)` | reject-wins (broadcast) | `bool \| None` | Any `False` vetoes the message; any `True` (with no `False`) accepts; `None` if all defer |
 | `should_send_response(channel, text, emission, trace_id, meta)` | reject-wins (broadcast) | `bool \| None` | Any `False` withholds the emission; anything else sends it |
-| `resolve_llm_error(channel, error)` | `firstresult=True` | `str \| None` | First non-None string wins; chain stops. If all return None, the default message names the failure class (timeout, unreachable server, or an HTTP status) and asks the user to try again. `LLMPlugin` registers a `trylast` handler that explains an unloaded router model, any non-2xx `LLMHTTPError` (naming the status, an actionable hint, and a short provider body), and connection/timeout failures that point at `llm.main.base_url`; it defers (`None`) for anything else. To inspect HTTP failures yourself, check `isinstance(error, corvidae.llm.LLMHTTPError)` and read `error.status`, `error.body`, and `error.model`. |
+| `resolve_llm_error(channel, error)` | `firstresult=True` | `str \| None` | First non-None string wins; chain stops. If all return None, the default message names the failure class (timeout, unreachable server, or an HTTP status) and gives its remedy: a timeout or an HTTP error asks the user to try again, while an unreachable backend the daemon has scheduled a retry for says the answer will come when the model server is back. When no retry could be scheduled (no kernel clock registered), the unreachable message falls back to asking the user to try again rather than promising a retry that will not happen. `LLMPlugin` registers a `trylast` handler that explains an unloaded router model, any non-2xx `LLMHTTPError` (naming the status, an actionable hint, and a short provider body), and connection/timeout failures that point at `llm.main.base_url`; it defers (`None`) for anything else. To inspect HTTP failures yourself, check `isinstance(error, corvidae.llm.LLMHTTPError)` and read `error.status`, `error.body`, and `error.model`. |
 | `resolve_compaction(channel, conversation, max_tokens)` | `firstresult=True` | `bool \| None` | First non-None return stops the chain. `CompactionPlugin` uses `trylast` (returns True). Third-party plugins run at default priority. |
 | `transform_tool_result(tool_name, result, channel)` | `firstresult=True` wrapper chain | `str \| None` | Wrappers compose transforms in LIFO order. The seed returns the input unchanged. Non-wrapper hookimpls short-circuit the seed via firstresult. |
 | `transform_display_text(channel, text, result_message)` | `firstresult=True` wrapper chain | `str \| None` | Wrappers compose transforms in LIFO order. The seed returns the input text unchanged. Non-wrapper hookimpls short-circuit the seed via firstresult. |
@@ -1393,7 +1399,14 @@ logged with a traceback and never breaks an LLM call.
   trace id (NULL for calls outside any trace), trigger,
   mode (`fork`/`standalone` for stages that can fork, else NULL), token
   counts, cached tokens, llama-server's `cache_n` and `prompt_n` (prompt
-  tokens reused from cache vs prefilled), latency, and error.
+  tokens reused from cache vs prefilled), latency (the final attempt),
+  and error; the call's `started_at`, `ended_at`, `total_ms` (including
+  retries) and `attempts`; the request's `message_count` and
+  `tool_count`; the channel's `max_context_tokens` (found through the
+  optional `"registry"` plugin; NULL when unknown); and llama-server's
+  `prompt_ms` and `predicted_ms` (prefill and decode time of the final
+  attempt, NULL when the backend reports none). Subtracting those two
+  from `latency_ms` approximates the time a call queued in the server.
   The table is created lazily on first use (`CREATE TABLE IF NOT EXISTS`).
 - **`MetricsJsonlPlugin`** (entry point `"metrics_jsonl"`) — consumes
   `on_metrics` and appends one JSON line per event

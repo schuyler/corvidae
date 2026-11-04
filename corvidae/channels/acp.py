@@ -186,14 +186,15 @@ class CorvidaeAcpAgent:
                     "reason": "a prompt is already in progress",
                 }
             )
-        future = self._plugin.begin_prompt(session_id)
+        prompt_trace = mint_trace_id()
+        future = self._plugin.begin_prompt(session_id, prompt_trace)
         started = False
         try:
             await self._plugin.pm.ahook.on_message(
                 channel=channel,
                 sender="user",
                 text=text,
-                trace_id=mint_trace_id(),
+                trace_id=prompt_trace,
             )
             started = True
         finally:
@@ -466,6 +467,8 @@ class AcpPlugin(TransportPlugin):
         self._stopping = False
         # session_id -> Future[PromptResponse] for the in-flight ACP prompt (A9).
         self._active_prompts: dict[str, asyncio.Future] = {}
+        # session_id -> the trace its active prompt was admitted under (#419).
+        self._prompt_traces: dict[str, str] = {}
         # (channel.id, tool_name) -> synthetic toolCallId for ACP updates.
         self._tool_call_ids: dict[tuple[str, str], str] = {}
 
@@ -546,15 +549,21 @@ class AcpPlugin(TransportPlugin):
         future = self._active_prompts.get(session_id)
         return future is not None and not future.done()
 
-    def begin_prompt(self, session_id: str) -> asyncio.Future:
-        """Register a Future that send_message resolves when the turn is idle."""
+    def begin_prompt(self, session_id: str, trace_id: str) -> asyncio.Future:
+        """Register a Future that send_message resolves when the turn is idle.
+
+        ``trace_id`` is the prompt's own trace, kept beside the future so a
+        final from some other turn on this channel cannot resolve it (#419).
+        """
         loop = asyncio.get_running_loop()
         future: asyncio.Future = loop.create_future()
         self._active_prompts[session_id] = future
+        self._prompt_traces[session_id] = trace_id
         return future
 
     def abandon_prompt(self, session_id: str) -> None:
         """Drop an unstarted prompt future so a later prompt cannot inherit it."""
+        self._prompt_traces.pop(session_id, None)
         future = self._active_prompts.pop(session_id, None)
         if future is not None and not future.done():
             future.cancel()
@@ -569,13 +578,22 @@ class AcpPlugin(TransportPlugin):
             if channel is not None:
                 channel.pending_tool_call_ids.clear()
 
+        self._prompt_traces.pop(session_id, None)
         future = self._active_prompts.pop(session_id, None)
         if future is None or future.done():
             return
         future.set_result(PromptResponse(stop_reason="cancelled"))
 
-    def _complete_prompt_if_idle(self, channel) -> None:
-        """Resolve the active prompt when no tool calls remain for this session."""
+    def _complete_prompt_if_idle(self, channel, trace_id: str | None = None) -> None:
+        """Resolve the active prompt when no tool calls remain for this session.
+
+        Only a final from the prompt's own trace resolves it (#419): a
+        cancelled turn keeps running, and a notification-originated turn can
+        fire on the same channel, so "a final arrived" is not the same as
+        "this prompt's turn finished". A final carrying no trace id at all
+        still completes, because a prompt that never resolves hangs the
+        client's ``session/prompt`` and the PRD requires every turn to end.
+        """
         from acp import PromptResponse
 
         session_id = channel.scope
@@ -584,8 +602,17 @@ class AcpPlugin(TransportPlugin):
             return
         if channel.pending_tool_call_ids:
             return
+        active_trace = self._prompt_traces.get(session_id)
+        if trace_id is not None and active_trace is not None and trace_id != active_trace:
+            logger.debug(
+                "acp: final from trace %s left prompt trace %s pending on %s",
+                trace_id, active_trace, channel.id,
+                extra={"channel": channel.id, "trace_id": trace_id},
+            )
+            return
         future.set_result(PromptResponse(stop_reason="end_turn"))
         self._active_prompts.pop(session_id, None)
+        self._prompt_traces.pop(session_id, None)
 
     @hookimpl
     async def on_init(self, pm, config: dict) -> None:
@@ -687,7 +714,7 @@ class AcpPlugin(TransportPlugin):
             )
             return
         if unsent:
-            self._complete_prompt_if_idle(channel)
+            self._complete_prompt_if_idle(channel, trace_id)
 
     async def send_message(self, channel, event: OutboundMessage) -> None:
         """Forward final assistant text and complete the ACP prompt when idle."""
@@ -695,7 +722,7 @@ class AcpPlugin(TransportPlugin):
         if self._conn is None:
             logger.debug("AcpPlugin.send_message: no ACP connection yet")
             # Still allow tests / prompt completion without a live client.
-            self._complete_prompt_if_idle(channel)
+            self._complete_prompt_if_idle(channel, event.trace_id)
             return
         from acp import text_block, update_agent_message
 
@@ -704,7 +731,7 @@ class AcpPlugin(TransportPlugin):
         finally:
             # The turn is over even if the client connection died mid-update;
             # leaving the future pending would hang the ACP prompt forever.
-            self._complete_prompt_if_idle(channel)
+            self._complete_prompt_if_idle(channel, event.trace_id)
 
     async def send_thinking(self, channel, event: OutboundThinking) -> None:
         """Map reasoning content to agent_thought_chunk updates."""
