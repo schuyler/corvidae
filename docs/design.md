@@ -206,7 +206,7 @@ owner's plugin name after the prefix.
 | `before_compaction` | broadcast, awaited | `CompactionPlugin`, after the summary succeeded and before `replace_with_summary()`; the window still holds `messages[:cut]`, so a plugin can fork over the dropped prefix (see [Forks](#forks)); failures logged, never block compaction |
 | `on_compaction` | broadcast | `CompactionPlugin`, after `replace_with_summary()`; side effects only (persistence) |
 | `on_llm_request` | broadcast | `LLMClient.chat()` via LLMPlugin's injected observer, before the retry loop; side effects only (observability) |
-| `on_llm_response` | broadcast | `LLMClient.chat()` via the observer, exactly once per call (success or terminal failure); names the model the request was sent with (an `extra_body` override wins, #297) and carries llama-server's `timings` verbatim; side effects only (metrics, usage log) |
+| `on_llm_response` | broadcast | `LLMClient.chat()` via the observer, exactly once per call (success or terminal failure); names the model the request was sent with (an `extra_body` override wins, #297) and carries llama-server's `timings` verbatim, plus the call's start time, total duration across retried attempts, attempts made, and the request's message and tool counts; side effects only (metrics, usage log) |
 | `on_metrics` | broadcast | any plugin via `pm.ahook.on_metrics(...)`; built-in emission from `MetricsPlugin.on_llm_response`; never emit from inside an `on_metrics` implementation (recursion) |
 | `on_config_reload` | broadcast | `ConfigWatcherPlugin`, when `agent.yaml`'s mtime changes; per-plugin error isolation |
 
@@ -483,6 +483,32 @@ retrieval, appraisal, critique, the gates and the silence plugin record
 their outcomes. All sinks are
 fail-soft.
 
+**Call timing and queue wait (PRD §3.10.6).** Each `usage_log` row records
+when its call started and ended, so overlapping calls are found from the
+rows alone: in a self-join on `a.id < b.id`, two calls overlap when
+`a.started_at < b.ended_at AND b.started_at < a.ended_at` (calls that only
+touch at an endpoint do not). `ended_at` is `started_at + total_ms / 1000`,
+so it comes from the monotonic duration and cannot disagree with
+`total_ms`. `latency_ms` is the final
+attempt only. When calls share a llama-server slot (a pinned `id_slot`, or
+a single-slot server), a call that arrives while another holds the slot
+waits inside the server, and that wait is part of its `latency_ms`. The
+server's own work is `prompt_ms + predicted_ms`; what remains is, approximately, the wait:
+
+```sql
+SELECT id, stage, latency_ms - (prompt_ms + predicted_ms) AS queue_wait_ms
+FROM usage_log;  -- NULL where the backend gave no timings
+```
+
+It is not stored: it is a function of stored columns. `prompt_ms` and
+`predicted_ms` are NULL, never 0, when the backend reports no `timings`
+or the call failed; a reported 0 stays 0. `max_context_tokens` is looked
+up at write time through the channel registry (`optional_depends_on`;
+`resolve_config(channel)`), so a runtime override that lands between the
+request and the write is what the row records; a failing lookup logs a
+warning naming the channel and writes NULL. Existing tables gain the
+columns in place; older rows read NULL.
+
 ```sql
 CREATE TABLE usage_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -501,8 +527,17 @@ CREATE TABLE usage_log (
     cached_tokens INTEGER,      -- usage.prompt_tokens_details.cached_tokens, where the provider reports it
     cache_n INTEGER,            -- llama-server timings.cache_n: prompt tokens reused from cache (PRD §3.13.10)
     prompt_n INTEGER,           -- llama-server timings.prompt_n: prompt tokens prefilled; NULL from other providers
-    latency_ms REAL,
-    error TEXT
+    latency_ms REAL,            -- the final attempt's duration (retried attempts and their sleeps are not in it)
+    error TEXT,
+    started_at REAL,            -- wall-clock epoch seconds when the call began (#350)
+    ended_at REAL,              -- started_at + total_ms / 1000
+    total_ms REAL,              -- monotonic, first attempt to end, including retries and the sleeps between
+    attempts INTEGER,           -- attempts made; 1 = no retry (transient retries and model-not-loaded waits count)
+    message_count INTEGER,      -- messages in the request (embeddings: number of texts)
+    tool_count INTEGER,         -- tool schemas in the request (embeddings: 0)
+    max_context_tokens INTEGER, -- the channel's budget in force when the row is written; NULL with no channel, no registry or an unknown channel
+    prompt_ms REAL,             -- llama-server timings.prompt_ms: the final attempt's prefill time; NULL from other providers and on failure
+    predicted_ms REAL           -- llama-server timings.predicted_ms: the final attempt's decode time; NULL likewise
 );
 
 CREATE TABLE exchange_log (
@@ -701,6 +736,22 @@ All operations are synchronous; no database access:
   because memory retrieval keys on a plain `user` tail, and because the
   rewrite must stay a pure function of each message for the prompt prefix
   to stay cache-stable.
+
+  Every row the window can hold is renderable (PRD §3.1.18.1, #392), because
+  these steps run unwrapped on every turn and an exception here is a
+  deterministic per-turn failure that wedges the channel. A row that is not a
+  message object is left out; a malformed `tool_calls` value (no `id`, a
+  non-list value including a falsy one such as `""`, a non-dict entry) is
+  filtered out by `well_formed_calls()`, and the row renders without it, or is
+  left out entirely when that was its whole payload. A `tool_call_id` that is
+  not a non-empty string — `message_log` never validates the field — is read
+  through `result_call_id()`, so an unhashable value renders as an orphan
+  result instead of raising. Each omission logs one WARNING naming the channel
+  and the row (`message_log` id, or the window position when the row was never
+  persisted). `snap_cut_forward`, `snap_cut_to_tool_boundary`,
+  `_first_result_index` and `build_fork_prompt` read `tool_calls` through the
+  same helper, so the cut snaps, the render and a fork's prefix agree on which
+  calls exist.
 - `corvidae.context.unanswered_user_messages(messages)` (a module function,
   not a method) — the user-role MESSAGE rows after the window's last
   assistant row, in order (all of them when there is no assistant row). A
@@ -716,7 +767,9 @@ All operations are synchronous; no database access:
   by its JSON-serialized visible fields (role, content, `tool_calls`,
   `reasoning_content`, etc.), not just the `content` string, so a message
   whose size is mostly in tool-call arguments or reasoning content is still
-  counted accurately.
+  counted accurately. It never raises on a row's content (§3.1.18.1, #392):
+  a value JSON cannot encode is counted by its `str()`, and a row that is not
+  a mapping is counted by its `repr`, so both still contribute to the budget.
 - `replace_with_summary(summary_msg, retain_count)` — replaces older messages
   with a summary in-memory, retaining the `retain_count` most-recent entries.
   Raises `ValueError` if `retain_count` exceeds `len(messages)`.
@@ -727,7 +780,9 @@ All operations are synchronous; no database access:
   would drop the newest row, in which case the orphaned result renders as a
   framed notification. The newest row is always kept; if it alone exceeds
   the budget its content is truncated in memory only, with a visible
-  marker. Returns `(dropped, truncated)`.
+  marker. A newest row that is not a message object has no content to
+  truncate, so it stands as it is and the caller reports the overage.
+  Returns `(dropped, truncated)`.
 - The window only grows at the tail (`append`) and truncates at the head
   (`replace_with_summary`, `fit_to_budget`). Nothing is inserted, removed or mutated
   mid-window, so there is no method for removing entries by type; stale
@@ -1659,7 +1714,12 @@ default priority) returned non-None first. The caller does not use the return va
    the channel's pending tool-call ids, the Agent's
    `mid_conversation_system_role`) as a plain call on `llm.main`,
    with no tools, through `view_call` (PRD §3.8). The render is the
-   uncapped prefix: the window is over budget when compaction runs. If that call raises or returns
+   uncapped prefix: the window is over budget when compaction runs. If the fork
+   raises a connection-class error (`is_backend_unreachable`), the view call is not
+   attempted: it would spend the same wait on a backend that is already
+   down. `_fork_summary` raises `BackendUnreachable`, `resolve_compaction`
+   records the failure cooldown and returns, and the turn's own retry loop
+   waits for the backend (#400, PRD §3.1). If the view call raises or returns
    nothing (logged at WARNING; `RuntimeError` when no Agent can render a
    view), compaction declines and the over-budget fallback (#308) brings the
    window back within budget. The client is resolved when
@@ -1778,7 +1838,7 @@ Stage names are opaque to core (it never names cognition plugins).
 
 | Stage | Cut | Runs | On a miss |
 |---|---|---|---|
-| `compaction` | dropped prefix | inline in `resolve_compaction` | standalone view call on the same prefix (`llm.main`, no tools), then the over-budget fallback (#308) |
+| `compaction` | dropped prefix | inline in `resolve_compaction` | standalone view call on the same prefix (`llm.main`, no tools), then the over-budget fallback (#308); on a connection-class failure the view is skipped and compaction defers to the turn's retry loop (#400) |
 | `consolidation` (compaction trigger) | dropped prefix | inline in `before_compaction`; the record is stashed and the `on_compaction` task consumes it | catch-up in the `on_compaction` task: no stash (range not in `messages[:cut]`, fork failed) or the watermark moved since the fork; the rebuilt view on `llm.main` |
 | `consolidation` (idle trigger) | full window | in the idle task | range wholly in the live window: skip with a warning, watermark unchanged, retried on the next idle trigger; no registered channel or window, or a range row not in the window: catch-up (rebuilt view on `llm.main`) |
 | `appraisal` (stage 2) | full window at run time | silent TaskQueue task | skip with a warning (forks off, originating rowid left the window or was never persisted, fork failed or unusable) |
@@ -2504,12 +2564,12 @@ Registered via `CoreToolsPlugin` in `tools/__init__.py`:
 
 | Tool | File | Purpose |
 |------|------|---------|
-| `shell(command)` | `tools/shell.py` | Execute shell command, 30s timeout (configurable). On cancellation (the call bound, shutdown) it kills and reaps its `/bin/sh` process, then re-raises; `task_pipeline` inherits this. Grandchildren of the shell are not killed. |
+| `shell(command)` | `tools/shell.py` | Execute shell command, 30s timeout (configurable). On cancellation (the call bound, shutdown) it kills and reaps its `/bin/sh` process, then re-raises; `task_pipeline` inherits this. Grandchildren of the shell are not killed. Its companion `run_shell` returns the exit code beside the output, for callers that must know whether the command succeeded (#105). |
 | `read_file(path)` | `tools/files.py` | Read file (1MB limit, configurable) |
 | `write_file(path, content)` | `tools/files.py` | Write file, creates parent dirs |
 | `web_fetch(url)` | `tools/web.py` | Fetch URL, 15s timeout, 50KB truncation (configurable) |
 | `web_search(query, max_results)` | `tools/web.py` | Search via DuckDuckGo, default 8 results (configurable) |
-| `task_pipeline(definition)` | `tools/task_pipeline.py` | Execute YAML/JSON task DAG with dependency resolution |
+| `task_pipeline(definition)` | `tools/task_pipeline.py` | Execute YAML/JSON task DAG with dependency resolution. A step whose command exits non-zero is marked failed and its dependents do not run; a timeout leaves the step done, since the model decides whether to retry (#105). |
 
 Additionally, `SubagentPlugin` registers `subagent` and `TaskPlugin`
 registers `task_status` as tool closures during `on_start`.
@@ -2784,8 +2844,12 @@ monitored.
   have no await between them, so a refresh can't land after the stop and a
   message arriving during the stop sends its start after it. A failed stop
   is logged at WARNING with the channel id and the indicator is left to
-  expire; it never prevents a reply from being delivered (a stop that
-  signal-cli never answers is #413).
+  expire; it never prevents a reply from being delivered. A liveness RPC
+  waits at most `LIVENESS_RPC_TIMEOUT` (10 s) for signal-cli's response, so
+  a daemon that accepts the frame and never answers costs one delay and a
+  WARNING rather than holding the inbound processor or the reply path
+  (#413). The bound covers typing and receipts only: `send` is not bounded
+  this way, because a send that times out may have been delivered.
 - *Read receipt.* Sent from `on_message_persisted` — processing start —
   not on arrival. A message can sit queued behind contended local
   inference, and a "read" marker followed by a long silence is worse than

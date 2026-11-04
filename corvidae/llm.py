@@ -397,7 +397,9 @@ class LLMClient:
         )
 
         response, elapsed = await self._post_with_retries(
-            "/chat/completions", payload, request_id, label="chat completion"
+            "/chat/completions", payload, request_id, label="chat completion",
+            message_count=len(messages),
+            tool_count=len(tools) if tools else 0,
         )
 
         usage = response.get("usage", {})
@@ -417,10 +419,21 @@ class LLMClient:
         choices = response.get("choices")
         if raw and choices and isinstance(choices[0].get("message"), dict):
             message = choices[0]["message"]
-            # Keep the completion as received, for the warning below.
+            # Keep the completion as received, for the warnings below.
             raw_content = message["content"]
             if split_raw_reasoning(message):
                 response["reasoning_unfinished"] = True
+                # Logged here rather than by the caller: forks, subagents,
+                # compaction and cognition stages all reach the model through
+                # this method, and a flag only the main turn inspected left
+                # every other cut-off unrecorded (#381, PRD §3.10).
+                channel_id = get_attribution().get("channel_id") or "(none)"
+                logger.warning(
+                    "reply on channel %s from model %s was cut off "
+                    "mid-reasoning; full raw completion: %r",
+                    channel_id, sent_model, raw_content,
+                    extra={"channel": channel_id},
+                )
             # A reply that reopens reasoning after its answer is cut at the
             # second block and flagged; the tail survives only in the log.
             if cut_reopened_reasoning(message) is not None:
@@ -476,7 +489,9 @@ class LLMClient:
         )
 
         response, elapsed = await self._post_with_retries(
-            "/embeddings", payload, request_id, label="embeddings"
+            "/embeddings", payload, request_id, label="embeddings",
+            message_count=len(texts),
+            tool_count=0,
         )
 
         # Unpack one vector per input, honoring the index field when the
@@ -496,7 +511,8 @@ class LLMClient:
         return vectors
 
     async def _post_with_retries(
-        self, path: str, payload: dict, request_id: str, label: str
+        self, path: str, payload: dict, request_id: str, label: str,
+        message_count: int, tool_count: int,
     ) -> tuple[dict, float]:
         """POST with transient-error retries; shared by chat() and embed().
 
@@ -508,6 +524,10 @@ class LLMClient:
         Returns:
             (parsed JSON response, elapsed seconds of the final attempt).
         """
+        # Call-level timing for the observer: wall-clock start for the
+        # interval, and a monotonic start spanning every attempt and sleep.
+        started_at = time.time()
+        call_start = time.monotonic()
         start = time.monotonic()
         # The model this request asks for; chat() may have overridden the
         # configured one through extra_body.
@@ -617,6 +637,11 @@ class LLMClient:
                 latency_ms=(time.monotonic() - start) * 1000,
                 error=str(exc),
                 timings=None,
+                started_at=started_at,
+                total_ms=(time.monotonic() - call_start) * 1000,
+                attempts=attempt + not_loaded_attempt + 1,
+                message_count=message_count,
+                tool_count=tool_count,
             )
             raise
 
@@ -633,6 +658,11 @@ class LLMClient:
             latency_ms=elapsed * 1000,
             error=None,
             timings=response.get("timings"),
+            started_at=started_at,
+            total_ms=(time.monotonic() - call_start) * 1000,
+            attempts=attempt + not_loaded_attempt + 1,
+            message_count=message_count,
+            tool_count=tool_count,
         )
 
         return response, elapsed

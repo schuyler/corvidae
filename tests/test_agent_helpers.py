@@ -14,9 +14,11 @@ implemented (Item 2 of corvidae-cleanup.md).
 
 import logging
 
+import aiohttp
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from corvidae.clock import Clock
 from corvidae.trace import mint_trace_id
 from corvidae.agent import (
     Agent,
@@ -762,3 +764,107 @@ class TestDefaultLlmErrorMessage:
         assert "model request failed" in sent_text.lower()
         assert "try again" in sent_text.lower()
         assert "RuntimeError" not in sent_text
+
+
+class TestUnreachableFallbackWording:
+    """#338: an unreachable backend is retried, so the fallback must not ask
+    the user to resend. The other failure classes keep their wording."""
+
+    async def test_armed_retry_promises_an_answer_not_a_resend(
+        self, plugin_and_channel
+    ):
+        """With a retry armed, the fallback says the agent will answer later."""
+        plugin, channel, db = plugin_and_channel
+        plugin._client = MagicMock()
+        plugin._mark_started()
+        plugin.pm.ahook.resolve_llm_error = AsyncMock(return_value=None)
+        plugin.pm.register(Clock(), name="clock")
+
+        with patch(
+            "corvidae.agent.run_agent_turn",
+            new=AsyncMock(side_effect=aiohttp.ClientConnectionError("refused")),
+        ):
+            await plugin._run_turn(
+                channel=channel,
+                messages=[{"role": "user", "content": "hi"}],
+                tool_schemas=[],
+                llm_overrides=None,
+                item=QueueItem(
+                    role=QueueItemRole.USER, content="hi", channel=channel,
+                    trace_id=mint_trace_id(), originating=True,
+                ),
+            )
+
+        sent_text = sent_texts(plugin.pm, OutboundMessage)[-1]
+        # The retry is real, so the remedy is the daemon's, not the user's.
+        assert "try again" not in sent_text.lower(), (
+            f"the turn retries itself; asking the user to resend is wrong: {sent_text!r}"
+        )
+        assert "back" in sent_text.lower(), (
+            f"the fallback must say the answer comes when the server is back: {sent_text!r}"
+        )
+        assert "couldn't reach the model server" in sent_text.lower()
+        # And the retry really was armed, so the promise is not a lie.
+        assert channel.id in plugin._turn_retries
+
+    async def test_no_clock_does_not_promise_a_retry_it_cannot_make(
+        self, plugin_and_channel
+    ):
+        """Without a kernel clock no retry is armed, so do not promise one."""
+        plugin, channel, db = plugin_and_channel
+        plugin._client = MagicMock()
+        plugin._mark_started()
+        plugin.pm.ahook.resolve_llm_error = AsyncMock(return_value=None)
+
+        with patch(
+            "corvidae.agent.run_agent_turn",
+            new=AsyncMock(side_effect=aiohttp.ClientConnectionError("refused")),
+        ):
+            await plugin._run_turn(
+                channel=channel,
+                messages=[{"role": "user", "content": "hi"}],
+                tool_schemas=[],
+                llm_overrides=None,
+                item=QueueItem(
+                    role=QueueItemRole.USER, content="hi", channel=channel,
+                    trace_id=mint_trace_id(), originating=True,
+                ),
+            )
+
+        assert channel.id not in plugin._turn_retries, "precondition: nothing was armed"
+        sent_text = sent_texts(plugin.pm, OutboundMessage)[-1]
+        assert "will answer" not in sent_text.lower(), (
+            f"no retry was armed, so the fallback must not promise one: {sent_text!r}"
+        )
+        assert "couldn't reach the model server" in sent_text.lower()
+        # With no retry, resending is the only remedy there is.
+        assert "try again" in sent_text.lower()
+
+    async def test_timeout_keeps_its_resend_hint(self, plugin_and_channel):
+        """A timeout is not retried, so its 'try again' wording is unchanged."""
+        plugin, channel, db = plugin_and_channel
+        plugin._client = MagicMock()
+        plugin._mark_started()
+        plugin.pm.ahook.resolve_llm_error = AsyncMock(return_value=None)
+        plugin.pm.register(Clock(), name="clock")
+
+        with patch(
+            "corvidae.agent.run_agent_turn",
+            new=AsyncMock(side_effect=TimeoutError()),
+        ):
+            await plugin._run_turn(
+                channel=channel,
+                messages=[{"role": "user", "content": "hi"}],
+                tool_schemas=[],
+                llm_overrides=None,
+                item=QueueItem(
+                    role=QueueItemRole.USER, content="hi", channel=channel,
+                    trace_id=mint_trace_id(), originating=True,
+                ),
+            )
+
+        sent_text = sent_texts(plugin.pm, OutboundMessage)[-1]
+        assert "timed out" in sent_text.lower()
+        assert "try again" in sent_text.lower(), (
+            "a timeout is not retried; the user still has to resend"
+        )

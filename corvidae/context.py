@@ -169,14 +169,48 @@ def unanswered_user_messages(messages: list[dict]) -> list[dict]:
     ]
 
 
+def well_formed_calls(msg: object) -> list[dict]:
+    """The tool calls in ``msg`` that can be rendered: dicts with a string id.
+
+    A backend can omit ``id``, and ``turn.py`` passes ``tool_calls`` through
+    unnormalized (#392), so every reader of the field filters through this one
+    rule rather than trusting the shape it was given.
+    """
+    if not isinstance(msg, dict):
+        return []
+    calls = msg.get("tool_calls")
+    if not isinstance(calls, list):
+        return []
+    return [c for c in calls if isinstance(c, dict) and isinstance(c.get("id"), str)]
+
+
+def result_call_id(msg: object) -> str | None:
+    """The ``tool_call_id`` of a tool-result row, or None when it has none.
+
+    Only a non-empty string can match a call: the field arrives from
+    ``message_log`` unvalidated, and an unhashable value (a list, a dict)
+    would raise at set membership (#392).
+    """
+    if not isinstance(msg, dict) or msg.get("role") != "tool":
+        return None
+    call_id = msg.get("tool_call_id")
+    return call_id if isinstance(call_id, str) and call_id else None
+
+
 def message_tokens(msg: dict) -> int:
     """Token count of a message the way it actually gets sent: the
     JSON-serialized visible dict, not just `content`. Catches size hiding in
     `tool_calls` and `reasoning_content` that content-only counting misses.
     Accepts messages in tagged or already-clean form — `_visible()` strips
     any `_`-prefixed keys itself, and is a no-op on a dict with none.
+
+    Never raises on a row's content (PRD §3.1.18.1): ``default=str`` counts a
+    value JSON cannot encode by its text, and a row that is not a mapping at
+    all is counted by its repr.
     """
-    return count_tokens(json.dumps(_visible(msg)))
+    if not isinstance(msg, dict):
+        return count_tokens(repr(msg))
+    return count_tokens(json.dumps(_visible(msg), default=str))
 
 
 class ContextWindow:
@@ -268,15 +302,24 @@ class ContextWindow:
         Strict chat templates reject a system message that is not first;
         "user" satisfies them. Only the returned copy changes — the window
         and the DB keep ``role: system``.
+
+        Every row the window can hold is rendered (PRD §3.1.18.1). A row that
+        is not a message object is left out; a malformed tool call in an
+        otherwise renderable row is left out of it, and a tool result whose
+        call had no usable id renders as an orphan result. Each omission logs
+        one WARNING naming the channel and the row id.
         """
         result_at = {}
         for i, m in enumerate(self.messages):
-            if m.get("role") == "tool" and m.get("tool_call_id") and m["tool_call_id"] not in result_at:
-                result_at[m["tool_call_id"]] = i
+            call_id = result_call_id(m)
+            if call_id is not None and call_id not in result_at:
+                result_at[call_id] = i
 
+        # Only well-formed calls are placed or claimed; the rest are dropped
+        # from the render below, where each row's loss is logged once.
         emit_at = {}
         for i, msg in enumerate(self.messages):
-            calls = msg.get("tool_calls") or []
+            calls = well_formed_calls(msg)
             if not calls:
                 continue
             if all(c["id"] in result_at for c in calls):
@@ -284,12 +327,12 @@ class ContextWindow:
             else:
                 emit_at[i] = i
         anchored = {j: i for i, j in emit_at.items()}
-        claimed = {c["id"] for m in self.messages for c in (m.get("tool_calls") or [])}
+        claimed = {c["id"] for m in self.messages for c in well_formed_calls(m)}
 
         def block(i: int) -> list[dict]:
             msg = self.messages[i]
-            out = [_visible(msg)]
-            for call in msg.get("tool_calls") or []:
+            out = [self._renderable(msg)]
+            for call in well_formed_calls(msg):
                 result = self.messages[result_at[call["id"]]] if call["id"] in result_at else None
                 out.append(_visible(result) if result is not None else {
                     "role": "tool",
@@ -304,9 +347,36 @@ class ContextWindow:
 
         out = [{"role": "system", "content": self.system_prompt}]
         for i, msg in enumerate(self.messages):
+            # A row that is not a message object can't be rendered at all.
+            if not isinstance(msg, dict):
+                self._warn_unrenderable(
+                    i, f"is a {type(msg).__name__}, not a message object",
+                    "left out of the prompt",
+                )
+                continue
+            # A row whose only payload is calls that can't carry an id has
+            # nothing left to render, and reporting it once is enough.
+            malformed = self._malformed_call_count(msg)
+            if malformed and not well_formed_calls(msg) and not msg.get("content"):
+                self._warn_unrenderable(
+                    i, f"carries {malformed} tool call(s) with no usable id",
+                    "left out of the prompt",
+                )
+                continue
+            # One warning per row, before either render path so the deferred
+            # block path reports it too.
+            if malformed:
+                self._warn_unrenderable(
+                    i, f"carries {malformed} tool call(s) with no usable id",
+                    "rendered without them",
+                )
             if i in anchored:
                 out += block(anchored[i])
-            if msg.get("role") == "tool" and msg.get("tool_call_id") in claimed:
+            # A result whose call is in the window was emitted inside its
+            # call's block above. Compare through result_call_id: the raw
+            # field can be unhashable (#392).
+            call_id = result_call_id(msg)
+            if call_id is not None and call_id in claimed:
                 continue
             if i in emit_at:
                 continue
@@ -317,7 +387,7 @@ class ContextWindow:
                     "content": f"[{ORPHAN_RESULT_LABEL}]\n\n{msg.get('content', '')}",
                 })
                 continue
-            out.append(_visible(msg))
+            out.append(self._renderable(msg))
 
         # Re-role non-leading system messages (CONTEXT, untargeted
         # notifications) for strict chat templates. A pure function of the
@@ -328,6 +398,58 @@ class ContextWindow:
                 for m in out[1:]
             ]
         return out
+
+    @staticmethod
+    def _malformed_call_count(msg: dict) -> int:
+        """How many of ``msg``'s tool calls have no usable id.
+
+        A truthy or falsy non-list value (``""``, ``0``, ``{}``, a string) is
+        one unusable call: testing truthiness would let ``""`` through
+        unwarned (#392).
+        """
+        if "tool_calls" not in msg:
+            return 0
+        raw = msg["tool_calls"]
+        if raw is None:
+            return 0
+        if not isinstance(raw, list):
+            return 1
+        return len(raw) - len(well_formed_calls(msg))
+
+    @staticmethod
+    def _renderable(msg: dict) -> dict:
+        """``msg`` as it goes to the model: visible fields, well-formed calls
+        only, and no ``tool_calls`` key at all when none survive (an empty
+        list is not the same as an absent one to a chat template)."""
+        out = _visible(msg)
+        if "tool_calls" not in out:
+            return out
+        kept = well_formed_calls(msg)
+        if kept:
+            out["tool_calls"] = kept
+        else:
+            del out["tool_calls"]
+        return out
+
+    def _warn_unrenderable(self, index: int, what: str, consequence: str) -> None:
+        """Log one WARNING for content left out of the prompt (PRD §3.1.18.1).
+
+        Names the channel and the row: ``_db_id`` when the row was persisted,
+        its position when it was not. Never the row's content (it may be
+        unrenderable for that very reason).
+        """
+        row = self.messages[index]
+        row_id = row.get("_db_id") if isinstance(row, dict) else None
+        where = (
+            f"message_log id {row_id}" if isinstance(row_id, int)
+            else f"window position {index} (not persisted)"
+        )
+        logger.warning(
+            "channel %s: %s at %s; %s — the turn continues without it "
+            "(inspect or redact the row)",
+            self.channel_id, what, where, consequence,
+            extra={"channel": self.channel_id},
+        )
 
     def token_estimate(self) -> int:
         """Token count using tiktoken (cl100k_base), with character-based fallback.
@@ -389,9 +511,11 @@ class ContextWindow:
         del self.messages[:cut]
 
         # The newest row alone may still not fit: truncate it in memory only.
+        # A row that is not a mapping has no content to truncate; it stands
+        # as it is and the caller reports the overage (#392).
         truncated = False
         newest = self.messages[-1]
-        if fixed + message_tokens(newest) > max_tokens:
+        if isinstance(newest, dict) and fixed + message_tokens(newest) > max_tokens:
             content = str(newest.get("content") or "")
             total = len(content)
             room = max_tokens - fixed
