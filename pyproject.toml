@@ -29,9 +29,13 @@ discord = [
     "discord-py>=2.4",
 ]
 # Memory, appraisal, critique, funnel and outcome log
-# (packages/corvidae-cognition, docs/cognition.md).
+# (packages/corvidae-cognition, docs/cognition.md). Includes the `vec`
+# sub-extra, so the documented install keeps vector memory (#130). For the
+# FTS5-only path, install `corvidae-cognition` without its `vec` extra:
+#   uv sync --extra dev --extra acp --extra discord --no-extra cognition
+#   uv pip install -e packages/corvidae-cognition   # no [vec]
 cognition = [
-    "corvidae-cognition",
+    "corvidae-cognition[vec]",
 ]
 
 [project.scripts]

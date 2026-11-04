@@ -13,6 +13,20 @@ uv sync --extra cognition
 `--extra discord` or `--extra acp` to the same line if you use those
 transports.
 
+**Vector memory is optional.** `sqlite-vec` is a compiled extension and only
+`MemoryPlugin` and retention use it, so it lives in the distribution's `vec`
+sub-extra. The `cognition` extra pulls it in, so the line above keeps vector
+memory. To run without it — funnel, appraisal, critique and goals, with memory
+falling back to FTS5 keyword retrieval and one startup warning (PRD §3.7,
+Memory 5):
+
+```sh
+uv pip install --no-deps -e packages/corvidae-cognition   # no [vec]
+```
+
+CI proves that path: the `cognition-fts` job installs cognition without
+`sqlite-vec` and runs `tests/cognition` against it (#130).
+
 | Plugin | Entry point | What it does |
 |---|---|---|
 | `MemoryPlugin` | `memory` | Consolidates compacted conversation into durable memories and retrieves them into context; owns `sqlite-vec` |
