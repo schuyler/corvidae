@@ -2504,12 +2504,12 @@ Registered via `CoreToolsPlugin` in `tools/__init__.py`:
 
 | Tool | File | Purpose |
 |------|------|---------|
-| `shell(command)` | `tools/shell.py` | Execute shell command, 30s timeout (configurable). On cancellation (the call bound, shutdown) it kills and reaps its `/bin/sh` process, then re-raises; `task_pipeline` inherits this. Grandchildren of the shell are not killed. |
+| `shell(command)` | `tools/shell.py` | Execute shell command, 30s timeout (configurable). On cancellation (the call bound, shutdown) it kills and reaps its `/bin/sh` process, then re-raises; `task_pipeline` inherits this. Grandchildren of the shell are not killed. Its companion `run_shell` returns the exit code beside the output, for callers that must know whether the command succeeded (#105). |
 | `read_file(path)` | `tools/files.py` | Read file (1MB limit, configurable) |
 | `write_file(path, content)` | `tools/files.py` | Write file, creates parent dirs |
 | `web_fetch(url)` | `tools/web.py` | Fetch URL, 15s timeout, 50KB truncation (configurable) |
 | `web_search(query, max_results)` | `tools/web.py` | Search via DuckDuckGo, default 8 results (configurable) |
-| `task_pipeline(definition)` | `tools/task_pipeline.py` | Execute YAML/JSON task DAG with dependency resolution |
+| `task_pipeline(definition)` | `tools/task_pipeline.py` | Execute YAML/JSON task DAG with dependency resolution. A step whose command exits non-zero is marked failed and its dependents do not run; a timeout leaves the step done, since the model decides whether to retry (#105). |
 
 Additionally, `SubagentPlugin` registers `subagent` and `TaskPlugin`
 registers `task_status` as tool closures during `on_start`.

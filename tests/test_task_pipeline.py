@@ -197,20 +197,14 @@ tasks:
 
         from corvidae.tools.task_pipeline import TaskPipelinePlugin
 
-        async def failing_shell(command, timeout=30):
-            return "some output\nExit code: 3"
-
         async def failing_run_shell(command, timeout=30):
             # Mirrors the real run_shell: a non-zero code is in the text too.
             return "some output\nExit code: 3", 3
 
         shell_module = importlib.import_module("corvidae.tools.shell")
-        # The pipeline reads the exit code from the structured companion; the
-        # string-returning shell is still what tool callers use.
-        monkeypatch.setattr(shell_module, "shell", failing_shell)
-        monkeypatch.setattr(
-            shell_module, "run_shell", failing_run_shell, raising=False
-        )
+        # The pipeline reads the exit code from run_shell, which is the only
+        # function it calls; patching `shell` as well would be dead.
+        monkeypatch.setattr(shell_module, "run_shell", failing_run_shell)
 
         plugin = TaskPipelinePlugin(None)
         registry: list = []

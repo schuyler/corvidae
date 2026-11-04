@@ -884,10 +884,16 @@ class TestToolExecutionIsError:
         tool_result = _make_tool_result([], is_error=True)
         mock_session.call_tool = AsyncMock(return_value=tool_result)
 
-        result = await _call_mcp_tool(mock_session, "tool", {}, 30.0, "myserver")
+        # A distinctive name: "tool" is literal boilerplate in the template,
+        # so asserting on it would pass even if the argument were never
+        # interpolated.
+        result = await _call_mcp_tool(
+            mock_session, "write_file", {}, 30.0, "filesystem"
+        )
 
         assert result != "Error: ", "an empty payload must still give a cause"
-        assert "myserver" in result and "tool" in result, result
+        assert "write_file" in result, f"the error must name the tool: {result!r}"
+        assert "filesystem" in result, f"the error must name the server: {result!r}"
         assert "no output" in result, (
             f"an empty payload must say so rather than ending at the colon: {result!r}"
         )
