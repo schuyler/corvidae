@@ -1,13 +1,9 @@
----
-name: write-corvidae-plugin
-description: Use when adding or changing a corvidae plugin (a tool, a hook implementation, a producer of channel work, a transport helper). Gives a short checklist of placement rules, conventions and traps that fail silently. Written for small, fast agents: follow it in order, and stop and ask the owner where it says to.
----
+# Plugin checklist
 
-# Writing a corvidae plugin
-
-Follow the steps in order. The traps in step 4 fail **silently** (no error, the
-plugin just does nothing or reads the wrong value), so read them before you
-write code.
+A short, ordered checklist for adding or changing a corvidae plugin, written
+for small, fast agents. Follow the steps in order, and stop and ask the owner
+where it says to. The traps in step 4 fail **silently** (no error, the plugin
+just does nothing or reads the wrong value), so read them before you write code.
 
 Depth lives in `docs/plugin-guide.md`. Requirements live in `docs/prd.md`. This
 file is the short path; it does not replace either.
