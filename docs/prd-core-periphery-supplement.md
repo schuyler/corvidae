@@ -8,6 +8,10 @@ disagree, the base PRD's principles (especially 2, 3, 8, 13, 14, 16)
 still bind; this supplement adds the architectural frame within which
 those principles operate.
 
+Terminology: in this supplement, **core** means the System Two context
+(§3.1) and never the framework. The framework's centre is the
+**kernel**, as in base PRD principle 1.
+
 The base PRD describes a system of independent channel contexts. This
 supplement describes a system of one cognitive center and many sensory
 peripherals. The transition is not a replacement of the base PRD's
@@ -20,8 +24,9 @@ heartbeat, per-channel identity) are reframed below.
 ## 1. What changes
 
 The base PRD's deployment shape "a personal instance (Lex): a
-strict-template model on a single-KV-slot llama-server router, Signal as
-the primary transport, running unattended for weeks" assumed one context
+strict-template model (Swift-1.5, a Qwen 3.8 fine-tune) on a single-KV-slot
+llama-server router, Signal as the primary transport, running unattended
+for weeks" assumed one context
 per channel, each with its own KV cache slot. The single-slot constraint
 meant the channels time-shared one prefill cache, and the heartbeat was a
 separate context that got timed ticks.
@@ -154,7 +159,7 @@ violates one is a bug even if its tests pass.
    periphery sends the dictated text verbatim. The default is
    instruction; the override is dictation.
 
-10. The core performs appraisal (base PRD §3.10) in addition to the
+10. The core performs appraisal (base PRD §3.7 Appraisal) in addition to the
     consolidation, compaction, and critique that all contexts perform
     (§3.7). Appraisal evaluates patterns across channels and over time,
     not just individual responses.
@@ -354,19 +359,7 @@ thought, or to respond to an escalation.
    works the channel itself in a fork, and joins the results back. The
    periphery steps back while the fork is active.
 
-2. The fork is disposable. Its outcome is summarized and appended to the
-   core's context; the fork itself is discarded.
-
-3. The core is not blocked while a fork is working. It continues to
-   receive notifications from other peripherals. The attentional shift is
-   not a context switch; it's a fork.
-
-4. Checkpoint and rollback: because the core's state is checkpointed
-   before the fork, long-running thinking can be preserved or rolled
-   back. If the fork produces a bad outcome, the core can roll back to
-   its checkpoint and try a different approach.
-
-5. The fork pattern is an extension of base PRD §3.8 (forks for background
+7. The fork pattern is an extension of base PRD §3.8 (forks for background
    work) to the core/periphery topology. The existing fork requirements
    (bounded output, same-lease completion, no standalone fallback) still
    apply.
@@ -395,14 +388,14 @@ thought, or to respond to an escalation.
 
 1. All contexts (core and peripherals) perform:
    - **Consolidation:** Converting raw conversation logs into narrative
-     memory (base PRD §3.10, dream plugin).
+     memory (base PRD §3.7 Memory).
    - **Compaction:** Summarizing old conversation to free up window space.
      Append-only constraint (base PRD principle 4): old content is
      summarized, not deleted.
    - **Critique:** Evaluating the quality of responses and decisions
-     (base PRD §3.10, critique plugin).
+     (base PRD §3.7 Critique).
 
-2. The core additionally performs **appraisal** (base PRD §3.10):
+2. The core additionally performs **appraisal** (base PRD §3.7 Appraisal):
    evaluating patterns across channels and over time, not just individual
    responses.
 
@@ -524,11 +517,13 @@ over without modification:
 - **Compute is finite** (principle 16): every model endpoint is a
   resource pool; a context switch is what it costs.
 
-The base PRD's transport requirements (§3.2), context window
-requirements (§3.3), persistence requirements (§3.4), channel
-requirements (§3.5), LLM client requirements (§3.6), memory requirements
-(§3.7), fork requirements (§3.8), scheduler requirements (§3.9), and
-cognition requirements (§3.10) all carry over, with the understanding
+The base PRD's kernel requirements (§3.1), transport requirements
+(§3.2), context window requirements (§3.3), persistence requirements
+(§3.4), tool requirements (§3.5), LLM client requirements (§3.6),
+cognition requirements (§3.7), fork requirements (§3.8), scheduler
+requirements (§3.9), observability requirements (§3.10), configuration
+requirements (§3.11), evaluation requirements (§3.12), and resource pool
+requirements (§3.13) all carry over, with the understanding
 that "channel" in those sections now means "peripheral" and the
 per-channel KV cache assumption is replaced by the shared hierarchy
 (§3.3).
