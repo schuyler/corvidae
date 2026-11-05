@@ -1065,9 +1065,7 @@ that trace.
 6. Calls `resolve_compaction` (`firstresult=True`): the first non-None
    return stops the chain, so a default-priority replacement runs before
    the `trylast` `CompactionPlugin`; the return value is not used. A
-   `tryfirst` handler may trim the window in place and return None, which
-   doesn't stop the chain (cognition's HeartbeatPlugin does this on
-   `internal:heartbeat`, keeping its last `heartbeat.keep_beats` beats).
+   `tryfirst` handler may return None, which doesn't stop the chain.
    Right after the hook, whatever it did or raised, the kernel calls
    `conv.fit_to_budget(max_context_tokens)` (also when no compaction
    plugin is loaded) and logs one WARNING if it dropped rows, truncated
@@ -3560,7 +3558,6 @@ scheduler:
 
 heartbeat:
   after: 3600                   # seconds of system quiet before a beat; absent = asleep
-  keep_beats: 3                 # earlier beats kept in the beat's window; 0 = start empty
 
 funnel:
   default_budget: 512           # tokens per admission-funnel call

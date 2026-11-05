@@ -611,10 +611,9 @@ human removed. What bounds it:
   can message any contact, with no allowlist (finding 15). Its tools are
   another matter: `shell`, `web_fetch` and `write_file` are as available to
   a beat as to any turn (finding 4). Drop them for the beat with
-  `channels.internal:heartbeat.tools.disabled`. Set it before start: the
-  heartbeat window is trimmed without compaction, so a reloaded list is
-  enforced at dispatch at once but reaches the beat's tool schemas only at a
-  restart.
+  `channels.internal:heartbeat.tools.disabled`. A reloaded list is
+  enforced at dispatch at once and reaches the beat's tool schemas at the next
+  compaction or restart.
 - **Scope.** The beat reviews the newest records of the whole memory, every
   channel's and its own earlier beats' included (#168); there is no group to
   keep a channel with untrusted participants out of. Memory spans channels
