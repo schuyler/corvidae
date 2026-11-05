@@ -409,6 +409,10 @@ class ChannelRegistry:
         """Look up a channel by its string ID. Returns None if not found."""
         return self.channels.get(channel_id)
 
+    def list_channels(self) -> list[str]:
+        """Return all registered channel IDs."""
+        return list(self.channels.keys())
+
     def resolve_config(self, channel: Channel) -> dict:
         """Resolve channel config with agent-level fallbacks and runtime overrides.
 
