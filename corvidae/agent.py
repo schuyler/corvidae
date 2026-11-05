@@ -600,6 +600,9 @@ class Agent(CorvidaePlugin):
         if channel is None:
             raise KeyError(f"channel {channel_id!r} is not registered")
 
+        if isinstance(hop_count, bool) or not isinstance(hop_count, int) or hop_count < 1:
+            raise ValueError("hop_count must be a positive integer")
+
         item = QueueItem(
             role=QueueItemRole.AGENT_SEND,
             content=text,
@@ -619,7 +622,7 @@ class Agent(CorvidaePlugin):
         """Return all registered channel IDs (sorted for stable output)."""
         if self._registry is None:
             return []
-        return self._registry.list_channels()
+        return sorted(self._registry.list_channels())
 
     def _get_or_create_queue(self, channel) -> SerialQueue:
         """Return existing SerialQueue for channel or create and start a new one."""

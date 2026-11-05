@@ -250,10 +250,121 @@ class TestListChannels:
         assert "No channels" in result
 
     async def test_agent_not_available(self):
-        """list_channels returns an error when the agent is not available."""
+        """list_channels returns a distinct error when the agent is not available."""
         plugin = CrossChannelSendPlugin()
         plugin._agent = None
 
         result = await plugin.list_channels()
 
-        assert "No channels" in result
+        assert "agent is not available" in result
+
+class TestEdgeCases:
+    """Additional edge cases from review."""
+
+    async def test_non_string_arguments(self):
+        """send_message returns an error for non-string channel_id or text."""
+        plugin, mock_agent = _build_plugin()
+
+        result = await plugin.send_message(12345, "hello")
+        assert "must be strings" in result
+
+        result = await plugin.send_message("signal:alice", 12345)
+        assert "must be strings" in result
+
+    async def test_attribution_meta_not_dict(self):
+        """send_message handles non-dict meta gracefully (hop_count=1)."""
+        plugin, mock_agent = _build_plugin()
+
+        from corvidae.attribution import set_attribution, reset_attribution
+        token = set_attribution(
+            stage="turn", channel_id="signal:alice",
+            trace_id="t1", meta="not-a-dict",
+        )
+        try:
+            result = await plugin.send_message("web:main", "hello")
+        finally:
+            reset_attribution(token)
+
+        assert result == "Queued on web:main."
+        assert mock_agent.enqueue_agent_send.call_args.kwargs["hop_count"] == 1
+
+    @pytest.mark.parametrize("bad_hop", ["1", 1.0, None, True, False])
+    async def test_attribution_hop_count_not_int(self, bad_hop):
+        """send_message falls back to hop_count=1 for non-int hop values."""
+        plugin, mock_agent = _build_plugin()
+
+        from corvidae.attribution import set_attribution, reset_attribution
+        token = set_attribution(
+            stage="turn", channel_id="signal:alice",
+            trace_id="t1",
+            meta={"origin": "agent_send", "hop_count": bad_hop},
+        )
+        try:
+            result = await plugin.send_message("web:main", "hello")
+        finally:
+            reset_attribution(token)
+
+        assert result == "Queued on web:main."
+        assert mock_agent.enqueue_agent_send.call_args.kwargs["hop_count"] == 1
+
+    async def test_source_channel_unregistered(self):
+        """send_message returns an error when the source channel is not registered."""
+        plugin, mock_agent = _build_plugin()
+
+        mock_agent.enqueue_agent_send.side_effect = ValueError(
+            "source_channel_id 'signal:ghost' is not registered"
+        )
+
+        from corvidae.attribution import set_attribution, reset_attribution
+        token = set_attribution(
+            stage="turn", channel_id="signal:ghost",
+            trace_id="t1", meta={},
+        )
+        try:
+            result = await plugin.send_message("web:main", "hello")
+        finally:
+            reset_attribution(token)
+
+        assert "signal:ghost" in result
+        assert "not registered" in result
+
+    async def test_list_channels_agent_unavailable(self):
+        """list_channels returns a distinct error when agent is unavailable."""
+        plugin = CrossChannelSendPlugin()
+        plugin._agent = None
+
+        result = await plugin.list_channels()
+
+        assert "agent is not available" in result
+
+    async def test_list_channels_exception(self):
+        """list_channels returns an error when the agent raises."""
+        plugin, mock_agent = _build_plugin()
+        mock_agent.list_channels.side_effect = RuntimeError("boom")
+
+        result = await plugin.list_channels()
+
+        assert "unexpected error" in result
+
+    async def test_list_channels_exact_output(self):
+        """list_channels returns newline-separated sorted output."""
+        plugin, mock_agent = _build_plugin()
+        mock_agent.list_channels.return_value = ["signal:alice", "web:main"]
+
+        result = await plugin.list_channels()
+
+        assert result == "signal:alice\nweb:main"
+
+    async def test_max_hops_invalid_config(self):
+        """on_init raises ValueError for invalid max_hops."""
+        import pytest
+        plugin = CrossChannelSendPlugin()
+
+        with pytest.raises(ValueError, match="max_hops"):
+            await plugin.on_init(None, {"max_hops": "not-a-number"})
+
+        with pytest.raises(ValueError, match="max_hops"):
+            await plugin.on_init(None, {"max_hops": None})
+
+        with pytest.raises(ValueError, match="max_hops"):
+            await plugin.on_init(None, {"max_hops": 0})

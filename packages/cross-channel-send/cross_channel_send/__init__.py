@@ -39,7 +39,13 @@ class CrossChannelSendPlugin(CorvidaePlugin):
     @hookimpl
     async def on_init(self, pm, config: dict) -> None:
         await super().on_init(pm, config)
-        self._max_hops = int(config.get("max_hops", DEFAULT_MAX_HOPS))
+        raw = config.get("max_hops", DEFAULT_MAX_HOPS)
+        try:
+            self._max_hops = int(raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"max_hops must be an integer, got {raw!r}") from exc
+        if self._max_hops < 1:
+            raise ValueError(f"max_hops must be >= 1, got {self._max_hops}")
 
     @hookimpl
     async def on_start(self, config: dict) -> None:
@@ -83,7 +89,7 @@ class CrossChannelSendPlugin(CorvidaePlugin):
                 meta = attribution.get("meta") or {}
                 if isinstance(meta, dict):
                     prev_hops = meta.get("hop_count")
-                    if isinstance(prev_hops, int):
+                    if type(prev_hops) is int:
                         hop_count = prev_hops + 1
             if not source_channel:
                 return "Could not send: no source channel in current context."
@@ -124,7 +130,7 @@ class CrossChannelSendPlugin(CorvidaePlugin):
             indicating no channels are registered.
         """
         if self._agent is None:
-            return "No channels registered."
+            return "Could not list channels: agent is not available."
         try:
             channels = self._agent.list_channels()
             if not channels:

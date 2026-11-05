@@ -1110,3 +1110,238 @@ class TestCrossChannel:
         assert len(a_rows) == 0
 
         await db.close()
+
+class TestHopCountValidation:
+    """hop_count validation in enqueue_agent_send."""
+
+    async def test_valid_hop_count_stored(self):
+        from corvidae.trace import mint_trace_id
+        plugin, channel, db = await build_plugin_and_channel()
+        plugin._mark_started()
+
+        items = []
+        async def spy_enqueue(item):
+            items.append(item)
+        plugin._get_or_create_queue(channel).enqueue = spy_enqueue
+
+        await plugin.enqueue_agent_send(
+            channel.id, "hello",
+            source_channel_id=channel.id,
+            trace_id=mint_trace_id(),
+            hop_count=2,
+        )
+        assert items[0].meta["hop_count"] == 2
+        await db.close()
+
+    async def test_default_hop_count_is_1(self):
+        from corvidae.trace import mint_trace_id
+        plugin, channel, db = await build_plugin_and_channel()
+        plugin._mark_started()
+
+        items = []
+        async def spy_enqueue(item):
+            items.append(item)
+        plugin._get_or_create_queue(channel).enqueue = spy_enqueue
+
+        await plugin.enqueue_agent_send(
+            channel.id, "hello",
+            source_channel_id=channel.id,
+            trace_id=mint_trace_id(),
+        )
+        assert items[0].meta["hop_count"] == 1
+        await db.close()
+
+    @pytest.mark.parametrize("bad", [0, -1, -100, 1.0, True, False, "1", None])
+    async def test_invalid_hop_count_rejected(self, bad):
+        import pytest
+        from corvidae.trace import mint_trace_id
+        plugin, channel, db = await build_plugin_and_channel()
+        plugin._mark_started()
+
+        with pytest.raises(ValueError, match="hop_count"):
+            await plugin.enqueue_agent_send(
+                channel.id, "hello",
+                source_channel_id=channel.id,
+                trace_id=mint_trace_id(),
+                hop_count=bad,
+            )
+        await db.close()
+
+
+class TestHopCountIntegration:
+    """Integration: hop_count propagates from QueueItem.meta into attribution."""
+
+    async def test_hop_count_visible_in_attribution(self):
+        """After an AGENT_SEND turn, the receiving context's attribution
+        carries the hop_count from the item's meta."""
+        from corvidae.trace import mint_trace_id
+        from corvidae.attribution import get_attribution
+        from llm_response_fixtures import _make_text_response
+        from unittest.mock import MagicMock, AsyncMock
+
+        # Two channels
+        from corvidae.channel import ChannelConfig, ChannelRegistry
+        from corvidae.agent import Agent
+        from corvidae.persistence import PersistencePlugin, init_db
+        from corvidae.hooks import create_plugin_manager
+        from corvidae.task import TaskPlugin
+        from corvidae.thinking import ThinkingPlugin
+        import aiosqlite
+
+        agent_defaults = {
+            "system_prompt": "You are a test assistant.",
+            "max_context_tokens": 8000,
+            "reasoning_history": "drop",
+        }
+        db = await aiosqlite.connect(":memory:")
+        await init_db(db)
+        pm = create_plugin_manager()
+        registry = ChannelRegistry()
+        registry.agent_defaults = agent_defaults
+        pm.register(registry, name="registry")
+        pm.ahook.send = AsyncMock()
+        pm.ahook.on_agent_response = AsyncMock()
+        task_plugin = TaskPlugin()
+        pm.register(task_plugin, name="task")
+        await task_plugin.on_init(pm=pm, config={})
+        await task_plugin.on_start(config={})
+        persistence = PersistencePlugin()
+        persistence.db = db
+        persistence._registry = registry
+        pm.register(persistence, name="persistence")
+        thinking_plugin = ThinkingPlugin()
+        pm.register(thinking_plugin, name="thinking")
+        await thinking_plugin.on_init(pm=pm, config={})
+        plugin = Agent()
+        pm.register(plugin, name="agent")
+        plugin.pm = pm
+        plugin._registry = registry
+
+        channel_a = registry.get_or_create("signal", "alice", config=ChannelConfig())
+        channel_b = registry.get_or_create("signal", "bob", config=ChannelConfig())
+
+        # Capture attribution during B's turn
+        captured = {}
+        mock_client = MagicMock()
+        async def chat_with_capture(*a, **kw):
+            captured.update(get_attribution())
+            return _make_text_response("ok")
+        mock_client.chat = AsyncMock(side_effect=chat_with_capture)
+        plugin._client = mock_client
+        plugin._mark_started()
+
+        await plugin.enqueue_agent_send(
+            channel_b.id, "hello B",
+            source_channel_id=channel_a.id,
+            trace_id=mint_trace_id(),
+            hop_count=1,
+        )
+        if channel_b.id in plugin.queues:
+            await plugin.queues[channel_b.id].drain()
+
+        # Attribution during B's turn should have the hop_count
+        assert captured.get("channel_id") == channel_b.id
+        assert captured.get("meta", {}).get("origin") == "agent_send"
+        assert captured.get("meta", {}).get("source_channel") == channel_a.id
+        assert captured.get("meta", {}).get("hop_count") == 1
+
+        await db.close()
+
+
+class TestAdditionalEdgeCases:
+    """Additional edge cases from review."""
+
+    async def test_text_at_exact_limit_accepted(self):
+        from corvidae.trace import mint_trace_id
+        plugin, channel, db = await build_plugin_and_channel()
+        plugin._mark_started()
+
+        items = []
+        async def spy_enqueue(item):
+            items.append(item)
+        plugin._get_or_create_queue(channel).enqueue = spy_enqueue
+
+        text = "a" * 8000
+        await plugin.enqueue_agent_send(
+            channel.id, text,
+            source_channel_id=channel.id,
+            trace_id=mint_trace_id(),
+        )
+        assert len(items) == 1
+        await db.close()
+
+    async def test_text_over_limit_rejected(self):
+        import pytest
+        from corvidae.trace import mint_trace_id
+        plugin, channel, db = await build_plugin_and_channel()
+        plugin._mark_started()
+
+        text = "a" * 8001
+        with pytest.raises(ValueError, match="too long"):
+            await plugin.enqueue_agent_send(
+                channel.id, text,
+                source_channel_id=channel.id,
+                trace_id=mint_trace_id(),
+            )
+        await db.close()
+
+    async def test_trace_id_none_framing(self):
+        """AGENT_SEND with trace_id=None renders trace_id="unknown" in frame."""
+        plugin, channel, db = await build_plugin_and_channel()
+        plugin._mark_started()
+
+        item = QueueItem(
+            role=QueueItemRole.AGENT_SEND,
+            content="no trace",
+            channel=channel,
+            trace_id=None,
+            meta={"origin": "agent_send", "source_channel": channel.id},
+        )
+        result = plugin._build_conversation_message(item)
+        assert result is not None
+        msg, _ = result
+        assert 'trace_id="unknown"' in msg["content"]
+        await db.close()
+
+    async def test_non_string_content_framing(self):
+        """AGENT_SEND with non-string content is coerced to string."""
+        plugin, channel, db = await build_plugin_and_channel()
+        plugin._mark_started()
+
+        item = QueueItem(
+            role=QueueItemRole.AGENT_SEND,
+            content=12345,
+            channel=channel,
+            trace_id="t1",
+            meta={"origin": "agent_send", "source_channel": channel.id},
+        )
+        result = plugin._build_conversation_message(item)
+        assert result is not None
+        msg, _ = result
+        assert "12345" in msg["content"]
+        await db.close()
+
+
+class TestListChannelsSorted:
+    """list_channels returns sorted output."""
+
+    async def test_sorted_output(self):
+        from corvidae.channel import ChannelConfig, ChannelRegistry
+        from corvidae.agent import Agent
+        from corvidae.hooks import create_plugin_manager
+
+        pm = create_plugin_manager()
+        registry = ChannelRegistry()
+        registry.agent_defaults = {"system_prompt": "test"}
+        pm.register(registry, name="registry")
+
+        # Register in non-alphabetical order
+        registry.get_or_create("zeta", "a", config=ChannelConfig())
+        registry.get_or_create("alpha", "b", config=ChannelConfig())
+        registry.get_or_create("mid", "c", config=ChannelConfig())
+
+        plugin = Agent()
+        plugin._registry = registry
+
+        result = plugin.list_channels()
+        assert result == ["alpha:b", "mid:c", "zeta:a"]
