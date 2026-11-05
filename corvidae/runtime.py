@@ -33,6 +33,7 @@ from corvidae.hooks import (
 from corvidae.idle import IdleTracker, validate_daemon_config
 from corvidae.llm_plugin import parse_llm_config
 from corvidae.logging import configure_logging
+from corvidae.mcp_client import validate_mcp_config
 from corvidae.tool_collection import parse_tool_timeouts
 
 logger = logging.getLogger(__name__)
@@ -155,9 +156,7 @@ class Runtime:
         8c. Run the hook arg-binding guard over the full plugin set.
         9.  Validate plugin dependencies, then report hookimpls left with no
             spec (report_orphan_hookimpls).
-        10. await pm.ahook.on_init(pm=pm, config=config). A ValueError from
-            a plugin's on_init is a config rejection: one-line Config error
-            and exit, like a malformed block in step 7 (#277).
+        10. await pm.ahook.on_init(pm=pm, config=config).
         11. await pm.ahook.on_start(config=config).
             NOTE: Agent.on_start has no @hookimpl — the broadcast skips it.
         12. Retrieve agent plugin; raise RuntimeError if absent.
@@ -250,6 +249,9 @@ class Runtime:
             # here, before any plugin loads.
             parse_llm_config(config.get("llm"))
             disabled_plugins = disabled_plugins_from(config)
+            # A disabled mcp plugin never reads its block, so skip the check.
+            if "mcp" not in disabled_plugins:
+                validate_mcp_config(config)
             # tools.call_timeout / tools.timeouts: reject a bad value at startup.
             parse_tool_timeouts(config.get("tools"))
             self.registry.agent_defaults = config.get("agent", {})
@@ -306,17 +308,8 @@ class Runtime:
         validate_dependencies(self.pm)
         report_orphan_hookimpls(self.pm)
 
-        # 10. on_init broadcast. A plugin that rejects its config raises
-        #     ValueError here (the IRC, Discord and mcp convention): report
-        #     it as the one-line operator error step 7 uses for a malformed
-        #     block, and exit — not as a traceback (#277). Any other
-        #     exception is a real fault and still raises.
-        try:
-            await self.pm.ahook.on_init(pm=self.pm, config=config)
-        except ValueError as exc:
-            sys.stderr.write(f"Config error: {exc} — check {self.config_path}\n")
-            sys.stderr.flush()
-            raise SystemExit(1) from exc
+        # 10. on_init broadcast
+        await self.pm.ahook.on_init(pm=self.pm, config=config)
 
         # 11. on_start broadcast (Agent.on_start has no @hookimpl — skipped here)
         await self.pm.ahook.on_start(config=config)

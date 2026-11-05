@@ -270,7 +270,7 @@ class TestDaemonStartupWithMalformedSignalBlock:
     """Full-daemon integration: Runtime.start() must raise, not start
     partially, when the signal: block is malformed."""
 
-    async def test_daemon_startup_raises_on_missing_socket(self, tmp_path, capsys):
+    async def test_daemon_startup_raises_on_missing_socket(self, tmp_path):
         from corvidae.runtime import Runtime
 
         session_db = tmp_path / "sessions.db"
@@ -292,11 +292,11 @@ class TestDaemonStartupWithMalformedSignalBlock:
         config_path.write_text(yaml.dump(config))
 
         rt = Runtime(config_path=str(config_path))
-        with pytest.raises(SystemExit) as exc_info:
+        with pytest.raises(Exception) as exc_info:
             await rt.start()
-        assert exc_info.value.code == 1
-        assert "socket" in capsys.readouterr().err.lower(), (
-            "Expected the error to name the missing field 'socket'"
+        assert "socket" in str(exc_info.value).lower(), (
+            f"Expected daemon startup to fail naming 'socket', "
+            f"got: {exc_info.value}"
         )
 
 
