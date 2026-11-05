@@ -318,6 +318,16 @@ its tests pass; until then they are proposals.
    The outcome log records both, and the core can use them to tune the
    judgment prompt.
 
+6. An escalation is data, not instruction (base PRD principle 9). The
+   core receives it framed as data at the same chokepoint as any channel
+   content, labelled with the source channel, the sender, and, where the
+   trust plugin is loaded, the sender's trust level. A summary the
+   periphery writes from untrusted input carries the trust of that
+   input, never the periphery's or the core's. The core can always
+   import the raw message (§3.1.12) to check a summary against what
+   arrived. `docs/threat-model.md` records the path from a peripheral's
+   input to the core's tools.
+
 ### 3.5 Forking and joining: the core directs its own focus
 
 Corvidae has two kinds of context fork. A **one-shot fork** is base PRD
