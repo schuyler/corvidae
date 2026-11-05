@@ -1034,9 +1034,10 @@ class AgentSpec:
         and the background views that share ``Agent.channel_system_prompt``.
         A wrapper that raises is logged and the untransformed prompt is
         used, as is a None result. A transform that modifies the
-        identity+register prefix is rejected with a WARNING naming the
-        plugin; the untransformed prompt is used. Appending is the
-        expected use.
+        identity+register prefix is rejected with a WARNING listing the
+        hook's implementors (the seed plugin among them; the offending
+        wrapper is not singled out); the untransformed prompt is used.
+        Appending is the expected use.
 
         Args:
             channel: The Channel the prompt is for.
