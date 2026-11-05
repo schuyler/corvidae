@@ -820,3 +820,293 @@ class TestStrictIdValidation:
         conversation_message, _ = result
         assert set(conversation_message.keys()) == {"role", "content"}
         await db.close()
+
+# ---------------------------------------------------------------------------
+# Section 9 — true cross-channel (A → B)
+# ---------------------------------------------------------------------------
+
+
+class TestCrossChannel:
+    """Tests that an AGENT_SEND from channel A lands on channel B and
+    triggers a turn on B with provenance identifying A."""
+
+    async def _build_two_channels(self):
+        """Build a plugin with two registered channels: A (source) and B (target)."""
+        from corvidae.channel import ChannelConfig, ChannelRegistry
+        from corvidae.agent import Agent
+        from corvidae.persistence import PersistencePlugin, init_db
+        from corvidae.hooks import create_plugin_manager
+        from corvidae.task import TaskPlugin
+        from corvidae.thinking import ThinkingPlugin
+        from unittest.mock import AsyncMock
+        import aiosqlite
+
+        agent_defaults = {
+            "system_prompt": "You are a test assistant.",
+            "max_context_tokens": 8000,
+            "reasoning_history": "drop",
+        }
+
+        db = await aiosqlite.connect(":memory:")
+        await init_db(db)
+
+        pm = create_plugin_manager()
+        registry = ChannelRegistry()
+        registry.agent_defaults = agent_defaults
+        pm.register(registry, name="registry")
+        pm.ahook.send = AsyncMock()
+        pm.ahook.on_agent_response = AsyncMock()
+
+        task_plugin = TaskPlugin()
+        pm.register(task_plugin, name="task")
+        await task_plugin.on_init(pm=pm, config={})
+        await task_plugin.on_start(config={})
+
+        persistence = PersistencePlugin()
+        persistence.db = db
+        persistence._registry = registry
+        pm.register(persistence, name="persistence")
+
+        thinking_plugin = ThinkingPlugin()
+        pm.register(thinking_plugin, name="thinking")
+        await thinking_plugin.on_init(pm=pm, config={})
+
+        plugin = Agent()
+        pm.register(plugin, name="agent")
+        plugin.pm = pm
+        plugin._registry = registry
+
+        channel_a = registry.get_or_create("signal", "alice", config=ChannelConfig())
+        channel_b = registry.get_or_create("signal", "bob", config=ChannelConfig())
+
+        return plugin, channel_a, channel_b, db
+
+    async def test_cross_channel_send_triggers_turn_on_target(self):
+        """An AGENT_SEND from channel A triggers an LLM turn on channel B.
+        The frame identifies A as the source."""
+        from corvidae.trace import mint_trace_id
+        from llm_response_fixtures import _make_text_response
+        from unittest.mock import MagicMock, AsyncMock
+
+        plugin, channel_a, channel_b, db = await self._build_two_channels()
+        plugin._mark_started()
+
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(return_value=_make_text_response("News delivered!"))
+        plugin._client = mock_client
+
+        # Simulate: heartbeat context (channel_a) sends instruction to channel_b
+        await plugin.enqueue_agent_send(
+            channel_b.id,  # target
+            "Ping Bob with the news",
+            source_channel_id=channel_a.id,  # source
+            trace_id=mint_trace_id(),
+        )
+
+        # Drain channel B's queue
+        if channel_b.id in plugin.queues:
+            await plugin.queues[channel_b.id].drain()
+
+        # Channel B should have processed the turn
+        mock_client.chat.assert_awaited()
+
+        # Channel B's conversation should have the framed message
+        conv_b = channel_b.conversation
+        assert conv_b is not None
+        user_msgs = [m for m in conv_b.messages if m["role"] == "user"]
+        assert len(user_msgs) == 1
+        assert f'source_channel="{channel_a.id}"' in user_msgs[0]["content"]
+        assert "Ping Bob with the news" in user_msgs[0]["content"]
+
+        # Channel B's response was delivered
+        from corvidae.outbound import OutboundMessage
+        sent_messages = sent(plugin.pm, OutboundMessage)
+        assert len(sent_messages) == 1
+        assert sent_messages[0][1].text == "News delivered!"
+        # The send was on channel B, not channel A
+        assert sent_messages[0][0].id == channel_b.id
+
+        # Channel A should have no conversation (it didn't process a turn)
+        assert channel_a.conversation is None
+
+        await db.close()
+
+    async def test_cross_channel_provenance_shows_source(self):
+        """The provenance frame on channel B clearly identifies channel A
+        as the originating context."""
+        from corvidae.trace import mint_trace_id
+        from llm_response_fixtures import _make_text_response
+        from unittest.mock import MagicMock, AsyncMock
+
+        plugin, channel_a, channel_b, db = await self._build_two_channels()
+        plugin._mark_started()
+
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(return_value=_make_text_response("ok"))
+        plugin._client = mock_client
+
+        trace = mint_trace_id()
+        await plugin.enqueue_agent_send(
+            channel_b.id,
+            "Check the weather",
+            source_channel_id=channel_a.id,
+            trace_id=trace,
+        )
+
+        if channel_b.id in plugin.queues:
+            await plugin.queues[channel_b.id].drain()
+
+        conv_b = channel_b.conversation
+        user_msgs = [m for m in conv_b.messages if m["role"] == "user"]
+        content = user_msgs[0]["content"]
+
+        # Frame has the correct source, trace, and mechanism
+        assert f'source_channel="{channel_a.id}"' in content
+        assert f'trace_id="{trace}"' in content
+        assert 'mechanism="agent_send"' in content
+        assert "Check the weather" in content
+
+        await db.close()
+
+    async def test_cross_channel_source_must_be_registered(self):
+        """Cannot send from an unregistered source channel."""
+        from corvidae.trace import mint_trace_id
+
+        plugin, channel_a, channel_b, db = await self._build_two_channels()
+        plugin._mark_started()
+
+        import pytest
+        with pytest.raises(ValueError, match="not registered"):
+            await plugin.enqueue_agent_send(
+                channel_b.id,
+                "hello",
+                source_channel_id="signal:mallory",  # not registered
+                trace_id=mint_trace_id(),
+            )
+
+        await db.close()
+
+    async def test_cross_channel_target_must_be_registered(self):
+        """Cannot send to an unregistered target channel."""
+        from corvidae.trace import mint_trace_id
+
+        plugin, channel_a, channel_b, db = await self._build_two_channels()
+        plugin._mark_started()
+
+        import pytest
+        with pytest.raises(KeyError, match="not registered"):
+            await plugin.enqueue_agent_send(
+                "signal:nowhere",  # not registered
+                "hello",
+                source_channel_id=channel_a.id,
+                trace_id=mint_trace_id(),
+            )
+
+        await db.close()
+
+    async def test_cross_channel_independent_conversations(self):
+        """Channel A and B maintain independent conversations. A send from
+        A to B does not pollute A's conversation."""
+        from corvidae.trace import mint_trace_id
+        from llm_response_fixtures import _make_text_response
+        from unittest.mock import MagicMock, AsyncMock
+
+        plugin, channel_a, channel_b, db = await self._build_two_channels()
+        plugin._mark_started()
+
+        mock_client = MagicMock()
+        call_count = 0
+        async def sequential_chat(*a, **kw):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return _make_text_response("A response")
+            return _make_text_response("B response")
+        mock_client.chat = AsyncMock(side_effect=sequential_chat)
+        plugin._client = mock_client
+
+        # Channel A has its own user turn
+        await plugin.on_message(
+            channel=channel_a, sender="alice", text="hi A",
+            trace_id=mint_trace_id(),
+        )
+
+        # Channel A sends to channel B
+        await plugin.enqueue_agent_send(
+            channel_b.id,
+            "hi B from A",
+            source_channel_id=channel_a.id,
+            trace_id=mint_trace_id(),
+        )
+
+        # Drain both
+        if channel_a.id in plugin.queues:
+            await plugin.queues[channel_a.id].drain()
+        if channel_b.id in plugin.queues:
+            await plugin.queues[channel_b.id].drain()
+
+        # Channel A: one user message + one assistant response
+        conv_a = channel_a.conversation
+        a_user = [m for m in conv_a.messages if m["role"] == "user"]
+        a_asst = [m for m in conv_a.messages if m["role"] == "assistant"]
+        assert len(a_user) == 1
+        assert a_user[0]["content"] == "hi A"
+        assert len(a_asst) == 1
+        assert a_asst[0]["content"] == "A response"
+
+        # Channel B: one user message (framed) + one assistant response
+        conv_b = channel_b.conversation
+        b_user = [m for m in conv_b.messages if m["role"] == "user"]
+        b_asst = [m for m in conv_b.messages if m["role"] == "assistant"]
+        assert len(b_user) == 1
+        assert f'source_channel="{channel_a.id}"' in b_user[0]["content"]
+        assert "hi B from A" in b_user[0]["content"]
+        assert len(b_asst) == 1
+        assert b_asst[0]["content"] == "B response"
+
+        await db.close()
+
+    async def test_cross_channel_persistence_separate_logs(self):
+        """Channel A and B have separate message_log entries."""
+        import json
+        from corvidae.trace import mint_trace_id
+        from llm_response_fixtures import _make_text_response
+        from unittest.mock import MagicMock, AsyncMock
+
+        plugin, channel_a, channel_b, db = await self._build_two_channels()
+        plugin._mark_started()
+
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(return_value=_make_text_response("ok"))
+        plugin._client = mock_client
+
+        await plugin.enqueue_agent_send(
+            channel_b.id,
+            "persisted cross-channel",
+            source_channel_id=channel_a.id,
+            trace_id=mint_trace_id(),
+        )
+
+        if channel_b.id in plugin.queues:
+            await plugin.queues[channel_b.id].drain()
+
+        # Channel B's log has the framed message
+        async with db.execute(
+            "SELECT message FROM message_log WHERE channel_id = ?",
+            (channel_b.id,),
+        ) as cursor:
+            b_rows = await cursor.fetchall()
+        b_msgs = [json.loads(r[0]) for r in b_rows]
+        b_user = [m for m in b_msgs if m.get("role") == "user"]
+        assert len(b_user) == 1
+        assert f'source_channel="{channel_a.id}"' in b_user[0]["content"]
+
+        # Channel A's log is empty (no turn happened on A)
+        async with db.execute(
+            "SELECT message FROM message_log WHERE channel_id = ?",
+            (channel_a.id,),
+        ) as cursor:
+            a_rows = await cursor.fetchall()
+        assert len(a_rows) == 0
+
+        await db.close()
