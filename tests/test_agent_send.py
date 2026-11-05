@@ -283,3 +283,101 @@ class TestAgentSendEdgeCases:
             await plugin.enqueue_agent_send(channel.id, "   ", trace_id=mint_trace_id())
 
         await db.close()
+
+# ---------------------------------------------------------------------------
+# Section 6 — second review pass: branch coverage
+# ---------------------------------------------------------------------------
+
+
+class TestAgentSendBranchCoverage:
+    async def test_conversation_init_loads_existing_history(self):
+        """When the target channel has no conversation but resolve_conversation
+        returns prior history, that history is loaded before the agent send."""
+        plugin, channel, db = await build_plugin_and_channel()
+        plugin._mark_started()
+
+        assert channel.conversation is None
+        # Make resolve_conversation return prior messages.
+        plugin.pm.ahook.resolve_conversation = AsyncMock(return_value=[
+            {"role": "user", "content": "old question"},
+            {"role": "assistant", "content": "old answer"},
+        ])
+
+        await plugin.enqueue_agent_send(channel.id, "new message", trace_id=mint_trace_id())
+        await drain(plugin, channel)
+
+        conv = channel.conversation
+        assert conv is not None
+        # Prior history loaded, then the agent send appended.
+        assert conv.messages[0]["content"] == "old question"
+        assert conv.messages[1]["content"] == "old answer"
+        assert conv.messages[-1]["role"] == "assistant"
+        assert conv.messages[-1]["content"] == "new message"
+
+        await db.close()
+
+    async def test_db_id_set_on_persist(self):
+        """When persist_message returns a rowid, _db_id is set on the message."""
+        plugin, channel, db = await build_plugin_and_channel()
+        plugin._mark_started()
+
+        await plugin.enqueue_agent_send(channel.id, "tracked message", trace_id=mint_trace_id())
+        await drain(plugin, channel)
+
+        conv = channel.conversation
+        last = conv.messages[-1]
+        assert last["role"] == "assistant"
+        assert "_db_id" in last
+        assert last["_db_id"] is not None
+
+        await db.close()
+
+    async def test_persist_failure_still_delivers(self):
+        """When persist_message raises, the message stays in the conversation
+        and delivery still occurs."""
+        plugin, channel, db = await build_plugin_and_channel()
+        plugin._mark_started()
+
+        plugin.pm.ahook.persist_message = AsyncMock(
+            side_effect=RuntimeError("db write failed")
+        )
+
+        await plugin.enqueue_agent_send(channel.id, "unpersisted message", trace_id=mint_trace_id())
+        await drain(plugin, channel)
+
+        conv = channel.conversation
+        # Message is in the conversation.
+        assert conv.messages[-1]["content"] == "unpersisted message"
+        # No _db_id since persistence failed.
+        assert "_db_id" not in conv.messages[-1]
+        # Delivery still happened.
+        sent_messages = sent(plugin.pm, OutboundMessage)
+        assert len(sent_messages) == 1
+        assert sent_messages[0][1].text == "unpersisted message"
+
+        await db.close()
+
+    async def test_serialization_order_explicit(self):
+        """The serialization test, strengthened: assert the turn response
+        precedes the agent send in the conversation."""
+        plugin, channel, db = await build_plugin_and_channel()
+        plugin._mark_started()
+
+        mock_client = MagicMock()
+        from llm_response_fixtures import _make_text_response
+        mock_client.chat = AsyncMock(return_value=_make_text_response("turn response"))
+        plugin._client = mock_client
+
+        user_trace = mint_trace_id()
+        send_trace = mint_trace_id()
+        await plugin.on_message(channel=channel, sender="user", text="do work", trace_id=user_trace)
+        await plugin.enqueue_agent_send(channel.id, "queued while working", trace_id=send_trace)
+        await drain(plugin, channel)
+
+        conv = channel.conversation
+        assistant_msgs = [m for m in conv.messages if m["role"] == "assistant"]
+        # The turn response comes before the agent send.
+        assert assistant_msgs[-2]["content"] == "turn response"
+        assert assistant_msgs[-1]["content"] == "queued while working"
+
+        await db.close()
