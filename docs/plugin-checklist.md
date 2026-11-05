@@ -1,3 +1,8 @@
+---
+name: write-corvidae-plugin
+description: Use when adding or changing a corvidae plugin (a tool, a hook implementation, a producer of channel work, a transport helper). Gives a short checklist of placement rules, conventions and traps that fail silently. Written for small, fast agents: follow it in order, and stop and ask the owner where it says to.
+---
+
 # Plugin checklist
 
 A short, ordered checklist for adding or changing a corvidae plugin, written
