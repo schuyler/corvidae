@@ -116,9 +116,11 @@ class CrossChannelSendPlugin(CorvidaePlugin):
                     "Could not send: no source channel in the current context."
                 )
 
-            meta = attribution.get("meta") or {}
+            meta = attribution.get("meta")
+            if not isinstance(meta, dict):
+                meta = {}
             prev_hops = meta.get("hop_count")
-            if type(prev_hops) is int:
+            if type(prev_hops) is int and prev_hops >= 0:
                 hop = prev_hops + 1
             else:
                 hop = 1

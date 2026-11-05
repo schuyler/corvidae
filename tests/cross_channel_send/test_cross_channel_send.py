@@ -706,3 +706,395 @@ class TestIntegration:
         assert "max 2" in result
 
         await db.close()
+
+class TestNegativeHopCount:
+    """Negative hop_count is clamped to 0, not accepted as-is."""
+
+    async def test_negative_hop_count_clamped(self):
+        plugin, registry, db, agent = await _build_harness()
+        pm = agent.pm
+        await _init_plugin(plugin, pm)
+
+        ch_a = registry.get_or_create("signal", "alice", config=ChannelConfig())
+        ch_b = registry.get_or_create("signal", "bob", config=ChannelConfig())
+
+        from corvidae.attribution import _attribution
+        _attribution.set({
+            "channel_id": ch_a.id,
+            "trace_id": "trace-123",
+            "meta": {"hop_count": -100},
+        })
+
+        notify = AsyncMock()
+        pm.ahook.on_notify = notify
+
+        result = await plugin.send_message(ch_b.id, "hello")
+        assert result == f"Queued on {ch_b.id}."
+        kwargs = notify.call_args.kwargs
+        assert kwargs["meta"]["hop_count"] == 1  # clamped, not -99
+
+        await db.close()
+
+    async def test_negative_one_hop_count(self):
+        plugin, registry, db, agent = await _build_harness()
+        pm = agent.pm
+        await _init_plugin(plugin, pm)
+
+        ch_a = registry.get_or_create("signal", "alice", config=ChannelConfig())
+        ch_b = registry.get_or_create("signal", "bob", config=ChannelConfig())
+
+        from corvidae.attribution import _attribution
+        _attribution.set({
+            "channel_id": ch_a.id,
+            "trace_id": "trace-123",
+            "meta": {"hop_count": -1},
+        })
+
+        notify = AsyncMock()
+        pm.ahook.on_notify = notify
+
+        result = await plugin.send_message(ch_b.id, "hello")
+        assert result == f"Queued on {ch_b.id}."
+        kwargs = notify.call_args.kwargs
+        assert kwargs["meta"]["hop_count"] == 1
+
+        await db.close()
+
+
+class TestNonDictMeta:
+    """Non-dict attribution meta is handled gracefully."""
+
+    async def test_non_dict_meta(self):
+        plugin, registry, db, agent = await _build_harness()
+        pm = agent.pm
+        await _init_plugin(plugin, pm)
+
+        ch_a = registry.get_or_create("signal", "alice", config=ChannelConfig())
+        ch_b = registry.get_or_create("signal", "bob", config=ChannelConfig())
+
+        from corvidae.attribution import _attribution
+        _attribution.set({
+            "channel_id": ch_a.id,
+            "trace_id": "trace-123",
+            "meta": "not a dict",
+        })
+
+        notify = AsyncMock()
+        pm.ahook.on_notify = notify
+
+        result = await plugin.send_message(ch_b.id, "hello")
+        assert result == f"Queued on {ch_b.id}."
+        kwargs = notify.call_args.kwargs
+        assert kwargs["meta"]["hop_count"] == 1
+
+        await db.close()
+
+
+class TestOnNotifyFailure:
+    """A failing on_notify returns an error string, does not raise."""
+
+    async def test_on_notify_failure(self):
+        plugin, registry, db, agent = await _build_harness()
+        pm = agent.pm
+        await _init_plugin(plugin, pm)
+
+        ch_a = registry.get_or_create("signal", "alice", config=ChannelConfig())
+        ch_b = registry.get_or_create("signal", "bob", config=ChannelConfig())
+
+        from corvidae.attribution import _attribution
+        _attribution.set({
+            "channel_id": ch_a.id,
+            "trace_id": "trace-123",
+            "meta": {},
+        })
+
+        pm.ahook.on_notify = AsyncMock(side_effect=RuntimeError("boom"))
+
+        result = await plugin.send_message(ch_b.id, "hello")
+        assert "unexpected error" in result
+
+        await db.close()
+
+
+class TestHopPropagation:
+    """Hop count propagates into the target's attribution meta."""
+
+    async def test_hop_count_in_target_attribution(self):
+        """After a send from A to B, B's attribution meta carries
+        hop_count=1 and source_trace_id, but NOT trace_id."""
+        db = await aiosqlite.connect(":memory:")
+        await init_db(db)
+        pm = create_plugin_manager()
+
+        registry = ChannelRegistry()
+        registry.agent_defaults = {
+            "system_prompt": "You are a test assistant.",
+            "max_context_tokens": 8000,
+            "reasoning_history": "drop",
+            "max_turns": 3,
+        }
+        pm.register(registry, name="registry")
+        pm.ahook.send = AsyncMock()
+        pm.ahook.on_agent_response = AsyncMock()
+
+        task_plugin = TaskPlugin()
+        pm.register(task_plugin, name="task")
+        await task_plugin.on_init(pm=pm, config={})
+        await task_plugin.on_start(config={})
+
+        persistence = PersistencePlugin()
+        persistence.db = db
+        persistence._registry = registry
+        pm.register(persistence, name="persistence")
+
+        thinking_plugin = ThinkingPlugin()
+        pm.register(thinking_plugin, name="thinking")
+        await thinking_plugin.on_init(pm=pm, config={})
+
+        agent = Agent()
+        pm.register(agent, name="agent")
+        agent.pm = pm
+        agent._registry = registry
+
+        ch_a = registry.get_or_create("signal", "alice", config=ChannelConfig())
+        ch_b = registry.get_or_create("signal", "bob", config=ChannelConfig())
+
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(return_value=_make_text_response("ok"))
+        agent._client = mock_client
+        agent._mark_started()
+
+        plugin = CrossChannelSendPlugin()
+        pm.register(plugin, name="cross_channel_send")
+        await _init_plugin(plugin, pm)
+
+        from corvidae.attribution import _attribution
+        trace_a = mint_trace_id()
+        _attribution.set({
+            "channel_id": ch_a.id,
+            "trace_id": trace_a,
+            "meta": {},
+        })
+
+        # Send from A to B
+        await plugin.send_message(ch_b.id, "hello bob")
+
+        # Drain B's queue
+        if ch_b.id in agent.queues:
+            await agent.queues[ch_b.id].drain()
+
+        # B's conversation should have the notification
+        b_msgs = ch_b.conversation.messages
+        sys_msgs = [m for m in b_msgs if m.get("role") == "system"]
+        assert any("agent_send from" in m.get("content", "") for m in sys_msgs)
+
+        await db.close()
+
+    async def test_target_mints_own_trace(self):
+        """B's turn has a different trace_id from A's, and
+        on_message_persisted fires for B."""
+        db = await aiosqlite.connect(":memory:")
+        await init_db(db)
+        pm = create_plugin_manager()
+
+        registry = ChannelRegistry()
+        registry.agent_defaults = {
+            "system_prompt": "You are a test assistant.",
+            "max_context_tokens": 8000,
+            "reasoning_history": "drop",
+            "max_turns": 3,
+        }
+        pm.register(registry, name="registry")
+        pm.ahook.send = AsyncMock()
+        pm.ahook.on_agent_response = AsyncMock()
+        pm.ahook.on_message_persisted = AsyncMock()
+
+        task_plugin = TaskPlugin()
+        pm.register(task_plugin, name="task")
+        await task_plugin.on_init(pm=pm, config={})
+        await task_plugin.on_start(config={})
+
+        persistence = PersistencePlugin()
+        persistence.db = db
+        persistence._registry = registry
+        pm.register(persistence, name="persistence")
+
+        thinking_plugin = ThinkingPlugin()
+        pm.register(thinking_plugin, name="thinking")
+        await thinking_plugin.on_init(pm=pm, config={})
+
+        agent = Agent()
+        pm.register(agent, name="agent")
+        agent.pm = pm
+        agent._registry = registry
+
+        ch_a = registry.get_or_create("signal", "alice", config=ChannelConfig())
+        ch_b = registry.get_or_create("signal", "bob", config=ChannelConfig())
+
+        mock_client = MagicMock()
+        mock_client.chat = AsyncMock(return_value=_make_text_response("ok"))
+        agent._client = mock_client
+        agent._mark_started()
+
+        plugin = CrossChannelSendPlugin()
+        pm.register(plugin, name="cross_channel_send")
+        await _init_plugin(plugin, pm)
+
+        from corvidae.attribution import _attribution
+        trace_a = mint_trace_id()
+        _attribution.set({
+            "channel_id": ch_a.id,
+            "trace_id": trace_a,
+            "meta": {},
+        })
+
+        await plugin.send_message(ch_b.id, "hello bob")
+
+        if ch_b.id in agent.queues:
+            await agent.queues[ch_b.id].drain()
+
+        # on_message_persisted should have fired (B got a new trace)
+        assert pm.ahook.on_message_persisted.call_count >= 1
+
+        await db.close()
+
+
+class TestHopDoesNotPersist:
+    """hop_count does not leak into unrelated user turns."""
+
+    async def test_fresh_turn_gets_fresh_hop_count(self):
+        """After a cross-channel chain, a new user turn on the target
+        channel starts with hop_count=1, not the chain's count."""
+        plugin, registry, db, agent = await _build_harness()
+        pm = agent.pm
+        await _init_plugin(plugin, pm)
+
+        ch_a = registry.get_or_create("signal", "alice", config=ChannelConfig())
+        ch_b = registry.get_or_create("signal", "bob", config=ChannelConfig())
+        ch_c = registry.get_or_create("signal", "carol", config=ChannelConfig())
+
+        from corvidae.attribution import _attribution
+
+        # Simulate: B is in the middle of a chain (hop_count=2)
+        _attribution.set({
+            "channel_id": ch_b.id,
+            "trace_id": mint_trace_id(),
+            "meta": {"hop_count": 2},
+        })
+
+        # B sends to C — this should use hop_count=3
+        notify = AsyncMock()
+        pm.ahook.on_notify = notify
+        await plugin.send_message(ch_c.id, "from b")
+        kwargs = notify.call_args.kwargs
+        assert kwargs["meta"]["hop_count"] == 3
+
+        # Now a fresh user turn starts on B (clean attribution)
+        _attribution.set({
+            "channel_id": ch_b.id,
+            "trace_id": mint_trace_id(),
+            "meta": {},  # clean, no hop_count
+        })
+
+        # B sends to C again — this should use hop_count=1
+        notify2 = AsyncMock()
+        pm.ahook.on_notify = notify2
+        await plugin.send_message(ch_c.id, "fresh turn")
+        kwargs2 = notify2.call_args.kwargs
+        assert kwargs2["meta"]["hop_count"] == 1
+
+        await db.close()
+
+
+class TestMinorCoverage:
+    """Minor test coverage gaps from the review."""
+
+    async def test_registry_none(self):
+        plugin = CrossChannelSendPlugin()
+        # Don't call on_start, so _registry is None
+        result = await plugin.send_message("signal:bob", "hello")
+        assert "registry is not available" in result
+
+    async def test_register_tools(self):
+        plugin, registry, db, agent = await _build_harness()
+        pm = agent.pm
+        await _init_plugin(plugin, pm)
+
+        tools = []
+        plugin.register_tools(tools)
+        assert len(tools) == 2
+        assert tools[0].__name__ == "send_message"
+        assert tools[1].__name__ == "list_channels"
+        await db.close()
+
+    async def test_text_exactly_at_limit_accepted(self):
+        plugin, registry, db, agent = await _build_harness()
+        pm = agent.pm
+        await _init_plugin(plugin, pm)
+
+        ch_a = registry.get_or_create("signal", "alice", config=ChannelConfig())
+        ch_b = registry.get_or_create("signal", "bob", config=ChannelConfig())
+
+        from corvidae.attribution import _attribution
+        _attribution.set({
+            "channel_id": ch_a.id,
+            "trace_id": "trace-123",
+            "meta": {},
+        })
+
+        notify = AsyncMock()
+        pm.ahook.on_notify = notify
+
+        exact_text = "x" * 8000
+        result = await plugin.send_message(ch_b.id, exact_text)
+        assert result == f"Queued on {ch_b.id}."
+        assert notify.call_count == 1
+
+        await db.close()
+
+    async def test_over_limit_no_notify(self):
+        plugin, registry, db, agent = await _build_harness()
+        pm = agent.pm
+        await _init_plugin(plugin, pm)
+
+        ch_a = registry.get_or_create("signal", "alice", config=ChannelConfig())
+        ch_b = registry.get_or_create("signal", "bob", config=ChannelConfig())
+
+        from corvidae.attribution import _attribution
+        _attribution.set({
+            "channel_id": ch_a.id,
+            "trace_id": "trace-123",
+            "meta": {},
+        })
+
+        notify = AsyncMock()
+        pm.ahook.on_notify = notify
+
+        result = await plugin.send_message(ch_b.id, "x" * 8001)
+        assert "8001" in result
+        assert notify.call_count == 0
+
+        await db.close()
+
+    async def test_empty_channel_no_notify(self):
+        plugin, registry, db, agent = await _build_harness()
+        pm = agent.pm
+        await _init_plugin(plugin, pm)
+
+        ch_a = registry.get_or_create("signal", "alice", config=ChannelConfig())
+
+        from corvidae.attribution import _attribution
+        _attribution.set({
+            "channel_id": ch_a.id,
+            "trace_id": "trace-123",
+            "meta": {},
+        })
+
+        notify = AsyncMock()
+        pm.ahook.on_notify = notify
+
+        result = await plugin.send_message("", "hello")
+        assert "non-empty" in result
+        assert notify.call_count == 0
+
+        await db.close()
