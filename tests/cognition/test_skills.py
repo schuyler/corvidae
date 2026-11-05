@@ -118,19 +118,28 @@ class TestIndex:
         assert "Available skills" not in prompt
         await db.close()
 
-    async def test_unreadable_skill_skipped(self, tmp_path):
+    async def test_unreadable_skill_skipped(self, tmp_path, monkeypatch):
         """A skill with an unreadable SKILL.md is skipped, not fatal."""
         skills_dir = _make_skills_dir(tmp_path)
         bad = skills_dir / "bad-skill"
         bad.mkdir()
         (bad / "SKILL.md").write_text("should be unreadable")
-        # On Linux as non-root, chmod 0 works; as root it doesn't.
-        # We test the code path by monkeypatching read_text to raise.
+
+        # Monkeypatch read_text to raise OSError for the bad skill only
+        original_read = Path.read_text
+        def patched_read(self, *args, **kwargs):
+            if "bad-skill" in str(self):
+                raise OSError("Permission denied")
+            return original_read(self, *args, **kwargs)
+        monkeypatch.setattr(Path, "read_text", patched_read)
+
         plugin, channel, db = await build_plugin_and_channel()
         skills = await _setup_skills(plugin, skills_dir.name, str(tmp_path))
 
-        # The index should still contain the good skills
+        # Good skills present, bad skill absent
         assert "develop" in skills._index
+        assert "systemd-run" in skills._index
+        assert "bad-skill" not in skills._index
         await db.close()
 
 
@@ -176,6 +185,19 @@ class TestUseSkill:
         assert "systemd-run" in result
         await db.close()
 
+    async def test_use_skill_no_skills_available(self, tmp_path):
+        """use_skill() with no argument when no skills exist."""
+        empty = tmp_path / "empty_skills"
+        empty.mkdir()
+        plugin, channel, db = await build_plugin_and_channel()
+        skills = await _setup_skills(plugin, "empty_skills", str(tmp_path))
+
+        tools: list = []
+        skills.register_tools(tools)
+        result = await tools[0]()
+        assert "No skills available" in result
+        await db.close()
+
     async def test_use_skill_path_traversal_blocked(self, tmp_path):
         """use_skill('../outside') is rejected, not read."""
         skills_dir = _make_skills_dir(tmp_path)
@@ -206,6 +228,73 @@ class TestUseSkill:
         skills.register_tools(tools)
         result = await tools[0]("/etc/passwd")
         assert "not found" in result.lower()
+        await db.close()
+
+    async def test_use_skill_accepts_display_name(self, tmp_path):
+        """use_skill accepts the frontmatter display name, not just the dir name."""
+        d = tmp_path / "skills"
+        s = d / "my-dir"
+        s.mkdir(parents=True)
+        (s / "SKILL.md").write_text(
+            "---\n"
+            "name: display-name\n"
+            "description: A skill with a different display name\n"
+            "---\n"
+            "\n"
+            "# Display Name Skill\n"
+        )
+        plugin, channel, db = await build_plugin_and_channel()
+        skills = await _setup_skills(plugin, "skills", str(tmp_path))
+
+        tools: list = []
+        skills.register_tools(tools)
+
+        # Both the display name and the directory name should work
+        result1 = await tools[0]("display-name")
+        assert "Display Name Skill" in result1
+
+        result2 = await tools[0]("my-dir")
+        assert "Display Name Skill" in result2
+        await db.close()
+
+    async def test_use_skill_not_found_lists_dir_names(self, tmp_path):
+        """Not-found error lists directory names, not display names."""
+        d = tmp_path / "skills"
+        s = d / "my-dir"
+        s.mkdir(parents=True)
+        (s / "SKILL.md").write_text(
+            "---\n"
+            "name: display-name\n"
+            "description: A skill\n"
+            "---\n"
+            "\n"
+            "# Display\n"
+        )
+        plugin, channel, db = await build_plugin_and_channel()
+        skills = await _setup_skills(plugin, "skills", str(tmp_path))
+
+        tools: list = []
+        skills.register_tools(tools)
+        result = await tools[0]("nonexistent")
+        assert "not found" in result.lower()
+        # Should list the directory name
+        assert "my-dir" in result
+        await db.close()
+
+    async def test_use_skill_read_failure(self, tmp_path, monkeypatch):
+        """Skill present in index but file deleted before read."""
+        skills_dir = _make_skills_dir(tmp_path)
+        plugin, channel, db = await build_plugin_and_channel()
+        skills = await _setup_skills(plugin, skills_dir.name, str(tmp_path))
+
+        tools: list = []
+        skills.register_tools(tools)
+
+        # Delete the skill file after index is built
+        (skills_dir / "develop" / "SKILL.md").unlink()
+
+        result = await tools[0]("develop")
+        assert "Failed to read" in result
         await db.close()
 
 
@@ -264,4 +353,140 @@ class TestFrontmatter:
         plugin, channel, db = await build_plugin_and_channel()
         skills = await _setup_skills(plugin, "skills", str(tmp_path))
         assert "multi-line" in skills._index
+        await db.close()
+
+    async def test_invalid_yaml_frontmatter(self, tmp_path):
+        """Invalid YAML in frontmatter is ignored, falls back to first line."""
+        d = tmp_path / "skills"
+        s = d / "badyaml"
+        s.mkdir(parents=True)
+        (s / "SKILL.md").write_text(
+            "---\n"
+            "name: [invalid\n"
+            "---\n"
+            "\n"
+            "# Bad YAML skill\n"
+        )
+        plugin, channel, db = await build_plugin_and_channel()
+        skills = await _setup_skills(plugin, "skills", str(tmp_path))
+        # Frontmatter ignored, description from first content line
+        assert "Bad YAML skill" in skills._index
+        await db.close()
+
+    async def test_non_dict_yaml_frontmatter(self, tmp_path):
+        """YAML frontmatter that is not a dict is ignored."""
+        d = tmp_path / "skills"
+        s = d / "nondict"
+        s.mkdir(parents=True)
+        (s / "SKILL.md").write_text(
+            "---\n"
+            "just a string\n"
+            "---\n"
+            "\n"
+            "# Non-dict skill\n"
+        )
+        plugin, channel, db = await build_plugin_and_channel()
+        skills = await _setup_skills(plugin, "skills", str(tmp_path))
+        # Frontmatter ignored, description from first content line
+        assert "Non-dict skill" in skills._index
+        await db.close()
+
+    async def test_missing_closing_delimiter(self, tmp_path):
+        """No closing --- means no frontmatter parsed."""
+        d = tmp_path / "skills"
+        s = d / "noclose"
+        s.mkdir(parents=True)
+        (s / "SKILL.md").write_text(
+            "---\n"
+            "name: noclose\n"
+            "description: never closed\n"
+            "\n"
+            "# No close skill\n"
+        )
+        plugin, channel, db = await build_plugin_and_channel()
+        skills = await _setup_skills(plugin, "skills", str(tmp_path))
+        # No frontmatter parsed; first non-empty line is "---"
+        # which becomes the description after heading strip (no change)
+        assert "noclose" in skills._index
+        await db.close()
+
+    async def test_four_dashes_not_frontmatter(self, tmp_path):
+        """A file starting with ---- is not parsed as frontmatter."""
+        d = tmp_path / "skills"
+        s = d / "fourdash"
+        s.mkdir(parents=True)
+        (s / "SKILL.md").write_text(
+            "----\n"
+            "# Four dash skill\n"
+        )
+        plugin, channel, db = await build_plugin_and_channel()
+        skills = await _setup_skills(plugin, "skills", str(tmp_path))
+        # No frontmatter parsed; the skill is still indexed
+        # (description is the first line, "----", since it's not a heading)
+        assert "fourdash" in skills._index
+        await db.close()
+
+
+class TestScanEdgeCases:
+    """Edge cases in the skills directory scan."""
+
+    async def test_non_directory_entries_skipped(self, tmp_path):
+        """Plain files in the skills dir are skipped."""
+        d = tmp_path / "skills"
+        d.mkdir()
+        # A plain file, not a directory
+        (d / "README.txt").write_text("not a skill")
+        # A valid skill
+        s = d / "good"
+        s.mkdir()
+        (s / "SKILL.md").write_text("# Good skill\n")
+
+        plugin, channel, db = await build_plugin_and_channel()
+        skills = await _setup_skills(plugin, "skills", str(tmp_path))
+        assert "good" in skills._index
+        assert "README" not in skills._index
+        await db.close()
+
+    async def test_directory_without_skill_md_skipped(self, tmp_path):
+        """A directory without SKILL.md is skipped."""
+        d = tmp_path / "skills"
+        d.mkdir()
+        # Directory without SKILL.md
+        (d / "empty-dir").mkdir()
+        # A valid skill
+        s = d / "good"
+        s.mkdir()
+        (s / "SKILL.md").write_text("# Good skill\n")
+
+        plugin, channel, db = await build_plugin_and_channel()
+        skills = await _setup_skills(plugin, "skills", str(tmp_path))
+        assert "good" in skills._index
+        assert "empty-dir" not in skills._index
+        await db.close()
+
+    async def test_late_skill_loadable_after_compaction(self, tmp_path):
+        """A skill added after startup is loadable via use_skill after compaction."""
+        skills_dir = _make_skills_dir(tmp_path)
+        plugin, channel, db = await build_plugin_and_channel()
+        skills = await _setup_skills(plugin, skills_dir.name, str(tmp_path))
+
+        tools: list = []
+        skills.register_tools(tools)
+
+        # Write a new skill
+        late = skills_dir / "late-skill"
+        late.mkdir()
+        (late / "SKILL.md").write_text("# Late skill\n\nFull late content.\n")
+
+        # Compaction triggers re-resolution
+        await skills.on_compaction(
+            channel=channel,
+            summary_msg={"role": "user", "content": "summary"},
+            retain_count=1,
+            compacted_ids=[],
+        )
+
+        # Now the late skill should be loadable
+        result = await tools[0]("late-skill")
+        assert "Full late content" in result
         await db.close()

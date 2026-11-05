@@ -36,24 +36,19 @@ def _parse_skill(text: str) -> tuple[str, str]:
 
     fm: dict = {}
     fm_end = 0
-    if text.startswith("---"):
+    lines = text.splitlines(keepends=True)
+    if lines and lines[0].strip() == "---":
         # Find the closing delimiter: a line that is exactly "---"
-        end = 3
-        while end < len(text):
-            newline = text.find("\n", end)
-            if newline == -1:
-                break
-            line = text[end:newline].strip()
-            if line == "---":
-                fm_end = newline + 1
+        for i in range(1, len(lines)):
+            if lines[i].strip() == "---":
+                fm_end = sum(len(l) for l in lines[: i + 1])
                 try:
-                    loaded = yaml.safe_load(text[3:end])
+                    loaded = yaml.safe_load("".join(lines[1:i]))
                     if isinstance(loaded, dict):
                         fm = loaded
                 except yaml.YAMLError:
                     pass
                 break
-            end = newline + 1
 
     name = fm.get("name")
     name = str(name) if name is not None else ""
@@ -81,12 +76,13 @@ class SkillsPlugin(CorvidaePlugin):
         self._skills_dir: Path | None = None
         self._index: str = ""
         self._skill_names: set[str] = set()
+        self._name_to_dir: dict[str, str] = {}
 
     @hookimpl
     async def on_init(self, pm, config: dict) -> None:
         await super().on_init(pm, config)
         skills_cfg = config.get("skills") or {}
-        directory = skills_cfg.get("directory", "skills")
+        directory = skills_cfg.get("directory") or "skills"
         base = config.get("_base_dir") or "."
         self._skills_dir = Path(base) / directory
 
@@ -128,6 +124,12 @@ class SkillsPlugin(CorvidaePlugin):
         """Build the index string from a synchronous scan."""
         results = self._scan_skills()
         self._skill_names = {r[0] for r in results}
+        # Map both directory name and display name to the directory name,
+        # so use_skill accepts either.
+        self._name_to_dir = {}
+        for dir_name, display_name, _ in results:
+            self._name_to_dir[dir_name] = dir_name
+            self._name_to_dir[display_name] = dir_name
         entries = [f"- {r[1]}: {r[2]}" for r in results]
         if not entries:
             self._index = ""
@@ -160,14 +162,16 @@ class SkillsPlugin(CorvidaePlugin):
             if plugin._skills_dir is None:
                 return "Skills directory not configured."
             # Validate against the scanned index to prevent path traversal.
-            if name not in plugin._skill_names:
+            # Accept both directory name and frontmatter display name.
+            if name not in plugin._name_to_dir:
                 available = ", ".join(sorted(plugin._skill_names))
                 return (
                     f"Skill '{name}' not found. "
                     f"Available: {available or 'none'}. "
                     f"Use use_skill with no argument to list skills."
                 )
-            skill_file = plugin._skills_dir / name / "SKILL.md"
+            dir_name = plugin._name_to_dir[name]
+            skill_file = plugin._skills_dir / dir_name / "SKILL.md"
 
             def _read() -> str:
                 return skill_file.read_text(encoding="utf-8", errors="replace")
