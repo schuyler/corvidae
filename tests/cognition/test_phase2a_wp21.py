@@ -425,9 +425,9 @@ class TestToolCyclePropagation:
         task = captured_tasks[0]
         assert task.trace_id is not None
         assert task.trace_id == gate.seen_keys[0]
-        # Core stamps only the attribution meta forward; it carries no
+        # The kernel stamps only the attribution meta forward; it carries no
         # 'user' origin string itself (R1 — origin is a plugin-side
-        # convention over meta["origin"], never set by core for USER items).
+        # convention over meta["origin"], never set by the kernel for USER items).
         assert task.meta == {}
 
         await task_plugin.on_stop()
@@ -680,8 +680,8 @@ class TestBeforeAgentTurnEnrichment:
 
         assert len(recorder.calls) == 1
         assert recorder.calls[0]["trace_id"] == gate.seen_keys[0]
-        # Core carries no 'user' origin string for a USER item -- origin is
-        # a plugin-side convention over meta["origin"] (R1); core's meta
+        # The kernel carries no 'user' origin string for a USER item -- origin is
+        # a plugin-side convention over meta["origin"] (R1); the kernel's meta
         # for a directly-admitted USER message stays empty.
         assert recorder.calls[0]["meta"] == {}
 

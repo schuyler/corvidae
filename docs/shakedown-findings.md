@@ -50,7 +50,7 @@ Five sessions, run against the minimal profile (`agent.minimal.yaml.example`
 — cognition plugins disabled: memory, appraisal, critique, funnel,
 outcome_log). Every session is clean in the sense that Buster never
 crashed, corrupted a reply, or crossed channels; the findings below are
-about behavior at the edges, not defects in the core loop.
+about behavior at the edges, not defects in the kernel loop.
 
 **Session 1 — baseline conversational behavior.** 15 turns. Instruction
 following (strict-format and constrained-language prompts), token echo at

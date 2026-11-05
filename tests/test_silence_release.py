@@ -1,5 +1,5 @@
 """Kernel tests for issue #215: an unsent final releases transport state
-(S8), the kernel's ``transform_system_prompt`` hook (S7), and core's freedom
+(S8), the kernel's ``transform_system_prompt`` hook (S7), and the kernel's freedom
 from the silence plugin (S10), with the no-plugin behaviour unchanged (S4).
 
 Design: .claude/plans/215-silence.md. Interface pinned here:
@@ -516,13 +516,13 @@ class TestSystemPromptHook:
 
 
 # ---------------------------------------------------------------------------
-# S10: core names nothing from cognition
+# S10: the kernel names nothing from cognition
 # ---------------------------------------------------------------------------
 
 
 class TestCoreIsUnawareOfSilence:
     def test_no_core_file_names_the_plugin_or_its_helpers(self):
-        # The strings S10 bans from core (tests/ is not scanned).
+        # The strings S10 bans from the kernel (tests/ is not scanned).
         banned = [
             '"' + "silence" + '"', "'" + "silence" + "'",
             "silence" + "_fragment", "with" + "_silence", "register" + "_fragment",
@@ -534,7 +534,7 @@ class TestCoreIsUnawareOfSilence:
             for token in banned
             if token in path.read_text()
         ]
-        assert not offenders, "core must not couple to the silence plugin:\n" + "\n".join(offenders)
+        assert not offenders, "the kernel must not couple to the silence plugin:\n" + "\n".join(offenders)
 
     def test_hooks_exports_the_neutral_helper_only(self):
         import corvidae.hooks as hooks

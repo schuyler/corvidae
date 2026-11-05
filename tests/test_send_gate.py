@@ -4,7 +4,7 @@ its four firing sites (plans/implementation/phase-2.md WP2.8; docs/prd.md
 
 Kernel deviations agreed on #131: the hook carries ``meta`` instead of an
 ``origin`` param (origin is a plugin-side convention), the stored type is
-``MessageType.UNSENT`` (the kernel vocabulary rule), and core appends the
+``MessageType.UNSENT`` (the kernel vocabulary rule), and the kernel appends the
 not-sent marker itself (the funnel is cognition).
 
 Interface pinned here:

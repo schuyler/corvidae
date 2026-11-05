@@ -191,7 +191,7 @@ class OutcomeLogPlugin(CorvidaePlugin):
             # INSERT OR IGNORE covers notification-born exchanges (no prior
             # on_message_admitted for those) — origin lands on first insert.
             # meta["origin"] normalizes to "task" for the background-origin
-            # default (reproduces core's old dequeue-mint default); the
+            # default (reproduces the kernel's old dequeue-mint default); the
             # admitted-time INSERT OR IGNORE row (origin="user") already
             # exists for user messages by the time this hook fires.
             origin = meta.get("origin") or "task"

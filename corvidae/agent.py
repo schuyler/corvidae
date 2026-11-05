@@ -187,7 +187,7 @@ class QueueItem:
         sender: For user messages, the sender identity; None for notifications.
         source: For notifications, the origin (e.g. "task"); None for user messages.
         tool_call_id: For deferred tool results (background task completions).
-        meta: Extensible metadata, opaque to core. Plugins stamp their own
+        meta: Extensible metadata, opaque to the kernel. Plugins stamp their own
             keys (e.g. ``meta["origin"]``) and read them back downstream.
         trace_id: The trace this item belongs to. None for
             notifications until dequeue-time resolution runs.
@@ -865,7 +865,7 @@ class Agent(CorvidaePlugin):
         """Append and persist the not-sent marker for a vetoed emission.
 
         A CONTEXT system row, persisted like any other, so it reloads with
-        the window and the model never cites the unsent text as said. Core
+        the window and the model never cites the unsent text as said. The kernel
         appends it directly rather than through a plugin, so every gate's
         veto gets one.
         """

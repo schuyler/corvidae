@@ -1,7 +1,7 @@
-"""RED tests for the core-generalization work (disentangle-buster.md Design
+"""RED tests for the kernel-generalization work (disentangle-buster.md Design
 §1 trace mechanism, §2 deletions).
 
-R1's acceptance made executable: a grep test asserting no core module
+R1's acceptance made executable: a grep test asserting no kernel module
 references the cognition vocabulary, plus structural assertions (QueueItem/
 Task field names, the new hookspec signatures, absence of the deleted
 surface); then behavioral round-trip tests for the generic trace
@@ -54,7 +54,7 @@ class TestR1VocabularyGrep:
                 line_no = text.count("\n", 0, m.start()) + 1
                 offenders.append(f"{rel}:{line_no}: {m.group(0)!r}")
         assert not offenders, (
-            "core modules must not reference cognition vocabulary "
+            "kernel modules must not reference cognition vocabulary "
             "(appraisal/critique/funnel/salience/withheld/engagement):\n"
             + "\n".join(offenders)
         )
@@ -65,7 +65,7 @@ class TestR1VocabularyGrep:
             if ORIGIN_TAXONOMY_LITERAL in path.read_text()
         ]
         assert not offenders, (
-            f"core modules must not hardcode the origin taxonomy literal "
+            f"kernel modules must not hardcode the origin taxonomy literal "
             f"{ORIGIN_TAXONOMY_LITERAL!r}; found in: {offenders}"
         )
 
@@ -241,7 +241,7 @@ class TestDequeueTraceResolution:
         call_kwargs = plugin.pm.ahook.on_agent_response.call_args.kwargs
         assert call_kwargs["trace_id"] is not None
         assert isinstance(call_kwargs["trace_id"], str)
-        # No origin field anywhere at the core level (R1).
+        # No origin field anywhere at the kernel level (R1).
         assert "origin" not in call_kwargs
 
 

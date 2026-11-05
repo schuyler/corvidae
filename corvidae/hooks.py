@@ -897,7 +897,7 @@ class AgentSpec:
                 Treat unknown values as no opinion.
             trace_id: The current turn's trace id, or None.
             meta: The trace metadata dict the item carries. Producers stamp
-                plugin-side keys into it (e.g. ``meta["origin"]``); core
+                plugin-side keys into it (e.g. ``meta["origin"]``); the kernel
                 never does.
         """
 
@@ -988,7 +988,7 @@ class AgentSpec:
         """Resolve who compacts the conversation near the context limit.
 
         Grammar class: resolve (firstresult=True). Here "resolve" means
-        "resolve who compacts": the core ignores the return value, but the
+        "resolve who compacts": the kernel ignores the return value, but the
         chain stops at the first non-None one. Handlers are called in priority
         order. The first handler that returns a non-None value wins and the
         chain stops. Return True to signal that compaction was performed,

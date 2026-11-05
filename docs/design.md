@@ -1903,7 +1903,7 @@ the provider text in the `ValueError`.
 
 **Which process forks from where.** Plugins reach the Agent through
 `fork_agent(pm, stage)`, which returns it only when that stage is enabled.
-Stage names are opaque to core (it never names cognition plugins).
+Stage names are opaque to the kernel (it never names cognition plugins).
 
 | Stage | Cut | Runs | On a miss |
 |---|---|---|---|
@@ -2153,7 +2153,7 @@ Every key under `llm:` except `defaults` and `stages` is a **profile**,
 built into one client. A plugin that calls a model
 registers each call site as a **stage** through the `register_llm_stages`
 hook (`stages[name] = kind`, kind `"chat"` or `"embedding"`), which
-`LLMPlugin.on_start` broadcasts once. Core registers `compaction` and
+`LLMPlugin.on_start` broadcasts once. The kernel registers `compaction` and
 `subagent`; the cognition plugins register `consolidation`, `rubric`,
 `embedding`, `appraisal` and `critique`. A plugin names stages, never
 profiles. A stage resolves to the profile `llm.stages` maps it to; a stage

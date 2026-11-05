@@ -23,7 +23,7 @@ Config:
 A fork's reasoning budget, token cap and the like are request parameters of
 the profile its stage maps to under ``llm.stages``, not ``agent.forks`` keys.
 
-Stage names are opaque here: core never names the cognition plugins
+Stage names are opaque here: the kernel never names the cognition plugins
 (tests/test_trace_core.py), so each plugin passes its own stage name
 to :func:`fork_agent` and a name nobody uses simply matches nothing.
 """

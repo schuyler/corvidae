@@ -269,7 +269,7 @@ def collect_llm_stages(plugin, name):
 def recording_llm_plugin(main, background=None):
     """A real LLMPlugin whose ``get_client`` records the stage it is asked for
     (``plugin.stages_requested``) and serves ``main`` and, when given, a
-    ``background`` client that no stage resolves to. The core stages are
+    ``background`` client that no stage resolves to. The kernel stages are
     registered, as register_llm_stages would on start."""
     from corvidae.llm_plugin import LLMPlugin
 

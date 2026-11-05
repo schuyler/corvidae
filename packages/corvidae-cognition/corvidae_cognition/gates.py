@@ -231,7 +231,7 @@ class GatePlugin(CorvidaePlugin):
                 key, default = _EMISSION_SWITCHES[emission]
                 if _bool_tunable(channel, self.config, key, default):
                     return None
-                # The vetoing plugin records the suppression; core only
+                # The vetoing plugin records the suppression; the kernel only
                 # marks the window.
                 if trace_id is not None:
                     self._record(trace_id, channel, {"suppressed": {emission: True}})

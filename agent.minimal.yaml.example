@@ -5,7 +5,7 @@
 #
 # What this profile gives up: no memory retrieval or consolidation across
 # sessions, no appraisal scoring, no deferred self-critique, and no goals. What it
-# keeps: the core agent loop, multi-turn tool calling, compaction, and
+# keeps: the kernel agent loop, multi-turn tool calling, compaction, and
 # persistence/restart recovery.
 
 llm:

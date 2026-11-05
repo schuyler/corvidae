@@ -57,7 +57,7 @@ class Task:
         trace_id: The trace this task belongs to. Stamped by
             Agent._dispatch_tool_calls from the current turn's attribution
             so the tool cycle carries its trace forward.
-        meta: Extensible metadata, opaque to core. Stamped alongside
+        meta: Extensible metadata, opaque to the kernel. Stamped alongside
             trace_id and merged into the completion notification's
             meta by TaskPlugin.
         deliver: When False, the task is silent: completion fires no

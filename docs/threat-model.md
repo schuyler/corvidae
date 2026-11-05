@@ -229,7 +229,7 @@ Four places:
   at an untrusted speaker's request, and it comes back later as a system
   row. See finding 7.
 - The not-sent marker the Agent appends after a `should_send_response`
-  veto (#131) is a `role: system` CONTEXT row. It is core-written, not
+  veto (#131) is a `role: system` CONTEXT row. It is kernel-written, not
   framed by the funnel, and quotes at most 40 characters of the agent's own
   progress text (the final and thinking markers quote nothing). If that
   text echoed an injection, those 40 characters are promoted to the system

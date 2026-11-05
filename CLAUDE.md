@@ -89,9 +89,9 @@ Things that are easy to get wrong and won't fail loudly:
 - Hook params with defaults can be silently dropped by pluggy — see
   `tests/test_hook_arg_binding.py` for the guard.
 - **Plugins can be switched off** via `plugins.disabled` in `agent.yaml`.
-  `agent.minimal.yaml.example` uses it to run the core loop without the
+  `agent.minimal.yaml.example` uses it to run the kernel loop without the
   cognition set (memory, appraisal, critique, funnel, outcome_log, goals),
-  which is the fastest config to reproduce a core-loop bug against.
+  which is the fastest config to reproduce a kernel-loop bug against.
 
 `harness/` drives the agent end-to-end over local IRC against a real
 llama-server and greps mechanical pass criteria out of the replies and

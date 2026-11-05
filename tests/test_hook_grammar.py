@@ -3,7 +3,7 @@
 Every hookspec name starts with a prefix that fixes its pluggy options, or
 is a bare imperative verb on a short allowlist (plans/kernel-split.md,
 Part 1 §1; docs/plugin-guide.md, "Hook grammar"). These tests check names
-against pluggy options. Whether the core reads a hook's return value is not
+against pluggy options. Whether the kernel reads a hook's return value is not
 something pluggy exposes, so that half of the grammar is enforced at review
 time by the admission criterion, not here.
 
@@ -163,6 +163,6 @@ def test_retired_name_is_not_a_hookspec(name: str) -> None:
 
     This is the only test that pins ``on_conversation_event`` ->
     ``persist_message``: the old name has a valid ``on_`` prefix and broadcast
-    options, so tests 1 and 2 cannot see that the core reads its result.
+    options, so tests 1 and 2 cannot see that the kernel reads its result.
     """
     assert not hasattr(AgentSpec, name), f"{name!r} is still a hookspec on AgentSpec"

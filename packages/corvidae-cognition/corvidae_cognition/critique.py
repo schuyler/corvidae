@@ -112,7 +112,7 @@ STYLISTIC_LENSES = ("predictive", "constrained", "adversarial")
 
 # Bound on the admitted-trace-id LRU (CritiquePlugin._admitted): "user"
 # origin recognition is inferred from on_message_admitted subscription
-# (R1 — origin is a plugin-side convention, not a core field).
+# (R1 — origin is a plugin-side convention, not a kernel field).
 ADMITTED_LRU_MAXSIZE = 512
 
 # JSON schema constraining objection output on servers that honour it.

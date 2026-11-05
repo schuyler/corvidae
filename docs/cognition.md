@@ -536,7 +536,7 @@ admission path for notification producers without a `tool_call_id`:
 plugin gating eligibility off that origin, never has to infer it from
 stub text. The `'user'|'reminder'|'critique'|'heartbeat'|'task'`
 taxonomy is a convention cognition plugins (AppraisalPlugin,
-CritiquePlugin, OutcomeLogPlugin) share over this key — not a core
+CritiquePlugin, OutcomeLogPlugin) share over this key — not a kernel
 concept. `'user'` is recognized by subscribing to `on_message_admitted`
 rather than by a value in `meta`; `'task'` is the default OutcomeLogPlugin
 applies when `meta["origin"]` is absent on a notification-born
@@ -883,7 +883,7 @@ nothing.
   final again, its decision overwrites the earlier one key by key.
 - `progress` / `thinking`: vetoed when `gate.send.allow_progress` /
   `gate.send.allow_thinking` (both default true) are off, recorded as
-  `outcomes.suppressed = {"progress": true}` or `{"thinking": true}`. Core
+  `outcomes.suppressed = {"progress": true}` or `{"thinking": true}`. The kernel
   never writes the outcome log; the vetoing plugin does.
 - `error` and anything else: no opinion.
 

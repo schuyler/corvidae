@@ -153,7 +153,7 @@ pluggy options. Hooks a plugin declares itself also carry the owner's
 plugin name after the prefix, can't be bare imperatives, and are checked
 at startup; see [Declaring hooks in a plugin](#declaring-hooks-in-a-plugin).
 
-| Prefix | pluggy spec | Resolution | Core uses result | Implementations |
+| Prefix | pluggy spec | Resolution | Kernel uses result | Implementations |
 |---|---|---|---|---|
 | `on_`, `before_`, `after_` | broadcast | none | no | any number; side effects allowed, including on objects passed in |
 | `should_` | broadcast | `resolve_reject_wins` | yes, `bool` | any number; `False` from any one rejects; `None` abstains |
@@ -168,7 +168,7 @@ relative to a stage. All three mean the same thing to pluggy.
 An observe hook may mutate an object it was handed (`after_persist_assistant`
 strips `reasoning_content` in place; `before_agent_turn` appends to
 `channel.conversation`), but its return value is never read. A transform
-returns the replacement and the core uses it.
+returns the replacement and the kernel uses it.
 
 `resolve_channel` shows the other safe shape for `resolve_`: each
 implementer answers only for ids under its own `transport:` prefix and
@@ -191,7 +191,7 @@ existing one (`on_llm_request` with `on_llm_response`). A single-consumer
 observation does not get a hookspec; it gets an entry in `meta`, a return
 value on an existing hook, or waits for its second consumer. Pick the name
 from the table above. The test checks the prefix against the pluggy
-options; whether the core reads a hook's return value is not something
+options; whether the kernel reads a hook's return value is not something
 pluggy exposes, so that half is checked in review.
 
 ### Declaring hooks in a plugin
@@ -363,7 +363,7 @@ async def on_message_admitted(self, channel, trace_id, sender, text):
     self._admitted.add(trace_id)
 ```
 
-The framework itself never stamps meaning into `meta` — it is a pass-through. Cognition plugins (see below) use the convention `meta["origin"]` to record where a queue item came from ("user" recognized by subscribing to `on_message_admitted`, or an explicit string like `"reminder"` stamped by a producer); that convention is plugin-side, not a core concept.
+The framework itself never stamps meaning into `meta` — it is a pass-through. Cognition plugins (see below) use the convention `meta["origin"]` to record where a queue item came from ("user" recognized by subscribing to `on_message_admitted`, or an explicit string like `"reminder"` stamped by a producer); that convention is plugin-side, not a kernel concept.
 
 `SchedulerPlugin` is the producer that stamps it for clock-driven items. A due reminder fires as
 
@@ -374,7 +374,7 @@ await self.pm.ahook.on_notify(
 )
 ```
 
-and core carries `meta` untouched to `on_message_persisted`, `before_agent_turn`, `on_agent_response`, every tool Task in the cycle, and the usage-log attribution. A notification like this, with no inherited `meta["trace_id"]`, originates its own trace, so it also gets a fresh `max_turns` budget (reset only when no tool cycle is in flight).
+and the kernel carries `meta` untouched to `on_message_persisted`, `before_agent_turn`, `on_agent_response`, every tool Task in the cycle, and the usage-log attribution. A notification like this, with no inherited `meta["trace_id"]`, originates its own trace, so it also gets a fresh `max_turns` budget (reset only when no tool cycle is in flight).
 
 Producers that start a background task in `on_start` and inject notifications should wait for `pm.get_plugin("agent").started` before calling `on_notify`: `on_start` is broadcast to every plugin concurrently, and `Agent` starts after the broadcast.
 

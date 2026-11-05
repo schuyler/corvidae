@@ -317,12 +317,13 @@ one is a bug even if its tests pass.
    dequeue for a notification that inherits none. The id and an opaque
    `meta` dict ride every hook, every `Task`, every completion
    notification, and every usage-log row. A falsy id is a `ValueError`;
-   omitting it is a hook-call error. Core never stamps meaning into `meta`;
-   `meta["origin"]` is a plugin-side convention. A message coalesced into
-   another's turn (item 19) keeps its own trace through admission and
-   persistence only; the owning trace carries the turn's hooks.
+   omitting it is a hook-call error. The kernel never stamps meaning into
+   `meta`; `meta["origin"]` is a plugin-side convention. A message
+   coalesced into another's turn (item 19) keeps its own trace through
+   admission and persistence only; the owning trace carries the turn's
+   hooks.
 5. The inbound gate (`should_process_message`) resolves reject-wins over
-   every implementation. After resolution core fires exactly one of
+   every implementation. After resolution the kernel fires exactly one of
    `on_message_admitted` / `on_message_rejected`, before `on_message`
    returns, and `on_message_persisted` once per trace when the originating
    row is written, with its rowid (null for a rejected message). Transports
@@ -1021,7 +1022,7 @@ deciding only what to newly append and in what order.
    final-text result, or the max-turns branch). A veto stores the row as
    withheld (`MessageType.UNSENT`): transports never see it, history
    replay included; the window always does, including across restarts,
-   with a core-appended marker so the model does not
+   with a kernel-appended marker so the model does not
    cite unsent statements as said. The max-turns branch strips
    `tool_calls` from both the row and the window copy regardless.
 3. Per-emission firings at the progress, thinking, and error-fallback
@@ -1294,7 +1295,7 @@ design, not requirement. The requirements are outcomes:
    workers do not inherit it.
 3. Sinks: `MetricsPlugin` (`on_metrics` events for tokens, latency,
    errors), `UsageLogPlugin` (one `usage_log` row per call), a JSONL sink.
-   Core plugins emit their own `on_metrics` events for the things an
+   Kernel plugins emit their own `on_metrics` events for the things an
    operator watches (queue depth, compaction, task latency). Never emit
    `on_metrics` from inside an `on_metrics` implementation.
 4. Startup logs the loaded and blocked plugin sets.
@@ -1531,7 +1532,7 @@ record that holds the reasoning.
 | Knowledge graph not part of the shipped memory: extraction is noisy, n-hop context is expensive, and at personal scale a graph duplicates facts plus vector and FTS retrieval; a graph plugin isn't precluded | diverges from Persyn §4.3 |
 | Emotion classifier replaced by appraisal valence | §3.7 Appraisal; diverges from Persyn §4.9 |
 | Engagement decision inverted: cheap gate first, generate only past threshold | principle 7; §3.7 Appraisal; diverges from the Persyn spec |
-| Two-stage appraisal; stage 1 never calls a model; core mints the exchange key; pull-based compute | §3.7 Appraisal 1–3 |
+| Two-stage appraisal; stage 1 never calls a model; the kernel mints the exchange key; pull-based compute | §3.7 Appraisal 1–3 |
 | Origin is stamped and propagated, never inferred; critique eligibility by origin | §3.1.4; §3.7 Critique 3 |
 | Silent tasks require no `tool_call_id` | principle 3; §3.7 Funnel |
 | Persona may tune its own gates; `immutable_settings` is the valve | operator directive 2, 2026-07-06 |
