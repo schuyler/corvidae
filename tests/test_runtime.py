@@ -442,22 +442,101 @@ class TestRuntimeStart:
     async def test_start_non_mapping_mcp_servers_reports_config_error_and_exits(
         self, tmp_path, capsys
     ):
-        """A list for mcp.servers prints a Config error naming the key (#265)."""
+        """A list for mcp.servers prints a Config error naming the key (#265).
+
+        Since #277 the validation runs in the mcp plugin's on_init (not a
+        special case in step 7); this test simulates that by running the
+        real validator in the on_init mock, and asserts Runtime's on_init
+        catch reports the ValueError as the standard one-line error.
+        """
+        from corvidae.mcp_client import validate_mcp_config
         from corvidae.runtime import Runtime
 
         config_path = tmp_path / "agent.yaml"
         config_path.write_text(
             "llm:\n  main: {base_url: http://x, model: m}\nmcp:\n  servers: [a]\n"
         )
-        rt = Runtime(config_path=str(config_path))
-        with pytest.raises(SystemExit) as excinfo:
-            await rt.start()
+
+        async def mcp_on_init(pm, config):
+            # What McpClientPlugin.on_init does with the merged config.
+            validate_mcp_config(config)
+
+        mock_pm, _ = _make_mock_pm_and_agent()
+        mock_pm.ahook.on_init = AsyncMock(side_effect=mcp_on_init)
+        with patch(
+            "corvidae.runtime.create_plugin_manager", return_value=mock_pm
+        ), patch("corvidae.runtime.validate_dependencies"), patch(
+            "corvidae.runtime.configure_logging"
+        ):
+            rt = Runtime(config_path=str(config_path))
+            with pytest.raises(SystemExit) as excinfo:
+                await rt.start()
 
         assert excinfo.value.code != 0
         stderr = capsys.readouterr().err
         assert "Config error:" in stderr
         assert "mcp.servers" in stderr and "['a']" in stderr
         assert str(config_path) in stderr
+        assert "Traceback" not in stderr
+
+    async def test_start_on_init_value_error_reports_config_error_and_exits(
+        self, tmp_path, capsys
+    ):
+        """#277: a plugin rejecting its config (ValueError from on_init) is
+        a one-line Config error naming the key and the file, not a
+        traceback."""
+        from corvidae.runtime import Runtime
+
+        config_path = tmp_path / "agent.yaml"
+        _write_config(str(config_path))
+
+        mock_pm, _ = _make_mock_pm_and_agent()
+        mock_pm.ahook.on_init = AsyncMock(
+            side_effect=ValueError("discord.token is required")
+        )
+        with patch(
+            "corvidae.runtime.create_plugin_manager", return_value=mock_pm
+        ), patch("corvidae.runtime.validate_dependencies"), patch(
+            "corvidae.runtime.configure_logging"
+        ):
+            rt = Runtime(config_path=str(config_path))
+            with pytest.raises(SystemExit) as excinfo:
+                await rt.start()
+
+        assert excinfo.value.code != 0
+        stderr = capsys.readouterr().err
+        assert (
+            "Config error: discord.token is required — check "
+            f"{config_path}" in stderr
+        )
+        assert "Traceback" not in stderr
+
+    async def test_start_on_init_non_value_error_propagates(self, tmp_path):
+        """#277: only ValueError is a config rejection; a real fault in
+        on_init (RuntimeError) still raises and is not reported as a
+        Config error."""
+        from corvidae.runtime import Runtime
+
+        config_path = tmp_path / "agent.yaml"
+        _write_config(str(config_path))
+
+        mock_pm, _ = _make_mock_pm_and_agent()
+        mock_pm.ahook.on_init = AsyncMock(side_effect=RuntimeError("boom"))
+        with patch(
+            "corvidae.runtime.create_plugin_manager", return_value=mock_pm
+        ), patch("corvidae.runtime.validate_dependencies"), patch(
+            "corvidae.runtime.configure_logging"
+        ), pytest.raises(RuntimeError, match="boom"):
+            rt = Runtime(config_path=str(config_path))
+            await rt.start()
+
+    def test_runtime_no_longer_imports_mcp_validation(self):
+        """#277: the step-7 MCP special case is gone — runtime must not
+        import the disableable plugin module's validator (that import is
+        what made #265's workaround not scale)."""
+        from corvidae import runtime
+
+        assert not hasattr(runtime, "validate_mcp_config")
 
     async def test_start_unknown_channel_key_reports_config_error_and_exits(
         self, tmp_path, capsys
