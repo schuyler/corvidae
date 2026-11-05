@@ -68,10 +68,11 @@ its tests pass; until then they are proposals.
     pattern-matching, System One). The core is constituted as a channel
     with an input queue; its transport is notifications from elsewhere in
     the framework (escalations, idle events, task completions), not a
-    network protocol. The peripherals are not degraded agents; they are
-    the same identity operating in a different cognitive mode. The
-    difference between core and periphery is cognitive mode, not
-    capability or identity.
+    network protocol. Channel-bound peripherals are not degraded agents;
+    they are the same identity operating in a different cognitive mode.
+    The difference between the core and a channel-bound periphery is
+    cognitive mode, not capability or identity. Task-bound peripherals
+    (§3.2.9) carry no persona.
 
 18. **The KV cache is a shared resource.** When the core has the levers
     to allocate context memory (local LLM deployments), it manages a
@@ -221,10 +222,11 @@ its tests pass; until then they are proposals.
      (Sketch-of-Thought, token budgets) indicates that shorter reasoning
      is more accurate and cheaper.
 
-5. The peripheral has access to the same identity files (SOUL.md,
-   USER.md, autobiography), the same memory system, and the same values
-   as the core. It operates with a subset of the cognitive machinery (no
-   xhigh thinking) but the full identity.
+5. A channel-bound peripheral has access to the same identity files
+   (SOUL.md, USER.md, autobiography), the same memory system, and the
+   same values as the core. It operates with a subset of the cognitive
+   machinery (no xhigh thinking) but the full identity. Task-bound
+   peripherals are the exception (§3.2.9).
 
 6. The peripheral knows the channel's conventions (Signal is plain text,
    Discord is Markdown, IRC is short). The core doesn't need to know or
@@ -254,8 +256,11 @@ its tests pass; until then they are proposals.
    back to the core (§3.5.3) and the peripheral is discarded. Channel-bound
    peripherals have conversation history and a persistent identity;
    task-bound peripherals are ephemeral, scoped to their task, and
-   discarded on completion. Both are the same architectural primitive:
-   a peripheral with a context, a tool set, and a model.
+   discarded on completion. A task-bound peripheral inherits none of the
+   core's identity context: its context is the persona-neutral system
+   prompt (base PRD §3.5.7) plus whatever the core appends when it
+   launches it. Both are the same architectural primitive: a peripheral
+   with a context, a tool set, and a model.
 
 ### 3.3 KV cache allocation
 
@@ -314,6 +319,17 @@ its tests pass; until then they are proposals.
 
 ### 3.5 Forking and joining: the core directs its own focus
 
+Corvidae has two kinds of context fork. A **one-shot fork** is base PRD
+§3.8's fork: one call over a copy of a live window. It cannot act: it
+dispatches no tools, fires no hooks, persists nothing, and runs under the
+lease that holds its prefix. A **long-lived fork** starts from a copy of
+the core's window and then runs as its own queue: it takes turns,
+dispatches tools, and exchanges messages with peripherals, and its
+outcome is joined back into the core. It acts only through its own turns,
+so the core's window and log change only at the join. The rest of this
+section concerns long-lived forks. Base §3.8 governs one-shot forks, and
+only those.
+
 Forking is the core's general mechanism for managing cognitive focus.
 It is not only a response to peripheral escalations; it is the tool the
 core uses to direct its own attention, split its working memory, and
@@ -364,10 +380,10 @@ thought, or to respond to an escalation.
    works the channel itself in a fork, and joins the results back. The
    periphery steps back while the fork is active.
 
-7. The fork pattern is an extension of base PRD §3.8 (forks for background
-   work) to the core/periphery topology. The existing fork requirements
-   (bounded output, same-lease completion, no standalone fallback) still
-   apply.
+7. Base PRD §3.8 governs one-shot forks only. A long-lived fork does
+   not run under the core's lease, since holding it would block the
+   core; it waits for a lease of its own like any other queue (base PRD
+   §3.13.3).
 
 ### 3.6 Goal block / commitment floor
 
