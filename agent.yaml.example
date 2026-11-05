@@ -222,6 +222,11 @@ agent:
 #   memory_limit: 20                   # newest in-scope memories a beat reviews; 0 = none
 #   retired_goal_limit: 20             # newest retired goals a beat reviews; 0 = none
 
+# Skills directory (cognition). The index appears in the system prompt at
+# conversation start and compaction; use_skill loads full text on demand.
+# skills:
+#   directory: skills   # relative to _base_dir, or absolute
+
 # Right to silence (cognition). The paragraph added to chat channels' system
 # prompts; keep the literal NO_REPLY in any replacement. Read at startup.
 # silence:

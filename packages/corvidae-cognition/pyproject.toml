@@ -33,6 +33,7 @@ gates = "corvidae_cognition.gates:GatePlugin"
 silence = "corvidae_cognition.silence:SilencePlugin"
 heartbeat = "corvidae_cognition.heartbeat:HeartbeatPlugin"
 goals = "corvidae_cognition.goals:GoalsPlugin"
+skills = "corvidae_cognition.skills:SkillsPlugin"
 
 [tool.uv.sources]
 corvidae = { workspace = true }

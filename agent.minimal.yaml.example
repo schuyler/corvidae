@@ -35,5 +35,6 @@ plugins:
     - outcome_log
     - gates
     - silence
+    - skills
     - heartbeat
     - goals

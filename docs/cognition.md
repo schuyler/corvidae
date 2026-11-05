@@ -39,6 +39,7 @@ CI proves that path: the `cognition-fts` job installs cognition without
 | `GatePlugin` | `gates` | The engagement gate (may the agent ignore a message?) and the decide gate (may it stay silent instead of answering?), both over the appraisal vector |
 | `SilencePlugin` | `silence` | Lets the agent end any turn without sending anything: a final that is exactly `NO_REPLY` goes unsent, and each decline is recorded in `exchange_log`. It adds the instruction to the system prompt of chat channels |
 | `HeartbeatPlugin` | `heartbeat` | Starts a turn on `internal:heartbeat` when the whole system has been quiet for `heartbeat.after` seconds; the turn reviews recent memory (and goals, when loaded) and acts only if something warrants it; keeps only its last `keep_beats` beats in its window. Asleep unless configured |
+| `SkillsPlugin` | `skills` | Scans a skills directory for `SKILL.md` files; contributes an index (name + description) to the system prompt via `transform_system_prompt` at conversation start and compaction; provides a `use_skill` tool that loads a skill's full text on demand |
 
 Entry-point names are the same as when these plugins lived in the kernel, so
 `plugins.disabled` lists in existing `agent.yaml` files keep working. Without
